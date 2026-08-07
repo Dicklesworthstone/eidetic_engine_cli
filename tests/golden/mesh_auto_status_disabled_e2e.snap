@@ -31,7 +31,7 @@
         "hit": null,
         "refreshedAt": null,
         "schema": "ee.mesh.discovery_cache.status.v1",
-        "status": "not_loaded",
+        "status": "not_probed_in_this_mode",
         "ttlSeconds": 30
       },
       "drift": {
@@ -72,7 +72,7 @@
         "enabled": false,
         "lastReconciliationAt": null,
         "schema": "ee.mesh.steward_posture.v1",
-        "status": "not_inspected"
+        "status": "not_probed_in_this_mode"
       },
       "tailscale": {
         "authenticated": null,

@@ -105,7 +105,7 @@
         },
         "status": {
           "type": "string",
-          "enum": ["not_loaded"]
+          "enum": ["not_loaded", "not_probed_in_this_mode"]
         },
         "ttlSeconds": {
           "type": "integer",
@@ -387,7 +387,7 @@
         },
         "status": {
           "type": "string",
-          "enum": ["not_inspected"]
+          "enum": ["not_inspected", "not_probed_in_this_mode"]
         },
         "enabled": {
           "type": "boolean"

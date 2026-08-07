@@ -32,11 +32,11 @@ use crate::mesh::auto_enrollment_safety::{
     emit_safety_snapshot_audit, update_materialization_outcome,
 };
 use crate::mesh::discovery_policy::{
-    DISCOVERY_ALLOWLIST_FILE, DISCOVERY_DENYLIST_FILE, DISCOVERY_POLICY_SCHEMA_V1,
-    DiscoveryConsent, DiscoveryDecision, DiscoveryDecisionInput, DiscoveryMode,
-    EE_MESH_SERVICE_TAG, RESPOND_ALLOWLIST_FILE, RespondDecisionInput, WorkspaceLists,
-    decide_discovery, decide_respond, evaluate_policy_degradations, load_node_key_list,
-    load_workspace_lists, validate_node_key,
+    DISCOVERY_ALLOWLIST_FILE, DISCOVERY_DENYLIST_FILE, DISCOVERY_POLICY_NO_EE_MESH_TAG_CODE,
+    DISCOVERY_POLICY_SCHEMA_V1, DiscoveryConsent, DiscoveryDecision, DiscoveryDecisionInput,
+    DiscoveryMode, EE_MESH_SERVICE_TAG, RESPOND_ALLOWLIST_FILE, RespondDecisionInput,
+    WorkspaceLists, decide_discovery, decide_respond, evaluate_policy_degradations,
+    load_node_key_list, load_workspace_lists, validate_node_key,
 };
 use crate::mesh::emergency_disable::{
     MeshEmergencyDisableInput, MeshEmergencyDisableReport, MeshEmergencyReenableInput,
@@ -808,6 +808,7 @@ struct MeshDiscoveryPolicyReport {
     allowlisted_node_keys: Vec<String>,
     respond_allowlisted_node_keys: Vec<String>,
     denied_node_keys: Vec<String>,
+    self_advertised_tags: Vec<String>,
     degraded: Vec<MeshCliDegradation>,
     effective_decision_preview: Vec<MeshDiscoveryPolicyDecisionPreview>,
     mutation: Option<MeshDiscoveryPolicyMutation>,
@@ -846,6 +847,7 @@ struct DiscoveryPolicyState {
     discovery_mode: DiscoveryMode,
     respond_mode: DiscoveryMode,
     lists: WorkspaceLists,
+    self_advertised_tags: Vec<String>,
     degraded: Vec<MeshCliDegradation>,
 }
 
@@ -2486,10 +2488,33 @@ where
         Ok(snapshot) => snapshot,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    let report = snapshot.status_report();
+    let local = gather_mesh_status_tailscale_local_report(snapshot.mesh_enabled);
+    let autodiscovery =
+        build_tailscale_autodiscovery_report_from_local(cli, &snapshot, local.as_ref());
+    let workspace_path = cli.resolve_workspace();
+    let discovery_policy = match load_discovery_policy_state(
+        &workspace_path,
+        None,
+        None,
+        local
+            .as_ref()
+            .map(|report| report.self_advertised_tags.as_slice()),
+    ) {
+        Ok(state) => state,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let policy_registry =
+        match load_mesh_status_peer_policy_registry(cli, args.database.as_deref(), &snapshot) {
+            Ok(registry) => registry,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    let report = snapshot.status_report_with_autodiscovery(
+        &autodiscovery,
+        local.as_ref(),
+        &policy_registry,
+        &discovery_policy.lists.denylist,
+    );
     if cli.wants_json() {
-        let autodiscovery = build_tailscale_autodiscovery_report(cli, &snapshot);
-        let report = snapshot.status_report_with_autodiscovery(&autodiscovery);
         return write_mesh_status_json_with_autodiscovery(stdout, &report, &autodiscovery);
     }
     write_mesh_report(cli, &report, &render_mesh_status_human(&report), stdout)
@@ -2727,21 +2752,19 @@ fn mesh_emergency_domain_error(
     }
 }
 
-fn build_tailscale_autodiscovery_report(
-    cli: &Cli,
-    snapshot: &MeshForegroundSnapshot,
-) -> TailscaleAutodiscoveryReport {
-    let local = gather_mesh_status_tailscale_local_report(snapshot.mesh_enabled);
-    build_tailscale_autodiscovery_report_from_local(cli, snapshot, local.as_ref())
-}
-
 fn build_tailscale_autodiscovery_report_from_local(
     cli: &Cli,
     snapshot: &MeshForegroundSnapshot,
     local: Option<&TailscaleLocalReport>,
 ) -> TailscaleAutodiscoveryReport {
     let workspace_path = cli.resolve_workspace();
-    let policy_state = load_discovery_policy_state(&workspace_path, None, None).ok();
+    let policy_state = load_discovery_policy_state(
+        &workspace_path,
+        None,
+        None,
+        local.map(|report| report.self_advertised_tags.as_slice()),
+    )
+    .ok();
     let discovery_mode = policy_state.as_ref().map_or_else(
         || DiscoveryMode::from_env_discovery(|_| {}),
         |state| state.discovery_mode,
@@ -2819,11 +2842,17 @@ fn write_mesh_status_json_with_autodiscovery<W: Write>(
     if let Some(discovery_slot) = data.pointer_mut("/autoEnrollment/discovery") {
         *discovery_slot = serde_json::to_value(autodiscovery).unwrap_or(serde_json::Value::Null);
     }
+    let degraded = report
+        .auto_enrollment
+        .degraded
+        .iter()
+        .map(|item| json!(item))
+        .collect::<Vec<_>>();
     let json = json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
-        "degraded": [],
+        "degraded": degraded,
     });
     write_stdout(stdout, &(json.to_string() + "\n"))
 }
@@ -3023,7 +3052,15 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
 
-    let state = match load_discovery_policy_state(&workspace_path, None, None) {
+    let local = gather_mesh_status_tailscale_local_report(snapshot.mesh_enabled);
+    let state = match load_discovery_policy_state(
+        &workspace_path,
+        None,
+        None,
+        local
+            .as_ref()
+            .map(|report| report.self_advertised_tags.as_slice()),
+    ) {
         Ok(state) => state,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
@@ -3091,7 +3128,7 @@ fn apply_mesh_discovery_policy_allow(
         | respond_allowlist.insert(node_key.to_owned());
     write_node_key_list(&discovery_path, &discovery_allowlist)?;
     write_node_key_list(&respond_path, &respond_allowlist)?;
-    let state = load_discovery_policy_state(&workspace_path, None, None)?;
+    let state = load_discovery_policy_state(&workspace_path, None, None, None)?;
     let mutation = MeshDiscoveryPolicyMutation {
         operation: "allow",
         changed,
@@ -3126,7 +3163,7 @@ fn apply_mesh_discovery_policy_deny(
     let mut denylist = load_node_key_list_for_cli(&deny_path)?;
     let changed = denylist.insert(node_key.to_owned());
     write_node_key_list(&deny_path, &denylist)?;
-    let state = load_discovery_policy_state(&workspace_path, None, None)?;
+    let state = load_discovery_policy_state(&workspace_path, None, None, None)?;
     let mutation = MeshDiscoveryPolicyMutation {
         operation: "deny",
         changed,
@@ -3734,6 +3771,30 @@ pub(crate) fn load_mesh_peer_policy_registry(
     Ok((registry, config_bytes, mesh_enabled))
 }
 
+fn load_mesh_status_peer_policy_registry(
+    cli: &Cli,
+    database_override: Option<&Path>,
+    snapshot: &MeshForegroundSnapshot,
+) -> Result<crate::mesh::policy::MeshPeerPolicyRegistry, DomainError> {
+    if snapshot.initialized {
+        let connection = open_mesh_connection(Path::new(&snapshot.database_path))?;
+        let (registry, _, _) = load_mesh_peer_policy_registry(
+            cli,
+            database_override,
+            &connection,
+            &snapshot.workspace_id,
+        )?;
+        return Ok(registry);
+    }
+
+    let config_path = mesh_workspace_config_path(cli, database_override);
+    let (config, config_bytes) = load_mesh_policy_config_snapshot_fail_closed(&config_path);
+    Ok(mesh_peer_policy_registry_for_config_snapshot(
+        &config,
+        config_bytes.as_deref(),
+    ))
+}
+
 fn mesh_enabled_for_config_snapshot(
     config: &crate::config::ConfigFile,
 ) -> Result<bool, DomainError> {
@@ -4237,6 +4298,7 @@ fn load_discovery_policy_state(
     workspace_path: &Path,
     discovery_override: Option<DiscoveryMode>,
     respond_override: Option<DiscoveryMode>,
+    self_advertised_tags: Option<&[String]>,
 ) -> Result<DiscoveryPolicyState, DomainError> {
     let config_modes = load_workspace_policy_modes(workspace_path)?;
     let discovery_mode = discovery_override
@@ -4248,7 +4310,10 @@ fn load_discovery_policy_state(
         .or(config_modes.respond_mode)
         .unwrap_or_default();
     let lists = load_workspace_lists(workspace_path).map_err(discovery_list_domain_error)?;
-    let self_advertised_tags = Vec::new();
+    let tags_were_probed = self_advertised_tags.is_some();
+    let mut self_advertised_tags = self_advertised_tags.unwrap_or_default().to_vec();
+    self_advertised_tags.sort();
+    self_advertised_tags.dedup();
     let degraded = evaluate_policy_degradations(
         discovery_mode,
         respond_mode,
@@ -4256,6 +4321,7 @@ fn load_discovery_policy_state(
         &lists.allowlist,
     )
     .into_iter()
+    .filter(|item| tags_were_probed || item.code != DISCOVERY_POLICY_NO_EE_MESH_TAG_CODE)
     .map(|item| MeshCliDegradation {
         code: item.code,
         severity: item.severity,
@@ -4267,6 +4333,7 @@ fn load_discovery_policy_state(
         discovery_mode,
         respond_mode,
         lists,
+        self_advertised_tags,
         degraded,
     })
 }
@@ -6074,6 +6141,7 @@ fn build_discovery_policy_report(
         allowlisted_node_keys: state.lists.allowlist.iter().cloned().collect(),
         respond_allowlisted_node_keys: state.lists.respond_allowlist.iter().cloned().collect(),
         denied_node_keys: state.lists.denylist.iter().cloned().collect(),
+        self_advertised_tags: state.self_advertised_tags.clone(),
         degraded: state.degraded.clone(),
         effective_decision_preview: if explain {
             discovery_policy_decision_preview(state)
@@ -6131,7 +6199,7 @@ fn discovery_policy_decision_preview(
         mode: state.respond_mode,
         requester_node_key: TAGGED_NODE,
         requester_advertised_tags: &tagged,
-        self_advertised_tags: &no_tags,
+        self_advertised_tags: &state.self_advertised_tags,
         respond_allowlist: &state.lists.respond_allowlist,
         denylist: &state.lists.denylist,
     });
@@ -6222,6 +6290,47 @@ fn render_mesh_status_human(report: &MeshCliStatusReport) -> String {
         profiles = report.selective_sync.profile_count,
         subscriptions = report.selective_sync.subscription_count,
         default_profile = report.selective_sync.default_profile_id,
+    ));
+    output.push_str(&format!(
+        "  Tailscale probe: {status}, authenticated={authenticated}, peers={peers}, shieldsUp={shields}, binaryAuthentic={binary}\n  Hello responder: {hello}\n  Discovery cache: {cache}\n  Steward posture: {steward}\n",
+        status = report.auto_enrollment.tailscale.status,
+        authenticated = report
+            .auto_enrollment
+            .tailscale
+            .authenticated
+            .map_or("not_probed".to_owned(), |value| value.to_string()),
+        peers = report.auto_enrollment.tailscale.peer_count,
+        shields = report
+            .auto_enrollment
+            .tailscale
+            .shields_up
+            .map_or("not_probed".to_owned(), |value| value.to_string()),
+        binary = report
+            .auto_enrollment
+            .tailscale
+            .binary_authentic
+            .map_or("not_probed".to_owned(), |value| value.to_string()),
+        hello = report.auto_enrollment.hello_responder.status,
+        cache = report.auto_enrollment.discovery_cache.status,
+        steward = report.auto_enrollment.steward_posture.status,
+    ));
+    if let Some(materialized) = &report.auto_enrollment.materialized {
+        output.push_str(&format!(
+            "  Effective lane exposure: metadata={metadata}, body={body}, embedding={embedding}, graphLink={graph}, revisionNotice={revision}, curationSignal={curation}\n",
+            metadata = materialized.lane_policy.metadata,
+            body = materialized.lane_policy.body,
+            embedding = materialized.lane_policy.embedding,
+            graph = materialized.lane_policy.graph_link,
+            revision = materialized.lane_policy.revision_notice,
+            curation = materialized.lane_policy.curation_signal,
+        ));
+    }
+    output.push_str(&format!(
+        "  Drift: newPeers={}, transientUnreachable={}, disabledConfigPeers={}, denylistedMaterializedPeers={}\n",
+        report.auto_enrollment.drift.new_peer_count,
+        report.auto_enrollment.drift.transient_unreachable.len(),
+        report.auto_enrollment.drift.stale_peers_in_config.len(),
+        report.auto_enrollment.peer_state_breakdown.denylisted,
     ));
     if !report.repair_commands.is_empty() {
         output.push_str("  Repair commands:\n");
@@ -7067,6 +7176,41 @@ mod tests {
             "{:?}",
             report.skipped_peers
         );
+    }
+
+    #[test]
+    fn discovery_policy_service_tag_degradation_uses_real_probe_tags_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace_path = tmp.path();
+
+        let unprobed = load_discovery_policy_state(workspace_path, None, None, None)
+            .expect("unprobed policy state");
+        assert!(unprobed.degraded.iter().all(|item| {
+            item.code != crate::mesh::discovery_policy::DISCOVERY_POLICY_NO_EE_MESH_TAG_CODE
+        }));
+
+        let no_tags = Vec::new();
+        let probed_without_tag =
+            load_discovery_policy_state(workspace_path, None, None, Some(&no_tags))
+                .expect("probed policy state without service tag");
+        assert!(probed_without_tag.degraded.iter().any(|item| {
+            item.code == crate::mesh::discovery_policy::DISCOVERY_POLICY_NO_EE_MESH_TAG_CODE
+        }));
+
+        let tags = vec![
+            "tag:zz-extra".to_owned(),
+            EE_MESH_SERVICE_TAG.to_owned(),
+            EE_MESH_SERVICE_TAG.to_owned(),
+        ];
+        let probed_with_tag = load_discovery_policy_state(workspace_path, None, None, Some(&tags))
+            .expect("probed policy state with service tag");
+        assert_eq!(
+            probed_with_tag.self_advertised_tags,
+            vec![EE_MESH_SERVICE_TAG.to_owned(), "tag:zz-extra".to_owned()]
+        );
+        assert!(probed_with_tag.degraded.iter().all(|item| {
+            item.code != crate::mesh::discovery_policy::DISCOVERY_POLICY_NO_EE_MESH_TAG_CODE
+        }));
     }
 
     #[test]

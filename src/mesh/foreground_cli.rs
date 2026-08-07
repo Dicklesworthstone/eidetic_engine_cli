@@ -12,8 +12,9 @@ use asupersync::time::sleep as asupersync_sleep;
 use asupersync::{CancelReason, Cx, Outcome};
 use serde::{Deserialize, Serialize};
 
-use crate::config::MeshLane;
+use crate::config::{MeshLane, MeshLaneDecision};
 use crate::core::memory_scope::{MeshOutboundPolicyDecisionInput, parse_mesh_lane};
+use crate::core::tailscale_probe::TailscaleLocalReport;
 use crate::db::{
     MeshStorageStatus, StoredMeshImportLedgerEvent, StoredMeshPeer, StoredMeshPeerCursor,
 };
@@ -1045,6 +1046,19 @@ pub struct MeshAutoLanePolicy {
     pub curation_signal: &'static str,
 }
 
+impl MeshAutoLanePolicy {
+    const fn deny_all() -> Self {
+        Self {
+            metadata: "deny",
+            body: "deny",
+            embedding: "deny",
+            graph_link: "deny",
+            revision_notice: "deny",
+            curation_signal: "deny",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshAutoPeerStateBreakdown {
@@ -1745,15 +1759,49 @@ pub struct MeshCheckedExportArtifact {
     pub secret_scan: MeshExportSecretScanReport,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug)]
 struct MeshAutoStatusSignals {
     tailscale_authenticated: Option<bool>,
+    tailscale_shields_up: Option<bool>,
+    tailscale_binary_authentic: Option<bool>,
+    tailnet_display_name: Option<String>,
+    tailscale_peer_count: u32,
     tailscale_authenticated_for_24h: bool,
     hello_responder_running: Option<bool>,
     discovered_peer_count: u32,
+    discovery: Option<TailscaleAutodiscoveryReport>,
+    lane_policy: MeshAutoLanePolicy,
+    new_peers_available: Vec<String>,
+    transient_unreachable: Vec<String>,
+    denylisted_peer_count: u32,
+    tailscale_degraded: Vec<MeshCliDegradation>,
     tailnet_changed: bool,
     node_key_changed: bool,
     manual_conflict_present: bool,
+}
+
+impl Default for MeshAutoStatusSignals {
+    fn default() -> Self {
+        Self {
+            tailscale_authenticated: None,
+            tailscale_shields_up: None,
+            tailscale_binary_authentic: None,
+            tailnet_display_name: None,
+            tailscale_peer_count: 0,
+            tailscale_authenticated_for_24h: false,
+            hello_responder_running: None,
+            discovered_peer_count: 0,
+            discovery: None,
+            lane_policy: MeshAutoLanePolicy::deny_all(),
+            new_peers_available: Vec::new(),
+            transient_unreachable: Vec::new(),
+            denylisted_peer_count: 0,
+            tailscale_degraded: Vec::new(),
+            tailnet_changed: false,
+            node_key_changed: false,
+            manual_conflict_present: false,
+        }
+    }
 }
 
 impl MeshForegroundSnapshot {
@@ -1807,11 +1855,20 @@ impl MeshForegroundSnapshot {
     pub fn status_report_with_autodiscovery(
         &self,
         autodiscovery: &TailscaleAutodiscoveryReport,
+        local: Option<&TailscaleLocalReport>,
+        policy_registry: &MeshPeerPolicyRegistry,
+        discovery_denylist: &BTreeSet<String>,
     ) -> MeshCliStatusReport {
         let mut report = self.status_report();
         report.auto_enrollment = auto_enrollment_status_for_snapshot(
             self,
-            auto_status_signals_from_autodiscovery(self, autodiscovery),
+            auto_status_signals_from_autodiscovery(
+                self,
+                autodiscovery,
+                local,
+                policy_registry,
+                discovery_denylist,
+            ),
         );
         report
     }
@@ -1896,14 +1953,13 @@ fn auto_enrollment_status_for_snapshot(
 ) -> MeshAutoEnrollmentStatus {
     let active_peer_count = active_peer_count(snapshot) as u32;
     let stale_peers_in_config = stale_mesh_peer_ids(snapshot);
-    let new_peer_count = signals
-        .discovered_peer_count
-        .saturating_sub(snapshot.storage.peer_count);
+    let new_peer_count = u32::try_from(signals.new_peers_available.len()).unwrap_or(u32::MAX);
     let drift_severity = auto_drift_severity(snapshot, &signals, new_peer_count);
     let action_graph = auto_status_action_graph(snapshot, &signals);
     let next_action_hint = auto_status_next_action_hint(snapshot, &signals, new_peer_count);
     let mut degraded = snapshot.degraded.clone();
     degraded.extend(auto_status_degradations(snapshot, &signals));
+    degraded.extend(signals.tailscale_degraded.clone());
 
     MeshAutoEnrollmentStatus {
         schema: MESH_AUTO_STATUS_SCHEMA_V1,
@@ -1918,10 +1974,10 @@ fn auto_enrollment_status_for_snapshot(
             }
             .to_owned(),
             authenticated: signals.tailscale_authenticated,
-            shields_up: None,
-            binary_authentic: None,
-            tailnet_display_name: None,
-            peer_count: signals.discovered_peer_count,
+            shields_up: signals.tailscale_shields_up,
+            binary_authentic: signals.tailscale_binary_authentic,
+            tailnet_display_name: signals.tailnet_display_name.clone(),
+            peer_count: signals.tailscale_peer_count,
         },
         hello_responder: MeshAutoHelloResponderStatus {
             schema: "ee.mesh.hello_responder.status.v1",
@@ -1934,26 +1990,29 @@ fn auto_enrollment_status_for_snapshot(
             running: signals.hello_responder_running,
             listen_addr: None,
         },
-        discovery: auto_status_discovery_report(&signals),
+        discovery: signals
+            .discovery
+            .clone()
+            .unwrap_or_else(|| auto_status_discovery_report(&signals)),
         discovery_cache: MeshAutoDiscoveryCacheStatus {
             schema: "ee.mesh.discovery_cache.status.v1",
-            status: "not_loaded".to_owned(),
+            status: "not_probed_in_this_mode".to_owned(),
             ttl_seconds: 30,
             hit: None,
             refreshed_at: None,
         },
-        materialized: auto_materialized_status(snapshot),
+        materialized: auto_materialized_status(snapshot, &signals.lane_policy),
         peer_state_breakdown: MeshAutoPeerStateBreakdown {
             active: active_peer_count,
             soft_stale: 0,
-            hard_stale: stale_peers_in_config.len() as u32,
-            denylisted: 0,
+            hard_stale: 0,
+            denylisted: signals.denylisted_peer_count,
         },
         drift: MeshAutoDriftStatus {
-            new_peers_available: Vec::new(),
+            new_peers_available: signals.new_peers_available.clone(),
             new_peer_count,
             stale_peers_in_config,
-            transient_unreachable: Vec::new(),
+            transient_unreachable: signals.transient_unreachable.clone(),
             tailnet_changed: signals.tailnet_changed,
             node_key_changed: signals.node_key_changed,
             manual_conflict_present: signals.manual_conflict_present,
@@ -1963,7 +2022,7 @@ fn auto_enrollment_status_for_snapshot(
         },
         steward_posture: MeshAutoStewardPosture {
             schema: "ee.mesh.steward_posture.v1",
-            status: "not_inspected".to_owned(),
+            status: "not_probed_in_this_mode".to_owned(),
             enabled: false,
             last_reconciliation_at: None,
         },
@@ -1997,13 +2056,60 @@ fn auto_status_discovery_report(signals: &MeshAutoStatusSignals) -> TailscaleAut
 fn auto_status_signals_from_autodiscovery(
     snapshot: &MeshForegroundSnapshot,
     autodiscovery: &TailscaleAutodiscoveryReport,
+    local: Option<&TailscaleLocalReport>,
+    policy_registry: &MeshPeerPolicyRegistry,
+    discovery_denylist: &BTreeSet<String>,
 ) -> MeshAutoStatusSignals {
     let identity_guard = auto_status_identity_guard(snapshot, autodiscovery);
+    let materialized_node_keys = materialized_mesh_node_keys(snapshot);
+    let denylisted_peer_count = u32::try_from(
+        discovery_denylist
+            .intersection(&materialized_node_keys)
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    let mut new_peers_available = autodiscovery
+        .ee_capable_peers
+        .iter()
+        .filter(|peer| !materialized_node_keys.contains(&peer.node_key))
+        .map(|peer| peer.node_key.clone())
+        .collect::<Vec<_>>();
+    new_peers_available.sort();
+    new_peers_available.dedup();
+    let mut transient_unreachable = autodiscovery
+        .skipped_peers
+        .iter()
+        .filter(|peer| peer.reason == "probe_timeout")
+        .map(|peer| peer.node_key.clone())
+        .collect::<Vec<_>>();
+    transient_unreachable.sort();
+    transient_unreachable.dedup();
     MeshAutoStatusSignals {
-        tailscale_authenticated: (autodiscovery.tailnet_id.is_some()
-            || autodiscovery.self_node_key.is_some())
-        .then_some(autodiscovery.tailnet_id.is_some() && autodiscovery.self_node_key.is_some()),
+        tailscale_authenticated: local.map(|report| report.authenticated),
+        tailscale_shields_up: local.and_then(|report| report.shields_up),
+        tailscale_binary_authentic: local.map(|report| report.binary_authentic),
+        tailnet_display_name: local.and_then(|report| report.tailnet_display_name.clone()),
+        tailscale_peer_count: local.map_or(0, |report| {
+            u32::try_from(report.peers.len()).unwrap_or(u32::MAX)
+        }),
         discovered_peer_count: autodiscovery.eligible_peer_count,
+        discovery: Some(autodiscovery.clone()),
+        lane_policy: effective_auto_lane_policy(snapshot, policy_registry),
+        new_peers_available,
+        transient_unreachable,
+        denylisted_peer_count,
+        tailscale_degraded: local.map_or_else(Vec::new, |report| {
+            report
+                .degradations
+                .iter()
+                .map(|item| MeshCliDegradation {
+                    code: item.code,
+                    severity: item.severity,
+                    message: item.message.clone(),
+                    repair: item.repair.to_owned(),
+                })
+                .collect()
+        }),
         tailnet_changed: auto_status_tailnet_changed(snapshot, autodiscovery)
             || matches!(identity_guard, IdentityGuardVerdict::TailnetChanged { .. }),
         node_key_changed: matches!(identity_guard, IdentityGuardVerdict::NodeKeyChanged { .. }),
@@ -2050,6 +2156,7 @@ fn auto_status_identity_guard(
 
 fn auto_materialized_status(
     snapshot: &MeshForegroundSnapshot,
+    lane_policy: &MeshAutoLanePolicy,
 ) -> Option<MeshAutoMaterializedStatus> {
     if snapshot.storage.peer_count == 0 && snapshot.peers.is_empty() {
         return None;
@@ -2065,14 +2172,7 @@ fn auto_materialized_status(
         peer_group_id: format!("pg_{peer_group_suffix}"),
         peer_set_hash,
         peer_count: snapshot.storage.peer_count,
-        lane_policy: MeshAutoLanePolicy {
-            metadata: "allow",
-            body: "deny",
-            embedding: "deny",
-            graph_link: "deny",
-            revision_notice: "allow",
-            curation_signal: "allow",
-        },
+        lane_policy: lane_policy.clone(),
         bound_tailnet_id: materialized_record
             .as_ref()
             .map(|record| record.endpoint.tailnet_id.clone()),
@@ -2082,9 +2182,92 @@ fn auto_materialized_status(
         last_materialized_at: latest_peer_seen_at(snapshot),
         enrollment_source: materialized_record
             .as_ref()
-            .map(|record| record.trust_established_by.clone())
+            .map(|record| match record.trust_established_by.as_str() {
+                "tailscale_auto_enrollment" => "auto".to_owned(),
+                "auto_replaced_manual" => "auto_replaced_manual".to_owned(),
+                _ => "manual".to_owned(),
+            })
             .unwrap_or_else(|| "manual".to_owned()),
     })
+}
+
+fn effective_auto_lane_policy(
+    snapshot: &MeshForegroundSnapshot,
+    registry: &MeshPeerPolicyRegistry,
+) -> MeshAutoLanePolicy {
+    // The v1 status contract has one lane decision for the whole peer set.
+    // Report the broadest effective exposure across enabled peers so one
+    // restrictive peer cannot hide that another peer may receive the lane.
+    MeshAutoLanePolicy {
+        metadata: effective_auto_lane_decision(snapshot, registry, MeshLane::Metadata).as_str(),
+        body: effective_auto_lane_decision(snapshot, registry, MeshLane::Body).as_str(),
+        embedding: effective_auto_lane_decision(snapshot, registry, MeshLane::Embedding).as_str(),
+        graph_link: effective_auto_lane_decision(snapshot, registry, MeshLane::GraphLink).as_str(),
+        revision_notice: effective_auto_lane_decision(snapshot, registry, MeshLane::RevisionNotice)
+            .as_str(),
+        curation_signal: effective_auto_lane_decision(snapshot, registry, MeshLane::CurationSignal)
+            .as_str(),
+    }
+}
+
+fn effective_auto_lane_decision(
+    snapshot: &MeshForegroundSnapshot,
+    registry: &MeshPeerPolicyRegistry,
+    lane: MeshLane,
+) -> MeshLaneDecision {
+    let mut enabled_peers = snapshot.peers.iter().filter(|peer| peer.enabled).peekable();
+    if enabled_peers.peek().is_none() {
+        return MeshLaneDecision::Deny;
+    }
+
+    enabled_peers.fold(MeshLaneDecision::Deny, |group_decision, peer| {
+        let matching_policies = registry
+            .policies()
+            .iter()
+            .filter(|policy| {
+                policy.workspace_id == snapshot.workspace_id
+                    && policy.peer_id == peer.peer_id
+                    && policy
+                        .origin_workspace_ids
+                        .iter()
+                        .any(|origin| origin == &snapshot.workspace_id)
+            })
+            .collect::<Vec<_>>();
+        let [policy] = matching_policies.as_slice() else {
+            return group_decision;
+        };
+        let durable_override =
+            registry.lane_override_for(&snapshot.workspace_id, &peer.peer_id, lane);
+        let peer_decision = durable_override.unwrap_or_else(|| policy.allowed_lanes.decision(lane));
+        broadest_mesh_lane_decision(group_decision, peer_decision)
+    })
+}
+
+const fn broadest_mesh_lane_decision(
+    left: MeshLaneDecision,
+    right: MeshLaneDecision,
+) -> MeshLaneDecision {
+    match (left, right) {
+        (MeshLaneDecision::Allow, _) | (_, MeshLaneDecision::Allow) => MeshLaneDecision::Allow,
+        (MeshLaneDecision::Quarantine, _) | (_, MeshLaneDecision::Quarantine) => {
+            MeshLaneDecision::Quarantine
+        }
+        (MeshLaneDecision::Deny, MeshLaneDecision::Deny) => MeshLaneDecision::Deny,
+    }
+}
+
+fn materialized_mesh_node_keys(snapshot: &MeshForegroundSnapshot) -> BTreeSet<String> {
+    snapshot
+        .peers
+        .iter()
+        .flat_map(|peer| {
+            let mut keys = vec![peer.peer_id.clone(), peer.origin_node_id.clone()];
+            if let Some(record) = foreground_sync_peer_record(peer) {
+                keys.push(record.endpoint.tailscale_node_key);
+            }
+            keys
+        })
+        .collect()
 }
 
 fn auto_materialized_peer_record(snapshot: &MeshForegroundSnapshot) -> Option<MeshPeerRecord> {
@@ -2758,6 +2941,8 @@ pub fn foreground_degradations(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::{
         AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE, AUTO_ENROLLMENT_TAILNET_CHANGED_CODE,
         MESH_AUTO_STATUS_SCHEMA_V1, MESH_EXPORT_ARTIFACT_SCHEMA_V1, MESH_IMPORT_LEDGER_SCHEMA_V1,
@@ -2773,6 +2958,7 @@ mod tests {
         run_mesh_sync_supervisor_supervised, run_mesh_sync_supervisor_supervised_with_transport,
     };
     use crate::config::ConfigFile;
+    use crate::core::tailscale_probe::TailscaleLocalReport;
     use crate::mesh::peer::{
         MESH_PEER_RECORD_SCHEMA_V1, MeshPeerCapabilities, MeshPeerCapabilityProfile,
         MeshPeerEndpoint, MeshPeerHandshake, MeshPeerKey, MeshPeerRecord, MeshPeerState,
@@ -3516,7 +3702,7 @@ max_bytes = 1048576
             materialized.bound_tailnet_id.as_deref(),
             Some("tailnet-test")
         );
-        assert_eq!(materialized.enrollment_source, "tailscale_auto_enrollment");
+        assert_eq!(materialized.enrollment_source, "auto");
     }
 
     #[test]
@@ -3526,15 +3712,100 @@ max_bytes = 1048576
             "nodekey:old-materializer",
         )]);
         let autodiscovery = sample_autodiscovery("tailnet-test", "nodekey:new-materializer");
+        let mut local = TailscaleLocalReport::mesh_disabled();
+        local.authenticated = true;
+        local.binary_authentic = true;
+        local.shields_up = Some(false);
+        local.tailnet_display_name = Some("test tailnet".to_owned());
+        local.degradations.clear();
 
-        let status = snapshot.status_report_with_autodiscovery(&autodiscovery);
+        let status = snapshot.status_report_with_autodiscovery(
+            &autodiscovery,
+            Some(&local),
+            &MeshPeerPolicyRegistry::default(),
+            &BTreeSet::new(),
+        );
 
         assert_eq!(status.auto_enrollment.tailscale.authenticated, Some(true));
+        assert_eq!(status.auto_enrollment.tailscale.shields_up, Some(false));
+        assert_eq!(
+            status.auto_enrollment.tailscale.binary_authentic,
+            Some(true)
+        );
+        assert_eq!(
+            status
+                .auto_enrollment
+                .tailscale
+                .tailnet_display_name
+                .as_deref(),
+            Some("test tailnet")
+        );
         assert!(status.auto_enrollment.drift.node_key_changed);
         assert!(!status.auto_enrollment.drift.tailnet_changed);
         assert!(status.auto_enrollment.degraded.iter().any(|item| {
             item.code == AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE && item.severity == "medium"
         }));
+    }
+
+    #[test]
+    fn auto_status_projects_real_policy_probe_and_drift_observations() {
+        let snapshot = sample_snapshot(vec![sample_auto_enrolled_peer(
+            "peer-a",
+            "nodekey:self-materializer",
+        )]);
+        let registry = auto_status_policy_registry();
+        let mut autodiscovery = sample_autodiscovery("tailnet-test", "nodekey:self-materializer");
+        autodiscovery.ee_capable_peers = vec![
+            crate::mesh::tailscale_autodiscovery::TailscaleAutodiscoveryPeer {
+                node_key: "nodekey:new-peer".to_owned(),
+                tailscale_ip: "100.64.0.2".to_owned(),
+                magic_dns_name: Some("new-peer.tailnet.test".to_owned()),
+                hostname: Some("new-peer".to_owned()),
+                ee_protocol_version: "1.0".to_owned(),
+                workspace_match_set: vec!["wsp_test".to_owned()],
+                last_probed_at: "2026-08-07T00:00:00Z".to_owned(),
+                latency_ms: 4,
+                discovery_policy_decision: "service_tag_match".to_owned(),
+            },
+        ];
+        autodiscovery.skipped_peers = vec![
+            crate::mesh::tailscale_autodiscovery::TailscaleAutodiscoverySkippedPeer {
+                node_key: "nodekey:timeout-peer".to_owned(),
+                reason: "probe_timeout".to_owned(),
+            },
+        ];
+        let mut local = TailscaleLocalReport::mesh_disabled();
+        local.authenticated = true;
+        local.binary_authentic = true;
+        local.shields_up = Some(false);
+        local.tailnet_display_name = Some("test tailnet".to_owned());
+        local.degradations.clear();
+
+        let status = snapshot.status_report_with_autodiscovery(
+            &autodiscovery,
+            Some(&local),
+            &registry,
+            &BTreeSet::from(["peer-a-node".to_owned()]),
+        );
+        let auto = status.auto_enrollment;
+        let materialized = auto.materialized.expect("materialized peer status");
+
+        assert_eq!(materialized.lane_policy.metadata, "quarantine");
+        assert_eq!(materialized.lane_policy.body, "allow");
+        assert_eq!(materialized.lane_policy.embedding, "deny");
+        assert_eq!(auto.drift.new_peers_available, vec!["nodekey:new-peer"]);
+        assert_eq!(auto.drift.new_peer_count, 1);
+        assert_eq!(
+            auto.drift.transient_unreachable,
+            vec!["nodekey:timeout-peer"]
+        );
+        assert_eq!(auto.peer_state_breakdown.active, 1);
+        assert_eq!(auto.peer_state_breakdown.soft_stale, 0);
+        assert_eq!(auto.peer_state_breakdown.hard_stale, 0);
+        assert_eq!(auto.peer_state_breakdown.denylisted, 1);
+        assert_eq!(auto.discovery, autodiscovery);
+        assert_eq!(auto.discovery_cache.status, "not_probed_in_this_mode");
+        assert_eq!(auto.steward_posture.status, "not_probed_in_this_mode");
     }
 
     #[test]
@@ -3958,6 +4229,42 @@ max_bytes = 1048576
             events: Vec::new(),
             degraded: Vec::new(),
         }
+    }
+
+    fn auto_status_policy_registry() -> MeshPeerPolicyRegistry {
+        let config = ConfigFile::parse(
+            r#"
+[[mesh.peer_policies]]
+policy_id = "pol_status"
+workspace_id = "wsp_test"
+peer_id = "peer-a"
+origin_workspace_ids = ["wsp_test"]
+trust_lane = "peerAgent"
+import_trust_class = "agent_validated"
+default_action = "deny"
+
+[mesh.peer_policies.allowed_lanes]
+metadata = "quarantine"
+body = "allow"
+embedding = "deny"
+graph_link = "deny"
+revision_notice = "allow"
+curation_signal = "deny"
+
+[mesh.peer_policies.redaction]
+metadata = "redact"
+preview = "redact"
+body = "share"
+embedding = "deny"
+
+[mesh.peer_policies.body_fetch]
+allowed = true
+requires_consent = false
+max_bytes = 1048576
+"#,
+        )
+        .expect("mesh status policy config should parse");
+        MeshPeerPolicyRegistry::from_config(&config)
     }
 
     #[test]

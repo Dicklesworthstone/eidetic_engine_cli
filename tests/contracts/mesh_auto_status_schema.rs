@@ -77,6 +77,10 @@ const TAILSCALE_STATUSES: &[&str] = &["not_probed", "authenticated", "not_authen
 
 const HELLO_RESPONDER_STATUSES: &[&str] = &["not_probed", "running", "not_running"];
 
+const DISCOVERY_CACHE_STATUSES: &[&str] = &["not_loaded", "not_probed_in_this_mode"];
+
+const STEWARD_POSTURE_STATUSES: &[&str] = &["not_inspected", "not_probed_in_this_mode"];
+
 const ENROLLMENT_SOURCES: &[&str] = &["auto", "manual", "auto_replaced_manual"];
 
 const LANE_DECISIONS: &[&str] = &["allow", "quarantine", "deny"];
@@ -250,6 +254,23 @@ fn auto_status_hello_responder_status_enum_matches_srr6_46_12() -> TestResult {
         "/properties/helloResponder/properties/status/enum",
         HELLO_RESPONDER_STATUSES,
         "helloResponder.status enum",
+    )
+}
+
+#[test]
+fn auto_status_unavailable_adapters_are_explicitly_unprobed() -> TestResult {
+    let schema = load_schema()?;
+    require_closed_set(
+        &schema,
+        "/properties/discoveryCache/properties/status/enum",
+        DISCOVERY_CACHE_STATUSES,
+        "discoveryCache.status enum",
+    )?;
+    require_closed_set(
+        &schema,
+        "/$defs/stewardPosture/properties/status/enum",
+        STEWARD_POSTURE_STATUSES,
+        "stewardPosture.status enum",
     )
 }
 
