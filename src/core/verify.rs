@@ -40,8 +40,9 @@ use crate::db::{
 };
 use crate::models::{
     CandidateId, DomainError, LineSpan, ProducerMetadata, ProvenanceUri, RESPONSE_SCHEMA_V2,
-    TrustClass, VERIFICATION_EVIDENCE_SCHEMA_V1, VerificationClosureGuidance,
-    VerificationEvidenceRecord, VerificationGateRequirement, VerificationStatus,
+    RCH_VERIFY_SCHEMA_V1, TrustClass, VERIFICATION_EVIDENCE_SCHEMA_V1,
+    VerificationClosureGuidance, VerificationEvidenceRecord, VerificationGateRequirement,
+    VerificationStatus,
     rch_cargo_closure_requirements, verification_closure_guidance,
     verification_evidence_beads_summary,
 };
@@ -653,6 +654,30 @@ pub struct VerificationRecordOptions<'a> {
     pub target_id: &'a str,
     pub actor: Option<&'a str>,
     pub evidence: VerificationEvidenceRecord,
+}
+
+/// Trust boundary established by the parser that produced normalized evidence.
+///
+/// The generic `ee.verification_evidence.v1` envelope is useful as advisory
+/// evidence, but all of its authority-bearing fields are caller controlled. A
+/// specialized parser may establish stronger provenance after validating the
+/// source artifact's own contract. This value is stored beside, rather than
+/// inside, the caller-provided evidence so an embedded producer block cannot
+/// grant itself closure authority.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum VerificationEvidenceAuthority {
+    #[default]
+    CallerAuthored,
+    ValidatedRunRecord,
+    ValidatedRchVerify,
+    ValidatedGithubActions,
+}
+
+impl VerificationEvidenceAuthority {
+    const fn can_authorize_pass(self) -> bool {
+        !matches!(self, Self::CallerAuthored)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2064,6 +2089,28 @@ fn provenance_referent_report(
 pub fn record_verification_evidence(
     options: VerificationRecordOptions<'_>,
 ) -> Result<VerificationRecordReport, DomainError> {
+    record_verification_evidence_with_authority(
+        options,
+        VerificationEvidenceAuthority::CallerAuthored,
+    )
+}
+
+/// Persist evidence normalized by one of the specialized proof parsers.
+///
+/// This is crate-private on purpose: external library callers can submit
+/// generic evidence, but cannot label their own normalized envelope as having
+/// passed an in-tree proof parser.
+pub(crate) fn record_validated_verification_evidence(
+    options: VerificationRecordOptions<'_>,
+    authority: VerificationEvidenceAuthority,
+) -> Result<VerificationRecordReport, DomainError> {
+    record_verification_evidence_with_authority(options, authority)
+}
+
+fn record_verification_evidence_with_authority(
+    options: VerificationRecordOptions<'_>,
+    authority: VerificationEvidenceAuthority,
+) -> Result<VerificationRecordReport, DomainError> {
     if options.target_type.trim().is_empty() {
         return Err(DomainError::Usage {
             message: "verification record target type must not be empty".to_owned(),
@@ -2076,14 +2123,16 @@ pub fn record_verification_evidence(
             repair: Some("pass --target-id <memory-or-pack-id>".to_owned()),
         });
     }
-    validate_verification_record(&options.evidence)?;
-    let content_hash =
-        verification_evidence_content_hash(&options.evidence).map_err(|message| {
-            DomainError::Storage {
-                message,
-                repair: Some("inspect the verification evidence JSON and retry".to_owned()),
-            }
-        })?;
+    let mut evidence = options.evidence;
+    validate_verification_evidence_authority(&evidence, authority)?;
+    normalize_validated_verification_evidence(&mut evidence, authority);
+    validate_verification_record(&evidence)?;
+    let content_hash = verification_evidence_content_hash(&evidence).map_err(|message| {
+        DomainError::Storage {
+            message,
+            repair: Some("inspect the verification evidence JSON and retry".to_owned()),
+        }
+    })?;
 
     let connection = open_verification_database(options.database_path)?;
     let workspace_id = ensure_verification_workspace(&connection, options.workspace_path)?;
@@ -2092,6 +2141,7 @@ pub fn record_verification_evidence(
         &content_hash,
         options.target_type,
         options.target_id,
+        authority,
     )? {
         return Ok(VerificationRecordReport {
             schema: VERIFY_RECORD_REPORT_SCHEMA_V1,
@@ -2110,7 +2160,7 @@ pub fn record_verification_evidence(
     }
 
     let audit_id = generate_audit_id();
-    let details = VerificationAuditDetails::new(content_hash.clone(), &options.evidence);
+    let details = VerificationAuditDetails::new(content_hash.clone(), &evidence, authority);
     let details = serde_json::to_string(&details).map_err(|error| DomainError::Storage {
         message: format!("Failed to serialize verification evidence: {error}"),
         repair: Some("inspect the verification evidence JSON and retry".to_owned()),
@@ -2149,7 +2199,7 @@ pub fn record_verification_evidence(
         persisted: true,
         replayed: false,
         degradations: Vec::new(),
-        evidence: options.evidence,
+        evidence,
     })
 }
 
@@ -2290,12 +2340,80 @@ fn validate_verification_record(record: &VerificationEvidenceRecord) -> Result<(
     Ok(())
 }
 
+fn validate_verification_evidence_authority(
+    record: &VerificationEvidenceRecord,
+    authority: VerificationEvidenceAuthority,
+) -> Result<(), DomainError> {
+    let source_is_verification = record.producer.source_system.as_str() == "verification";
+    let valid = match authority {
+        VerificationEvidenceAuthority::CallerAuthored => true,
+        VerificationEvidenceAuthority::ValidatedRunRecord => {
+            source_is_verification
+                && record.command.starts_with("verification_run ")
+                && record.producer.run.run_id.is_some()
+        }
+        VerificationEvidenceAuthority::ValidatedRchVerify => {
+            source_is_verification
+                && record.producer.run.run_id.as_deref() == Some(RCH_VERIFY_SCHEMA_V1)
+                && record.offload.offload_tool.as_deref() == Some("rch")
+        }
+        VerificationEvidenceAuthority::ValidatedGithubActions => {
+            source_is_verification
+                && record.offload.offload_tool.as_deref() == Some("github_actions")
+        }
+    };
+    if valid {
+        return Ok(());
+    }
+
+    Err(DomainError::Usage {
+        message: format!(
+            "verification evidence does not match its validated parser authority ({authority:?})"
+        ),
+        repair: Some("parse the original proof with the matching in-tree verifier".to_owned()),
+    })
+}
+
+fn normalize_validated_verification_evidence(
+    record: &mut VerificationEvidenceRecord,
+    authority: VerificationEvidenceAuthority,
+) {
+    if authority != VerificationEvidenceAuthority::ValidatedRunRecord {
+        return;
+    }
+    let Some(substrate) = record
+        .command
+        .strip_prefix("verification_run ")
+        .and_then(|summary| summary.split_whitespace().next())
+        .filter(|substrate| {
+            matches!(
+                *substrate,
+                "remote_artifact" | "github_actions_artifact" | "remote_build_artifact"
+            )
+        })
+        .map(str::to_owned)
+    else {
+        return;
+    };
+
+    // A downloaded artifact was built and exercised remotely even when it was
+    // later consumed on this host. Preserve that distinction for closure and
+    // posture instead of allowing the normalized record to look like a local
+    // source build.
+    record.offload.required_remote = true;
+    record.offload.remote_required_env = None;
+    record.offload.offload_tool = Some(substrate);
+    record.offload.fallback_detected = false;
+    record.offload.fallback_reason = None;
+}
+
 #[derive(Clone, Debug)]
 struct ParsedVerificationAuditEntry {
     audit_id: String,
     content_hash: String,
     target_type: Option<String>,
     target_id: Option<String>,
+    authority: VerificationEvidenceAuthority,
     record: VerificationEvidenceRecord,
 }
 
@@ -2304,16 +2422,23 @@ struct ParsedVerificationAuditEntry {
 struct VerificationAuditDetails {
     schema: String,
     content_hash: String,
+    #[serde(default)]
+    authority: VerificationEvidenceAuthority,
     producer: ProducerMetadata,
     status: VerificationStatus,
     evidence: VerificationEvidenceRecord,
 }
 
 impl VerificationAuditDetails {
-    fn new(content_hash: String, evidence: &VerificationEvidenceRecord) -> Self {
+    fn new(
+        content_hash: String,
+        evidence: &VerificationEvidenceRecord,
+        authority: VerificationEvidenceAuthority,
+    ) -> Self {
         Self {
             schema: VERIFICATION_LEDGER_ENTRY_SCHEMA_V1.to_owned(),
             content_hash,
+            authority,
             producer: evidence.producer.clone(),
             status: evidence.status,
             evidence: evidence.clone(),
@@ -2361,6 +2486,7 @@ fn find_existing_verification_ingest(
     content_hash: &str,
     target_type: &str,
     target_id: &str,
+    authority: VerificationEvidenceAuthority,
 ) -> Result<Option<ParsedVerificationAuditEntry>, DomainError> {
     let entries = list_verification_audit_entries(connection)?;
     let parsed = parse_verification_audit_entries_with_metadata(entries).map_err(|message| {
@@ -2375,6 +2501,7 @@ fn find_existing_verification_ingest(
         entry.content_hash == content_hash
             && entry.target_type.as_deref() == Some(target_type)
             && entry.target_id.as_deref() == Some(target_id)
+            && entry.authority == authority
     }))
 }
 
@@ -2428,10 +2555,10 @@ fn parse_verification_audit_entries_with_metadata(
                 entry.id
             ));
         };
-        let (record, content_hash) =
+        let (record, content_hash, authority) =
             match serde_json::from_str::<VerificationAuditDetails>(&details) {
                 Ok(details) if details.schema == VERIFICATION_LEDGER_ENTRY_SCHEMA_V1 => {
-                    (details.evidence, details.content_hash)
+                    (details.evidence, details.content_hash, details.authority)
                 }
                 Ok(details) => {
                     return Err(format!(
@@ -2448,7 +2575,11 @@ fn parse_verification_audit_entries_with_metadata(
                             )
                         })?;
                     let content_hash = verification_evidence_content_hash(&record)?;
-                    (record, content_hash)
+                    (
+                        record,
+                        content_hash,
+                        VerificationEvidenceAuthority::CallerAuthored,
+                    )
                 }
             };
         records.push(ParsedVerificationAuditEntry {
@@ -2456,6 +2587,7 @@ fn parse_verification_audit_entries_with_metadata(
             content_hash,
             target_type: entry.target_type,
             target_id: entry.target_id,
+            authority,
             record,
         });
     }

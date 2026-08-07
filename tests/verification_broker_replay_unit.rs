@@ -46,7 +46,11 @@ struct BrokerReplayRequest {
     normalized_argv_hash: String,
     execution_substrate: String,
     env_fingerprint_class: Option<String>,
+    target_triple: Option<String>,
     target_profile: Option<String>,
+    build_command_hash: Option<String>,
+    effective_input_hash: Option<String>,
+    provenance_hash: Option<String>,
 }
 
 fn repo_root() -> PathBuf {
@@ -170,6 +174,10 @@ fn broker_request(request: &BrokerReplayRequest) -> VerificationBrokerViewReques
         normalized_argv_hash: request.normalized_argv_hash.as_str(),
         execution_substrate: request.execution_substrate.as_str(),
         env_fingerprint_class: request.env_fingerprint_class.as_deref(),
+        target_triple: request.target_triple.as_deref(),
         target_profile: request.target_profile.as_deref(),
+        build_command_hash: request.build_command_hash.as_deref(),
+        effective_input_hash: request.effective_input_hash.as_deref(),
+        provenance_hash: request.provenance_hash.as_deref(),
     }
 }

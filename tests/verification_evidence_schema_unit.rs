@@ -25,6 +25,14 @@ use serde::Serialize;
 
 type TestResult = Result<(), String>;
 const REMOTE_SOURCE_HASH: &str = "git_tree:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const REMOTE_TARGET: &str = "aarch64-apple-darwin";
+const REMOTE_PROFILE: &str = "debug";
+const REMOTE_BUILD_COMMAND_HASH: &str =
+    "sha256:4444444444444444444444444444444444444444444444444444444444444444";
+const REMOTE_EFFECTIVE_INPUT_HASH: &str =
+    "sha256:5555555555555555555555555555555555555555555555555555555555555555";
+const REMOTE_PROVENANCE_HASH: &str =
+    "sha256:6666666666666666666666666666666666666666666666666666666666666666";
 
 fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1013,7 +1021,11 @@ fn reuse_advisory_reports_all_statuses() -> TestResult {
 
     for (request, expected_status) in [
         (
-            reuse_request(Some(REMOTE_SOURCE_HASH), "blake3:rch-command", "rch"),
+            reuse_request(
+                Some(REMOTE_SOURCE_HASH),
+                "blake3:rch-command",
+                "remote_artifact",
+            ),
             VerificationReuseStatus::ReusablePass,
         ),
         (
@@ -1025,7 +1037,11 @@ fn reuse_advisory_reports_all_statuses() -> TestResult {
             VerificationReuseStatus::InFlight,
         ),
         (
-            reuse_request(Some("blake3:new-source"), "blake3:rch-command", "rch"),
+            reuse_request(
+                Some("blake3:new-source"),
+                "blake3:rch-command",
+                "remote_artifact",
+            ),
             VerificationReuseStatus::StaleSource,
         ),
         (
@@ -1043,7 +1059,11 @@ fn reuse_advisory_reports_all_statuses() -> TestResult {
     }
 
     let missing = verification_reuse_advisory(
-        reuse_request(Some(REMOTE_SOURCE_HASH), "blake3:rch-command", "rch"),
+        reuse_request(
+            Some(REMOTE_SOURCE_HASH),
+            "blake3:rch-command",
+            "remote_artifact",
+        ),
         &[],
     );
     assert_eq!(missing.status, VerificationReuseStatus::MissingEvidence);
@@ -1061,9 +1081,14 @@ fn reuse_request<'a>(
         source_hash,
         command_hash,
         execution_substrate,
-        feature_profile_hash: Some("blake3:profile"),
-        workspace_generation: Some(42),
-        strictness_flags: vec!["RCH_REQUIRE_REMOTE=1"],
+        target_triple: (execution_substrate == "remote_artifact").then_some(REMOTE_TARGET),
+        target_profile: (execution_substrate == "remote_artifact").then_some(REMOTE_PROFILE),
+        build_command_hash: (execution_substrate == "remote_artifact")
+            .then_some(REMOTE_BUILD_COMMAND_HASH),
+        effective_input_hash: (execution_substrate == "remote_artifact")
+            .then_some(REMOTE_EFFECTIVE_INPUT_HASH),
+        provenance_hash: (execution_substrate == "remote_artifact")
+            .then_some(REMOTE_PROVENANCE_HASH),
     }
 }
 

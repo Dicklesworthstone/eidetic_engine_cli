@@ -63,6 +63,34 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "required": ["executionSubstrate"],
+        "properties": {
+          "executionSubstrate": {
+            "enum": [
+              "remote_artifact",
+              "github_actions_artifact",
+              "remote_build_artifact"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": ["exercisedBinaryHash", "remoteArtifactAttestation"],
+        "properties": {
+          "exercisedBinaryHash": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "remoteArtifactAttestation": {
+            "$ref": "../ee.remote_build_artifact_manifest.verification.v1.json"
+          }
+        }
+      }
+    }
+  ],
   "x-ee-doc": "docs/swarm/verification_run.md",
   "x-ee-status": {
     "shipped": true,

@@ -415,9 +415,11 @@ pub struct VerificationReuseRequest<'a> {
     pub source_hash: Option<&'a str>,
     pub command_hash: &'a str,
     pub execution_substrate: &'a str,
-    pub feature_profile_hash: Option<&'a str>,
-    pub workspace_generation: Option<u64>,
-    pub strictness_flags: Vec<&'a str>,
+    pub target_triple: Option<&'a str>,
+    pub target_profile: Option<&'a str>,
+    pub build_command_hash: Option<&'a str>,
+    pub effective_input_hash: Option<&'a str>,
+    pub provenance_hash: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -438,9 +440,11 @@ pub struct VerificationReuseAdvisory {
     pub requested_source_hash: Option<String>,
     pub requested_command_hash: String,
     pub requested_execution_substrate: String,
-    pub feature_profile_hash: Option<String>,
-    pub workspace_generation: Option<u64>,
-    pub strictness_flags: Vec<String>,
+    pub target_triple: Option<String>,
+    pub target_profile: Option<String>,
+    pub build_command_hash: Option<String>,
+    pub effective_input_hash: Option<String>,
+    pub provenance_hash: Option<String>,
     pub matched_run_id: Option<String>,
     pub matched_agent_name: Option<String>,
     pub matched_finished_at: Option<String>,
@@ -482,7 +486,11 @@ pub struct VerificationBrokerViewRequest<'a> {
     pub normalized_argv_hash: &'a str,
     pub execution_substrate: &'a str,
     pub env_fingerprint_class: Option<&'a str>,
+    pub target_triple: Option<&'a str>,
     pub target_profile: Option<&'a str>,
+    pub build_command_hash: Option<&'a str>,
+    pub effective_input_hash: Option<&'a str>,
+    pub provenance_hash: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -514,7 +522,11 @@ pub struct VerificationBrokerView {
     pub normalized_argv_hash: String,
     pub source_tree_fingerprint_class: String,
     pub env_fingerprint_class: String,
+    pub target_triple: Option<String>,
     pub target_profile: Option<String>,
+    pub build_command_hash: Option<String>,
+    pub effective_input_hash: Option<String>,
+    pub provenance_hash: Option<String>,
     pub execution_substrate: String,
     pub rch: VerificationBrokerRchMetadata,
     pub exit_code: Option<i32>,
@@ -1742,6 +1754,10 @@ pub fn verification_reuse_advisory(
         .iter()
         .copied()
         .find(|record| record_matches_request(record, &request));
+    let identity_candidate = candidates
+        .iter()
+        .copied()
+        .find(|record| reuse_base_match(record, &request));
     let command_match = candidates
         .iter()
         .copied()
@@ -1753,22 +1769,27 @@ pub fn verification_reuse_advisory(
             .find(|record| record.source_hash.as_deref() == Some(source_hash))
     });
 
-    let (status, matched, reason) = if let Some(record) = exact {
+    let (status, matched, reason) = if request.source_hash.is_none() {
+        (
+            VerificationReuseStatus::RerunRequired,
+            command_match,
+            "current source fingerprint is unavailable; verification evidence cannot be reused",
+        )
+    } else if let Some(record) = identity_candidate.filter(|record| {
+        run_record_requires_remote_artifact_attestation(record)
+            && !verification_run_has_verified_remote_artifact(record)
+    }) {
+        (
+            VerificationReuseStatus::RerunRequired,
+            Some(record),
+            "matching artifact-consumer run lacks a valid source-bound artifact attestation",
+        )
+    } else if let Some(record) = exact {
         match record.exit_code {
-            Some(0)
-                if run_record_requires_remote_artifact_attestation(record)
-                    && !verification_run_has_verified_remote_artifact(record) =>
-            {
-                (
-                    VerificationReuseStatus::RerunRequired,
-                    Some(record),
-                    "matching remote run lacks a valid source-bound artifact attestation",
-                )
-            }
             Some(0) => (
                 VerificationReuseStatus::ReusablePass,
                 Some(record),
-                "matching verification run passed for the same source, command, and substrate",
+                "matching verification run passed for the same source, command, substrate, and build identity",
             ),
             Some(_) => (
                 VerificationReuseStatus::ReusableFail,
@@ -1781,6 +1802,12 @@ pub fn verification_reuse_advisory(
                 "matching verification run is still in flight or has no final exit code",
             ),
         }
+    } else if let Some(record) = identity_candidate {
+        (
+            VerificationReuseStatus::RerunRequired,
+            Some(record),
+            "matching source and command use a different or incomplete artifact build identity",
+        )
     } else if let Some(record) = command_match {
         (
             VerificationReuseStatus::StaleSource,
@@ -1814,9 +1841,11 @@ pub fn verification_reuse_advisory(
         requested_source_hash: normalized_non_empty(request.source_hash),
         requested_command_hash: request.command_hash.to_owned(),
         requested_execution_substrate: request.execution_substrate.to_owned(),
-        feature_profile_hash: normalized_non_empty(request.feature_profile_hash),
-        workspace_generation: request.workspace_generation,
-        strictness_flags: sorted_flags(&request.strictness_flags),
+        target_triple: normalized_non_empty(request.target_triple),
+        target_profile: normalized_non_empty(request.target_profile),
+        build_command_hash: normalized_non_empty(request.build_command_hash),
+        effective_input_hash: normalized_non_empty(request.effective_input_hash),
+        provenance_hash: normalized_non_empty(request.provenance_hash),
         matched_run_id: matched.map(|record| record.run_id.clone()),
         matched_agent_name: matched.and_then(|record| record.agent_name.clone()),
         matched_finished_at: matched.and_then(|record| record.finished_at.clone()),
@@ -1842,6 +1871,10 @@ pub fn verification_broker_view(
         .iter()
         .copied()
         .find(|record| broker_exact_match(record, &request));
+    let identity_candidate = candidates
+        .iter()
+        .copied()
+        .find(|record| broker_base_match(record, &request));
     let command_match = candidates
         .iter()
         .copied()
@@ -1855,25 +1888,32 @@ pub fn verification_broker_view(
     });
 
     let (status, matched, compatibility_reason_codes, stale_reason_codes, suggested_action) =
-        if let Some(record) = exact {
+        if request.source_hash.is_none() {
+            (
+                VerificationBrokerStatus::Incompatible,
+                command_match,
+                vec!["source_identity_missing"],
+                vec!["source_hash_missing"],
+                "resolve_current_source",
+            )
+        } else if let Some(record) = identity_candidate.filter(|record| {
+            run_record_requires_remote_artifact_attestation(record)
+                && !verification_run_has_verified_remote_artifact(record)
+        }) {
+            (
+                VerificationBrokerStatus::Incompatible,
+                Some(record),
+                vec![
+                    "source_match",
+                    "command_match",
+                    "substrate_match",
+                    "artifact_attestation_invalid",
+                ],
+                vec!["remote_artifact_attestation_invalid"],
+                "verify_downloaded_artifact",
+            )
+        } else if let Some(record) = exact {
             match record.exit_code {
-                Some(0)
-                    if run_record_requires_remote_artifact_attestation(record)
-                        && !verification_run_has_verified_remote_artifact(record) =>
-                {
-                    (
-                        VerificationBrokerStatus::Incompatible,
-                        Some(record),
-                        vec![
-                            "source_match",
-                            "command_match",
-                            "substrate_match",
-                            "artifact_attestation_invalid",
-                        ],
-                        vec!["remote_artifact_attestation_invalid"],
-                        "verify_downloaded_artifact",
-                    )
-                }
                 Some(0) => (
                     VerificationBrokerStatus::Reusable,
                     Some(record),
@@ -1911,6 +1951,18 @@ pub fn verification_broker_view(
                     "wait_for_in_progress_run",
                 ),
             }
+        } else if let Some(record) = identity_candidate {
+            let mut stale = remote_artifact_identity_rejections_for_broker(record, &request);
+            if stale.is_empty() {
+                stale.push("artifact_build_identity_incomplete".to_owned());
+            }
+            (
+                VerificationBrokerStatus::Incompatible,
+                Some(record),
+                vec!["source_match", "command_match", "substrate_match"],
+                stale,
+                "verify_matching_artifact_build",
+            )
         } else if let Some(record) = command_match {
             (
                 VerificationBrokerStatus::Stale,
@@ -1963,10 +2015,22 @@ pub fn verification_broker_view(
         env_fingerprint_class: normalized_non_empty(request.env_fingerprint_class)
             .or_else(|| matched.and_then(|record| record.cargo_target_dir_hash_or_class.clone()))
             .unwrap_or_else(|| "class:unknown_env".to_owned()),
+        target_triple: normalized_non_empty(request.target_triple),
         target_profile: normalized_non_empty(request.target_profile),
+        build_command_hash: normalized_non_empty(request.build_command_hash),
+        effective_input_hash: normalized_non_empty(request.effective_input_hash),
+        provenance_hash: normalized_non_empty(request.provenance_hash),
         execution_substrate: request.execution_substrate.to_owned(),
         rch: VerificationBrokerRchMetadata {
-            required_remote: request.execution_substrate == "rch",
+            required_remote: matches!(
+                request.execution_substrate,
+                "rch"
+                    | "remote_rch"
+                    | "rch_remote"
+                    | "remote_artifact"
+                    | "github_actions_artifact"
+                    | "remote_build_artifact"
+            ),
             worker_host: matched.and_then(|record| record.worker_host.clone()),
             job_id: None,
         },
@@ -2082,14 +2146,29 @@ pub fn verification_closeout_capsule(
         caveats
             .push("cargo evidence was local; remote-required gates need an RCH rerun".to_owned());
     }
-    if request.source_must_match
-        && requested_source_hash.is_some()
-        && record.source_hash != requested_source_hash
-    {
-        failure_mode_codes.push("source_hash_mismatch".to_owned());
-        caveats.push("source hash differs from the requested closeout source".to_owned());
-    }
-    if record.finished_at.is_none() || record.exit_code.is_none() || record.provenance.is_empty() {
+    let source_hash_invalid = if request.source_must_match {
+        match requested_source_hash.as_ref() {
+            Some(requested) if record.source_hash.as_ref() == Some(requested) => false,
+            Some(_) => {
+                failure_mode_codes.push("source_hash_mismatch".to_owned());
+                caveats.push("source hash differs from the requested closeout source".to_owned());
+                true
+            }
+            None => {
+                failure_mode_codes.push("requested_source_hash_missing".to_owned());
+                caveats.push(
+                    "source matching was required but no requested source hash was supplied"
+                        .to_owned(),
+                );
+                true
+            }
+        }
+    } else {
+        false
+    };
+    let evidence_incomplete =
+        record.finished_at.is_none() || record.exit_code.is_none() || record.provenance.is_empty();
+    if evidence_incomplete {
         failure_mode_codes.push("evidence_incomplete".to_owned());
         caveats.push(
             "verification evidence is incomplete; do not treat as final closure proof".to_owned(),
@@ -2101,8 +2180,12 @@ pub fn verification_closeout_capsule(
     caveats.sort();
     caveats.dedup();
 
+    let closure_unverified = remote_artifact_attestation_invalid
+        || source_hash_invalid
+        || record.execution_substrate == "local_cargo"
+        || evidence_incomplete;
     let (result, passed_count, failed_count) = match record.exit_code {
-        Some(0) if remote_artifact_attestation_invalid => ("unverified", Some(0), Some(0)),
+        Some(_) if closure_unverified => ("unverified", Some(0), Some(0)),
         Some(0) => ("passed", Some(1), Some(0)),
         Some(_) => ("failed", Some(0), Some(1)),
         None => ("in_flight", None, None),
@@ -2262,11 +2345,19 @@ const SAMPLE_REMOTE_MANIFEST_HASH: &str =
     "sha256:2222222222222222222222222222222222222222222222222222222222222222";
 const SAMPLE_REMOTE_BINARY_HASH: &str =
     "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+const SAMPLE_REMOTE_BUILD_COMMAND_HASH: &str =
+    "sha256:4444444444444444444444444444444444444444444444444444444444444444";
+const SAMPLE_REMOTE_EFFECTIVE_INPUT_HASH: &str =
+    "sha256:5555555555555555555555555555555555555555555555555555555555555555";
+const SAMPLE_REMOTE_PROVENANCE_HASH: &str =
+    "sha256:6666666666666666666666666666666666666666666666666666666666666666";
+const SAMPLE_REMOTE_TARGET: &str = "aarch64-apple-darwin";
+const SAMPLE_REMOTE_PROFILE: &str = "debug";
 
 fn sample_remote_artifact_attestation() -> RemoteArtifactAttestation {
     let source_commit = SAMPLE_REMOTE_SOURCE_COMMIT.to_owned();
-    let target = "aarch64-apple-darwin".to_owned();
-    let profile = "debug".to_owned();
+    let target = SAMPLE_REMOTE_TARGET.to_owned();
+    let profile = SAMPLE_REMOTE_PROFILE.to_owned();
     let version_assertions = vec![
         sample_remote_assertion("/schema", serde_json::json!("ee.response.v2")),
         sample_remote_assertion("/success", serde_json::json!(true)),
@@ -2301,15 +2392,9 @@ fn sample_remote_artifact_attestation() -> RemoteArtifactAttestation {
         source_commit: Some(source_commit),
         git_tree: Some(SAMPLE_REMOTE_GIT_TREE.to_owned()),
         manifest_hash: Some(SAMPLE_REMOTE_MANIFEST_HASH.to_owned()),
-        build_command_hash: Some(
-            "sha256:4444444444444444444444444444444444444444444444444444444444444444".to_owned(),
-        ),
-        effective_input_hash: Some(
-            "sha256:5555555555555555555555555555555555555555555555555555555555555555".to_owned(),
-        ),
-        provenance_hash: Some(
-            "sha256:6666666666666666666666666666666666666666666666666666666666666666".to_owned(),
-        ),
+        build_command_hash: Some(SAMPLE_REMOTE_BUILD_COMMAND_HASH.to_owned()),
+        effective_input_hash: Some(SAMPLE_REMOTE_EFFECTIVE_INPUT_HASH.to_owned()),
+        provenance_hash: Some(SAMPLE_REMOTE_PROVENANCE_HASH.to_owned()),
         target: Some(target),
         profile: Some(profile),
         binary_hash: Some(SAMPLE_REMOTE_BINARY_HASH.to_owned()),
@@ -2386,7 +2471,7 @@ pub fn sample_verification_run_records() -> Vec<VerificationRunRecord> {
         command_hash: "blake3:rch-command".to_owned(),
         command_argv_hash: "blake3:rch-command-argv".to_owned(),
         cargo_target_dir_hash_or_class: Some("class:external_cargo_target".to_owned()),
-        execution_substrate: "rch".to_owned(),
+        execution_substrate: "remote_artifact".to_owned(),
         worker_host: Some("css".to_owned()),
         started_at: Some("2026-05-15T05:00:00Z".to_owned()),
         finished_at: Some("2026-05-15T05:00:42Z".to_owned()),
@@ -2454,10 +2539,12 @@ pub fn sample_verification_reuse_advisories() -> Vec<VerificationReuseAdvisory> 
                 bead_id: Some("bd-example"),
                 source_hash: Some(SAMPLE_REMOTE_SOURCE_HASH),
                 command_hash: "blake3:rch-command",
-                execution_substrate: "rch",
-                feature_profile_hash: Some("blake3:profile"),
-                workspace_generation: Some(42),
-                strictness_flags: vec!["RCH_REQUIRE_REMOTE=1", "--all-targets"],
+                execution_substrate: "remote_artifact",
+                target_triple: Some(SAMPLE_REMOTE_TARGET),
+                target_profile: Some(SAMPLE_REMOTE_PROFILE),
+                build_command_hash: Some(SAMPLE_REMOTE_BUILD_COMMAND_HASH),
+                effective_input_hash: Some(SAMPLE_REMOTE_EFFECTIVE_INPUT_HASH),
+                provenance_hash: Some(SAMPLE_REMOTE_PROVENANCE_HASH),
             },
             &records,
         ),
@@ -2466,10 +2553,12 @@ pub fn sample_verification_reuse_advisories() -> Vec<VerificationReuseAdvisory> 
                 bead_id: Some("bd-example"),
                 source_hash: Some("blake3:new-source"),
                 command_hash: "blake3:rch-command",
-                execution_substrate: "rch",
-                feature_profile_hash: Some("blake3:profile"),
-                workspace_generation: Some(43),
-                strictness_flags: vec!["--all-targets", "RCH_REQUIRE_REMOTE=1"],
+                execution_substrate: "remote_artifact",
+                target_triple: Some(SAMPLE_REMOTE_TARGET),
+                target_profile: Some(SAMPLE_REMOTE_PROFILE),
+                build_command_hash: Some(SAMPLE_REMOTE_BUILD_COMMAND_HASH),
+                effective_input_hash: Some(SAMPLE_REMOTE_EFFECTIVE_INPUT_HASH),
+                provenance_hash: Some(SAMPLE_REMOTE_PROVENANCE_HASH),
             },
             &records,
         ),
@@ -3319,24 +3408,147 @@ fn record_matches_request(
     record: &VerificationRunRecord,
     request: &VerificationReuseRequest<'_>,
 ) -> bool {
+    reuse_base_match(record, request)
+        && remote_artifact_identity_rejections_for_reuse(record, request).is_empty()
+}
+
+fn reuse_base_match(
+    record: &VerificationRunRecord,
+    request: &VerificationReuseRequest<'_>,
+) -> bool {
     record.command_hash == request.command_hash
         && record.execution_substrate == request.execution_substrate
-        && match request.source_hash {
-            Some(source_hash) => record.source_hash.as_deref() == Some(source_hash),
-            None => true,
-        }
+        && request
+            .source_hash
+            .is_some_and(|source_hash| record.source_hash.as_deref() == Some(source_hash))
+}
+
+fn remote_artifact_identity_rejections_for_reuse(
+    record: &VerificationRunRecord,
+    request: &VerificationReuseRequest<'_>,
+) -> Vec<&'static str> {
+    if !run_record_requires_remote_artifact_attestation(record) {
+        return if request.target_triple.is_none()
+            && request.target_profile.is_none()
+            && request.build_command_hash.is_none()
+            && request.effective_input_hash.is_none()
+            && request.provenance_hash.is_none()
+        {
+            Vec::new()
+        } else {
+            vec!["artifact_identity_supplied_for_non_artifact_run"]
+        };
+    }
+
+    let Some(report) = record.remote_artifact_attestation.as_ref() else {
+        return vec!["remote_artifact_attestation_missing"];
+    };
+    remote_artifact_identity_rejections(
+        report,
+        request.target_triple,
+        request.target_profile,
+        request.build_command_hash,
+        request.effective_input_hash,
+        request.provenance_hash,
+    )
 }
 
 fn broker_exact_match(
     record: &VerificationRunRecord,
     request: &VerificationBrokerViewRequest<'_>,
 ) -> bool {
+    broker_base_match(record, request)
+        && remote_artifact_identity_rejections_for_broker(record, request).is_empty()
+}
+
+fn broker_base_match(
+    record: &VerificationRunRecord,
+    request: &VerificationBrokerViewRequest<'_>,
+) -> bool {
     broker_command_match(record, request)
-        && match request.source_hash {
-            Some(source_hash) => record.source_hash.as_deref() == Some(source_hash),
-            None => true,
-        }
+        && request
+            .source_hash
+            .is_some_and(|source_hash| record.source_hash.as_deref() == Some(source_hash))
         && broker_env_match(record, request)
+}
+
+fn remote_artifact_identity_rejections_for_broker(
+    record: &VerificationRunRecord,
+    request: &VerificationBrokerViewRequest<'_>,
+) -> Vec<&'static str> {
+    if !run_record_requires_remote_artifact_attestation(record) {
+        return if request.target_triple.is_none()
+            && request.build_command_hash.is_none()
+            && request.effective_input_hash.is_none()
+            && request.provenance_hash.is_none()
+        {
+            Vec::new()
+        } else {
+            vec!["artifact_identity_supplied_for_non_artifact_run"]
+        };
+    }
+
+    let Some(report) = record.remote_artifact_attestation.as_ref() else {
+        return vec!["remote_artifact_attestation_missing"];
+    };
+    remote_artifact_identity_rejections(
+        report,
+        request.target_triple,
+        request.target_profile,
+        request.build_command_hash,
+        request.effective_input_hash,
+        request.provenance_hash,
+    )
+}
+
+fn remote_artifact_identity_rejections(
+    report: &RemoteArtifactAttestation,
+    target_triple: Option<&str>,
+    target_profile: Option<&str>,
+    build_command_hash: Option<&str>,
+    effective_input_hash: Option<&str>,
+    provenance_hash: Option<&str>,
+) -> Vec<&'static str> {
+    let mut rejections = Vec::new();
+    for (requested, observed, missing, mismatch) in [
+        (
+            target_triple,
+            report.target.as_deref(),
+            "remote_artifact_target_missing_from_request",
+            "remote_artifact_target_mismatch",
+        ),
+        (
+            target_profile,
+            report.profile.as_deref(),
+            "remote_artifact_profile_missing_from_request",
+            "remote_artifact_profile_mismatch",
+        ),
+        (
+            build_command_hash,
+            report.build_command_hash.as_deref(),
+            "remote_artifact_build_command_hash_missing_from_request",
+            "remote_artifact_build_command_hash_mismatch",
+        ),
+        (
+            effective_input_hash,
+            report.effective_input_hash.as_deref(),
+            "remote_artifact_effective_input_hash_missing_from_request",
+            "remote_artifact_effective_input_hash_mismatch",
+        ),
+        (
+            provenance_hash,
+            report.provenance_hash.as_deref(),
+            "remote_artifact_provenance_hash_missing_from_request",
+            "remote_artifact_provenance_hash_mismatch",
+        ),
+    ] {
+        match requested {
+            None => rejections.push(missing),
+            Some(requested) if observed != Some(requested) => rejections.push(mismatch),
+            Some(_) => {}
+        }
+    }
+    rejections
 }
 
 fn broker_env_match(
@@ -3466,7 +3678,12 @@ fn broker_request<'a>(
     source_hash: Option<&'a str>,
     command_hash: &'a str,
 ) -> VerificationBrokerViewRequest<'a> {
-    broker_request_for_substrate(source_hash, command_hash, "cargo_test", "rch")
+    let substrate = if command_hash == "blake3:rch-command" {
+        "remote_artifact"
+    } else {
+        "rch"
+    };
+    broker_request_for_substrate(source_hash, command_hash, "cargo_test", substrate)
 }
 
 fn broker_request_for_substrate<'a>(
@@ -3489,7 +3706,14 @@ fn broker_request_for_substrate<'a>(
         normalized_argv_hash,
         execution_substrate,
         env_fingerprint_class: Some("class:external_cargo_target"),
-        target_profile: Some("debug"),
+        target_triple: (execution_substrate == "remote_artifact").then_some(SAMPLE_REMOTE_TARGET),
+        target_profile: Some(SAMPLE_REMOTE_PROFILE),
+        build_command_hash: (execution_substrate == "remote_artifact")
+            .then_some(SAMPLE_REMOTE_BUILD_COMMAND_HASH),
+        effective_input_hash: (execution_substrate == "remote_artifact")
+            .then_some(SAMPLE_REMOTE_EFFECTIVE_INPUT_HASH),
+        provenance_hash: (execution_substrate == "remote_artifact")
+            .then_some(SAMPLE_REMOTE_PROVENANCE_HASH),
     }
 }
 
@@ -3668,14 +3892,13 @@ fn run_record_status(record: &VerificationRunRecord) -> VerificationStatus {
     if run_record_is_local_cargo(record) {
         return VerificationStatus::FallbackDetected;
     }
+    if run_record_requires_remote_artifact_attestation(record)
+        && !verification_run_has_verified_remote_artifact(record)
+    {
+        return VerificationStatus::Unknown;
+    }
 
     match record.exit_code {
-        Some(0)
-            if run_record_requires_remote_artifact_attestation(record)
-                && !verification_run_has_verified_remote_artifact(record) =>
-        {
-            VerificationStatus::Unknown
-        }
         Some(0) => VerificationStatus::Passed,
         Some(_) => VerificationStatus::Failed,
         None if record.finished_at.is_none() => VerificationStatus::Interrupted,
@@ -3695,6 +3918,15 @@ fn run_record_offload(record: &VerificationRunRecord) -> VerificationOffload {
 
     if run_record_uses_rch(record) {
         VerificationOffload::rch_required(record.worker_host.as_deref())
+    } else if run_record_requires_remote_artifact_attestation(record) {
+        VerificationOffload {
+            required_remote: true,
+            remote_required_env: None,
+            offload_tool: Some(record.execution_substrate.clone()),
+            worker: record.worker_host.clone(),
+            fallback_detected: false,
+            fallback_reason: None,
+        }
     } else {
         VerificationOffload::local()
     }
@@ -3750,11 +3982,15 @@ fn run_record_uses_rch(record: &VerificationRunRecord) -> bool {
 }
 
 fn run_record_requires_remote_artifact_attestation(record: &VerificationRunRecord) -> bool {
-    run_record_uses_rch(record)
-        || matches!(
-            record.execution_substrate.as_str(),
-            "remote_artifact" | "github_actions_artifact" | "remote_build_artifact"
-        )
+    matches!(
+        record.execution_substrate.as_str(),
+        "remote_artifact" | "github_actions_artifact" | "remote_build_artifact"
+    ) || record.remote_artifact_attestation.is_some()
+        || record.exercised_binary_hash.is_some()
+        || record.provenance.iter().any(|provenance| {
+            provenance.event_kind == "remote_artifact_attestation_verified"
+                || provenance.source.starts_with("artifact_attestation:")
+        })
 }
 
 fn run_record_is_local_cargo(record: &VerificationRunRecord) -> bool {
@@ -3858,6 +4094,9 @@ fn run_record_from_artifact_manifest_event(
     } else {
         None
     };
+    if let Some(report) = remote_artifact_attestation.as_ref() {
+        validate_v2_artifact_manifest_bindings(line, fields, command, report)?;
+    }
     let artifact_manifest_hash = field_str(fields, "artifact_manifest_hash")
         .ok_or(VerificationRunImportError::MissingArtifactManifest { line })?;
     let command_argv = command
@@ -3927,6 +4166,85 @@ fn run_record_from_artifact_manifest_event(
     Ok(record)
 }
 
+fn validate_v2_artifact_manifest_bindings(
+    line: usize,
+    fields: &serde_json::Map<String, JsonValue>,
+    command: Option<&PendingJ1Command>,
+    report: &RemoteArtifactAttestation,
+) -> Result<(), VerificationRunImportError> {
+    let mismatch = |reason: String| VerificationRunImportError::MismatchedArtifactManifest {
+        line,
+        reason,
+    };
+    let command = command.ok_or_else(|| {
+        mismatch("v2 artifact manifest has no adjacent command_end event".to_owned())
+    })?;
+    if field_str(fields, "phase") != Some("command_end") {
+        return Err(mismatch("phase must be command_end".to_owned()));
+    }
+    let executable = command.command_argv.first().map(String::as_str);
+    if field_str(fields, "binary_path") != executable {
+        return Err(mismatch(
+            "binary_path does not match command_end.command".to_owned(),
+        ));
+    }
+    if field_str(fields, "binary_hash_status") != Some("available") {
+        return Err(mismatch("binary_hash_status must be available".to_owned()));
+    }
+    if field_str(fields, "execution_substrate") != Some("remote_artifact") {
+        return Err(mismatch(
+            "execution_substrate must identify remote artifact consumption".to_owned(),
+        ));
+    }
+
+    let expected_arg_count = command.command_argv.len().saturating_sub(1);
+    let observed_arg_count = field_usize(fields, "command_arg_count")
+        .ok_or_else(|| mismatch("command_arg_count is missing or malformed".to_owned()))?;
+    if observed_arg_count != expected_arg_count {
+        return Err(mismatch(format!(
+            "command_arg_count {observed_arg_count} does not match command_end args {expected_arg_count}"
+        )));
+    }
+    let advertised_command_hash = field_str(fields, "command_hash")
+        .ok_or_else(|| mismatch("command_hash is missing".to_owned()))?;
+    let expected_command_hash = e2e_artifact_command_hash(
+        executable.unwrap_or_default(),
+        &command.command_argv[1..],
+        advertised_command_hash,
+    )
+    .ok_or_else(|| mismatch("command_hash uses an unsupported algorithm".to_owned()))?;
+    if advertised_command_hash != expected_command_hash {
+        return Err(mismatch(
+            "command_hash does not bind binary_path and command_end args".to_owned(),
+        ));
+    }
+
+    for (field, expected) in [
+        ("source_commit", report.source_commit.as_deref()),
+        ("git_tree", report.git_tree.as_deref()),
+        ("artifact_manifest_hash", report.manifest_hash.as_deref()),
+        ("binary_hash", report.binary_hash.as_deref()),
+        ("build_command_hash", report.build_command_hash.as_deref()),
+        ("effective_input_hash", report.effective_input_hash.as_deref()),
+        ("provenance_hash", report.provenance_hash.as_deref()),
+        ("archive_hash", report.archive_hash.as_deref()),
+        ("verification_hash", Some(report.verification_hash.as_str())),
+    ] {
+        if field_str(fields, field) != expected {
+            return Err(mismatch(format!(
+                "{field} does not match remote_artifact_attestation"
+            )));
+        }
+    }
+    let expected_source_hash = report.git_tree.as_deref().map(|tree| format!("git_tree:{tree}"));
+    if field_str(fields, "source_hash") != expected_source_hash.as_deref() {
+        return Err(mismatch(
+            "source_hash does not match attested git_tree".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn reject_raw_output_fields(
     event: &JsonValue,
     line: usize,
@@ -3954,6 +4272,39 @@ fn reject_raw_output_fields(
 
 fn field_str<'a>(fields: &'a serde_json::Map<String, JsonValue>, key: &str) -> Option<&'a str> {
     fields.get(key).and_then(JsonValue::as_str)
+}
+
+fn field_usize(fields: &serde_json::Map<String, JsonValue>, key: &str) -> Option<usize> {
+    fields.get(key).and_then(|value| {
+        value
+            .as_str()
+            .and_then(|value| value.parse::<usize>().ok())
+            .or_else(|| value.as_u64().and_then(|value| usize::try_from(value).ok()))
+    })
+}
+
+fn e2e_artifact_command_hash(
+    binary_path: &str,
+    args: &[String],
+    advertised_hash: &str,
+) -> Option<String> {
+    let mut payload = String::from(binary_path);
+    payload.push('\n');
+    payload.push_str(&args.join("\u{1}"));
+    if advertised_hash.starts_with("blake3:") {
+        Some(hash_str(&payload))
+    } else if advertised_hash.starts_with("sha256:") {
+        let digest = Sha256::digest(payload.as_bytes());
+        let mut encoded = String::with_capacity("sha256:".len() + (digest.len() * 2));
+        encoded.push_str("sha256:");
+        for byte in digest {
+            use std::fmt::Write as _;
+            write!(encoded, "{byte:02x}").ok()?;
+        }
+        Some(encoded)
+    } else {
+        None
+    }
 }
 
 fn reject_unless(rejections: &mut Vec<String>, accepted: bool, code: &str) {
@@ -4587,10 +4938,12 @@ mod tests {
                 bead_id: Some("bd-example"),
                 source_hash: Some(SAMPLE_REMOTE_SOURCE_HASH),
                 command_hash: "blake3:rch-command",
-                execution_substrate: "rch",
-                feature_profile_hash: None,
-                workspace_generation: None,
-                strictness_flags: Vec::new(),
+                execution_substrate: "remote_artifact",
+                target_triple: Some(SAMPLE_REMOTE_TARGET),
+                target_profile: Some(SAMPLE_REMOTE_PROFILE),
+                build_command_hash: Some(SAMPLE_REMOTE_BUILD_COMMAND_HASH),
+                effective_input_hash: Some(SAMPLE_REMOTE_EFFECTIVE_INPUT_HASH),
+                provenance_hash: Some(SAMPLE_REMOTE_PROVENANCE_HASH),
             },
             &[run.clone()],
         );
@@ -4603,9 +4956,13 @@ mod tests {
                 command_hash: "blake3:rch-command",
                 command_class: "cargo_test",
                 normalized_argv_hash: "blake3:rch-command-argv",
-                execution_substrate: "rch",
+                execution_substrate: "remote_artifact",
                 env_fingerprint_class: Some("class:external_cargo_target"),
-                target_profile: Some("debug"),
+                target_triple: Some(SAMPLE_REMOTE_TARGET),
+                target_profile: Some(SAMPLE_REMOTE_PROFILE),
+                build_command_hash: Some(SAMPLE_REMOTE_BUILD_COMMAND_HASH),
+                effective_input_hash: Some(SAMPLE_REMOTE_EFFECTIVE_INPUT_HASH),
+                provenance_hash: Some(SAMPLE_REMOTE_PROVENANCE_HASH),
             },
             &[run.clone()],
         );
@@ -4638,13 +4995,24 @@ mod tests {
     #[test]
     fn j1_v2_import_requires_exact_attestation_mirrors_and_probe_evidence() -> TestResult {
         let report = sample_remote_artifact_attestation();
+        let manifest_args = vec![
+            "/tmp/ee".to_owned(),
+            "version".to_owned(),
+            "--json".to_owned(),
+        ];
+        let manifest_command_hash = e2e_artifact_command_hash(
+            "/tmp/ee",
+            &manifest_args,
+            "blake3:placeholder",
+        )
+        .ok_or_else(|| std::io::Error::other("supported manifest command hash"))?;
         let command = serde_json::json!({
             "schema": "ee.test_event.v1",
             "ts": "2026-08-06T12:00:00Z",
             "test_id": "downloaded_artifact",
             "kind": "command_end",
             "command": "/tmp/ee",
-            "args": ["version", "--json"],
+            "args": manifest_args,
             "stdout_hash": "blake3:stdout",
             "exit_code": 0
         });
@@ -4655,11 +5023,28 @@ mod tests {
             "kind": "artifact_manifest",
             "fields": {
                 "manifest_schema": "ee.test_artifact_manifest.v2",
+                "phase": "command_end",
+                "binary_path": "/tmp/ee",
                 "binary_hash": SAMPLE_REMOTE_BINARY_HASH,
+                "binary_hash_status": "available",
                 "source_hash": SAMPLE_REMOTE_SOURCE_HASH,
-                "command_hash": "blake3:artifact-command",
+                "command_hash": manifest_command_hash,
+                "command_arg_count": "3",
                 "execution_substrate": "remote_artifact",
+                "local_host": "consumer",
+                "worker_host": "macos-runner",
+                "target_directory": "/tmp/target",
+                "fixture_filter": "",
+                "log_path": "/tmp/e2e.jsonl",
+                "retention_manifest_path": "/tmp/retention.json",
                 "artifact_manifest_hash": SAMPLE_REMOTE_MANIFEST_HASH,
+                "source_commit": SAMPLE_REMOTE_SOURCE_COMMIT,
+                "git_tree": SAMPLE_REMOTE_GIT_TREE,
+                "build_command_hash": SAMPLE_REMOTE_BUILD_COMMAND_HASH,
+                "effective_input_hash": SAMPLE_REMOTE_EFFECTIVE_INPUT_HASH,
+                "provenance_hash": SAMPLE_REMOTE_PROVENANCE_HASH,
+                "archive_hash": report.archive_hash,
+                "verification_hash": report.verification_hash,
                 "remote_artifact_attestation": report
             }
         });
@@ -4690,10 +5075,8 @@ mod tests {
             .expect_err("binary mirror mismatch must be rejected");
         assert!(matches!(
             error,
-            VerificationRunImportError::InvalidArtifactAttestation {
-                rejection_codes,
-                ..
-            } if rejection_codes.contains(&"remote_artifact_binary_hash_mismatch".to_owned())
+            VerificationRunImportError::MismatchedArtifactManifest { reason, .. }
+                if reason.contains("binary_hash")
         ));
         Ok(())
     }
