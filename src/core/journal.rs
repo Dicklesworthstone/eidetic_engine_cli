@@ -1999,6 +1999,12 @@ fn apply_distill_proposals(
                         .collect(),
                 )
                 .to_string();
+                let provenance_uri = proposal.evidence.iter().min().cloned().ok_or_else(|| {
+                    distill_storage_error(
+                        "Failed to build journal distill provenance",
+                        "create proposal has no journal evidence",
+                    )
+                })?;
                 let metadata_json = serde_json::json!({
                     "memorySpec": {
                         "level": "episodic",
@@ -2009,6 +2015,7 @@ fn apply_distill_proposals(
                         "importance": serde_json::Value::Null,
                         "validFrom": serde_json::Value::Null,
                         "validTo": serde_json::Value::Null,
+                        "provenanceUri": provenance_uri,
                     },
                     "producer": {
                         "producer": "journal_distill",
@@ -3760,6 +3767,40 @@ mod tests {
                 .all(|candidate| candidate.status == "pending"),
             "distilled candidates land with status pending",
         )?;
+        for candidate in candidates.iter().filter(|candidate| {
+            candidate.candidate_type == CandidateType::CreateDerivedMemory.as_str()
+        }) {
+            let metadata: serde_json::Value = serde_json::from_str(
+                candidate
+                    .derivation_metadata_json
+                    .as_deref()
+                    .ok_or("create-derived candidate must carry derivation metadata")?,
+            )
+            .map_err(|error| error.to_string())?;
+            let proposal_id = metadata
+                .pointer("/producer/producerPayload/proposalId")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("derivation metadata must identify its journal proposal")?;
+            let proposal = first
+                .proposals
+                .iter()
+                .find(|proposal| proposal.proposal_id == proposal_id)
+                .ok_or("applied candidate must correspond to a reported proposal")?;
+            let expected_provenance = proposal
+                .evidence
+                .iter()
+                .min()
+                .ok_or("create proposal must carry journal evidence")?;
+            let actual_provenance = metadata
+                .pointer("/memorySpec/provenanceUri")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("derived memory spec must carry journal provenance")?;
+            ensure_equal(
+                &actual_provenance,
+                &expected_provenance.as_str(),
+                "derived memory provenance is the deterministic first real journal source",
+            )?;
+        }
         ensure_equal(
             &count_distill_audit_rows(&connection, &workspace_id)?,
             &applied.audit_ids.len(),
