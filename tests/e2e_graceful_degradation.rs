@@ -64,6 +64,24 @@ fn unique_artifact_dir(name: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn private_runtime_tempdir(name: &str) -> Result<tempfile::TempDir, String> {
+    #[cfg(unix)]
+    let temp_root = fs::canonicalize("/tmp")
+        .map_err(|error| format!("failed to canonicalize Unix temp root: {error}"))?;
+    #[cfg(not(unix))]
+    let temp_root = env::temp_dir();
+
+    tempfile::Builder::new()
+        .prefix(&format!("ee-{name}-"))
+        .tempdir_in(&temp_root)
+        .map_err(|error| {
+            format!(
+                "failed to create private runtime tempdir under {}: {error}",
+                temp_root.display()
+            )
+        })
+}
+
 fn run_ee<I, S>(workspace: &Path, args: I) -> Result<Output, String>
 where
     I: IntoIterator<Item = S>,
@@ -624,8 +642,12 @@ fn stale_index_search_degrades_to_lexical_fallback_and_recovers_after_rebuild() 
 
 #[test]
 fn multiprocess_write_after_source_snapshot_is_present_or_explicitly_stale() -> TestResult {
-    let artifact_dir = unique_artifact_dir("multiprocess-source-snapshot")?;
-    let workspace = artifact_dir.join("workspace");
+    // The DB path hardening correctly rejects symlinked ancestors. Pinned
+    // verification materializes the checkout below a compatibility symlink,
+    // so this real multi-process fixture must use a canonical runtime root
+    // rather than CARGO_TARGET_DIR.
+    let artifact_dir = private_runtime_tempdir("multiprocess-source-snapshot")?;
+    let workspace = artifact_dir.path().join("workspace");
     fs::create_dir_all(&workspace)
         .map_err(|error| format!("failed to create workspace: {error}"))?;
 

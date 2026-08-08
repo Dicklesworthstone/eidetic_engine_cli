@@ -4410,7 +4410,16 @@ mod tests {
     }
 
     fn private_tempdir() -> tempfile::TempDir {
-        let temp = tempfile::tempdir().expect("tempdir");
+        // Pinned remote verification can set TMPDIR to a long materialized
+        // checkout path whose ancestors intentionally fail the daemon's
+        // security policy (or whose socket names exceed SUN_LEN). Keep the
+        // fixture under the canonical system temp root instead: /tmp is
+        // sticky on Unix, while the fresh leaf remains owner-only.
+        let temp_root = fs::canonicalize("/tmp").expect("canonical Unix temp root");
+        let temp = tempfile::Builder::new()
+            .prefix("ee-sb-")
+            .tempdir_in(temp_root)
+            .expect("private short socket tempdir");
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
             .expect("make tempdir private");
         temp
