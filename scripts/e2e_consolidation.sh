@@ -100,7 +100,7 @@ dry_status="$(ee_json index status --workspace "$WS" --json)"
 assert_jq "$dry_status" "(.data.dbGeneration == ${BASELINE_DB_GEN:-null}) and (.data.dbGeneration == .data.indexGeneration)" \
     "dry-run moves neither workspace generation nor index generation"
 dry_audit="$(ee_json audit timeline --workspace "$WS" --action curation_candidate.create --json)"
-assert_jq "$dry_audit" '.data.pagination.total_count == 0' \
+assert_jq "$dry_audit" '(.pagination.total_count // .data.pagination.total_count) == 0' \
     "dry-run writes no creation audit rows"
 
 step "zero item budget cancels before any mutation"
@@ -127,7 +127,7 @@ RERUN_CANDIDATE_ID="$(json_scalar "$rerun_out" '.data.ticks[0].runner.results[0]
 assert_eq "$RERUN_CANDIDATE_ID" "$CANDIDATE_ID" \
     "re-run plans the same deterministic candidate id"
 create_audit="$(ee_json audit timeline --workspace "$WS" --action curation_candidate.create --json)"
-assert_jq "$create_audit" '.data.pagination.total_count == 1' \
+assert_jq "$create_audit" '(.pagination.total_count // .data.pagination.total_count) == 1' \
     "exactly one creation audit row exists"
 
 step "validate and apply through the public curation commands"
@@ -158,10 +158,10 @@ lineage="$(printf '%s' "$why_out" | jq -r --arg id "$DUPLICATE_ID" \
 e2e_log_assert_num "${lineage:-0}" -ge 1 \
     "why survivor explains the derived_from lineage"
 apply_audit="$(ee_json audit timeline --workspace "$WS" --action curation_candidate.apply --json)"
-assert_jq "$apply_audit" '.data.pagination.total_count == 1' \
+assert_jq "$apply_audit" '(.pagination.total_count // .data.pagination.total_count) == 1' \
     "exactly one apply audit row exists"
 verify_out="$(ee_json audit verify --workspace "$WS" --json)"
-assert_jq "$verify_out" '.data.integrity_ok == true' \
+assert_jq "$verify_out" '(.integrity_ok // .data.integrity_ok) == true' \
     "append-only audit hash chain verifies"
 
 step "workflow job restores a truthful deduplicated index"
@@ -200,7 +200,7 @@ replay_out="$(ee_json curate apply "$CANDIDATE_ID" --workspace "$WS" --json)"
 assert_jq "$replay_out" '.data.application.status == "already_applied" and .data.durableMutation == false' \
     "apply replay is an idempotent no-op"
 replay_audit="$(ee_json audit timeline --workspace "$WS" --action curation_candidate.apply --json)"
-assert_jq "$replay_audit" '.data.pagination.total_count == 1' \
+assert_jq "$replay_audit" '(.pagination.total_count // .data.pagination.total_count) == 1' \
     "replay appends no duplicate audit rows"
 
 if [ "${EE_GRAPH_E2E_INJECT_FAILURE:-0}" = "1" ]; then

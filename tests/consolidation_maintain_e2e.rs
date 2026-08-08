@@ -268,9 +268,14 @@ fn audit_action_count(ws: &E2eWorkspace, label: &str, action: &str) -> Result<u6
         label,
         &["audit", "timeline", "--action", action, "--limit", "50"],
     )?;
-    json_u64(&timeline, &["data", "pagination", "total_count"]).ok_or_else(|| {
-        format!("{label}: audit timeline missing pagination.total_count: {timeline}")
-    })
+    // `ee audit timeline --json` emits the ee.audit.timeline.v1 report at the
+    // top level; accept an enveloped shape too so the assertion survives a
+    // future envelope migration.
+    json_u64(&timeline, &["pagination", "total_count"])
+        .or_else(|| json_u64(&timeline, &["data", "pagination", "total_count"]))
+        .ok_or_else(|| {
+            format!("{label}: audit timeline missing pagination.total_count: {timeline}")
+        })
 }
 
 #[test]
@@ -613,7 +618,9 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
     let verify = ws.run_json("audit_verify", &["audit", "verify"])?;
     ws.check(
         "audit_chain_intact",
-        json_bool(&verify, &["data", "integrity_ok"]) == Some(true),
+        json_bool(&verify, &["integrity_ok"])
+            .or_else(|| json_bool(&verify, &["data", "integrity_ok"]))
+            == Some(true),
         &format!("audit hash chain must verify after the full loop: {verify}"),
     )?;
 
