@@ -19,15 +19,32 @@ source "$E2E_DIR/e2e_lib.sh"
 
 harness_init "journal_capture"
 
+# Command output is captured through `$(ee_json ...)`, so each helper runs in
+# a subshell. Persist nonzero command/logger results and fold them into the
+# parent harness before summary; otherwise success-shaped stdout can mask a
+# failing `ee` process.
+EE_JSON_FAILURES_FILE="$LOG_DIR/command-failures.log"
+: >"$EE_JSON_FAILURES_FILE"
+
 ee_json() {
-    e2e_log_command "$EE_BIN" "$@" || true
+    local rc=0
+    e2e_log_command "$EE_BIN" "$@" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf 'exit=%s command=%s\n' "$rc" "$*" >>"$EE_JSON_FAILURES_FILE"
+    fi
+    return "$rc"
 }
 
 ee_json_stdin() {
     local input="$1"
     shift
+    local rc=0
     e2e_log_note "stdin_command argv=$* input_bytes=${#input}"
-    printf '%s\n' "$input" | "$EE_BIN" "$@" 2>&1 || true
+    printf '%s\n' "$input" | e2e_log_command "$EE_BIN" "$@" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf 'exit=%s stdin=true command=%s\n' "$rc" "$*" >>"$EE_JSON_FAILURES_FILE"
+    fi
+    return "$rc"
 }
 
 json_value() {
@@ -235,6 +252,11 @@ assert_jq "$trace_out" '.success == true and .data.memoryId == "'"$memory_id"'" 
     "outcome trace joins feedback for the created memory"
 
 end_temp_workspace
+if [ -s "$EE_JSON_FAILURES_FILE" ]; then
+    while IFS= read -r command_failure; do
+        _harness_fail "logged command failure: $command_failure"
+    done <"$EE_JSON_FAILURES_FILE"
+fi
 summary_rc=0
 harness_summary || summary_rc=$?
 printf 'Artifacts: %s\n' "$LOG_DIR" >&2

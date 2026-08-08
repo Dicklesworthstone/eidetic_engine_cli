@@ -1,6 +1,7 @@
 //! Contract and golden coverage for journal capture (`bd-1pi9m.6`).
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use ee::core::journal::{JOURNAL_DISTILL_SCHEMA_V1, JOURNAL_ENTRY_SCHEMA_V1};
 use serde_json::{Value, json};
@@ -262,6 +263,86 @@ fn e2e_journal_capture_script_exercises_full_capture_lifecycle() -> TestResult {
         )?;
     }
     Ok(())
+}
+
+#[test]
+fn e2e_journal_capture_cannot_mask_nonzero_ee_commands() -> TestResult {
+    let script = read_text("scripts/e2e_journal_capture.sh")?;
+    let helpers = script
+        .split_once("ee_json() {")
+        .and_then(|(_, rest)| rest.split_once("json_value() {").map(|(body, _)| body))
+        .ok_or("journal capture command helpers must remain discoverable")?;
+
+    ensure(
+        script.contains("EE_JSON_FAILURES_FILE=\"$LOG_DIR/command-failures.log\""),
+        "journal capture must persist failures across command-substitution subshells",
+    )?;
+    ensure(
+        helpers.matches("return \"$rc\"").count() == 2,
+        "both journal capture command helpers must propagate the command exit code",
+    )?;
+    ensure(
+        !helpers.contains("|| true"),
+        "journal capture command helpers must not swallow nonzero exits",
+    )?;
+    ensure(
+        script.contains("_harness_fail \"logged command failure: $command_failure\""),
+        "journal capture must fold durable command failures into harness_summary",
+    )
+}
+
+#[test]
+fn e2e_journal_capture_records_success_shaped_nonzero_results() -> TestResult {
+    let script = read_text("scripts/e2e_journal_capture.sh")?;
+    let helpers = script
+        .split_once("ee_json() {")
+        .and_then(|(_, rest)| rest.split_once("json_value() {").map(|(body, _)| body))
+        .ok_or("journal capture command helpers must remain discoverable")?;
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let failures = temp.path().join("command-failures.log");
+    let mut probe = String::from(
+        r#"
+set -uo pipefail
+EE_BIN=fake-ee
+e2e_log_note() { :; }
+e2e_log_command() {
+    printf '%s\n' '{"schema":"ee.response.v2","success":true}'
+    return 7
+}
+ee_json() {
+"#,
+    );
+    probe.push_str(helpers);
+    probe.push_str(
+        r#"
+json="$(ee_json status --json)"
+rc=$?
+[ "$rc" -eq 7 ] || exit 20
+[ "$json" = '{"schema":"ee.response.v2","success":true}' ] || exit 21
+stdin_json="$(ee_json_stdin '{}' journal append --stdin --json)"
+stdin_rc=$?
+[ "$stdin_rc" -eq 7 ] || exit 22
+[ "$stdin_json" = '{"schema":"ee.response.v2","success":true}' ] || exit 23
+[ "$(wc -l <"$EE_JSON_FAILURES_FILE")" -eq 2 ] || exit 24
+grep -q '^exit=7 command=status --json$' "$EE_JSON_FAILURES_FILE" || exit 25
+grep -q '^exit=7 stdin=true command=journal append --stdin --json$' "$EE_JSON_FAILURES_FILE" || exit 26
+"#,
+    );
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(probe)
+        .env("EE_JSON_FAILURES_FILE", &failures)
+        .output()
+        .map_err(|error| format!("run journal command-failure probe: {error}"))?;
+
+    ensure(
+        output.status.success(),
+        format!(
+            "success-shaped nonzero command probe failed with {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
 }
 
 #[test]
