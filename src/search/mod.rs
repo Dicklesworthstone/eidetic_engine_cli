@@ -1093,6 +1093,7 @@ pub fn evidence_span_to_document(span: &crate::db::StoredEvidenceSpan) -> Canoni
     } else {
         egress.content
     };
+    let (content, content_truncated) = content_preview_with_flag(&safe_excerpt);
     let mut doc = CanonicalSearchDocument::new(&span.id, safe_excerpt, DocumentSource::Import)
         .with_title(format!(
             "Imported evidence {} (session {}, lines {}-{})",
@@ -1100,6 +1101,8 @@ pub fn evidence_span_to_document(span: &crate::db::StoredEvidenceSpan) -> Canoni
         ))
         .with_kind("evidence_span")
         .with_created_at(&span.created_at)
+        .with_metadata_entry("content", content)
+        .with_metadata_entry("content_truncated", content_truncated.to_string())
         .with_metadata_entry("workspace_id", &span.workspace_id)
         .with_metadata_entry("session_id", &span.session_id)
         .with_metadata_entry("provenance_uri", span.canonical_provenance_uri())
@@ -4607,6 +4610,14 @@ mod tests {
             indexable.metadata.get("provenance_uri"),
             Some(&"cass-session://sess_01234567890123456789012345#L42-42".to_owned())
         );
+        assert_eq!(
+            indexable.metadata.get("content"),
+            Some(&"Release verification completed successfully.".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("content_truncated"),
+            Some(&"false".to_owned())
+        );
         assert!(!indexable.metadata.contains_key("cass_span_id"));
         assert!(!indexable.metadata.contains_key("source_path"));
         assert!(!indexable.metadata.contains_key("metadata_json"));
@@ -4627,6 +4638,10 @@ mod tests {
         assert!(!rendered.contains(raw));
         assert!(!rendered.contains(&raw_hash));
         assert!(!indexable.metadata.contains_key("content_hash"));
+        assert_eq!(
+            indexable.metadata.get("content"),
+            Some(&"[EVIDENCE_WITHHELD]".to_owned())
+        );
     }
 
     #[test]

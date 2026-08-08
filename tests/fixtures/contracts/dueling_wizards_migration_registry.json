@@ -128,16 +128,6 @@
   },
   {
    "id": "attestation_bundles",
-   "version": 98,
-   "status": "planned",
-   "runtimeRule": "planned_allocation_only",
-   "migrationConstant": "required_before_implemented",
-   "boundaryMigrationEvidence": "required_before_implemented",
-   "backupCoverageEvidence": "required_before_implemented",
-   "proofPosture": "rch_only_no_local_fallback"
-  },
-  {
-   "id": "query_miss_ledger",
    "version": 99,
    "status": "planned",
    "runtimeRule": "planned_allocation_only",
@@ -147,8 +137,18 @@
    "proofPosture": "rch_only_no_local_fallback"
   },
   {
-   "id": "source_write_stats",
+   "id": "query_miss_ledger",
    "version": 100,
+   "status": "planned",
+   "runtimeRule": "planned_allocation_only",
+   "migrationConstant": "required_before_implemented",
+   "boundaryMigrationEvidence": "required_before_implemented",
+   "backupCoverageEvidence": "required_before_implemented",
+   "proofPosture": "rch_only_no_local_fallback"
+  },
+  {
+   "id": "source_write_stats",
+   "version": 101,
    "status": "planned",
    "runtimeRule": "planned_allocation_only",
    "migrationConstant": "required_before_implemented",
@@ -300,7 +300,7 @@
   {
    "id": "attestation_bundles",
    "version": 99,
-   "migrationName": "V098_ATTESTATION_BUNDLES",
+   "migrationName": "V099_ATTESTATION_BUNDLES",
    "ownerBead": "bd-1n0np.22.1",
    "ownerSurface": "attestation_bundles",
    "status": "planned",
@@ -315,7 +315,7 @@
   {
    "id": "query_miss_ledger",
    "version": 100,
-   "migrationName": "V099_QUERY_MISS_LEDGER",
+   "migrationName": "V100_QUERY_MISS_LEDGER",
    "ownerBead": "bd-1n0np.6.3",
    "ownerSurface": "gap_honesty",
    "status": "planned",
@@ -329,7 +329,7 @@
   {
    "id": "source_write_stats",
    "version": 101,
-   "migrationName": "V100_SOURCE_WRITE_STATS",
+   "migrationName": "V101_SOURCE_WRITE_STATS",
    "ownerBead": "bd-1n0np.8.5",
    "ownerSurface": "read_fence",
    "status": "planned",

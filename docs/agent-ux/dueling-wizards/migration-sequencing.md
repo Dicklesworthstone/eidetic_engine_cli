@@ -5,16 +5,28 @@ This registry is the human-facing companion to
 owned by `bd-1n0np.23.1` and enforced by
 `tests/contracts/dueling_wizards_migration_registry.rs`.
 
-The current compiled migration tail in `src/db/mod.rs` is `V096`. The next
-planned allocation starts at `V097`. `V094_MEMORY_ATTEMPT_FAMILY` and
+The current compiled migration tail in `src/db/mod.rs` is `V098`. The next
+planned allocation starts at `V099`. `V094_MEMORY_ATTEMPT_FAMILY` and
 `V095_ATTEMPT_FAMILY_LEDGER` are non-initiative attempt-family migrations
 (bd-multiplicity-aware-trust-p0u7g), and `V096_MEMORY_SENTINEL_POLARITY` is the
 shipped inverse-sentinel migration (bd-wake-on-condition-inverse-sentinel-65uci).
-All three remain visible under `nonInitiativeCompiledMigrations`. Every
+`V097_SESSION_INDEX_GENERATIONS` is the bd-3k1mg forward-only session
+generation repair, and `V098_MEMORY_SEALS` is the commit-reveal seal sidecar
+from bd-sealed-preregistration-memory-b67be. All five remain visible under
+`nonInitiativeCompiledMigrations`. Every
 dueling-wizards schema task must
 allocate from the registry before adding a runtime migration, then keep the
 runtime `MIGRATIONS` array contiguous. The registry is a plan artifact, not a
 substitute for the real migration constants.
+
+The three documentation-only reservations that previously occupied
+`V097`-`V099` moved forward to `V098`-`V100` when the runtime session repair
+needed the actual next compiled slot, then moved together again to
+`V099`-`V101` when the memory-seal sidecar compiled as `V098`. This preserves
+their order and ownership without inserting placeholder migrations. Runtime
+migration versions cannot skip a reservation: the schema-version watermark
+would advance past the hole and make a later migration at that version
+permanently unreachable.
 
 The migration number line is shared with non-initiative workstreams:
 `V073_ERROR_REPAIR_LINKS` (an extension of the `error_fingerprints` allocation
@@ -39,8 +51,9 @@ allows), and the ADR 0086 TC-D7 trust CHECK rebuilds
 `V091_CURATION_PEER_HUMAN_ATTESTED_TRUST`,
 `V092_PROCEDURAL_RULE_PEER_HUMAN_ATTESTED_TRUST`, and
 `V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST`,
-`V094_MEMORY_ATTEMPT_FAMILY`, `V095_ATTEMPT_FAMILY_LEDGER`, and
-`V096_MEMORY_SENTINEL_POLARITY` landed
+`V094_MEMORY_ATTEMPT_FAMILY`, `V095_ATTEMPT_FAMILY_LEDGER`,
+`V096_MEMORY_SENTINEL_POLARITY`, `V097_SESSION_INDEX_GENERATIONS`, and
+`V098_MEMORY_SEALS` landed
 between the initiative's implemented allocations and the compiled tail.
 Implemented allocations therefore record historical fact (two
 allocations may share one compiled migration, as the sentinel pair does under
@@ -55,7 +68,7 @@ rollback must never be required for ordinary repair. A task that adds durable
 or derived storage must also name the backup/export/restore asset class and the
 boundary migration coverage path before source work starts.
 
-Do not reuse migration numbers. If the compiled tail moves past `V096`, update
+Do not reuse migration numbers. If the compiled tail moves past `V098`, update
 this registry in the same change that adds the runtime migration.
 
 ### V085 legacy-evidence remediation
@@ -147,9 +160,9 @@ does not rewrite either the V088 history record or already canonical rows.
 | `V070` | `typed_memory_kind_sidecar` | implemented | `bd-1n0np.12.1` | Optional validated per-kind memory JSON sidecar fields (landed as `V070_MEMORY_TYPED_FIELDS` on `memories`). |
 | `V071` | `workspace_generations` | implemented | `bd-1n0np.8.2` | Monotonic workspace and derived-asset generation state. |
 | `V072` | `error_fingerprints` | implemented | `bd-1n0np.4.3` | Error fingerprints plus repair, proof, and outcome links (`error_repair_links` landed separately as `V073_ERROR_REPAIR_LINKS`). |
-| `V097` | `attestation_bundles` | planned | `bd-1n0np.22.1` | Canonical attestation bundle rows and bundle item hashes. |
-| `V098` | `query_miss_ledger` | planned | `bd-1n0np.6.3` | Redacted low-utility query miss ledger with TTL posture. |
-| `V099` | `source_write_stats` | planned | `bd-1n0np.8.5` | Per-source write-stream statistics for write-immune quarantine decisions. |
+| `V099` | `attestation_bundles` | planned | `bd-1n0np.22.1` | Canonical attestation bundle rows and bundle item hashes. |
+| `V100` | `query_miss_ledger` | planned | `bd-1n0np.6.3` | Redacted low-utility query miss ledger with TTL posture. |
+| `V101` | `source_write_stats` | planned | `bd-1n0np.8.5` | Per-source write-stream statistics for write-immune quarantine decisions. |
 
 `V084_PACK_RECORD_PROFILE_DOMAIN` is covered by the FrankenSQLite regression
 `db::tests::v084_pack_profile_rebuild_preserves_parent_children_indexes_and_order`.
@@ -161,7 +174,7 @@ proves all six canonical profiles plus `contradiction_suppressed` persist.
 
 The manifest's `transitionMatrix` mirrors the allocation table one-for-one.
 This is the implementation gate: `implemented` rows must name the compiled
-migration constant and stay at or behind the current compiled tail (`V096` at
+migration constant and stay at or behind the current compiled tail (`V098` at
 the time of this registry). `planned` rows must stay ahead of the compiled tail
 and keep `migrationConstant`, `boundaryMigrationEvidence`, and
 `backupCoverageEvidence` set to `required_before_implemented`.
@@ -180,7 +193,7 @@ same change.
 `scripts/e2e_cross_cutting.sh` statically pins the registry's conservative
 posture before runtime proof is available. The shell gate pins the exact
 implemented version layout (`V066` through `V072`, with the sentinel pair
-sharing `V069`) plus the planned reservations (`V097` through `V099`),
+sharing `V069`) plus the planned reservations (`V099` through `V101`),
 transition rows mirror allocation rows by ID, version, and status, implemented
 rows stay at or behind the compiled tail, planned rows stay at or beyond the
 next allocation, and backup assets mirror each allocation's asset kind,

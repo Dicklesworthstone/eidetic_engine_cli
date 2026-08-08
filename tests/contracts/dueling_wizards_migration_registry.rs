@@ -215,6 +215,15 @@ fn registry_identity_matches_current_runtime_tail() -> TestResult {
     }
 
     let versions = compiled_migration_versions()?;
+    for (index, version) in versions.iter().enumerate() {
+        let expected = u64::try_from(index + 1)
+            .map_err(|error| format!("compiled migration index overflow: {error}"))?;
+        if *version != expected {
+            return Err(format!(
+                "compiled migrations must stay contiguous: expected V{expected:03}, got V{version:03}"
+            ));
+        }
+    }
     let compiled_tail = *versions
         .last()
         .ok_or_else(|| "compiled migrations must not be empty".to_owned())?;
@@ -398,6 +407,9 @@ fn planned_allocations_are_contiguous_and_complete() -> TestResult {
         ));
     }
     planned_versions.sort_unstable();
+    let compiled_versions = compiled_migration_versions()?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     for (offset, version) in planned_versions.iter().enumerate() {
         let expected = next_planned
             + u64::try_from(offset)
@@ -405,6 +417,11 @@ fn planned_allocations_are_contiguous_and_complete() -> TestResult {
         if *version != expected {
             return Err(format!(
                 "planned allocations must be contiguous from V{next_planned:03}; expected V{expected:03}, got V{version:03}"
+            ));
+        }
+        if compiled_versions.contains(version) {
+            return Err(format!(
+                "planned allocation V{version:03} already has a compiled migration; shift the documentation-only reservation forward before runtime publication"
             ));
         }
     }

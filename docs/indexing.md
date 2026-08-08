@@ -70,6 +70,31 @@ re-embed, staged intake, and interrupted-publish recovery verify those counts
 before publishing a current generation; a per-document build failure can never
 be published as a complete corpus.
 
+## Session Generation Invalidation
+
+`V097_SESSION_INDEX_GENERATIONS` makes the session source family obey the same
+workspace-generation fence as other first-class search documents. Committed
+session inserts and deletes advance the owning workspace; material updates
+advance the new workspace and also the old workspace when ownership moves. A
+null-safe predicate suppresses exact-row no-ops, and transaction rollback rolls
+back both the session mutation and its generation advance. Migration advances
+each workspace that already contains sessions once, monotonically invalidating
+pre-V097 index metadata without treating generation as a row count.
+
+A CASS intake transaction may insert one session, its positively admitted
+evidence spans, and the stable `single_document` session job atomically. Both
+the ordinary single-job processor and the limited/coalesced processor consume a
+complete writer-fenced source snapshot, so draining that session job publishes
+the session and all admitted evidence committed beside it without an operator
+running a manual rebuild. Evidence projection retains only screened content and
+canonical `cass-session://...#L...` provenance; raw paths and upstream span IDs
+do not enter the index.
+
+This slice proves search-index admission only. It does not claim that an
+`EvidenceSpan` is accepted directly by context packing. Pagination, the
+remaining job-fence cases, attachment projection, and CLI E2E coverage remain
+follow-up work for `bd-3k1mg`.
+
 ## E2E And Perf Proof
 
 `scripts/e2e_incremental_index.sh` exercises the real CLI intake path (the

@@ -8166,6 +8166,426 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
+    fn seed_healthy_session_index_case(
+        label: &str,
+        suffix: &str,
+    ) -> Result<(PathBuf, PathBuf, PathBuf, DbConnection, String), String> {
+        let root = unique_test_dir(label);
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let workspace = std::fs::canonicalize(&workspace).map_err(|error| error.to_string())?;
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = format!("wsp_012345678901234567890123{suffix}");
+        let memory_id = format!("mem_012345678901234567890123{suffix}");
+        let job_id = format!("sidx_012345678901234567890123{suffix}");
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some(format!("healthy session index {suffix}")),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        insert_snapshot_test_memory_job(
+            &connection,
+            &workspace_id,
+            &memory_id,
+            &job_id,
+            "Healthy baseline memory before the session evidence transaction.",
+        )?;
+        let baseline = process_index_job_for_connection(&connection, &job_id, &index_dir)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            baseline.outcome == "completed" && baseline.documents_indexed == 1,
+            format!("baseline job must publish one healthy document: {baseline:?}"),
+        )?;
+        let status = get_index_status_with_connection(
+            &IndexStatusOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database.clone()),
+                index_dir: Some(index_dir.clone()),
+            },
+            Some(&connection),
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            status.health == IndexHealth::Ready
+                && status.db_generation == status.index_generation
+                && status.index_document_counts == IndexDocumentCounts::checked(1, 0, 0, 0, 0).ok(),
+            format!("baseline index must begin Ready with exact counts: {status:?}"),
+        )?;
+        Ok((workspace, database, index_dir, connection, workspace_id))
+    }
+
+    fn session_index_input(workspace_id: &str, suffix: &str) -> crate::db::CreateSessionInput {
+        let cass_session_id = format!("cass-session-generation-{suffix}");
+        crate::db::CreateSessionInput {
+            workspace_id: workspace_id.to_owned(),
+            cass_session_id: cass_session_id.clone(),
+            source_path: Some(format!("/private/raw-session-{suffix}.jsonl")),
+            agent_name: Some("codex".to_owned()),
+            model: Some("gpt-5".to_owned()),
+            started_at: Some("2026-08-08T01:00:00Z".to_owned()),
+            ended_at: Some("2026-08-08T01:01:00Z".to_owned()),
+            message_count: 2,
+            token_count: Some(24),
+            content_hash: format!(
+                "blake3:{}",
+                blake3::hash(cass_session_id.as_bytes()).to_hex()
+            ),
+            metadata_json: Some(r#"{"source":"cass"}"#.to_owned()),
+        }
+    }
+
+    fn admitted_session_evidence_input(
+        workspace_id: &str,
+        session_id: &str,
+        suffix: &str,
+        line: u32,
+        excerpt: &str,
+    ) -> crate::db::CreateEvidenceSpanInput {
+        crate::db::CreateEvidenceSpanInput {
+            workspace_id: workspace_id.to_owned(),
+            session_id: session_id.to_owned(),
+            memory_id: None,
+            producer_kind: crate::db::EvidenceProducerKind::CassImport,
+            cass_span_id: format!("raw-session-{suffix}-span-{line}"),
+            span_kind: "message".to_owned(),
+            start_line: line,
+            end_line: line,
+            start_byte: None,
+            end_byte: None,
+            role: Some("assistant".to_owned()),
+            excerpt: excerpt.to_owned(),
+            content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
+            metadata_json: Some(
+                r#"{"source":"cass","rawPath":"/private/never-egress.jsonl"}"#.to_owned(),
+            ),
+            inherited_redaction_classes: Vec::new(),
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum SessionEvidenceDrain {
+        OrdinarySingle,
+        LimitedCoalesced,
+    }
+
+    fn assert_session_evidence_job_from_healthy_index(
+        mode: SessionEvidenceDrain,
+        suffix: &str,
+    ) -> TestResult {
+        let (workspace, database, index_dir, connection, workspace_id) =
+            seed_healthy_session_index_case("session-evidence-job", suffix)?;
+        let memory_id = format!("mem_012345678901234567890123{suffix}");
+        let session_id = format!("sess_012345678901234567890123{suffix}");
+        let first_evidence_id = format!("ev_012345678901234567890123{suffix}");
+        let second_evidence_id = format!("ev_112345678901234567890123{suffix}");
+        let session_job_id = format!("sidx_112345678901234567890123{suffix}");
+        let first_excerpt = "Quartz kestrel verification evidence stayed safely searchable.";
+        let second_excerpt = "Nimbus lantern provenance evidence stayed safely searchable.";
+
+        connection
+            .with_transaction(|| {
+                connection
+                    .insert_session(&session_id, &session_index_input(&workspace_id, suffix))?;
+                connection.insert_evidence_span(
+                    &first_evidence_id,
+                    &admitted_session_evidence_input(
+                        &workspace_id,
+                        &session_id,
+                        suffix,
+                        7,
+                        first_excerpt,
+                    ),
+                )?;
+                connection.insert_evidence_span(
+                    &second_evidence_id,
+                    &admitted_session_evidence_input(
+                        &workspace_id,
+                        &session_id,
+                        suffix,
+                        11,
+                        second_excerpt,
+                    ),
+                )?;
+                connection.insert_search_index_job(
+                    &session_job_id,
+                    &crate::db::CreateSearchIndexJobInput {
+                        workspace_id: workspace_id.clone(),
+                        job_type: SearchIndexJobType::SingleDocument,
+                        document_source: Some("session".to_owned()),
+                        document_id: Some(session_id.clone()),
+                        documents_total: 1,
+                    },
+                )
+            })
+            .map_err(|error| error.to_string())?;
+
+        let status_options = IndexStatusOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+        };
+        let stale = get_index_status_with_connection(&status_options, Some(&connection))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            stale.health == IndexHealth::Stale
+                && stale.db_generation > stale.index_generation.unwrap_or(0)
+                && stale.db_evidence_admitted_count == 2,
+            format!("atomic session/evidence commit must make the healthy index stale: {stale:?}"),
+        )?;
+
+        let snapshot = collect_workspace_index_source_snapshot(&connection, &workspace_id)
+            .map_err(|error| error.to_string())?;
+        let admission = EvidenceAdmissionTotals::from_report(&snapshot.evidence_admission);
+        ensure(
+            snapshot.document_counts == IndexDocumentCounts::checked(1, 1, 0, 0, 2)?
+                && admission.admitted == 2
+                && admission.quarantined == 0
+                && admission.denied == 0,
+            format!(
+                "source snapshot must have exact kind and admission counts: counts={:?} admission={admission:?}",
+                snapshot.document_counts
+            ),
+        )?;
+        let evidence_documents = snapshot
+            .documents
+            .iter()
+            .filter(|document| {
+                document
+                    .metadata
+                    .get("kind")
+                    .is_some_and(|kind| kind == "evidence_span")
+            })
+            .map(|document| (document.id.as_str(), document))
+            .collect::<BTreeMap<_, _>>();
+        ensure(
+            evidence_documents.keys().copied().collect::<BTreeSet<_>>()
+                == BTreeSet::from([first_evidence_id.as_str(), second_evidence_id.as_str()]),
+            format!(
+                "snapshot must contain exactly the admitted evidence IDs: {evidence_documents:?}"
+            ),
+        )?;
+        for (evidence_id, excerpt, line) in [
+            (first_evidence_id.as_str(), first_excerpt, 7_u32),
+            (second_evidence_id.as_str(), second_excerpt, 11_u32),
+        ] {
+            let document = evidence_documents
+                .get(evidence_id)
+                .ok_or_else(|| format!("missing evidence document {evidence_id}"))?;
+            let expected_provenance = format!("cass-session://{session_id}#L{line}-{line}");
+            let rendered = format!("{} {:?}", document.content, document.metadata);
+            ensure(
+                document.content == excerpt
+                    && document.metadata.get("provenance_uri") == Some(&expected_provenance)
+                    && document.metadata.get("kind") == Some(&"evidence_span".to_owned())
+                    && !rendered.contains("/private/")
+                    && !rendered.contains("raw-session"),
+                format!("evidence projection must retain only safe content/provenance: {rendered}"),
+            )?;
+        }
+
+        let reports = match mode {
+            SessionEvidenceDrain::OrdinarySingle => vec![
+                process_index_job_for_connection(&connection, &session_job_id, &index_dir)
+                    .map_err(|error| error.to_string())?,
+            ],
+            SessionEvidenceDrain::LimitedCoalesced => process_pending_index_jobs_coalesced(
+                &connection,
+                &workspace_id,
+                &index_dir,
+                Some(1),
+            )
+            .map_err(|error| error.to_string())?,
+        };
+        ensure(
+            reports.len() == 1
+                && reports[0].outcome == "completed"
+                && reports[0].documents_indexed == 4,
+            format!("{mode:?} must publish the complete four-document corpus: {reports:?}"),
+        )?;
+
+        let metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(index_dir.join(INDEX_METADATA_FILE))
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let quality_expected = index_dir
+            .join(VECTOR_INDEX_QUALITY_FILE)
+            .is_file()
+            .then_some(4_u32);
+        let lexical_expected = cfg!(feature = "lexical-bm25").then_some(4_u32);
+        ensure(
+            metadata["documentCount"] == 4
+                && metadata["documentCounts"]
+                    == serde_json::json!({
+                        "memories": 1,
+                        "sessions": 1,
+                        "artifacts": 0,
+                        "rules": 0,
+                        "evidence": 2,
+                    })
+                && metadata["tierDocumentCounts"]["fast"] == 4
+                && metadata["tierDocumentCounts"]["quality"] == serde_json::json!(quality_expected)
+                && metadata["tierDocumentCounts"]["lexical"] == serde_json::json!(lexical_expected),
+            format!("published kind/tier counts must be exact: {metadata}"),
+        )?;
+        let indexed_ids = vector_index_snapshot(&index_dir)?
+            .into_iter()
+            .map(|row| row.doc_id)
+            .collect::<BTreeSet<_>>();
+        ensure(
+            indexed_ids
+                == BTreeSet::from([
+                    memory_id,
+                    session_id.clone(),
+                    first_evidence_id.clone(),
+                    second_evidence_id.clone(),
+                ]),
+            format!("published index must contain the exact complete corpus: {indexed_ids:?}"),
+        )?;
+
+        for (query, evidence_id, excerpt, line) in [
+            (
+                "Quartz kestrel",
+                first_evidence_id.as_str(),
+                first_excerpt,
+                7_u32,
+            ),
+            (
+                "Nimbus lantern",
+                second_evidence_id.as_str(),
+                second_excerpt,
+                11_u32,
+            ),
+        ] {
+            let hit = published_search_hit(&index_dir, query, evidence_id)?;
+            let expected = PublishedSearchHit {
+                doc_id: evidence_id.to_owned(),
+                content: excerpt.to_owned(),
+                provenance_uri: format!("cass-session://{session_id}#L{line}-{line}"),
+                kind: "evidence_span".to_owned(),
+            };
+            ensure(
+                hit == expected,
+                format!(
+                    "published TwoTierSearcher must return the exact hydrated evidence hit for {query:?}: expected={expected:?} actual={hit:?}"
+                ),
+            )?;
+            let rendered = format!("{hit:?}");
+            ensure(
+                !rendered.contains("/private/") && !rendered.contains("raw-session"),
+                format!("published search result leaked raw evidence provenance: {rendered}"),
+            )?;
+        }
+
+        let ready = get_index_status_with_connection(&status_options, Some(&connection))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            ready.health == IndexHealth::Ready
+                && ready.db_generation == ready.index_generation
+                && ready.index_document_counts == IndexDocumentCounts::checked(1, 1, 0, 0, 2).ok()
+                && ready.db_evidence_admitted_count == 2
+                && ready.db_evidence_quarantined_count == 0
+                && ready.db_evidence_denied_count == 0,
+            format!("drain must restore Ready at the exact DB generation: {ready:?}"),
+        )?;
+
+        let before_repeat = index_regular_file_snapshot(&index_dir)?;
+        match mode {
+            SessionEvidenceDrain::OrdinarySingle => {
+                let repeated =
+                    process_index_job_for_connection(&connection, &session_job_id, &index_dir)
+                        .map_err(|error| error.to_string())?;
+                ensure(
+                    repeated.outcome == "skipped",
+                    format!("repeat ordinary drain must skip completed job: {repeated:?}"),
+                )?;
+            }
+            SessionEvidenceDrain::LimitedCoalesced => {
+                let repeated = process_pending_index_jobs_coalesced(
+                    &connection,
+                    &workspace_id,
+                    &index_dir,
+                    Some(1),
+                )
+                .map_err(|error| error.to_string())?;
+                ensure(
+                    repeated.is_empty(),
+                    format!("repeat coalesced drain must find no pending work: {repeated:?}"),
+                )?;
+            }
+        }
+        ensure(
+            index_regular_file_snapshot(&index_dir)? == before_repeat,
+            "idempotent repeat drain must not mutate the published index",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn session_insert_with_zero_admitted_spans_marks_healthy_index_stale() -> TestResult {
+        let (workspace, database, index_dir, connection, workspace_id) =
+            seed_healthy_session_index_case("session-zero-evidence-stale", "z0")?;
+        let session_id = "sess_012345678901234567890123z0";
+        let session_job_id = "sidx_112345678901234567890123z0";
+        connection
+            .with_transaction(|| {
+                connection.insert_session(session_id, &session_index_input(&workspace_id, "z0"))?;
+                connection.insert_search_index_job(
+                    session_job_id,
+                    &crate::db::CreateSearchIndexJobInput {
+                        workspace_id: workspace_id.clone(),
+                        job_type: SearchIndexJobType::SingleDocument,
+                        document_source: Some("session".to_owned()),
+                        document_id: Some(session_id.to_owned()),
+                        documents_total: 1,
+                    },
+                )
+            })
+            .map_err(|error| error.to_string())?;
+
+        let status = get_index_status_with_connection(
+            &IndexStatusOptions {
+                workspace_path: workspace,
+                database_path: Some(database),
+                index_dir: Some(index_dir),
+            },
+            Some(&connection),
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            status.health == IndexHealth::Stale
+                && status.db_generation > status.index_generation.unwrap_or(0)
+                && status.db_session_count == 1
+                && status.db_evidence_count == 0
+                && status.db_evidence_admitted_count == 0
+                && status.db_evidence_quarantined_count == 0
+                && status.db_evidence_denied_count == 0,
+            format!(
+                "a session-only corpus change must make a zero-evidence healthy index stale: {status:?}"
+            ),
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn ordinary_session_job_indexes_atomic_admitted_evidence_without_manual_rebuild() -> TestResult
+    {
+        assert_session_evidence_job_from_healthy_index(SessionEvidenceDrain::OrdinarySingle, "o1")
+    }
+
+    #[test]
+    fn limited_coalesced_session_job_indexes_atomic_admitted_evidence_without_manual_rebuild()
+    -> TestResult {
+        assert_session_evidence_job_from_healthy_index(SessionEvidenceDrain::LimitedCoalesced, "c1")
+    }
+
     fn deterministic_incremental_doc(
         slot: u8,
         term: u8,
@@ -8212,6 +8632,14 @@ mod tests {
     struct SearchSnapshotRow {
         doc_id: String,
         score: String,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct PublishedSearchHit {
+        doc_id: String,
+        content: String,
+        provenance_uri: String,
+        kind: String,
     }
 
     fn vector_index_snapshot(index_dir: &Path) -> Result<Vec<VectorSnapshotRow>, String> {
@@ -8275,6 +8703,62 @@ mod tests {
             )
         })
         .map_err(|error| format!("search runtime failed: {error}"))?
+    }
+
+    fn published_search_hit(
+        index_dir: &Path,
+        query: &str,
+        expected_doc_id: &str,
+    ) -> Result<PublishedSearchHit, String> {
+        let index = Arc::new(
+            crate::search::TwoTierIndex::open(index_dir, crate::search::TwoTierConfig::default())
+                .map_err(|error| error.to_string())?,
+        );
+        let searcher = crate::search::TwoTierSearcher::new(
+            index,
+            default_search_embedder_stack().fast_arc(),
+            crate::search::TwoTierConfig::default(),
+        );
+        let query = query.to_owned();
+        let expected_doc_id = expected_doc_id.to_owned();
+        crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            let (results, _) = searcher
+                .search_collect(&cx, &query, 4)
+                .await
+                .map_err(|error| error.to_string())?;
+            let result = results
+                .into_iter()
+                .find(|result| result.doc_id == expected_doc_id)
+                .ok_or_else(|| {
+                    format!(
+                        "published TwoTierSearcher did not return expected evidence {expected_doc_id} among four hits for {query:?}"
+                    )
+                })?;
+            let metadata = result
+                .metadata
+                .as_deref()
+                .ok_or_else(|| format!("published search hit {} had no metadata", result.doc_id))?;
+            let required = |key: &str| {
+                metadata
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        format!(
+                            "published search hit {} omitted string metadata {key}",
+                            result.doc_id
+                        )
+                    })
+            };
+            Ok::<PublishedSearchHit, String>(PublishedSearchHit {
+                doc_id: result.doc_id.to_string(),
+                content: required("content")?,
+                provenance_uri: required("provenance_uri")?,
+                kind: required("kind")?,
+            })
+        })
+        .map_err(|error| format!("published search runtime failed: {error}"))?
     }
 
     fn ensure_search_results_match_full_rebuild(
