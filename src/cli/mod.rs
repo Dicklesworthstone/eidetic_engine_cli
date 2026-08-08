@@ -63777,9 +63777,9 @@ mod tests {
         DiagResourceRchPostureArg, DiagResourceReplayArg, DiagResourceSurfaceArg,
         DiagResourceWorkloadPressureArg, DomainError, ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES,
         EconomyCommand, EffectiveRedactionLevel, FieldsLevel, FocusCommand, GraphCommand,
-        GraphSnapshotCommand, HandoffCommand, HookCommand, LabCommand, LabSwarmCommand,
-        LabSwarmWorkloadProfile, LearnCommand, LearnExperimentCommand, LensCommand,
-        MIGRATION_REPAIR_COMMAND, MaintenanceCommand, MaintenanceWalCheckpointArgs,
+        GraphSnapshotCommand, HandoffCommand, HookCommand, HotsetCollectOptions, LabCommand,
+        LabSwarmCommand, LabSwarmWorkloadProfile, LearnCommand, LearnExperimentCommand,
+        LensCommand, MIGRATION_REPAIR_COMMAND, MaintenanceCommand, MaintenanceWalCheckpointArgs,
         MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat, PackCommand,
         PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, ReflectCommand,
         ReflectRequestLedgerCommand, RegressCommand, RegressExplainArgs, RegressionSurfaceArg,
@@ -63788,14 +63788,16 @@ mod tests {
         SwarmRepairPlanArgs, SwarmWorkPacketArgs, TaskFrameCommand, TaskFrameSubgoalCommand,
         TripwireCommand, TrustCommand, VerificationEvidenceAuthority, VerifyCommand,
         VerifyRchCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
-        WorkspaceHygieneMode, cass_import_domain_error, context_request_from_options,
-        context_stream_header_frame, context_stream_options_for_request,
-        db_inspect_redact_source_uri, diag_environment_attestation_response_json,
-        doctor_fix_dispatches, doctor_runtime_error_result,
-        environment_attestation_unavailable_sources, format_impact_json,
-        format_search_json_with_mesh_and_recalibration, hook_git_readiness_response_json,
-        hook_status_response_json, init_report_exit_code, json_with_data_result_path, mesh,
-        orient_next_commands, parse_completion_audit_evidence_input, parse_context_profile,
+        WorkspaceHygieneMode, cass_import_domain_error, collect_hotset_retrieval_provenance,
+        collect_hotset_signals, context_request_from_options, context_stream_header_frame,
+        context_stream_options_for_request, db_inspect_redact_source_uri,
+        diag_environment_attestation_response_json, doctor_fix_dispatches,
+        doctor_runtime_error_result, environment_attestation_unavailable_sources,
+        format_impact_json, format_search_json_with_mesh_and_recalibration,
+        hook_git_readiness_response_json, hook_status_response_json,
+        hotset_bounded_regular_file_read, hotset_bv_signals_from_robot_json, init_report_exit_code,
+        json_with_data_result_path, mesh, orient_next_commands,
+        parse_completion_audit_evidence_input, parse_context_profile,
         parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
         plan_cache_diag_degraded, plan_cache_diag_response_json,
@@ -74679,7 +74681,7 @@ mod tests {
         let database = crate::db::DbConnection::open_file(&database_path)
             .expect("open hotset fixture database");
         database.migrate().expect("migrate hotset fixture database");
-        let workspace_id = workspace_core::stable_workspace_id(ws);
+        let workspace_id = crate::core::workspace::stable_workspace_id(ws);
         database
             .insert_workspace(
                 &workspace_id,
@@ -74710,7 +74712,7 @@ mod tests {
             .expect("insert hotset fixture pack record");
         database
             .insert_audit(
-                "audit_hotset_recent_search",
+                "audit_hotset_recent_search_00000",
                 &crate::db::CreateAuditInput {
                     workspace_id: Some(workspace_id),
                     actor: Some("agent:hotset-test".to_owned()),
@@ -74817,7 +74819,8 @@ mod tests {
             .expect("hotset collect schema is public");
         assert_eq!(entry.category, "ops");
         let exported: serde_json::Value =
-            serde_json::from_str(&(entry.definition)()).expect("registered schema parses");
+            serde_json::from_str(&crate::output::render_schema_export_json(Some(entry.id)))
+                .expect("registered schema parses");
         let canonical: serde_json::Value = serde_json::from_str(include_str!(
             "../../docs/schemas/ee.cache.hotset_collect.v1.json"
         ))
