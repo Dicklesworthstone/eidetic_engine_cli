@@ -9304,6 +9304,14 @@ pub struct RememberArgs {
     #[arg(long = "sentinel-stale-threshold-seconds", value_name = "SECONDS")]
     pub sentinel_stale_threshold_seconds: Option<u64>,
 
+    /// Attach a revive-when predicate (`kind:target`); repeatable. The
+    /// inverse of --sentinel: this memory records a dead or retired route,
+    /// and a passing check signals the recorded blocker has cleared and the
+    /// memory should resurface. Revive predicates never gate serving. Same
+    /// kinds and target syntax as --sentinel.
+    #[arg(long = "revive-when", value_name = "KIND:TARGET", action = ArgAction::Append)]
+    pub revive_when: Vec<String>,
+
     /// Read a JSONL batch of remember inputs (one object per line, content
     /// required per line) from stdin. Requires --stdin; each line is
     /// validated and persisted independently.
@@ -49682,6 +49690,7 @@ fn note_to_remember_args(args: &NoteArgs) -> RememberArgs {
         valid_to: args.valid_to.clone(),
         sentinels: Vec::new(),
         sentinel_stale_threshold_seconds: None,
+        revive_when: Vec::new(),
         batch: false,
         stdin: false,
         reinforce: false,
@@ -50106,19 +50115,27 @@ fn persist_remember_sentinels(
     args: &RememberArgs,
     report: &RememberMemoryReport,
 ) -> Result<(), DomainError> {
-    if args.sentinels.is_empty() || report.dry_run {
+    if (args.sentinels.is_empty() && args.revive_when.is_empty()) || report.dry_run {
         return Ok(());
     }
     let specs = args
         .sentinels
         .iter()
-        .map(|raw| {
+        .map(|raw| (raw, MemorySentinelPolarity::Gate, "ee remember --sentinel"))
+        .chain(args.revive_when.iter().map(|raw| {
+            (
+                raw,
+                MemorySentinelPolarity::Revive,
+                "ee remember --revive-when",
+            )
+        }))
+        .map(|(raw, polarity, provenance)| {
             MemorySentinelSpec::from_raw(
                 &report.memory_id.to_string(),
                 raw,
-                MemorySentinelPolarity::Gate,
+                polarity,
                 None,
-                "ee remember --sentinel",
+                provenance,
                 args.sentinel_stale_threshold_seconds,
             )
             .map_err(memory_sentinel_validation_to_domain)
@@ -50199,11 +50216,11 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, Do
             repair: Some("ee remember \"<content>\" --family <id> --json".to_owned()),
         });
     }
-    if !args.sentinels.is_empty() && args.reinforce {
+    if (!args.sentinels.is_empty() || !args.revive_when.is_empty()) && args.reinforce {
         return Err(DomainError::Usage {
-            message: "--sentinel cannot be combined with --reinforce; a reinforced write \
-                      strengthens an existing memory instead of creating one to attach \
-                      sentinels to"
+            message: "--sentinel/--revive-when cannot be combined with --reinforce; a \
+                      reinforced write strengthens an existing memory instead of creating \
+                      one to attach sentinels to"
                 .to_owned(),
             repair: Some("ee remember --help".to_owned()),
         });
@@ -50427,8 +50444,8 @@ where
         );
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
-    if !args.sentinels.is_empty() {
-        let error = usage("--sentinel is not supported with --batch");
+    if !args.sentinels.is_empty() || !args.revive_when.is_empty() {
+        let error = usage("--sentinel/--revive-when are not supported with --batch");
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
     if args.attempt_family.is_some()

@@ -13373,6 +13373,12 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
                 default: None,
             },
             CommandArg {
+                name: "--revive-when",
+                description: "Attach a revive-when predicate (`KIND:TARGET`); the inverse of --sentinel. The memory records a dead or retired route, and a passing check signals its blocker has cleared and the memory should resurface. Revive predicates never gate serving. Same kinds and target syntax as --sentinel.",
+                required: false,
+                default: None,
+            },
+            CommandArg {
                 name: "--dry-run",
                 description: "Perform dry run without storing",
                 required: false,
