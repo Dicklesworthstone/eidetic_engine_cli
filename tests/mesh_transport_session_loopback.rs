@@ -4,6 +4,8 @@
 //! uses only the public authenticated-session API. Raw peers are confined to
 //! adversarial wire injection; there is no in-memory transport substitute.
 
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use std::fmt::Write as _;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
