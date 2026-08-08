@@ -2720,6 +2720,7 @@ mod tests {
         generate_journal_entry_id, journal_retention_days, list_journal_entries,
         normalize_command_root, show_journal_entry, truncate_at_char_boundary,
     };
+    use crate::curate::CandidateType;
     use crate::db::{
         CreateJournalEntryInput, CreateMemoryInput, DbConnection, JournalEntryListFilter,
         audit_actions,
