@@ -1083,6 +1083,12 @@ service, mail sender, Beads mutator, or agent loop.
 Mesh is optional. Local-first operation is the default. Use mesh when a trusted
 tailnet or local file-exchange path is part of the agent workflow.
 
+The shipped sharing path is policy-governed file export/import plus local
+Tailscale observation. Live EE-to-EE synchronization is not yet available:
+the production foreground supervisor currently uses a no-op transport, so a
+successful `ee mesh sync --once` cycle does not prove peer contact, network
+hello, anti-entropy exchange, or body transfer.
+
 | Command | Purpose |
 |---|---|
 | `ee mesh init --json` | Inspect foreground mesh readiness without starting a daemon |
@@ -1098,7 +1104,7 @@ tailnet or local file-exchange path is part of the agent workflow.
 | `ee mesh revoke-lane <peer-id> --lane <lane> --json` | Deny one lane, always advance its generation, invalidate prior previews, and audit atomically |
 | `ee mesh export --peer <peer-id> --out <file> --json` | Write a redaction-safe artifact for an enrolled, enabled peer; use `ee export` or `ee backup` for local backups |
 | `ee mesh import --file <file> --json` | Import a foreground artifact; peer rows require exact prior local consent, and cursors advance only through locally durable contiguous accepted replay |
-| `ee mesh sync --once --json` | Run one foreground sync cycle |
+| `ee mesh sync --once --json` | Run one foreground supervisor cycle; the current no-op transport may contact zero peers |
 
 Mesh command mode can be selected per command or through `EE_MESH_MODE`:
 
