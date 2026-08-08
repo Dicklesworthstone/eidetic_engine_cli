@@ -113,6 +113,24 @@ assert_jq "$blocked_revival" \
      and .data.mutationPosture == "read_only_no_result_trust_or_tombstone_mutation"' \
     "revival surface evaluates a blocked Revive spec without reporting it ready"
 
+step "revival file probes reject outside-workspace symlinks"
+outside_probe_dir="$(mktemp -d "${WS%/*}/ee-sentinel-outside-XXXXXX")"
+HARNESS_TMP_WORKSPACES+=("$outside_probe_dir")
+printf 'outside-secret-marker\n' >"$outside_probe_dir/marker.txt"
+ln -s "$outside_probe_dir" "$WS/linked-outside"
+symlink_revival="$(ee_json remember "An outside symlink must never revive this route." \
+    --workspace "$WS" --level episodic --kind failure \
+    --revive-when "file_hash_or_marker:linked-outside/marker.txt#outside-secret-marker" --json)"
+assert_jq "$symlink_revival" '.success == true and .data.persisted == true' \
+    "outside-symlink revival predicate persists for conservative evaluation"
+symlink_revival_id="$(printf '%s' "$symlink_revival" | jq -r '.data.memory_id // empty')"
+symlink_check="$(ee_json tripwire check --revivals --workspace "$WS" --json)"
+SYMLINK_REVIVE_ID="$symlink_revival_id" assert_jq "$symlink_check" \
+    '.success == true
+     and .data.summary.unknown >= 1
+     and all(.data.revivals[]?; .memoryId != env.SYMLINK_REVIVE_ID)' \
+    "outside-workspace symlink remains unverifiable and never ready"
+
 step "remember a sentinel-backed contract-shaped fact"
 mem="$(ee_json remember \
     "The demo.v1 schema defines the memoryId field." \
@@ -146,7 +164,7 @@ assert_jq "$help_pass" \
      and any(.data.results[]?; .status == "pass" and .polarity == "gate")' \
     "allowlisted command-help sentinel passes"
 
-step "explicit revival checks may introspect command help while implicit orient stays process-free"
+step "implicit revival evaluator stays process-free"
 help_revive_mem="$(ee_json remember "Retry this route when pack advertises fresh sentinels." \
     --workspace "$WS" --level episodic --kind failure \
     --revive-when "command_help_contains_flag:ee pack --require-fresh-sentinels" --json)"
@@ -232,6 +250,12 @@ REVIVE_ID="$revive_mem_id" HELP_REVIVE_ID="$help_revive_id" ENV_REVIVE_ID="$env_
 implicit_orient_human="$(ee_json orient "inspect newly unblocked routes" --fast --workspace "$WS")"
 assert_contains "$implicit_orient_human" "Revival evaluator: mode=implicit" \
     "orient human output identifies implicit revival evaluation"
+assert_contains "$implicit_orient_human" "evaluationPosture=local_read_only_predicates_no_process_execution" \
+    "orient human output exposes exact implicit evaluation posture"
+assert_contains "$implicit_orient_human" "commandHelpProcessExecution=false" \
+    "orient human output exposes command-help process posture"
+assert_contains "$implicit_orient_human" "limit=25" \
+    "orient human output exposes the effective revival limit"
 assert_contains "$implicit_orient_human" "matched=" \
     "orient human output exposes matched revival count"
 assert_contains "$implicit_orient_human" "evaluated=" \
@@ -268,6 +292,12 @@ assert_contains "$sensitive_human" "target=blake3:" \
     "revival human stdout retains digest-based target identity"
 assert_contains "$sensitive_human" "Revival evaluator: mode=explicit" \
     "tripwire human output identifies explicit revival evaluation"
+assert_contains "$sensitive_human" "evaluationPosture=local_read_only_predicates_plus_allowlisted_command_help_process" \
+    "tripwire human output exposes exact explicit evaluation posture"
+assert_contains "$sensitive_human" "commandHelpProcessExecution=true" \
+    "tripwire human output exposes command-help process posture"
+assert_contains "$sensitive_human" "limit=25" \
+    "tripwire human output exposes the effective revival limit"
 assert_contains "$sensitive_human" "matched=" \
     "tripwire human output exposes matched revival count"
 assert_contains "$sensitive_human" "unevaluated=" \

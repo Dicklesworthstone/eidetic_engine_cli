@@ -62136,13 +62136,6 @@ fn revival_sentinel_data(
     ensure_inspection_database_current(&connection, &database_path, "revival sentinel check")?;
     let workspace_id = resolve_database_workspace_id(&connection, &workspace_path)?;
     let checked_at = chrono::Utc::now().to_rfc3339();
-    let stored_specs = connection
-        .list_current_memory_revival_specs(&workspace_id, &checked_at)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to load current revival sentinel specs: {error}"),
-            repair: Some("ee migrate status --workspace . --json".to_owned()),
-        })?;
-
     let limit = args.limit.unwrap_or(DEFAULT_REVIVAL_SENTINEL_LIMIT);
     if !(1..=MAX_REVIVAL_SENTINEL_LIMIT).contains(&limit) {
         return Err(DomainError::Usage {
@@ -62154,8 +62147,14 @@ fn revival_sentinel_data(
             )),
         });
     }
-    let matched_spec_count = stored_specs.len();
-    let evaluated_spec_count = matched_spec_count.min(limit);
+    let bounded_specs = connection
+        .list_current_memory_revival_specs_bounded(&workspace_id, &checked_at, limit)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load current revival sentinel specs: {error}"),
+            repair: Some("ee migrate status --workspace . --json".to_owned()),
+        })?;
+    let matched_spec_count = bounded_specs.total_count;
+    let evaluated_spec_count = bounded_specs.specs.len();
     let unevaluated_spec_count = matched_spec_count.saturating_sub(evaluated_spec_count);
     let limit_repair = (unevaluated_spec_count > 0).then(|| {
         let next_limit = matched_spec_count.min(MAX_REVIVAL_SENTINEL_LIMIT);
@@ -62165,14 +62164,14 @@ fn revival_sentinel_data(
             )
         } else {
             format!(
-                "ee tripwire check --revivals --limit {MAX_REVIVAL_SENTINEL_LIMIT} --workspace . --json; more than {MAX_REVIVAL_SENTINEL_LIMIT} current Revive specs require a future pagination slice"
+                "ee tripwire check --revivals --limit {MAX_REVIVAL_SENTINEL_LIMIT} --workspace . --json; this surface safely evaluates at most {MAX_REVIVAL_SENTINEL_LIMIT} specs and emits no cursor because live revival observations can change without a database generation change"
             )
         }
     });
     let ctx = SentinelCheckContext::new(&workspace_path);
     let mut counts = SentinelCheckCounts::default();
     let mut revival_rows = Vec::new();
-    for stored in stored_specs.iter().take(limit) {
+    for stored in &bounded_specs.specs {
         if stored.polarity != MemorySentinelPolarity::Revive {
             return Err(DomainError::Storage {
                 message: format!(
@@ -62320,6 +62319,18 @@ fn render_revival_evaluation_human(data: &serde_json::Value) -> String {
         .get("observationMode")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown");
+    let evaluation_posture = data
+        .get("evaluationPosture")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let command_help_process_execution = data
+        .get("commandHelpProcessExecution")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let limit = data
+        .get("limit")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     let matched = data
         .get("matchedSpecCount")
         .and_then(serde_json::Value::as_u64)
@@ -62341,7 +62352,7 @@ fn render_revival_evaluation_human(data: &serde_json::Value) -> String {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("none");
     format!(
-        "Revival evaluator: mode={mode} matched={matched} evaluated={evaluated} unevaluated={unevaluated} truncated={truncated} limitRepair={limit_repair}\n"
+        "Revival evaluator: mode={mode} evaluationPosture={evaluation_posture} commandHelpProcessExecution={command_help_process_execution} limit={limit} matched={matched} evaluated={evaluated} unevaluated={unevaluated} truncated={truncated} limitRepair={limit_repair}\n"
     )
 }
 
@@ -62672,7 +62683,7 @@ mod tests {
     }
 
     #[test]
-    fn revival_payload_json_golden_and_toon_are_equivalent() -> TestResult {
+    fn revival_sentinel_payload_json_golden_and_toon_are_equivalent() -> TestResult {
         let envelope = super::revival_sentinel_envelope(bounded_revival_payload_fixture());
         let pretty = serde_json::to_string_pretty(&envelope).map_err(|error| error.to_string())?;
         let golden =
@@ -62686,11 +62697,14 @@ mod tests {
     }
 
     #[test]
-    fn capped_revival_human_and_orient_output_expose_complete_evaluation_posture() -> TestResult {
+    fn revival_sentinel_capped_human_and_orient_expose_complete_evaluation_posture() -> TestResult {
         let revivals = bounded_revival_payload_fixture();
         let tripwire = super::render_revival_sentinel_human(&revivals);
         for expected in [
             "mode=explicit",
+            "evaluationPosture=local_read_only_predicates_plus_allowlisted_command_help_process",
+            "commandHelpProcessExecution=true",
+            "limit=1",
             "matched=3",
             "evaluated=1",
             "unevaluated=2",
@@ -62716,6 +62730,9 @@ mod tests {
         );
         for expected in [
             "mode=implicit",
+            "evaluationPosture=local_read_only_predicates_no_process_execution",
+            "commandHelpProcessExecution=false",
+            "limit=1",
             "matched=3",
             "evaluated=1",
             "unevaluated=2",

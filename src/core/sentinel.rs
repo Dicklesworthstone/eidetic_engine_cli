@@ -10,8 +10,9 @@
 //!
 //! Safety envelope (ADR 0060):
 //! - Every probe is read-only and bounded by a [`RequestBudget`] (strict
-//!   per-check I/O + wall-clock caps); an oversize/unreadable referent resolves
-//!   to `Unverifiable`, never to a slurp.
+//!   per-check byte cap plus a checkpointed wall budget); an
+//!   oversize/unreadable/late referent resolves to `Unverifiable`, never to an
+//!   unbounded slurp.
 //! - Workspace targets resolve strictly *inside* the workspace root: absolute
 //!   paths, `..` traversal, and path prefixes are rejected (`Unverifiable`).
 //! - No process execution on this implicit path. The allowlisted-introspection
@@ -25,6 +26,7 @@
 //! kind resolve to `Unverifiable` with a documented reason — never a silent pass
 //! and never a false fail.
 
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -43,7 +45,9 @@ use crate::models::memory_sentinel::{
 /// not slurp an unbounded file to answer a predicate.
 pub const MAX_SENTINEL_CHECK_IO_BYTES: u64 = 1_048_576; // 1 MiB
 
-/// Strict per-check wall-clock cap.
+/// Per-check wall-clock budget. Synchronous regular-file syscalls are not
+/// preempted; the evaluator checks this budget before and after path traversal,
+/// bounded reading, and parsing, and rejects a late result as unverifiable.
 pub const SENTINEL_CHECK_WALL_CLOCK: Duration = Duration::from_millis(250);
 
 /// Maximum captured bytes per command-help stream. The bounded source runner
@@ -151,19 +155,18 @@ fn observe_env_var_registered(target: &str) -> SentinelObservation {
 
 fn observe_path_exists(target: &str, ctx: SentinelCheckContext<'_>) -> SentinelObservation {
     let (path_part, _) = split_target_marker(target);
-    match resolve_in_workspace(ctx.workspace_root, path_part) {
-        Some(resolved) if resolved.exists() => SentinelObservation::Satisfied,
-        Some(_) => SentinelObservation::Unsatisfied,
-        None => SentinelObservation::Unverifiable,
+    let mut budget = sentinel_check_budget();
+    match inspect_workspace_path(ctx.workspace_root, path_part, &mut budget) {
+        WorkspacePathInspection::Present(_) => SentinelObservation::Satisfied,
+        WorkspacePathInspection::Missing => SentinelObservation::Unsatisfied,
+        WorkspacePathInspection::UnsafeOrUnreadable => SentinelObservation::Unverifiable,
     }
 }
 
 fn observe_file_hash_or_marker(target: &str, ctx: SentinelCheckContext<'_>) -> SentinelObservation {
     let (path_part, marker) = split_target_marker(target);
-    let Some(resolved) = resolve_in_workspace(ctx.workspace_root, path_part) else {
-        return SentinelObservation::Unverifiable;
-    };
-    let bytes = match read_capped(&resolved) {
+    let mut budget = sentinel_check_budget();
+    let bytes = match read_capped_in_workspace(ctx.workspace_root, path_part, &mut budget) {
         CappedRead::Missing => return SentinelObservation::Unsatisfied,
         CappedRead::Unreadable => return SentinelObservation::Unverifiable,
         CappedRead::Contents(bytes) => bytes,
@@ -175,17 +178,27 @@ fn observe_file_hash_or_marker(target: &str, ctx: SentinelCheckContext<'_>) -> S
     };
     if let Some(expected_hex) = expected.strip_prefix("blake3:") {
         let actual_hex = blake3::hash(&bytes).to_hex();
-        if actual_hex.as_str().eq_ignore_ascii_case(expected_hex) {
+        let observation = if actual_hex.as_str().eq_ignore_ascii_case(expected_hex) {
             SentinelObservation::Satisfied
         } else {
             SentinelObservation::Unsatisfied
+        };
+        if budget.check().is_err() {
+            SentinelObservation::Unverifiable
+        } else {
+            observation
         }
     } else {
         // Treat the marker as a UTF-8 substring; a binary file is ambiguous.
-        match std::str::from_utf8(&bytes) {
+        let observation = match std::str::from_utf8(&bytes) {
             Ok(text) if text.contains(expected) => SentinelObservation::Satisfied,
             Ok(_) => SentinelObservation::Unsatisfied,
             Err(_) => SentinelObservation::Unverifiable,
+        };
+        if budget.check().is_err() {
+            SentinelObservation::Unverifiable
+        } else {
+            observation
         }
     }
 }
@@ -199,10 +212,8 @@ fn observe_json_schema_contains_field(
         // Without a `#<field>` selector the predicate is unanswerable.
         return SentinelObservation::Unverifiable;
     };
-    let Some(resolved) = resolve_in_workspace(ctx.workspace_root, path_part) else {
-        return SentinelObservation::Unverifiable;
-    };
-    let bytes = match read_capped(&resolved) {
+    let mut budget = sentinel_check_budget();
+    let bytes = match read_capped_in_workspace(ctx.workspace_root, path_part, &mut budget) {
         CappedRead::Missing => return SentinelObservation::Unsatisfied,
         CappedRead::Unreadable => return SentinelObservation::Unverifiable,
         CappedRead::Contents(bytes) => bytes,
@@ -214,7 +225,14 @@ fn observe_json_schema_contains_field(
         // Unparseable JSON is ambiguous, not a definitive negative.
         return SentinelObservation::Unverifiable;
     };
-    if json_has_dotted_field(&value, field) {
+    if budget.check().is_err() {
+        return SentinelObservation::Unverifiable;
+    }
+    let has_field = json_has_dotted_field(&value, field);
+    if budget.check().is_err() {
+        return SentinelObservation::Unverifiable;
+    }
+    if has_field {
         SentinelObservation::Satisfied
     } else {
         SentinelObservation::Unsatisfied
@@ -351,30 +369,177 @@ enum CappedRead {
     Unreadable,
 }
 
-/// Read a file under the strict per-check I/O budget. A file larger than the cap
-/// is `Unreadable` rather than truncated, so the checker never half-reads.
-fn read_capped(path: &Path) -> CappedRead {
-    let metadata = match std::fs::metadata(path) {
+enum WorkspacePathInspection {
+    Present(std::fs::File),
+    Missing,
+    UnsafeOrUnreadable,
+}
+
+/// Resolve and inspect a target without following any target-side symlink.
+/// Canonicalizing the workspace root permits an explicitly accepted symlinked
+/// workspace while every component below that root must be a real directory or
+/// file. This prevents a sentinel target from escaping through an in-workspace
+/// symlink before any content is opened.
+fn inspect_workspace_path(
+    root: &Path,
+    relative: &str,
+    budget: &mut RequestBudget,
+) -> WorkspacePathInspection {
+    if budget.check().is_err() {
+        return WorkspacePathInspection::UnsafeOrUnreadable;
+    }
+    let Some(lexical) = resolve_in_workspace(root, relative) else {
+        return WorkspacePathInspection::UnsafeOrUnreadable;
+    };
+    let Ok(canonical_root) = root.canonicalize() else {
+        return WorkspacePathInspection::UnsafeOrUnreadable;
+    };
+    if budget.check().is_err() {
+        return WorkspacePathInspection::UnsafeOrUnreadable;
+    }
+    let Ok(relative_to_root) = lexical.strip_prefix(root) else {
+        return WorkspacePathInspection::UnsafeOrUnreadable;
+    };
+    open_sentinel_target_no_follow(&canonical_root, relative_to_root, budget)
+}
+
+/// Read a workspace-contained regular file under the strict per-check I/O and
+/// wall budget. Both the stat-time length and the actual read are capped; a
+/// concurrent growth can allocate and read at most `cap + 1` bytes before the
+/// result becomes `Unreadable`.
+fn read_capped_in_workspace(root: &Path, relative: &str, budget: &mut RequestBudget) -> CappedRead {
+    let file = match inspect_workspace_path(root, relative, budget) {
+        WorkspacePathInspection::Present(file) => file,
+        WorkspacePathInspection::Missing => return CappedRead::Missing,
+        WorkspacePathInspection::UnsafeOrUnreadable => return CappedRead::Unreadable,
+    };
+    let metadata = match file.metadata() {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return CappedRead::Missing,
         Err(_) => return CappedRead::Unreadable,
     };
     if !metadata.is_file() {
         return CappedRead::Missing;
     }
-    if metadata.len() > MAX_SENTINEL_CHECK_IO_BYTES {
+    if metadata.len() > MAX_SENTINEL_CHECK_IO_BYTES || budget.check().is_err() {
         return CappedRead::Unreadable;
     }
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            let mut budget = sentinel_check_budget();
-            budget.record_io_bytes(bytes.len() as u64);
-            if budget.check().is_err() {
-                return CappedRead::Unreadable;
-            }
-            CappedRead::Contents(bytes)
+
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len().min(MAX_SENTINEL_CHECK_IO_BYTES)).unwrap_or(0),
+    );
+    if file
+        .take(MAX_SENTINEL_CHECK_IO_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return CappedRead::Unreadable;
+    }
+    budget.record_io_bytes(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_SENTINEL_CHECK_IO_BYTES
+        || budget.check().is_err()
+    {
+        return CappedRead::Unreadable;
+    }
+    CappedRead::Contents(bytes)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn open_sentinel_target_no_follow(
+    canonical_root: &Path,
+    relative: &Path,
+    budget: &mut RequestBudget,
+) -> WorkspacePathInspection {
+    use rustix::fs::{Mode, OFlags};
+
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let root_descriptor = match rustix::fs::openat(
+        rustix::fs::CWD,
+        Path::new("/"),
+        directory_flags,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(_) => return WorkspacePathInspection::UnsafeOrUnreadable,
+    };
+    let mut directory = std::fs::File::from(root_descriptor);
+    for component in canonical_root.components() {
+        let Component::Normal(part) = component else {
+            continue;
+        };
+        let descriptor = match rustix::fs::openat(&directory, part, directory_flags, Mode::empty())
+        {
+            Ok(descriptor) => descriptor,
+            Err(_) => return WorkspacePathInspection::UnsafeOrUnreadable,
+        };
+        directory = std::fs::File::from(descriptor);
+        if budget.check().is_err() {
+            return WorkspacePathInspection::UnsafeOrUnreadable;
         }
-        Err(_) => CappedRead::Unreadable,
+    }
+
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(part) = component else {
+            return WorkspacePathInspection::UnsafeOrUnreadable;
+        };
+        let flags = if components.peek().is_some() {
+            directory_flags
+        } else {
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC
+        };
+        let descriptor = match rustix::fs::openat(&directory, part, flags, Mode::empty()) {
+            Ok(descriptor) => descriptor,
+            Err(error) if matches!(error, rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => {
+                return WorkspacePathInspection::Missing;
+            }
+            Err(_) => return WorkspacePathInspection::UnsafeOrUnreadable,
+        };
+        let opened = std::fs::File::from(descriptor);
+        if budget.check().is_err() {
+            return WorkspacePathInspection::UnsafeOrUnreadable;
+        }
+        if components.peek().is_none() {
+            return WorkspacePathInspection::Present(opened);
+        }
+        directory = opened;
+    }
+    WorkspacePathInspection::UnsafeOrUnreadable
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn open_sentinel_target_no_follow(
+    canonical_root: &Path,
+    relative: &Path,
+    budget: &mut RequestBudget,
+) -> WorkspacePathInspection {
+    let mut current = canonical_root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return WorkspacePathInspection::UnsafeOrUnreadable;
+        };
+        current.push(part);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return WorkspacePathInspection::UnsafeOrUnreadable;
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return WorkspacePathInspection::Missing;
+            }
+            Err(_) => return WorkspacePathInspection::UnsafeOrUnreadable,
+        }
+        if budget.check().is_err() {
+            return WorkspacePathInspection::UnsafeOrUnreadable;
+        }
+    }
+    match std::fs::OpenOptions::new().read(true).open(current) {
+        Ok(file) => WorkspacePathInspection::Present(file),
+        Err(_) => WorkspacePathInspection::UnsafeOrUnreadable,
     }
 }
 
@@ -384,8 +549,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        MAX_SENTINEL_COMMAND_HELP_STREAM_BYTES, SentinelCheckContext, command_help_observation,
-        observe_sentinel, resolve_in_workspace, split_target_marker,
+        MAX_SENTINEL_CHECK_IO_BYTES, MAX_SENTINEL_COMMAND_HELP_STREAM_BYTES, SentinelCheckContext,
+        command_help_observation, observe_sentinel, resolve_in_workspace, split_target_marker,
     };
     use crate::config::env_registry::EnvVar;
     use crate::core::source_run::SourceRunStatus;
@@ -563,6 +728,61 @@ mod tests {
             observe(MemorySentinelKind::FileHashOrMarker, "gone.txt#beta", root),
             SentinelObservation::Unsatisfied
         );
+    }
+
+    #[test]
+    fn revival_sentinel_file_reads_are_byte_bounded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let oversize = vec![
+            b'x';
+            usize::try_from(MAX_SENTINEL_CHECK_IO_BYTES + 1)
+                .expect("sentinel cap fits usize")
+        ];
+        fs::write(root.join("oversize.txt"), oversize).expect("write oversize sentinel referent");
+        assert_eq!(
+            observe(MemorySentinelKind::FileHashOrMarker, "oversize.txt#x", root),
+            SentinelObservation::Unverifiable,
+            "the actual file read must remain byte-bounded"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn revival_sentinel_workspace_file_probes_reject_outside_symlink_components() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&workspace).expect("create workspace");
+        fs::create_dir_all(&outside).expect("create outside directory");
+        fs::write(outside.join("secret.txt"), b"outside-secret-marker")
+            .expect("write outside marker");
+        fs::write(
+            outside.join("schema.json"),
+            br#"{"outside":{"secret":true}}"#,
+        )
+        .expect("write outside schema");
+        symlink(&outside, workspace.join("linked-outside")).expect("create outside symlink");
+
+        for (kind, target) in [
+            (MemorySentinelKind::PathExists, "linked-outside/secret.txt"),
+            (
+                MemorySentinelKind::FileHashOrMarker,
+                "linked-outside/secret.txt#outside-secret-marker",
+            ),
+            (
+                MemorySentinelKind::JsonSchemaContainsField,
+                "linked-outside/schema.json#outside.secret",
+            ),
+        ] {
+            assert_eq!(
+                observe(kind, target, &workspace),
+                SentinelObservation::Unverifiable,
+                "{kind} must not follow an outside-workspace symlink"
+            );
+        }
     }
 
     #[test]
