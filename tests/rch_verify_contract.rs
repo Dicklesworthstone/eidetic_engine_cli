@@ -4141,7 +4141,9 @@ fn proof_broker_dispatch_allowed_launches_single_remote_proof() -> TestResult {
     let summary = report["summary_markdown"]
         .as_str()
         .ok_or_else(|| "summary missing".to_owned())?;
-    if !summary.contains("proof_broker: `dispatch_allowed` remote_cargo_launched=`true`") {
+    if !summary.contains(
+        "proof_broker: `dispatch_allowed` dispatch_attempted=`true` remote_cargo_launched=`true`",
+    ) {
         return Err(format!("summary missing broker dispatch line: {summary}"));
     }
     let ledger_rows: Value = serde_json::from_str(
@@ -4163,6 +4165,229 @@ fn proof_broker_dispatch_allowed_launches_single_remote_proof() -> TestResult {
     {
         return Err(format!(
             "dispatch did not append reusable broker ledger row: {ledger_rows}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_broker_exit_zero_without_remote_attestation_is_not_reusable() -> TestResult {
+    let ledger = unique_tmp_path("proof-broker-missing-remote-ledger").join("ledger.json");
+    let target_dir = unique_tmp_path("proof-broker-missing-remote-target");
+    let ledger_arg = ledger
+        .to_str()
+        .ok_or_else(|| "missing-remote ledger path is not utf-8".to_owned())?;
+    let target_dir_arg = target_dir
+        .to_str()
+        .ok_or_else(|| "missing-remote target path is not utf-8".to_owned())?;
+    let clean_tripwire = r#"{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"ok","count":0,"processes":[],"detectedLocalBuilds":[]}"#;
+
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--skip-build-admission",
+            "--skip-known-blocker",
+            "--proof-broker-ledger",
+            ledger_arg,
+            "--summary",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "proof_broker_missing_remote",
+        ],
+        &[
+            ("CARGO_TARGET_DIR", target_dir_arg),
+            ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire),
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "cargo command exited successfully\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "19"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "exit-zero missing-remote fixture should retain the command exit\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse missing-remote report: {error}"))?;
+    if report["status"] != "pass_without_remote_marker"
+        || report["proof_broker"]["dispatchAttempted"] != true
+        || report["proof_broker"]["remoteCargoLaunched"] != false
+    {
+        return Err(format!(
+            "missing remote marker was not classified explicitly: {report}"
+        ));
+    }
+    let ledger_rows: Value = serde_json::from_str(
+        &fs::read_to_string(&ledger)
+            .map_err(|error| format!("read missing-remote broker ledger: {error}"))?,
+    )
+    .map_err(|error| format!("parse missing-remote broker ledger: {error}"))?;
+    let row = ledger_rows
+        .as_array()
+        .and_then(|rows| rows.first())
+        .ok_or_else(|| format!("missing-remote broker ledger row absent: {ledger_rows}"))?;
+    if row["state"] != "rejected"
+        || row["admission"]["verdict"] != "proof_unusable"
+        || row["admission"]["reasonCodes"] != serde_json::json!(["remote_attestation_missing"])
+        || row["admission"]["nextAction"] != "rerun_with_authoritative_remote_attestation"
+        || !row["admission"]["reuseRunId"].is_null()
+    {
+        return Err(format!(
+            "exit-zero proof without remote attestation became reusable: {ledger_rows}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_broker_transient_remote_failures_remain_retryable() -> TestResult {
+    let ledger = unique_tmp_path("proof-broker-retryable-ledger").join("ledger.json");
+    let target_dir = unique_tmp_path("proof-broker-retryable-target");
+    let ledger_arg = ledger
+        .to_str()
+        .ok_or_else(|| "retryable ledger path is not utf-8".to_owned())?;
+    let target_dir_arg = target_dir
+        .to_str()
+        .ok_or_else(|| "retryable target path is not utf-8".to_owned())?;
+    let clean_tripwire = r#"{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"ok","count":0,"processes":[],"detectedLocalBuilds":[]}"#;
+    let args = [
+        "--skip-build-admission",
+        "--skip-known-blocker",
+        "--proof-broker-ledger",
+        ledger_arg,
+        "--summary",
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "proof_broker_retryable_environment",
+    ];
+    let envs = [
+        ("CARGO_TARGET_DIR", target_dir_arg),
+        ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire),
+        (
+            "RCH_VERIFY_FAKE_OUTPUT",
+            "[RCH] remote required; refusing local fallback\n",
+        ),
+        ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+        ("RCH_VERIFY_FAKE_ELAPSED_MS", "23"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+    ];
+
+    for attempt in 1..=2 {
+        let (status, stdout, stderr) = run_script_with_env(&args, &envs)?;
+        if status.success() {
+            return Err(format!(
+                "retryable environment attempt {attempt} should preserve the failed RCH exit\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            ));
+        }
+        let report: Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("parse retryable attempt {attempt}: {error}"))?;
+        if report["status"] != "rch_environment_failure"
+            || report["proof_broker"]["verdict"] != "dispatch_allowed"
+            || report["proof_broker"]["dispatchAttempted"] != true
+            || report["proof_broker"]["remoteCargoLaunched"] != false
+        {
+            return Err(format!(
+                "retryable environment attempt {attempt} was poisoned or not launched: {report}"
+            ));
+        }
+    }
+
+    let ledger_rows: Value = serde_json::from_str(
+        &fs::read_to_string(&ledger)
+            .map_err(|error| format!("read retryable broker ledger: {error}"))?,
+    )
+    .map_err(|error| format!("parse retryable broker ledger: {error}"))?;
+    let rows = ledger_rows
+        .as_array()
+        .ok_or_else(|| format!("retryable broker ledger should be an array: {ledger_rows}"))?;
+    if rows.len() != 1
+        || rows[0]["state"] != "rejected"
+        || rows[0]["admission"]["verdict"] != "dispatch_allowed"
+        || rows[0]["admission"]["reasonCodes"]
+            != serde_json::json!(["retryable_rch_environment_failure"])
+        || rows[0]["admission"]["nextAction"] != "rerun_single_remote_proof"
+        || !rows[0]["admission"]["reuseRunId"].is_null()
+    {
+        return Err(format!(
+            "retryable remote environment failure poisoned its fingerprint: {ledger_rows}"
+        ));
+    }
+
+    let capacity_ledger = unique_tmp_path("proof-broker-capacity-ledger").join("ledger.json");
+    let capacity_target = unique_tmp_path("proof-broker-capacity-target");
+    let capacity_ledger_arg = capacity_ledger
+        .to_str()
+        .ok_or_else(|| "capacity ledger path is not utf-8".to_owned())?;
+    let capacity_target_arg = capacity_target
+        .to_str()
+        .ok_or_else(|| "capacity target path is not utf-8".to_owned())?;
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--skip-build-admission",
+            "--skip-known-blocker",
+            "--proof-broker-ledger",
+            capacity_ledger_arg,
+            "--summary",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "proof_broker_retryable_capacity",
+        ],
+        &[
+            ("CARGO_TARGET_DIR", capacity_target_arg),
+            ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire),
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "[RCH] local (no admissible workers: critical_pressure=2)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "103"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "29"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+        ],
+    )?;
+    if status.success() {
+        return Err(format!(
+            "capacity refusal should preserve the failed RCH exit\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse retryable capacity report: {error}"))?;
+    if report["status"] != "capacity_or_timeout"
+        || report["proof_broker"]["verdict"] != "dispatch_allowed"
+        || report["proof_broker"]["dispatchAttempted"] != true
+        || report["proof_broker"]["remoteCargoLaunched"] != false
+    {
+        return Err(format!(
+            "capacity refusal was poisoned or not launched: {report}"
+        ));
+    }
+    let capacity_rows: Value = serde_json::from_str(
+        &fs::read_to_string(&capacity_ledger)
+            .map_err(|error| format!("read capacity broker ledger: {error}"))?,
+    )
+    .map_err(|error| format!("parse capacity broker ledger: {error}"))?;
+    let row = capacity_rows
+        .as_array()
+        .and_then(|rows| rows.first())
+        .ok_or_else(|| format!("capacity broker ledger row absent: {capacity_rows}"))?;
+    if row["state"] != "rejected"
+        || row["admission"]["verdict"] != "dispatch_allowed"
+        || row["admission"]["reasonCodes"] != serde_json::json!(["retryable_capacity_or_timeout"])
+        || row["admission"]["nextAction"] != "rerun_single_remote_proof"
+    {
+        return Err(format!(
+            "capacity refusal poisoned its proof fingerprint: {capacity_rows}"
         ));
     }
     Ok(())
@@ -4439,7 +4664,9 @@ fn proof_broker_reuse_existing_skips_remote_dispatch() -> TestResult {
     let summary = report["summary_markdown"]
         .as_str()
         .ok_or_else(|| "summary missing".to_owned())?;
-    if !summary.contains("proof_broker: `reuse_existing` remote_cargo_launched=`false`") {
+    if !summary.contains(
+        "proof_broker: `reuse_existing` dispatch_attempted=`false` remote_cargo_launched=`false`",
+    ) {
         return Err(format!("summary missing broker reuse line: {summary}"));
     }
     Ok(())

@@ -1441,10 +1441,10 @@ PY
 }
 
 proof_broker_mark_json() {
-    local remote_launched="${1:?remote launched bool required}"
+    local dispatch_attempted="${1:?dispatch attempted bool required}"
     local bypass_reason="${2:-}"
     JSON_INPUT="${PROOF_BROKER_JSON:-null}" \
-    PROOF_BROKER_REMOTE_LAUNCHED="$remote_launched" \
+    PROOF_BROKER_DISPATCH_ATTEMPTED="$dispatch_attempted" \
     PROOF_BROKER_BYPASS_REASON_MARK="$bypass_reason" \
     python3 - <<'PY'
 import json
@@ -1456,10 +1456,30 @@ except Exception:
     payload = None
 if not isinstance(payload, dict):
     payload = {"enabled": False}
-payload["remoteCargoLaunched"] = os.environ.get("PROOF_BROKER_REMOTE_LAUNCHED") == "true"
+payload["dispatchAttempted"] = os.environ.get("PROOF_BROKER_DISPATCH_ATTEMPTED") == "true"
+payload["remoteCargoLaunched"] = False
 bypass = os.environ.get("PROOF_BROKER_BYPASS_REASON_MARK") or None
 if bypass:
     payload["bypassReason"] = bypass
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+proof_broker_remote_result_json() {
+    local remote_launched="${1:?remote launched bool required}"
+    JSON_INPUT="${PROOF_BROKER_JSON:-null}" \
+    PROOF_BROKER_REMOTE_LAUNCHED="$remote_launched" \
+    python3 - <<'PY'
+import json
+import os
+
+try:
+    payload = json.loads(os.environ.get("JSON_INPUT") or "null")
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = {"enabled": False}
+payload["remoteCargoLaunched"] = os.environ.get("PROOF_BROKER_REMOTE_LAUNCHED") == "true"
 print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 PY
 }
@@ -5802,7 +5822,7 @@ def proof_broker_row_id(fingerprint_id, run_id):
 
 def persist_proof_broker_ledger(proof, status, command_hash):
     proof_broker = proof.get("proof_broker")
-    if not isinstance(proof_broker, dict) or proof_broker.get("remoteCargoLaunched") is not True:
+    if not isinstance(proof_broker, dict) or proof_broker.get("dispatchAttempted") is not True:
         return
     ledger_path = os.environ.get("PROOF_BROKER_LEDGER_PATH") or ""
     if not ledger_path:
@@ -5815,20 +5835,44 @@ def persist_proof_broker_ledger(proof, status, command_hash):
         }
         return
     exit_code = proof.get("exit_code")
-    completed = exit_code == 0
+    reusable = exit_code == 0 and status == "remote_pass"
+    retryable = status in {"rch_environment_failure", "capacity_or_timeout"}
+    if reusable:
+        state = "completed"
+        admission = {
+            "verdict": "reuse_existing",
+            "reasonCodes": ["completed_remote_proof"],
+            "nextAction": "cite_existing_proof",
+        }
+    elif retryable:
+        state = "rejected"
+        admission = {
+            "verdict": "dispatch_allowed",
+            "reasonCodes": [f"retryable_{status}"],
+            "nextAction": "rerun_single_remote_proof",
+        }
+    else:
+        state = "rejected"
+        missing_attestation = status == "pass_without_remote_marker"
+        reason = "remote_attestation_missing" if missing_attestation else "remote_proof_failed"
+        admission = {
+            "verdict": "proof_unusable",
+            "reasonCodes": [reason],
+            "nextAction": (
+                "rerun_with_authoritative_remote_attestation"
+                if missing_attestation
+                else "inspect_failure_before_rerun"
+            ),
+        }
     run_id = proof_broker_run_id(command_hash, proof.get("generated_at"))
+    admission["reuseRunId"] = run_id if reusable else None
+    admission["waitOwner"] = None
     row = {
         "schema": "ee.proof_broker.v1",
         "rowId": proof_broker_row_id(fingerprint.get("fingerprintId"), run_id),
         "fingerprint": fingerprint,
-        "state": "completed" if completed else "rejected",
-        "admission": {
-            "verdict": "reuse_existing" if completed else "proof_unusable",
-            "reasonCodes": ["completed_remote_proof"] if completed else ["remote_proof_failed"],
-            "nextAction": "cite_existing_proof" if completed else "inspect_failure_before_rerun",
-            "reuseRunId": run_id if completed else None,
-            "waitOwner": None,
-        },
+        "state": state,
+        "admission": admission,
         "runId": run_id,
         "owner": None,
         "createdAt": proof.get("generated_at"),
@@ -6143,6 +6187,7 @@ if build_admission.get("status") not in (None, "not_run"):
 if proof_broker:
     summary_lines.append(
         f"- proof_broker: `{proof_broker.get('verdict') or proof_broker.get('status') or 'unknown'}`"
+        f" dispatch_attempted=`{str(bool(proof_broker.get('dispatchAttempted'))).lower()}`"
         f" remote_cargo_launched=`{str(bool(proof_broker.get('remoteCargoLaunched'))).lower()}`"
         f" next_action=`{proof_broker.get('nextAction') or 'unknown'}`"
     )
@@ -6841,6 +6886,13 @@ if [ -n "$worker_id" ]; then
     if [ -n "$allowed_workers_csv" ] && ! csv_contains "$allowed_workers_csv" "$worker_id"; then
         worker_filter_ignored=1
     fi
+fi
+if [ -n "$PROOF_BROKER_LEDGER" ] && [ "$(proof_broker_json_field dispatchAttempted)" = "true" ]; then
+    proof_broker_remote_launched=false
+    if [ -n "$worker_id" ]; then
+        proof_broker_remote_launched=true
+    fi
+    PROOF_BROKER_JSON="$(proof_broker_remote_result_json "$proof_broker_remote_launched")"
 fi
 if [ -n "$planner_worker_id" ]; then
     allowed_workers_csv="${REQUESTED_WORKERS_CSV:-$CONFIGURED_WORKERS_CSV}"
