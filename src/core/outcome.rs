@@ -49,8 +49,8 @@ use crate::db::{
 };
 use crate::models::degradation::{HARMFUL_BURST_QUARANTINE_CODE, SPRT_QUARANTINE_CODE};
 use crate::models::{
-    AgentContextProfileCounts, DomainError, ProcessExitCode, RecoveryKind, TrustClass,
-    VerificationEvidenceRecord,
+    AgentContextProfileCounts, AttemptFamilyMultiplicity, DomainError, ProcessExitCode,
+    RecoveryKind, TrustClass, VerificationEvidenceRecord,
 };
 use crate::runtime::determinism::{Deterministic, Seed};
 
@@ -1564,6 +1564,43 @@ fn apply_memory_trust_class_transition(
         return Ok(());
     }
 
+    // bd-multiplicity-aware-trust-p0u7g: refuse to promote a memory above the
+    // privileged threshold (anything past agent_assertion) while its declared
+    // attempt family is incomplete. A survivor reported out of N declared
+    // sibling attempts keeps agent-assertion authority until the remaining
+    // siblings are recorded; the refusal is audited and leaves the stored
+    // trust class untouched. Demotions are never gated.
+    if matches!(transition.direction, TrustClassTransitionDirection::Promote)
+        && matches!(
+            transition.next_class,
+            TrustClass::AgentValidated | TrustClass::PeerHumanAttested | TrustClass::HumanExplicit
+        )
+        && let Some(multiplicity) =
+            promotion_ineligible_attempt_family_multiplicity(connection, workspace_id, memory_id)?
+    {
+        connection
+            .insert_audit(
+                &id_source.next_audit_id(),
+                &CreateAuditInput {
+                    workspace_id: Some(workspace_id.to_string()),
+                    actor: actor.map(ToOwned::to_owned),
+                    action: audit_actions::TRUST_CLASS_PROMOTION_BLOCKED.to_string(),
+                    target_type: Some("memory".to_string()),
+                    target_id: Some(memory_id.to_string()),
+                    details: Some(memory_trust_class_promotion_blocked_audit_details(
+                        feedback_event_id,
+                        &transition,
+                        &multiplicity,
+                    )),
+                },
+            )
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to audit blocked trust-class promotion: {error}"),
+                repair: Some("ee doctor".to_string()),
+            })?;
+        return Ok(());
+    }
+
     let updated = connection
         .update_memory_trust_class(memory_id, transition.next_class.as_str())
         .map_err(|error| DomainError::Storage {
@@ -1599,6 +1636,79 @@ fn apply_memory_trust_class_transition(
             message: format!("Failed to audit memory trust-class transition: {error}"),
             repair: Some("ee doctor".to_string()),
         })
+}
+
+/// Load the attempt-family multiplicity for a memory and return it only when
+/// the family is incomplete (declared sibling attempts exceed live recorded
+/// members). Memories without a family, and complete families, return `None`
+/// (bd-multiplicity-aware-trust-p0u7g).
+fn promotion_ineligible_attempt_family_multiplicity(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+) -> Result<Option<AttemptFamilyMultiplicity>, DomainError> {
+    let family = connection
+        .get_memory_attempt_family(memory_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to read memory attempt family: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+    let Some(family) = family else {
+        return Ok(None);
+    };
+    let members = connection
+        .list_memory_attempt_family(workspace_id, &family.family_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list attempt-family members: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+    let declaration = connection
+        .get_attempt_family_declaration(workspace_id, &family.family_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to read attempt-family declaration: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+    let declared_size = declaration
+        .and_then(|(declared, _origin)| declared)
+        .or(family.declared_size);
+    let multiplicity = AttemptFamilyMultiplicity::from_members(
+        family.family_id,
+        declared_size,
+        members.iter().map(|member| {
+            (
+                Some(member.attempt_index),
+                Some(member.disposition.as_str()),
+            )
+        }),
+    );
+    Ok((!multiplicity.is_promotion_eligible()).then_some(multiplicity))
+}
+
+fn memory_trust_class_promotion_blocked_audit_details(
+    feedback_event_id: &str,
+    transition: &TrustClassTransition,
+    multiplicity: &AttemptFamilyMultiplicity,
+) -> String {
+    serde_json::json!({
+        "schema": "ee.audit.trust_class_promotion_blocked.v1",
+        "feedbackEventId": feedback_event_id,
+        "fromClass": transition.previous_class.as_str(),
+        "refusedClass": transition.next_class.as_str(),
+        "reason": if multiplicity.is_complete() {
+            "attempt_family_composition_not_canonical"
+        } else {
+            "attempt_family_incomplete"
+        },
+        "familyId": multiplicity.family_id,
+        "declaredSize": multiplicity.declared_size,
+        "recordedSlots": multiplicity.recorded_slots,
+        "selectedCount": multiplicity.selected_count,
+        "rejectedCount": multiplicity.rejected_count,
+        "unslottedCount": multiplicity.unslotted_count,
+        "unrecordedCount": multiplicity.unrecorded_count(),
+        "summary": multiplicity.summary(),
+    })
+    .to_string()
 }
 
 fn memory_trust_class_transition_audit_details(

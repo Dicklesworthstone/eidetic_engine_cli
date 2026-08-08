@@ -9328,6 +9328,32 @@ pub struct RememberArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub apply: bool,
 
+    /// Stable attempt-family identity this finding was selected from
+    /// (bd-multiplicity-aware-trust-p0u7g). Record every sibling attempt —
+    /// including the failures — under the same family id so retrieval and
+    /// trust scoring can see the denominator, not just the survivor.
+    #[arg(long = "family", value_name = "FAMILY_ID")]
+    pub attempt_family: Option<String>,
+
+    /// Declared number of sibling attempts the family was drawn from
+    /// (for example `--of-n 18` for one finding selected out of eighteen
+    /// tries). Requires --family.
+    #[arg(long = "of-n", value_name = "N")]
+    pub attempt_family_of_n: Option<u32>,
+
+    /// Unique 1-based attempt slot this write occupies inside its family.
+    /// Family completion is measured in distinct slots, so recording the
+    /// winner repeatedly cannot stand in for the missing siblings. Requires
+    /// --family and --attempt-outcome.
+    #[arg(long = "attempt", value_name = "K")]
+    pub attempt_index: Option<u32>,
+
+    /// Role of this attempt inside its family: `selected` for the winner,
+    /// `rejected` for a sibling attempt that failed. Required with
+    /// --attempt.
+    #[arg(long = "attempt-outcome", value_name = "selected|rejected")]
+    pub attempt_outcome: Option<String>,
+
     /// Perform a dry run without storing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
@@ -22187,15 +22213,17 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_audit_timeline_human(&report))
             }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_audit_timeline_toon(&report) + "\n"))
-            }
+            output::Renderer::Toon => match output::render_audit_timeline_toon(&report) {
+                Ok(toon) => write_stdout(stdout, &(toon + "\n")),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            },
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_audit_timeline_json(&report) + "\n"))
-            }
+            | output::Renderer::Hook => match output::render_audit_timeline_json(&report) {
+                Ok(json) => write_stdout(stdout, &(json + "\n")),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            },
         },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
@@ -22222,15 +22250,17 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_audit_show_human(&report))
             }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_audit_show_toon(&report) + "\n"))
-            }
+            output::Renderer::Toon => match output::render_audit_show_toon(&report) {
+                Ok(toon) => write_stdout(stdout, &(toon + "\n")),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            },
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_audit_show_json(&report) + "\n"))
-            }
+            | output::Renderer::Hook => match output::render_audit_show_json(&report) {
+                Ok(json) => write_stdout(stdout, &(json + "\n")),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            },
         },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
@@ -22258,15 +22288,17 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_audit_diff_human(&report))
             }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_audit_diff_toon(&report) + "\n"))
-            }
+            output::Renderer::Toon => match output::render_audit_diff_toon(&report) {
+                Ok(toon) => write_stdout(stdout, &(toon + "\n")),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            },
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_audit_diff_json(&report) + "\n"))
-            }
+            | output::Renderer::Hook => match output::render_audit_diff_json(&report) {
+                Ok(json) => write_stdout(stdout, &(json + "\n")),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            },
         },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
@@ -22294,15 +22326,17 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &output::render_audit_verify_human(&report))
             }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(output::render_audit_verify_toon(&report) + "\n"))
-            }
+            output::Renderer::Toon => match output::render_audit_verify_toon(&report) {
+                Ok(toon) => write_stdout(stdout, &(toon + "\n")),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            },
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                write_stdout(stdout, &(output::render_audit_verify_json(&report) + "\n"))
-            }
+            | output::Renderer::Hook => match output::render_audit_verify_json(&report) {
+                Ok(json) => write_stdout(stdout, &(json + "\n")),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            },
         },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
@@ -48920,6 +48954,24 @@ impl RememberMemoryReport {
         if let Some(typed_fields) = &self.typed_fields {
             output.push_str(&format!("  Typed fields: {typed_fields}\n"));
         }
+        if let Some(family) = &self.attempt_family {
+            let mut line = format!("  Attempt family: {}", family.family_id);
+            match (family.attempt_index, family.declared_size) {
+                (Some(index), Some(declared)) => {
+                    line.push_str(&format!(" (slot {index} of {declared}"));
+                }
+                (Some(index), None) => line.push_str(&format!(" (slot {index}")),
+                (None, Some(declared)) => {
+                    line.push_str(&format!(" (unslotted member of declared {declared}"));
+                }
+                (None, None) => line.push_str(" (unslotted member"),
+            }
+            if let Some(disposition) = family.disposition.as_deref() {
+                line.push_str(&format!(", {disposition}"));
+            }
+            line.push_str(")\n");
+            output.push_str(&line);
+        }
         if !self.dry_run && !self.auto_links.is_empty() {
             output.push_str(&format!("  Auto links: {}\n", self.auto_links.len()));
         }
@@ -48986,6 +49038,27 @@ impl RememberMemoryReport {
             .typed_fields
             .as_ref()
             .map_or_else(String::new, |fields| format!(",\"typedFields\":{fields}"));
+        let attempt_family_json = self
+            .attempt_family
+            .as_ref()
+            .map_or_else(String::new, |family| {
+                let declared_size = family
+                    .declared_size
+                    .map_or_else(|| "null".to_string(), |size| size.to_string());
+                let attempt_index = family
+                    .attempt_index
+                    .map_or_else(|| "null".to_string(), |index| index.to_string());
+                let disposition = family.disposition.as_deref().map_or_else(
+                    || "null".to_string(),
+                    |disposition| format!("\"{}\"", escape_json_string(disposition)),
+                );
+                format!(
+                    ",\"attemptFamily\":{{\"familyId\":\"{}\",\"declaredSize\":{declared_size},\
+                 \"attemptIndex\":{attempt_index},\"disposition\":{disposition}}}",
+                    escape_json_string(&family.family_id)
+                )
+            });
+        let typed_fields_json = format!("{typed_fields_json}{attempt_family_json}");
         let valid_from_json = self.valid_from.as_ref().map_or("null".to_string(), |s| {
             format!("\"{}\"", escape_json_string(s))
         });
@@ -49492,6 +49565,10 @@ fn note_to_remember_args(args: &NoteArgs) -> RememberArgs {
         from_diff: None,
         from_worktree: false,
         apply: false,
+        attempt_family: None,
+        attempt_family_of_n: None,
+        attempt_index: None,
+        attempt_outcome: None,
         dry_run: args.dry_run,
     }
 }
@@ -49937,11 +50014,64 @@ fn persist_remember_sentinels(
         .map(|_| ())
 }
 
+fn remember_attempt_family_from_args(
+    args: &RememberArgs,
+) -> Result<Option<crate::core::memory::RememberAttemptFamily<'_>>, DomainError> {
+    if args.attempt_family_of_n.is_some() && args.attempt_family.is_none() {
+        return Err(DomainError::Usage {
+            message: "--of-n requires --family: a declared sibling count only means something \
+                      relative to a named attempt family"
+                .to_owned(),
+            repair: Some("ee remember \"<content>\" --family <id> --of-n <N> --json".to_owned()),
+        });
+    }
+    if (args.attempt_index.is_some() || args.attempt_outcome.is_some())
+        && args.attempt_family.is_none()
+    {
+        return Err(DomainError::Usage {
+            message: "--attempt/--attempt-outcome require --family: an attempt slot only means \
+                      something inside a named attempt family"
+                .to_owned(),
+            repair: Some(
+                "ee remember \"<content>\" --family <id> --attempt <K> --attempt-outcome \
+                 <selected|rejected> --json"
+                    .to_owned(),
+            ),
+        });
+    }
+    Ok(args
+        .attempt_family
+        .as_deref()
+        .map(|family_id| crate::core::memory::RememberAttemptFamily {
+            family_id,
+            declared_size: args.attempt_family_of_n,
+            attempt_index: args.attempt_index,
+            disposition: args.attempt_outcome.as_deref(),
+        }))
+}
+
 fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, DomainError> {
     let workspace_path = cli.resolve_workspace();
     validate_remember_sentinels(args)?;
+    let attempt_family = remember_attempt_family_from_args(args)?;
     let git_selection =
         validate_remember_git_capture_args(args, remember_git_capture_selection(args)?)?;
+    if attempt_family.is_some() && git_selection.is_some() {
+        return Err(DomainError::Usage {
+            message: "--family cannot be combined with git capture modes; record the attempt \
+                      family on an explicit `ee remember \"<content>\"` write"
+                .to_owned(),
+            repair: Some("ee remember \"<content>\" --family <id> --json".to_owned()),
+        });
+    }
+    if attempt_family.is_some() && args.global {
+        return Err(DomainError::Usage {
+            message: "--family cannot be combined with --global: attempt-family completeness is \
+                      tracked per workspace database"
+                .to_owned(),
+            repair: Some("ee remember \"<content>\" --family <id> --json".to_owned()),
+        });
+    }
     if !args.sentinels.is_empty() && args.reinforce {
         return Err(DomainError::Usage {
             message: "--sentinel cannot be combined with --reinforce; a reinforced write \
@@ -50041,10 +50171,11 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, Do
             &args.typed_field_assignments,
         )
     } else {
-        remember_memory_with_controls_and_typed_fields(
+        crate::core::memory::remember_memory_with_controls_typed_fields_and_family(
             &options,
             &controls,
             &args.typed_field_assignments,
+            attempt_family.as_ref(),
         )
     }?;
     let RememberOutcome::Created(ref report) = outcome else {
@@ -50171,6 +50302,17 @@ where
     }
     if !args.sentinels.is_empty() {
         let error = usage("--sentinel is not supported with --batch");
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    if args.attempt_family.is_some()
+        || args.attempt_family_of_n.is_some()
+        || args.attempt_index.is_some()
+        || args.attempt_outcome.is_some()
+    {
+        let error = usage(
+            "--family/--of-n/--attempt/--attempt-outcome apply to single-memory mode; record \
+             each sibling attempt with its own `ee remember --family <id>` write",
+        );
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
     // Reading stdin would block forever if no input is piped; refuse on an
@@ -62141,6 +62283,7 @@ mod tests {
             level: crate::models::MemoryLevel::Procedural,
             kind: crate::models::MemoryKind::Rule,
             typed_fields: None,
+            attempt_family: None,
             confidence: 0.88,
             tags: vec!["release".to_owned()],
             source: None,

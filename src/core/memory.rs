@@ -209,6 +209,9 @@ pub struct RememberMemoryReport {
     pub kind: MemoryKind,
     /// Canonical typed sidecar fields selected for this write.
     pub typed_fields: Option<serde_json::Value>,
+    /// Attempt-family multiplicity declaration persisted with this write
+    /// (bd-multiplicity-aware-trust-p0u7g).
+    pub attempt_family: Option<crate::db::MemoryAttemptFamily>,
     /// Validated confidence score.
     pub confidence: f32,
     /// Canonical tags.
@@ -645,7 +648,7 @@ pub fn remember_memory(
     options: &RememberMemoryOptions<'_>,
 ) -> Result<RememberMemoryReport, DomainError> {
     let mut id_source = RememberIdSource::Ambient;
-    remember_memory_inner(options, &mut id_source, None, false, &[])
+    remember_memory_inner(options, &mut id_source, None, false, &[], None)
 }
 
 /// [`remember_memory`] with the search-index publish optionally deferred
@@ -655,6 +658,7 @@ fn remember_memory_with_index_mode(
     options: &RememberMemoryOptions<'_>,
     defer_index_processing: bool,
     typed_field_assignments: &[String],
+    attempt_family: Option<&RememberAttemptFamily<'_>>,
 ) -> Result<RememberMemoryReport, DomainError> {
     let mut id_source = RememberIdSource::Ambient;
     remember_memory_inner(
@@ -663,6 +667,7 @@ fn remember_memory_with_index_mode(
         None,
         defer_index_processing,
         typed_field_assignments,
+        attempt_family,
     )
 }
 
@@ -671,7 +676,7 @@ pub fn remember_memory_seeded(
     determinism: &mut Deterministic<Seed>,
 ) -> Result<RememberMemoryReport, DomainError> {
     let mut id_source = RememberIdSource::Seeded(determinism);
-    remember_memory_inner(options, &mut id_source, None, false, &[])
+    remember_memory_inner(options, &mut id_source, None, false, &[], None)
 }
 
 /// Build a dry-run-first memory candidate from a git commit or diff.
@@ -1382,6 +1387,7 @@ fn remember_memory_inner(
     audit_lane: Option<&AuditLaneHandle>,
     defer_index_processing: bool,
     typed_field_assignments: &[String],
+    attempt_family: Option<&RememberAttemptFamily<'_>>,
 ) -> Result<RememberMemoryReport, DomainError> {
     remember_memory_inner_with_store(
         options,
@@ -1390,6 +1396,7 @@ fn remember_memory_inner(
         defer_index_processing,
         None,
         typed_field_assignments,
+        attempt_family,
     )
 }
 
@@ -1400,12 +1407,14 @@ fn remember_memory_inner_with_store(
     defer_index_processing: bool,
     store_override: Option<&RememberStoreOverride>,
     typed_field_assignments: &[String],
+    attempt_family: Option<&RememberAttemptFamily<'_>>,
 ) -> Result<RememberMemoryReport, DomainError> {
     let prepared = prepare_remember_memory_with_store(
         options,
         id_source.next_memory_id(),
         store_override,
         typed_field_assignments,
+        attempt_family,
     )?;
     if options.dry_run {
         let typed_fields =
@@ -1421,6 +1430,7 @@ fn remember_memory_inner_with_store(
             level: prepared.level,
             kind: prepared.kind,
             typed_fields,
+            attempt_family: prepared.attempt_family,
             confidence: prepared.confidence,
             tags: prepared.tags,
             source: prepared.provenance_uri,
@@ -1482,7 +1492,22 @@ fn remember_memory_inner_with_store(
         utility: UnitScore::neutral().into_inner(),
         importance: UnitScore::neutral().into_inner(),
         provenance_uri: prepared.provenance_uri.clone(),
-        trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+        trust_class: if prepared.attempt_family.is_some()
+            && super::memory_scope::current_agent_name().is_some()
+        {
+            // bd-multiplicity-aware-trust-p0u7g: an attempt-family write from
+            // a registered agent identity (the same actor signal
+            // remember_trust_subclass records) is an agent fan-out record and
+            // enters at agent_assertion — the class the promotion gate holds
+            // it at until every declared sibling slot is recorded. Human
+            // --family writes keep ADR 0009's human_explicit posture; their
+            // multiplicity still surfaces through reporting and ranking
+            // discounts. The actor signal, never the flag alone, decides the
+            // class.
+            TrustClass::AgentAssertion.as_str().to_owned()
+        } else {
+            TrustClass::HumanExplicit.as_str().to_owned()
+        },
         trust_subclass: super::memory_scope::remember_trust_subclass("ee remember"),
         tags: prepared.tags.clone(),
         valid_from: prepared.valid_from.clone(),
@@ -1506,7 +1531,12 @@ fn remember_memory_inner_with_store(
         .link
         .as_ref()
         .map(|_| generate_memory_link_id());
-    let audit_details = remember_audit_details(&memory_id, &memory_input, policy_bypass.as_ref());
+    let audit_details = remember_audit_details(
+        &memory_id,
+        &memory_input,
+        policy_bypass.as_ref(),
+        prepared.attempt_family.as_ref(),
+    );
     let typed_fields_json = prepared.typed_fields_json.clone();
 
     let write_operation = crate::core::write_owner::WriteOperation::MemoryCreate {
@@ -1516,7 +1546,22 @@ fn remember_memory_inner_with_store(
         kind: prepared.kind.as_str().to_owned(),
         tags: prepared.tags.clone(),
         source_id: None,
-        trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+        trust_class: if prepared.attempt_family.is_some()
+            && super::memory_scope::current_agent_name().is_some()
+        {
+            // bd-multiplicity-aware-trust-p0u7g: an attempt-family write from
+            // a registered agent identity (the same actor signal
+            // remember_trust_subclass records) is an agent fan-out record and
+            // enters at agent_assertion — the class the promotion gate holds
+            // it at until every declared sibling slot is recorded. Human
+            // --family writes keep ADR 0009's human_explicit posture; their
+            // multiplicity still surfaces through reporting and ranking
+            // discounts. The actor signal, never the flag alone, decides the
+            // class.
+            TrustClass::AgentAssertion.as_str().to_owned()
+        } else {
+            TrustClass::HumanExplicit.as_str().to_owned()
+        },
         provenance_uri: prepared.provenance_uri.clone(),
         observed_at_ms: u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
     };
@@ -1531,6 +1576,7 @@ fn remember_memory_inner_with_store(
                 &index_job_id,
                 &memory_input,
                 typed_fields_json.as_deref(),
+                prepared.attempt_family.as_ref(),
                 &embed_dedup_decision,
                 embed_dedup_link_id.as_deref(),
                 &audit_details,
@@ -1739,6 +1785,7 @@ fn remember_memory_inner_with_store(
         level: prepared.level,
         kind: prepared.kind,
         typed_fields,
+        attempt_family: prepared.attempt_family,
         confidence: prepared.confidence,
         tags: prepared.tags,
         source: prepared.provenance_uri,
@@ -2185,6 +2232,7 @@ struct PreparedRememberMemory {
     level: MemoryLevel,
     kind: MemoryKind,
     typed_fields_json: Option<String>,
+    attempt_family: Option<crate::db::MemoryAttemptFamily>,
     confidence: f32,
     tags: Vec<String>,
     provenance_uri: Option<String>,
@@ -2288,7 +2336,7 @@ fn prepare_remember_memory(
     options: &RememberMemoryOptions<'_>,
     memory_id: MemoryId,
 ) -> Result<PreparedRememberMemory, DomainError> {
-    prepare_remember_memory_with_store(options, memory_id, None, &[])
+    prepare_remember_memory_with_store(options, memory_id, None, &[], None)
 }
 
 fn prepare_remember_memory_with_store(
@@ -2296,6 +2344,7 @@ fn prepare_remember_memory_with_store(
     memory_id: MemoryId,
     store_override: Option<&RememberStoreOverride>,
     typed_field_assignments: &[String],
+    attempt_family: Option<&RememberAttemptFamily<'_>>,
 ) -> Result<PreparedRememberMemory, DomainError> {
     let caller_workspace_path = resolve_workspace_path(options.workspace_path, options.dry_run)?;
     let default_database_path = options
@@ -2376,6 +2425,9 @@ fn prepare_remember_memory_with_store(
         })
         .transpose()?;
     let validity = prepare_validity_window(options.valid_from, options.valid_to)?;
+    let attempt_family = attempt_family
+        .map(validate_remember_attempt_family)
+        .transpose()?;
 
     Ok(PreparedRememberMemory {
         memory_id,
@@ -2388,6 +2440,7 @@ fn prepare_remember_memory_with_store(
         level,
         kind,
         typed_fields_json,
+        attempt_family,
         confidence,
         tags,
         provenance_uri,
@@ -3696,7 +3749,22 @@ fn build_prepared_remember_txn_write(
         utility: UnitScore::neutral().into_inner(),
         importance: UnitScore::neutral().into_inner(),
         provenance_uri: prepared.provenance_uri.clone(),
-        trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+        trust_class: if prepared.attempt_family.is_some()
+            && super::memory_scope::current_agent_name().is_some()
+        {
+            // bd-multiplicity-aware-trust-p0u7g: an attempt-family write from
+            // a registered agent identity (the same actor signal
+            // remember_trust_subclass records) is an agent fan-out record and
+            // enters at agent_assertion — the class the promotion gate holds
+            // it at until every declared sibling slot is recorded. Human
+            // --family writes keep ADR 0009's human_explicit posture; their
+            // multiplicity still surfaces through reporting and ranking
+            // discounts. The actor signal, never the flag alone, decides the
+            // class.
+            TrustClass::AgentAssertion.as_str().to_owned()
+        } else {
+            TrustClass::HumanExplicit.as_str().to_owned()
+        },
         trust_subclass: super::memory_scope::remember_trust_subclass("ee remember"),
         tags: prepared.tags.clone(),
         valid_from: prepared.valid_from.clone(),
@@ -3720,7 +3788,12 @@ fn build_prepared_remember_txn_write(
         .link
         .as_ref()
         .map(|_| generate_memory_link_id());
-    let audit_details = remember_audit_details(&memory_id, &memory_input, policy_bypass.as_ref());
+    let audit_details = remember_audit_details(
+        &memory_id,
+        &memory_input,
+        policy_bypass.as_ref(),
+        prepared.attempt_family.as_ref(),
+    );
     let typed_fields_json = prepared.typed_fields_json.clone();
 
     Ok(PreparedRememberTxnWrite {
@@ -3752,7 +3825,7 @@ pub(crate) fn prepare_remember_txn_write_for_connection(
 ) -> Result<PreparedRememberTxnWrite, DomainError> {
     let mut id_source = RememberIdSource::Ambient;
     let prepared =
-        prepare_remember_memory_with_store(options, id_source.next_memory_id(), None, &[])?;
+        prepare_remember_memory_with_store(options, id_source.next_memory_id(), None, &[], None)?;
     if options.dry_run {
         return Err(DomainError::Usage {
             message: "daemon remember batching cannot persist a dry-run request".to_owned(),
@@ -3809,6 +3882,7 @@ fn record_remembered_memory_in_txn(
     index_job_id: &str,
     memory_input: &CreateMemoryInput,
     typed_fields_json: Option<&str>,
+    attempt_family: Option<&crate::db::MemoryAttemptFamily>,
     embed_dedup_decision: &RememberEmbedDedupDecision,
     embed_dedup_link_id: Option<&str>,
     audit_details: &str,
@@ -3826,6 +3900,9 @@ fn record_remembered_memory_in_txn(
     }
     if let Some(typed_fields_json) = typed_fields_json {
         connection.set_memory_typed_fields_json(memory_id, Some(typed_fields_json))?;
+    }
+    if let Some(family) = attempt_family {
+        connection.set_memory_attempt_family(memory_id, family)?;
     }
     if let (Some(link), Some(link_id)) = (embed_dedup_decision.link.as_ref(), embed_dedup_link_id) {
         connection.insert_memory_link(
@@ -3870,6 +3947,7 @@ fn store_remembered_memory_with_retry(
     index_job_id: &str,
     memory_input: &CreateMemoryInput,
     typed_fields_json: Option<&str>,
+    attempt_family: Option<&crate::db::MemoryAttemptFamily>,
     embed_dedup_decision: &RememberEmbedDedupDecision,
     embed_dedup_link_id: Option<&str>,
     audit_details: &str,
@@ -3886,6 +3964,7 @@ fn store_remembered_memory_with_retry(
                 index_job_id,
                 memory_input,
                 typed_fields_json,
+                attempt_family,
                 embed_dedup_decision,
                 embed_dedup_link_id,
                 audit_details,
@@ -4156,6 +4235,7 @@ fn finish_remember_memory_after_primary_commit(
         level: prepared.level,
         kind: prepared.kind,
         typed_fields,
+        attempt_family: prepared.attempt_family,
         confidence: prepared.confidence,
         tags: prepared.tags,
         source: prepared.provenance_uri,
@@ -4469,6 +4549,7 @@ fn remember_audit_details(
     memory_id: &str,
     input: &CreateMemoryInput,
     policy_bypass: Option<&RememberPolicyBypassReport>,
+    attempt_family: Option<&crate::db::MemoryAttemptFamily>,
 ) -> String {
     serde_json::json!({
         "schema": "ee.audit.memory_create.v1",
@@ -4482,6 +4563,12 @@ fn remember_audit_details(
         "provenanceUri": input.provenance_uri,
         "workflowId": input.workflow_id,
         "tagCount": input.tags.len(),
+        "attemptFamily": attempt_family.map(|family| serde_json::json!({
+            "familyId": family.family_id,
+            "declaredSize": family.declared_size,
+            "attemptIndex": family.attempt_index,
+            "disposition": family.disposition,
+        })),
         "policyBypass": policy_bypass.map(policy_bypass_audit_json),
     })
     .to_string()
@@ -5901,6 +5988,85 @@ pub struct RememberWriteControls<'a> {
     pub defer_index_processing: bool,
 }
 
+/// Attempt-family multiplicity declaration supplied at write time
+/// (bd-multiplicity-aware-trust-p0u7g): the stable family identity this
+/// finding was selected from and, optionally, the declared number of sibling
+/// attempts the family was drawn from.
+#[derive(Clone, Copy, Debug)]
+pub struct RememberAttemptFamily<'a> {
+    /// Stable pre-registered family identity (1..=64 bytes, `[A-Za-z0-9._:-]`).
+    pub family_id: &'a str,
+    /// Declared sibling attempt count (`--of-n`), 1..=1_000_000.
+    pub declared_size: Option<u32>,
+    /// Unique 1-based attempt slot this write occupies (`--attempt`). Family
+    /// completion is measured in distinct slots, so a member without a slot
+    /// never advances completion.
+    pub attempt_index: Option<u32>,
+    /// Member role for the slot (`--attempt-outcome`): `selected` winner or
+    /// `rejected` sibling. Required exactly when a slot is declared.
+    pub disposition: Option<&'a str>,
+}
+
+/// Validate a write-time attempt-family declaration into its canonical
+/// persisted form.
+fn validate_remember_attempt_family(
+    family: &RememberAttemptFamily<'_>,
+) -> Result<crate::db::MemoryAttemptFamily, DomainError> {
+    let trimmed = family.family_id.trim();
+    if trimmed.is_empty() || trimmed.len() > 64 {
+        return Err(remember_usage_error(
+            "--family must be 1..=64 bytes after trimming".to_owned(),
+        ));
+    }
+    if !trimmed
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+    {
+        return Err(remember_usage_error(format!(
+            "--family `{trimmed}` may only contain ASCII letters, digits, `.`, `_`, `:`, and `-`"
+        )));
+    }
+    if let Some(size) = family.declared_size
+        && !(1..=1_000_000).contains(&size)
+    {
+        return Err(remember_usage_error(format!(
+            "--of-n must be in 1..=1000000, got {size}"
+        )));
+    }
+    if let Some(index) = family.attempt_index
+        && !(1..=1_000_000).contains(&index)
+    {
+        return Err(remember_usage_error(format!(
+            "--attempt must be in 1..=1000000, got {index}"
+        )));
+    }
+    if let (Some(index), Some(declared)) = (family.attempt_index, family.declared_size)
+        && index > declared
+    {
+        return Err(remember_usage_error(format!(
+            "--attempt {index} is outside the declared family size --of-n {declared}"
+        )));
+    }
+    if family.attempt_index.is_some() != family.disposition.is_some() {
+        return Err(remember_usage_error(
+            "--attempt and --attempt-outcome must be provided together".to_owned(),
+        ));
+    }
+    if let Some(disposition) = family.disposition
+        && !matches!(disposition, "selected" | "rejected")
+    {
+        return Err(remember_usage_error(format!(
+            "--attempt-outcome must be `selected` or `rejected`, got `{disposition}`"
+        )));
+    }
+    Ok(crate::db::MemoryAttemptFamily {
+        family_id: trimmed.to_owned(),
+        declared_size: family.declared_size,
+        attempt_index: family.attempt_index,
+        disposition: family.disposition.map(str::to_owned),
+    })
+}
+
 /// Outcome of one controlled remember write (bd-1pi9m.4).
 #[derive(Clone, Debug, PartialEq)]
 pub enum RememberOutcome {
@@ -6063,13 +6229,31 @@ fn remember_content_hash(content: &str) -> String {
 fn remember_request_hash(
     options: &RememberMemoryOptions<'_>,
     typed_field_assignments: &[String],
+    attempt_family: Option<&RememberAttemptFamily<'_>>,
 ) -> Result<String, DomainError> {
     let content = MemoryContent::parse(options.content)
         .map_err(|error| remember_usage_error(error.to_string()))?
         .as_str()
         .to_owned();
-    if typed_field_assignments.is_empty() {
+    let canonical_family = attempt_family
+        .map(validate_remember_attempt_family)
+        .transpose()?;
+    if typed_field_assignments.is_empty() && canonical_family.is_none() {
         return Ok(remember_content_hash(&content));
+    }
+    if typed_field_assignments.is_empty() {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"ee.remember.request.v1\0");
+        hasher.update(&(content.len() as u64).to_le_bytes());
+        hasher.update(content.as_bytes());
+        if let Some(family) = &canonical_family {
+            hasher.update(b"\0attempt_family\0");
+            hasher.update(family.family_id.as_bytes());
+            hasher.update(&u64::from(family.declared_size.unwrap_or(0)).to_le_bytes());
+            hasher.update(&u64::from(family.attempt_index.unwrap_or(0)).to_le_bytes());
+            hasher.update(family.disposition.as_deref().unwrap_or("").as_bytes());
+        }
+        return Ok(format!("blake3:{}", hasher.finalize().to_hex()));
     }
     let kind = MemoryKind::from_str(options.kind)
         .map_err(|error| remember_usage_error(error.to_string()))?;
@@ -6088,6 +6272,13 @@ fn remember_request_hash(
     hasher.update(content.as_bytes());
     hasher.update(&(typed_fields.len() as u64).to_le_bytes());
     hasher.update(typed_fields.as_bytes());
+    if let Some(family) = &canonical_family {
+        hasher.update(b"\0attempt_family\0");
+        hasher.update(family.family_id.as_bytes());
+        hasher.update(&u64::from(family.declared_size.unwrap_or(0)).to_le_bytes());
+        hasher.update(&u64::from(family.attempt_index.unwrap_or(0)).to_le_bytes());
+        hasher.update(family.disposition.as_deref().unwrap_or("").as_bytes());
+    }
     Ok(format!("blake3:{}", hasher.finalize().to_hex()))
 }
 
@@ -6502,9 +6693,31 @@ pub fn remember_memory_with_controls_and_typed_fields(
     controls: &RememberWriteControls<'_>,
     typed_field_assignments: &[String],
 ) -> Result<RememberOutcome, DomainError> {
+    remember_memory_with_controls_typed_fields_and_family(
+        options,
+        controls,
+        typed_field_assignments,
+        None,
+    )
+}
+
+/// Controlled remember write with typed fields and an optional attempt-family
+/// multiplicity declaration (bd-multiplicity-aware-trust-p0u7g).
+pub fn remember_memory_with_controls_typed_fields_and_family(
+    options: &RememberMemoryOptions<'_>,
+    controls: &RememberWriteControls<'_>,
+    typed_field_assignments: &[String],
+    attempt_family: Option<&RememberAttemptFamily<'_>>,
+) -> Result<RememberOutcome, DomainError> {
     if controls.reinforce && !typed_field_assignments.is_empty() {
         return Err(remember_usage_error(
             "--field cannot be combined with --reinforce because reinforcement does not mutate the surviving memory's typed sidecar"
+                .to_owned(),
+        ));
+    }
+    if controls.reinforce && attempt_family.is_some() {
+        return Err(remember_usage_error(
+            "--family cannot be combined with --reinforce because reinforcement corroborates an existing memory instead of recording a new sibling attempt"
                 .to_owned(),
         ));
     }
@@ -6514,7 +6727,7 @@ pub fn remember_memory_with_controls_and_typed_fields(
         .transpose()?;
     let idempotency_request_hash = idempotency_key
         .as_ref()
-        .map(|_| remember_request_hash(options, typed_field_assignments))
+        .map(|_| remember_request_hash(options, typed_field_assignments, attempt_family))
         .transpose()?;
 
     if idempotency_key.is_some() || controls.reinforce {
@@ -6598,6 +6811,7 @@ pub fn remember_memory_with_controls_and_typed_fields(
         options,
         controls.defer_index_processing,
         typed_field_assignments,
+        attempt_family,
     )?;
     if let Some(key) = idempotency_key.as_deref()
         && !options.dry_run
@@ -6684,7 +6898,7 @@ pub fn remember_global_memory_with_controls_and_typed_fields(
         .transpose()?;
     let idempotency_request_hash = idempotency_key
         .as_ref()
-        .map(|_| remember_request_hash(&global_options, typed_field_assignments))
+        .map(|_| remember_request_hash(&global_options, typed_field_assignments, None))
         .transpose()?;
     if let Some(key) = idempotency_key.as_deref() {
         if paths.database_path.exists() {
@@ -6725,6 +6939,7 @@ pub fn remember_global_memory_with_controls_and_typed_fields(
         controls.defer_index_processing,
         Some(&store_override),
         typed_field_assignments,
+        None,
     )?;
     if let Some(key) = idempotency_key.as_deref()
         && !global_options.dry_run
@@ -11087,7 +11302,22 @@ mod tests {
             utility: 0.5,
             importance: 0.5,
             provenance_uri: None,
-            trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+            trust_class: if prepared.attempt_family.is_some()
+                && super::memory_scope::current_agent_name().is_some()
+            {
+                // bd-multiplicity-aware-trust-p0u7g: an attempt-family write from
+                // a registered agent identity (the same actor signal
+                // remember_trust_subclass records) is an agent fan-out record and
+                // enters at agent_assertion — the class the promotion gate holds
+                // it at until every declared sibling slot is recorded. Human
+                // --family writes keep ADR 0009's human_explicit posture; their
+                // multiplicity still surfaces through reporting and ranking
+                // discounts. The actor signal, never the flag alone, decides the
+                // class.
+                TrustClass::AgentAssertion.as_str().to_owned()
+            } else {
+                TrustClass::HumanExplicit.as_str().to_owned()
+            },
             trust_subclass: None,
             tags: Vec::new(),
             valid_from: None,
@@ -11578,7 +11808,22 @@ mod tests {
             utility: 0.5,
             importance: 0.5,
             provenance_uri: None,
-            trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+            trust_class: if prepared.attempt_family.is_some()
+                && super::memory_scope::current_agent_name().is_some()
+            {
+                // bd-multiplicity-aware-trust-p0u7g: an attempt-family write from
+                // a registered agent identity (the same actor signal
+                // remember_trust_subclass records) is an agent fan-out record and
+                // enters at agent_assertion — the class the promotion gate holds
+                // it at until every declared sibling slot is recorded. Human
+                // --family writes keep ADR 0009's human_explicit posture; their
+                // multiplicity still surfaces through reporting and ranking
+                // discounts. The actor signal, never the flag alone, decides the
+                // class.
+                TrustClass::AgentAssertion.as_str().to_owned()
+            } else {
+                TrustClass::HumanExplicit.as_str().to_owned()
+            },
             trust_subclass: None,
             tags: Vec::new(),
             valid_from: None,
@@ -11603,6 +11848,7 @@ mod tests {
             audit_id,
             index_job_id,
             &memory_input,
+            None,
             None,
             &RememberEmbedDedupDecision::disabled(),
             None,
@@ -11803,6 +12049,7 @@ mod tests {
             audit_id,
             index_job_id,
             &memory_input,
+            None,
             None,
             &decision,
             Some("link_embeddedupnew0000000000000"),
@@ -14346,7 +14593,22 @@ mod tests {
             utility: 0.5,
             importance: 0.5,
             provenance_uri: Some(format!("file:///timeline/{kind}.md:1")),
-            trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+            trust_class: if prepared.attempt_family.is_some()
+                && super::memory_scope::current_agent_name().is_some()
+            {
+                // bd-multiplicity-aware-trust-p0u7g: an attempt-family write from
+                // a registered agent identity (the same actor signal
+                // remember_trust_subclass records) is an agent fan-out record and
+                // enters at agent_assertion — the class the promotion gate holds
+                // it at until every declared sibling slot is recorded. Human
+                // --family writes keep ADR 0009's human_explicit posture; their
+                // multiplicity still surfaces through reporting and ranking
+                // discounts. The actor signal, never the flag alone, decides the
+                // class.
+                TrustClass::AgentAssertion.as_str().to_owned()
+            } else {
+                TrustClass::HumanExplicit.as_str().to_owned()
+            },
             trust_subclass: None,
             tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
             valid_from: Some(valid_from.to_owned()),

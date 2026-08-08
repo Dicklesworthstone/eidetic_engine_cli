@@ -8516,6 +8516,89 @@ CREATE INDEX IF NOT EXISTS idx_memories_attempt_family
     "blake3:v094_memory_attempt_family_2026_08_08",
 );
 
+/// V095: Canonical workspace-scoped attempt-family ledger
+/// (bd-multiplicity-aware-trust-p0u7g, allocation confirmed by the
+/// dueling-wizards migration registry in the same change). Families carry an
+/// immutable declared sibling count; members are an append-only ledger of
+/// unique attempt slots keyed to the memory revision chain's `logical_id`
+/// (falling back to the memory row id for pre-V043 rows), so revisions
+/// inherit membership and re-recording a winner cannot occupy a second slot.
+/// V094's legacy memory columns are preserved byte-immutable as declarations
+/// only: the backfill seeds family rows (origin `legacy_v094`) but never
+/// infers slots or dispositions, so legacy families stay fail-closed
+/// (visible, discounted, never promotion-eligible) until siblings are
+/// explicitly recorded through the ledger.
+pub const V095_ATTEMPT_FAMILY_LEDGER: Migration = Migration::new(
+    95,
+    "attempt_family_ledger",
+    r#"
+CREATE TABLE attempt_families (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    family_id TEXT NOT NULL CHECK (
+        length(trim(family_id)) > 0 AND length(family_id) <= 64
+    ),
+    declared_size INTEGER CHECK (
+        declared_size IS NULL
+        OR (declared_size >= 1 AND declared_size <= 1000000)
+    ),
+    origin TEXT NOT NULL DEFAULT 'declared' CHECK (
+        origin IN ('declared', 'legacy_v094')
+    ),
+    declared_by_audit_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, family_id)
+);
+
+CREATE TABLE attempt_family_members (
+    workspace_id TEXT NOT NULL,
+    family_id TEXT NOT NULL,
+    attempt_index INTEGER NOT NULL CHECK (
+        attempt_index >= 1 AND attempt_index <= 1000000
+    ),
+    disposition TEXT NOT NULL CHECK (disposition IN ('selected', 'rejected')),
+    memory_logical_id TEXT NOT NULL CHECK (length(trim(memory_logical_id)) > 0),
+    recorded_at TEXT NOT NULL,
+    audit_id TEXT,
+    PRIMARY KEY (workspace_id, family_id, attempt_index),
+    FOREIGN KEY (workspace_id, family_id)
+        REFERENCES attempt_families(workspace_id, family_id)
+);
+
+CREATE INDEX idx_attempt_family_members_logical
+    ON attempt_family_members(memory_logical_id);
+
+CREATE TRIGGER trg_attempt_families_declared_size_immutable
+BEFORE UPDATE OF declared_size ON attempt_families
+WHEN OLD.declared_size IS NOT NULL
+    AND (NEW.declared_size IS NULL OR NEW.declared_size <> OLD.declared_size)
+BEGIN
+    SELECT RAISE(ABORT, 'attempt family declared_size is immutable once set');
+END;
+
+CREATE TRIGGER trg_attempt_family_members_append_only
+BEFORE UPDATE ON attempt_family_members
+BEGIN
+    SELECT RAISE(ABORT, 'attempt family members are append-only');
+END;
+
+INSERT INTO attempt_families (
+    workspace_id, family_id, declared_size, origin, created_at, updated_at
+)
+SELECT
+    workspace_id,
+    attempt_family_id,
+    MAX(attempt_family_size),
+    'legacy_v094',
+    MIN(created_at),
+    MIN(created_at)
+FROM memories
+WHERE attempt_family_id IS NOT NULL
+GROUP BY workspace_id, attempt_family_id;
+"#,
+    "blake3:v095_attempt_family_ledger_2026_08_08",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -8612,6 +8695,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V092_PROCEDURAL_RULE_PEER_HUMAN_ATTESTED_TRUST,
     V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST,
     V094_MEMORY_ATTEMPT_FAMILY,
+    V095_ATTEMPT_FAMILY_LEDGER,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -17052,6 +17136,33 @@ pub struct StoredMemory {
     pub valid_to: Option<String>,
 }
 
+/// Attempt-family multiplicity sidecar on a memory row
+/// (bd-multiplicity-aware-trust-p0u7g): the stable family identity a finding
+/// was selected from and the declared number of sibling attempts.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MemoryAttemptFamily {
+    pub family_id: String,
+    pub declared_size: Option<u32>,
+    /// Unique 1-based slot this member occupies inside the family. Slot
+    /// uniqueness among live rows is enforced by
+    /// `idx_memories_attempt_family_slot`; members without a slot never count
+    /// toward family completion.
+    pub attempt_index: Option<u32>,
+    /// Member role: `selected` (winner) or `rejected` (sibling attempt).
+    pub disposition: Option<String>,
+}
+
+/// One recorded ledger member of an attempt family, in deterministic slot
+/// order. Ledger members always carry a slot and disposition by
+/// construction.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MemoryAttemptFamilyMember {
+    pub memory_logical_id: String,
+    pub attempt_index: u32,
+    pub disposition: String,
+    pub recorded_at: String,
+}
+
 /// Persisted 128-bit content SimHash bytes, stored big-endian.
 pub type MemoryContentSimHash = [u8; 16];
 
@@ -18627,6 +18738,317 @@ impl DbConnection {
             ],
         )?;
         Ok(affected > 0)
+    }
+
+    /// Read a memory's attempt-family multiplicity sidecar
+    /// (bd-multiplicity-aware-trust-p0u7g).
+    pub fn get_memory_attempt_family(&self, id: &str) -> Result<Option<MemoryAttemptFamily>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, COALESCE(logical_id, id), attempt_family_id, \
+             attempt_family_size FROM memories WHERE id = ?1 ORDER BY id ASC LIMIT 1",
+            &[Value::Text(id.to_string())],
+        )?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        let workspace_id = required_text(row, 0, DbOperation::Query, "workspace_id")?.to_string();
+        let ledger_key = required_text(row, 1, DbOperation::Query, "logical_id")?.to_string();
+        let Some(family_id) = optional_text(row, 2)? else {
+            return Ok(None);
+        };
+        let family_id = family_id.to_string();
+        let declared_size = {
+            let family_rows = self.query_for(
+                DbOperation::Query,
+                "SELECT declared_size FROM attempt_families \
+                 WHERE workspace_id = ?1 AND family_id = ?2 LIMIT 1",
+                &[
+                    Value::Text(workspace_id.clone()),
+                    Value::Text(family_id.clone()),
+                ],
+            )?;
+            match family_rows.first() {
+                Some(family_row) => {
+                    optional_i64(family_row, 0, DbOperation::Query, "declared_size")?
+                        .and_then(|raw| u32::try_from(raw).ok())
+                }
+                None => optional_i64(row, 3, DbOperation::Query, "attempt_family_size")?
+                    .and_then(|raw| u32::try_from(raw).ok()),
+            }
+        };
+        let slot_rows = self.query_for(
+            DbOperation::Query,
+            "SELECT attempt_index, disposition FROM attempt_family_members \
+             WHERE workspace_id = ?1 AND family_id = ?2 AND memory_logical_id = ?3 \
+             ORDER BY attempt_index ASC LIMIT 1",
+            &[
+                Value::Text(workspace_id),
+                Value::Text(family_id.clone()),
+                Value::Text(ledger_key),
+            ],
+        )?;
+        let (attempt_index, disposition) = match slot_rows.first() {
+            Some(slot_row) => (
+                optional_i64(slot_row, 0, DbOperation::Query, "attempt_index")?
+                    .and_then(|raw| u32::try_from(raw).ok()),
+                optional_text(slot_row, 1)?.map(str::to_string),
+            ),
+            None => (None, None),
+        };
+        Ok(Some(MemoryAttemptFamily {
+            family_id,
+            declared_size,
+            attempt_index,
+            disposition,
+        }))
+    }
+
+    /// Persist a memory's attempt-family membership
+    /// (bd-multiplicity-aware-trust-p0u7g): the V094 legacy pointer columns
+    /// on the memory row carry the family identity, while the authoritative
+    /// slot/disposition record is appended to the workspace-scoped
+    /// attempt-family ledger keyed by the memory's revision-stable
+    /// `logical_id` (memory id fallback for pre-V043 rows). A declaration
+    /// that conflicts with the family's immutable declared size fails; a
+    /// taken slot fails through the ledger primary key.
+    pub fn set_memory_attempt_family(
+        &self,
+        id: &str,
+        family: &MemoryAttemptFamily,
+    ) -> Result<bool> {
+        let trimmed = family.family_id.trim();
+        if trimmed.is_empty() || trimmed.len() > 64 {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!(
+                    "attempt_family_id must be 1..=64 bytes after trimming, got {} bytes",
+                    trimmed.len()
+                ),
+            });
+        }
+        if !trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+        {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!(
+                    "attempt_family_id `{trimmed}` may only contain ASCII letters, digits, \
+                     `.`, `_`, `:`, and `-`"
+                ),
+            });
+        }
+        if let Some(size) = family.declared_size
+            && !(1..=1_000_000).contains(&size)
+        {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!("attempt_family_size must be in 1..=1000000, got {size}"),
+            });
+        }
+        if let Some(index) = family.attempt_index
+            && !(1..=1_000_000).contains(&index)
+        {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!("attempt_index must be in 1..=1000000, got {index}"),
+            });
+        }
+        if family.attempt_index.is_some() != family.disposition.is_some() {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "attempt_index and attempt_disposition must be recorded together"
+                    .to_string(),
+            });
+        }
+        if let Some(disposition) = family.disposition.as_deref()
+            && !matches!(disposition, "selected" | "rejected")
+        {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!(
+                    "attempt_disposition must be `selected` or `rejected`, got `{disposition}`"
+                ),
+            });
+        }
+
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, COALESCE(logical_id, id) FROM memories \
+             WHERE id = ?1 AND tombstoned_at IS NULL ORDER BY id ASC LIMIT 1",
+            &[Value::Text(id.to_string())],
+        )?;
+        let Some(row) = rows.first() else {
+            return Ok(false);
+        };
+        let workspace_id = required_text(row, 0, DbOperation::Query, "workspace_id")?.to_string();
+        let ledger_key = required_text(row, 1, DbOperation::Query, "logical_id")?.to_string();
+        let now = Utc::now().to_rfc3339();
+
+        let family_rows = self.query_for(
+            DbOperation::Query,
+            "SELECT declared_size FROM attempt_families \
+             WHERE workspace_id = ?1 AND family_id = ?2 LIMIT 1",
+            &[
+                Value::Text(workspace_id.clone()),
+                Value::Text(trimmed.to_string()),
+            ],
+        )?;
+        match family_rows.first() {
+            None => {
+                self.execute_for(
+                    DbOperation::Execute,
+                    "INSERT INTO attempt_families (workspace_id, family_id, declared_size, \
+                     origin, created_at, updated_at) VALUES (?1, ?2, ?3, 'declared', ?4, ?4)",
+                    &[
+                        Value::Text(workspace_id.clone()),
+                        Value::Text(trimmed.to_string()),
+                        family
+                            .declared_size
+                            .map_or(Value::Null, |size| Value::BigInt(i64::from(size))),
+                        Value::Text(now.clone()),
+                    ],
+                )?;
+            }
+            Some(existing_row) => {
+                let existing = optional_i64(existing_row, 0, DbOperation::Query, "declared_size")?
+                    .and_then(|raw| u32::try_from(raw).ok());
+                match (existing, family.declared_size) {
+                    (Some(existing), Some(declared)) if existing != declared => {
+                        return Err(DbError::MalformedRow {
+                            operation: DbOperation::Execute,
+                            message: format!(
+                                "attempt family `{trimmed}` already declares {existing} \
+                                 sibling attempts; conflicting declaration {declared} refused"
+                            ),
+                        });
+                    }
+                    (None, Some(declared)) => {
+                        self.execute_for(
+                            DbOperation::Execute,
+                            "UPDATE attempt_families SET declared_size = ?1, updated_at = ?2 \
+                             WHERE workspace_id = ?3 AND family_id = ?4 \
+                               AND declared_size IS NULL",
+                            &[
+                                Value::BigInt(i64::from(declared)),
+                                Value::Text(now.clone()),
+                                Value::Text(workspace_id.clone()),
+                                Value::Text(trimmed.to_string()),
+                            ],
+                        )?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let (Some(index), Some(disposition)) =
+            (family.attempt_index, family.disposition.as_deref())
+        {
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO attempt_family_members (workspace_id, family_id, attempt_index, \
+                 disposition, memory_logical_id, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                &[
+                    Value::Text(workspace_id.clone()),
+                    Value::Text(trimmed.to_string()),
+                    Value::BigInt(i64::from(index)),
+                    Value::Text(disposition.to_string()),
+                    Value::Text(ledger_key),
+                    Value::Text(now.clone()),
+                ],
+            )?;
+        }
+
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET attempt_family_id = ?1, attempt_family_size = ?2, \
+             updated_at = ?3 WHERE id = ?4 AND tombstoned_at IS NULL",
+            &[
+                Value::Text(trimmed.to_string()),
+                family
+                    .declared_size
+                    .map_or(Value::Null, |size| Value::BigInt(i64::from(size))),
+                Value::Text(now),
+                Value::Text(id.to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// List the recorded ledger members of an attempt family within one
+    /// workspace in deterministic slot order. Every ledger member has a slot
+    /// and disposition by construction; V094-legacy family members without
+    /// ledger rows are intentionally absent (fail-closed: they never advance
+    /// completion).
+    pub fn list_memory_attempt_family(
+        &self,
+        workspace_id: &str,
+        family_id: &str,
+    ) -> Result<Vec<MemoryAttemptFamilyMember>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT memory_logical_id, attempt_index, disposition, recorded_at \
+             FROM attempt_family_members \
+             WHERE workspace_id = ?1 AND family_id = ?2 \
+             ORDER BY attempt_index ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(family_id.to_string()),
+            ],
+        )?;
+        rows.iter()
+            .map(|row| {
+                Ok(MemoryAttemptFamilyMember {
+                    memory_logical_id: required_text(
+                        row,
+                        0,
+                        DbOperation::Query,
+                        "memory_logical_id",
+                    )?
+                    .to_string(),
+                    attempt_index: u32::try_from(required_i64(
+                        row,
+                        1,
+                        DbOperation::Query,
+                        "attempt_index",
+                    )?)
+                    .unwrap_or(u32::MAX),
+                    disposition: required_text(row, 2, DbOperation::Query, "disposition")?
+                        .to_string(),
+                    recorded_at: required_text(row, 3, DbOperation::Query, "recorded_at")?
+                        .to_string(),
+                })
+            })
+            .collect()
+    }
+
+    /// Read one attempt family's declaration row (declared size + origin)
+    /// within a workspace.
+    pub fn get_attempt_family_declaration(
+        &self,
+        workspace_id: &str,
+        family_id: &str,
+    ) -> Result<Option<(Option<u32>, String)>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT declared_size, origin FROM attempt_families \
+             WHERE workspace_id = ?1 AND family_id = ?2 LIMIT 1",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(family_id.to_string()),
+            ],
+        )?;
+        rows.first()
+            .map(|row| {
+                Ok((
+                    optional_i64(row, 0, DbOperation::Query, "declared_size")?
+                        .and_then(|raw| u32::try_from(raw).ok()),
+                    required_text(row, 1, DbOperation::Query, "origin")?.to_string(),
+                ))
+            })
+            .transpose()
     }
 
     /// Tombstone a memory (soft delete).
@@ -22486,6 +22908,25 @@ impl DbConnection {
             ],
         )?;
         Ok(affected > 0)
+    }
+
+    /// Public retry path for interrupted index work: atomically transition
+    /// every cancelled job in the workspace back to `pending` as the SAME
+    /// logical job (no clone rows, no id churn), clearing run bookkeeping so
+    /// the next workflow-emitted processing tick picks it up. A single
+    /// conditional UPDATE keeps this race-free and idempotent: a second
+    /// caller finds no cancelled rows and changes nothing.
+    pub fn requeue_cancelled_search_index_jobs(&self, workspace_id: &str) -> Result<u32> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE search_index_jobs SET status = ?1, started_at = NULL, completed_at = NULL, error_message = NULL, documents_indexed = 0 WHERE workspace_id = ?2 AND status = ?3",
+            &[
+                Value::Text(SearchIndexJobStatus::Pending.as_str().to_string()),
+                Value::Text(workspace_id.to_string()),
+                Value::Text(SearchIndexJobStatus::Cancelled.as_str().to_string()),
+            ],
+        )?;
+        Ok(u32::try_from(affected).unwrap_or(u32::MAX))
     }
 
     /// Get the latest search index job for a workspace (regardless of status).
