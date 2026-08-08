@@ -18509,15 +18509,17 @@ fn collect_hotset_agent_mail_source(
     // reservations live under `file_reservations[]` with a singular
     // `path_pattern`; threads live under `threads[]` keyed `thread_id`
     // (accepting the `threadId` alias the producer also recognizes).
-    let parity_drift = snapshot
+    let Some(degraded_entries) = snapshot
         .get("degraded")
         .and_then(serde_json::Value::as_array)
-        .is_some_and(|entries| {
-            entries.iter().any(|entry| {
-                entry.get("code").and_then(serde_json::Value::as_str)
-                    == Some("archive_index_parity_drift")
-            })
-        });
+    else {
+        return unavailable(
+            "Agent Mail snapshot lacks the required degraded[] authority evidence".to_owned(),
+        );
+    };
+    let parity_drift = degraded_entries.iter().any(|entry| {
+        entry.get("code").and_then(serde_json::Value::as_str) == Some("archive_index_parity_drift")
+    });
     if parity_drift {
         return (
             Vec::new(),
@@ -18531,6 +18533,20 @@ fn collect_hotset_agent_mail_source(
                  then regenerate the snapshot.",
             ),
             std::collections::BTreeSet::new(),
+        );
+    }
+    let producer_declares_fallback = snapshot
+        .get("producer_status")
+        .and_then(serde_json::Value::as_str)
+        == Some("degraded")
+        || snapshot
+            .get("fallback_active")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+    if !degraded_entries.is_empty() || producer_declares_fallback {
+        return unavailable(
+            "Agent Mail snapshot reports degraded source authority; abstaining from mail signals"
+                .to_owned(),
         );
     }
     let mut reserved_paths = std::collections::BTreeSet::new();
@@ -75090,6 +75106,61 @@ mod tests {
                 .iter()
                 .any(|signal| signal.source() == PrewarmSignalSource::AgentMail),
             "a snapshot without reconciliation counts must contribute zero mail signals"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hotset_collector_degraded_mail_authority_abstains() {
+        use crate::cache::hotset::{
+            HOTSET_AGENT_MAIL_UNAVAILABLE_CODE, HotsetSourceStatus, PrewarmSignalSource,
+        };
+
+        let dir = hotset_collect_workspace("mail-degraded-authority");
+        let options = healthy_hotset_collect_options(&dir);
+        fs::write(
+            dir.path().join(".ee").join("agent-mail-snapshot.json"),
+            serde_json::json!({
+                "schema": "ee.agent_mail.snapshot.v1",
+                "producer_status": "degraded",
+                "fallback_active": true,
+                "degraded": [{
+                    "code": "agent_mail_snapshot_source_unavailable",
+                    "severity": "warning",
+                    "source": "agent_mail",
+                }],
+                "file_reservations": [{
+                    "exclusive": true,
+                    "holder": "PeerAgent",
+                    "path_pattern": "src/lib.rs",
+                }],
+                "threads": [{"thread_id": "bd-aaa"}],
+            })
+            .to_string(),
+        )
+        .expect("write degraded mail snapshot");
+
+        let collection = collect_hotset_signals(&options);
+        let mail = collection
+            .sources()
+            .iter()
+            .find(|record| record.source() == "agent_mail")
+            .expect("mail record");
+        assert_eq!(mail.status(), HotsetSourceStatus::Unavailable);
+        assert_eq!(
+            mail.degraded_code(),
+            Some(HOTSET_AGENT_MAIL_UNAVAILABLE_CODE)
+        );
+        assert!(
+            !collection
+                .signals()
+                .iter()
+                .any(|signal| signal.source() == PrewarmSignalSource::AgentMail),
+            "degraded mail authority must contribute zero mail signals"
+        );
+        assert!(
+            collection.dirty_overlap_path_hashes().is_empty(),
+            "degraded reservation evidence must not reach overlap detection"
         );
     }
 
