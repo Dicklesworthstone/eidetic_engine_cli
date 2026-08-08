@@ -13258,7 +13258,7 @@ mod tests {
             kind: "decision",
             tags: Some("typed-field,decision"),
             confidence: 0.9,
-            source: Some("test://remember/explicit-typed-fields"),
+            source: Some("manual://remember/explicit-typed-fields"),
             allow_secret_mention: false,
             valid_from: None,
             valid_to: None,
