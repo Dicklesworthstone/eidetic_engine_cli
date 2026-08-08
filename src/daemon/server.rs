@@ -3926,7 +3926,7 @@ mod tests {
                 kind: "rule".to_string(),
                 tags: Some("daemon-batch".to_string()),
                 confidence: 0.8,
-                source: Some("test://daemon-remember-batch".to_string()),
+                source: Some("manual://daemon-remember-batch".to_string()),
                 workflow_id: None,
                 auto_link: false,
                 propose_candidates: false,
