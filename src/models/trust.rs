@@ -306,11 +306,70 @@ pub const fn evaluate_local_signing_key_policy(
 /// Multiplicity evidence for a memory that was one recorded attempt out of a
 /// declared family of sibling attempts (bd-multiplicity-aware-trust-p0u7g).
 ///
-/// The canonical discount and completeness math lives here so the trust
-/// report, pack ranking, and the promotion gate cannot drift apart. A family
-/// is *complete* when at least the declared number of attempts is recorded;
-/// survivor-only evidence (one recorded member drawn from N > 1 declared
-/// attempts) receives the strongest discount.
+/// The canonical discount and completion math lives here so the trust report,
+/// pack ranking, and promotion gate cannot drift apart. An incomplete declared
+/// family discounts every selected member by exactly `1 / declared_size`,
+/// regardless of how many siblings have subsequently been recorded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttemptFamilyPromotionPosture {
+    /// The family has exactly the canonical selected/rejected composition.
+    Eligible,
+    /// A declared denominator is required before a family may promote.
+    BlockedUndeclared,
+    /// The declared denominator is zero and therefore cannot describe a family.
+    BlockedInvalidDeclaredSize,
+    /// A slot was recorded more than once.
+    BlockedDuplicateSlots,
+    /// The family contains more members than declared or an out-of-range slot.
+    BlockedOverfull,
+    /// One or more declared slots remain unrecorded.
+    BlockedIncomplete,
+    /// The slots are complete but do not contain one selected and N-1 rejected.
+    BlockedInvalidComposition,
+}
+
+impl AttemptFamilyPromotionPosture {
+    /// Stable machine-facing posture token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Eligible => "eligible",
+            Self::BlockedUndeclared => "blocked_undeclared",
+            Self::BlockedInvalidDeclaredSize => "blocked_invalid_declared_size",
+            Self::BlockedDuplicateSlots => "blocked_duplicate_slots",
+            Self::BlockedOverfull => "blocked_overfull",
+            Self::BlockedIncomplete => "blocked_incomplete",
+            Self::BlockedInvalidComposition => "blocked_invalid_composition",
+        }
+    }
+
+    /// Stable explanation of the promotion posture.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Eligible => "family has the canonical selected/rejected composition",
+            Self::BlockedUndeclared => "family has no declared attempt count",
+            Self::BlockedInvalidDeclaredSize => {
+                "declared attempt count must be greater than zero"
+            }
+            Self::BlockedDuplicateSlots => "one or more attempt slots were recorded more than once",
+            Self::BlockedOverfull => {
+                "family has more members than declared or an out-of-range attempt slot"
+            }
+            Self::BlockedIncomplete => "not every declared attempt slot is recorded",
+            Self::BlockedInvalidComposition => {
+                "canonical completion requires exactly one selected member and N-1 rejected members"
+            }
+        }
+    }
+}
+
+impl fmt::Display for AttemptFamilyPromotionPosture {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttemptFamilyMultiplicity {
     /// Stable pre-registered family identity.
@@ -329,37 +388,55 @@ pub struct AttemptFamilyMultiplicity {
     /// Live members without a slot; they are visible evidence but never
     /// count toward completion.
     pub unslotted_count: u32,
+    /// Number of live members, including duplicates and unslotted members.
+    pub member_count: u32,
+    /// Members that repeated a slot already occupied by another member.
+    pub duplicate_slot_count: u32,
+    /// Members whose explicit slot is outside `1..=declared_size`.
+    pub out_of_range_slot_count: u32,
 }
 
 impl AttemptFamilyMultiplicity {
     /// Aggregate member rows (slot, disposition) into the canonical
-    /// multiplicity posture. Slots are deduplicated, and when a declared
-    /// size exists only slots in `1..=declared` count toward completion.
+    /// multiplicity posture. Duplicate and out-of-range members remain
+    /// visible because canonical promotion must reject them rather than
+    /// silently deduplicating them away.
     #[must_use]
     pub fn from_members<'a>(
         family_id: String,
         declared_size: Option<u32>,
         members: impl IntoIterator<Item = (Option<u32>, Option<&'a str>)>,
     ) -> Self {
-        let mut seen_slots = std::collections::BTreeSet::new();
+        let mut all_slots = std::collections::BTreeSet::new();
+        let mut seen_valid_slots = std::collections::BTreeSet::new();
         let mut selected_count = 0_u32;
         let mut rejected_count = 0_u32;
         let mut unslotted_count = 0_u32;
+        let mut member_count = 0_u32;
+        let mut duplicate_slot_count = 0_u32;
+        let mut out_of_range_slot_count = 0_u32;
         for (slot, disposition) in members {
+            member_count = member_count.saturating_add(1);
             match slot {
-                Some(slot) if declared_size.is_none_or(|declared| slot <= declared) => {
-                    if seen_slots.insert(slot) {
+                Some(slot) => {
+                    if !all_slots.insert(slot) {
+                        duplicate_slot_count = duplicate_slot_count.saturating_add(1);
+                    }
+                    if declared_size.is_some_and(|declared| slot == 0 || slot > declared) {
+                        out_of_range_slot_count = out_of_range_slot_count.saturating_add(1);
+                        unslotted_count = unslotted_count.saturating_add(1);
+                    } else if seen_valid_slots.insert(slot) {
                         match disposition {
-                            Some("selected") => selected_count += 1,
-                            Some("rejected") => rejected_count += 1,
+                            Some("selected") => selected_count = selected_count.saturating_add(1),
+                            Some("rejected") => rejected_count = rejected_count.saturating_add(1),
                             _ => {}
                         }
                     }
                 }
-                Some(_) | None => unslotted_count += 1,
+                None => unslotted_count = unslotted_count.saturating_add(1),
             }
         }
-        let recorded_slots = u32::try_from(seen_slots.len()).unwrap_or(u32::MAX);
+        let recorded_slots = u32::try_from(seen_valid_slots.len()).unwrap_or(u32::MAX);
         Self {
             family_id,
             declared_size,
@@ -367,6 +444,9 @@ impl AttemptFamilyMultiplicity {
             selected_count,
             rejected_count,
             unslotted_count,
+            member_count,
+            duplicate_slot_count,
+            out_of_range_slot_count,
         }
     }
 
@@ -377,12 +457,18 @@ impl AttemptFamilyMultiplicity {
             .map_or(0, |declared| declared.saturating_sub(self.recorded_slots))
     }
 
-    /// True when every declared sibling slot is occupied by a distinct live
-    /// member (or no sibling count was ever declared, which leaves nothing
-    /// outstanding to require).
+    /// True when every declared sibling slot is occupied by exactly one live
+    /// member. Composition remains a separate canonical-promotion check.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.unrecorded_count() == 0
+        self.declared_size.is_some_and(|declared| {
+            declared > 0
+                && self.recorded_slots == declared
+                && self.member_count == declared
+                && self.duplicate_slot_count == 0
+                && self.out_of_range_slot_count == 0
+                && self.unslotted_count == 0
+        })
     }
 
     /// True for the selection-bias shape the discount exists for: a declared
@@ -395,45 +481,61 @@ impl AttemptFamilyMultiplicity {
             && self.selected_count >= 1
     }
 
-    /// Deterministic multiplicity discount in (0.0, 1.0]: the fraction of
-    /// declared attempt slots that are actually recorded. A complete family
-    /// (or one that never declared a size) is undiscounted at 1.0; "1 of 18"
-    /// yields 1/18. Unslotted members never raise the factor. The factor is
-    /// a pure ratio so identical inputs always produce byte-identical
-    /// scores.
+    /// Deterministic multiplicity discount in (0.0, 1.0]. An incomplete
+    /// selected family remains exactly `1 / declared_size`: recording some
+    /// siblings cannot gradually launder survivor-selection bias. Rejected
+    /// evidence remains undiscounted through [`Self::member_discount_factor`].
     #[must_use]
     pub fn discount_factor(&self) -> f32 {
         let Some(declared) = self.declared_size else {
             return 1.0;
         };
-        if declared <= 1 || self.recorded_slots >= declared {
+        if declared <= 1 || self.is_complete() {
             return 1.0;
         }
         #[allow(clippy::cast_possible_truncation)]
-        let factor = (f64::from(self.recorded_slots) / f64::from(declared)) as f32;
-        factor.clamp(f32::MIN_POSITIVE, 1.0)
+        (1.0_f64 / f64::from(declared)) as f32
     }
 
-    /// True when the family may support a trust promotion: every declared
-    /// slot is recorded AND the recorded composition is the canonical
-    /// fan-out shape — exactly one `selected` winner with the remaining
-    /// slots `rejected`. Mere slot coverage is deliberately insufficient:
-    /// N rows all recorded as winners fill every slot while recording zero
-    /// negative evidence, which is exactly the all-winners laundering shape.
-    /// Families with several genuine winners are not yet modeled and stay
-    /// ineligible (an explicit, documented limitation rather than a silent
-    /// pass); undeclared or single-attempt families reduce to completeness.
+    /// Stable promotion posture for this family.
+    #[must_use]
+    pub fn promotion_posture(&self) -> AttemptFamilyPromotionPosture {
+        let Some(declared) = self.declared_size else {
+            return AttemptFamilyPromotionPosture::BlockedUndeclared;
+        };
+        if declared == 0 {
+            return AttemptFamilyPromotionPosture::BlockedInvalidDeclaredSize;
+        }
+        if self.duplicate_slot_count > 0 {
+            return AttemptFamilyPromotionPosture::BlockedDuplicateSlots;
+        }
+        if self.member_count > declared || self.out_of_range_slot_count > 0 {
+            return AttemptFamilyPromotionPosture::BlockedOverfull;
+        }
+        if !self.is_complete() {
+            return AttemptFamilyPromotionPosture::BlockedIncomplete;
+        }
+        if self.selected_count == 1 && self.rejected_count == declared - 1 {
+            AttemptFamilyPromotionPosture::Eligible
+        } else {
+            AttemptFamilyPromotionPosture::BlockedInvalidComposition
+        }
+    }
+
+    /// Stable human-readable reason for the current promotion posture.
+    #[must_use]
+    pub fn promotion_reason(&self) -> &'static str {
+        self.promotion_posture().reason()
+    }
+
+    /// True when the family has the declared, exact, canonical fan-out shape:
+    /// one selected member and `N - 1` rejected members.
     #[must_use]
     pub fn is_promotion_eligible(&self) -> bool {
-        if !self.is_complete() {
-            return false;
-        }
-        match self.declared_size {
-            Some(declared) if declared > 1 => {
-                self.selected_count == 1 && self.rejected_count == declared - 1
-            }
-            _ => true,
-        }
+        matches!(
+            self.promotion_posture(),
+            AttemptFamilyPromotionPosture::Eligible
+        )
     }
 
     /// Per-member ranking discount. The multiplicity discount exists to
