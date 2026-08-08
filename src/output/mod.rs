@@ -22267,11 +22267,17 @@ mod tests {
 
         let markdown = render_context_response_markdown(&response);
 
-        // Find positions of section headers in the output.
-        // Section names are as_str() values passed through section_display_name().
+        // Find positions of section headers in the output. Failure memories
+        // selected through the reserved anti-pattern-first phase
+        // (bd-2vq2z.11) render under the "What NOT to do" heading rather
+        // than a raw `## failures` header; the rank-order contract this test
+        // guards is unchanged — the reserved failure item still leads.
         let failures_pos = markdown
-            .find("## failures")
-            .ok_or("failures section not found in markdown")?;
+            .find("## What NOT to do")
+            .ok_or("anti-pattern failures section not found in markdown")?;
+        if markdown.contains("## failures") {
+            return Err("failure item must not double-render under a raw failures header".into());
+        }
         let rules_pos = markdown
             .find("## procedural_rules")
             .ok_or("procedural_rules section not found in markdown")?;
