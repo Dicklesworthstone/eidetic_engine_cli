@@ -725,10 +725,15 @@ fn lane_audit_entries(fixture: &LaneGrantFixture, action: &str) -> Result<Vec<Va
     let json = stdout_json(&output, "ee audit timeline")?;
     ensure_equal(
         &json.pointer("/schema").and_then(Value::as_str),
+        &Some("ee.response.v2"),
+        "audit timeline envelope schema",
+    )?;
+    ensure_equal(
+        &json.pointer("/data/schema").and_then(Value::as_str),
         &Some("ee.audit.timeline.v1"),
         "audit timeline schema",
     )?;
-    json.pointer("/entries")
+    json.pointer("/data/entries")
         .and_then(Value::as_array)
         .cloned()
         .ok_or_else(|| format!("audit timeline {action} omitted entries: {json}"))

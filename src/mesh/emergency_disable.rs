@@ -647,7 +647,8 @@ mod tests {
     use super::{
         MESH_EMERGENCY_CONFIG_MAX_BYTES, MeshEmergencyDisableInput, MeshEmergencyError,
         MeshEmergencyReenableInput, apply_emergency_disable, apply_emergency_reenable,
-        plan_emergency_disable, plan_emergency_reenable,
+        emergency_status_report, plan_emergency_disable, plan_emergency_reenable,
+        shell_quote_command_arg,
     };
     use crate::config::{ConfigFile, MeshCommandMode};
     use std::fs;
