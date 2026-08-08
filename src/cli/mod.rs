@@ -40256,6 +40256,16 @@ fn redact_public_projection_strings(value: &mut serde_json::Value, field: Option
                 Some("packId") => Some(crate::models::public_pack_id(text)),
                 Some("workspaceId") => Some(crate::models::public_workspace_id(text)),
                 Some("memoryId") => Some(crate::models::public_memory_id(text)),
+                Some("familyAlias")
+                    if text.len() == 36
+                        && text.strip_prefix("afm_").is_some_and(|digest| {
+                            digest
+                                .bytes()
+                                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                        }) =>
+                {
+                    Some(text.clone())
+                }
                 _ => None,
             };
             if let Some(projected_id) = projected_id {
@@ -48192,7 +48202,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
 
     let selection = report.selection.as_ref().map(|s| {
         let pack = s.latest_pack_selection.as_ref().map(|pack| {
-            serde_json::json!({
+            let mut value = serde_json::json!({
                 "packId": pack.pack_id,
                 "query": pack.query,
                 "profile": pack.profile,
@@ -48207,7 +48217,13 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
                 "ledgerStatus": pack.ledger_status,
                 "ledgerStorage": pack.ledger_storage,
                 "selectedAt": pack.selected_at,
-            })
+            });
+            if let Some(snapshot) = &pack.attempt_family_multiplicity
+                && let Some(object) = value.as_object_mut()
+            {
+                object.insert("attemptFamilyMultiplicity".to_owned(), snapshot.clone());
+            }
+            value
         });
 
         serde_json::json!({
@@ -65785,6 +65801,30 @@ mod tests {
                     ledger_hash: None,
                     ledger_status: "missing".to_string(),
                     ledger_storage: serde_json::json!({"mode": "missing"}),
+                    attempt_family_multiplicity: Some(serde_json::json!({
+                        "schema": "ee.pack.attempt_family_multiplicity.v1",
+                        "effectiveDiscountFactor": 0.5,
+                        "promotionPosture": "blocked_incomplete",
+                        "promotionReason": "not every declared attempt slot is recorded",
+                        "memberships": [{
+                            "familyAlias": crate::models::public_attempt_family_alias(
+                                "AKIAIOSFODNN7EXAMPLE"
+                            ),
+                            "memberDisposition": "selected",
+                            "memberDiscountFactor": 0.5,
+                            "declaredSize": 2,
+                            "recordedSlots": 1,
+                            "selectedCount": 1,
+                            "rejectedCount": 0,
+                            "unslottedCount": 0,
+                            "duplicateSlotCount": 0,
+                            "duplicateMemberCount": 0,
+                            "outOfRangeSlotCount": 0,
+                            "unrecordedCount": 1,
+                            "promotionPosture": "blocked_incomplete",
+                            "promotionReason": "not every declared attempt slot is recorded"
+                        }]
+                    })),
                     selected_at: "2026-05-04T12:01:00Z".to_string(),
                 }),
             },
@@ -65866,6 +65906,17 @@ mod tests {
             &actual["data"]["selection"]["latestPackSelection"]["packId"],
             &serde_json::json!("pack_release"),
             "why TOON preserves latest pack selection provenance",
+        )?;
+        let family_alias = crate::models::public_attempt_family_alias("AKIAIOSFODNN7EXAMPLE");
+        ensure_equal(
+            &actual["data"]["selection"]["latestPackSelection"]["attemptFamilyMultiplicity"]["memberships"]
+                [0]["familyAlias"],
+            &serde_json::json!(family_alias),
+            "why TOON preserves only the public family alias",
+        )?;
+        ensure(
+            !json.contains("AKIAIOSFODNN7EXAMPLE") && !toon.contains("AKIAIOSFODNN7EXAMPLE"),
+            "why JSON and TOON must not expose a secret-shaped raw family id",
         )?;
         ensure(
             actual["data"]["agentProfile"]["helpfulCount"].as_f64() == Some(12.0),
@@ -82526,6 +82577,29 @@ demos:
         let secret_memory_id = format!("mem_{SECRET}000000");
         let secret_pack_id = format!("pack_{SECRET}000000");
         let secret_workspace_id = format!("wsp_{SECRET}000000");
+        let family_alias = crate::models::public_attempt_family_alias(SECRET);
+        let multiplicity = serde_json::json!({
+            "schema": "ee.pack.attempt_family_multiplicity.v1",
+            "effectiveDiscountFactor": 0.5,
+            "promotionPosture": "blocked_incomplete",
+            "promotionReason": "not every declared attempt slot is recorded",
+            "memberships": [{
+                "familyAlias": family_alias,
+                "memberDisposition": "selected",
+                "memberDiscountFactor": 0.5,
+                "declaredSize": 2,
+                "recordedSlots": 1,
+                "selectedCount": 1,
+                "rejectedCount": 0,
+                "unslottedCount": 0,
+                "duplicateSlotCount": 0,
+                "duplicateMemberCount": 0,
+                "outOfRangeSlotCount": 0,
+                "unrecordedCount": 1,
+                "promotionPosture": "blocked_incomplete",
+                "promotionReason": "not every declared attempt slot is recorded"
+            }]
+        });
         assert_eq!(secret_memory_id.len(), 30, "fixture is ID-shaped");
         assert_eq!(secret_pack_id.len(), 31, "fixture is pack-ID-shaped");
         assert_eq!(
@@ -82571,9 +82645,15 @@ demos:
                     "redactionReasons": ["aws_access_key"]
                 },
                 "redactionClasses": [SECRET],
-                "freshness": "unavailable"
+                "freshness": "unavailable",
+                "attemptFamilyMultiplicity": multiplicity.clone()
             }],
-            "omittedItems": [],
+            "omittedItems": [{
+                "memoryId": "mem_safe_omitted",
+                "reason": "token_budget",
+                "candidateRank": 2,
+                "attemptFamilyMultiplicity": multiplicity
+            }],
             "degraded": [{
                 "code": format!("code-{SECRET}"),
                 "severity": "high",
@@ -82645,6 +82725,16 @@ demos:
         assert_eq!(
             public["selectedItems"][0]["freshness"],
             serde_json::json!("unavailable")
+        );
+        assert_eq!(
+            public["selectedItems"][0]["attemptFamilyMultiplicity"]["memberships"][0]["familyAlias"],
+            serde_json::json!(family_alias),
+            "selected replay preserves the domain-separated public family alias"
+        );
+        assert_eq!(
+            public["omittedItems"][0]["attemptFamilyMultiplicity"]["memberships"][0]["familyAlias"],
+            serde_json::json!(family_alias),
+            "omitted replay preserves the same frozen public family alias"
         );
         assert!(public["selectedItems"][0].get("diversityKey").is_none());
         assert!(

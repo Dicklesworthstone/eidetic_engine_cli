@@ -840,6 +840,8 @@ fn recent_pack_old_only_archived_source_drift_does_not_block_current_claim_windo
                 estimated_tokens: 32,
                 relevance: 0.03,
                 utility: 0.5,
+                combined_score: None,
+                attempt_family_multiplicity: None,
                 why: "historical archived-plan selection".to_owned(),
                 diversity_key: None,
                 provenance_json: "{}".to_owned(),

@@ -34,6 +34,7 @@ fn base_response() -> ContextResponse {
         utility: score(0.72),
         proximity_to_seed: None,
         score_breakdown: None,
+        attempt_family_multiplicity: None,
         provenance: vec![
             PackProvenance::new(ProvenanceUri::EeMemory(memory_id), "coordination fixture")
                 .expect("provenance should be valid"),

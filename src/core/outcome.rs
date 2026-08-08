@@ -1698,6 +1698,13 @@ fn render_memory_trust_class_promotion_blocked_audit_details(
     membership_family_count: usize,
     multiplicity: Option<&crate::models::AttemptFamilyMultiplicity>,
 ) -> String {
+    let family_aliases = family_ids
+        .iter()
+        .map(|family_id| crate::models::public_attempt_family_alias(family_id))
+        .collect::<Vec<_>>();
+    let family_alias = multiplicity
+        .as_ref()
+        .map(|family| crate::models::public_attempt_family_alias(&family.family_id));
     serde_json::json!({
         "schema": "ee.audit.trust_class_promotion_blocked.v1",
         "feedbackEventId": feedback_event_id,
@@ -1705,8 +1712,8 @@ fn render_memory_trust_class_promotion_blocked_audit_details(
         "refusedClass": transition.next_class.as_str(),
         "promotionPosture": posture.as_str(),
         "reason": posture.reason(),
-        "familyId": multiplicity.as_ref().map(|family| family.family_id.as_str()),
-        "familyIds": family_ids,
+        "familyAlias": family_alias,
+        "familyAliases": family_aliases,
         "membershipFamilyCount": membership_family_count,
         "declaredSize": multiplicity.as_ref().and_then(|family| family.declared_size),
         "recordedSlots": multiplicity.as_ref().map(|family| family.recorded_slots),
@@ -4428,7 +4435,7 @@ mod tests {
             survivor,
             "Winning config out of three parallel attempts.",
             &crate::db::MemoryAttemptFamily {
-                family_id: "fam-gate-a".to_string(),
+                family_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
                 declared_size: Some(3),
                 attempt_index: Some(1),
                 disposition: Some("selected".to_string()),
@@ -4474,10 +4481,18 @@ mod tests {
             &Some("not every declared attempt slot is recorded"),
             "blocked audit must expose the typed incomplete reason",
         )?;
+        let expected_family_alias =
+            crate::models::public_attempt_family_alias("AKIAIOSFODNN7EXAMPLE");
         ensure_equal(
-            &details.get("familyId").and_then(serde_json::Value::as_str),
-            &Some("fam-gate-a"),
-            "blocked audit must name the incomplete family",
+            &details
+                .get("familyAlias")
+                .and_then(serde_json::Value::as_str),
+            &Some(expected_family_alias.as_str()),
+            "blocked audit must expose only the public family alias",
+        )?;
+        ensure(
+            !details.to_string().contains("AKIAIOSFODNN7EXAMPLE"),
+            "blocked trust audit must not expose a secret-shaped raw family id",
         )?;
 
         let transitions = connection
@@ -4626,7 +4641,7 @@ mod tests {
         )?;
         ensure_equal(
             &details
-                .get("familyIds")
+                .get("familyAliases")
                 .and_then(serde_json::Value::as_array)
                 .map(Vec::len),
             &Some(2_usize),

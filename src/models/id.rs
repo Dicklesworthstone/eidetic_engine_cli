@@ -521,6 +521,21 @@ pub fn public_audit_id(value: &str) -> String {
     public_id_or_alias::<AuditKind>(value)
 }
 
+/// Return a stable, domain-separated public alias for an internal attempt-family ID.
+///
+/// Attempt-family IDs are caller-controlled lookup keys rather than typed public IDs.
+/// Public surfaces must therefore never echo them, even when they happen to match the
+/// accepted lookup alphabet: that alphabet also accepts secret-shaped tokens.
+#[must_use]
+pub fn public_attempt_family_alias(value: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.attempt_family.public_alias.v1\0");
+    hasher.update(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(value.as_bytes());
+    let digest = hasher.finalize().to_hex().to_string();
+    format!("afm_{}", &digest[..32])
+}
+
 /// Errors produced by [`Id::from_str`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParseIdError {
@@ -899,6 +914,18 @@ mod tests {
             MemoryId::from_str(&alias).is_ok(),
             "alias is a typed memory ID"
         );
+    }
+
+    #[test]
+    fn attempt_family_alias_never_echoes_secret_shaped_lookup_tokens() {
+        let secret_shaped = "AKIAIOSFODNN7EXAMPLE";
+        let alias = public_attempt_family_alias(secret_shaped);
+        assert_eq!(alias.len(), 36);
+        assert!(alias.starts_with("afm_"));
+        assert_ne!(alias, secret_shaped);
+        assert!(!alias.contains("AKIA"));
+        assert_eq!(public_attempt_family_alias(secret_shaped), alias);
+        assert_ne!(public_attempt_family_alias("other-family"), alias);
     }
 
     #[test]

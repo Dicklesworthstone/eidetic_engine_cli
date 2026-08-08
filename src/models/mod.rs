@@ -142,8 +142,8 @@ pub use id::{
     AuditId, BackupId, CandidateId, ClaimId, DemoId, EXECUTABLE_ID_SCHEMA_V1, EvidenceId,
     ExecutableIdKind, Id, IdJsonSchema, IdKind, MemoryId, MemoryLinkId, ModelId, PackId,
     ParseExecutableIdKindError, ParseIdError, PolicyId, RuleId, SessionId, TraceId, WorkspaceId,
-    executable_id_schema_catalog_json, executable_id_schemas, public_audit_id, public_memory_id,
-    public_memory_link_id, public_pack_id, public_workspace_id,
+    executable_id_schema_catalog_json, executable_id_schemas, public_attempt_family_alias,
+    public_audit_id, public_memory_id, public_memory_link_id, public_pack_id, public_workspace_id,
 };
 pub use install::{
     CurrentBinary, INSTALL_CHECK_SCHEMA_V1, INSTALL_PLAN_SCHEMA_V1, InstallArtifactSelection,

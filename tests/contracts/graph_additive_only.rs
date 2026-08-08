@@ -473,6 +473,8 @@ fn seed_workspace(workspace: &Path, database: &Path) -> TestResult {
                 estimated_tokens: 8,
                 relevance: 0.91,
                 utility: 0.8,
+                combined_score: None,
+                attempt_family_multiplicity: None,
                 why: "Selected because the memory matches release-formatting work.".to_owned(),
                 diversity_key: Some("procedural:rule:cargo".to_owned()),
                 provenance_json: r#"{"schema":"ee.pack_item.provenance.v1","entries":[{"uri":"file://AGENTS.md#L164-173","trustClass":"human_explicit","trustSubclass":"project-rule"}]}"#.to_owned(),

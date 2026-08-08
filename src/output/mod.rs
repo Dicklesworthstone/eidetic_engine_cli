@@ -5990,7 +5990,7 @@ pub fn render_why_json(report: &WhyReport) -> String {
 
     let selection = report.selection.as_ref().map(|selection| {
         let pack = selection.latest_pack_selection.as_ref().map(|pack| {
-            serde_json::json!({
+            let mut value = serde_json::json!({
                 "packId": &pack.pack_id,
                 "query": &pack.query,
                 "profile": &pack.profile,
@@ -6005,7 +6005,13 @@ pub fn render_why_json(report: &WhyReport) -> String {
                 "ledgerStatus": &pack.ledger_status,
                 "ledgerStorage": &pack.ledger_storage,
                 "selectedAt": &pack.selected_at,
-            })
+            });
+            if let Some(snapshot) = &pack.attempt_family_multiplicity
+                && let Some(object) = value.as_object_mut()
+            {
+                object.insert("attemptFamilyMultiplicity".to_owned(), snapshot.clone());
+            }
+            value
         });
 
         serde_json::json!({

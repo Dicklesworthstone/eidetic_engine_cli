@@ -17424,6 +17424,17 @@ pub struct AttemptFamilyMembershipSnapshot {
     pub families: Vec<AttemptFamilySnapshot>,
 }
 
+pub const ATTEMPT_FAMILY_MEMBERSHIP_BATCH_SIZE: usize = 128;
+
+/// Deterministic result of the bounded candidate-ID membership batch loader.
+/// `query_count` is surfaced for SLO/conformance tests: it is exactly one SQL
+/// statement per non-empty chunk and never scales with families per candidate.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AttemptFamilyMembershipSnapshotBatch {
+    pub by_memory_id: BTreeMap<String, AttemptFamilyMembershipSnapshot>,
+    pub query_count: usize,
+}
+
 impl AttemptFamilyMembershipSnapshot {
     #[must_use]
     pub fn family(&self, family_id: &str) -> Option<&AttemptFamilySnapshot> {
@@ -17794,6 +17805,15 @@ fn stored_memory_sentinel_spec_from_row(row: &Row) -> Result<StoredMemorySentine
         created_at: required_text(row, 8, DbOperation::Query, "created_at")?.to_string(),
         updated_at: required_text(row, 9, DbOperation::Query, "updated_at")?.to_string(),
     })
+}
+
+/// A deterministic, allocation-bounded page of current revival specs.
+/// `total_count` is computed by the same filtered query before `LIMIT` is
+/// applied, so callers can report unevaluated rows without loading them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BoundedMemoryRevivalSpecs {
+    pub specs: Vec<StoredMemorySentinelSpec>,
+    pub total_count: usize,
 }
 
 fn stored_memory_sentinel_result_from_row(row: &Row) -> Result<StoredMemorySentinelResult> {
@@ -18532,28 +18552,50 @@ impl DbConnection {
             .collect()
     }
 
-    /// List current workspace-local revival specs in deterministic order.
+    /// List a bounded prefix of current workspace-local revival specs in
+    /// deterministic order.
     ///
     /// The owning-memory join deliberately enforces the same privacy boundary
     /// as workspace-local retrieval and excludes tombstoned, not-yet-valid,
     /// and expired memories in the query itself. Gate specs cannot cross this
     /// boundary because polarity is filtered in SQL, not after retrieval.
-    pub fn list_current_memory_revival_specs(
+    pub fn list_current_memory_revival_specs_bounded(
         &self,
         workspace_id: &str,
         reference_time: &str,
-    ) -> Result<Vec<StoredMemorySentinelSpec>> {
+        limit: usize,
+    ) -> Result<BoundedMemoryRevivalSpecs> {
+        if limit == 0 {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "current revival spec limit must be greater than zero".to_owned(),
+            });
+        }
+        let limit = i64::try_from(limit).map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "current revival spec limit must fit i64".to_owned(),
+        })?;
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT s.spec_hash, s.memory_id, s.sentinel_kind, s.target, s.expected_predicate, s.safety_class, s.provenance, s.stale_threshold_seconds, s.created_at, s.updated_at, s.polarity FROM memory_sentinel_specs s JOIN memories m ON m.id = s.memory_id WHERE s.polarity = 'revive' AND m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND (m.valid_from IS NULL OR julianday(m.valid_from) <= julianday(?2)) AND (m.valid_to IS NULL OR julianday(m.valid_to) > julianday(?2)) ORDER BY s.memory_id ASC, s.sentinel_kind ASC, s.target ASC, s.expected_predicate ASC, s.spec_hash ASC",
+            "SELECT s.spec_hash, s.memory_id, s.sentinel_kind, s.target, s.expected_predicate, s.safety_class, s.provenance, s.stale_threshold_seconds, s.created_at, s.updated_at, s.polarity, COUNT(*) OVER () AS total_count FROM memory_sentinel_specs s JOIN memories m ON m.id = s.memory_id WHERE s.polarity = 'revive' AND m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND (m.valid_from IS NULL OR julianday(m.valid_from) <= julianday(?2)) AND (m.valid_to IS NULL OR julianday(m.valid_to) > julianday(?2)) ORDER BY s.memory_id ASC, s.sentinel_kind ASC, s.target ASC, s.expected_predicate ASC, s.spec_hash ASC LIMIT ?3",
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::Text(reference_time.to_string()),
+                Value::BigInt(limit),
             ],
         )?;
-        rows.iter()
+        let total_count = rows.first().map_or(Ok(0_usize), |row| {
+            let count = required_i64(row, 11, DbOperation::Query, "total_count")?;
+            usize::try_from(count).map_err(|_| DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: format!("current revival total_count is invalid: {count}"),
+            })
+        })?;
+        let specs = rows
+            .iter()
             .map(stored_memory_sentinel_spec_from_row)
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        Ok(BoundedMemoryRevivalSpecs { specs, total_count })
     }
 
     /// Return the latest result for every sentinel attached to one memory.
@@ -19635,6 +19677,177 @@ impl DbConnection {
             workspace_id: workspace_id.to_string(),
             memory_logical_id: memory_logical_id.to_string(),
             families,
+        })
+    }
+
+    /// Load authoritative attempt-family membership for candidate memory IDs in
+    /// bounded chunks. Each chunk is one SQL statement that derives the owning
+    /// workspace and revision-stable logical ID, unions every V095 ledger family
+    /// with every V094 pointer family, and materializes the full family members.
+    pub fn get_attempt_family_membership_snapshots_for_memory_ids(
+        &self,
+        memory_ids: &[String],
+    ) -> Result<AttemptFamilyMembershipSnapshotBatch> {
+        let memory_ids = memory_ids
+            .iter()
+            .filter(|memory_id| !memory_id.trim().is_empty())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut by_memory_id = BTreeMap::new();
+        let mut query_count = 0_usize;
+
+        for chunk in memory_ids.chunks(ATTEMPT_FAMILY_MEMBERSHIP_BATCH_SIZE) {
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "WITH candidates AS (\
+                     SELECT id AS candidate_id, workspace_id, COALESCE(logical_id, id) AS logical_id \
+                     FROM memories WHERE id IN ({placeholders})\
+                 ), candidate_families AS (\
+                     SELECT candidate.candidate_id, candidate.workspace_id, candidate.logical_id, member.family_id \
+                     FROM candidates AS candidate \
+                     JOIN attempt_family_members AS member \
+                       ON member.workspace_id = candidate.workspace_id \
+                      AND member.memory_logical_id = candidate.logical_id \
+                     UNION \
+                     SELECT candidate.candidate_id, candidate.workspace_id, candidate.logical_id, memory.attempt_family_id \
+                     FROM candidates AS candidate \
+                     JOIN memories AS memory \
+                       ON memory.workspace_id = candidate.workspace_id \
+                      AND COALESCE(memory.logical_id, memory.id) = candidate.logical_id \
+                     WHERE memory.attempt_family_id IS NOT NULL\
+                 ) \
+                 SELECT candidate.candidate_id, candidate.workspace_id, candidate.logical_id, \
+                        family_key.family_id, family.declared_size, family.origin, \
+                        member.memory_logical_id, member.attempt_index, member.disposition, \
+                        member.recorded_at, 0 AS pointer_only \
+                 FROM candidates AS candidate \
+                 LEFT JOIN candidate_families AS family_key \
+                   ON family_key.candidate_id = candidate.candidate_id \
+                 LEFT JOIN attempt_families AS family \
+                   ON family.workspace_id = family_key.workspace_id \
+                  AND family.family_id = family_key.family_id \
+                 LEFT JOIN attempt_family_members AS member \
+                   ON member.workspace_id = family_key.workspace_id \
+                  AND member.family_id = family_key.family_id \
+                 UNION ALL \
+                 SELECT candidate.candidate_id, candidate.workspace_id, candidate.logical_id, \
+                        family_key.family_id, family.declared_size, family.origin, \
+                        COALESCE(memory.logical_id, memory.id), NULL, NULL, NULL, 1 AS pointer_only \
+                 FROM candidates AS candidate \
+                 JOIN candidate_families AS family_key \
+                   ON family_key.candidate_id = candidate.candidate_id \
+                 LEFT JOIN attempt_families AS family \
+                   ON family.workspace_id = family_key.workspace_id \
+                  AND family.family_id = family_key.family_id \
+                 JOIN memories AS memory \
+                   ON memory.workspace_id = family_key.workspace_id \
+                  AND memory.attempt_family_id = family_key.family_id \
+                 WHERE NOT EXISTS (\
+                     SELECT 1 FROM attempt_family_members AS recorded \
+                     WHERE recorded.workspace_id = family_key.workspace_id \
+                       AND recorded.family_id = family_key.family_id \
+                       AND recorded.memory_logical_id = COALESCE(memory.logical_id, memory.id)\
+                 ) \
+                 GROUP BY candidate.candidate_id, candidate.workspace_id, candidate.logical_id, \
+                          family_key.family_id, family.declared_size, family.origin, \
+                          COALESCE(memory.logical_id, memory.id) \
+                 ORDER BY 1 ASC, 4 ASC, 11 ASC, 8 ASC, 7 ASC"
+            );
+            let params = chunk
+                .iter()
+                .map(|memory_id| Value::Text(memory_id.clone()))
+                .collect::<Vec<_>>();
+            let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+            query_count = query_count.saturating_add(1);
+
+            for row in &rows {
+                let candidate_id =
+                    required_text(row, 0, DbOperation::Query, "candidate_id")?.to_owned();
+                let workspace_id =
+                    required_text(row, 1, DbOperation::Query, "workspace_id")?.to_owned();
+                let logical_id =
+                    required_text(row, 2, DbOperation::Query, "logical_id")?.to_owned();
+                let snapshot = by_memory_id.entry(candidate_id).or_insert_with(|| {
+                    AttemptFamilyMembershipSnapshot {
+                        workspace_id,
+                        memory_logical_id: logical_id,
+                        families: Vec::new(),
+                    }
+                });
+                let Some(family_id) = optional_text(row, 3)?.map(str::to_owned) else {
+                    continue;
+                };
+                let family_index = match snapshot
+                    .families
+                    .iter()
+                    .position(|family| family.family_id == family_id)
+                {
+                    Some(index) => index,
+                    None => {
+                        let declared_size =
+                            optional_i64(row, 4, DbOperation::Query, "declared_size")?
+                                .and_then(|value| u32::try_from(value).ok());
+                        let origin = optional_text(row, 5)?.map(str::to_owned);
+                        snapshot.families.push(AttemptFamilySnapshot {
+                            family_id: family_id.clone(),
+                            declared_size,
+                            origin,
+                            ledger_members: Vec::new(),
+                            pointer_only_logical_ids: Vec::new(),
+                        });
+                        snapshot.families.len() - 1
+                    }
+                };
+                let family = &mut snapshot.families[family_index];
+                let Some(member_logical_id) = optional_text(row, 6)?.map(str::to_owned) else {
+                    continue;
+                };
+                let pointer_only = required_i64(row, 10, DbOperation::Query, "pointer_only")? != 0;
+                if pointer_only {
+                    if !family.pointer_only_logical_ids.contains(&member_logical_id) {
+                        family.pointer_only_logical_ids.push(member_logical_id);
+                    }
+                } else {
+                    family.ledger_members.push(MemoryAttemptFamilyMember {
+                        memory_logical_id: member_logical_id,
+                        attempt_index: u32::try_from(required_i64(
+                            row,
+                            7,
+                            DbOperation::Query,
+                            "attempt_index",
+                        )?)
+                        .unwrap_or(u32::MAX),
+                        disposition: required_text(row, 8, DbOperation::Query, "disposition")?
+                            .to_owned(),
+                        recorded_at: required_text(row, 9, DbOperation::Query, "recorded_at")?
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+
+        for snapshot in by_memory_id.values_mut() {
+            snapshot
+                .families
+                .sort_by(|left, right| left.family_id.cmp(&right.family_id));
+            for family in &mut snapshot.families {
+                family.ledger_members.sort_by(|left, right| {
+                    left.attempt_index
+                        .cmp(&right.attempt_index)
+                        .then_with(|| left.memory_logical_id.cmp(&right.memory_logical_id))
+                });
+                family.pointer_only_logical_ids.sort();
+            }
+        }
+
+        Ok(AttemptFamilyMembershipSnapshotBatch {
+            by_memory_id,
+            query_count,
         })
     }
 
@@ -24249,6 +24462,8 @@ pub struct CreatePackItemInput {
     pub estimated_tokens: u32,
     pub relevance: f32,
     pub utility: f32,
+    pub combined_score: Option<f32>,
+    pub attempt_family_multiplicity: Option<serde_json::Value>,
     pub why: String,
     pub diversity_key: Option<String>,
     pub provenance_json: String,
@@ -24280,6 +24495,7 @@ pub struct CreatePackOmissionInput {
     pub memory_id: String,
     pub estimated_tokens: u32,
     pub reason: String,
+    pub attempt_family_multiplicity: Option<serde_json::Value>,
 }
 
 /// A stored pack_omissions row.
@@ -24579,6 +24795,8 @@ struct PackLedgerSelectedItem {
     section: String,
     estimated_tokens: u32,
     scores: PackLedgerScoreComponents,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attempt_family_multiplicity: Option<serde_json::Value>,
     why: PackLedgerTextRecord,
     diversity_key: Option<String>,
     trust_class: String,
@@ -24593,6 +24811,8 @@ struct PackLedgerSelectedItem {
 struct PackLedgerScoreComponents {
     relevance: f32,
     utility: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    combined_score: Option<f32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -24609,6 +24829,8 @@ struct PackLedgerOmittedItem {
     memory_id: String,
     estimated_tokens: u32,
     reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attempt_family_multiplicity: Option<serde_json::Value>,
 }
 
 const PACK_INSERT_MAX_BIND_PARAMS: usize = 900;
@@ -25947,6 +26169,7 @@ fn build_uncompressed_pack_selection_ledger(
             memory_id: omission.memory_id.clone(),
             estimated_tokens: omission.estimated_tokens,
             reason: omission.reason.clone(),
+            attempt_family_multiplicity: omission.attempt_family_multiplicity.clone(),
         })
         .collect::<Vec<_>>();
     omitted_items.sort_by(|left, right| {
@@ -26097,7 +26320,9 @@ fn pack_ledger_selected_item(item: &CreatePackItemInput) -> PackLedgerSelectedIt
         scores: PackLedgerScoreComponents {
             relevance: item.relevance,
             utility: item.utility,
+            combined_score: item.combined_score,
         },
+        attempt_family_multiplicity: item.attempt_family_multiplicity.clone(),
         why,
         diversity_key: item.diversity_key.clone(),
         trust_class: item.trust_class.clone(),
@@ -26604,8 +26829,19 @@ fn pack_ledger_internal_invariant_mismatches(core: &PackSelectionLedgerCore) -> 
             || !(0.0..=1.0).contains(&item.scores.relevance)
             || !item.scores.utility.is_finite()
             || !(0.0..=1.0).contains(&item.scores.utility)
+            || item
+                .scores
+                .combined_score
+                .is_some_and(|score| !score.is_finite() || !(0.0..=1.0).contains(&score))
     }) {
         mismatches.push("selectedItems.scores");
+    }
+    if core.selected_items.iter().any(|item| {
+        item.attempt_family_multiplicity
+            .as_ref()
+            .is_some_and(|snapshot| !pack_attempt_family_multiplicity_is_valid(snapshot))
+    }) {
+        mismatches.push("selectedItems.attemptFamilyMultiplicity");
     }
     if core.selected_items.iter().any(|item| {
         item.estimated_tokens == 0
@@ -26670,6 +26906,13 @@ fn pack_ledger_internal_invariant_mismatches(core: &PackSelectionLedgerCore) -> 
         mismatches.push("omittedItems.metadata");
     }
     if core.omitted_items.iter().any(|item| {
+        item.attempt_family_multiplicity
+            .as_ref()
+            .is_some_and(|snapshot| !pack_attempt_family_multiplicity_is_valid(snapshot))
+    }) {
+        mismatches.push("omittedItems.attemptFamilyMultiplicity");
+    }
+    if core.omitted_items.iter().any(|item| {
         selected_memory_ids.contains(item.memory_id.as_str())
             && item.reason != "redundant_candidate"
     }) {
@@ -26690,6 +26933,210 @@ fn pack_ledger_internal_invariant_mismatches(core: &PackSelectionLedgerCore) -> 
         mismatches.push("candidateCounts.candidatePool");
     }
     mismatches
+}
+
+fn pack_attempt_family_multiplicity_is_valid(snapshot: &serde_json::Value) -> bool {
+    let Some(object) = snapshot.as_object() else {
+        return false;
+    };
+    let required_keys = [
+        "schema",
+        "effectiveDiscountFactor",
+        "promotionPosture",
+        "promotionReason",
+        "memberships",
+    ];
+    let posture = object
+        .get("promotionPosture")
+        .and_then(serde_json::Value::as_str);
+    let reason = object
+        .get("promotionReason")
+        .and_then(serde_json::Value::as_str);
+    if object.len() != required_keys.len()
+        || required_keys.iter().any(|key| !object.contains_key(*key))
+        || object.get("schema").and_then(serde_json::Value::as_str)
+            != Some("ee.pack.attempt_family_multiplicity.v1")
+        || !json_unit_score(object.get("effectiveDiscountFactor"))
+        || posture.is_none_or(|posture| !is_attempt_family_promotion_posture(posture))
+        || reason.is_none_or(str::is_empty)
+        || posture.and_then(attempt_family_promotion_reason) != reason
+    {
+        return false;
+    }
+    let Some(memberships) = object
+        .get("memberships")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    let aliases_are_strictly_sorted = memberships.windows(2).all(|window| {
+        window[0]
+            .get("familyAlias")
+            .and_then(serde_json::Value::as_str)
+            < window[1]
+                .get("familyAlias")
+                .and_then(serde_json::Value::as_str)
+    });
+    let effective_factor = object
+        .get("effectiveDiscountFactor")
+        .and_then(serde_json::Value::as_f64);
+    let minimum_member_factor = memberships
+        .iter()
+        .filter_map(|membership| {
+            membership
+                .get("memberDiscountFactor")
+                .and_then(serde_json::Value::as_f64)
+        })
+        .reduce(f64::min);
+    !memberships.is_empty()
+        && aliases_are_strictly_sorted
+        && effective_factor == minimum_member_factor
+        && memberships
+            .iter()
+            .all(pack_attempt_family_membership_is_valid)
+}
+
+fn pack_attempt_family_membership_is_valid(membership: &serde_json::Value) -> bool {
+    let Some(object) = membership.as_object() else {
+        return false;
+    };
+    let required_keys = [
+        "familyAlias",
+        "memberDisposition",
+        "memberDiscountFactor",
+        "declaredSize",
+        "recordedSlots",
+        "selectedCount",
+        "rejectedCount",
+        "unslottedCount",
+        "duplicateSlotCount",
+        "duplicateMemberCount",
+        "outOfRangeSlotCount",
+        "unrecordedCount",
+        "promotionPosture",
+        "promotionReason",
+    ];
+    let disposition = object
+        .get("memberDisposition")
+        .and_then(serde_json::Value::as_str);
+    let member_factor = object
+        .get("memberDiscountFactor")
+        .and_then(serde_json::Value::as_f64);
+    let declared_size = object
+        .get("declaredSize")
+        .and_then(serde_json::Value::as_u64);
+    let posture = object
+        .get("promotionPosture")
+        .and_then(serde_json::Value::as_str);
+    let reason = object
+        .get("promotionReason")
+        .and_then(serde_json::Value::as_str);
+    object.len() == required_keys.len()
+        && required_keys.iter().all(|key| object.contains_key(*key))
+        && object
+            .get("familyAlias")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(is_attempt_family_alias)
+        && disposition.is_some_and(|value| {
+            matches!(value, "selected" | "rejected" | "unslotted" | "conflicted")
+        })
+        && json_unit_score(object.get("memberDiscountFactor"))
+        && object.get("declaredSize").is_some_and(|value| {
+            value.is_null()
+                || value
+                    .as_u64()
+                    .is_some_and(|size| (1..=1_000_000).contains(&size))
+        })
+        && [
+            "recordedSlots",
+            "selectedCount",
+            "rejectedCount",
+            "unslottedCount",
+            "duplicateSlotCount",
+            "duplicateMemberCount",
+            "outOfRangeSlotCount",
+            "unrecordedCount",
+        ]
+        .iter()
+        .all(|field| {
+            object
+                .get(*field)
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|count| count <= 1_000_000)
+        })
+        && posture.is_some_and(is_attempt_family_promotion_posture)
+        && reason.is_some_and(|reason| !reason.is_empty())
+        && posture.and_then(attempt_family_promotion_reason) == reason
+        && member_discount_factor_is_canonical(disposition, declared_size, posture, member_factor)
+}
+
+fn member_discount_factor_is_canonical(
+    disposition: Option<&str>,
+    declared_size: Option<u64>,
+    posture: Option<&str>,
+    factor: Option<f64>,
+) -> bool {
+    let Some(factor) = factor else {
+        return false;
+    };
+    let expected = match disposition {
+        Some("selected") => match (declared_size, posture) {
+            (Some(declared), Some(posture)) if declared > 1 && posture != "eligible" => {
+                let declared = u32::try_from(declared).unwrap_or(u32::MAX);
+                #[allow(clippy::cast_possible_truncation)]
+                let discounted = (1.0_f64 / f64::from(declared)) as f32;
+                f64::from(discounted)
+            }
+            _ => 1.0,
+        },
+        Some("rejected" | "unslotted") => 1.0,
+        Some("conflicted") => return (0.0..=1.0).contains(&factor),
+        _ => return false,
+    };
+    factor == expected
+}
+
+fn json_unit_score(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_f64)
+        .is_some_and(|score| score.is_finite() && (0.0..=1.0).contains(&score))
+}
+
+fn is_attempt_family_alias(value: &str) -> bool {
+    value.len() == 36
+        && value.starts_with("afm_")
+        && value[4..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn is_attempt_family_promotion_posture(value: &str) -> bool {
+    attempt_family_promotion_reason(value).is_some()
+}
+
+fn attempt_family_promotion_reason(posture: &str) -> Option<&'static str> {
+    match posture {
+        "eligible" => Some("family has the canonical selected/rejected composition"),
+        "blocked_undeclared" => Some("family has no declared attempt count"),
+        "blocked_invalid_declared_size" => Some("declared attempt count must be greater than zero"),
+        "blocked_duplicate_slots" => Some("one or more attempt slots were recorded more than once"),
+        "blocked_duplicate_members" => {
+            Some("one or more logical memories were recorded into multiple attempt slots")
+        }
+        "blocked_multiple_families" => {
+            Some("the logical memory belongs to more than one attempt family")
+        }
+        "blocked_overfull" => Some("family has more members than its declared attempt count"),
+        "blocked_out_of_range_slots" => {
+            Some("one or more attempt slots are outside the declared attempt count")
+        }
+        "blocked_unslotted_members" => Some("one or more family members have no attempt slot"),
+        "blocked_incomplete" => Some("not every declared attempt slot is recorded"),
+        "blocked_invalid_composition" => Some(
+            "canonical completion requires exactly one selected member and N-1 rejected members",
+        ),
+        _ => None,
+    }
 }
 
 fn pack_ledger_text_record_is_canonical(record: &PackLedgerTextRecord) -> bool {
@@ -32574,6 +33021,16 @@ mod tests {
             &super::MemorySentinelPolarity::Revive,
             "revive polarity round-trips through storage",
         )?;
+        let second_revive = super::MemorySentinelSpec::from_raw(
+            &memory_id,
+            "path_exists:README.md",
+            super::MemorySentinelPolarity::Revive,
+            Some("exists"),
+            "test://sentinel",
+            Some(600),
+        )
+        .map_err(|error| format!("build second revive spec: {error:?}"))?;
+        connection.upsert_memory_sentinel_spec(&second_revive)?;
 
         let expired_memory_id =
             crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(1)).to_string();
@@ -32614,19 +33071,41 @@ mod tests {
         .map_err(|error| format!("build future revive spec: {error:?}"))?;
         connection.upsert_memory_sentinel_spec(&future_revive)?;
 
-        let current_revivals = connection.list_current_memory_revival_specs(
+        let current_revivals = connection.list_current_memory_revival_specs_bounded(
             "wsp_01234567890123456789012345",
             "2026-08-08T12:00:00Z",
+            10,
         )?;
         ensure_equal(
-            &current_revivals.len(),
-            &1,
+            &current_revivals.specs.len(),
+            &2,
             "current revival join excludes Gate, expired, and future specs",
         )?;
         ensure_equal(
-            &current_revivals[0].spec_hash,
+            &current_revivals.total_count,
+            &2,
+            "current revival count is computed before the provider limit",
+        )?;
+        ensure_equal(
+            &current_revivals.specs[0].spec_hash,
             &revive.spec_hash,
-            "current revival join selects only the active Revive spec",
+            "current revival join preserves deterministic ordering",
+        )?;
+
+        let bounded_revivals = connection.list_current_memory_revival_specs_bounded(
+            "wsp_01234567890123456789012345",
+            "2026-08-08T12:00:00Z",
+            1,
+        )?;
+        ensure_equal(
+            &bounded_revivals.specs.len(),
+            &1,
+            "provider allocates no more than the requested revival prefix",
+        )?;
+        ensure_equal(
+            &bounded_revivals.total_count,
+            &2,
+            "bounded provider still reports truthful continuation cardinality",
         )?;
 
         connection.execute_for(
@@ -32639,10 +33118,12 @@ mod tests {
         )?;
         ensure(
             connection
-                .list_current_memory_revival_specs(
+                .list_current_memory_revival_specs_bounded(
                     "wsp_01234567890123456789012345",
                     "2026-08-08T12:00:00Z",
+                    1,
                 )?
+                .specs
                 .is_empty(),
             "current revival join excludes tombstoned owners",
         )?;
@@ -34610,6 +35091,56 @@ mod tests {
             &multiple.promotion_posture(),
             &Some(AttemptFamilyPromotionPosture::BlockedMultipleFamilies),
             "multi-family logical membership fails closed",
+        )
+    }
+
+    #[test]
+    fn attempt_family_candidate_batch_uses_one_query_per_bounded_chunk() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_id = "wsp_afbatch00000000000000000001";
+        insert_attempt_family_test_workspace(&connection, workspace_id, "/tmp/afbatch")?;
+        let candidate_count = super::ATTEMPT_FAMILY_MEMBERSHIP_BATCH_SIZE + 1;
+        let mut memory_ids = Vec::with_capacity(candidate_count);
+        for index in 0..candidate_count {
+            let memory_id = format!("mem_afbatch{index:020}");
+            connection.insert_memory(
+                &memory_id,
+                &test_memory_input(workspace_id, &format!("batch candidate {index}")),
+            )?;
+            memory_ids.push(memory_id);
+        }
+        connection.set_memory_attempt_family(
+            &memory_ids[0],
+            &super::MemoryAttemptFamily {
+                family_id: "AKIAIOSFODNN7EXAMPLE".to_owned(),
+                declared_size: Some(3),
+                attempt_index: Some(1),
+                disposition: Some("selected".to_owned()),
+            },
+        )?;
+
+        let batch =
+            connection.get_attempt_family_membership_snapshots_for_memory_ids(&memory_ids)?;
+        ensure_equal(
+            &batch.query_count,
+            &2_usize,
+            "batch loader executes one query per bounded chunk",
+        )?;
+        ensure_equal(
+            &batch.by_memory_id.len(),
+            &candidate_count,
+            "batch loader returns every candidate, including non-family candidates",
+        )?;
+        let selected = batch
+            .by_memory_id
+            .get(&memory_ids[0])
+            .and_then(|snapshot| snapshot.family("AKIAIOSFODNN7EXAMPLE"))
+            .ok_or_else(|| "selected batch family missing".to_owned())?;
+        ensure_equal(
+            &selected.multiplicity().promotion_posture(),
+            &AttemptFamilyPromotionPosture::BlockedIncomplete,
+            "batch snapshot preserves full family posture",
         )
     }
 
@@ -46339,6 +46870,8 @@ mod tests {
             estimated_tokens: 50,
             relevance: 0.95,
             utility: 0.8,
+            combined_score: None,
+            attempt_family_multiplicity: None,
             why: format!("Selected memory {rank} for cargo formatting"),
             diversity_key: Some(format!("memory-{rank}")),
             provenance_json: r#"{"schema":"ee.pack_item.provenance.v1","entries":[{"uri":"file://AGENTS.md#L42","note":"project release rule"}]}"#.to_string(),
@@ -46365,6 +46898,7 @@ mod tests {
             memory_id: memory_id.to_string(),
             estimated_tokens: 50,
             reason: reason.to_string(),
+            attempt_family_multiplicity: None,
         }
     }
 
@@ -46395,6 +46929,8 @@ mod tests {
             estimated_tokens: 50,
             relevance: 0.95,
             utility: 0.8,
+            combined_score: None,
+            attempt_family_multiplicity: None,
             why: "High relevance to cargo formatting query".to_string(),
             diversity_key: None,
             provenance_json: r#"{"schema":"ee.pack_item.provenance.v1","entries":[{"uri":"file://AGENTS.md#L42","note":"project release rule"}]}"#.to_string(),
@@ -46761,6 +47297,8 @@ mod tests {
             estimated_tokens: 50,
             relevance: 0.95,
             utility: 0.8,
+            combined_score: None,
+            attempt_family_multiplicity: None,
             why: format!("Selected after seeing bearer {raw_secret} in the request"),
             diversity_key: Some("release".to_string()),
             provenance_json: format!(
@@ -47020,6 +47558,8 @@ mod tests {
             estimated_tokens: 50,
             relevance: 0.95,
             utility: 0.8,
+            combined_score: None,
+            attempt_family_multiplicity: None,
             why: "Selected because the memory matches release work.".to_string(),
             diversity_key: Some("release".to_string()),
             provenance_json: r#"{"schema":"ee.pack_item.provenance.v1","entries":[]}"#.to_string(),
@@ -47876,6 +48416,105 @@ mod tests {
     }
 
     #[test]
+    fn pack_ledger_freezes_selected_and_omitted_multiplicity_without_raw_family_ids() -> TestResult
+    {
+        let pack_id = "pack_000000000000000000000afm01";
+        let input = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            query: "attempt family pack".to_owned(),
+            profile: "balanced".to_owned(),
+            max_tokens: 4000,
+            used_tokens: 50,
+            item_count: 1,
+            omitted_count: 1,
+            pack_hash: pack_test_hash("attempt-family-pack"),
+            degraded_json: None,
+            created_by: Some("ee pack".to_owned()),
+        };
+        let snapshot = serde_json::json!({
+            "schema": "ee.pack.attempt_family_multiplicity.v1",
+            "effectiveDiscountFactor": 1.0_f32 / 3.0_f32,
+            "promotionPosture": "blocked_incomplete",
+            "promotionReason": "not every declared attempt slot is recorded",
+            "memberships": [{
+                "familyAlias": "afm_0123456789abcdef0123456789abcdef",
+                "memberDisposition": "selected",
+                "memberDiscountFactor": 1.0_f32 / 3.0_f32,
+                "declaredSize": 3,
+                "recordedSlots": 2,
+                "selectedCount": 1,
+                "rejectedCount": 1,
+                "unslottedCount": 0,
+                "duplicateSlotCount": 0,
+                "duplicateMemberCount": 0,
+                "outOfRangeSlotCount": 0,
+                "unrecordedCount": 1,
+                "promotionPosture": "blocked_incomplete",
+                "promotionReason": "not every declared attempt slot is recorded"
+            }]
+        });
+        let mut selected = pack_item_input(pack_id, "mem_00000000000000000000pack01", 1);
+        selected.combined_score = Some(0.25);
+        selected.attempt_family_multiplicity = Some(snapshot.clone());
+        let mut omitted = pack_omission_input(pack_id, "mem_00000000000000000000btch04");
+        omitted.attempt_family_multiplicity = Some(snapshot.clone());
+        let (ledger_json, ledger_hash) = super::build_pack_selection_ledger(
+            pack_id,
+            &input,
+            &[selected],
+            &[omitted],
+            "2026-08-08T00:00:00Z",
+            None,
+        )?;
+        let ledger: serde_json::Value = serde_json::from_str(&ledger_json)
+            .map_err(|error| TestFailure::new(format!("ledger json malformed: {error}")))?;
+        ensure_equal(
+            &ledger["selectedItems"][0]["attemptFamilyMultiplicity"],
+            &snapshot,
+            "selected multiplicity snapshot is frozen",
+        )?;
+        ensure_equal(
+            &ledger["omittedItems"][0]["attemptFamilyMultiplicity"],
+            &snapshot,
+            "omitted multiplicity snapshot is frozen",
+        )?;
+        ensure_equal(
+            &ledger["selectedItems"][0]["scores"]["combinedScore"],
+            &serde_json::json!(0.25),
+            "discounted combined score is frozen",
+        )?;
+        ensure(
+            !ledger_json.contains("AKIAIOSFODNN7EXAMPLE"),
+            "ledger never contains caller-controlled raw family ids",
+        )?;
+        ensure(
+            super::is_canonical_blake3_hash(&ledger_hash),
+            "frozen multiplicity participates in the canonical ledger hash",
+        )?;
+
+        let mut hostile = snapshot.clone();
+        hostile["memberships"][0]["familyAlias"] = serde_json::json!("AKIAIOSFODNN7EXAMPLE");
+        ensure(
+            !super::pack_attempt_family_multiplicity_is_valid(&hostile),
+            "ledger validation rejects a raw secret-shaped family id",
+        )?;
+
+        let mut discounted_rejection = snapshot.clone();
+        discounted_rejection["memberships"][0]["memberDisposition"] = serde_json::json!("rejected");
+        ensure(
+            !super::pack_attempt_family_multiplicity_is_valid(&discounted_rejection),
+            "ledger validation refuses to discount rejected family evidence",
+        )?;
+
+        let mut unstable_reason = snapshot;
+        unstable_reason["promotionReason"] = serde_json::json!("caller supplied reason");
+        ensure(
+            !super::pack_attempt_family_multiplicity_is_valid(&unstable_reason),
+            "ledger validation binds each posture to its stable reason",
+        )
+    }
+
+    #[test]
     fn legacy_pack_record_without_ledger_remains_readable() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
@@ -48146,6 +48785,8 @@ mod tests {
             estimated_tokens: 50,
             relevance: 0.92,
             utility: 0.75,
+            combined_score: None,
+            attempt_family_multiplicity: None,
             why: "Selected for release preparation".to_string(),
             diversity_key: Some("cargo".to_string()),
             provenance_json: r#"{"schema":"ee.pack_item.provenance.v1","entries":[{"uri":"cass-session://release-a#L10-12","note":"session evidence"}]}"#.to_string(),

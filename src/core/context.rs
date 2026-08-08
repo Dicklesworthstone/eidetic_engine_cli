@@ -92,12 +92,14 @@ use crate::models::{
 use crate::pack::{
     ConflictKind, ConflictRecommendedAction, ConsensusConflictReport, ContextPackProfile,
     ContextRequest, ContextRequestInput, ContextResponse, ContextResponseDegradation,
-    ContextResponsePagination, ContextResponseSeverity, PACK_COMMAND, PackAdmissionPosture,
-    PackAssemblySlo, PackAssemblySloActuals, PackCandidate, PackCandidateInput,
-    PackCoordinationSnapshot, PackDraft, PackFreshnessAnchorFacet, PackFreshnessFacet,
-    PackItemLifecycle, PackOmission, PackOmissionReason, PackProvenance, PackRejectionStage,
-    PackResourceProfile, PackScoreBreakdown, PackSection, PackTrustSignal, TokenBudget,
-    WhyNotSelectedInput, WhyNotSelectedReport, assemble_draft_with_profile_and_options_seeded,
+    ContextResponsePagination, ContextResponseSeverity, PACK_ATTEMPT_FAMILY_MULTIPLICITY_SCHEMA_V1,
+    PACK_COMMAND, PackAdmissionPosture, PackAssemblySlo, PackAssemblySloActuals,
+    PackAttemptFamilyMembershipSnapshot, PackAttemptFamilyMultiplicitySnapshot, PackCandidate,
+    PackCandidateInput, PackCoordinationSnapshot, PackDraft, PackFreshnessAnchorFacet,
+    PackFreshnessFacet, PackItemLifecycle, PackOmission, PackOmissionReason, PackProvenance,
+    PackRejectionStage, PackResourceProfile, PackScoreBreakdown, PackSection, PackTrustSignal,
+    TokenBudget, WhyNotSelectedInput, WhyNotSelectedReport,
+    assemble_draft_with_profile_and_options_seeded,
     budget_classifier::{AdaptiveBudgetDecision, AdaptiveBudgetInput, classify_adaptive_budget},
     estimate_tokens_default, explain_why_not_selected, pack_item_provenance_json,
     redact_pack_provenance_text,
@@ -112,7 +114,7 @@ static CONTEXT_PROXIMITY_TREE_CACHE: OnceLock<RwLock<Option<CachedContextProximi
     OnceLock::new();
 const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
 #[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
-pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V2: &str = "ee.pack.l2_cache_key.v2";
+pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V3: &str = "ee.pack.l2_cache_key.v3";
 const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2: &str = "ee.pack.l2_context_response.v2";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
 const CONTEXT_CHANGED_SYMBOL_BOOST: f32 = 0.05;
@@ -2574,6 +2576,9 @@ async fn run_context_pack_with_performance_inner(
     }
     trace.record_elapsed("memoryTierAdmission", tier_admission_start);
 
+    let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+    annotate_attempt_family_multiplicity(read_connection, &mut candidates)?;
+
     let sentinel_omissions = if options.require_fresh_sentinels {
         let reference_time =
             context_validity_reference_time(options, &effective_filters).unwrap_or_else(Utc::now);
@@ -2644,6 +2649,7 @@ async fn run_context_pack_with_performance_inner(
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let mut agent_profile =
         apply_agent_context_profile_bias(read_connection, &options.workspace_path, &mut candidates);
+    apply_attempt_family_multiplicity_discount(&mut candidates)?;
     control.check()?;
 
     let scoring_ordering_start = Instant::now();
@@ -4279,6 +4285,151 @@ fn sort_context_candidates(candidates: &mut [PackCandidate]) {
     });
 }
 
+fn annotate_attempt_family_multiplicity(
+    connection: &DbConnection,
+    candidates: &mut [PackCandidate],
+) -> Result<(), ContextPackError> {
+    let memory_ids = candidates
+        .iter()
+        .map(|candidate| candidate.memory_id.to_string())
+        .collect::<Vec<_>>();
+    let batch = connection
+        .get_attempt_family_membership_snapshots_for_memory_ids(&memory_ids)
+        .map_err(|error| {
+            ContextPackError::Pack(format!(
+                "failed to batch-resolve authoritative attempt-family membership: {error}"
+            ))
+        })?;
+    for candidate in candidates {
+        let memory_id = candidate.memory_id.to_string();
+        candidate.attempt_family_multiplicity = batch
+            .by_memory_id
+            .get(&memory_id)
+            .and_then(pack_attempt_family_multiplicity_snapshot);
+    }
+    Ok(())
+}
+
+fn pack_attempt_family_multiplicity_snapshot(
+    snapshot: &crate::db::AttemptFamilyMembershipSnapshot,
+) -> Option<PackAttemptFamilyMultiplicitySnapshot> {
+    if snapshot.families.is_empty() {
+        return None;
+    }
+
+    let overall_posture = snapshot.promotion_posture()?;
+    let mut effective_discount_factor = 1.0_f32;
+    let mut memberships = snapshot
+        .families
+        .iter()
+        .map(|family| {
+            let multiplicity = family.multiplicity();
+            let dispositions = family
+                .ledger_members
+                .iter()
+                .filter(|member| member.memory_logical_id == snapshot.memory_logical_id)
+                .map(|member| member.disposition.as_str())
+                .collect::<BTreeSet<_>>();
+            let pointer_only = family
+                .pointer_only_logical_ids
+                .iter()
+                .any(|logical_id| logical_id == &snapshot.memory_logical_id);
+            let member_disposition = if dispositions.len() == 1
+                && dispositions.contains("selected")
+                && !pointer_only
+            {
+                "selected"
+            } else if dispositions.len() == 1 && dispositions.contains("rejected") && !pointer_only
+            {
+                "rejected"
+            } else if dispositions.is_empty() && pointer_only {
+                "unslotted"
+            } else {
+                "conflicted"
+            };
+            let discount_disposition = dispositions
+                .contains("selected")
+                .then_some("selected")
+                .or_else(|| dispositions.contains("rejected").then_some("rejected"));
+            let member_discount_factor = multiplicity.member_discount_factor(discount_disposition);
+            effective_discount_factor = effective_discount_factor.min(member_discount_factor);
+            let posture = multiplicity.promotion_posture();
+            PackAttemptFamilyMembershipSnapshot {
+                family_alias: crate::models::public_attempt_family_alias(&family.family_id),
+                member_disposition: member_disposition.to_owned(),
+                member_discount_factor,
+                declared_size: multiplicity.declared_size,
+                recorded_slots: multiplicity.recorded_slots,
+                selected_count: multiplicity.selected_count,
+                rejected_count: multiplicity.rejected_count,
+                unslotted_count: multiplicity.unslotted_count,
+                duplicate_slot_count: multiplicity.duplicate_slot_count,
+                duplicate_member_count: multiplicity.duplicate_member_count,
+                out_of_range_slot_count: multiplicity.out_of_range_slot_count,
+                unrecorded_count: multiplicity.unrecorded_count(),
+                promotion_posture: posture.as_str().to_owned(),
+                promotion_reason: posture.reason().to_owned(),
+            }
+        })
+        .collect::<Vec<_>>();
+    memberships.sort_by(|left, right| left.family_alias.cmp(&right.family_alias));
+
+    Some(PackAttemptFamilyMultiplicitySnapshot {
+        schema: PACK_ATTEMPT_FAMILY_MULTIPLICITY_SCHEMA_V1,
+        effective_discount_factor,
+        promotion_posture: overall_posture.as_str().to_owned(),
+        promotion_reason: overall_posture.reason().to_owned(),
+        memberships,
+    })
+}
+
+fn pack_attempt_family_multiplicity_json(
+    snapshot: &PackAttemptFamilyMultiplicitySnapshot,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": snapshot.schema,
+        "effectiveDiscountFactor": snapshot.effective_discount_factor,
+        "promotionPosture": snapshot.promotion_posture,
+        "promotionReason": snapshot.promotion_reason,
+        "memberships": snapshot.memberships.iter().map(|membership| serde_json::json!({
+            "familyAlias": membership.family_alias,
+            "memberDisposition": membership.member_disposition,
+            "memberDiscountFactor": membership.member_discount_factor,
+            "declaredSize": membership.declared_size,
+            "recordedSlots": membership.recorded_slots,
+            "selectedCount": membership.selected_count,
+            "rejectedCount": membership.rejected_count,
+            "unslottedCount": membership.unslotted_count,
+            "duplicateSlotCount": membership.duplicate_slot_count,
+            "duplicateMemberCount": membership.duplicate_member_count,
+            "outOfRangeSlotCount": membership.out_of_range_slot_count,
+            "unrecordedCount": membership.unrecorded_count,
+            "promotionPosture": membership.promotion_posture,
+            "promotionReason": membership.promotion_reason,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn apply_attempt_family_multiplicity_discount(
+    candidates: &mut [PackCandidate],
+) -> Result<(), ContextPackError> {
+    for candidate in candidates {
+        let Some(snapshot) = &candidate.attempt_family_multiplicity else {
+            continue;
+        };
+        let factor = snapshot.effective_discount_factor;
+        candidate.relevance = UnitScore::parse(candidate.relevance.into_inner() * factor)
+            .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+        candidate.utility = UnitScore::parse(candidate.utility.into_inner() * factor)
+            .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+        if let Some(score_breakdown) = &mut candidate.score_breakdown {
+            score_breakdown.combined_score =
+                (score_breakdown.combined_score * factor).clamp(0.0, 1.0);
+        }
+    }
+    Ok(())
+}
+
 fn apply_global_store_pack_policy(
     candidates: &mut Vec<PackCandidate>,
     global_store_memory_ids: &BTreeSet<String>,
@@ -4955,6 +5106,11 @@ fn persist_pack_record_with_pack_id(
             estimated_tokens: item.estimated_tokens,
             relevance: item.relevance.into_inner(),
             utility: item.utility.into_inner(),
+            combined_score: item.score_breakdown.map(|score| score.combined_score),
+            attempt_family_multiplicity: item
+                .attempt_family_multiplicity
+                .as_ref()
+                .map(pack_attempt_family_multiplicity_json),
             why: item.why.clone(),
             diversity_key: item.diversity_key.clone(),
             provenance_json: pack_item_provenance_json(&item.provenance),
@@ -4973,6 +5129,10 @@ fn persist_pack_record_with_pack_id(
             memory_id: omission.memory_id.to_string(),
             estimated_tokens: omission.estimated_tokens,
             reason: omission.reason.as_str().to_string(),
+            attempt_family_multiplicity: omission
+                .attempt_family_multiplicity
+                .as_ref()
+                .map(pack_attempt_family_multiplicity_json),
         })
         .collect();
     subspans.omission_input_build = omission_input_start.elapsed();
@@ -6001,7 +6161,7 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        PACK_L2_CACHE_KEY_SCHEMA_V2.as_bytes(),
+        PACK_L2_CACHE_KEY_SCHEMA_V3.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "workspace_id", input.workspace_id.as_bytes());
     hash_labeled_u64(
@@ -6362,6 +6522,7 @@ fn compute_pack_hash_components(
                 hasher.update(&score_breakdown.ppr_score.to_le_bytes());
                 hasher.update(&score_breakdown.combined_score.to_le_bytes());
             }
+            hash_attempt_family_multiplicity(hasher, item.attempt_family_multiplicity.as_ref());
             hasher.update(item.why.as_bytes());
             hasher.update(item.selected_in.as_str().as_bytes());
         }
@@ -6464,10 +6625,18 @@ fn compute_pack_hash_components(
         draft_hasher.update(omission.memory_id.to_string().as_bytes());
         draft_hasher.update(&omission.estimated_tokens.to_le_bytes());
         draft_hasher.update(omission.reason.as_str().as_bytes());
+        hash_attempt_family_multiplicity(
+            &mut draft_hasher,
+            omission.attempt_family_multiplicity.as_ref(),
+        );
         if output_options.include_skipped {
             composite_hasher.update(omission.memory_id.to_string().as_bytes());
             composite_hasher.update(&omission.estimated_tokens.to_le_bytes());
             composite_hasher.update(omission.reason.as_str().as_bytes());
+            hash_attempt_family_multiplicity(
+                &mut composite_hasher,
+                omission.attempt_family_multiplicity.as_ref(),
+            );
         }
     }
 
@@ -6491,6 +6660,93 @@ fn compute_pack_hash_components(
         degraded_summary_hash: finalize_blake3(degraded_hasher),
         rendered_text_hash: finalize_blake3(rendered_text_hasher),
         composite_hash: finalize_blake3(composite_hasher),
+    }
+}
+
+fn hash_attempt_family_multiplicity(
+    hasher: &mut Hasher,
+    snapshot: Option<&PackAttemptFamilyMultiplicitySnapshot>,
+) {
+    hash_labeled_bool(
+        hasher,
+        "attempt_family_multiplicity.present",
+        snapshot.is_some(),
+    );
+    let Some(snapshot) = snapshot else {
+        return;
+    };
+    hash_labeled_bytes(
+        hasher,
+        "attempt_family_multiplicity.schema",
+        snapshot.schema.as_bytes(),
+    );
+    hash_labeled_bytes(
+        hasher,
+        "attempt_family_multiplicity.effective_discount_factor",
+        &snapshot.effective_discount_factor.to_le_bytes(),
+    );
+    hash_labeled_bytes(
+        hasher,
+        "attempt_family_multiplicity.promotion_posture",
+        snapshot.promotion_posture.as_bytes(),
+    );
+    hash_labeled_bytes(
+        hasher,
+        "attempt_family_multiplicity.promotion_reason",
+        snapshot.promotion_reason.as_bytes(),
+    );
+    hash_labeled_u64(
+        hasher,
+        "attempt_family_multiplicity.membership_count",
+        u64::try_from(snapshot.memberships.len()).unwrap_or(u64::MAX),
+    );
+    for (index, membership) in snapshot.memberships.iter().enumerate() {
+        let prefix = format!("attempt_family_multiplicity.membership.{index}");
+        hash_labeled_bytes(
+            hasher,
+            &format!("{prefix}.family_alias"),
+            membership.family_alias.as_bytes(),
+        );
+        hash_labeled_bytes(
+            hasher,
+            &format!("{prefix}.member_disposition"),
+            membership.member_disposition.as_bytes(),
+        );
+        hash_labeled_bytes(
+            hasher,
+            &format!("{prefix}.member_discount_factor"),
+            &membership.member_discount_factor.to_le_bytes(),
+        );
+        hash_labeled_optional_u64(
+            hasher,
+            &format!("{prefix}.declared_size"),
+            membership.declared_size.map(u64::from),
+        );
+        for (label, count) in [
+            ("recorded_slots", membership.recorded_slots),
+            ("selected_count", membership.selected_count),
+            ("rejected_count", membership.rejected_count),
+            ("unslotted_count", membership.unslotted_count),
+            ("duplicate_slot_count", membership.duplicate_slot_count),
+            ("duplicate_member_count", membership.duplicate_member_count),
+            (
+                "out_of_range_slot_count",
+                membership.out_of_range_slot_count,
+            ),
+            ("unrecorded_count", membership.unrecorded_count),
+        ] {
+            hash_labeled_u64(hasher, &format!("{prefix}.{label}"), u64::from(count));
+        }
+        hash_labeled_bytes(
+            hasher,
+            &format!("{prefix}.promotion_posture"),
+            membership.promotion_posture.as_bytes(),
+        );
+        hash_labeled_bytes(
+            hasher,
+            &format!("{prefix}.promotion_reason"),
+            membership.promotion_reason.as_bytes(),
+        );
     }
 }
 
@@ -9129,6 +9385,7 @@ fn filter_candidates_by_required_fresh_sentinels(
                     estimated_tokens: candidate.estimated_tokens,
                     relevance: candidate.relevance,
                     utility: candidate.utility,
+                    attempt_family_multiplicity: candidate.attempt_family_multiplicity.clone(),
                     reason: PackOmissionReason::ExcludedByPolicy,
                     rejected_at: PackRejectionStage::Selection,
                     feasible: false,
@@ -16634,6 +16891,7 @@ pub fn unrelated_context() -> u64 {{
                 utility: UnitScore::parse(0.7).map_err(|error| error.to_string())?,
                 proximity_to_seed: None,
                 score_breakdown: None,
+                attempt_family_multiplicity: None,
                 provenance: vec![
                     PackProvenance::new(ProvenanceUri::EeMemory(memory_id), "test source")
                         .map_err(|error| error.to_string())?,
@@ -16734,6 +16992,233 @@ pub fn unrelated_context() -> u64 {{
     }
 
     #[test]
+    fn authoritative_batch_annotation_drives_selected_and_rejected_pack_scores()
+    -> Result<(), String> {
+        use crate::pack::{
+            PackCandidate, PackCandidateInput, PackProvenance, PackScoreBreakdown, PackSection,
+        };
+
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_afpack000000000000000000001";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-attempt-family-pack".to_owned(),
+                    name: Some("attempt family pack".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let selected_id = MemoryId::from_uuid(uuid::Uuid::from_u128(8_101));
+        let rejected_id = MemoryId::from_uuid(uuid::Uuid::from_u128(8_102));
+        for (memory_id, content) in [
+            (selected_id, "selected attempt"),
+            (rejected_id, "rejected attempt"),
+        ] {
+            connection
+                .insert_memory(
+                    &memory_id.to_string(),
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.to_owned(),
+                        level: "working".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.6,
+                        importance: 0.5,
+                        provenance_uri: None,
+                        trust_class: TrustClass::AgentAssertion.as_str().to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        const RAW_FAMILY_ID: &str = "AKIAIOSFODNN7EXAMPLE";
+        for (memory_id, attempt_index, disposition) in
+            [(selected_id, 1, "selected"), (rejected_id, 2, "rejected")]
+        {
+            connection
+                .set_memory_attempt_family(
+                    &memory_id.to_string(),
+                    &crate::db::MemoryAttemptFamily {
+                        family_id: RAW_FAMILY_ID.to_owned(),
+                        declared_size: Some(3),
+                        attempt_index: Some(attempt_index),
+                        disposition: Some(disposition.to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        let candidate = |memory_id: MemoryId| -> Result<PackCandidate, String> {
+            PackCandidate::new(PackCandidateInput {
+                memory_id,
+                section: PackSection::Evidence,
+                content: "attempt-family evidence".to_owned(),
+                estimated_tokens: 8,
+                relevance: UnitScore::parse(0.9).map_err(|error| error.to_string())?,
+                utility: UnitScore::parse(0.6).map_err(|error| error.to_string())?,
+                provenance: vec![
+                    PackProvenance::new(
+                        ProvenanceUri::EeMemory(memory_id),
+                        "authoritative attempt-family ledger",
+                    )
+                    .map_err(|error| error.to_string())?,
+                ],
+                why: "candidate received every upstream boost".to_owned(),
+            })
+            .map(|candidate| {
+                candidate.with_score_breakdown(PackScoreBreakdown::ppr(0.8, 0.7, 0.75))
+            })
+            .map_err(|error| error.to_string())
+        };
+        let mut candidates = vec![candidate(selected_id)?, candidate(rejected_id)?];
+        super::annotate_attempt_family_multiplicity(&connection, &mut candidates)
+            .map_err(|error| error.to_string())?;
+        super::apply_attempt_family_multiplicity_discount(&mut candidates)
+            .map_err(|error| error.to_string())?;
+
+        let selected_snapshot = candidates[0]
+            .attempt_family_multiplicity
+            .as_ref()
+            .ok_or_else(|| "selected authoritative snapshot missing".to_owned())?;
+        let rejected_snapshot = candidates[1]
+            .attempt_family_multiplicity
+            .as_ref()
+            .ok_or_else(|| "rejected authoritative snapshot missing".to_owned())?;
+        assert_eq!(selected_snapshot.promotion_posture, "blocked_incomplete");
+        assert_eq!(selected_snapshot.effective_discount_factor, 1.0 / 3.0);
+        assert_eq!(rejected_snapshot.effective_discount_factor, 1.0);
+        assert_eq!(
+            selected_snapshot.memberships[0].member_disposition,
+            "selected"
+        );
+        assert_eq!(
+            rejected_snapshot.memberships[0].member_disposition,
+            "rejected"
+        );
+        assert!((candidates[0].relevance.into_inner() - 0.3).abs() < 1.0e-7);
+        assert!((candidates[0].utility.into_inner() - 0.2).abs() < 1.0e-7);
+        assert!(
+            (candidates[0]
+                .score_breakdown
+                .ok_or_else(|| "selected combined score missing".to_owned())?
+                .combined_score
+                - 0.25)
+                .abs()
+                < 1.0e-7
+        );
+        assert_eq!(candidates[1].relevance.into_inner(), 0.9);
+        assert_eq!(candidates[1].utility.into_inner(), 0.6);
+        assert_eq!(
+            candidates[1]
+                .score_breakdown
+                .ok_or_else(|| "rejected combined score missing".to_owned())?
+                .combined_score,
+            0.75
+        );
+        let public_snapshot = super::pack_attempt_family_multiplicity_json(selected_snapshot);
+        assert!(!public_snapshot.to_string().contains(RAW_FAMILY_ID));
+        assert_eq!(
+            public_snapshot["memberships"][0]["familyAlias"],
+            serde_json::json!(crate::models::public_attempt_family_alias(RAW_FAMILY_ID))
+        );
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn multiplicity_discount_scales_final_selected_scores_but_not_rejected_evidence()
+    -> Result<(), String> {
+        use crate::models::{MemoryId, ProvenanceUri, UnitScore};
+        use crate::pack::{
+            PACK_ATTEMPT_FAMILY_MULTIPLICITY_SCHEMA_V1, PackAttemptFamilyMembershipSnapshot,
+            PackAttemptFamilyMultiplicitySnapshot, PackCandidate, PackCandidateInput,
+            PackProvenance, PackScoreBreakdown, PackSection,
+        };
+
+        let candidate = |seed: u128| -> Result<PackCandidate, String> {
+            PackCandidate::new(PackCandidateInput {
+                memory_id: MemoryId::from_uuid(uuid::Uuid::from_u128(seed)),
+                section: PackSection::Evidence,
+                content: "attempt-family evidence".to_owned(),
+                estimated_tokens: 8,
+                relevance: UnitScore::parse(0.9).map_err(|error| error.to_string())?,
+                utility: UnitScore::parse(0.6).map_err(|error| error.to_string())?,
+                provenance: vec![
+                    PackProvenance::new(
+                        ProvenanceUri::from_str("test://attempt-family-ranking")
+                            .map_err(|error| error.to_string())?,
+                        "ranking fixture",
+                    )
+                    .map_err(|error| error.to_string())?,
+                ],
+                why: "candidate received every upstream boost".to_owned(),
+            })
+            .map(|candidate| {
+                candidate.with_score_breakdown(PackScoreBreakdown::ppr(0.8, 0.7, 0.75))
+            })
+            .map_err(|error| error.to_string())
+        };
+        let snapshot = |disposition: &str, factor: f32| PackAttemptFamilyMultiplicitySnapshot {
+            schema: PACK_ATTEMPT_FAMILY_MULTIPLICITY_SCHEMA_V1,
+            effective_discount_factor: factor,
+            promotion_posture: "blocked_incomplete".to_owned(),
+            promotion_reason: "not every declared attempt slot is recorded".to_owned(),
+            memberships: vec![PackAttemptFamilyMembershipSnapshot {
+                family_alias: "afm_0123456789abcdef0123456789abcdef".to_owned(),
+                member_disposition: disposition.to_owned(),
+                member_discount_factor: factor,
+                declared_size: Some(3),
+                recorded_slots: 2,
+                selected_count: 1,
+                rejected_count: 1,
+                unslotted_count: 0,
+                duplicate_slot_count: 0,
+                duplicate_member_count: 0,
+                out_of_range_slot_count: 0,
+                unrecorded_count: 1,
+                promotion_posture: "blocked_incomplete".to_owned(),
+                promotion_reason: "not every declared attempt slot is recorded".to_owned(),
+            }],
+        };
+
+        let mut selected = candidate(8001)?;
+        selected.attempt_family_multiplicity = Some(snapshot("selected", 1.0 / 3.0));
+        let mut rejected = candidate(8002)?;
+        rejected.attempt_family_multiplicity = Some(snapshot("rejected", 1.0));
+        let mut candidates = vec![selected, rejected];
+        super::apply_attempt_family_multiplicity_discount(&mut candidates)?;
+
+        assert!((candidates[0].relevance.into_inner() - 0.3).abs() < 1.0e-7);
+        assert!((candidates[0].utility.into_inner() - 0.2).abs() < 1.0e-7);
+        assert!(
+            (candidates[0]
+                .score_breakdown
+                .ok_or_else(|| "selected score breakdown missing".to_owned())?
+                .combined_score
+                - 0.25)
+                .abs()
+                < 1.0e-7
+        );
+        assert!((candidates[1].relevance.into_inner() - 0.9).abs() < f32::EPSILON);
+        assert!((candidates[1].utility.into_inner() - 0.6).abs() < f32::EPSILON);
+        assert_eq!(
+            candidates[1]
+                .score_breakdown
+                .ok_or_else(|| "rejected score breakdown missing".to_owned())?
+                .combined_score,
+            0.75
+        );
+        Ok(())
+    }
+
+    #[test]
     fn pack_hash_includes_content_provenance_and_degradation() -> Result<(), String> {
         use super::{
             ContextPackOutputOptions, ContextPackOutputProfile, ContextResponseDegradation,
@@ -16744,10 +17229,12 @@ pub fn unrelated_context() -> u64 {{
         };
         use crate::models::{ProvenanceUri, TrustClass, UnitScore};
         use crate::pack::{
-            ContextRequest, DEFAULT_COORDINATION_STALE_AFTER_MS, PackCoordinationSnapshot,
-            PackDraft, PackDraftItem, PackOmission, PackOmissionReason, PackProvenance,
-            PackRejectionStage, PackSection, PackSelectionAudit, PackSelectionObjective,
-            PackSelectionPhase, PackTrustSignal, TokenBudget,
+            ContextRequest, DEFAULT_COORDINATION_STALE_AFTER_MS,
+            PACK_ATTEMPT_FAMILY_MULTIPLICITY_SCHEMA_V1, PackAttemptFamilyMembershipSnapshot,
+            PackAttemptFamilyMultiplicitySnapshot, PackCoordinationSnapshot, PackDraft,
+            PackDraftItem, PackOmission, PackOmissionReason, PackProvenance, PackRejectionStage,
+            PackSection, PackSelectionAudit, PackSelectionObjective, PackSelectionPhase,
+            PackTrustSignal, TokenBudget,
         };
 
         let request =
@@ -16758,6 +17245,28 @@ pub fn unrelated_context() -> u64 {{
         let mem_c = MemoryId::from_uuid(uuid::Uuid::from_u128(3));
         let mem_d = MemoryId::from_uuid(uuid::Uuid::from_u128(4));
         let budget = TokenBudget::default_context();
+        let multiplicity_snapshot = PackAttemptFamilyMultiplicitySnapshot {
+            schema: PACK_ATTEMPT_FAMILY_MULTIPLICITY_SCHEMA_V1,
+            effective_discount_factor: 1.0 / 3.0,
+            promotion_posture: "blocked_incomplete".to_owned(),
+            promotion_reason: "not every declared attempt slot is recorded".to_owned(),
+            memberships: vec![PackAttemptFamilyMembershipSnapshot {
+                family_alias: "afm_0123456789abcdef0123456789abcdef".to_owned(),
+                member_disposition: "selected".to_owned(),
+                member_discount_factor: 1.0 / 3.0,
+                declared_size: Some(3),
+                recorded_slots: 1,
+                selected_count: 1,
+                rejected_count: 0,
+                unslotted_count: 0,
+                duplicate_slot_count: 0,
+                duplicate_member_count: 0,
+                out_of_range_slot_count: 0,
+                unrecorded_count: 2,
+                promotion_posture: "blocked_incomplete".to_owned(),
+                promotion_reason: "not every declared attempt slot is recorded".to_owned(),
+            }],
+        };
 
         let base_item = PackDraftItem {
             rank: 1,
@@ -16769,6 +17278,7 @@ pub fn unrelated_context() -> u64 {{
             utility: crate::models::UnitScore::parse(0.7).map_err(|error| error.to_string())?,
             proximity_to_seed: None,
             score_breakdown: None,
+            attempt_family_multiplicity: None,
             provenance: vec![
                 PackProvenance::new(ProvenanceUri::EeMemory(mem_b), "source note")
                     .map_err(|error| error.to_string())?,
@@ -16992,6 +17502,16 @@ pub fn unrelated_context() -> u64 {{
         let hash_trust = compute_pack_hash(&request, &draft_trust, &base_degraded);
         assert_ne!(hash_base, hash_trust, "trust change must alter hash");
 
+        let mut draft_selected_multiplicity = base_draft.clone();
+        draft_selected_multiplicity.items[0].attempt_family_multiplicity =
+            Some(multiplicity_snapshot.clone());
+        let hash_selected_multiplicity =
+            compute_pack_hash(&request, &draft_selected_multiplicity, &base_degraded);
+        assert_ne!(
+            hash_base, hash_selected_multiplicity,
+            "selected multiplicity snapshot must alter hash"
+        );
+
         // Different omissions produce different hash.
         let mut draft_omission = base_draft.clone();
         draft_omission.omitted = vec![PackOmission {
@@ -16999,6 +17519,7 @@ pub fn unrelated_context() -> u64 {{
             estimated_tokens: 50,
             relevance: UnitScore::parse(0.5).map_err(|error| error.to_string())?,
             utility: UnitScore::parse(0.4).map_err(|error| error.to_string())?,
+            attempt_family_multiplicity: None,
             reason: PackOmissionReason::TokenBudgetExceeded,
             rejected_at: PackRejectionStage::Selection,
             feasible: false,
@@ -17006,6 +17527,15 @@ pub fn unrelated_context() -> u64 {{
         }];
         let hash_omission = compute_pack_hash(&request, &draft_omission, &base_degraded);
         assert_ne!(hash_base, hash_omission, "omission change must alter hash");
+        let mut draft_omission_multiplicity = draft_omission.clone();
+        draft_omission_multiplicity.omitted[0].attempt_family_multiplicity =
+            Some(multiplicity_snapshot);
+        let hash_omission_multiplicity =
+            compute_pack_hash(&request, &draft_omission_multiplicity, &base_degraded);
+        assert_ne!(
+            hash_omission, hash_omission_multiplicity,
+            "omitted multiplicity snapshot must alter hash"
+        );
 
         // Different degradations produce different hash.
         let degraded_with_issue = vec![ContextResponseDegradation {

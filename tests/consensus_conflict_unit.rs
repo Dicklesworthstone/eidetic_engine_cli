@@ -52,6 +52,7 @@ fn item(
         utility: score(0.7),
         proximity_to_seed: None,
         score_breakdown: None,
+        attempt_family_multiplicity: None,
         provenance: vec![
             PackProvenance::new(ProvenanceUri::EeMemory(memory_id), "test evidence")
                 .expect("provenance should be valid"),

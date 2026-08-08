@@ -29,7 +29,8 @@ bypasses L2.
 ## Canonical Key
 
 The L2 key is a BLAKE3 hash of every input that can affect emitted pack JSON.
-The canonical key schema is `ee.pack.l2_cache_key.v2`.
+The canonical key schema is `ee.pack.l2_cache_key.v3`. V3 invalidates cached
+packs assembled before multiplicity-aware ranking and frozen family snapshots.
 At minimum, the canonical input set includes:
 
 - workspace ID

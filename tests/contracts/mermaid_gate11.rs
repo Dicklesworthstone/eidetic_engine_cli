@@ -148,6 +148,7 @@ fn why_fixture() -> WhyReport {
                 ledger_hash: None,
                 ledger_status: "missing".to_string(),
                 ledger_storage: serde_json::json!({"mode": "missing"}),
+                attempt_family_multiplicity: None,
                 selected_at: "2026-01-02T03:05:06Z".to_string(),
             }),
         },

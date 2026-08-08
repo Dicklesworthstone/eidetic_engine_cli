@@ -17844,7 +17844,7 @@ pub struct SearchFamilyMember {
     pub discount_factor: f32,
     pub promotion_posture: String,
     pub promotion_reason: String,
-    pub membership_family_ids: Vec<String>,
+    pub membership_family_aliases: Vec<String>,
     pub kind: String,
     pub level: String,
     pub trust_class: String,
@@ -17858,7 +17858,7 @@ pub struct SearchFamilyMember {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchFamilyReport {
     pub workspace_id: String,
-    pub family_id: String,
+    pub family_alias: String,
     pub declared_size: Option<u32>,
     pub origin: Option<String>,
     pub recorded_slots: u32,
@@ -17886,7 +17886,7 @@ impl SearchFamilyReport {
         serde_json::json!({
             "schema": crate::models::schema::SEARCH_FAMILY_SCHEMA_V1,
             "workspaceId": self.workspace_id,
-            "familyId": self.family_id,
+            "familyAlias": self.family_alias,
             "declaredSize": self.declared_size,
             "origin": self.origin,
             "recordedSlots": self.recorded_slots,
@@ -17917,7 +17917,7 @@ impl SearchFamilyReport {
                         "discountFactor": member.discount_factor,
                         "promotionPosture": member.promotion_posture,
                         "promotionReason": member.promotion_reason,
-                        "membershipFamilyIds": member.membership_family_ids,
+                        "membershipFamilyAliases": member.membership_family_aliases,
                         "kind": member.kind,
                         "level": member.level,
                         "trustClass": member.trust_class,
@@ -17939,7 +17939,7 @@ impl SearchFamilyReport {
              ({} selected, {} rejected, {} unslotted, {} unrecorded)\n  Promotion eligible: {}\n  \
              Memory scope: {}{}\n  Visible members: {}\n  Scope-filtered members: {}\n  \
              Missing live revisions: {}\n",
-            self.family_id,
+            self.family_alias,
             self.posture_summary,
             self.promotion_posture,
             self.promotion_reason,
@@ -18141,7 +18141,11 @@ pub fn run_family_retrieval(
                 disposition,
                 promotion_posture: membership_posture.as_str().to_owned(),
                 promotion_reason: membership_posture.reason().to_owned(),
-                membership_family_ids: snapshot.family_ids(),
+                membership_family_aliases: snapshot
+                    .family_ids()
+                    .iter()
+                    .map(|family_id| crate::models::public_attempt_family_alias(family_id))
+                    .collect(),
                 kind: memory.kind.clone(),
                 level: memory.level.clone(),
                 trust_class: memory.trust_class.clone(),
@@ -18177,7 +18181,7 @@ pub fn run_family_retrieval(
 
     Ok(SearchFamilyReport {
         workspace_id,
-        family_id: family_id.to_owned(),
+        family_alias: crate::models::public_attempt_family_alias(family_id),
         declared_size: multiplicity.declared_size,
         origin,
         recorded_slots: multiplicity.recorded_slots,

@@ -37,6 +37,8 @@ pub const DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR: f32 = 0.05;
 pub const MAX_PACK_SKIPPED_ITEMS: usize = 50;
 pub const COORDINATION_SNAPSHOT_SCHEMA_V1: &str = "ee.coordination_snapshot.v1";
 pub const PACK_REVISION_TOKEN_SCHEMA_V1: &str = "ee.pack.revision_token.v1";
+pub const PACK_ATTEMPT_FAMILY_MULTIPLICITY_SCHEMA_V1: &str =
+    "ee.pack.attempt_family_multiplicity.v1";
 pub const WHY_NOT_SELECTED_SCHEMA_V1: &str = "ee.why_not_selected.v1";
 pub const DEFAULT_COORDINATION_STALE_AFTER_MS: u64 = 86_400_000;
 
@@ -1701,6 +1703,7 @@ pub struct PackCandidate {
     pub utility: UnitScore,
     pub proximity_to_seed: Option<f32>,
     pub score_breakdown: Option<PackScoreBreakdown>,
+    pub attempt_family_multiplicity: Option<PackAttemptFamilyMultiplicitySnapshot>,
     pub provenance: Vec<PackProvenance>,
     pub why: String,
     pub diversity_key: Option<String>,
@@ -1726,6 +1729,40 @@ pub struct PackScoreBreakdown {
     pub text_score: f32,
     pub ppr_score: f32,
     pub combined_score: f32,
+}
+
+/// Redaction-safe, immutable attempt-family state captured at pack assembly.
+///
+/// Family lookup IDs never enter this projection. Each membership carries only
+/// a domain-separated public alias plus the exact posture and discount used by
+/// ranking, so replay cannot be rewritten by siblings recorded later.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackAttemptFamilyMultiplicitySnapshot {
+    pub schema: &'static str,
+    pub effective_discount_factor: f32,
+    pub promotion_posture: String,
+    pub promotion_reason: String,
+    pub memberships: Vec<PackAttemptFamilyMembershipSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackAttemptFamilyMembershipSnapshot {
+    pub family_alias: String,
+    pub member_disposition: String,
+    pub member_discount_factor: f32,
+    pub declared_size: Option<u32>,
+    pub recorded_slots: u32,
+    pub selected_count: u32,
+    pub rejected_count: u32,
+    pub unslotted_count: u32,
+    pub duplicate_slot_count: u32,
+    pub duplicate_member_count: u32,
+    pub out_of_range_slot_count: u32,
+    pub unrecorded_count: u32,
+    pub promotion_posture: String,
+    pub promotion_reason: String,
 }
 
 impl PackScoreBreakdown {
@@ -1851,6 +1888,7 @@ impl PackCandidate {
             utility,
             proximity_to_seed: None,
             score_breakdown: None,
+            attempt_family_multiplicity: None,
             provenance,
             why,
             diversity_key: None,
@@ -2045,6 +2083,7 @@ impl PackDraft {
                     estimated_tokens: item.estimated_tokens,
                     relevance: item.relevance,
                     utility: item.utility,
+                    attempt_family_multiplicity: item.attempt_family_multiplicity.clone(),
                     reason: PackOmissionReason::ContradictionSuppressed,
                     rejected_at: PackRejectionStage::Selection,
                     feasible: true,
@@ -5097,6 +5136,7 @@ pub struct PackDraftItem {
     pub utility: UnitScore,
     pub proximity_to_seed: Option<f32>,
     pub score_breakdown: Option<PackScoreBreakdown>,
+    pub attempt_family_multiplicity: Option<PackAttemptFamilyMultiplicitySnapshot>,
     pub provenance: Vec<PackProvenance>,
     pub why: String,
     pub diversity_key: Option<String>,
@@ -5170,6 +5210,7 @@ impl PackDraftItem {
             utility,
             proximity_to_seed,
             score_breakdown,
+            attempt_family_multiplicity,
             provenance,
             why,
             diversity_key,
@@ -5187,6 +5228,7 @@ impl PackDraftItem {
             utility,
             proximity_to_seed,
             score_breakdown,
+            attempt_family_multiplicity,
             provenance,
             why,
             diversity_key,
@@ -5218,6 +5260,7 @@ fn redact_pack_candidate(candidate: PackCandidate) -> (PackCandidate, Vec<PackIt
         utility,
         proximity_to_seed,
         score_breakdown,
+        attempt_family_multiplicity,
         provenance,
         why,
         diversity_key,
@@ -5241,6 +5284,7 @@ fn redact_pack_candidate(candidate: PackCandidate) -> (PackCandidate, Vec<PackIt
             utility,
             proximity_to_seed,
             score_breakdown,
+            attempt_family_multiplicity,
             provenance,
             why,
             diversity_key,
@@ -5271,6 +5315,7 @@ pub struct PackOmission {
     pub estimated_tokens: u32,
     pub relevance: UnitScore,
     pub utility: UnitScore,
+    pub attempt_family_multiplicity: Option<PackAttemptFamilyMultiplicitySnapshot>,
     pub reason: PackOmissionReason,
     pub rejected_at: PackRejectionStage,
     pub feasible: bool,
@@ -5302,6 +5347,7 @@ impl PackOmission {
             estimated_tokens: candidate.estimated_tokens,
             relevance: candidate.relevance,
             utility: candidate.utility,
+            attempt_family_multiplicity: candidate.attempt_family_multiplicity.clone(),
             reason,
             rejected_at,
             feasible: false,

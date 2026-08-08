@@ -793,6 +793,7 @@ fn make_context_response_fixture() -> ContextResponse {
             utility: score(0.74),
             proximity_to_seed: None,
             score_breakdown: None,
+            attempt_family_multiplicity: None,
             provenance: vec![provenance_a],
             why: "matched renderer parity via fixture (relevance 0.8200, utility 0.7400)"
                 .to_owned(),
@@ -814,6 +815,7 @@ fn make_context_response_fixture() -> ContextResponse {
             utility: score(0.58),
             proximity_to_seed: None,
             score_breakdown: None,
+            attempt_family_multiplicity: None,
             provenance: vec![provenance_b],
             why: "matched renderer parity via fixture (relevance 0.6700, utility 0.5800)"
                 .to_owned(),
@@ -859,6 +861,7 @@ fn make_context_response_fixture() -> ContextResponse {
             estimated_tokens: 900,
             relevance: score(0.44),
             utility: score(0.33),
+            attempt_family_multiplicity: None,
             reason: PackOmissionReason::TokenBudgetExceeded,
             rejected_at: PackRejectionStage::Selection,
             feasible: false,

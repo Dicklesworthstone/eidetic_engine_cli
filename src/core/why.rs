@@ -272,6 +272,8 @@ pub struct PackSelectionExplanation {
     pub relevance: f32,
     /// Utility score recorded when the pack was assembled.
     pub utility: f32,
+    /// Redaction-safe multiplicity snapshot frozen into the selected ledger item.
+    pub attempt_family_multiplicity: Option<JsonValue>,
     /// Pack item's persisted why text.
     pub why: String,
     /// Persisted pack hash.
@@ -2638,6 +2640,10 @@ fn pack_selection_from_ledger(
         estimated_tokens: pack_ledger_u32(item, "estimatedTokens")?,
         relevance: pack_ledger_score(item, "/scores/relevance")?,
         utility: pack_ledger_score(item, "/scores/utility")?,
+        attempt_family_multiplicity: item
+            .get("attemptFamilyMultiplicity")
+            .filter(|snapshot| !snapshot.is_null())
+            .cloned(),
         why,
         pack_hash: record.pack_hash,
         ledger_hash: record.ledger_hash,
@@ -3581,6 +3587,7 @@ mod tests {
             estimated_tokens: 8,
             relevance: 0.91,
             utility: 0.8,
+            attempt_family_multiplicity: None,
             why: "selected because it matches the release task".to_string(),
             pack_hash: "hash".to_string(),
             ledger_hash: None,

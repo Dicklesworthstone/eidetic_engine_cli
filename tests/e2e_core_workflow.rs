@@ -521,7 +521,7 @@ fn search_family_is_queryless_complete_scoped_and_redaction_safe() -> TestResult
     let second = tempfile::tempdir().map_err(|error| error.to_string())?;
     let first_workspace = first.path().to_string_lossy().to_string();
     let second_workspace = second.path().to_string_lossy().to_string();
-    let family_id = "release-matrix-2026-08";
+    let family_id = "AKIAIOSFODNN7EXAMPLE";
 
     for workspace in [&first_workspace, &second_workspace] {
         let init = run_ee(&["--workspace", workspace, "init", "--json"])?;
@@ -630,6 +630,13 @@ fn search_family_is_queryless_complete_scoped_and_redaction_safe() -> TestResult
         &Some(&serde_json::json!("ee.search.family.v1")),
         "family payload schema",
     )?;
+    ensure(
+        family_json
+            .pointer("/data/familyAlias")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|alias| alias.starts_with("afm_") && alias.len() == 36),
+        "family search exposes only a stable domain-separated alias",
+    )?;
     for (pointer, expected) in [
         ("/data/declaredSize", 3_u64),
         ("/data/recordedSlots", 3),
@@ -721,6 +728,8 @@ fn search_family_is_queryless_complete_scoped_and_redaction_safe() -> TestResult
         serde_json::to_string(&family_json).map_err(|error| error.to_string())?;
     ensure(
         !serialized_family.contains(raw_secret)
+            && !serialized_family.contains(family_id)
+            && !serialized_family.contains("AKIA")
             && !serialized_family.contains("redaction-fixture")
             && !serialized_family.contains("/Users/alice"),
         "family output must not project raw content secrets or local provenance paths",

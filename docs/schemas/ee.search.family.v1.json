@@ -8,7 +8,7 @@
   "required": [
     "schema",
     "workspaceId",
-    "familyId",
+    "familyAlias",
     "declaredSize",
     "origin",
     "recordedSlots",
@@ -32,11 +32,9 @@
   "properties": {
     "schema": { "const": "ee.search.family.v1" },
     "workspaceId": { "type": "string", "minLength": 1 },
-    "familyId": {
+    "familyAlias": {
       "type": "string",
-      "minLength": 1,
-      "maxLength": 64,
-      "pattern": "^[A-Za-z0-9._:-]+$"
+      "pattern": "^afm_[0-9a-f]{32}$"
     },
     "declaredSize": {
       "type": ["integer", "null"],
@@ -99,7 +97,7 @@
         "discountFactor",
         "promotionPosture",
         "promotionReason",
-        "membershipFamilyIds",
+        "membershipFamilyAliases",
         "kind",
         "level",
         "trustClass",
@@ -124,11 +122,11 @@
         "discountFactor": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
         "promotionPosture": { "$ref": "#/$defs/promotionPosture" },
         "promotionReason": { "type": "string", "minLength": 1 },
-        "membershipFamilyIds": {
+        "membershipFamilyAliases": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "type": "string", "minLength": 1, "maxLength": 64 }
+          "items": { "type": "string", "pattern": "^afm_[0-9a-f]{32}$" }
         },
         "kind": { "type": "string", "minLength": 1 },
         "level": { "type": "string", "minLength": 1 },

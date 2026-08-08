@@ -363,6 +363,7 @@
         },
         "estimatedTokens": {"type": "integer", "minimum": 1},
         "scores": {"$ref": "#/$defs/scores"},
+        "attemptFamilyMultiplicity": {"$ref": "#/$defs/attemptFamilyMultiplicity"},
         "why": {"$ref": "#/$defs/textRecord"},
         "diversityKeyHash": {"$ref": "#/$defs/blake3Hash"},
         "trustClass": {
@@ -385,7 +386,8 @@
       "additionalProperties": false,
       "properties": {
         "relevance": {"type": "number", "minimum": 0, "maximum": 1},
-        "utility": {"type": "number", "minimum": 0, "maximum": 1}
+        "utility": {"type": "number", "minimum": 0, "maximum": 1},
+        "combinedScore": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
       }
     },
     "provenance": {
@@ -424,6 +426,7 @@
       "properties": {
         "memoryId": {"$ref": "#/$defs/memoryId"},
         "estimatedTokens": {"type": "integer", "minimum": 1},
+        "attemptFamilyMultiplicity": {"$ref": "#/$defs/attemptFamilyMultiplicity"},
         "reason": {
           "type": "string",
           "enum": [
@@ -436,6 +439,88 @@
           ]
         }
       }
+    },
+    "attemptFamilyMultiplicity": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "effectiveDiscountFactor",
+            "promotionPosture",
+            "promotionReason",
+            "memberships"
+          ],
+          "properties": {
+            "schema": {"const": "ee.pack.attempt_family_multiplicity.v1"},
+            "effectiveDiscountFactor": {"type": "number", "minimum": 0, "maximum": 1},
+            "promotionPosture": {"$ref": "#/$defs/attemptFamilyPromotionPosture"},
+            "promotionReason": {"type": "string", "minLength": 1},
+            "memberships": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"$ref": "#/$defs/attemptFamilyMembership"}
+            }
+          }
+        }
+      ]
+    },
+    "attemptFamilyMembership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "familyAlias",
+        "memberDisposition",
+        "memberDiscountFactor",
+        "declaredSize",
+        "recordedSlots",
+        "selectedCount",
+        "rejectedCount",
+        "unslottedCount",
+        "duplicateSlotCount",
+        "duplicateMemberCount",
+        "outOfRangeSlotCount",
+        "unrecordedCount",
+        "promotionPosture",
+        "promotionReason"
+      ],
+      "properties": {
+        "familyAlias": {"type": "string", "pattern": "^afm_[0-9a-f]{32}$"},
+        "memberDisposition": {
+          "type": "string",
+          "enum": ["selected", "rejected", "unslotted", "conflicted"]
+        },
+        "memberDiscountFactor": {"type": "number", "minimum": 0, "maximum": 1},
+        "declaredSize": {"type": ["integer", "null"], "minimum": 1, "maximum": 1000000},
+        "recordedSlots": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "selectedCount": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "rejectedCount": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "unslottedCount": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "duplicateSlotCount": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "duplicateMemberCount": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "outOfRangeSlotCount": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "unrecordedCount": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "promotionPosture": {"$ref": "#/$defs/attemptFamilyPromotionPosture"},
+        "promotionReason": {"type": "string", "minLength": 1}
+      }
+    },
+    "attemptFamilyPromotionPosture": {
+      "type": "string",
+      "enum": [
+        "eligible",
+        "blocked_undeclared",
+        "blocked_invalid_declared_size",
+        "blocked_duplicate_slots",
+        "blocked_duplicate_members",
+        "blocked_multiple_families",
+        "blocked_overfull",
+        "blocked_out_of_range_slots",
+        "blocked_unslotted_members",
+        "blocked_incomplete",
+        "blocked_invalid_composition"
+      ]
     },
     "degradation": {
       "type": "object",
