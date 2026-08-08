@@ -652,6 +652,7 @@ mod tests {
     use crate::config::{ConfigFile, MeshCommandMode};
     use std::fs;
     use std::io;
+    use std::path::{Path, PathBuf};
 
     type TestResult = Result<(), String>;
 
