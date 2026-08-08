@@ -18789,6 +18789,20 @@ fn collect_hotset_retrieval_provenance(
             );
         }
     };
+    match connection.get_workspace(&workspace_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return unavailable(
+                "workspace database has no matching workspace row for retrieval provenance"
+                    .to_owned(),
+            );
+        }
+        Err(_) => {
+            return unavailable(
+                "workspace identity row could not be inspected for retrieval provenance".to_owned(),
+            );
+        }
+    }
     let limit = u32::try_from(options.max_signals_per_source.min(128)).unwrap_or(128);
     let pack_records =
         match connection.list_recent_pack_record_metadata_for_workspace(&workspace_id, limit) {
@@ -74602,6 +74616,30 @@ mod tests {
         ))
         .expect("canonical schema parses");
         assert_eq!(exported, canonical);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hotset_retrieval_provenance_requires_matching_workspace_identity() {
+        use crate::cache::hotset::HOTSET_RETRIEVAL_PROVENANCE_UNAVAILABLE_CODE;
+
+        let dir = hotset_collect_workspace("retrieval-workspace-identity");
+        let database = crate::db::DbConnection::open_file(dir.path().join(".ee").join("ee.db"))
+            .expect("open empty hotset database");
+        database.migrate().expect("migrate empty hotset database");
+        drop(database);
+
+        let options = HotsetCollectOptions::new(dir.path());
+        let (signals, source, provenance) = collect_hotset_retrieval_provenance(
+            &options,
+            HOTSET_RETRIEVAL_PROVENANCE_UNAVAILABLE_CODE,
+        );
+        assert!(signals.is_empty());
+        assert_eq!(
+            source.degraded_code(),
+            Some(HOTSET_RETRIEVAL_PROVENANCE_UNAVAILABLE_CODE)
+        );
+        assert!(provenance.is_none());
     }
 
     #[cfg(unix)]
