@@ -24,9 +24,9 @@ use ee::mesh::transport_session::{
     InitiatorHandshake, InitiatorSessionConfig, MAX_FRAME_BYTES, NegotiatedExtensions,
     ResolvedAcceptedRoute, ResponderExpectations, SessionBinding, SessionCapabilities,
     SessionChannelError, SessionChannelLimits, SessionCounters, SessionDirection, SessionMessage,
-    TRANSPORT_FRAME_SCHEMA_V1, accept_authenticated_session_with,
-    connect_authenticated_session, decode_frame, decode_session_confirm, decode_session_finish,
-    decode_session_open, responder_accept_open, sign_frame, verify_frame,
+    TRANSPORT_FRAME_SCHEMA_V1, accept_authenticated_session_with, connect_authenticated_session,
+    decode_frame, decode_session_confirm, decode_session_finish, decode_session_open,
+    responder_accept_open, sign_frame, verify_frame,
 };
 use regex_lite::Regex;
 use serde_json::json;
@@ -157,13 +157,12 @@ fn pending_route_cannot_widen_session_limits_after_open() -> TestResult {
             limits(),
             move |_route_cx, peer_address, _selectors| async move {
                 let mut widened = limits();
-                widened.max_authenticated_bytes =
-                    widened.max_authenticated_bytes.saturating_add(1);
+                widened.max_authenticated_bytes = widened.max_authenticated_bytes.saturating_add(1);
                 resolved_route(widened, peer_address.ip())
             },
         )
         .await
-            .expect_err("route selection must not widen pending-open limits");
+        .expect_err("route selection must not widen pending-open limits");
         Ok(error)
     })?;
 
