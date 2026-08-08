@@ -1,0 +1,19 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_frame_target_mismatch",
+  "introduced_by": { "bead": "bd-tc-epic-qzk7o.3.2", "epic_letter": "TC" },
+  "surfaces": ["mesh authenticated transport"],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A handshake or frame names the wrong team, node, workspace, session, or direction for the already verified endpoint.",
+    "setup_commands": ["send a correctly encoded frame with a near-identical but wrong authenticated binding"],
+    "invocation": "exchange an authenticated mesh transport frame"
+  },
+  "expected_emission": {
+    "code": "mesh_frame_target_mismatch",
+    "severity": "high",
+    "message_contains": ["session binding"],
+    "repair_contains": "verify the enrolled peer and target workspace"
+  }
+}

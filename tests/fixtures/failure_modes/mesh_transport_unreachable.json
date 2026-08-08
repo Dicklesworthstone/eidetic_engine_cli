@@ -1,0 +1,19 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_transport_unreachable",
+  "introduced_by": { "bead": "bd-tc-epic-qzk7o.3.2", "epic_letter": "TC" },
+  "surfaces": ["mesh authenticated transport"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Authenticated mesh TCP transport is disabled, cannot connect, is cancelled, exceeds an I/O deadline, or loses the peer before a correlated response.",
+    "setup_commands": ["set EE_MESH_TRANSPORT_DISABLED=1 or make the verified peer endpoint unreachable"],
+    "invocation": "open an authenticated mesh transport session"
+  },
+  "expected_emission": {
+    "code": "mesh_transport_unreachable",
+    "severity": "warning",
+    "message_contains": ["Mesh TCP"],
+    "repair_contains": "verify the enrolled peer endpoint"
+  }
+}

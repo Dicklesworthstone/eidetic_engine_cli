@@ -1,0 +1,19 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_frame_auth_failed",
+  "introduced_by": { "bead": "bd-tc-epic-qzk7o.3.2", "epic_letter": "TC" },
+  "surfaces": ["mesh authenticated transport"],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A handshake, frame MAC, payload hash, wire size, negotiated capability, request budget, or response-correlation authentication check fails.",
+    "setup_commands": ["send a malformed, oversized, downgrade, wrong-MAC, or unnegotiated frame on a real session socket"],
+    "invocation": "exchange an authenticated mesh transport frame"
+  },
+  "expected_emission": {
+    "code": "mesh_frame_auth_failed",
+    "severity": "high",
+    "message_contains": ["Mesh", "failed"],
+    "repair_contains": "re-establish the enrolled session"
+  }
+}

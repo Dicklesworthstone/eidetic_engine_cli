@@ -36,14 +36,14 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::io;
-use std::net::{Shutdown, SocketAddr};
+use std::net::{IpAddr, Shutdown, SocketAddr};
 use std::num::NonZeroU64;
 use std::sync::atomic::{Ordering, compiler_fence};
 use std::time::Duration;
 
 use asupersync::Cx;
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
-use asupersync::net::TcpStream;
+use asupersync::net::{TcpSocket, TcpStream};
 use asupersync::time::{BudgetTimeExt, timeout, wall_now};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -1566,6 +1566,37 @@ fn validate_binding_shape(binding: &SessionBinding) -> Result<(), HandshakeError
     Ok(())
 }
 
+fn valid_bounded_identity(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= MAX_SESSION_BINDING_FIELD_BYTES
+}
+
+fn untrusted_route_selectors(
+    open: &SessionOpenV1,
+) -> Result<UntrustedRouteSelectors, SessionChannelError> {
+    if !valid_bounded_identity(&open.team_id)
+        || !valid_bounded_identity(&open.responder_workspace_id)
+    {
+        return Err(SessionChannelError::Handshake(
+            HandshakeError::BindingMismatch {
+                field: "route_selector",
+            },
+        ));
+    }
+    if open.pair_key_generation == 0 {
+        return Err(SessionChannelError::Handshake(
+            HandshakeError::GenerationMismatch {
+                expected: 1,
+                observed: 0,
+            },
+        ));
+    }
+    Ok(UntrustedRouteSelectors {
+        team_id: open.team_id.clone(),
+        responder_workspace_id: open.responder_workspace_id.clone(),
+        pair_key_generation: open.pair_key_generation,
+    })
+}
+
 fn session_transcript_hash(
     binding: &SessionBinding,
     initiator_nonce: &[u8; 32],
@@ -1856,6 +1887,9 @@ pub struct AuthenticatedSessionUsage {
 /// observations. The session channel never discovers or persists identity.
 #[derive(Debug)]
 pub struct InitiatorSessionConfig {
+    /// Exact local source address selected by the caller's Tailscale route
+    /// authority. Port zero requests an ephemeral source port.
+    pub local_address: SocketAddr,
     pub binding: SessionBinding,
     pub pair_key: SecretBytes,
     pub pair_key_generation: u64,
@@ -1864,8 +1898,9 @@ pub struct InitiatorSessionConfig {
     pub limits: SessionChannelLimits,
 }
 
-/// Responder inputs for a stream already accepted and WhoIs-verified by the
-/// listener owner. This API performs no listen, accept, or WhoIs work.
+/// Responder inputs selected only after the listener owner has accepted the
+/// stream, resolved its source with WhoIs, and matched a registered route.
+/// This module performs no listen, accept, WhoIs, or key lookup work.
 #[derive(Debug)]
 pub struct AcceptedSessionConfig {
     pub expectations: ResponderExpectations,
@@ -1873,6 +1908,96 @@ pub struct AcceptedSessionConfig {
     pub observations: HandshakeObservations,
     pub capabilities: SessionCapabilities,
     pub limits: SessionChannelLimits,
+}
+
+/// The only unauthenticated selectors exposed to the responder broker. These
+/// values are bounded wire claims used solely to choose local verification
+/// state; they are never peer identity or authorization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UntrustedRouteSelectors {
+    pub team_id: String,
+    pub responder_workspace_id: String,
+    pub pair_key_generation: u64,
+}
+
+/// Accepted-source identity returned by a fresh LocalAPI WhoIs lookup (or the
+/// plan's freshly queried status-map fallback). The session layer checks this
+/// attestation against the kernel-observed source and the locally selected
+/// expectations before it reads pair-key material into the handshake.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcceptedSourceAttestation {
+    queried_ip: IpAddr,
+    tailnet_id: String,
+    stable_id: String,
+    current_node_pubkey: String,
+}
+
+impl AcceptedSourceAttestation {
+    /// Construct the transport handoff from a caller-verified WhoIs result.
+    /// This constructor validates shape only; T2.2 owns the LocalAPI query and
+    /// must pass the exact accepted source IP rather than a wire/header claim.
+    pub fn from_local_whois(
+        queried_ip: IpAddr,
+        tailnet_id: impl Into<String>,
+        stable_id: impl Into<String>,
+        current_node_pubkey: impl Into<String>,
+    ) -> Result<Self, SessionChannelError> {
+        let tailnet_id = tailnet_id.into();
+        let stable_id = stable_id.into();
+        let current_node_pubkey = current_node_pubkey.into();
+        if queried_ip.is_unspecified()
+            || !valid_bounded_identity(&tailnet_id)
+            || !valid_bounded_identity(&stable_id)
+            || current_node_pubkey.trim().is_empty()
+            || current_node_pubkey.len() > MAX_NODE_PUBKEY_BYTES
+        {
+            return Err(SessionChannelError::Authentication {
+                message: "accepted-source WhoIs attestation is incomplete or malformed".to_owned(),
+            });
+        }
+        Ok(Self {
+            queried_ip,
+            tailnet_id,
+            stable_id,
+            current_node_pubkey,
+        })
+    }
+}
+
+/// Route/key result selected by the responder broker. `G` is an opaque
+/// source/global admission permit; the session layer holds it until the
+/// handshake succeeds or fails so pre-auth capacity cannot be released early.
+#[derive(Debug)]
+pub struct ResolvedAcceptedRoute<G> {
+    config: AcceptedSessionConfig,
+    source: AcceptedSourceAttestation,
+    admission_guard: G,
+}
+
+impl<G> ResolvedAcceptedRoute<G> {
+    #[must_use]
+    pub const fn new(
+        config: AcceptedSessionConfig,
+        source: AcceptedSourceAttestation,
+        admission_guard: G,
+    ) -> Self {
+        Self {
+            config,
+            source,
+            admission_guard,
+        }
+    }
+}
+
+/// One bounded `session_open` read from an accepted socket but not yet
+/// authenticated. This stays private so callers cannot hold a socket beyond
+/// the original accept budget or resume authentication under a fresh `Cx`.
+#[derive(Debug)]
+struct PendingAcceptedSession {
+    stream: TcpStream,
+    untrusted_open: SessionOpenV1,
+    peer_address: SocketAddr,
+    limits: SessionChannelLimits,
 }
 
 /// One application message returned only after all frame, capability,
@@ -2340,7 +2465,7 @@ impl AuthenticatedTransportSession {
             cx,
             self.limits.io_timeout,
             "write half-close",
-            self.stream.shutdown(),
+            AsyncWriteExt::shutdown(&mut self.stream),
         )
         .await;
         if let Err(error) = result {
@@ -2559,30 +2684,163 @@ pub async fn connect_authenticated_session(
     refuse_if_transport_disabled()?;
     checkpoint(cx, "connect")?;
     validate_limits(config.limits)?;
+    if config.local_address.ip().is_unspecified()
+        || address.ip().is_unspecified()
+        || config.local_address.is_ipv4() != address.is_ipv4()
+    {
+        return Err(SessionChannelError::InvalidLimits {
+            message: "mesh connect requires concrete same-family local and remote addresses"
+                .to_owned(),
+        });
+    }
     let initiator_nonce = fresh_bytes()?;
     config.binding.session_id = fresh_session_id()?;
+    let socket = if address.is_ipv4() {
+        TcpSocket::new_v4()
+    } else {
+        TcpSocket::new_v6()
+    }
+    .map_err(|error| SessionChannelError::Io {
+        phase: "socket create",
+        message: error.to_string(),
+    })?;
+    socket
+        .bind(config.local_address)
+        .map_err(|error| SessionChannelError::Io {
+            phase: "source bind",
+            message: error.to_string(),
+        })?;
     let stream = await_io(
         cx,
         config.limits.connect_timeout,
         "connect",
-        TcpStream::connect(address),
+        socket.connect(address),
     )
     .await?;
     run_initiator_handshake(cx, stream, config, initiator_nonce).await
 }
 
-/// Authenticate a stream already accepted and WhoIs-verified by the listener
-/// owner. The kill switch is checked before reading or authenticating it.
-pub async fn accept_authenticated_session(
+/// Read one bounded `session_open` for the in-scope resolver below. The value
+/// never escapes the accept orchestration boundary.
+async fn read_pending_accepted_session(
     cx: &Cx,
-    stream: TcpStream,
-    config: AcceptedSessionConfig,
-) -> Result<AuthenticatedTransportSession, SessionChannelError> {
+    mut stream: TcpStream,
+    limits: SessionChannelLimits,
+) -> Result<PendingAcceptedSession, SessionChannelError> {
     refuse_if_transport_disabled()?;
     checkpoint(cx, "accepted session")?;
+    validate_limits(limits)?;
+    let peer_address = stream
+        .peer_addr()
+        .map_err(|error| SessionChannelError::Io {
+            phase: "peer address",
+            message: error.to_string(),
+        })?;
+    let open_bytes = match required_packet(
+        &mut stream,
+        cx,
+        limits.io_timeout,
+        "session_open read",
+        MAX_HANDSHAKE_MESSAGE_BYTES,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            close_stream(&stream);
+            return Err(error);
+        }
+    };
+    let untrusted_open = match decode_session_open(&open_bytes) {
+        Ok(open) => open,
+        Err(error) => {
+            close_stream(&stream);
+            return Err(SessionChannelError::Handshake(error));
+        }
+    };
+    Ok(PendingAcceptedSession {
+        stream,
+        untrusted_open,
+        peer_address,
+        limits,
+    })
+}
+
+/// Authenticate a pending socket after the in-scope resolver has selected
+/// route-specific expectations and key material.
+async fn authenticate_pending_session<G>(
+    cx: &Cx,
+    pending: PendingAcceptedSession,
+    route: ResolvedAcceptedRoute<G>,
+) -> Result<AuthenticatedTransportSession, SessionChannelError> {
+    refuse_if_transport_disabled()?;
+    checkpoint(cx, "pending session authentication")?;
+    let ResolvedAcceptedRoute {
+        config,
+        source,
+        admission_guard,
+    } = route;
     validate_limits(config.limits)?;
+    if pending.limits != config.limits {
+        close_stream(&pending.stream);
+        return Err(SessionChannelError::InvalidLimits {
+            message: "pending-open and authenticated-session limits differ".to_owned(),
+        });
+    }
+    if pending.peer_address.ip() != source.queried_ip
+        || config.expectations.tailnet_id != source.tailnet_id
+        || config.expectations.initiator_stable_id != source.stable_id
+        || config.observations.initiator_node_pubkey != source.current_node_pubkey
+    {
+        close_stream(&pending.stream);
+        return Err(SessionChannelError::Authentication {
+            message: "accepted source does not match the WhoIs-bound route identity".to_owned(),
+        });
+    }
     let responder_nonce = fresh_bytes()?;
-    run_responder_handshake(cx, stream, config, responder_nonce).await
+    let result = run_responder_handshake(
+        cx,
+        pending.stream,
+        pending.untrusted_open,
+        config,
+        responder_nonce,
+    )
+    .await;
+    drop(admission_guard);
+    result
+}
+
+/// Resolve and authenticate one accepted socket without exposing a resumable
+/// pre-auth state. The resolver receives only bounded route selectors plus the
+/// kernel source address, executes under the original `Cx` and I/O deadline,
+/// and returns a WhoIs-bound local route with an opaque admission guard.
+pub async fn accept_authenticated_session_with<R, F, G>(
+    cx: &Cx,
+    stream: TcpStream,
+    limits: SessionChannelLimits,
+    resolve: R,
+) -> Result<AuthenticatedTransportSession, SessionChannelError>
+where
+    R: FnOnce(Cx, SocketAddr, UntrustedRouteSelectors) -> F,
+    F: Future<Output = Result<ResolvedAcceptedRoute<G>, SessionChannelError>>,
+{
+    let pending = read_pending_accepted_session(cx, stream, limits).await?;
+    let selectors = untrusted_route_selectors(&pending.untrusted_open)?;
+    let route = match await_route_resolution(
+        cx,
+        limits.io_timeout,
+        resolve(cx.clone(), pending.peer_address, selectors),
+    )
+    .await
+    {
+        Ok(route) => route,
+        Err(error) => {
+            close_stream(&pending.stream);
+            return Err(error);
+        }
+    };
+    refuse_if_transport_disabled()?;
+    authenticate_pending_session(cx, pending, route).await
 }
 
 async fn run_initiator_handshake(
@@ -2717,31 +2975,10 @@ async fn run_initiator_handshake(
 async fn run_responder_handshake(
     cx: &Cx,
     mut stream: TcpStream,
+    open: SessionOpenV1,
     config: AcceptedSessionConfig,
     responder_nonce: [u8; 32],
 ) -> Result<AuthenticatedTransportSession, SessionChannelError> {
-    let open_bytes = match required_packet(
-        &mut stream,
-        cx,
-        config.limits.io_timeout,
-        "session_open read",
-        MAX_HANDSHAKE_MESSAGE_BYTES,
-    )
-    .await
-    {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            close_stream(&stream);
-            return Err(error);
-        }
-    };
-    let open = match decode_session_open(&open_bytes) {
-        Ok(open) => open,
-        Err(error) => {
-            close_stream(&stream);
-            return Err(SessionChannelError::Handshake(error));
-        }
-    };
     let (pending, confirm) = match responder_accept_open(
         &open,
         &config.expectations,
@@ -2980,6 +3217,38 @@ where
         Ok(Err(error)) => Err(map_io_error(cx, phase, error)),
         Err(_) => match checkpoint(cx, phase) {
             Ok(()) => Err(SessionChannelError::Timeout { phase }),
+            Err(cancelled) => Err(cancelled),
+        },
+    }
+}
+
+async fn await_route_resolution<T, F>(
+    cx: &Cx,
+    duration: Duration,
+    future: F,
+) -> Result<T, SessionChannelError>
+where
+    F: Future<Output = Result<T, SessionChannelError>>,
+{
+    const PHASE: &str = "accepted route resolution";
+    checkpoint(cx, PHASE)?;
+    let now = wall_now();
+    let effective_duration = cx
+        .budget()
+        .remaining_duration(now)
+        .map_or(duration, |remaining| remaining.min(duration));
+    if effective_duration.is_zero() {
+        checkpoint(cx, PHASE)?;
+        return Err(SessionChannelError::Timeout { phase: PHASE });
+    }
+    let _ambient = Cx::set_current(Some(cx.clone()));
+    match timeout(now, effective_duration, future).await {
+        Ok(result) => {
+            checkpoint(cx, PHASE)?;
+            result
+        }
+        Err(_) => match checkpoint(cx, PHASE) {
+            Ok(()) => Err(SessionChannelError::Timeout { phase: PHASE }),
             Err(cancelled) => Err(cancelled),
         },
     }

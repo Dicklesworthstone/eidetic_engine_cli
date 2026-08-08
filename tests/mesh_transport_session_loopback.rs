@@ -6,7 +6,7 @@
 
 use std::fmt::Write as _;
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU64;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,11 +19,12 @@ use asupersync::net::{TcpListener, TcpStream};
 use asupersync::{CancelKind, Cx};
 use ee::mesh::key_store::SecretBytes;
 use ee::mesh::transport_session::{
-    AcceptedSessionConfig, CAPABILITY_NEGOTIATION_SCHEMA_V1, EstablishedSession, FrameCapability,
-    FrameDraft, FrameKind, HandshakeObservations, InitiatorHandshake, InitiatorSessionConfig,
-    MAX_FRAME_BYTES, NegotiatedExtensions, ResponderExpectations, SessionBinding,
-    SessionCapabilities, SessionChannelError, SessionChannelLimits, SessionCounters,
-    SessionDirection, SessionMessage, TRANSPORT_FRAME_SCHEMA_V1, accept_authenticated_session,
+    AcceptedSessionConfig, AcceptedSourceAttestation, CAPABILITY_NEGOTIATION_SCHEMA_V1,
+    EstablishedSession, FrameCapability, FrameDraft, FrameKind, HandshakeObservations,
+    InitiatorHandshake, InitiatorSessionConfig, MAX_FRAME_BYTES, NegotiatedExtensions,
+    ResolvedAcceptedRoute, ResponderExpectations, SessionBinding, SessionCapabilities,
+    SessionChannelError, SessionChannelLimits, SessionCounters, SessionDirection, SessionMessage,
+    TRANSPORT_FRAME_SCHEMA_V1, accept_authenticated_session_with,
     connect_authenticated_session, decode_frame, decode_session_confirm, decode_session_finish,
     decode_session_open, responder_accept_open, sign_frame, verify_frame,
 };
@@ -71,6 +72,7 @@ fn limits() -> SessionChannelLimits {
 
 fn initiator_config(custom_limits: SessionChannelLimits) -> InitiatorSessionConfig {
     InitiatorSessionConfig {
+        local_address: "127.0.0.2:0".parse().expect("valid loopback source"),
         binding: binding(),
         pair_key: pair_key(),
         pair_key_generation: 7,
@@ -78,6 +80,140 @@ fn initiator_config(custom_limits: SessionChannelLimits) -> InitiatorSessionConf
         capabilities: SessionCapabilities::base(),
         limits: custom_limits,
     }
+}
+
+#[test]
+fn accepted_route_is_inspected_before_auth_and_client_source_is_explicit() -> TestResult {
+    let (address, server) = spawn_server(move |cx, stream| async move {
+        let peer_address = stream.peer_addr().map_err(|error| error.to_string())?;
+        let session = accept_authenticated_session_with(
+            &cx,
+            stream,
+            limits(),
+            move |_route_cx, observed_address, route| async move {
+                if observed_address != peer_address
+                    || route.team_id != "team-loopback"
+                    || route.responder_workspace_id != "ws-resp"
+                    || route.pair_key_generation != 7
+                {
+                    return Err(SessionChannelError::Authentication {
+                        message: "bounded route selectors did not match the accepted socket"
+                            .to_owned(),
+                    });
+                }
+                resolved_route(limits(), observed_address.ip())
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        if session.binding().responder_workspace_id != "ws-resp" {
+            return Err("authenticated route changed after local selection".to_owned());
+        }
+        Ok(peer_address)
+    })?;
+
+    run_runtime(|cx| async move {
+        let mut session = connect_authenticated_session(&cx, address, initiator_config(limits()))
+            .await
+            .map_err(|error| error.to_string())?;
+        session.close();
+        Ok(())
+    })?;
+    let peer_address = join_server(server)?;
+    if peer_address.ip().to_string() != "127.0.0.2" {
+        return Err(format!(
+            "listener observed {peer_address}, expected explicitly bound 127.0.0.2 source"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn connect_refuses_wildcard_source_before_network_io() -> TestResult {
+    run_runtime(|cx| async move {
+        let mut config = initiator_config(limits());
+        config.local_address = "0.0.0.0:0"
+            .parse()
+            .map_err(|error| format!("parse: {error}"))?;
+        let remote = "127.0.0.1:9"
+            .parse()
+            .map_err(|error| format!("parse: {error}"))?;
+        let error = connect_authenticated_session(&cx, remote, config)
+            .await
+            .expect_err("wildcard source must fail before connect");
+        if !matches!(error, SessionChannelError::InvalidLimits { .. }) {
+            return Err(format!("unexpected wildcard-source error: {error}"));
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn pending_route_cannot_widen_session_limits_after_open() -> TestResult {
+    let (address, server) = spawn_server(move |cx, stream| async move {
+        let error = accept_authenticated_session_with(
+            &cx,
+            stream,
+            limits(),
+            move |_route_cx, peer_address, _selectors| async move {
+                let mut widened = limits();
+                widened.max_authenticated_bytes =
+                    widened.max_authenticated_bytes.saturating_add(1);
+                resolved_route(widened, peer_address.ip())
+            },
+        )
+        .await
+            .expect_err("route selection must not widen pending-open limits");
+        Ok(error)
+    })?;
+
+    run_runtime(|cx| async move {
+        connect_authenticated_session(&cx, address, initiator_config(limits()))
+            .await
+            .expect_err("server must close a limit-mismatched pending route");
+        Ok(())
+    })?;
+    let error = join_server(server)?;
+    if !matches!(error, SessionChannelError::InvalidLimits { .. }) {
+        return Err(format!("unexpected pending-limit error: {error}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn accepted_source_attestation_must_match_kernel_peer_before_pair_key_auth() -> TestResult {
+    let (address, server) = spawn_server(move |cx, stream| async move {
+        let error = accept_authenticated_session_with(
+            &cx,
+            stream,
+            limits(),
+            move |_route_cx, _peer_address, _selectors| async move {
+                resolved_route(
+                    limits(),
+                    "127.0.0.3"
+                        .parse()
+                        .map_err(|error| SessionChannelError::Authentication {
+                            message: format!("invalid test source address: {error}"),
+                        })?,
+                )
+            },
+        )
+        .await
+        .expect_err("unrelated source attestation must fail before handshake");
+        Ok(error)
+    })?;
+
+    run_runtime(|cx| async move {
+        connect_authenticated_session(&cx, address, initiator_config(limits()))
+            .await
+            .expect_err("server must close a source-mismatched pending route");
+        Ok(())
+    })?;
+    let error = join_server(server)?;
+    if !matches!(error, SessionChannelError::Authentication { .. }) {
+        return Err(format!("unexpected source-mismatch error: {error}"));
+    }
+    Ok(())
 }
 
 fn accepted_config(custom_limits: SessionChannelLimits) -> AcceptedSessionConfig {
@@ -97,6 +233,42 @@ fn accepted_config(custom_limits: SessionChannelLimits) -> AcceptedSessionConfig
         capabilities: SessionCapabilities::base(),
         limits: custom_limits,
     }
+}
+
+fn accepted_source(source_ip: IpAddr) -> Result<AcceptedSourceAttestation, SessionChannelError> {
+    AcceptedSourceAttestation::from_local_whois(
+        source_ip,
+        "tailnet-loopback.ts.net",
+        "stable-init",
+        "nodekey:init-current",
+    )
+}
+
+fn resolved_route(
+    custom_limits: SessionChannelLimits,
+    source_ip: IpAddr,
+) -> Result<ResolvedAcceptedRoute<()>, SessionChannelError> {
+    Ok(ResolvedAcceptedRoute::new(
+        accepted_config(custom_limits),
+        accepted_source(source_ip)?,
+        (),
+    ))
+}
+
+async fn accept_loopback_session(
+    cx: &Cx,
+    stream: TcpStream,
+    custom_limits: SessionChannelLimits,
+) -> Result<ee::mesh::transport_session::AuthenticatedTransportSession, SessionChannelError> {
+    accept_authenticated_session_with(
+        cx,
+        stream,
+        custom_limits,
+        move |_route_cx, peer_address, _selectors| async move {
+            resolved_route(custom_limits, peer_address.ip())
+        },
+    )
+    .await
 }
 
 fn run_runtime<F, Fut, T>(operation: F) -> TestResult<T>
@@ -327,7 +499,7 @@ fn real_loopback_public_api_exchanges_bidirectional_frames_and_half_closes() -> 
     let mutations = Arc::new(AtomicUsize::new(0));
     let server_mutations = Arc::clone(&mutations);
     let (address, server) = spawn_server(move |cx, stream| async move {
-        let mut session = accept_authenticated_session(&cx, stream, accepted_config(limits()))
+        let mut session = accept_loopback_session(&cx, stream, limits())
             .await
             .map_err(|error| error.to_string())?;
         session
@@ -403,7 +575,7 @@ fn real_loopback_public_api_exchanges_bidirectional_frames_and_half_closes() -> 
 
 fn negotiated_usage() -> TestResult<ee::mesh::transport_session::AuthenticatedSessionUsage> {
     let (address, server) = spawn_server(move |cx, stream| async move {
-        let session = accept_authenticated_session(&cx, stream, accepted_config(limits()))
+        let session = accept_loopback_session(&cx, stream, limits())
             .await
             .map_err(|error| error.to_string())?;
         Ok(session.authenticated_usage())
@@ -430,7 +602,7 @@ fn terminal_authenticated_frame_budget_closes_at_the_exact_boundary() -> TestRes
     let mut server_limits = limits();
     server_limits.max_authenticated_frames = 2;
     let (address, server) = spawn_server(move |cx, stream| async move {
-        let mut session = accept_authenticated_session(&cx, stream, accepted_config(server_limits))
+        let mut session = accept_loopback_session(&cx, stream, server_limits)
             .await
             .map_err(|error| error.to_string())?;
         if session.authenticated_usage().frames != 2 {
@@ -477,7 +649,7 @@ fn terminal_authenticated_byte_budget_closes_at_the_exact_boundary() -> TestResu
     let mut server_limits = limits();
     server_limits.max_authenticated_bytes = negotiated.wire_bytes;
     let (address, server) = spawn_server(move |cx, stream| async move {
-        let mut session = accept_authenticated_session(&cx, stream, accepted_config(server_limits))
+        let mut session = accept_loopback_session(&cx, stream, server_limits)
             .await
             .map_err(|error| error.to_string())?;
         if session.authenticated_usage().wire_bytes != negotiated.wire_bytes {
@@ -521,7 +693,7 @@ fn peer_half_close_with_outstanding_response_is_not_clean_eof() -> TestResult {
     let mutations = Arc::new(AtomicUsize::new(0));
     let server_mutations = Arc::clone(&mutations);
     let (address, server) = spawn_server(move |cx, stream| async move {
-        let mut session = accept_authenticated_session(&cx, stream, accepted_config(limits()))
+        let mut session = accept_loopback_session(&cx, stream, limits())
             .await
             .map_err(|error| error.to_string())?;
         let _request = session
@@ -690,8 +862,7 @@ async fn inject_attack(
                 .write_all(&[0, 0])
                 .await
                 .map_err(|error| format!("write partial prefix: {error}"))?;
-            stream
-                .shutdown()
+            AsyncWriteExt::shutdown(stream)
                 .await
                 .map_err(|error| format!("half-close partial prefix: {error}"))?;
             return Ok(());
@@ -705,8 +876,7 @@ async fn inject_attack(
                 .write_all(b"partial")
                 .await
                 .map_err(|error| format!("write partial body: {error}"))?;
-            stream
-                .shutdown()
+            AsyncWriteExt::shutdown(stream)
                 .await
                 .map_err(|error| format!("half-close partial body: {error}"))?;
             return Ok(());
@@ -764,7 +934,7 @@ fn run_attack(attack: Attack) -> TestResult {
     let mutations = Arc::new(AtomicUsize::new(0));
     let server_mutations = Arc::clone(&mutations);
     let (address, server) = spawn_server(move |cx, stream| async move {
-        let mut session = accept_authenticated_session(&cx, stream, accepted_config(limits()))
+        let mut session = accept_loopback_session(&cx, stream, limits())
             .await
             .map_err(|error| error.to_string())?;
         let error = session
@@ -948,7 +1118,7 @@ fn real_loopback_rejects_response_capability_mismatch_on_send() -> TestResult {
     let mutations = Arc::new(AtomicUsize::new(0));
     let server_mutations = Arc::clone(&mutations);
     let (address, join) = spawn_server(move |cx, stream| async move {
-        let mut session = accept_authenticated_session(&cx, stream, accepted_config(limits()))
+        let mut session = accept_loopback_session(&cx, stream, limits())
             .await
             .map_err(|error| error.to_string())?;
         let inbound = session
@@ -1081,7 +1251,7 @@ fn authenticated_requested_budget_bounds_processing_without_mutation() -> TestRe
     let mutations = Arc::new(AtomicUsize::new(0));
     let server_mutations = Arc::clone(&mutations);
     let (address, server) = spawn_server(move |cx, stream| async move {
-        let mut session = accept_authenticated_session(&cx, stream, accepted_config(limits()))
+        let mut session = accept_loopback_session(&cx, stream, limits())
             .await
             .map_err(|error| error.to_string())?;
         let request = session
@@ -1178,7 +1348,7 @@ fn kill_switch_refuses_connect_and_accepted_paths_before_authentication() -> Tes
             .join()
             .map_err(|_| "accepted-path connector panicked".to_owned())?
             .map_err(|error| format!("accepted-path connector failed: {error}"))?;
-        let accepted_error = accept_authenticated_session(&cx, stream, accepted_config(limits()))
+        let accepted_error = accept_loopback_session(&cx, stream, limits())
             .await
             .expect_err("kill switch must refuse accepted stream before authentication");
         if accepted_error != SessionChannelError::TransportDisabled {
@@ -1239,7 +1409,7 @@ fn invalid_kill_switch_value_fails_closed_on_both_paths() -> TestResult {
             .join()
             .map_err(|_| "invalid accepted connector panicked".to_owned())?
             .map_err(|error| format!("invalid accepted connector failed: {error}"))?;
-        let accepted_error = accept_authenticated_session(&cx, stream, accepted_config(limits()))
+        let accepted_error = accept_loopback_session(&cx, stream, limits())
             .await
             .expect_err("invalid emergency switch must fail before accepted authentication");
         if accepted_error != expected {
@@ -1313,7 +1483,7 @@ fn fresh_responder_nonce_rejects_cross_session_frame_replay() -> TestResult {
     let mutations = Arc::new(AtomicUsize::new(0));
     let first_mutations = Arc::clone(&mutations);
     let (first_address, first_server) = spawn_server(move |cx, stream| async move {
-        let mut session = accept_authenticated_session(&cx, stream, accepted_config(limits()))
+        let mut session = accept_loopback_session(&cx, stream, limits())
             .await
             .map_err(|error| error.to_string())?;
         let request = session
@@ -1351,7 +1521,7 @@ fn fresh_responder_nonce_rejects_cross_session_frame_replay() -> TestResult {
 
     let second_mutations = Arc::clone(&mutations);
     let (second_address, second_server) = spawn_server(move |cx, stream| async move {
-        let mut session = accept_authenticated_session(&cx, stream, accepted_config(limits()))
+        let mut session = accept_loopback_session(&cx, stream, limits())
             .await
             .map_err(|error| error.to_string())?;
         let error = session
