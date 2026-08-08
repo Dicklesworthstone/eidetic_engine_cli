@@ -499,7 +499,8 @@ impl AttemptFamilyMultiplicity {
             return 1.0;
         }
         #[allow(clippy::cast_possible_truncation)]
-        (1.0_f64 / f64::from(declared)) as f32
+        let factor = (1.0_f64 / f64::from(declared)) as f32;
+        factor
     }
 
     /// Stable promotion posture for this family.
