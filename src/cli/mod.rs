@@ -51479,9 +51479,13 @@ fn handle_remember(
         let conflict = if args.reinforce {
             Some("--reinforce (a reinforced write strengthens existing content)")
         } else if !args.sentinels.is_empty() || !args.revive_when.is_empty() {
-            Some("--sentinel/--revive-when (predicates over a withheld placeholder are meaningless)")
+            Some(
+                "--sentinel/--revive-when (predicates over a withheld placeholder are meaningless)",
+            )
         } else if args.idempotency_key.is_some() {
-            Some("--idempotency-key (replay identity would be the placeholder, not the sealed content)")
+            Some(
+                "--idempotency-key (replay identity would be the placeholder, not the sealed content)",
+            )
         } else if args.global {
             Some("--global (seals are workspace-scoped in v1)")
         } else {
@@ -51666,16 +51670,21 @@ fn persist_remember_seal(
 ) -> Result<serde_json::Value, DomainError> {
     let sealed_at = chrono::Utc::now().to_rfc3339();
     if !report.dry_run {
-        let connection =
-            DbConnection::open_file(&report.database_path).map_err(|error| DomainError::Storage {
+        let connection = DbConnection::open_file(&report.database_path).map_err(|error| {
+            DomainError::Storage {
                 message: format!(
                     "Failed to open database {} for seal metadata: {error}",
                     report.database_path.display()
                 ),
                 repair: Some("ee doctor --workspace . --json".to_string()),
-            })?;
+            }
+        })?;
         connection
-            .insert_memory_seal(&report.memory_id.to_string(), content_commitment, &sealed_at)
+            .insert_memory_seal(
+                &report.memory_id.to_string(),
+                content_commitment,
+                &sealed_at,
+            )
             .map_err(|error| DomainError::Storage {
                 message: format!("Failed to persist memory seal: {error}"),
                 repair: Some("ee doctor --workspace . --json".to_string()),
@@ -51865,7 +51874,8 @@ where
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
     if args.seal {
-        let error = usage("--seal applies to single-memory mode; seal each protocol write individually");
+        let error =
+            usage("--seal applies to single-memory mode; seal each protocol write individually");
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
     if args.attempt_family.is_some()

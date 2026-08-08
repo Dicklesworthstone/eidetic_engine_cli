@@ -13407,6 +13407,12 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
                 default: None,
             },
             CommandArg {
+                name: "--seal",
+                description: "Seal the memory: store only a blake3 content commitment plus metadata and withhold the content until `ee memory reveal <id>` supplies matching bytes. Proves a protocol or prediction was registered before its outcome was seen. Rejected with --reinforce, --sentinel/--revive-when, --idempotency-key, --global, git capture modes, and --batch.",
+                required: false,
+                default: None,
+            },
+            CommandArg {
                 name: "--dry-run",
                 description: "Perform dry run without storing",
                 required: false,
