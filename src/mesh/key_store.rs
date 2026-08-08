@@ -302,6 +302,28 @@ impl SigningKeyClass {
     }
 }
 
+/// Serde field wrapper whose backing allocation is wiped on every drop,
+/// including partial-deserialization error paths.
+#[derive(Deserialize, Serialize)]
+#[serde(transparent)]
+struct SecretHex(String);
+
+impl SecretHex {
+    fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl Drop for SecretHex {
+    fn drop(&mut self) {
+        wipe_secret_string(&mut self.0);
+    }
+}
+
 /// On-disk record document (schema [`KEY_STORE_RECORD_SCHEMA`]). Field names
 /// are part of the stored contract; unknown fields are rejected so a tampered
 /// or future-version record fails closed instead of partially loading.
@@ -311,7 +333,7 @@ struct RecordDocument {
     schema: String,
     peer_handle: String,
     key_class: String,
-    key_hex: String,
+    key_hex: SecretHex,
     created_at: String,
 }
 
@@ -325,7 +347,7 @@ struct SigningRecordDocument {
     node_handle: String,
     key_class: String,
     generation: NonZeroU64,
-    seed_hex: String,
+    seed_hex: SecretHex,
     created_at: String,
 }
 
@@ -407,12 +429,11 @@ impl SecureLocalDir {
     ) -> Result<Self, KeyStoreError> {
         let boundary = boundary.as_ref();
         let dir = dir.as_ref();
-        let dir_handle = open_secure_directory(boundary, dir, true)?.ok_or_else(|| {
-            KeyStoreError::Io {
+        let dir_handle =
+            open_secure_directory(boundary, dir, true)?.ok_or_else(|| KeyStoreError::Io {
                 path: dir.display().to_string(),
                 message: "directory remained absent after descriptor-relative creation".to_owned(),
-            }
-        })?;
+            })?;
         let this = Self {
             dir: dir.to_path_buf(),
             dir_handle,
@@ -454,12 +475,10 @@ impl SecureLocalDir {
             message: format!("inspect opened secure directory: {error}"),
         })?;
         verify_directory_stat(&opened, &self.dir, true)?;
-        let named = rustix::fs::statat(
-            rustix::fs::CWD,
-            &self.dir,
-            AtFlags::SYMLINK_NOFOLLOW,
-        )
-        .map_err(|error| key_store_errno(&self.dir, "revalidate secure directory path", error))?;
+        let named = rustix::fs::statat(rustix::fs::CWD, &self.dir, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|error| {
+                key_store_errno(&self.dir, "revalidate secure directory path", error)
+            })?;
         if FileType::from_raw_mode(named.st_mode) != FileType::Directory
             || named.st_dev != opened.st_dev
             || named.st_ino != opened.st_ino
@@ -501,11 +520,25 @@ impl SecureLocalDir {
         let mut file = std::fs::File::from(descriptor);
         self.verify_open_file(&file, &path)?;
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|error| KeyStoreError::Io {
+        if let Err(error) = (&mut file)
+            .take(MAX_RECORD_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)
+        {
+            bytes.fill(0);
+            compiler_fence(Ordering::SeqCst);
+            return Err(KeyStoreError::Io {
                 path: path.display().to_string(),
                 message: error.to_string(),
-            })?;
+            });
+        }
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_RECORD_BYTES {
+            bytes.fill(0);
+            compiler_fence(Ordering::SeqCst);
+            return Err(KeyStoreError::CapExceeded {
+                path: path.display().to_string(),
+                len: MAX_RECORD_BYTES.saturating_add(1),
+            });
+        }
         Ok(Some(bytes))
     }
 
@@ -561,11 +594,7 @@ impl SecureLocalDir {
         let descriptor = rustix::fs::openat(
             &self.dir_handle,
             name,
-            OFlags::WRONLY
-                | OFlags::CREATE
-                | OFlags::EXCL
-                | OFlags::NOFOLLOW
-                | OFlags::CLOEXEC,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_raw_mode(0o600),
         )
         .map_err(|error| {
@@ -604,11 +633,7 @@ impl SecureLocalDir {
         let tmp_name = format!(".{name}.tmp.{}.{}", std::process::id(), sequence);
         let tmp = self.dir.join(&tmp_name);
         let path = self.dir.join(name);
-        match rustix::fs::statat(
-            &self.dir_handle,
-            name,
-            AtFlags::SYMLINK_NOFOLLOW,
-        ) {
+        match rustix::fs::statat(&self.dir_handle, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(stat) => verify_record_stat(&stat, &path)?,
             Err(error) if error == rustix::io::Errno::NOENT => {}
             Err(error) => {
@@ -622,11 +647,7 @@ impl SecureLocalDir {
         let descriptor = rustix::fs::openat(
             &self.dir_handle,
             tmp_name.as_str(),
-            OFlags::WRONLY
-                | OFlags::CREATE
-                | OFlags::EXCL
-                | OFlags::NOFOLLOW
-                | OFlags::CLOEXEC,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_raw_mode(0o600),
         )
         .map_err(|error| {
@@ -651,11 +672,12 @@ impl SecureLocalDir {
             message: error.to_string(),
         })?;
         drop(file);
-        rustix::fs::renameat(&self.dir_handle, tmp_name.as_str(), &self.dir_handle, name)
-            .map_err(|error| KeyStoreError::Io {
-            path: path.display().to_string(),
-            message: format!("atomic replace: {error}"),
-        })?;
+        rustix::fs::renameat(&self.dir_handle, tmp_name.as_str(), &self.dir_handle, name).map_err(
+            |error| KeyStoreError::Io {
+                path: path.display().to_string(),
+                message: format!("atomic replace: {error}"),
+            },
+        )?;
         self.sync_dir()
     }
 
@@ -695,11 +717,7 @@ impl SecureLocalDir {
         validate_file_name(name)?;
         self.verify_dir()?;
         let path = self.dir.join(name);
-        match rustix::fs::statat(
-            &self.dir_handle,
-            name,
-            AtFlags::SYMLINK_NOFOLLOW,
-        ) {
+        match rustix::fs::statat(&self.dir_handle, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(stat) => {
                 verify_record_stat(&stat, &path)?;
                 Ok(true)
@@ -710,10 +728,12 @@ impl SecureLocalDir {
     }
 
     fn sync_dir(&self) -> Result<(), KeyStoreError> {
-        self.dir_handle.sync_all().map_err(|error| KeyStoreError::Io {
-            path: self.dir.display().to_string(),
-            message: format!("directory fsync: {error}"),
-        })
+        self.dir_handle
+            .sync_all()
+            .map_err(|error| KeyStoreError::Io {
+                path: self.dir.display().to_string(),
+                message: format!("directory fsync: {error}"),
+            })
     }
 }
 
@@ -829,15 +849,15 @@ impl MeshKeyStore {
     ) -> Result<(), KeyStoreError> {
         validate_name_component(peer_handle, "peer handle")?;
         validate_created_at(created_at)?;
-        let mut document = RecordDocument {
+        let document = RecordDocument {
             schema: KEY_STORE_RECORD_SCHEMA.to_owned(),
             peer_handle: peer_handle.to_owned(),
             key_class: class.token().to_owned(),
-            key_hex: hex_lower(key.as_bytes()),
+            key_hex: SecretHex::new(hex_lower(key.as_bytes())),
             created_at: created_at.to_owned(),
         };
         let serialized = serde_json::to_vec_pretty(&document);
-        wipe_secret_string(&mut document.key_hex);
+        drop(document);
         let mut bytes = serialized.map_err(|error| KeyStoreError::Malformed {
             message: format!("serialize record: {error}"),
         })?;
@@ -867,32 +887,26 @@ impl MeshKeyStore {
         let parsed: Result<RecordDocument, _> = serde_json::from_slice(&bytes);
         bytes.fill(0);
         compiler_fence(Ordering::SeqCst);
-        let mut document = parsed.map_err(|error| KeyStoreError::Malformed {
-            message: format!("parse record: {error}"),
+        let document = parsed.map_err(|_| KeyStoreError::Malformed {
+            message: "pair-key record is not valid canonical JSON".to_owned(),
         })?;
         if document.schema != KEY_STORE_RECORD_SCHEMA {
-            wipe_secret_string(&mut document.key_hex);
             return Err(KeyStoreError::Malformed {
                 message: "unexpected pair-key record schema".to_owned(),
             });
         }
         if document.peer_handle != peer_handle {
-            wipe_secret_string(&mut document.key_hex);
             return Err(KeyStoreError::Malformed {
                 message: "pair-key record peer handle does not match its requested path".to_owned(),
             });
         }
         if document.key_class != class.token() {
-            wipe_secret_string(&mut document.key_hex);
             return Err(KeyStoreError::Malformed {
                 message: "pair-key record key class does not match its requested path".to_owned(),
             });
         }
-        let mut key_hex = std::mem::take(&mut document.key_hex).into_bytes();
-        let decoded = decode_secret_hex(&key_hex, "key_hex");
-        key_hex.fill(0);
-        compiler_fence(Ordering::SeqCst);
-        let key = decoded?;
+        validate_created_at(&document.created_at)?;
+        let key = decode_secret_hex(document.key_hex.as_bytes(), "key_hex")?;
         Ok(Some(PairKeyRecord {
             peer_handle: document.peer_handle,
             key_class: class,
@@ -916,16 +930,16 @@ impl MeshKeyStore {
     ) -> Result<(), KeyStoreError> {
         validate_name_component(node_handle, "node handle")?;
         validate_created_at(created_at)?;
-        let mut document = SigningRecordDocument {
+        let document = SigningRecordDocument {
             schema: SIGNING_KEY_STORE_RECORD_SCHEMA.to_owned(),
             node_handle: node_handle.to_owned(),
             key_class: class.token().to_owned(),
             generation,
-            seed_hex: hex_lower(seed.as_bytes()),
+            seed_hex: SecretHex::new(hex_lower(seed.as_bytes())),
             created_at: created_at.to_owned(),
         };
         let serialized = serde_json::to_vec_pretty(&document);
-        wipe_secret_string(&mut document.seed_hex);
+        drop(document);
         let mut bytes = serialized.map_err(|error| KeyStoreError::Malformed {
             message: format!("serialize signing record: {error}"),
         })?;
@@ -957,32 +971,26 @@ impl MeshKeyStore {
         let parsed: Result<SigningRecordDocument, _> = serde_json::from_slice(&bytes);
         bytes.fill(0);
         compiler_fence(Ordering::SeqCst);
-        let mut document = parsed.map_err(|error| KeyStoreError::Malformed {
-            message: format!("parse signing record: {error}"),
+        let document = parsed.map_err(|_| KeyStoreError::Malformed {
+            message: "signing record is not valid canonical JSON".to_owned(),
         })?;
         if document.schema != SIGNING_KEY_STORE_RECORD_SCHEMA {
-            wipe_secret_string(&mut document.seed_hex);
             return Err(KeyStoreError::Malformed {
                 message: "unexpected signing record schema".to_owned(),
             });
         }
         if document.node_handle != node_handle {
-            wipe_secret_string(&mut document.seed_hex);
             return Err(KeyStoreError::Malformed {
                 message: "signing record node handle does not match its requested path".to_owned(),
             });
         }
         if document.key_class != class.token() {
-            wipe_secret_string(&mut document.seed_hex);
             return Err(KeyStoreError::Malformed {
                 message: "signing record key class does not match its requested path".to_owned(),
             });
         }
-        let mut seed_hex = std::mem::take(&mut document.seed_hex).into_bytes();
-        let decoded = decode_secret_hex(&seed_hex, "seed_hex");
-        seed_hex.fill(0);
-        compiler_fence(Ordering::SeqCst);
-        let seed = decoded?;
+        validate_created_at(&document.created_at)?;
+        let seed = decode_secret_hex(document.seed_hex.as_bytes(), "seed_hex")?;
         Ok(Some(SigningKeyRecord {
             node_handle: document.node_handle,
             key_class: class,
@@ -1103,8 +1111,22 @@ fn decode_secret_hex(value: &[u8], label: &str) -> Result<SecretBytes, KeyStoreE
     }
     let mut bytes = [0_u8; SECRET_BYTES_LEN];
     for (index, chunk) in value.chunks_exact(2).enumerate() {
-        let high = hex_nibble(chunk[0], label)?;
-        let low = hex_nibble(chunk[1], label)?;
+        let high = match hex_nibble(chunk[0], label) {
+            Ok(value) => value,
+            Err(error) => {
+                bytes.fill(0);
+                compiler_fence(Ordering::SeqCst);
+                return Err(error);
+            }
+        };
+        let low = match hex_nibble(chunk[1], label) {
+            Ok(value) => value,
+            Err(error) => {
+                bytes.fill(0);
+                compiler_fence(Ordering::SeqCst);
+                return Err(error);
+            }
+        };
         bytes[index] = (high << 4) | low;
     }
     Ok(SecretBytes::new(bytes))
@@ -1126,27 +1148,21 @@ fn wipe_secret_string(value: &mut String) {
     compiler_fence(Ordering::SeqCst);
 }
 
-/// Validate only components controlled beneath the caller-supplied workspace
-/// boundary. The boundary and its system ancestors are deliberately not
-/// inspected. `Ok(false)` means the first absent component was found; any
-/// existing symlink or non-directory fails closed.
+/// Open every descendant below the trusted workspace boundary with
+/// descriptor-relative `O_NOFOLLOW` traversal. Existing descendants must be
+/// process-owned and not group/other writable; the final secure directory is
+/// exactly `0700`. Newly created directory entries are parent-fsynced before
+/// traversal continues.
 #[cfg(unix)]
-fn validate_existing_directory_components(
+fn open_secure_directory(
     boundary: &Path,
     target: &Path,
-) -> Result<bool, KeyStoreError> {
+    create: bool,
+) -> Result<Option<std::fs::File>, KeyStoreError> {
     use std::path::Component;
 
-    let boundary_metadata = std::fs::metadata(boundary).map_err(|error| KeyStoreError::Io {
-        path: boundary.display().to_string(),
-        message: format!("trusted boundary is unavailable: {error}"),
-    })?;
-    if !boundary_metadata.is_dir() {
-        return Err(KeyStoreError::WrongFileType {
-            path: boundary.display().to_string(),
-            expected: "directory",
-        });
-    }
+    use rustix::fs::{Mode, OFlags};
+
     let relative = target
         .strip_prefix(boundary)
         .map_err(|_| KeyStoreError::Malformed {
@@ -1156,61 +1172,160 @@ fn validate_existing_directory_components(
                 boundary.display()
             ),
         })?;
-    let mut current = boundary.to_path_buf();
-    let mut present = true;
-    let mut saw_component = false;
-    for component in relative.components() {
+    let mut components = relative.components().peekable();
+    if components.peek().is_none() {
+        return Err(KeyStoreError::Malformed {
+            message: "secure directory must be a strict descendant of its boundary".to_owned(),
+        });
+    }
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let boundary_descriptor =
+        rustix::fs::openat(rustix::fs::CWD, boundary, flags, Mode::from_raw_mode(0))
+            .map_err(|error| key_store_errno(boundary, "open trusted boundary", error))?;
+    let mut directory = std::fs::File::from(boundary_descriptor);
+    let mut current_path = boundary.to_path_buf();
+
+    while let Some(component) = components.next() {
         let Component::Normal(component) = component else {
             return Err(KeyStoreError::Malformed {
                 message: "secure directory path contains a non-normal component".to_owned(),
             });
         };
-        saw_component = true;
-        current.push(component);
-        if !present {
-            continue;
-        }
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() {
-                    return Err(KeyStoreError::SymlinkComponent {
-                        path: current.display().to_string(),
-                    });
+        current_path.push(component);
+        let descriptor =
+            match rustix::fs::openat(&directory, component, flags, Mode::from_raw_mode(0)) {
+                Ok(descriptor) => descriptor,
+                Err(error) if error == rustix::io::Errno::NOENT && !create => return Ok(None),
+                Err(error) if error == rustix::io::Errno::NOENT => {
+                    match rustix::fs::mkdirat(&directory, component, Mode::from_raw_mode(0o700)) {
+                        Ok(()) => directory
+                            .sync_all()
+                            .map_err(|sync_error| KeyStoreError::Io {
+                                path: current_path.display().to_string(),
+                                message: format!(
+                                    "fsync parent after directory creation: {sync_error}"
+                                ),
+                            })?,
+                        Err(create_error) if create_error == rustix::io::Errno::EXIST => {}
+                        Err(create_error) => {
+                            return Err(key_store_errno(
+                                &current_path,
+                                "create secure directory component",
+                                create_error,
+                            ));
+                        }
+                    }
+                    rustix::fs::openat(&directory, component, flags, Mode::from_raw_mode(0))
+                        .map_err(|open_error| {
+                            key_store_errno(
+                                &current_path,
+                                "open newly created secure directory component",
+                                open_error,
+                            )
+                        })?
                 }
-                if !metadata.is_dir() {
-                    return Err(KeyStoreError::WrongFileType {
-                        path: current.display().to_string(),
-                        expected: "directory",
-                    });
+                Err(error) => {
+                    return Err(key_store_errno(
+                        &current_path,
+                        "open secure directory component",
+                        error,
+                    ));
                 }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => present = false,
-            Err(error) => {
-                return Err(KeyStoreError::Io {
-                    path: current.display().to_string(),
-                    message: error.to_string(),
-                });
-            }
-        }
+            };
+        let child = std::fs::File::from(descriptor);
+        let stat = rustix::fs::fstat(&child).map_err(|error| {
+            key_store_errno(&current_path, "inspect secure directory component", error)
+        })?;
+        verify_directory_stat(&stat, &current_path, components.peek().is_none())?;
+        directory = child;
     }
-    if !saw_component {
-        return Err(KeyStoreError::Malformed {
-            message: "secure directory must be a strict descendant of its boundary".to_owned(),
-        });
-    }
-    Ok(present)
+    Ok(Some(directory))
 }
 
 #[cfg(unix)]
-fn reject_symlink(path: &Path) -> Result<(), KeyStoreError> {
-    if let Ok(metadata) = std::fs::symlink_metadata(path)
-        && metadata.file_type().is_symlink()
-    {
-        return Err(KeyStoreError::SymlinkComponent {
+fn verify_directory_stat(
+    stat: &rustix::fs::Stat,
+    path: &Path,
+    exact_owner_only: bool,
+) -> Result<(), KeyStoreError> {
+    use rustix::fs::FileType;
+
+    if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
+        return Err(KeyStoreError::WrongFileType {
             path: path.display().to_string(),
+            expected: "directory",
+        });
+    }
+    let mode = stat.st_mode & 0o777;
+    if (exact_owner_only && mode != 0o700) || (!exact_owner_only && mode & 0o022 != 0) {
+        let expectation = if exact_owner_only {
+            "expected exactly 0700"
+        } else {
+            "ancestor is group/other writable"
+        };
+        return Err(KeyStoreError::InsecurePermissions {
+            path: path.display().to_string(),
+            detail: format!("directory mode {mode:04o}, {expectation}"),
+        });
+    }
+    let euid = rustix::process::geteuid().as_raw();
+    if stat.st_uid != euid {
+        return Err(KeyStoreError::ForeignOwner {
+            path: path.display().to_string(),
+            uid: stat.st_uid,
+            euid,
         });
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn verify_record_stat(stat: &rustix::fs::Stat, path: &Path) -> Result<(), KeyStoreError> {
+    use rustix::fs::FileType;
+
+    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile || stat.st_nlink != 1 {
+        return Err(KeyStoreError::WrongFileType {
+            path: path.display().to_string(),
+            expected: "single-link regular file",
+        });
+    }
+    let mode = stat.st_mode & 0o777;
+    if mode != 0o600 {
+        return Err(KeyStoreError::InsecurePermissions {
+            path: path.display().to_string(),
+            detail: format!("file mode {mode:04o}, expected exactly 0600"),
+        });
+    }
+    let euid = rustix::process::geteuid().as_raw();
+    if stat.st_uid != euid {
+        return Err(KeyStoreError::ForeignOwner {
+            path: path.display().to_string(),
+            uid: stat.st_uid,
+            euid,
+        });
+    }
+    let len = u64::try_from(stat.st_size).unwrap_or(u64::MAX);
+    if len > MAX_RECORD_BYTES {
+        return Err(KeyStoreError::CapExceeded {
+            path: path.display().to_string(),
+            len,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn key_store_errno(path: &Path, operation: &str, error: rustix::io::Errno) -> KeyStoreError {
+    if error == rustix::io::Errno::LOOP {
+        KeyStoreError::SymlinkComponent {
+            path: path.display().to_string(),
+        }
+    } else {
+        KeyStoreError::Io {
+            path: path.display().to_string(),
+            message: format!("{operation}: {error}"),
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -1416,12 +1531,19 @@ mod tests {
         assert_eq!(current.generation, generation(2));
         assert_eq!(staged.generation, generation(2));
         assert_eq!(current.seed.as_bytes(), staged.seed.as_bytes());
-        assert!(
-            !store
-                .secure_dir()
-                .exists("signing.node-local-1.current.json.tmp")
-                .expect("temp check"),
-            "atomic replacement must not leave a temp sibling"
+        let live_temp_count = std::fs::read_dir(store.secure_dir().path())
+            .expect("read key directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".signing.node-local-1.current.json.tmp.")
+            })
+            .count();
+        assert_eq!(
+            live_temp_count, 0,
+            "successful atomic replacement must not leave its unique temp sibling"
         );
 
         store
@@ -1533,7 +1655,7 @@ mod tests {
     }
 
     #[test]
-    fn atomic_replace_refuses_preexisting_temp_without_disclosing_new_seed() {
+    fn atomic_replace_survives_crash_retained_temp_without_reusing_or_disclosing() {
         let workspace = temp_workspace();
         let store = MeshKeyStore::open_or_create(workspace.path()).expect("open store");
         store
@@ -1555,7 +1677,7 @@ mod tests {
         std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o644))
             .expect("make planted temp broadly readable");
 
-        let error = store
+        store
             .store_signing_key(
                 "node-local-1",
                 SigningKeyClass::Current,
@@ -1564,18 +1686,17 @@ mod tests {
                 CREATED_AT,
                 true,
             )
-            .expect_err("preexisting temp must block replacement");
+            .expect("a unique temp name must bypass the crash-retained sibling");
 
-        assert!(matches!(error, KeyStoreError::AlreadyExists { .. }));
         let planted = std::fs::read_to_string(temp_path).expect("read planted temp");
         assert_eq!(planted, "attacker-controlled");
         assert!(!planted.contains(&"a5".repeat(SIGNING_KEY_SEED_LEN)));
         let current = store
             .load_signing_key("node-local-1", SigningKeyClass::Current)
-            .expect("load unchanged current")
+            .expect("load replaced current")
             .expect("current present");
-        assert_eq!(current.generation, generation(1));
-        assert_eq!(current.seed.as_bytes(), &[1; SIGNING_KEY_SEED_LEN]);
+        assert_eq!(current.generation, generation(2));
+        assert_eq!(current.seed.as_bytes(), &[0xA5; SIGNING_KEY_SEED_LEN]);
     }
 
     #[test]
