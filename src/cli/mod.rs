@@ -18035,7 +18035,6 @@ fn collect_hotset_signals(
     let mut sources = Vec::new();
 
     let (git_signals, git_record, dirty_paths) = collect_hotset_git_source(options);
-    signals.extend(git_signals);
     sources.push(git_record);
 
     let (beads_signals, beads_record) = collect_hotset_beads_source(options);
@@ -18047,7 +18046,6 @@ fn collect_hotset_signals(
     sources.push(bv_record);
 
     let (mail_signals, mail_record, reserved_paths) = collect_hotset_agent_mail_source(options);
-    signals.extend(mail_signals);
     sources.push(mail_record);
 
     let (authority_signals, authority_record) = collect_hotset_source_authority(options);
@@ -18060,6 +18058,13 @@ fn collect_hotset_signals(
     sources.push(retrieval_record);
 
     let overlap = dirty_overlap_hashes(&dirty_paths, &reserved_paths);
+    // Git activity and Agent Mail reservations disagree about ownership when
+    // their paths overlap. Preserve both source records for diagnosis, but do
+    // not let either contested source influence prewarm ranking.
+    if overlap.is_empty() {
+        signals.extend(git_signals);
+        signals.extend(mail_signals);
+    }
     HotsetCollection::from_parts(signals, sources, overlap, retrieval_provenance)
 }
 
@@ -18485,9 +18490,13 @@ fn collect_hotset_agent_mail_source(
     let database_count = snapshot
         .get("databaseMessageCount")
         .and_then(serde_json::Value::as_u64);
-    if let (Some(archive), Some(database)) = (archive_count, database_count)
-        && archive != database
-    {
+    let (Some(archive), Some(database)) = (archive_count, database_count) else {
+        return unavailable(
+            "Agent Mail snapshot must include numeric archiveMessageCount and databaseMessageCount"
+                .to_owned(),
+        );
+    };
+    if archive != database {
         return (
             Vec::new(),
             HotsetSourceRecord::degraded(
@@ -74826,7 +74835,8 @@ mod tests {
     #[test]
     fn hotset_collector_mail_archive_database_mismatch_abstains() {
         use crate::cache::hotset::{
-            HOTSET_AGENT_MAIL_ARCHIVE_MISMATCH_CODE, HotsetSourceStatus, PrewarmSignalSource,
+            HOTSET_AGENT_MAIL_ARCHIVE_MISMATCH_CODE, HOTSET_AGENT_MAIL_UNAVAILABLE_CODE,
+            HotsetSourceStatus, PrewarmSignalSource,
         };
 
         let dir = hotset_collect_workspace("mailmismatch");
@@ -74866,6 +74876,33 @@ mod tests {
         assert!(
             collection.dirty_overlap_path_hashes().is_empty(),
             "mismatched mail snapshot must not feed overlap detection"
+        );
+
+        fs::write(
+            dir.path().join(".ee").join("agent-mail-snapshot.json"),
+            serde_json::json!({
+                "schema": "ee.agent_mail.snapshot.v1",
+                "reservations": [{"paths": ["src/lib.rs"]}],
+            })
+            .to_string(),
+        )
+        .expect("write count-free mail snapshot");
+        let missing_counts = collect_hotset_signals(&options);
+        let mail = missing_counts
+            .sources()
+            .iter()
+            .find(|record| record.source() == "agent_mail")
+            .expect("mail record");
+        assert_eq!(
+            mail.degraded_code(),
+            Some(HOTSET_AGENT_MAIL_UNAVAILABLE_CODE)
+        );
+        assert!(
+            !missing_counts
+                .signals()
+                .iter()
+                .any(|signal| signal.source() == PrewarmSignalSource::AgentMail),
+            "a snapshot without reconciliation counts must contribute zero mail signals"
         );
     }
 
@@ -74919,7 +74956,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn hotset_collector_dirty_overlap_emits_hashed_paths_only() {
-        use crate::cache::hotset::{HOTSET_DIRTY_OVERLAP_CODE, HotsetBudget};
+        use crate::cache::hotset::{HOTSET_DIRTY_OVERLAP_CODE, HotsetBudget, PrewarmSignalSource};
 
         let dir = hotset_collect_workspace("overlap");
         let mut options = healthy_hotset_collect_options(&dir);
@@ -74947,6 +74984,13 @@ mod tests {
             "exactly the src/foo.rs dirty path overlaps the src/** reservation"
         );
         assert!(hotset_degraded_codes(&collection).contains(&HOTSET_DIRTY_OVERLAP_CODE));
+        assert!(
+            !collection.signals().iter().any(|signal| matches!(
+                signal.source(),
+                PrewarmSignalSource::HostProfile | PrewarmSignalSource::AgentMail
+            )),
+            "a contested checkout must abstain from both git and reservation-derived ranking signals"
+        );
         let manifest = collection
             .manifest_json(0, HotsetBudget::new(64, 262_144), 16)
             .to_string();
