@@ -8335,7 +8335,10 @@ mod tests {
             .map_err(|error| error.to_string())?;
         ensure(
             stale.health == IndexHealth::Stale
-                && stale.db_generation > stale.index_generation.unwrap_or(0)
+                && stale
+                    .db_generation
+                    .zip(stale.index_generation)
+                    .is_some_and(|(database, index)| database > index)
                 && stale.db_evidence_admitted_count == 2,
             format!("atomic session/evidence commit must make the healthy index stale: {stale:?}"),
         )?;
@@ -8561,7 +8564,10 @@ mod tests {
         .map_err(|error| error.to_string())?;
         ensure(
             status.health == IndexHealth::Stale
-                && status.db_generation > status.index_generation.unwrap_or(0)
+                && status
+                    .db_generation
+                    .zip(status.index_generation)
+                    .is_some_and(|(database, index)| database > index)
                 && status.db_session_count == 1
                 && status.db_evidence_count == 0
                 && status.db_evidence_admitted_count == 0
