@@ -1228,8 +1228,107 @@ fn release_workflow_proves_checksums_bash_and_native_reranker_smoke() -> TestRes
     )
 }
 
+fn validate_windows_native_release_proof(workflow: &str) -> TestResult {
+    let (_, unix_build_and_rest) = workflow
+        .split_once("      - name: Build, link, audit, and compile-test release target\n")
+        .ok_or_else(|| "CI is missing the Unix release-target proof".to_owned())?;
+    let (unix_build, windows_build_and_rest) = unix_build_and_rest
+        .split_once(
+            "      - name: Build, link, audit, and compile-test Windows release target natively\n",
+        )
+        .ok_or_else(|| "CI is missing its dedicated Windows build proof".to_owned())?;
+    let (windows_build, _) = windows_build_and_rest
+        .split_once("      - name: Cross-platform graph determinism\n")
+        .ok_or_else(|| "Windows build proof has no stable boundary".to_owned())?;
+    ensure(
+        unix_build.contains("runner.os != 'Windows'") && unix_build.contains("shell: bash"),
+        "the Bash build proof must explicitly exclude Windows",
+    )?;
+    for contract in [
+        "runner.os == 'Windows'",
+        "shell: pwsh",
+        "Get-Command link.exe",
+        "Get-Command cl.exe",
+        r#"[\\/]Git[\\/]usr[\\/]bin[\\/]link\.exe"#,
+        "ee.windows_native_toolchain_proof.v1",
+        "Invoke-NativeLogged build cargo",
+        "Invoke-NativeLogged full-suite-link cargo",
+        "Invoke-NativeLogged graph-determinism cargo",
+        "Invoke-NativeLogged cargo-tree cargo",
+    ] {
+        ensure(
+            windows_build.contains(contract),
+            &format!("Windows build proof is missing {contract:?}"),
+        )?;
+    }
+    ensure(
+        !windows_build.contains("shell: bash"),
+        "Windows build proof must not fall back to the common Bash lane",
+    )?;
+
+    let (_, unix_strict_and_rest) = workflow
+        .split_once("      - name: Run fail-closed native-reranker release proof\n")
+        .ok_or_else(|| "CI is missing the Unix strict reranker proof".to_owned())?;
+    let (unix_strict, windows_strict_and_rest) = unix_strict_and_rest
+        .split_once(
+            "      - name: Run fail-closed Windows native-reranker release proof natively\n",
+        )
+        .ok_or_else(|| "CI is missing its dedicated Windows strict reranker proof".to_owned())?;
+    let (windows_strict, _) = windows_strict_and_rest
+        .split_once("      - name: Upload per-target native-reranker evidence\n")
+        .ok_or_else(|| {
+            "Windows strict reranker proof has no evidence-upload boundary".to_owned()
+        })?;
+    ensure(
+        unix_strict.contains("runner.os != 'Windows'") && unix_strict.contains("shell: bash"),
+        "the Bash strict reranker proof must explicitly exclude Windows",
+    )?;
+    for contract in [
+        "runner.os == 'Windows'",
+        "shell: pwsh",
+        "Invoke-NativeLogged model-download curl.exe",
+        "Get-FileHash -Algorithm SHA256",
+        "Invoke-EeJson model-fetch",
+        "Invoke-NativeLogged full-ee-suite cargo",
+        "Invoke-NativeLogged frankensearch-rerank-suite cargo",
+        "[native_reranker] SKIP",
+        "[native_reranker] ranking(desc)=",
+        "Invoke-NativeLogged binary-linkage dumpbin.exe",
+        r#"onnxruntime|(^|[\\/])ort\.dll"#,
+        "Invoke-EeJson e2e-fusion",
+        "Invoke-EeJson e2e-reranked",
+        "BD1NL1314_RERANK_TRAP",
+        "BD1NL1314_RERANK_TARGET",
+        "ee.rerank_determinism.vector.v1",
+        "rerank-vector.json",
+        "strict-completed-at.txt",
+    ] {
+        ensure(
+            windows_strict.contains(contract),
+            &format!("Windows strict reranker proof is missing {contract:?}"),
+        )?;
+    }
+    for contract in [
+        "windows-toolchain.json",
+        "ee.windows_native_toolchain_proof.v1",
+        "compiler.endswith(\"/cl.exe\")",
+        "linker.endswith(\"/link.exe\")",
+        "\"/git/usr/bin/link.exe\" in linker",
+    ] {
+        ensure(
+            workflow.contains(contract),
+            &format!("aggregate Windows-native proof is missing {contract:?}"),
+        )?;
+    }
+    ensure(
+        !windows_strict.contains("bash scripts/e2e_native_reranker.sh"),
+        "Windows native proof must execute ee.exe directly rather than relabel the Bash harness",
+    )
+}
+
 #[test]
 fn ci_proves_five_target_native_reranker_release_gate() -> TestResult {
+    validate_windows_native_release_proof(CI_WORKFLOW)?;
     let (_, cross_and_rest) = CI_WORKFLOW
         .split_once("\n  cross-platform-determinism:\n")
         .ok_or_else(|| "CI is missing the cross-platform-determinism job".to_owned())?;
@@ -1439,6 +1538,19 @@ fn ci_proves_five_target_native_reranker_release_gate() -> TestResult {
         ensure(status.success(), "native reranker E2E should pass bash -n")?;
     }
     Ok(())
+}
+
+#[test]
+fn ci_rejects_a_common_lane_masquerading_as_windows_native_proof() -> TestResult {
+    let weakened = CI_WORKFLOW.replacen(
+        "      - name: Run fail-closed Windows native-reranker release proof natively\n",
+        "      - name: Run fail-closed native-reranker release proof\n",
+        1,
+    );
+    ensure(
+        validate_windows_native_release_proof(&weakened).is_err(),
+        "a planted common-lane substitution must fail the Windows-native proof contract",
+    )
 }
 
 #[test]

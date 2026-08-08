@@ -393,7 +393,7 @@ jobs:
           Write-Host "::endgroup::"
 
       - name: Build, link, audit, and compile-test release target
-        if: matrix.release_target == true
+        if: matrix.release_target == true && runner.os != 'Windows'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -482,6 +482,91 @@ jobs:
 
           date -u +"%Y-%m-%dT%H:%M:%SZ" >"$proof_root/completed-at.txt"
 
+      - name: Build, link, audit, and compile-test Windows release target natively
+        if: matrix.release_target == true && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          BINARY_NAME: ${{ matrix.binary }}
+          FRANKENSEARCH_EXPECTED_REV: b559c92e03242336614b995c562a13dfd1269eed
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $proofRoot = Join-Path $env:RUNNER_TEMP "bd-1nl13.7\$env:TARGET"
+          $timestamps = Join-Path $proofRoot "timestamps.tsv"
+          New-Item -ItemType Directory -Force -Path $proofRoot | Out-Null
+
+          function Invoke-NativeLogged {
+            param(
+              [Parameter(Mandatory)][string]$Label,
+              [Parameter(Mandatory)][string]$Command,
+              [Parameter(Mandatory)][string[]]$Arguments
+            )
+            $log = Join-Path $proofRoot "$Label.log"
+            Add-Content $timestamps "$([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))`t$Label`tstarted"
+            & $Command @Arguments 2>&1 | Tee-Object -FilePath $log | Write-Host
+            $status = $LASTEXITCODE
+            Add-Content $timestamps "$([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))`t$Label`tcompleted`t$status"
+            if ($status -ne 0) {
+              throw "$Label failed with exit code $status"
+            }
+          }
+
+          $lockedRevision = (Import-Csv franken-stack.lock -Delimiter "`t" -Header Project,Revision |
+            Where-Object Project -eq "frankensearch").Revision
+          $checkedOutRevision = (& git -C .ci/franken-stack/projects/frankensearch rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or
+              $lockedRevision -ne $env:FRANKENSEARCH_EXPECTED_REV -or
+              $checkedOutRevision -ne $env:FRANKENSEARCH_EXPECTED_REV) {
+            throw "expected latest Frankensearch $env:FRANKENSEARCH_EXPECTED_REV, lock=$lockedRevision checkout=$checkedOutRevision"
+          }
+
+          $linker = (Get-Command link.exe -CommandType Application | Select-Object -First 1).Source
+          $compiler = (Get-Command cl.exe -CommandType Application | Select-Object -First 1).Source
+          if (-not $linker -or -not $compiler -or $linker -match '[\\/]Git[\\/]usr[\\/]bin[\\/]link\.exe$') {
+            throw "Windows proof requires the activated MSVC cl.exe/link.exe, got cl=$compiler link=$linker"
+          }
+          [ordered]@{
+            schema = "ee.windows_native_toolchain_proof.v1"
+            target = $env:TARGET
+            compiler = $compiler
+            linker = $linker
+          } | ConvertTo-Json | Set-Content (Join-Path $proofRoot "windows-toolchain.json")
+          [ordered]@{
+            target = $env:TARGET
+            frankensearchRevision = $checkedOutRevision
+          } | ConvertTo-Json -Compress | Set-Content (Join-Path $proofRoot "target.json")
+
+          Invoke-NativeLogged build cargo @("build", "--locked", "--workspace", "--bin", "ee", "--target", $env:TARGET)
+          Invoke-NativeLogged full-suite-link cargo @(
+            "test", "--locked", "--workspace", "--lib", "--bins", "--tests", "--examples",
+            "--no-run", "--target", $env:TARGET
+          )
+          Invoke-NativeLogged graph-determinism cargo @(
+            "test", "--locked", "--workspace", "--test", "cross_platform_determinism",
+            "--target", $env:TARGET, "--", "--nocapture"
+          )
+          Invoke-NativeLogged cargo-tree cargo @(
+            "tree", "--locked", "--target", $env:TARGET, "-e", "features", "--prefix", "none"
+          )
+
+          $forbidden = @(
+            "tokio", "tokio-util", "hyper", "axum", "tower", "reqwest",
+            "async-std", "smol", "rusqlite", "sqlx", "diesel", "sea-orm",
+            "petgraph", "ort", "ort-sys", "onnxruntime", "onnxruntime-sys"
+          )
+          $found = Get-Content (Join-Path $proofRoot "cargo-tree.log") |
+            ForEach-Object { ($_ -split '\s+')[0] } |
+            Where-Object { $_ -in $forbidden } |
+            Sort-Object -Unique
+          if ($found) {
+            throw "$env:TARGET forbidden target-resolved dependencies: $($found -join ', ')"
+          }
+          "$env:TARGET target-resolved dependency tree is project-forbidden-dep and ORT free" |
+            Set-Content (Join-Path $proofRoot "dependency-audit.txt")
+          [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") |
+            Set-Content (Join-Path $proofRoot "completed-at.txt")
+
       - name: Cross-platform graph determinism
         if: matrix.release_target != true && matrix.runner != 'cross'
         run: cargo test --workspace --test cross_platform_determinism --target ${{ matrix.target }} -- --nocapture
@@ -491,7 +576,7 @@ jobs:
         run: cross test --workspace --test cross_platform_determinism --target ${{ matrix.target }} -- --nocapture
 
       - name: Run fail-closed native-reranker release proof
-        if: github.event_name == 'workflow_dispatch' && inputs.run_native_reranker_release_matrix == true && matrix.release_target == true
+        if: github.event_name == 'workflow_dispatch' && inputs.run_native_reranker_release_matrix == true && matrix.release_target == true && runner.os != 'Windows'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -681,6 +766,224 @@ jobs:
           fi
           date -u +"%Y-%m-%dT%H:%M:%SZ" >"$proof_root/strict-completed-at.txt"
 
+      - name: Run fail-closed Windows native-reranker release proof natively
+        if: github.event_name == 'workflow_dispatch' && inputs.run_native_reranker_release_matrix == true && matrix.release_target == true && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          BINARY_NAME: ${{ matrix.binary }}
+          RERANK_MODEL_URL: ${{ inputs.rerank_model_url }}
+          RERANK_MODEL_BYTES: '82767464'
+          RERANK_MODEL_SHA256: adaada3ccc15ae535e9bea238d2ec05e4f39726bdcad07dd87cba9f85dc10edb
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          if ([string]::IsNullOrWhiteSpace($env:RERANK_MODEL_URL)) {
+            throw "rerank_model_url is required for the Windows native-reranker release proof"
+          }
+
+          $proofRoot = Join-Path $env:RUNNER_TEMP "bd-1nl13.7\$env:TARGET"
+          $modelRoot = Join-Path $env:RUNNER_TEMP "bd-1nl13.7-model\$env:TARGET"
+          $archive = Join-Path $modelRoot "rerank-default-v1.tar.zst"
+          $timestamps = Join-Path $proofRoot "timestamps.tsv"
+          New-Item -ItemType Directory -Force -Path $proofRoot, $modelRoot | Out-Null
+
+          function Add-ProofTimestamp {
+            param([string]$Label, [string]$Phase, [int]$Status = 0)
+            $line = "$([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))`t$Label`t$Phase"
+            if ($Phase -eq "completed") { $line += "`t$Status" }
+            Add-Content $timestamps $line
+          }
+
+          function Invoke-NativeLogged {
+            param(
+              [Parameter(Mandatory)][string]$Label,
+              [Parameter(Mandatory)][string]$Command,
+              [Parameter(Mandatory)][string[]]$Arguments
+            )
+            $log = Join-Path $proofRoot "$Label.log"
+            Add-ProofTimestamp $Label "started"
+            & $Command @Arguments 2>&1 | Tee-Object -FilePath $log | Write-Host
+            $status = $LASTEXITCODE
+            Add-ProofTimestamp $Label "completed" $status
+            if ($status -ne 0) { throw "$Label failed with exit code $status" }
+          }
+
+          function Invoke-EeJson {
+            param([string]$Label, [string[]]$Arguments)
+            $stdoutPath = Join-Path $proofRoot "$Label.stdout.json"
+            $stderrPath = Join-Path $proofRoot "$Label.stderr.log"
+            Add-ProofTimestamp $Label "started"
+            $stdout = & $script:eeBinary @Arguments 2> $stderrPath
+            $status = $LASTEXITCODE
+            $stdout | Set-Content $stdoutPath
+            $stdout | Write-Host
+            if (Test-Path $stderrPath) { Get-Content $stderrPath | Write-Host }
+            Add-ProofTimestamp $Label "completed" $status
+            if ($status -ne 0) { throw "$Label failed with exit code $status" }
+            $json = ($stdout -join "`n") | ConvertFrom-Json
+            if ($json.schema -ne "ee.response.v2" -or $json.success -ne $true) {
+              throw "$Label did not emit a successful ee.response.v2 envelope"
+            }
+            return $json
+          }
+
+          Invoke-NativeLogged model-download curl.exe @(
+            "--fail", "--location", "--retry", "3", "--retry-all-errors",
+            "--output", $archive, $env:RERANK_MODEL_URL
+          )
+          $artifact = Get-Item $archive
+          $sha256 = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($artifact.Length -ne [int64]$env:RERANK_MODEL_BYTES -or
+              $sha256 -ne $env:RERANK_MODEL_SHA256) {
+            throw "reranker artifact mismatch: bytes=$($artifact.Length) sha256=$sha256"
+          }
+
+          $metadata = (& cargo metadata --locked --no-deps --format-version 1) | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "cargo metadata failed" }
+          $script:eeBinary = Join-Path $metadata.target_directory "$env:TARGET\debug\$env:BINARY_NAME"
+          if (-not (Test-Path -PathType Leaf $script:eeBinary)) {
+            throw "compiled ee binary is missing: $script:eeBinary"
+          }
+
+          $home = Join-Path $modelRoot "home"
+          $workspace = Join-Path $modelRoot "workspace"
+          $tmp = Join-Path $modelRoot "tmp"
+          $env:HOME = $home
+          $env:USERPROFILE = $home
+          $env:APPDATA = Join-Path $home "AppData\Roaming"
+          $env:LOCALAPPDATA = Join-Path $home "AppData\Local"
+          $env:TMPDIR = $tmp
+          $env:TMP = $tmp
+          $env:TEMP = $tmp
+          New-Item -ItemType Directory -Force -Path $home, $workspace, $tmp, $env:APPDATA, $env:LOCALAPPDATA | Out-Null
+
+          Invoke-EeJson model-init @("--workspace", $workspace, "init", "--json") | Out-Null
+          Invoke-EeJson model-fetch @(
+            "--workspace", $workspace, "model", "fetch", "rerank-default",
+            "--from-file", $archive, "--json"
+          ) | Out-Null
+          $modelDir = Join-Path $home ".local\share\ee\models\rerank\rerank-default-v1\rerank-default-v1"
+          if (-not (Test-Path (Join-Path $modelDir "tokenizer.json")) -or
+              (-not (Test-Path (Join-Path $modelDir "model_f32.safetensors")) -and
+               -not (Test-Path (Join-Path $modelDir "model.safetensors")))) {
+            throw "verified model fetch did not produce native reranker files at $modelDir"
+          }
+
+          $driveRoot = [IO.Path]::GetPathRoot($env:GITHUB_WORKSPACE)
+          $upstreamModelDir = Join-Path $driveRoot "private\tmp\ee-reranker-port\model"
+          New-Item -ItemType Directory -Force -Path $upstreamModelDir | Out-Null
+          Copy-Item -Recurse -Force (Join-Path $modelDir "*") $upstreamModelDir
+
+          $env:EE_E2E_RERANK_MODEL_DIR = $modelDir
+          $env:EE_E2E_RERANK_REQUIRE_MODEL = "1"
+          $env:EE_E2E_NATIVE_RERANK_REQUIRE_MODEL = "1"
+          Invoke-NativeLogged full-ee-suite cargo @(
+            "test", "--locked", "--workspace", "--lib", "--bins", "--tests", "--examples",
+            "--target", $env:TARGET, "--", "--test-threads=1", "--nocapture"
+          )
+          $frankensearchManifest = Join-Path $env:GITHUB_WORKSPACE ".ci\franken-stack\projects\frankensearch\Cargo.toml"
+          Invoke-NativeLogged frankensearch-rerank-suite cargo @(
+            "test", "--locked", "--manifest-path", $frankensearchManifest,
+            "-p", "frankensearch-rerank", "--no-default-features", "--features", "native",
+            "--target", $env:TARGET, "--", "--test-threads=1", "--nocapture"
+          )
+          $upstreamLog = Get-Content (Join-Path $proofRoot "frankensearch-rerank-suite.log") -Raw
+          if ($upstreamLog.Contains("[native_reranker] SKIP") -or
+              -not $upstreamLog.Contains("[native_reranker] ranking(desc)=")) {
+            throw "upstream native reranker did not prove real-model ranking without skips"
+          }
+
+          Invoke-NativeLogged binary-linkage dumpbin.exe @("/dependents", $script:eeBinary)
+          if ((Get-Content (Join-Path $proofRoot "binary-linkage.log") -Raw) -match
+              '(?i)onnxruntime|(^|[\\/])ort\.dll') {
+            throw "Windows ee.exe links a forbidden ONNX Runtime library"
+          }
+
+          $e2eHome = Join-Path $modelRoot "native-e2e-home"
+          $e2eWorkspace = Join-Path $modelRoot "native-e2e-workspace"
+          New-Item -ItemType Directory -Force -Path $e2eHome, $e2eWorkspace | Out-Null
+          $env:HOME = $e2eHome
+          $env:USERPROFILE = $e2eHome
+          $env:APPDATA = Join-Path $e2eHome "AppData\Roaming"
+          $env:LOCALAPPDATA = Join-Path $e2eHome "AppData\Local"
+          New-Item -ItemType Directory -Force -Path $env:APPDATA, $env:LOCALAPPDATA | Out-Null
+          Invoke-EeJson e2e-init @("--workspace", $e2eWorkspace, "init", "--json") | Out-Null
+          Invoke-EeJson e2e-model-fetch @(
+            "--workspace", $e2eWorkspace, "model", "fetch", "rerank-default",
+            "--from-file", $archive, "--json"
+          ) | Out-Null
+          $env:EE_E2E_RERANK_MODEL_DIR = Join-Path $e2eHome ".local\share\ee\models\rerank\rerank-default-v1\rerank-default-v1"
+
+          $corpus = @(
+            @("semantic", "fact", "BD1NL1314_RERANK_TRAP release release release format format checklist checklist cargo cargo clippy clippy, but this is a noisy lexical trap and not the Rust release policy target."),
+            @("procedural", "rule", "BD1NL1314_RERANK_TARGET The correct Rust release policy says run cargo fmt --check and cargo clippy before publishing."),
+            @("semantic", "fact", "BD1NL1314_RERANK_NOISE_ONE Database migration notes cover index ownership and schema upgrade ordering."),
+            @("semantic", "fact", "BD1NL1314_RERANK_NOISE_TWO Onboarding screenshots and terminal color themes need a design review."),
+            @("semantic", "fact", "BD1NL1314_RERANK_NOISE_THREE Rust ownership and borrowing prevent memory safety errors at compile time.")
+          )
+          $index = 0
+          foreach ($memory in $corpus) {
+            Invoke-EeJson "e2e-remember-$index" @(
+              "--workspace", $e2eWorkspace, "remember", $memory[2],
+              "--level", $memory[0], "--kind", $memory[1],
+              "--tags", "bd-1nl13.7,rerank,e2e", "--no-auto-link",
+              "--no-propose-candidates", "--json"
+            ) | Out-Null
+            $index++
+          }
+          Invoke-EeJson e2e-index @("--workspace", $e2eWorkspace, "index", "rebuild", "--json") | Out-Null
+          Invoke-EeJson e2e-top-k @(
+            "--workspace", $e2eWorkspace, "config", "set", "search.rerank_top_k", "5", "--json"
+          ) | Out-Null
+          Invoke-EeJson e2e-rerank-off @(
+            "--workspace", $e2eWorkspace, "config", "set", "search.rerank", "off", "--json"
+          ) | Out-Null
+          $query = "What exact Rust release policy should run before publishing?"
+          $fusion = Invoke-EeJson e2e-fusion @(
+            "--workspace", $e2eWorkspace, "search", $query,
+            "--limit", "5", "--relevance-floor", "0", "--explain", "--json"
+          )
+          Invoke-EeJson e2e-rerank-auto @(
+            "--workspace", $e2eWorkspace, "config", "set", "search.rerank", "auto", "--json"
+          ) | Out-Null
+          $reranked = Invoke-EeJson e2e-reranked @(
+            "--workspace", $e2eWorkspace, "search", $query,
+            "--limit", "5", "--relevance-floor", "0", "--explain", "--json"
+          )
+
+          $fusionResults = @($fusion.data.results)
+          $rerankedResults = @($reranked.data.results)
+          $fusionOrder = @($fusionResults | ForEach-Object content)
+          $rerankedOrder = @($rerankedResults | ForEach-Object content)
+          if ($fusion.data.rerank.mode -ne "fusion_only" -or
+              $fusionResults.Count -ne 5 -or $rerankedResults.Count -ne 5 -or
+              $reranked.data.rerank.mode -ne "reranked" -or
+              $reranked.data.rerank.rerankScoreCount -ne 5 -or
+              ($rerankedResults | Where-Object {
+                $_.scoreKind -ne "reranked" -or $_.rerankScore -lt 0 -or $_.rerankScore -gt 1
+              }).Count -ne 0) {
+            throw "native ee.exe did not expose the required five-result reranker posture and scores"
+          }
+          if ((Compare-Object ($fusionResults.memoryId | Sort-Object) ($rerankedResults.memoryId | Sort-Object)) -or
+              (($fusionOrder -join "`n") -eq ($rerankedOrder -join "`n")) -or
+              -not $rerankedOrder[0].StartsWith("BD1NL1314_RERANK_TARGET") -or
+              -not $rerankedOrder[1].StartsWith("BD1NL1314_RERANK_TRAP")) {
+            throw "native ee.exe did not preserve candidates and observably rerank the planted lexical trap"
+          }
+
+          [ordered]@{
+            schema = "ee.rerank_determinism.vector.v1"
+            query = $query
+            fusionOnlyOrder = $fusionOrder
+            rerankedOrder = $rerankedOrder
+            rerankedScores = @($rerankedResults | ForEach-Object {
+              [ordered]@{ content = $_.content; rerankScore = $_.rerankScore }
+            })
+          } | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $proofRoot "rerank-vector.json")
+          [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") |
+            Set-Content (Join-Path $proofRoot "strict-completed-at.txt")
+
       - name: Upload per-target native-reranker evidence
         if: ${{ always() && matrix.release_target }}
         uses: actions/upload-artifact@v4
@@ -771,6 +1074,22 @@ jobs:
                   raise SystemExit(
                       f"{target}: Frankensearch revision is not {expected_revision}"
                   )
+              if target == "x86_64-pc-windows-msvc":
+                  toolchain_path = sidecar.with_name("windows-toolchain.json")
+                  if not toolchain_path.is_file():
+                      raise SystemExit(f"{target}: Windows toolchain proof is missing")
+                  toolchain = json.loads(toolchain_path.read_text(encoding="utf-8-sig"))
+                  if toolchain.get("schema") != "ee.windows_native_toolchain_proof.v1" \
+                      or toolchain.get("target") != target:
+                      raise SystemExit(f"{target}: invalid Windows toolchain proof")
+                  compiler = str(toolchain.get("compiler", "")).replace("\\", "/").lower()
+                  linker = str(toolchain.get("linker", "")).replace("\\", "/").lower()
+                  if not compiler.endswith("/cl.exe") \
+                      or not linker.endswith("/link.exe") \
+                      or "/git/usr/bin/link.exe" in linker:
+                      raise SystemExit(
+                          f"{target}: proof did not bind compilation to native MSVC tools"
+                      )
               for marker in ("completed-at.txt", "strict-completed-at.txt"):
                   if not sidecar.with_name(marker).is_file():
                       raise SystemExit(f"{target}: success marker is missing: {marker}")

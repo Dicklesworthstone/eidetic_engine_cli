@@ -30,6 +30,15 @@ const TARGET_TRIPLES: &[&str] = &[
     "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-gnu",
     "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+];
+
+const RELEASE_TARGET_TRIPLES: &[&str] = &[
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
     "x86_64-pc-windows-msvc",
 ];
 
@@ -108,6 +117,24 @@ const EXPECTED_HASHES: &[ExpectedHash] = &[
     },
     ExpectedHash {
         target_triple: "aarch64-apple-darwin",
+        algorithm: "minhash_rank_centrality",
+        seed: "incoming-density-v1",
+        output_hash: "blake3:6756bd905f8593b7587ec91fe699e48c4bf2ffff22dd4c94bdeb248cc99a4b53",
+    },
+    ExpectedHash {
+        target_triple: "x86_64-apple-darwin",
+        algorithm: "personalized_pagerank",
+        seed: "weighted-cycle-v1",
+        output_hash: "blake3:01255168f7add48cf43e7a296eff360a5d3248a7e315ceea60985c3410a1e2f0",
+    },
+    ExpectedHash {
+        target_triple: "x86_64-apple-darwin",
+        algorithm: "hits",
+        seed: "authority-star-v1",
+        output_hash: "blake3:899880f112e11cf015273f6cae10010e01d49f362061bb4cd18932fcbcab1bf9",
+    },
+    ExpectedHash {
+        target_triple: "x86_64-apple-darwin",
         algorithm: "minhash_rank_centrality",
         seed: "incoming-density-v1",
         output_hash: "blake3:6756bd905f8593b7587ec91fe699e48c4bf2ffff22dd4c94bdeb248cc99a4b53",
@@ -225,6 +252,37 @@ fn all_supported_targets_have_hash_rows_for_each_algorithm_seed() -> TestResult 
         ),
     )?;
     Ok(())
+}
+
+#[test]
+fn release_hash_domain_is_exactly_the_five_shipped_targets() -> TestResult {
+    let expected = BTreeSet::from([
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+    ]);
+    let expected_len = expected.len();
+    ensure_equal(
+        RELEASE_TARGET_TRIPLES
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        expected,
+        "release determinism target set",
+    )?;
+    ensure_equal(
+        RELEASE_TARGET_TRIPLES.len(),
+        expected_len,
+        "release determinism targets must be unique",
+    )?;
+    ensure(
+        RELEASE_TARGET_TRIPLES
+            .iter()
+            .all(|target| TARGET_TRIPLES.contains(target)),
+        "every release target must have pinned graph hashes",
+    )
 }
 
 #[test]
@@ -564,6 +622,8 @@ fn current_target_triple() -> &'static str {
         "aarch64-unknown-linux-gnu"
     } else if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
         "aarch64-apple-darwin"
+    } else if cfg!(all(target_arch = "x86_64", target_os = "macos")) {
+        "x86_64-apple-darwin"
     } else if cfg!(all(
         target_arch = "x86_64",
         target_os = "windows",
