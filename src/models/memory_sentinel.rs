@@ -123,6 +123,46 @@ impl FromStr for MemorySentinelKind {
     }
 }
 
+/// Which direction a sentinel's predicate acts on its memory
+/// (bd-wake-on-condition-inverse-sentinel-65uci).
+///
+/// `Gate` is the original polarity: the memory serves while the predicate
+/// holds and is withheld once it breaks. `Revive` is the inverse: the
+/// predicate is expected to fail while the memory stays retired, and a pass
+/// signals the recorded blocker has cleared and the memory should resurface.
+/// Revive sentinels never gate serving.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum MemorySentinelPolarity {
+    #[default]
+    Gate,
+    Revive,
+}
+
+impl MemorySentinelPolarity {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Gate => "gate",
+            Self::Revive => "revive",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(input: &str) -> Option<Self> {
+        match input {
+            "gate" => Some(Self::Gate),
+            "revive" => Some(Self::Revive),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for MemorySentinelPolarity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MemorySentinelSafetyClass {
     PurePredicate,
@@ -236,6 +276,7 @@ pub struct ParsedMemorySentinelSpec {
 pub struct CreateMemorySentinelSpecInput {
     pub memory_id: String,
     pub sentinel_kind: MemorySentinelKind,
+    pub polarity: MemorySentinelPolarity,
     pub target: String,
     pub expected_predicate: Option<String>,
     pub provenance: String,
@@ -248,6 +289,7 @@ pub struct MemorySentinelSpec {
     pub spec_hash: String,
     pub memory_id: String,
     pub sentinel_kind: MemorySentinelKind,
+    pub polarity: MemorySentinelPolarity,
     pub target: String,
     pub expected_predicate: String,
     pub safety_class: MemorySentinelSafetyClass,
@@ -265,6 +307,7 @@ impl MemorySentinelSpec {
     pub fn from_raw(
         memory_id: &str,
         raw_spec: &str,
+        polarity: MemorySentinelPolarity,
         expected_predicate: Option<&str>,
         provenance: &str,
         stale_threshold_seconds: Option<u64>,
@@ -273,6 +316,7 @@ impl MemorySentinelSpec {
         Self::new(CreateMemorySentinelSpecInput {
             memory_id: memory_id.to_owned(),
             sentinel_kind: parsed.sentinel_kind,
+            polarity,
             target: parsed.target,
             expected_predicate: expected_predicate.map(str::to_owned),
             provenance: provenance.to_owned(),
@@ -303,6 +347,7 @@ impl MemorySentinelSpec {
         let spec_hash = stable_spec_hash(
             &memory_id,
             input.sentinel_kind,
+            input.polarity,
             &target,
             &expected_predicate,
             safety_class,
@@ -314,6 +359,7 @@ impl MemorySentinelSpec {
             spec_hash,
             memory_id,
             sentinel_kind: input.sentinel_kind,
+            polarity: input.polarity,
             target,
             expected_predicate,
             safety_class,
@@ -328,6 +374,7 @@ pub struct StoredMemorySentinelSpec {
     pub spec_hash: String,
     pub memory_id: String,
     pub sentinel_kind: MemorySentinelKind,
+    pub polarity: MemorySentinelPolarity,
     pub target: String,
     pub expected_predicate: String,
     pub safety_class: MemorySentinelSafetyClass,
@@ -867,6 +914,7 @@ fn validate_evidence_summary(input: &str) -> Result<String, MemorySentinelValida
 fn stable_spec_hash(
     memory_id: &str,
     kind: MemorySentinelKind,
+    polarity: MemorySentinelPolarity,
     target: &str,
     expected_predicate: &str,
     safety_class: MemorySentinelSafetyClass,
@@ -882,6 +930,13 @@ fn stable_spec_hash(
     hash_part(&mut hasher, safety_class.as_str());
     hash_part(&mut hasher, provenance);
     hash_opt_u64(&mut hasher, stale_threshold_seconds);
+    // Domain-separated polarity: gate specs hash exactly as they did before
+    // polarity existed, so every stored spec_hash and the upsert-by-hash
+    // dedupe stay valid; only revive specs append the extra part
+    // (bd-wake-on-condition-inverse-sentinel-65uci).
+    if matches!(polarity, MemorySentinelPolarity::Revive) {
+        hash_part(&mut hasher, "polarity:revive");
+    }
     format!("blake3:{}", hasher.finalize().to_hex())
 }
 
@@ -988,6 +1043,7 @@ mod tests {
         let spec = MemorySentinelSpec::from_raw(
             &memory_id(),
             "path_exists:docs/adr/0060-verifiable-memory-sentinels.md",
+            MemorySentinelPolarity::Gate,
             None,
             "test://sentinel",
             Some(3_600),
@@ -1018,6 +1074,7 @@ mod tests {
         let rebuilt = MemorySentinelSpec::from_raw(
             &memory_id(),
             "path-exists:docs/adr/0060-verifiable-memory-sentinels.md",
+            MemorySentinelPolarity::Gate,
             None,
             "test://sentinel",
             Some(3_600),
@@ -1034,6 +1091,7 @@ mod tests {
         let spec = MemorySentinelSpec::from_raw(
             &memory_id(),
             "command_help_contains_flag:ee pack --require-fresh-sentinels",
+            MemorySentinelPolarity::Gate,
             None,
             "test://sentinel",
             None,
@@ -1047,6 +1105,7 @@ mod tests {
         let error = match MemorySentinelSpec::from_raw(
             &memory_id(),
             "command_help_contains_flag:sh -c 'echo hi'",
+            MemorySentinelPolarity::Gate,
             None,
             "test://sentinel",
             None,
@@ -1065,6 +1124,7 @@ mod tests {
         let error = match MemorySentinelSpec::from_raw(
             &memory_id(),
             "path_exists",
+            MemorySentinelPolarity::Gate,
             None,
             "test://sentinel",
             None,
@@ -1083,6 +1143,7 @@ mod tests {
         let spec = MemorySentinelSpec::from_raw(
             &memory_id(),
             "env_var_registered:EE_PACK_TRACE",
+            MemorySentinelPolarity::Gate,
             Some("registered"),
             "test://sentinel",
             None,
@@ -1113,6 +1174,98 @@ mod tests {
         ensure(
             changed.result_hash != first.result_hash,
             "status should affect result hash",
+        )
+    }
+
+    #[test]
+    fn gate_polarity_hash_matches_pre_polarity_algorithm() -> TestResult {
+        // bd-wake-on-condition-inverse-sentinel-65uci: polarity is hashed
+        // domain-separated, appended only for revive. Every gate spec —
+        // which is every spec that existed before polarity — must keep the
+        // exact hash the original algorithm produced, or stored spec_hash
+        // identities and upsert-by-hash dedupe would silently fork.
+        let spec = MemorySentinelSpec::from_raw(
+            &memory_id(),
+            "env_var_registered:EE_PACK_TRACE",
+            MemorySentinelPolarity::Gate,
+            Some("registered"),
+            "test://sentinel",
+            Some(600),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let mut hasher = blake3::Hasher::new();
+        hash_part(&mut hasher, MEMORY_SENTINEL_SPEC_HASH_SCHEMA_V1);
+        hash_part(&mut hasher, &spec.memory_id);
+        hash_part(&mut hasher, spec.sentinel_kind.as_str());
+        hash_part(&mut hasher, &spec.target);
+        hash_part(&mut hasher, &spec.expected_predicate);
+        hash_part(&mut hasher, spec.safety_class.as_str());
+        hash_part(&mut hasher, &spec.provenance);
+        hash_opt_u64(&mut hasher, spec.stale_threshold_seconds);
+        let legacy_hash = format!("blake3:{}", hasher.finalize().to_hex());
+
+        ensure(
+            spec.spec_hash == legacy_hash,
+            "gate polarity must not perturb the original spec hash",
+        )
+    }
+
+    #[test]
+    fn revive_polarity_produces_distinct_spec_identity() -> TestResult {
+        let gate = MemorySentinelSpec::from_raw(
+            &memory_id(),
+            "command_help_contains_flag:cargo --locked",
+            MemorySentinelPolarity::Gate,
+            None,
+            "test://sentinel",
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        let revive = MemorySentinelSpec::from_raw(
+            &memory_id(),
+            "command_help_contains_flag:cargo --locked",
+            MemorySentinelPolarity::Revive,
+            None,
+            "test://sentinel",
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure(
+            revive.polarity == MemorySentinelPolarity::Revive,
+            "revive spec must carry its polarity",
+        )?;
+        ensure(
+            gate.polarity == MemorySentinelPolarity::Gate,
+            "gate spec must carry its polarity",
+        )?;
+        ensure(
+            gate.spec_hash != revive.spec_hash,
+            "opposite polarities over identical inputs must be distinct spec identities",
+        )?;
+        // Same validation envelope applies to both polarities.
+        ensure(
+            gate.safety_class == revive.safety_class,
+            "polarity must not change the safety class",
+        )
+    }
+
+    #[test]
+    fn polarity_wire_strings_round_trip() -> TestResult {
+        ensure(
+            MemorySentinelPolarity::default() == MemorySentinelPolarity::Gate,
+            "default polarity must be gate",
+        )?;
+        for polarity in [MemorySentinelPolarity::Gate, MemorySentinelPolarity::Revive] {
+            ensure(
+                MemorySentinelPolarity::parse(polarity.as_str()) == Some(polarity),
+                format!("wire string `{polarity}` must round-trip"),
+            )?;
+        }
+        ensure(
+            MemorySentinelPolarity::parse("resurrect").is_none(),
+            "unknown polarity tokens must be rejected",
         )
     }
 

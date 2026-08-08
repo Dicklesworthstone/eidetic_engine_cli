@@ -191,11 +191,11 @@ pub use memory_sentinel::{
     MAX_MEMORY_SENTINEL_PREDICATE_BYTES, MAX_MEMORY_SENTINEL_PROVENANCE_BYTES,
     MAX_MEMORY_SENTINEL_TARGET_BYTES, MEMORY_SENTINEL_RESULT_HASH_SCHEMA_V1,
     MEMORY_SENTINEL_RESULT_SCHEMA_V1, MEMORY_SENTINEL_SPEC_HASH_SCHEMA_V1,
-    MEMORY_SENTINEL_SPEC_SCHEMA_V1, MemorySentinelKind, MemorySentinelResult,
-    MemorySentinelResultInput, MemorySentinelResultStatus, MemorySentinelSafetyClass,
-    MemorySentinelSpec, MemorySentinelValidationError, ParsedMemorySentinelSpec,
-    SentinelObservation, StoredMemorySentinelResult, StoredMemorySentinelSpec,
-    memory_sentinel_spec_repair_hint, parse_memory_sentinel_spec,
+    MEMORY_SENTINEL_SPEC_SCHEMA_V1, MemorySentinelKind, MemorySentinelPolarity,
+    MemorySentinelResult, MemorySentinelResultInput, MemorySentinelResultStatus,
+    MemorySentinelSafetyClass, MemorySentinelSpec, MemorySentinelValidationError,
+    ParsedMemorySentinelSpec, SentinelObservation, StoredMemorySentinelResult,
+    StoredMemorySentinelSpec, memory_sentinel_spec_repair_hint, parse_memory_sentinel_spec,
 };
 pub use model_registry::{
     EMBEDDING_METADATA_SCHEMA_V1, EmbeddingMetadataFieldSchema, EmbeddingMetadataObjectSchema,

@@ -306,11 +306,11 @@ use crate::models::{
     DEMO_RUN_RESULT_SCHEMA_V1, DemoEntry, DemoFile, DemoId, DemoStatus, DomainError,
     ExperimentOutcomeStatus, ExperimentSafetyBoundary, FilterOperator, InstallOperation,
     LearningObservationSignal, MemoryAnchorKind, MemoryScope, MemorySentinelKind,
-    MemorySentinelResult, MemorySentinelResultInput, MemorySentinelResultStatus,
-    MemorySentinelSpec, MemorySentinelValidationError, OutputVerification, ProcessExitCode,
-    QUERY_SCHEMA_V1, RedactionLevel, SentinelObservation, StoredMemorySentinelSpec, Tag, TaskLens,
-    TaskLensCatalog, TaskLensOverlay, is_valid_demo_artifact_path, parse_demo_file_yaml,
-    parse_memory_sentinel_spec,
+    MemorySentinelPolarity, MemorySentinelResult, MemorySentinelResultInput,
+    MemorySentinelResultStatus, MemorySentinelSpec, MemorySentinelValidationError,
+    OutputVerification, ProcessExitCode, QUERY_SCHEMA_V1, RedactionLevel, SentinelObservation,
+    StoredMemorySentinelSpec, Tag, TaskLens, TaskLensCatalog, TaskLensOverlay,
+    is_valid_demo_artifact_path, parse_demo_file_yaml, parse_memory_sentinel_spec,
 };
 use crate::output;
 use crate::pack::{
@@ -49870,6 +49870,7 @@ fn sentinel_spec_from_stored(
     MemorySentinelSpec::new(CreateMemorySentinelSpecInput {
         memory_id: stored.memory_id.clone(),
         sentinel_kind: stored.sentinel_kind,
+        polarity: stored.polarity,
         target: stored.target.clone(),
         expected_predicate: Some(stored.expected_predicate.clone()),
         provenance: stored.provenance.clone(),
@@ -50115,6 +50116,7 @@ fn persist_remember_sentinels(
             MemorySentinelSpec::from_raw(
                 &report.memory_id.to_string(),
                 raw,
+                MemorySentinelPolarity::Gate,
                 None,
                 "ee remember --sentinel",
                 args.sentinel_stale_threshold_seconds,

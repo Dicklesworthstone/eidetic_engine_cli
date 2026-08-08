@@ -35,7 +35,7 @@ use crate::models::{
 };
 use crate::models::{MemoryKind, MemoryValidationError, canonicalize_typed_memory_fields_json};
 use crate::models::{
-    MemorySentinelKind, MemorySentinelResult, MemorySentinelResultStatus,
+    MemorySentinelKind, MemorySentinelPolarity, MemorySentinelResult, MemorySentinelResultStatus,
     MemorySentinelSafetyClass, MemorySentinelSpec, StoredMemorySentinelResult,
     StoredMemorySentinelSpec,
 };
@@ -17457,6 +17457,10 @@ fn stored_memory_sentinel_spec_from_row(row: &Row) -> Result<StoredMemorySentine
         spec_hash: required_text(row, 0, DbOperation::Query, "spec_hash")?.to_string(),
         memory_id: required_text(row, 1, DbOperation::Query, "memory_id")?.to_string(),
         sentinel_kind,
+        // The persisted polarity column arrives with the revive-when slice's
+        // migration; every spec stored before it is a gate sentinel
+        // (bd-wake-on-condition-inverse-sentinel-65uci).
+        polarity: MemorySentinelPolarity::Gate,
         target: required_text(row, 3, DbOperation::Query, "target")?.to_string(),
         expected_predicate: required_text(row, 4, DbOperation::Query, "expected_predicate")?
             .to_string(),
