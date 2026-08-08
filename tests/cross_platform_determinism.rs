@@ -264,24 +264,23 @@ fn release_hash_domain_is_exactly_the_five_shipped_targets() -> TestResult {
         "x86_64-pc-windows-msvc",
     ]);
     let expected_len = expected.len();
-    ensure_equal(
-        RELEASE_TARGET_TRIPLES
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>(),
-        expected,
-        "release determinism target set",
+    let actual = RELEASE_TARGET_TRIPLES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    ensure(
+        actual == expected,
+        format!("release determinism target set mismatch: {actual:?}"),
     )?;
-    ensure_equal(
-        RELEASE_TARGET_TRIPLES.len(),
-        expected_len,
-        "release determinism targets must be unique",
+    ensure(
+        RELEASE_TARGET_TRIPLES.len() == expected_len,
+        "release determinism targets must be unique".to_owned(),
     )?;
     ensure(
         RELEASE_TARGET_TRIPLES
             .iter()
             .all(|target| TARGET_TRIPLES.contains(target)),
-        "every release target must have pinned graph hashes",
+        "every release target must have pinned graph hashes".to_owned(),
     )
 }
 
