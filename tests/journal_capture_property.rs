@@ -57,6 +57,35 @@ impl JournalLineCase {
     }
 }
 
+#[derive(Clone, Debug)]
+enum RememberLineCase {
+    /// A unique valid remember line that must mint its own memory id.
+    DistinctValid(String),
+    /// Structurally valid JSON object missing the required `content` field.
+    MissingContent,
+    /// A line that is not parseable JSON at all.
+    InvalidJson,
+    /// A byte-identical replay of the idempotency-keyed line.
+    KeyedReplay,
+}
+
+impl RememberLineCase {
+    fn jsonl(&self, index: usize, keyed_line: &str) -> String {
+        match self {
+            Self::DistinctValid(text) => serde_json::json!({
+                "content": format!("Interleaved distinct {index}: {text}"),
+            })
+            .to_string(),
+            Self::MissingContent => serde_json::json!({
+                "idempotencyKey": format!("missing-content-{index}"),
+            })
+            .to_string(),
+            Self::InvalidJson => "{interleaved not valid json".to_owned(),
+            Self::KeyedReplay => keyed_line.to_owned(),
+        }
+    }
+}
+
 fn safe_text() -> impl Strategy<Value = String> {
     "[A-Za-z0-9 _.,:/-]{1,64}"
         .prop_map(|raw| raw.trim().to_owned())
@@ -168,6 +197,116 @@ proptest! {
                 prop_assert_eq!(result.status, "failed");
                 prop_assert!(result.entry_id.is_none());
                 prop_assert!(result.error_code.is_some());
+            }
+        }
+    }
+
+    /// bd-1pi9m.6 literal acceptance: idempotency-key replay must return the
+    /// FIRST memoryId under ARBITRARY interleavings — keyed replays scattered
+    /// among distinct valid lines and malformed lines, not just two adjacent
+    /// identical lines. Invalid lines must stay isolated (planted negatives)
+    /// and never disturb the replay identity or their neighbors' statuses.
+    #[test]
+    fn remember_batch_interleaved_replays_and_invalid_lines_stay_isolated(
+        body in safe_text(),
+        key in safe_key(),
+        cases in proptest::collection::vec(
+            prop_oneof![
+                3 => safe_text().prop_map(RememberLineCase::DistinctValid),
+                1 => Just(RememberLineCase::MissingContent),
+                1 => Just(RememberLineCase::InvalidJson),
+                3 => Just(RememberLineCase::KeyedReplay),
+            ],
+            4..14,
+        ).prop_filter(
+            "interleaving must contain at least two keyed replays",
+            |cases| {
+                cases
+                    .iter()
+                    .filter(|case| matches!(case, RememberLineCase::KeyedReplay))
+                    .count()
+                    >= 2
+            },
+        ),
+    ) {
+        let (_dir, workspace) = temp_workspace("ee-remember-interleave-prop")?;
+        let keyed_content = format!("Interleaved keyed replay: {body}");
+        let keyed_line = serde_json::json!({
+            "content": keyed_content,
+            "idempotencyKey": key,
+        })
+        .to_string();
+        let input = cases
+            .iter()
+            .enumerate()
+            .map(|(index, case)| case.jsonl(index + 1, &keyed_line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let report = remember_memory_batch_stdin(&remember_batch_options(&workspace), &input)
+            .map_err(|error| TestCaseError::fail(error.message()))?;
+
+        let distinct_count = cases
+            .iter()
+            .filter(|case| matches!(case, RememberLineCase::DistinctValid(_)))
+            .count();
+        let keyed_count = cases
+            .iter()
+            .filter(|case| matches!(case, RememberLineCase::KeyedReplay))
+            .count();
+        let invalid_count = cases.len() - distinct_count - keyed_count;
+
+        prop_assert_eq!(report.line_count, cases.len());
+        prop_assert_eq!(report.stored_count, distinct_count + 1);
+        prop_assert_eq!(report.already_recorded_count, keyed_count - 1);
+        prop_assert_eq!(report.failed_count, invalid_count);
+        prop_assert_eq!(report.results.len(), cases.len());
+
+        let mut first_keyed_memory_id: Option<String> = None;
+        for (index, case) in cases.iter().enumerate() {
+            let result = &report.results[index];
+            prop_assert_eq!(result.line, index + 1);
+            match case {
+                RememberLineCase::DistinctValid(_) => {
+                    prop_assert_eq!(result.status, "stored");
+                    prop_assert!(result.memory_id.is_some());
+                    prop_assert_eq!(result.error_code, None);
+                }
+                RememberLineCase::MissingContent | RememberLineCase::InvalidJson => {
+                    prop_assert_eq!(result.status, "failed");
+                    prop_assert!(result.memory_id.is_none());
+                    prop_assert!(result.error_code.is_some());
+                }
+                RememberLineCase::KeyedReplay => {
+                    let memory_id = result
+                        .memory_id
+                        .clone()
+                        .ok_or_else(|| TestCaseError::fail("keyed line missing memory id"))?;
+                    match &first_keyed_memory_id {
+                        None => {
+                            prop_assert_eq!(result.status, "stored");
+                            first_keyed_memory_id = Some(memory_id);
+                        }
+                        Some(first_id) => {
+                            prop_assert_eq!(result.status, "already_recorded");
+                            prop_assert_eq!(&memory_id, first_id);
+                        }
+                    }
+                }
+            }
+        }
+        prop_assert!(first_keyed_memory_id.is_some());
+
+        // Distinct valid lines must all mint UNIQUE memory ids: replay
+        // identity belongs to the idempotency key alone, never to position.
+        let mut distinct_ids = std::collections::BTreeSet::new();
+        for (index, case) in cases.iter().enumerate() {
+            if matches!(case, RememberLineCase::DistinctValid(_)) {
+                let id = report.results[index]
+                    .memory_id
+                    .clone()
+                    .ok_or_else(|| TestCaseError::fail("distinct line missing memory id"))?;
+                prop_assert!(distinct_ids.insert(id));
             }
         }
     }

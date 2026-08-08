@@ -354,6 +354,88 @@ grep -q '^exit=7 stdin=true command=journal append --stdin --json$' "$EE_JSON_FA
     )
 }
 
+/// bd-1pi9m.6: a nonzero `ee` command that prints success-shaped JSON must
+/// make the REAL harness fail — not merely land in the failures file. This
+/// probe sources the actual `scripts/lib/e2e_harness.sh`, extracts the
+/// script's own command helpers and failure fold-in block verbatim, plants a
+/// success-shaped exit-7 command, and requires `harness_summary` to return 1
+/// with a FAIL verdict in its summary artifact. If a future edit disconnects
+/// the failures file from `_harness_fail`, this probe fails.
+#[cfg(unix)]
+#[test]
+fn planted_success_shaped_failure_fails_the_real_harness_summary() -> TestResult {
+    let script = read_text("scripts/e2e_journal_capture.sh")?;
+    let helpers = script
+        .split_once("ee_json() {")
+        .and_then(|(_, rest)| rest.split_once("json_value() {").map(|(body, _)| body))
+        .ok_or("journal capture command helpers must remain discoverable")?;
+    let fold_in = script
+        .split_once("if [ -s \"$EE_JSON_FAILURES_FILE\" ]; then")
+        .and_then(|(_, rest)| rest.split_once("summary_rc=0").map(|(body, _)| body))
+        .ok_or("journal capture failure fold-in block must remain discoverable")?;
+
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let failures = temp.path().join("command-failures.log");
+
+    let mut probe = String::from(
+        r#"
+set -uo pipefail
+# shellcheck disable=SC1090
+source "$HARNESS_LIB"
+HARNESS_TEST_NAME=journal_capture_harness_probe
+HARNESS_PASS=0; HARNESS_FAIL=0; HARNESS_STEP=0; HARNESS_DROPS=0; HARNESS_FAILURES=()
+LOG_DIR="$PROBE_LOG_DIR"
+EE_TEST_LOG_PATH="$PROBE_LOG_DIR/events.jsonl"
+HARNESS_START_NS="$(_harness_now_ns)"
+EE_BIN=fake-ee
+e2e_log_note() { :; }
+e2e_log_command() {
+    printf '%s\n' '{"schema":"ee.response.v2","success":true}'
+    return 7
+}
+ee_json() {
+"#,
+    );
+    probe.push_str(helpers);
+    probe.push_str(
+        r#"
+out="$(ee_json status --json)"
+[ -n "$out" ] || exit 40
+if [ -s "$EE_JSON_FAILURES_FILE" ]; then
+"#,
+    );
+    probe.push_str(fold_in);
+    probe.push_str(
+        r#"
+summary_rc=0
+harness_summary || summary_rc=$?
+[ "$summary_rc" -eq 1 ] || exit 30
+[ "$HARNESS_FAIL" -ge 1 ] || exit 31
+grep -q '"verdict": "FAIL"' "$PROBE_LOG_DIR/summary.json" || exit 32
+exit 0
+"#,
+    );
+
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(probe)
+        .env("EE_JSON_FAILURES_FILE", &failures)
+        .env("PROBE_LOG_DIR", temp.path())
+        .env("HARNESS_LIB", repo_path("scripts/lib/e2e_harness.sh"))
+        .output()
+        .map_err(|error| format!("run planted harness-failure probe: {error}"))?;
+
+    ensure(
+        output.status.success(),
+        format!(
+            "planted success-shaped failure did not fail the real harness (probe exit {:?})\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
+}
+
 #[cfg(unix)]
 #[test]
 fn journal_capture_real_binary_e2e_completes_without_false_green() -> TestResult {

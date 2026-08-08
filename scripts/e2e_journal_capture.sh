@@ -265,6 +265,8 @@ assert_jq "$search_out" '.success == true and .data.resultCount >= 1' \
     "search sees at least one journal-distilled failure memory"
 assert_search_returns_distilled_memory "$search_out" "$memory_id" \
     "search returns the journal-distilled failure memory"
+assert_jq "$search_out" 'any(.data.results[]?; (.memoryId // .docId) == "'"$memory_id"'" and any(.provenance[]?; (.uri // "") | startswith("journal://")))' \
+    "distilled memory carries journal:// provenance in search results"
 search_memory_id="$(memory_id_from_search "$search_out")"
 assert_nonempty "$search_memory_id" "search returns a memory id for outcome feedback"
 
