@@ -354,6 +354,31 @@ grep -q '^exit=7 stdin=true command=journal append --stdin --json$' "$EE_JSON_FA
     )
 }
 
+#[cfg(unix)]
+#[test]
+fn journal_capture_real_binary_e2e_completes_without_false_green() -> TestResult {
+    let output = Command::new("bash")
+        .arg(repo_path("scripts/e2e_journal_capture.sh"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("EE_BIN", env!("CARGO_BIN_EXE_ee"))
+        .output()
+        .map_err(|error| format!("run journal capture real-binary E2E: {error}"))?;
+
+    ensure(
+        output.status.success(),
+        format!(
+            "journal capture real-binary E2E failed with {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ),
+    )?;
+    ensure(
+        String::from_utf8_lossy(&output.stderr).contains("Artifacts:"),
+        "journal capture E2E must report its retained artifact directory",
+    )
+}
+
 #[test]
 fn journal_capture_contract_fixture_lists_required_evidence() -> TestResult {
     let fixture = read_json("tests/fixtures/contracts/journal_capture/coverage.json")?;
