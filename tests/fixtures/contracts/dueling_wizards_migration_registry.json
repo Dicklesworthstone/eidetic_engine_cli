@@ -4,8 +4,8 @@
  "gateBead": "bd-1n0np.23.1",
  "manifestOwner": "tests/contracts/dueling_wizards_migration_registry.rs",
  "sourceOfTruth": "src/db/mod.rs::MIGRATIONS",
- "currentLastCompiledMigration": 96,
- "nextPlannedMigration": 97,
+ "currentLastCompiledMigration": 98,
+ "nextPlannedMigration": 99,
  "boundaryMigrationE2e": "scripts/e2e_boundary_migration.sh",
  "backupCoverageBead": "bd-1n0np.23.2",
  "policy": {
@@ -39,7 +39,9 @@
     "V093": "V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST (forward-only pack-item trust CHECK rebuild for ADR 0086 TC-D7)",
     "V094": "V094_MEMORY_ATTEMPT_FAMILY (bd-multiplicity-aware-trust-p0u7g legacy attempt-family declaration columns; byte-immutable, superseded by the V095 ledger for slots/composition)",
     "V095": "V095_ATTEMPT_FAMILY_LEDGER (bd-multiplicity-aware-trust-p0u7g workspace-scoped attempt_families + attempt_family_members ledger keyed to memory logical_id; fail-closed legacy_v094 backfill)",
-    "V096": "V096_MEMORY_SENTINEL_POLARITY (bd-wake-on-condition-inverse-sentinel-65uci forward-only dual-table sentinel polarity rebuild; preserves shipped V094 and V095 migrations)"
+    "V096": "V096_MEMORY_SENTINEL_POLARITY (bd-wake-on-condition-inverse-sentinel-65uci forward-only dual-table sentinel polarity rebuild; preserves shipped V094 and V095 migrations)",
+    "V097": "V097_SESSION_INDEX_GENERATIONS (bd-3k1mg forward-only session workspace-generation triggers and monotonic existing-session floor repair; the prior documentation-only V097-V099 allocations shifted forward without placeholder migrations)",
+    "V098": "V098_MEMORY_SEALS (bd-sealed-preregistration-memory-b67be commit-reveal seal sidecar: per-memory content commitment, reveal timestamp/verification; failed reveals are audit-only)"
    }
   }
  },
@@ -126,16 +128,6 @@
   },
   {
    "id": "attestation_bundles",
-   "version": 97,
-   "status": "planned",
-   "runtimeRule": "planned_allocation_only",
-   "migrationConstant": "required_before_implemented",
-   "boundaryMigrationEvidence": "required_before_implemented",
-   "backupCoverageEvidence": "required_before_implemented",
-   "proofPosture": "rch_only_no_local_fallback"
-  },
-  {
-   "id": "query_miss_ledger",
    "version": 98,
    "status": "planned",
    "runtimeRule": "planned_allocation_only",
@@ -145,8 +137,18 @@
    "proofPosture": "rch_only_no_local_fallback"
   },
   {
-   "id": "source_write_stats",
+   "id": "query_miss_ledger",
    "version": 99,
+   "status": "planned",
+   "runtimeRule": "planned_allocation_only",
+   "migrationConstant": "required_before_implemented",
+   "boundaryMigrationEvidence": "required_before_implemented",
+   "backupCoverageEvidence": "required_before_implemented",
+   "proofPosture": "rch_only_no_local_fallback"
+  },
+  {
+   "id": "source_write_stats",
+   "version": 100,
    "status": "planned",
    "runtimeRule": "planned_allocation_only",
    "migrationConstant": "required_before_implemented",
@@ -297,8 +299,8 @@
   },
   {
    "id": "attestation_bundles",
-   "version": 97,
-   "migrationName": "V097_ATTESTATION_BUNDLES",
+   "version": 99,
+   "migrationName": "V098_ATTESTATION_BUNDLES",
    "ownerBead": "bd-1n0np.22.1",
    "ownerSurface": "attestation_bundles",
    "status": "planned",
@@ -312,8 +314,8 @@
   },
   {
    "id": "query_miss_ledger",
-   "version": 98,
-   "migrationName": "V098_QUERY_MISS_LEDGER",
+   "version": 100,
+   "migrationName": "V099_QUERY_MISS_LEDGER",
    "ownerBead": "bd-1n0np.6.3",
    "ownerSurface": "gap_honesty",
    "status": "planned",
@@ -326,8 +328,8 @@
   },
   {
    "id": "source_write_stats",
-   "version": 99,
-   "migrationName": "V099_SOURCE_WRITE_STATS",
+   "version": 101,
+   "migrationName": "V100_SOURCE_WRITE_STATS",
    "ownerBead": "bd-1n0np.8.5",
    "ownerSurface": "read_fence",
    "status": "planned",

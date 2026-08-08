@@ -22,6 +22,7 @@ pub mod jsonl;
 pub mod learn;
 pub mod memory;
 pub mod memory_anchor;
+pub mod memory_seal;
 pub mod memory_sentinel;
 pub mod model_registry;
 pub mod mutation;
@@ -185,6 +186,11 @@ pub use memory_anchor::{
     CreateMemoryAnchorInput, ExtractedAnchorSurface, MEMORY_ANCHOR_SCHEMA_V1,
     MemoryAnchorFreshnessState, MemoryAnchorKind, MemoryAnchorSource, StoredMemoryAnchor,
     extract_memory_anchor_surfaces, extract_precision_memory_anchors, memory_anchor_value_hash,
+};
+pub use memory_seal::{
+    MEMORY_SEAL_COMMITMENT_SCHEMA_V1, MEMORY_SEAL_PLACEHOLDER_CONTENT, MEMORY_SEAL_SCHEMA_V1,
+    MemorySeal, MemorySealValidationError, memory_seal_commitment, seal_commitment_for_content,
+    validate_memory_seal_commitment,
 };
 pub use memory_sentinel::{
     CreateMemorySentinelSpecInput, MAX_MEMORY_SENTINEL_EVIDENCE_BYTES,

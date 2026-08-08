@@ -34,6 +34,7 @@ use crate::models::{
     extract_precision_memory_anchors,
 };
 use crate::models::{MemoryKind, MemoryValidationError, canonicalize_typed_memory_fields_json};
+use crate::models::{MemorySeal, validate_memory_seal_commitment};
 use crate::models::{
     MemorySentinelKind, MemorySentinelPolarity, MemorySentinelResult, MemorySentinelResultStatus,
     MemorySentinelSafetyClass, MemorySentinelSpec, StoredMemorySentinelResult,
@@ -8698,6 +8699,113 @@ CREATE INDEX idx_memory_sentinel_results_status
     "blake3:v096_memory_sentinel_polarity_2026_08_08",
 );
 
+/// V097: make imported-session state part of the workspace generation.
+///
+/// Sessions are first-class search documents, but V071 did not include them in
+/// its trigger family. Every committed INSERT, material UPDATE, and DELETE now
+/// invalidates the affected workspace. The null-safe UPDATE predicate suppresses
+/// true no-ops and a workspace move invalidates both the old and new corpus.
+///
+/// Existing databases never counted this source family. The final monotonic
+/// floor repair advances each workspace containing at least one session exactly
+/// once, so a pre-V097 index cannot remain falsely Ready. A generation is an
+/// invalidation watermark rather than a row counter, matching the V086 repair.
+pub const V097_SESSION_INDEX_GENERATIONS: Migration = Migration::new(
+    97,
+    "session_index_generations",
+    r#"
+CREATE TRIGGER trg_workspace_generations_sessions_insert
+AFTER INSERT ON sessions
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.updated_at);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_sessions_update
+AFTER UPDATE ON sessions
+WHEN OLD.id IS NOT NEW.id
+  OR OLD.workspace_id IS NOT NEW.workspace_id
+  OR OLD.cass_session_id IS NOT NEW.cass_session_id
+  OR OLD.source_path IS NOT NEW.source_path
+  OR OLD.agent_name IS NOT NEW.agent_name
+  OR OLD.model IS NOT NEW.model
+  OR OLD.started_at IS NOT NEW.started_at
+  OR OLD.ended_at IS NOT NEW.ended_at
+  OR OLD.message_count IS NOT NEW.message_count
+  OR OLD.token_count IS NOT NEW.token_count
+  OR OLD.content_hash IS NOT NEW.content_hash
+  OR OLD.metadata_json IS NOT NEW.metadata_json
+  OR OLD.imported_at IS NOT NEW.imported_at
+  OR OLD.updated_at IS NOT NEW.updated_at
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.updated_at);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = NEW.workspace_id;
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = OLD.workspace_id
+       AND OLD.workspace_id <> NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_sessions_delete
+AFTER DELETE ON sessions
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id = OLD.workspace_id;
+END;
+
+INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+SELECT id, 0, updated_at FROM workspaces;
+
+UPDATE workspace_generations
+   SET generation = generation + 1,
+       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+ WHERE workspace_id IN (
+    SELECT DISTINCT workspace_id FROM sessions
+ );
+"#,
+    "blake3:v097_session_index_generations_2026_08_08",
+);
+
+/// Sealed (commit-reveal) memory sidecar
+/// (bd-sealed-preregistration-memory-b67be). One row per sealed memory:
+/// the content commitment recorded at seal time, and the reveal outcome
+/// once matching bytes are supplied. Failed reveal attempts never touch
+/// this table — they are audit-log events only.
+pub const V098_MEMORY_SEALS: Migration = Migration::new(
+    98,
+    "memory_seals",
+    r#"
+CREATE TABLE IF NOT EXISTS memory_seals (
+    memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    content_commitment TEXT NOT NULL CHECK (
+        length(content_commitment) = 71 AND substr(content_commitment, 1, 7) = 'blake3:'
+    ),
+    sealed_at TEXT NOT NULL CHECK (length(trim(sealed_at)) > 0),
+    revealed_at TEXT CHECK (revealed_at IS NULL OR length(trim(revealed_at)) > 0),
+    reveal_verified INTEGER CHECK (reveal_verified IS NULL OR reveal_verified IN (0, 1)),
+    CHECK ((revealed_at IS NULL) = (reveal_verified IS NULL))
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_seals_unrevealed
+    ON memory_seals(sealed_at) WHERE revealed_at IS NULL;
+"#,
+    "blake3:v098_memory_seals_2026_08_08",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -8796,6 +8904,8 @@ pub const MIGRATIONS: &[Migration] = &[
     V094_MEMORY_ATTEMPT_FAMILY,
     V095_ATTEMPT_FAMILY_LEDGER,
     V096_MEMORY_SENTINEL_POLARITY,
+    V097_SESSION_INDEX_GENERATIONS,
+    V098_MEMORY_SEALS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -18076,6 +18186,77 @@ impl DbConnection {
         rows.iter()
             .map(stored_anchor_index_candidate_from_row)
             .collect()
+    }
+
+    /// Insert the seal row for a freshly sealed memory
+    /// (bd-sealed-preregistration-memory-b67be). One seal per memory;
+    /// sealing an already-sealed memory is a caller error surfaced as the
+    /// primary-key conflict.
+    pub fn insert_memory_seal(
+        &self,
+        memory_id: &str,
+        content_commitment: &str,
+        sealed_at: &str,
+    ) -> Result<()> {
+        validate_memory_seal_commitment(content_commitment).map_err(|error| {
+            DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!("memory_seals.content_commitment rejected: {error}"),
+            }
+        })?;
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO memory_seals (memory_id, content_commitment, sealed_at, revealed_at, reveal_verified) VALUES (?1, ?2, ?3, NULL, NULL)",
+            &[
+                Value::Text(memory_id.to_string()),
+                Value::Text(content_commitment.to_string()),
+                Value::Text(sealed_at.to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Read a memory's seal row, if any.
+    pub fn get_memory_seal(&self, memory_id: &str) -> Result<Option<MemorySeal>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT memory_id, content_commitment, sealed_at, revealed_at, reveal_verified FROM memory_seals WHERE memory_id = ?1",
+            &[Value::Text(memory_id.to_string())],
+        )?;
+        rows.first()
+            .map(|row| {
+                Ok(MemorySeal {
+                    memory_id: required_text(row, 0, DbOperation::Query, "memory_id")?.to_string(),
+                    content_commitment: required_text(
+                        row,
+                        1,
+                        DbOperation::Query,
+                        "content_commitment",
+                    )?
+                    .to_string(),
+                    sealed_at: required_text(row, 2, DbOperation::Query, "sealed_at")?.to_string(),
+                    revealed_at: optional_text(row, 3)?.map(str::to_string),
+                    reveal_verified: optional_u64(row, 4, DbOperation::Query, "reveal_verified")?
+                        .map(|value| value == 1),
+                })
+            })
+            .transpose()
+    }
+
+    /// Record a verified reveal on an existing, still-sealed row. Returns
+    /// `false` when no unrevealed seal exists for the memory (unknown id
+    /// or already revealed) — callers surface that honestly instead of
+    /// upserting. Mismatched reveals never reach this method.
+    pub fn mark_memory_seal_revealed(&self, memory_id: &str, revealed_at: &str) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memory_seals SET revealed_at = ?2, reveal_verified = 1 WHERE memory_id = ?1 AND revealed_at IS NULL",
+            &[
+                Value::Text(memory_id.to_string()),
+                Value::Text(revealed_at.to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
     }
 
     /// Read a cached primer payload for the exact ADR 0065 cache key.
@@ -31528,8 +31709,11 @@ mod tests {
         let migration = connection.migrate()?;
         ensure_equal(
             &migration.applied().to_vec(),
-            &(89_u32..=93).collect::<Vec<_>>(),
-            "legacy target fixtures migrate through V089 and later trust rebuilds",
+            &migration_versions()
+                .into_iter()
+                .filter(|version| *version >= 89)
+                .collect::<Vec<_>>(),
+            "legacy target fixtures migrate through every compiled migration after V088",
         )?;
         let states = connection.list_mesh_lane_grant_states("wsp_01234567890123456789012345")?;
         ensure_equal(
@@ -31640,8 +31824,11 @@ mod tests {
         let migration = connection.migrate()?;
         ensure_equal(
             &migration.applied().to_vec(),
-            &(89_u32..=93).collect::<Vec<_>>(),
-            "V089 and later trust rebuilds are pending",
+            &migration_versions()
+                .into_iter()
+                .filter(|version| *version >= 89)
+                .collect::<Vec<_>>(),
+            "V089 and every later compiled migration are pending",
         )?;
 
         let allow = connection
@@ -31854,8 +32041,13 @@ mod tests {
             let migration = connection.migrate()?;
             ensure_equal(
                 &migration.applied().to_vec(),
-                &(89_u32..=93).collect::<Vec<_>>(),
-                &format!("known accidental {case} checksum applies V089 and later trust rebuilds"),
+                &migration_versions()
+                    .into_iter()
+                    .filter(|version| *version >= 89)
+                    .collect::<Vec<_>>(),
+                &format!(
+                    "known accidental {case} checksum applies V089 and every later compiled migration"
+                ),
             )?;
             let state = connection
                 .get_mesh_lane_grant_state(
@@ -32022,6 +32214,75 @@ mod tests {
     }
 
     #[test]
+    fn memory_seal_roundtrip_and_single_reveal() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 98)?;
+        setup_workspace(&connection)?;
+
+        let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::nil()).to_string();
+        connection.insert_memory(
+            &memory_id,
+            &test_memory_input(
+                "wsp_01234567890123456789012345",
+                crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+            ),
+        )?;
+
+        let commitment = crate::models::memory_seal_commitment(b"pre-registered eval protocol v1");
+        connection.insert_memory_seal(&memory_id, &commitment, "2026-08-08T06:00:00Z")?;
+
+        let sealed = connection
+            .get_memory_seal(&memory_id)?
+            .ok_or("seal row missing after insert")?;
+        ensure(sealed.is_sealed(), "fresh seal must report sealed")?;
+        ensure_equal(&sealed.content_commitment, &commitment, "commitment")?;
+        ensure_equal(&sealed.revealed_at, &None, "revealed_at starts null")?;
+        ensure_equal(
+            &sealed.reveal_verified,
+            &None,
+            "reveal_verified starts null",
+        )?;
+
+        ensure(
+            connection.mark_memory_seal_revealed(&memory_id, "2026-08-08T07:00:00Z")?,
+            "first reveal on a sealed row must succeed",
+        )?;
+        let revealed = connection
+            .get_memory_seal(&memory_id)?
+            .ok_or("seal row missing after reveal")?;
+        ensure(
+            !revealed.is_sealed(),
+            "revealed seal must not report sealed",
+        )?;
+        ensure_equal(
+            &revealed.revealed_at,
+            &Some("2026-08-08T07:00:00Z".to_owned()),
+            "revealed_at",
+        )?;
+        ensure_equal(&revealed.reveal_verified, &Some(true), "reveal_verified")?;
+
+        ensure(
+            !connection.mark_memory_seal_revealed(&memory_id, "2026-08-08T08:00:00Z")?,
+            "a second reveal must be refused (already revealed)",
+        )?;
+        ensure(
+            !connection.mark_memory_seal_revealed(
+                "mem_11111111111111111111111111",
+                "2026-08-08T08:00:00Z",
+            )?,
+            "revealing an unknown memory must be refused",
+        )?;
+        ensure(
+            connection
+                .insert_memory_seal(&memory_id, "blake3:short", "2026-08-08T09:00:00Z")
+                .is_err(),
+            "malformed commitments must be rejected before SQL",
+        )?;
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn v096_sentinel_polarity_rebuild_preserves_rows_and_allows_dual_polarity() -> TestResult {
         let connection = DbConnection::open_memory()?;
         seed_migrations_through(&connection, 95)?;
@@ -32066,9 +32327,12 @@ mod tests {
 
         let migration_result = connection.migrate()?;
         ensure(
-            migration_result.applied().len() == 1
-                && migration_result.applied()[0] == super::V096_MEMORY_SENTINEL_POLARITY.version(),
-            "production migrate routing applies only V096",
+            migration_result.applied()
+                == [
+                    super::V096_MEMORY_SENTINEL_POLARITY.version(),
+                    super::V097_SESSION_INDEX_GENERATIONS.version(),
+                ],
+            "production migrate routing applies contiguous V096 and V097",
         )?;
 
         ensure_equal(
@@ -32737,7 +33001,10 @@ mod tests {
         let migration = connection.migrate()?;
         ensure_equal(
             &migration.applied().to_vec(),
-            &(84_u32..=93).collect::<Vec<_>>(),
+            &migration_versions()
+                .into_iter()
+                .filter(|version| *version >= 84)
+                .collect::<Vec<_>>(),
             "V084 and later migrations applied",
         )?;
         let first_record_after = connection
@@ -33135,8 +33402,11 @@ mod tests {
         let migration = connection.migrate()?;
         ensure_equal(
             &migration.applied().to_vec(),
-            &(85_u32..=93).collect::<Vec<_>>(),
-            "legacy evidence upgrade must apply V085 through V093 in order",
+            &migration_versions()
+                .into_iter()
+                .filter(|version| *version >= 85)
+                .collect::<Vec<_>>(),
+            "legacy evidence upgrade must apply V085 through the compiled tail in order",
         )?;
         ensure(
             matches!(
@@ -33666,6 +33936,176 @@ mod tests {
             &workspace_generation(&connection, other_workspace_id)?,
             &other_generation,
             "rule mutations remain isolated to the owning workspace",
+        )
+    }
+
+    #[test]
+    fn v097_session_projection_mutations_advance_generation_transactionally() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 96)?;
+        let workspace_id = "wsp_gen00000000000000000000100";
+        let other_workspace_id = "wsp_gen00000000000000000000101";
+        for (id, path) in [
+            (workspace_id, "/tmp/v097-session-generation"),
+            (other_workspace_id, "/tmp/v097-session-generation-other"),
+        ] {
+            connection.insert_workspace(
+                id,
+                &CreateWorkspaceInput {
+                    path: path.to_owned(),
+                    name: Some("V097 session generation".to_owned()),
+                },
+            )?;
+        }
+
+        let session_id = "sess_gen00000000000000000000100";
+        let mut existing = session_input("v097-existing-session");
+        existing.workspace_id = workspace_id.to_owned();
+        connection.insert_session(session_id, &existing)?;
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE workspace_generations SET generation = 40 WHERE workspace_id = ?1",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE workspace_generations SET generation = 70 WHERE workspace_id = ?1",
+            &[Value::Text(other_workspace_id.to_owned())],
+        )?;
+
+        let outcome = connection.apply_migration(
+            &super::V097_SESSION_INDEX_GENERATIONS,
+            "2026-08-08T00:00:00Z",
+        )?;
+        ensure_equal(
+            &outcome,
+            &super::ApplyOutcome::Applied,
+            "V097 migration must apply",
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &41,
+            "V097 monotonically invalidates a workspace containing legacy sessions",
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, other_workspace_id)?,
+            &70,
+            "V097 floor repair does not touch a workspace without sessions",
+        )?;
+
+        let repeated = connection.apply_migration(
+            &super::V097_SESSION_INDEX_GENERATIONS,
+            "2026-08-08T00:00:01Z",
+        )?;
+        ensure_equal(
+            &repeated,
+            &super::ApplyOutcome::AlreadyApplied,
+            "V097 migration history makes repeat application a no-op",
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &41,
+            "repeat migration application must not repeat the floor repair",
+        )?;
+
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE sessions
+                SET agent_name = agent_name,
+                    updated_at = updated_at
+              WHERE id = ?1",
+            &[Value::Text(session_id.to_owned())],
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &41,
+            "null-safe V097 predicate suppresses a true no-op update",
+        )?;
+
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE sessions
+                SET agent_name = 'codex-v097',
+                    updated_at = '2026-08-08T00:00:02Z'
+              WHERE id = ?1",
+            &[Value::Text(session_id.to_owned())],
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &42,
+            "material session update advances generation once",
+        )?;
+
+        let rollback_result: std::result::Result<(), DbError> = connection.with_transaction(|| {
+            connection.execute_for(
+                DbOperation::Execute,
+                "UPDATE sessions
+                    SET model = 'rolled-back-model',
+                        updated_at = '2026-08-08T00:00:03Z'
+                  WHERE id = ?1",
+                &[Value::Text(session_id.to_owned())],
+            )?;
+            Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "intentional V097 rollback".to_owned(),
+            })
+        });
+        ensure(
+            rollback_result.is_err(),
+            "intentional V097 mutation failure must surface",
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &42,
+            "rolled-back session update also rolls back its generation bump",
+        )?;
+        ensure(
+            connection
+                .get_session(session_id)?
+                .is_some_and(|session| session.model.as_deref() != Some("rolled-back-model")),
+            "rolled-back session mutation leaves the row unchanged",
+        )?;
+
+        let inserted_session_id = "sess_gen00000000000000000000101";
+        let mut inserted = session_input("v097-inserted-session");
+        inserted.workspace_id = workspace_id.to_owned();
+        connection.insert_session(inserted_session_id, &inserted)?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &43,
+            "session insert advances generation once",
+        )?;
+        connection.execute_for(
+            DbOperation::Execute,
+            "DELETE FROM sessions WHERE id = ?1",
+            &[Value::Text(inserted_session_id.to_owned())],
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &44,
+            "session delete advances generation once",
+        )?;
+
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE sessions
+                SET workspace_id = ?1,
+                    updated_at = '2026-08-08T00:00:04Z'
+              WHERE id = ?2",
+            &[
+                Value::Text(other_workspace_id.to_owned()),
+                Value::Text(session_id.to_owned()),
+            ],
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &45,
+            "session move invalidates the old workspace",
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, other_workspace_id)?,
+            &71,
+            "session move invalidates the new workspace",
         )
     }
 
