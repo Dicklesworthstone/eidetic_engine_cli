@@ -967,7 +967,7 @@ printf 'matching-tag=accepted\n'
 #[test]
 fn franken_stack_lock_pins_complete_full_sha_closure() -> TestResult {
     const EXPECTED: &[(&str, &str)] = &[
-        ("asupersync", "8563d55a7947ff6bd7eb1cf21752397f358b6cdf"),
+        ("asupersync", "24eb7ec6c62e9ba037d70fed4a69c4e733785926"),
         (
             "franken_agent_detection",
             "f839b370a91e0d403fc4e2e16c1dc9d19b5a5ceb",
@@ -977,7 +977,7 @@ fn franken_stack_lock_pins_complete_full_sha_closure() -> TestResult {
             "bec1d4b9edfd832bc31c3a56713c918a0bf682b9",
         ),
         ("frankensearch", "b559c92e03242336614b995c562a13dfd1269eed"),
-        ("frankensqlite", "98232375fa5f5cbf2c5c2190e9b08a8e76bbaaf6"),
+        ("frankensqlite", "6a86c07176830dcab0fd845a71a3dd070694ea28"),
         ("sqlmodel_rust", "84e4f0a9d2f1098afeeae19142442d8208c0f265"),
         ("toon_rust", "e46b71957fad5397d4bae9eef9d428c8ac8b52aa"),
     ];
