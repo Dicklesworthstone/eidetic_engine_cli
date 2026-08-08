@@ -1282,7 +1282,28 @@ mod tests {
             )),
             "writer inserts row",
         );
-        must(connection.close(), "writer closes");
+        close_writer_tolerating_pinned_checkpoint(connection);
+    }
+
+    /// Close a test writer while SnapshotPins are intentionally held open.
+    ///
+    /// FrankenSQLite's ordinary close runs a final passive WAL checkpoint
+    /// (`sqlmodel-frankensqlite` `close_sync` -> `CloseMode::Checkpoint`);
+    /// with active pinned readers that checkpoint reports "database is busy"
+    /// while the handle is consumed regardless and the committed frames stay
+    /// durable in the WAL, recovered and published by the next open. That
+    /// contention outcome is the expected checkpoint-blocked-by-pin signal —
+    /// exactly what `note_checkpoint_outcome` attributes — so ONLY the
+    /// transient-contention class is tolerated here. Any other close failure
+    /// still fails the test, and every snapshot/isolation assertion in the
+    /// callers observes the row's durability through real reads afterwards.
+    fn close_writer_tolerating_pinned_checkpoint(connection: DbConnection) {
+        if let Err(error) = connection.close() {
+            assert!(
+                crate::db::db_error_is_transient_sqlite_contention(&error),
+                "writer close failed with a non-contention error: {error}"
+            );
+        }
     }
 
     fn snapshot_item_count(connection: &DbConnection) -> i64 {
