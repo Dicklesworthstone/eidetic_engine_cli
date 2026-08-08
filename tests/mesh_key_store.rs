@@ -90,8 +90,8 @@ fn symlinked_keys_directory_fails_closed() {
 #[test]
 fn secure_local_dir_primitive_supports_replace_rename_exists() {
     let workspace = temp_workspace();
-    let dir =
-        SecureLocalDir::open_or_create(workspace.path().join("cache")).expect("open primitive");
+    let dir = SecureLocalDir::open_or_create(workspace.path(), workspace.path().join("cache"))
+        .expect("open primitive");
     dir.write_exclusive("body.blob.json", b"{\"v\":1}\n")
         .expect("create");
     assert!(dir.exists("body.blob.json").expect("exists"));
