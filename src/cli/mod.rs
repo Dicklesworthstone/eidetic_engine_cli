@@ -74819,7 +74819,7 @@ mod tests {
     #[test]
     fn hotset_collect_schema_is_registered_with_its_canonical_document() {
         let entry = crate::output::public_schemas()
-            .into_iter()
+            .iter()
             .find(|entry| entry.id == crate::models::CACHE_HOTSET_COLLECT_SCHEMA_V1)
             .expect("hotset collect schema is public");
         assert_eq!(entry.category, "ops");
