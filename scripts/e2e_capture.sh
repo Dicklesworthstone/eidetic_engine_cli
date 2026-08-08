@@ -204,40 +204,79 @@ assert_jq "$import_out" '
     (.data.schema == "ee.import.cass.v1")
     and ((.data.sessionsImported // .data.sessions_imported // 0) >= 1)
     and ((.data.spansImported // .data.spans_imported // 0) >= 1)
+    and (.data.indexJobsQueued == 1)
+    and (.data.sessions[0].indexJobId | type == "string" and length > 0)
 ' "fixture cass import stores one session with evidence spans"
+spans_imported="$(printf '%s' "$import_out" | jq -r '.data.spansImported // 0')"
 after_import_memories="$(memory_list_count "$WS")"
 assert_zero "$after_import_memories" \
     "cass import creates evidence but does not silently store memories"
 assert_zero "$before_import_memories" \
     "capture workspace starts without memories"
 
-# bd-16imy: the primary README promise — a phrase from an imported transcript
-# must be discoverable through ee search once the derived index includes the
-# imported evidence spans, and a pack for that phrase must either hydrate the
-# evidence with honest attribution or degrade with the documented
-# context_evidence_hit_unhydrated code (spans here are undistilled, so the
-# degradation arm is the expected deterministic outcome).
+# bd-3k1mg: exercise the ordinary durable job path. A manual index rebuild here
+# would hide a missing or incomplete import job, and an ID-or-content assertion
+# could pass when two different documents accidentally satisfy half the proof.
+step "bd-3k1mg: ordinary index job publishes the complete imported evidence corpus"
+stale_index_out="$(ee_json --workspace "$WS" index status --json)"
+assert_jq "$stale_index_out" ".schema == \"ee.response.v2\"
+    and .success == true
+    and .data.health == \"stale\"
+    and .data.dbSessionCount == 1
+    and .data.dbEvidenceCount == $spans_imported
+    and .data.dbEvidenceAdmittedCount == $spans_imported
+    and (.data.dbGeneration > .data.indexGeneration)" \
+    "atomic CASS import makes the previously ready index truthfully stale"
+coalesce_out="$(ee_json --workspace "$WS" job run index_coalesce --item-limit 1 --json)"
+assert_jq "$coalesce_out" '.schema == "ee.response.v2" and .success == true' \
+    "public index_coalesce drains the import job without a manual rebuild"
+ready_index_out="$(ee_json --workspace "$WS" index status --json)"
+assert_jq "$ready_index_out" ".schema == \"ee.response.v2\"
+    and .success == true
+    and .data.health == \"ready\"
+    and (.data.dbGeneration == .data.indexGeneration)
+    and .data.dbSessionCount == 1
+    and .data.dbEvidenceCount == $spans_imported
+    and .data.dbEvidenceAdmittedCount == $spans_imported
+    and .data.indexDocumentCounts.sessions == 1
+    and .data.indexDocumentCounts.evidence == $spans_imported
+    and .data.indexDocumentCount == (1 + $spans_imported)" \
+    "ordinary job drain publishes exact session/evidence counts at the DB generation"
+
+# bd-16imy owns direct EvidenceSpan hydration into packs. Until that typed pack
+# path lands, this undistilled span must be searchable with exact provenance and
+# must fail visibly at pack hydration instead of masquerading as a memory.
 step "bd-16imy: imported transcript phrase is searchable and pack-honest"
-rebuild_out="$(ee_json --workspace "$WS" index rebuild --json)"
-assert_jq "$rebuild_out" '.schema == "ee.response.v2" and .success == true' \
-    "index rebuild after cass import succeeds"
 evidence_search_out="$(ee_json --workspace "$WS" search \
     "ambient capture must dedupe accepted suggestions" --limit 20 --json)"
 assert_jq "$evidence_search_out" '.schema == "ee.response.v2" and .success == true' \
     "search for imported transcript phrase succeeds"
 assert_jq "$evidence_search_out" '
     any(.data.results[]?;
-        ((.docId // .memoryId // "") | startswith("ev_"))
-        or ((.content // .contentPreview // "") | test("dedupe accepted suggestions"; "i")))
-' "imported evidence excerpt is retrievable by its own phrase"
+        ((.docId // "") | startswith("ev_"))
+        and ((.content // .metadata.content // "") | test("dedupe accepted suggestions"; "i"))
+        and any(.provenance[]?; ((.uri // "") | startswith("cass-session://"))))
+' "one imported evidence hit carries its exact ID, content, and safe canonical provenance"
 evidence_pack_out="$(ee_json --workspace "$WS" pack \
     "ambient capture must dedupe accepted suggestions" --max-tokens 2000 --json)"
 assert_jq "$evidence_pack_out" '.schema == "ee.response.v2" and .success == true' \
     "pack for imported transcript phrase succeeds"
 assert_jq "$evidence_pack_out" '
     any((.degraded // [])[]?; .code == "context_evidence_hit_unhydrated")
-    or any(.data.pack.items[]?; ((.why // "") | contains("via imported evidence")))
-' "evidence hit hydrates with attribution or degrades honestly"
+    and all(.data.pack.items[]?; ((.memoryId // "") | startswith("ev_") | not))
+' "undistilled evidence is rejected from memory packing with the exact degradation"
+
+ready_generation="$(printf '%s' "$ready_index_out" | jq -r '.data.indexGeneration // empty')"
+assert_nonempty "$ready_generation" "ready index exposes its published generation"
+repeat_coalesce_out="$(ee_json --workspace "$WS" job run index_coalesce --item-limit 1 --json)"
+assert_jq "$repeat_coalesce_out" '.schema == "ee.response.v2" and .success == true' \
+    "repeating public index_coalesce is idempotent"
+repeat_index_out="$(ee_json --workspace "$WS" index status --json)"
+assert_jq "$repeat_index_out" ".data.health == \"ready\"
+    and .data.dbGeneration == $ready_generation
+    and .data.indexGeneration == $ready_generation
+    and .data.indexDocumentCount == (1 + $spans_imported)" \
+    "idempotent repeat preserves the exact ready generation and document count"
 
 step "ambient capture suggest is read-only and proposes one explicit capture"
 if capture_suggest_available; then
