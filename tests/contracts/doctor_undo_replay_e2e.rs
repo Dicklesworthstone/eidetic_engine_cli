@@ -19,7 +19,8 @@
 //!    `ee.doctor.fix_summary.v1`, plus the canonical
 //!    `ee.doctor.undo_summary.v1` undo surface.
 //! 6. It forces a finalization failure and asserts nonzero `ee.error.v2`,
-//!    failed persisted state, lock cleanup, peer-file preservation, and undo.
+//!    nonempty retained fixer/action outcomes, canonical recovery, failed
+//!    persisted state, lock cleanup, peer-file preservation, and undo.
 //! 7. It refuses Cargo/git/destructive shortcuts (no `cargo `, no
 //!    `git reset`, no `rm -rf` literal — the harness lives outside
 //!    the per-FM fixture suite and uses a temp workspace it leaves
@@ -127,7 +128,7 @@ fn doctor_undo_replay_script_asserts_truthful_failure_lifecycle() {
         "fixerResults",
         "structured recovery",
         "machine error leaked to stderr",
-        "doctor lock survived failed finalization",
+        "persistent doctor lock is missing or unsafe",
         "assert_state_json \"$run_id\" \"failed\"",
         "run_undo \"$run_id\" \"$FAILURE_WORKSPACE\"",
         "assert_state_json \"$run_id\" \"undone\"",
@@ -135,6 +136,28 @@ fn doctor_undo_replay_script_asserts_truthful_failure_lifecycle() {
         assert!(
             body.contains(needle),
             "doctor failure/undo harness must assert {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn doctor_undo_replay_script_preserves_partial_outcomes_and_canonical_recovery() {
+    let body = fs::read_to_string(script_path()).expect("read script");
+    for needle in [
+        ".error.repair | type == \"string\" and length > 0",
+        ".error.details.recovery",
+        ".fixerResults | type == \"array\" and length > 0",
+        ".fixerResultCount == ($details.fixerResults | length)",
+        ".attemptedFixerCount == ($details.fixerResults | length)",
+        ".failedFixerCount == 0",
+        ".skippedFixerCount == 0",
+        ".outcome == \"applied\"",
+        ".actionSequence | type == \"number\" and . > 0",
+        ".run.actionCount ==",
+    ] {
+        assert!(
+            body.contains(needle),
+            "doctor failure harness must retain partial outcomes/recovery assertion {needle:?}"
         );
     }
 }

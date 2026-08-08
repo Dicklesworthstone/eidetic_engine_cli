@@ -20,8 +20,9 @@
 #      status in {undone, undone_partial}.
 #   5. A peer-owned regular .doctor/latest forces finalization failure:
 #      --fix exits nonzero with ee.error.v2, state.json reports failed,
-#      the lock is released, the peer file is preserved, and --undo can
-#      still replay the failed run.
+#      completed fixer outcomes and action evidence remain in the error,
+#      structured recovery stays canonical, the lock is released, the peer
+#      file is preserved, and --undo can still replay the failed run.
 #
 # This is the proof that bd-3boan's --fix + --undo CLI wiring is
 # end-to-end functional with the registered fixer dispatch table.
@@ -221,16 +222,45 @@ run_finish_failure_and_undo() {
     printf 'error: finish failure contract mismatch: %s\n' "$failure_json" >&2
     exit 6
   fi
-  if ! printf '%s' "$failure_json" |
-       jq -e '.error.details.fixerResults | type == "array"' >/dev/null; then
-    emit_event "finish_failure" "fail" "fixerResults is not an array"
-    printf 'error: finish failure omitted fixerResults\n' >&2
+  if ! printf '%s' "$failure_json" | jq -e '
+       .error.repair | type == "string" and length > 0
+     ' >/dev/null; then
+    emit_event "finish_failure" "fail" "canonical repair guidance missing"
+    printf 'error: finish failure omitted canonical repair guidance\n' >&2
     exit 6
   fi
   if ! printf '%s' "$failure_json" |
-       jq -e '.error.details.recovery | type == "array" and length > 0' >/dev/null; then
+       jq -e '
+         .error.details.recovery
+         | type == "array" and length > 0
+           and all(.[];
+             (.priority | type == "number")
+             and (.kind | type == "string" and length > 0)
+             and (.rationale | type == "string" and length > 0)
+             and (.command | type == "string" and length > 0)
+           )
+       ' >/dev/null; then
     emit_event "finish_failure" "fail" "structured recovery missing"
     printf 'error: finish failure omitted structured recovery\n' >&2
+    exit 6
+  fi
+  if ! printf '%s' "$failure_json" | jq -e '
+       .error.details as $details
+       | ($details.fixerResults | type == "array" and length > 0)
+         and ($details.fixerResultCount == ($details.fixerResults | length))
+         and ($details.attemptedFixerCount == ($details.fixerResults | length))
+         and ($details.failedFixerCount == 0)
+         and ($details.skippedFixerCount == 0)
+         and all($details.fixerResults[];
+           .outcome == "applied"
+           and (.actionSequence | type == "number" and . > 0)
+         )
+         and ($details.run.actionCount ==
+           ([$details.fixerResults[].actionSequence] | max))
+     ' >/dev/null; then
+    emit_event "finish_failure" "fail" "partial fixer outcomes were discarded or inconsistent"
+    printf 'error: finish failure did not preserve completed fixer outcomes: %s\n' \
+      "$failure_json" >&2
     exit 6
   fi
   if [ "$(tr -d '\n' < "$FAILURE_WORKSPACE/.doctor/latest")" != "$sentinel" ]; then
