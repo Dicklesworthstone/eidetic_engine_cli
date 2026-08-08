@@ -960,6 +960,7 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let lane = preview_lane(args.lane);
+    let approval_purpose = lane_approval_purpose(lane);
     let mut prepared = match prepare_lane_grant_preview(
         &connection,
         &snapshot.workspace_id,
@@ -989,6 +990,7 @@ where
         };
         let issued = match crate::mesh::lane_grant::issue(
             &root,
+            approval_purpose,
             &snapshot.workspace_id,
             MESH_GRANT_SCHEMA_V1,
             &canonical_snapshot,
@@ -1090,6 +1092,7 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let lane = preview_lane(args.lane);
+    let approval_purpose = lane_approval_purpose(lane);
 
     let (authenticated, target_adapter, current_state) = if authenticated_json_flow {
         let token = match read_bounded_token(&mut std::io::stdin().lock()) {
@@ -1101,6 +1104,7 @@ where
         };
         let authenticated = match verify_authentic_token(
             &root,
+            approval_purpose,
             &snapshot.workspace_id,
             MESH_GRANT_SCHEMA_V1,
             &token,
@@ -1193,6 +1197,7 @@ where
         let issuance_now = chrono::Utc::now().timestamp();
         let issued = match issue(
             &root,
+            approval_purpose,
             &snapshot.workspace_id,
             MESH_GRANT_SCHEMA_V1,
             &canonical_snapshot,
@@ -1206,6 +1211,7 @@ where
         };
         let authenticated = match verify_authentic_token(
             &root,
+            approval_purpose,
             &snapshot.workspace_id,
             MESH_GRANT_SCHEMA_V1,
             issued.token(),
@@ -2294,6 +2300,21 @@ fn config_mesh_lane(lane: crate::mesh::lane_grant_preview::Lane) -> crate::confi
         Lane::GraphLink => MeshLane::GraphLink,
         Lane::CurationSignal => MeshLane::CurationSignal,
         Lane::RevisionNotice => MeshLane::RevisionNotice,
+    }
+}
+
+fn lane_approval_purpose(
+    lane: crate::mesh::lane_grant_preview::Lane,
+) -> crate::mesh::lane_grant::ApprovalPurpose {
+    use crate::mesh::lane_grant::ApprovalPurpose;
+    use crate::mesh::lane_grant_preview::Lane;
+    match lane {
+        Lane::Body => ApprovalPurpose::Body,
+        Lane::Metadata
+        | Lane::Embedding
+        | Lane::GraphLink
+        | Lane::CurationSignal
+        | Lane::RevisionNotice => ApprovalPurpose::Lane,
     }
 }
 

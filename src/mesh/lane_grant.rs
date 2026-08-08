@@ -63,11 +63,71 @@ pub const APPROVAL_TOKEN_BEARER_LEN: usize = APPROVAL_TOKEN_PREFIX.len() + ENCOD
 
 const MAX_WORKSPACE_CONTEXT_BYTES: usize = 4 * 1024;
 const MAX_SURFACE_CONTEXT_BYTES: usize = 256;
-const ENVELOPE_MAC_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.lane_approval.envelope.v1";
-const SNAPSHOT_TAG_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.lane_approval.snapshot.v1";
-const AUDIT_ID_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.lane_approval.audit_id.v1";
+const LANE_ENVELOPE_MAC_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.lane_approval.envelope.v1";
+const LANE_SNAPSHOT_TAG_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.lane_approval.snapshot.v1";
+const LANE_AUDIT_ID_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.lane_approval.audit_id.v1";
+const BODY_ENVELOPE_MAC_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.body_approval.envelope.v1";
+const BODY_SNAPSHOT_TAG_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.body_approval.snapshot.v1";
+const BODY_AUDIT_ID_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.body_approval.audit_id.v1";
 const CONFIG_DIGEST_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.lane_approval.config.v1\0";
 const AUDIT_ID_PREFIX: &str = "eela1_";
+
+/// Which approval authority authenticates a preview bearer.
+///
+/// Body exposure is intentionally separate from ordinary lane consent. The
+/// purpose is invocation context, not a wire field: choosing the wrong purpose
+/// changes all three derived subkeys and makes the envelope invalid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApprovalPurpose {
+    /// Metadata, embedding, graph-link, revision-notice, or curation consent.
+    Lane,
+    /// Unredacted body exposure consent.
+    Body,
+}
+
+impl ApprovalPurpose {
+    const fn envelope_mac_domain(self) -> MacDomain {
+        match self {
+            Self::Lane => MacDomain::LaneApprovalEnvelopeMac,
+            Self::Body => MacDomain::BodyApprovalEnvelopeMac,
+        }
+    }
+
+    const fn snapshot_tag_domain(self) -> MacDomain {
+        match self {
+            Self::Lane => MacDomain::LaneApprovalSnapshotTag,
+            Self::Body => MacDomain::BodyApprovalSnapshotTag,
+        }
+    }
+
+    const fn audit_id_domain(self) -> MacDomain {
+        match self {
+            Self::Lane => MacDomain::LaneApprovalAuditId,
+            Self::Body => MacDomain::BodyApprovalAuditId,
+        }
+    }
+
+    const fn envelope_message_domain(self) -> &'static [u8] {
+        match self {
+            Self::Lane => LANE_ENVELOPE_MAC_MESSAGE_DOMAIN,
+            Self::Body => BODY_ENVELOPE_MAC_MESSAGE_DOMAIN,
+        }
+    }
+
+    const fn snapshot_message_domain(self) -> &'static [u8] {
+        match self {
+            Self::Lane => LANE_SNAPSHOT_TAG_MESSAGE_DOMAIN,
+            Self::Body => BODY_SNAPSHOT_TAG_MESSAGE_DOMAIN,
+        }
+    }
+
+    const fn audit_message_domain(self) -> &'static [u8] {
+        match self {
+            Self::Lane => LANE_AUDIT_ID_MESSAGE_DOMAIN,
+            Self::Body => BODY_AUDIT_ID_MESSAGE_DOMAIN,
+        }
+    }
+}
 
 /// Bind one durable allow override to the exact config-file bytes reviewed by
 /// the operator. Runtime policy lookup recomputes this digest from the current
@@ -272,6 +332,7 @@ impl fmt::Debug for IssuedApprovalToken {
 /// compare the snapshot tag or use the nonce as an equality oracle. It has no
 /// serialization surface and a redacted `Debug`.
 pub struct AuthenticatedApprovalToken {
+    purpose: ApprovalPurpose,
     nonce: [u8; NONCE_LEN],
     issued_at_unix_seconds: i64,
     expires_at_unix_seconds: i64,
@@ -349,6 +410,7 @@ impl VerifiedApproval {
 /// nonce-salted keyed tag does.
 pub fn issue(
     root: &StoreAuthRoot,
+    purpose: ApprovalPurpose,
     workspace_id: &str,
     surface: &str,
     canonical_snapshot: &[u8],
@@ -366,6 +428,7 @@ pub fn issue(
     })?;
     issue_with_nonce(
         root,
+        purpose,
         workspace_id,
         surface,
         canonical_snapshot,
@@ -379,19 +442,28 @@ pub fn issue(
 /// callers do both with [`compare_snapshot`] inside the write transaction.
 pub fn verify_authentic(
     root: &StoreAuthRoot,
+    purpose: ApprovalPurpose,
     workspace_id: &str,
     surface: &str,
     token_text: &str,
     now_unix_seconds: i64,
 ) -> Result<AuthenticatedApprovalToken, ApprovalTokenError> {
     let token = ApprovalToken::parse(token_text)?;
-    verify_authentic_token(root, workspace_id, surface, &token, now_unix_seconds)
+    verify_authentic_token(
+        root,
+        purpose,
+        workspace_id,
+        surface,
+        &token,
+        now_unix_seconds,
+    )
 }
 
 /// Authenticate an already bounded/parsed bearer, avoiding a second explicit
 /// string exposure for stdin consumers.
 pub fn verify_authentic_token(
     root: &StoreAuthRoot,
+    purpose: ApprovalPurpose,
     workspace_id: &str,
     surface: &str,
     token: &ApprovalToken,
@@ -404,13 +476,13 @@ pub fn verify_authentic_token(
 
     let envelope = &token.envelope;
     let candidate_mac = Mac::from_bytes(copy_array::<MAC_LEN>(&envelope[ENVELOPE_MAC_OFFSET..]));
-    let mac_message =
-        envelope_mac_message(workspace_id, surface, &envelope[..ENVELOPE_MAC_OFFSET])?;
-    if !root.verify(
-        MacDomain::LaneApprovalEnvelopeMac,
-        &mac_message,
-        &candidate_mac,
-    )? {
+    let mac_message = envelope_mac_message(
+        purpose,
+        workspace_id,
+        surface,
+        &envelope[..ENVELOPE_MAC_OFFSET],
+    )?;
+    if !root.verify(purpose.envelope_mac_domain(), &mac_message, &candidate_mac)? {
         return Err(ApprovalTokenError::Invalid);
     }
 
@@ -428,6 +500,7 @@ pub fn verify_authentic_token(
     }
 
     Ok(AuthenticatedApprovalToken {
+        purpose,
         nonce: copy_array::<NONCE_LEN>(&envelope[NONCE_OFFSET..ISSUED_AT_OFFSET]),
         issued_at_unix_seconds,
         expires_at_unix_seconds,
@@ -458,13 +531,18 @@ pub fn compare_snapshot(
         return Err(ApprovalTokenError::Stale);
     }
 
-    let current_tag = snapshot_tag(root, &authenticated.nonce, canonical_snapshot)?;
+    let current_tag = snapshot_tag(
+        root,
+        authenticated.purpose,
+        &authenticated.nonce,
+        canonical_snapshot,
+    )?;
     if current_tag != authenticated.snapshot_tag {
         return Err(ApprovalTokenError::Stale);
     }
     let audit_mac = root.mac(
-        MacDomain::LaneApprovalAuditId,
-        &audit_id_message(&authenticated.nonce),
+        authenticated.purpose.audit_id_domain(),
+        &audit_id_message(authenticated.purpose, &authenticated.nonce),
     )?;
     Ok(VerifiedApproval {
         audit_id: ApprovalAuditId(*audit_mac.as_bytes()),
@@ -500,6 +578,7 @@ pub fn read_bounded_token(
 
 fn issue_with_nonce(
     root: &StoreAuthRoot,
+    purpose: ApprovalPurpose,
     workspace_id: &str,
     surface: &str,
     canonical_snapshot: &[u8],
@@ -513,7 +592,7 @@ fn issue_with_nonce(
     let expires_at_unix_seconds = now_unix_seconds
         .checked_add(APPROVAL_TOKEN_TTL_SECONDS)
         .ok_or(ApprovalTokenError::Invalid)?;
-    let tag = snapshot_tag(root, &nonce, canonical_snapshot)?;
+    let tag = snapshot_tag(root, purpose, &nonce, canonical_snapshot)?;
 
     let mut envelope = [0_u8; ENVELOPE_LEN];
     envelope[VERSION_OFFSET] = TOKEN_VERSION;
@@ -522,9 +601,13 @@ fn issue_with_nonce(
     envelope[EXPIRES_AT_OFFSET..SNAPSHOT_TAG_OFFSET]
         .copy_from_slice(&expires_at_unix_seconds.to_be_bytes());
     envelope[SNAPSHOT_TAG_OFFSET..ENVELOPE_MAC_OFFSET].copy_from_slice(tag.as_bytes());
-    let mac_message =
-        envelope_mac_message(workspace_id, surface, &envelope[..ENVELOPE_MAC_OFFSET])?;
-    let envelope_mac = root.mac(MacDomain::LaneApprovalEnvelopeMac, &mac_message)?;
+    let mac_message = envelope_mac_message(
+        purpose,
+        workspace_id,
+        surface,
+        &envelope[..ENVELOPE_MAC_OFFSET],
+    )?;
+    let envelope_mac = root.mac(purpose.envelope_mac_domain(), &mac_message)?;
     envelope[ENVELOPE_MAC_OFFSET..].copy_from_slice(envelope_mac.as_bytes());
 
     Ok(IssuedApprovalToken {
@@ -547,6 +630,7 @@ fn validate_context(workspace_id: &str, surface: &str) -> Result<(), ApprovalTok
 
 fn snapshot_tag(
     root: &StoreAuthRoot,
+    purpose: ApprovalPurpose,
     nonce: &[u8; NONCE_LEN],
     canonical_snapshot: &[u8],
 ) -> Result<Mac, ApprovalTokenError> {
@@ -554,38 +638,39 @@ fn snapshot_tag(
         return Err(ApprovalTokenError::Stale);
     }
     let mut message = Vec::with_capacity(
-        SNAPSHOT_TAG_MESSAGE_DOMAIN.len() + NONCE_LEN + 8 + canonical_snapshot.len(),
+        purpose.snapshot_message_domain().len() + NONCE_LEN + 8 + canonical_snapshot.len(),
     );
-    message.extend_from_slice(SNAPSHOT_TAG_MESSAGE_DOMAIN);
+    message.extend_from_slice(purpose.snapshot_message_domain());
     message.extend_from_slice(nonce);
     append_len_prefixed(&mut message, canonical_snapshot)?;
-    root.mac(MacDomain::LaneApprovalSnapshotTag, &message)
+    root.mac(purpose.snapshot_tag_domain(), &message)
         .map_err(Into::into)
 }
 
 fn envelope_mac_message(
+    purpose: ApprovalPurpose,
     workspace_id: &str,
     surface: &str,
     authenticated_envelope_fields: &[u8],
 ) -> Result<Vec<u8>, ApprovalTokenError> {
     let mut message = Vec::with_capacity(
-        ENVELOPE_MAC_MESSAGE_DOMAIN.len()
+        purpose.envelope_message_domain().len()
             + 8
             + workspace_id.len()
             + 8
             + surface.len()
             + authenticated_envelope_fields.len(),
     );
-    message.extend_from_slice(ENVELOPE_MAC_MESSAGE_DOMAIN);
+    message.extend_from_slice(purpose.envelope_message_domain());
     append_len_prefixed(&mut message, workspace_id.as_bytes())?;
     append_len_prefixed(&mut message, surface.as_bytes())?;
     message.extend_from_slice(authenticated_envelope_fields);
     Ok(message)
 }
 
-fn audit_id_message(nonce: &[u8; NONCE_LEN]) -> Vec<u8> {
-    let mut message = Vec::with_capacity(AUDIT_ID_MESSAGE_DOMAIN.len() + 1 + NONCE_LEN);
-    message.extend_from_slice(AUDIT_ID_MESSAGE_DOMAIN);
+fn audit_id_message(purpose: ApprovalPurpose, nonce: &[u8; NONCE_LEN]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(purpose.audit_message_domain().len() + 1 + NONCE_LEN);
+    message.extend_from_slice(purpose.audit_message_domain());
     message.push(TOKEN_VERSION);
     message.extend_from_slice(nonce);
     message
@@ -629,6 +714,7 @@ mod tests {
     ) -> IssuedApprovalToken {
         issue_with_nonce(
             root,
+            ApprovalPurpose::Lane,
             WORKSPACE,
             SURFACE,
             snapshot,
@@ -652,8 +738,15 @@ mod tests {
         assert_eq!(format!("{:?}", issued.token()), "ApprovalToken(<redacted>)");
         assert!(!format!("{issued:?}").contains(&bearer));
 
-        let authenticated =
-            verify_authentic(&root, WORKSPACE, SURFACE, &bearer, NOW).expect("authenticate");
+        let authenticated = verify_authentic(
+            &root,
+            ApprovalPurpose::Lane,
+            WORKSPACE,
+            SURFACE,
+            &bearer,
+            NOW,
+        )
+        .expect("authenticate");
         let verified =
             compare_snapshot(&root, &authenticated, snapshot, NOW).expect("compare snapshot");
         assert!(
@@ -662,6 +755,95 @@ mod tests {
                 .to_opaque_string()
                 .starts_with(AUDIT_ID_PREFIX)
         );
+    }
+
+    #[test]
+    fn body_approval_uses_separate_current_key_domains_without_a_wire_key_id() {
+        let (_directory, mut root) = root();
+        let snapshot = br#"{"schema":"ee.mesh.lane_grant_preview.v2","lane":"body"}"#;
+        let nonce = [0x19; NONCE_LEN];
+        let body = issue_with_nonce(
+            &root,
+            ApprovalPurpose::Body,
+            WORKSPACE,
+            SURFACE,
+            snapshot,
+            NOW,
+            nonce,
+        )
+        .expect("issue body approval");
+        let lane = issue_with_nonce(
+            &root,
+            ApprovalPurpose::Lane,
+            WORKSPACE,
+            SURFACE,
+            snapshot,
+            NOW,
+            nonce,
+        )
+        .expect("issue ordinary lane approval");
+        let body_bearer = body.token().expose_bearer();
+        let lane_bearer = lane.token().expose_bearer();
+
+        assert_ne!(
+            body_bearer, lane_bearer,
+            "body snapshot and envelope domains must differ"
+        );
+        assert!(!body_bearer.contains(&root.current_key_id().to_hex()));
+        assert_eq!(body_bearer.len(), APPROVAL_TOKEN_BEARER_LEN);
+        assert!(matches!(
+            verify_authentic(
+                &root,
+                ApprovalPurpose::Lane,
+                WORKSPACE,
+                SURFACE,
+                &body_bearer,
+                NOW,
+            ),
+            Err(ApprovalTokenError::Invalid)
+        ));
+
+        let body_authenticated = verify_authentic(
+            &root,
+            ApprovalPurpose::Body,
+            WORKSPACE,
+            SURFACE,
+            &body_bearer,
+            NOW,
+        )
+        .expect("authenticate body approval");
+        let lane_authenticated = verify_authentic(
+            &root,
+            ApprovalPurpose::Lane,
+            WORKSPACE,
+            SURFACE,
+            &lane_bearer,
+            NOW,
+        )
+        .expect("authenticate ordinary lane approval");
+        let body_audit = compare_snapshot(&root, &body_authenticated, snapshot, NOW)
+            .expect("verify body snapshot")
+            .audit_id();
+        let lane_audit = compare_snapshot(&root, &lane_authenticated, snapshot, NOW)
+            .expect("verify lane snapshot")
+            .audit_id();
+        assert_ne!(
+            body_audit, lane_audit,
+            "body audit IDs need a separate subkey"
+        );
+
+        root.rotate().expect("rotate current key");
+        assert!(matches!(
+            verify_authentic(
+                &root,
+                ApprovalPurpose::Body,
+                WORKSPACE,
+                SURFACE,
+                &body_bearer,
+                NOW,
+            ),
+            Err(ApprovalTokenError::Invalid)
+        ));
     }
 
     #[test]
@@ -685,7 +867,14 @@ mod tests {
             let tampered = ApprovalToken { envelope }.expose_bearer();
             assert!(
                 matches!(
-                    verify_authentic(&root, WORKSPACE, SURFACE, &tampered, NOW),
+                    verify_authentic(
+                        &root,
+                        ApprovalPurpose::Lane,
+                        WORKSPACE,
+                        SURFACE,
+                        &tampered,
+                        NOW,
+                    ),
                     Err(ApprovalTokenError::Invalid)
                 ),
                 "tampering envelope byte {byte_index} must be invalid",
@@ -693,12 +882,20 @@ mod tests {
         }
         let authentic_bearer = issued.token().expose_bearer();
         assert!(matches!(
-            verify_authentic(&root, "ws_other", SURFACE, &authentic_bearer, NOW),
+            verify_authentic(
+                &root,
+                ApprovalPurpose::Lane,
+                "ws_other",
+                SURFACE,
+                &authentic_bearer,
+                NOW,
+            ),
             Err(ApprovalTokenError::Invalid)
         ));
         assert!(matches!(
             verify_authentic(
                 &root,
+                ApprovalPurpose::Lane,
                 WORKSPACE,
                 "ee.team.share_bodies.v1",
                 &authentic_bearer,
@@ -726,8 +923,15 @@ mod tests {
         let (_directory, root) = root();
         let issued = issue_deterministic(&root, b"preview-a", 0x43);
         let bearer = issued.token().expose_bearer();
-        let authenticated =
-            verify_authentic(&root, WORKSPACE, SURFACE, &bearer, NOW).expect("authenticate");
+        let authenticated = verify_authentic(
+            &root,
+            ApprovalPurpose::Lane,
+            WORKSPACE,
+            SURFACE,
+            &bearer,
+            NOW,
+        )
+        .expect("authenticate");
 
         assert!(matches!(
             compare_snapshot(&root, &authenticated, b"preview-b", NOW),
@@ -751,7 +955,14 @@ mod tests {
         let bearer = issued.token().expose_bearer();
 
         assert!(matches!(
-            verify_authentic(&root, WORKSPACE, SURFACE, &bearer, NOW - 1),
+            verify_authentic(
+                &root,
+                ApprovalPurpose::Lane,
+                WORKSPACE,
+                SURFACE,
+                &bearer,
+                NOW - 1,
+            ),
             Err(ApprovalTokenError::Invalid)
         ));
     }
@@ -764,7 +975,14 @@ mod tests {
         root.rotate().expect("rotate current key");
 
         assert!(matches!(
-            verify_authentic(&root, WORKSPACE, SURFACE, &bearer, NOW),
+            verify_authentic(
+                &root,
+                ApprovalPurpose::Lane,
+                WORKSPACE,
+                SURFACE,
+                &bearer,
+                NOW,
+            ),
             Err(ApprovalTokenError::Invalid)
         ));
     }
@@ -777,7 +995,14 @@ mod tests {
         let bearer = issued.token().expose_bearer();
 
         assert!(matches!(
-            verify_authentic(&root_b, WORKSPACE, SURFACE, &bearer, NOW),
+            verify_authentic(
+                &root_b,
+                ApprovalPurpose::Lane,
+                WORKSPACE,
+                SURFACE,
+                &bearer,
+                NOW,
+            ),
             Err(ApprovalTokenError::Invalid)
         ));
     }
@@ -787,8 +1012,15 @@ mod tests {
         let (_directory, root) = root();
         let issued = issue_deterministic(&root, b"preview", 0x76);
         let bearer = issued.token().expose_bearer();
-        let authenticated =
-            verify_authentic(&root, WORKSPACE, SURFACE, &bearer, NOW).expect("authenticate");
+        let authenticated = verify_authentic(
+            &root,
+            ApprovalPurpose::Lane,
+            WORKSPACE,
+            SURFACE,
+            &bearer,
+            NOW,
+        )
+        .expect("authenticate");
         let first = compare_snapshot(&root, &authenticated, b"preview", NOW)
             .expect("compare")
             .audit_id()
@@ -809,7 +1041,15 @@ mod tests {
         let issued = issue_deterministic(&root, b"preview", 0x87);
         let input = format!("{}\n", issued.token().expose_bearer());
         let parsed = read_bounded_token(&mut input.as_bytes()).expect("bounded token");
-        verify_authentic_token(&root, WORKSPACE, SURFACE, &parsed, NOW).expect("authenticate");
+        verify_authentic_token(
+            &root,
+            ApprovalPurpose::Lane,
+            WORKSPACE,
+            SURFACE,
+            &parsed,
+            NOW,
+        )
+        .expect("authenticate");
 
         let oversized = "x".repeat(MAX_APPROVAL_TOKEN_INPUT_BYTES + 1);
         assert!(matches!(

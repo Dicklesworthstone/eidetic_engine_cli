@@ -22,7 +22,10 @@ use ee::mesh::foreground_cli::{
     MESH_EXPORT_ARTIFACT_SCHEMA_V1, MeshCursorRow, MeshEventRow, MeshExportArtifact, MeshPeerRow,
     MeshStorageCounts,
 };
-use ee::mesh::lane_grant::{APPROVAL_TOKEN_TTL_SECONDS, compare_snapshot, issue, verify_authentic};
+use ee::mesh::lane_grant::{
+    APPROVAL_TOKEN_PREFIX, APPROVAL_TOKEN_TTL_SECONDS, ApprovalPurpose, compare_snapshot, issue,
+    verify_authentic,
+};
 use ee::mesh::peer::build_peer_origin_node_id;
 use ee::policy::store_auth::{StoreAuthRoot, workspace_keys_dir};
 use serde_json::Value;
@@ -210,6 +213,16 @@ fn sensitive_json_string(value: &Value, pointer: &str, label: &str) -> Result<St
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| format!("{label}: {pointer} must contain the sensitive bearer projection"))
+}
+
+fn tamper_approval_bearer(bearer: &str) -> Result<String, String> {
+    let mut bytes = bearer.as_bytes().to_vec();
+    let index = APPROVAL_TOKEN_PREFIX.len() + 20;
+    let byte = bytes
+        .get_mut(index)
+        .ok_or_else(|| "approval bearer was too short for a one-byte tamper".to_owned())?;
+    *byte = if *byte == b'A' { b'B' } else { b'A' };
+    String::from_utf8(bytes).map_err(|error| format!("tampered bearer was not UTF-8: {error}"))
 }
 
 fn json_u64(value: &Value, pointer: &str, label: &str) -> Result<u64, String> {
@@ -1332,6 +1345,7 @@ fn invalid_and_expired_bearers_have_distinct_public_errors_and_zero_effect() -> 
         .ok_or_else(|| "approval token expiry fixture timestamp underflowed".to_owned())?;
     let expired = issue(
         &root,
+        ApprovalPurpose::Lane,
         &fixture.workspace_id,
         GRANT_SCHEMA,
         &canonical_snapshot,
@@ -1571,6 +1585,7 @@ fn concurrent_double_apply_commits_once_and_stales_the_loser() -> TestResult {
     let approval_now = chrono::Utc::now().timestamp();
     let issued = issue(
         &root,
+        ApprovalPurpose::Lane,
         &fixture.workspace_id,
         GRANT_SCHEMA,
         &canonical_snapshot,
@@ -1599,9 +1614,15 @@ fn concurrent_double_apply_commits_once_and_stales_the_loser() -> TestResult {
             let prepared: Result<_, String> = (|| {
                 let root = StoreAuthRoot::open(&keys_dir)
                     .map_err(|error| format!("{label}: open store-auth root: {error}"))?;
-                let authenticated =
-                    verify_authentic(&root, &workspace_id, GRANT_SCHEMA, &bearer, approval_now)
-                        .map_err(|error| format!("{label}: authenticate shared bearer: {error}"))?;
+                let authenticated = verify_authentic(
+                    &root,
+                    ApprovalPurpose::Lane,
+                    &workspace_id,
+                    GRANT_SCHEMA,
+                    &bearer,
+                    approval_now,
+                )
+                .map_err(|error| format!("{label}: authenticate shared bearer: {error}"))?;
                 let connection = DbConnection::open_file(&database_path)
                     .map_err(|error| format!("{label}: open database: {error}"))?;
                 let peer = connection
@@ -2783,10 +2804,135 @@ fn body_grant_pins_and_releases_hash_bound_metadata_body_fields() -> TestResult 
         &canonical_preview_bytes(&ordinary_json, "token-free metadata-body preview")?,
         "approval token exact preview binding",
     )?;
-    let bearer = sensitive_json_string(
+    let prior_key_bearer = sensitive_json_string(
         &issued_json,
         "/data/preview/approvalToken/value",
         "metadata-body approval preview",
+    )?;
+    let baseline_preview = preview_payload(&ordinary_json, "body approval rejection baseline")?;
+
+    let tampered_bearer = tamper_approval_bearer(&prior_key_bearer)?;
+    let tampered = run_ee_with_stdin(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            "body",
+            "--preview-token-stdin",
+            "--json",
+        ],
+        format!("{tampered_bearer}\n").as_bytes(),
+    )?;
+    approval_error_json(
+        &tampered,
+        "tampered body approval bearer",
+        "mesh_approval_token_invalid",
+        "high",
+        "invalid for this store, workspace, and command",
+    )?;
+    let tampered_after = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "preview-grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            "body",
+            "--json",
+        ],
+    )?;
+    let tampered_after_json = success_json(&tampered_after, "post-tamper body preview")?;
+    ensure_equal(
+        &preview_payload(&tampered_after_json, "post-tamper body preview")?,
+        &baseline_preview,
+        "tampered body approval must leave persisted consent state unchanged",
+    )?;
+    ensure_equal(
+        &lane_audit_entries(&fixture, GRANT_AUDIT_ACTION)?.len(),
+        &0,
+        "tampered body approval must append no grant audit",
+    )?;
+
+    let keys_dir = workspace_keys_dir(Path::new(&fixture.workspace));
+    let mut root = StoreAuthRoot::open(&keys_dir)
+        .map_err(|error| format!("open body-approval store root for rotation: {error}"))?;
+    let prior_key_id = root.current_key_id();
+    let current_key_id = root
+        .rotate()
+        .map_err(|error| format!("rotate body-approval store root: {error}"))?;
+    ensure(
+        prior_key_id != current_key_id,
+        "body-approval rotation must install a distinct current key",
+    )?;
+    ensure(
+        !prior_key_bearer.contains(&prior_key_id.to_hex())
+            && !prior_key_bearer.contains(&current_key_id.to_hex()),
+        "body approval bearer must not serialize an approval key ID",
+    )?;
+    drop(root);
+
+    let prior_key = run_ee_with_stdin(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            "body",
+            "--preview-token-stdin",
+            "--json",
+        ],
+        format!("{prior_key_bearer}\n").as_bytes(),
+    )?;
+    approval_error_json(
+        &prior_key,
+        "prior-key body approval bearer",
+        "mesh_approval_token_invalid",
+        "high",
+        "invalid for this store, workspace, and command",
+    )?;
+    let prior_key_after = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "preview-grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            "body",
+            "--json",
+        ],
+    )?;
+    let prior_key_after_json = success_json(&prior_key_after, "post-prior-key body preview")?;
+    ensure_equal(
+        &preview_payload(&prior_key_after_json, "post-prior-key body preview")?,
+        &baseline_preview,
+        "prior-key body approval must leave persisted consent state unchanged",
+    )?;
+    ensure_equal(
+        &lane_audit_entries(&fixture, GRANT_AUDIT_ACTION)?.len(),
+        &0,
+        "prior-key body approval must append no grant audit",
+    )?;
+
+    let refreshed = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "preview-grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            "body",
+            "--issue-approval-token",
+            "--json",
+        ],
+    )?;
+    let refreshed_json = success_json(&refreshed, "current-key body approval preview")?;
+    let bearer = sensitive_json_string(
+        &refreshed_json,
+        "/data/preview/approvalToken/value",
+        "current-key body approval preview",
     )?;
     let grant = run_ee_with_stdin(
         &fixture.workspace,
