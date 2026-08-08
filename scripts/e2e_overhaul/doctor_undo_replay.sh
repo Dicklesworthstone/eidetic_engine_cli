@@ -32,9 +32,9 @@
 # AGENTS.md compliance:
 #  - Per RULE 1, this script NEVER deletes files (the temp workspace
 #    is left in place for the operator to inspect).
-#  - No Cargo / rustc / rustdoc invocations. The ee binary path is
-#    supplied via $EE_BIN (defaults to "ee" on PATH) and the harness
-#    refuses to run if the binary cannot be probed.
+#  - No package-manager, compiler, or documentation-tool invocations. The
+#    ee binary path is supplied via $EE_BIN (defaults to "ee" on PATH), and
+#    the harness refuses to run if the binary cannot be probed.
 #  - No git mutation of any kind.
 #
 # Exit 0 on success.
