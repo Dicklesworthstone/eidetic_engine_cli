@@ -26,11 +26,14 @@
 //! and never a false fail.
 
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use crate::config::env_registry::EnvVar;
 use crate::core::budget::RequestBudget;
+use crate::core::source_run::{
+    SourceRunArgvRedaction, SourceRunCommand, SourceRunKind, SourceRunRequest, SourceRunSource,
+    SourceRunStatus, run_source_command,
+};
 use crate::models::memory_sentinel::{
     MemorySentinelKind, MemorySentinelResultStatus, MemorySentinelSpec, SentinelObservation,
 };
@@ -42,6 +45,11 @@ pub const MAX_SENTINEL_CHECK_IO_BYTES: u64 = 1_048_576; // 1 MiB
 
 /// Strict per-check wall-clock cap.
 pub const SENTINEL_CHECK_WALL_CLOCK: Duration = Duration::from_millis(250);
+
+/// Maximum captured bytes per command-help stream. The bounded source runner
+/// retains only this redacted tail; any larger stream makes the predicate
+/// unverifiable so a flag outside the retained tail cannot fabricate a result.
+pub const MAX_SENTINEL_COMMAND_HELP_STREAM_BYTES: usize = 32 * 1024;
 
 /// Resolution context for a sentinel check: the workspace root that relative
 /// path / schema / fixture targets resolve against.
@@ -235,17 +243,49 @@ fn observe_command_help_contains_flag(target: &str) -> SentinelObservation {
     let Ok(exe) = std::env::current_exe() else {
         return SentinelObservation::Unverifiable;
     };
-    let output = Command::new(exe).args(help_args).arg("--help").output();
-    let Ok(output) = output else {
-        return SentinelObservation::Unverifiable;
-    };
-    if !output.status.success() {
+    help_args.push("--help".to_string());
+    let request = SourceRunRequest::new(
+        SourceRunSource::new(
+            SourceRunKind::Ee,
+            "memory_sentinel_command_help",
+            "allowlisted_help_introspection",
+        ),
+        SourceRunCommand::new(exe.to_string_lossy().into_owned())
+            .with_args(help_args)
+            .with_display("ee <allowlisted-subcommand> --help")
+            .with_argv_redaction(SourceRunArgvRedaction::HashOnly),
+        SENTINEL_CHECK_WALL_CLOCK,
+    )
+    .with_tail_bytes_max(MAX_SENTINEL_COMMAND_HELP_STREAM_BYTES);
+    let evidence = run_source_command(&request);
+
+    command_help_observation(
+        &expected_flag,
+        evidence.status,
+        evidence.output.stdout_bytes,
+        evidence.output.stderr_bytes,
+        evidence.output.stdout_tail.as_deref(),
+        evidence.output.stderr_tail.as_deref(),
+    )
+}
+
+fn command_help_observation(
+    expected_flag: &str,
+    status: SourceRunStatus,
+    stdout_bytes: usize,
+    stderr_bytes: usize,
+    stdout_tail: Option<&str>,
+    stderr_tail: Option<&str>,
+) -> SentinelObservation {
+    if status != SourceRunStatus::Passed
+        || stdout_bytes > MAX_SENTINEL_COMMAND_HELP_STREAM_BYTES
+        || stderr_bytes > MAX_SENTINEL_COMMAND_HELP_STREAM_BYTES
+    {
         return SentinelObservation::Unverifiable;
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stdout.contains(&expected_flag) || stderr.contains(&expected_flag) {
+    if stdout_tail.is_some_and(|stdout| stdout.contains(expected_flag))
+        || stderr_tail.is_some_and(|stderr| stderr.contains(expected_flag))
+    {
         SentinelObservation::Satisfied
     } else {
         SentinelObservation::Unsatisfied
@@ -344,9 +384,11 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        SentinelCheckContext, observe_sentinel, resolve_in_workspace, split_target_marker,
+        MAX_SENTINEL_COMMAND_HELP_STREAM_BYTES, SentinelCheckContext, command_help_observation,
+        observe_sentinel, resolve_in_workspace, split_target_marker,
     };
     use crate::config::env_registry::EnvVar;
+    use crate::core::source_run::SourceRunStatus;
     use crate::models::memory_sentinel::{
         MEMORY_SENTINEL_SPEC_SCHEMA_V1, MemorySentinelKind, MemorySentinelPolarity,
         MemorySentinelSpec, SentinelObservation,
@@ -387,6 +429,55 @@ mod tests {
             ),
             SentinelObservation::Unsatisfied
         );
+    }
+
+    #[test]
+    fn command_help_probe_pass_fail_timeout_and_overflow_are_bounded() {
+        assert_eq!(
+            command_help_observation(
+                "--json",
+                SourceRunStatus::Passed,
+                18,
+                0,
+                Some("Usage: ee pack --json"),
+                None,
+            ),
+            SentinelObservation::Satisfied
+        );
+        assert_eq!(
+            command_help_observation(
+                "--json",
+                SourceRunStatus::Passed,
+                15,
+                0,
+                Some("Usage: ee pack"),
+                None,
+            ),
+            SentinelObservation::Unsatisfied
+        );
+
+        let secret = "AKIAIOSFODNN7EXAMPLE-timeout-output";
+        let timed_out = command_help_observation(
+            "--json",
+            SourceRunStatus::TimedOut,
+            secret.len(),
+            0,
+            Some(secret),
+            None,
+        );
+        assert_eq!(timed_out, SentinelObservation::Unverifiable);
+        assert!(!format!("{timed_out:?}").contains(secret));
+
+        let overflow = command_help_observation(
+            "--json",
+            SourceRunStatus::Passed,
+            MAX_SENTINEL_COMMAND_HELP_STREAM_BYTES + 1,
+            0,
+            Some(secret),
+            None,
+        );
+        assert_eq!(overflow, SentinelObservation::Unverifiable);
+        assert!(!format!("{overflow:?}").contains(secret));
     }
 
     #[test]

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.memory_sentinel.revivals.v1.json",
   "title": "ee.memory_sentinel.revivals.v1",
-  "description": "Bounded, deterministic, redaction-safe read-only evaluation of current Revive-polarity memory sentinels. Explicit tripwire checks may run allowlisted ee help introspection; implicit orient evaluation never executes a process.",
+  "description": "Bounded, deterministic, redaction-safe read-only evaluation of current Revive-polarity memory sentinels. The explicit tripwire revival evaluator may run allowlisted ee help introspection under wall-time and captured-output caps. The implicit revival evaluator embedded in orient does not execute command-help processes; this statement does not describe unrelated orient components.",
   "x-ee-status": {
     "shipped": true,
     "available_in_build": true,

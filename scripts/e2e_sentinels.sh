@@ -229,6 +229,19 @@ REVIVE_ID="$revive_mem_id" HELP_REVIVE_ID="$help_revive_id" ENV_REVIVE_ID="$env_
      and any(.data.revivals.revivals[]?; .memoryId == env.ENV_REVIVE_ID and .kind == "env_var_registered")
      and all(.data.revivals.revivals[]?; .memoryId != env.HELP_REVIVE_ID)' \
     "orient keeps safe revival predicates live but never marks command-help revival ready"
+implicit_orient_human="$(ee_json orient "inspect newly unblocked routes" --fast --workspace "$WS")"
+assert_contains "$implicit_orient_human" "Revival evaluator: mode=implicit" \
+    "orient human output identifies implicit revival evaluation"
+assert_contains "$implicit_orient_human" "matched=" \
+    "orient human output exposes matched revival count"
+assert_contains "$implicit_orient_human" "evaluated=" \
+    "orient human output exposes evaluated revival count"
+assert_contains "$implicit_orient_human" "unevaluated=" \
+    "orient human output exposes unevaluated revival count"
+assert_contains "$implicit_orient_human" "truncated=" \
+    "orient human output exposes revival truncation posture"
+assert_contains "$implicit_orient_human" "limitRepair=" \
+    "orient human output exposes revival limit repair"
 
 step "revival JSON and human stdout never expose secret-shaped path targets"
 sensitive_target="private/AKIAIOSFODNN7EXAMPLE-token.marker"
@@ -253,6 +266,16 @@ assert_eq "$([[ "$sensitive_human" == *"$sensitive_target"* ]] && echo leaked ||
     "redacted" "revival human stdout omits the raw secret-shaped path"
 assert_contains "$sensitive_human" "target=blake3:" \
     "revival human stdout retains digest-based target identity"
+assert_contains "$sensitive_human" "Revival evaluator: mode=explicit" \
+    "tripwire human output identifies explicit revival evaluation"
+assert_contains "$sensitive_human" "matched=" \
+    "tripwire human output exposes matched revival count"
+assert_contains "$sensitive_human" "unevaluated=" \
+    "tripwire human output exposes unevaluated revival count"
+assert_contains "$sensitive_human" "truncated=" \
+    "tripwire human output exposes revival truncation posture"
+assert_contains "$sensitive_human" "limitRepair=" \
+    "tripwire human output exposes revival limit repair"
 
 step "ee sentinel check passes while the field is present"
 pass="$(ee_json sentinel check "$mem_id" --workspace "$WS" --json)"
@@ -284,5 +307,23 @@ assert_jq "$why" \
      and any(.data.sentinel.specs[]?; .polarity == "gate" and .latestResult.status == "fail")' \
     "why reports latest failed sentinel status"
 
+step "orient revival degradation fixture has a reproducible real filesystem trigger"
+BROKEN_REVIVAL_WS=""
+with_temp_workspace BROKEN_REVIVAL_WS
+BROKEN_REVIVAL_DB="$EE_DATABASE_PATH"
+broken_init="$(ee_json init --workspace "$BROKEN_REVIVAL_WS" --json)"
+assert_jq "$broken_init" '.success == true' \
+    "broken-revival fixture workspace initializes"
+mv "$BROKEN_REVIVAL_DB" "$BROKEN_REVIVAL_DB.saved"
+mkdir "$BROKEN_REVIVAL_DB"
+broken_orient="$(ee_json orient "resume work" --fast --workspace "$BROKEN_REVIVAL_WS" --json)"
+assert_jq "$broken_orient" \
+    '.success == true
+     and any(.degraded[]?;
+         .code == "orient_revivals_unavailable"
+         and .severity == "info"
+         and (.message | contains("Revival sentinel check could not be assembled"))
+         and (.repair | contains("ee tripwire check --revivals --json")))' \
+    "orient emits the fixture-backed revival degradation when ee.db is a directory"
 
 harness_summary

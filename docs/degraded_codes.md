@@ -10420,7 +10420,8 @@ ee status --workspace . --json
 
 ```bash
 ee init --workspace .
-# make the initialized database unavailable to the orient read-only connection
+mv .ee/ee.db .ee/ee.db.saved
+mkdir .ee/ee.db
 ```
 
 **Invocation.**

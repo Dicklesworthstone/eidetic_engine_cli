@@ -36219,6 +36219,9 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
     let mut out = format!(
         "Orientation: {task}\nWorkspace: {workspace}\nMode: {mode}\nDoctor posture: {posture}\nDirty paths: {dirty_paths}\nPack items: {pack_items}\nDecision revisits: {decision_revisits}\nRevivable dead routes: {revivable_routes}\n"
     );
+    if let Some(revivals) = data.get("revivals").filter(|value| value.is_object()) {
+        out.push_str(&render_revival_evaluation_human(revivals));
+    }
     if revivable_routes > 0 {
         out.push_str(&format!(
             "\n{revivable_routes} previously dead route(s) are now unblocked — run `ee tripwire check --revivals --json` for the list.\n"
@@ -62236,12 +62239,7 @@ fn write_revival_sentinel_data<W>(
 where
     W: Write,
 {
-    let envelope = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V2,
-        "success": true,
-        "data": data,
-        "degraded": [],
-    });
+    let envelope = revival_sentinel_envelope(data);
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => write_stdout(
             stdout,
@@ -62260,26 +62258,22 @@ where
     }
 }
 
+fn revival_sentinel_envelope(data: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+        "degraded": [],
+    })
+}
+
 fn render_revival_sentinel_human(data: &serde_json::Value) -> String {
-    let mode = data
-        .get("observationMode")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown");
-    let matched = data
-        .get("matchedSpecCount")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    let evaluated = data
-        .get("evaluatedSpecCount")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
     let ready = data
         .get("revivalCount")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    let mut output = format!(
-        "Revival check (read-only, {mode} observation): evaluated {evaluated}/{matched} revive spec(s), ready={ready}\n"
-    );
+    let mut output = format!("Revival check (read-only evaluator): ready={ready}\n");
+    output.push_str(&render_revival_evaluation_human(data));
     if let Some(revivals) = data.get("revivals").and_then(serde_json::Value::as_array) {
         for revival in revivals {
             let memory_id = revival
@@ -62302,24 +62296,37 @@ fn render_revival_sentinel_human(data: &serde_json::Value) -> String {
     if ready == 0 {
         output.push_str("  No evaluated revival predicates currently pass.\n");
     }
-    if data
+    output
+}
+
+fn render_revival_evaluation_human(data: &serde_json::Value) -> String {
+    let mode = data
+        .get("observationMode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let matched = data
+        .get("matchedSpecCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let evaluated = data
+        .get("evaluatedSpecCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let unevaluated = data
+        .get("unevaluatedSpecCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let truncated = data
         .get("truncatedByLimit")
         .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        let limit = data
-            .get("limit")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let repair = data
-            .get("limitRepair")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("increase --limit to inspect more specs");
-        output.push_str(&format!(
-            "  Evaluation stopped at --limit {limit}. Repair: {repair}\n"
-        ));
-    }
-    output
+        .unwrap_or(false);
+    let limit_repair = data
+        .get("limitRepair")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("none");
+    format!(
+        "Revival evaluator: mode={mode} matched={matched} evaluated={evaluated} unevaluated={unevaluated} truncated={truncated} limitRepair={limit_repair}\n"
+    )
 }
 
 fn parse_optional_tripwire_state(
@@ -62603,6 +62610,105 @@ mod tests {
             }
             other => Err(format!("expected tripwire check args, got {other:?}")),
         }
+    }
+
+    fn bounded_revival_payload_fixture() -> serde_json::Value {
+        serde_json::json!({
+            "schema": "ee.memory_sentinel.revivals.v1",
+            "command": "tripwire check --revivals",
+            "workspaceId": "ws_fixture",
+            "checkedAt": "2026-08-08T06:40:00Z",
+            "observationMode": "explicit",
+            "evaluationPosture": "local_read_only_predicates_plus_allowlisted_command_help_process",
+            "commandHelpProcessExecution": true,
+            "limit": 1,
+            "matchedSpecCount": 3,
+            "evaluatedSpecCount": 1,
+            "unevaluatedSpecCount": 2,
+            "truncatedByLimit": true,
+            "limitRepair": "ee tripwire check --revivals --limit 3 --workspace . --json",
+            "revivalCount": 1,
+            "summary": {
+                "specCount": 1,
+                "pass": 1,
+                "fail": 0,
+                "unknown": 0,
+                "degraded": 0
+            },
+            "polarity": "revive",
+            "mutationPosture": "read_only_no_result_trust_or_tombstone_mutation",
+            "redactionStatus": "metadata_and_domain_separated_target_digest_no_memory_content_provenance_or_raw_target",
+            "memoryContentIncluded": false,
+            "revivals": [{
+                "schema": "ee.memory_sentinel.revival.v1",
+                "memoryId": "mem_fixture",
+                "specHash": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "resultHash": "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "kind": "path_exists",
+                "polarity": "revive",
+                "targetDigest": "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "expectedPredicate": "exists",
+                "status": "pass",
+                "checkedAt": "2026-08-08T06:40:00Z",
+                "staleThresholdSeconds": null
+            }]
+        })
+    }
+
+    #[test]
+    fn revival_payload_json_golden_and_toon_are_equivalent() -> TestResult {
+        let envelope = super::revival_sentinel_envelope(bounded_revival_payload_fixture());
+        let pretty = serde_json::to_string_pretty(&envelope).map_err(|error| error.to_string())?;
+        let golden =
+            include_str!("../../tests/fixtures/golden/sentinel/revival_list_bounded.json.golden")
+                .trim_end();
+        ensure_equal(&pretty, &golden.to_owned(), "bounded revival JSON golden")?;
+
+        let compact = envelope.to_string();
+        let toon = output::render_toon_from_json(&compact);
+        ensure_toon_matches_json(&compact, &toon, "bounded revival TOON matches JSON")
+    }
+
+    #[test]
+    fn capped_revival_human_and_orient_output_expose_complete_evaluation_posture() -> TestResult {
+        let revivals = bounded_revival_payload_fixture();
+        let tripwire = super::render_revival_sentinel_human(&revivals);
+        for expected in [
+            "mode=explicit",
+            "matched=3",
+            "evaluated=1",
+            "unevaluated=2",
+            "truncated=true",
+            "limitRepair=ee tripwire check --revivals --limit 3 --workspace . --json",
+        ] {
+            ensure_contains(&tripwire, expected, "tripwire revival human posture")?;
+        }
+
+        let mut implicit = revivals;
+        implicit["observationMode"] = serde_json::json!("implicit");
+        implicit["evaluationPosture"] =
+            serde_json::json!("local_read_only_predicates_no_process_execution");
+        implicit["commandHelpProcessExecution"] = serde_json::json!(false);
+        let orient = super::render_orient_human(
+            &serde_json::json!({
+                "task": "resume",
+                "workspace": "/fixture",
+                "mode": "fast",
+                "revivals": implicit
+            }),
+            &[],
+        );
+        for expected in [
+            "mode=implicit",
+            "matched=3",
+            "evaluated=1",
+            "unevaluated=2",
+            "truncated=true",
+            "limitRepair=ee tripwire check --revivals --limit 3 --workspace . --json",
+        ] {
+            ensure_contains(&orient, expected, "orient revival human posture")?;
+        }
+        Ok(())
     }
 
     fn mesh_approval_bearer_canary() -> String {

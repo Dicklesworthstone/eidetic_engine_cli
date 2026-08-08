@@ -52,11 +52,14 @@ referents): a sentinel is a **user-declared predicate** over any memory.
   curation operation.
 - Revival evaluation has two truthful observation modes. Explicit
   `ee tripwire check --revivals` may run the allowlisted `ee ... --help`
-  introspection predicate. Implicit consumers such as `ee orient` use only
-  `observe_sentinel`, so `command_help_contains_flag` stays unknown and no
-  process executes; safe path, file, schema, and env-registry predicates remain
-  live. The payload identifies `observationMode`, `evaluationPosture`, and
-  whether command-help process execution is enabled.
+  introspection predicate under strict wall-time and redacted captured-output
+  caps. The implicit revival-sentinel evaluator used by consumers such as
+  `ee orient` calls only `observe_sentinel`, so `command_help_contains_flag`
+  stays unknown and that evaluator executes no process; this does not claim
+  that unrelated orient components are process-free. Safe path, file, schema,
+  and env-registry predicates remain live. The payload identifies
+  `observationMode`, `evaluationPosture`, and whether command-help process
+  execution is enabled.
 - `ee tripwire check --revivals` evaluates at most 25 deterministically ordered
   specs by default and accepts validated `--limit 1..=100`. It reports matched,
   evaluated, and unevaluated counts plus an explicit higher-limit repair so the

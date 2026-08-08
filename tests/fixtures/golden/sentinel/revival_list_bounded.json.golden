@@ -1,0 +1,47 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "schema": "ee.memory_sentinel.revivals.v1",
+    "command": "tripwire check --revivals",
+    "workspaceId": "ws_fixture",
+    "checkedAt": "2026-08-08T06:40:00Z",
+    "observationMode": "explicit",
+    "evaluationPosture": "local_read_only_predicates_plus_allowlisted_command_help_process",
+    "commandHelpProcessExecution": true,
+    "limit": 1,
+    "matchedSpecCount": 3,
+    "evaluatedSpecCount": 1,
+    "unevaluatedSpecCount": 2,
+    "truncatedByLimit": true,
+    "limitRepair": "ee tripwire check --revivals --limit 3 --workspace . --json",
+    "revivalCount": 1,
+    "summary": {
+      "specCount": 1,
+      "pass": 1,
+      "fail": 0,
+      "unknown": 0,
+      "degraded": 0
+    },
+    "polarity": "revive",
+    "mutationPosture": "read_only_no_result_trust_or_tombstone_mutation",
+    "redactionStatus": "metadata_and_domain_separated_target_digest_no_memory_content_provenance_or_raw_target",
+    "memoryContentIncluded": false,
+    "revivals": [
+      {
+        "schema": "ee.memory_sentinel.revival.v1",
+        "memoryId": "mem_fixture",
+        "specHash": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "resultHash": "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "kind": "path_exists",
+        "polarity": "revive",
+        "targetDigest": "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "expectedPredicate": "exists",
+        "status": "pass",
+        "checkedAt": "2026-08-08T06:40:00Z",
+        "staleThresholdSeconds": null
+      }
+    ]
+  },
+  "degraded": []
+}
