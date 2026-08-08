@@ -554,18 +554,22 @@ impl SecureLocalDir {
     /// Exclusively create a record (`O_EXCL | O_NOFOLLOW`, mode `0600`), then
     /// fsync the file and the directory.
     pub fn write_exclusive(&self, name: &str, bytes: &[u8]) -> Result<(), KeyStoreError> {
+        use rustix::fs::{Mode, OFlags};
         validate_file_name(name)?;
         self.verify_dir()?;
         let path = self.dir.join(name);
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-            options.custom_flags(libc::O_NOFOLLOW);
-        }
-        let mut file = options.open(&path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
+        let descriptor = rustix::fs::openat(
+            &self.dir_handle,
+            name,
+            OFlags::WRONLY
+                | OFlags::CREATE
+                | OFlags::EXCL
+                | OFlags::NOFOLLOW
+                | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(|error| {
+            if error == rustix::io::Errno::EXIST {
                 KeyStoreError::AlreadyExists {
                     path: path.display().to_string(),
                 }
@@ -576,6 +580,7 @@ impl SecureLocalDir {
                 }
             }
         })?;
+        let mut file = std::fs::File::from(descriptor);
         file.write_all(bytes).map_err(|error| KeyStoreError::Io {
             path: path.display().to_string(),
             message: error.to_string(),
@@ -588,25 +593,44 @@ impl SecureLocalDir {
     }
 
     /// Atomically replace a record via an exclusively created, hardened temp
-    /// sibling + rename, then fsync the file and the directory. A preexisting
-    /// temp sibling fails closed; it is never truncated or reused.
+    /// sibling + rename, then fsync the file and the directory. Every attempt
+    /// uses a unique temp name, so a crash-retained temp cannot wedge later
+    /// rotations and is never truncated or reused.
     pub fn write_replace(&self, name: &str, bytes: &[u8]) -> Result<(), KeyStoreError> {
+        use rustix::fs::{AtFlags, Mode, OFlags};
         validate_file_name(name)?;
         self.verify_dir()?;
-        let tmp_name = format!("{name}.tmp");
+        let sequence = SECURE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let tmp_name = format!(".{name}.tmp.{}.{}", std::process::id(), sequence);
         let tmp = self.dir.join(&tmp_name);
         let path = self.dir.join(name);
-        reject_symlink(&tmp)?;
-        reject_symlink(&path)?;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-            options.custom_flags(libc::O_NOFOLLOW);
+        match rustix::fs::statat(
+            &self.dir_handle,
+            name,
+            AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Ok(stat) => verify_record_stat(&stat, &path)?,
+            Err(error) if error == rustix::io::Errno::NOENT => {}
+            Err(error) => {
+                return Err(key_store_errno(
+                    &path,
+                    "inspect replacement destination",
+                    error,
+                ));
+            }
         }
-        let mut file = options.open(&tmp).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
+        let descriptor = rustix::fs::openat(
+            &self.dir_handle,
+            tmp_name.as_str(),
+            OFlags::WRONLY
+                | OFlags::CREATE
+                | OFlags::EXCL
+                | OFlags::NOFOLLOW
+                | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(|error| {
+            if error == rustix::io::Errno::EXIST {
                 KeyStoreError::AlreadyExists {
                     path: tmp.display().to_string(),
                 }
@@ -617,6 +641,7 @@ impl SecureLocalDir {
                 }
             }
         })?;
+        let mut file = std::fs::File::from(descriptor);
         file.write_all(bytes).map_err(|error| KeyStoreError::Io {
             path: tmp.display().to_string(),
             message: error.to_string(),
@@ -625,7 +650,9 @@ impl SecureLocalDir {
             path: tmp.display().to_string(),
             message: error.to_string(),
         })?;
-        std::fs::rename(&tmp, &path).map_err(|error| KeyStoreError::Io {
+        drop(file);
+        rustix::fs::renameat(&self.dir_handle, tmp_name.as_str(), &self.dir_handle, name)
+            .map_err(|error| KeyStoreError::Io {
             path: path.display().to_string(),
             message: format!("atomic replace: {error}"),
         })?;
@@ -634,37 +661,56 @@ impl SecureLocalDir {
 
     /// Rename a record in place (used for retirement; never deletes).
     pub fn rename(&self, from: &str, to: &str) -> Result<(), KeyStoreError> {
+        use rustix::fs::RenameFlags;
         validate_file_name(from)?;
         validate_file_name(to)?;
         self.verify_dir()?;
         let from_path = self.dir.join(from);
         let to_path = self.dir.join(to);
-        reject_symlink(&from_path)?;
-        if std::fs::symlink_metadata(&to_path).is_ok() {
-            return Err(KeyStoreError::AlreadyExists {
-                path: to_path.display().to_string(),
-            });
-        }
-        std::fs::rename(&from_path, &to_path).map_err(|error| KeyStoreError::Io {
-            path: from_path.display().to_string(),
-            message: format!("rename: {error}"),
+        rustix::fs::renameat_with(
+            &self.dir_handle,
+            from,
+            &self.dir_handle,
+            to,
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(|error| {
+            if error == rustix::io::Errno::EXIST {
+                KeyStoreError::AlreadyExists {
+                    path: to_path.display().to_string(),
+                }
+            } else {
+                KeyStoreError::Io {
+                    path: from_path.display().to_string(),
+                    message: format!("descriptor-relative no-replace rename: {error}"),
+                }
+            }
         })?;
         self.sync_dir()
     }
 
     /// Whether a record exists (without following symlinks).
     pub fn exists(&self, name: &str) -> Result<bool, KeyStoreError> {
+        use rustix::fs::AtFlags;
         validate_file_name(name)?;
         self.verify_dir()?;
-        Ok(std::fs::symlink_metadata(self.dir.join(name)).is_ok())
+        let path = self.dir.join(name);
+        match rustix::fs::statat(
+            &self.dir_handle,
+            name,
+            AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Ok(stat) => {
+                verify_record_stat(&stat, &path)?;
+                Ok(true)
+            }
+            Err(error) if error == rustix::io::Errno::NOENT => Ok(false),
+            Err(error) => Err(key_store_errno(&path, "inspect record existence", error)),
+        }
     }
 
     fn sync_dir(&self) -> Result<(), KeyStoreError> {
-        let dir = std::fs::File::open(&self.dir).map_err(|error| KeyStoreError::Io {
-            path: self.dir.display().to_string(),
-            message: format!("open directory for fsync: {error}"),
-        })?;
-        dir.sync_all().map_err(|error| KeyStoreError::Io {
+        self.dir_handle.sync_all().map_err(|error| KeyStoreError::Io {
             path: self.dir.display().to_string(),
             message: format!("directory fsync: {error}"),
         })
