@@ -807,8 +807,8 @@ mod tests {
         BackupId, ClaimId, DemoId, ENCODED_LEN, EXECUTABLE_ID_SCHEMA_V1, EvidenceId,
         ExecutableIdKind, Id, IdKind, MemoryId, ModelId, PackId, ParseExecutableIdKindError,
         ParseIdError, PolicyId, RuleId, SessionId, TraceId, WorkspaceId, encode_crockford,
-        executable_id_schema_catalog_json, executable_id_schemas, public_memory_id, public_pack_id,
-        public_workspace_id,
+        executable_id_schema_catalog_json, executable_id_schemas, public_attempt_family_alias,
+        public_memory_id, public_pack_id, public_workspace_id,
     };
 
     const EXECUTABLE_ID_SCHEMA_GOLDEN: &str =

@@ -6664,7 +6664,7 @@ fn compute_pack_hash_components(
 }
 
 fn hash_attempt_family_multiplicity(
-    hasher: &mut Hasher,
+    hasher: &mut blake3::Hasher,
     snapshot: Option<&PackAttemptFamilyMultiplicitySnapshot>,
 ) {
     hash_labeled_bool(
@@ -17193,7 +17193,8 @@ pub fn unrelated_context() -> u64 {{
         let mut rejected = candidate(8002)?;
         rejected.attempt_family_multiplicity = Some(snapshot("rejected", 1.0));
         let mut candidates = vec![selected, rejected];
-        super::apply_attempt_family_multiplicity_discount(&mut candidates)?;
+        super::apply_attempt_family_multiplicity_discount(&mut candidates)
+            .map_err(|error| error.to_string())?;
 
         assert!((candidates[0].relevance.into_inner() - 0.3).abs() < 1.0e-7);
         assert!((candidates[0].utility.into_inner() - 0.2).abs() < 1.0e-7);

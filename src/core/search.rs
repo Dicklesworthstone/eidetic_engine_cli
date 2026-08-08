@@ -4646,6 +4646,7 @@ fn search_hit_pack_item(index: usize, hit: &SearchHit) -> Option<PackDraftItem> 
         tombstoned_at: metadata_string(metadata, "tombstoned_at").map(str::to_string),
         lifecycle,
         freshness_facets: Vec::new(),
+        attempt_family_multiplicity: None,
         selected_in: PackSelectionPhase::FacilityLocation,
     })
 }
