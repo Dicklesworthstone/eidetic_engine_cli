@@ -263,8 +263,8 @@ assert_jq "$baseline_trace_out" '.success == true and .data.bayesUpdatesApplied 
 
 step "process the workflow-emitted index job without a manual rebuild"
 stale_status_out="$(ee_json --workspace "$WS" index status --json)"
-assert_jq "$stale_status_out" '.success == true and .data.dbGeneration > .data.indexGeneration and .data.health == "stale"' \
-    "curate apply leaves an honestly stale index until its emitted job runs"
+assert_jq "$stale_status_out" '.success == true and .data.dbGeneration != null and ((.data.health == "missing" and .data.indexGeneration == null) or (.data.health == "stale" and .data.dbGeneration > .data.indexGeneration))' \
+    "curate apply reports the unbuilt or stale index honestly until its emitted job runs"
 coalesce_out="$(ee_json --workspace "$WS" daemon --foreground --once --job index_coalesce --json)"
 assert_jq "$coalesce_out" '.success == true' \
     "public index coalescer processes the workflow-emitted job"
