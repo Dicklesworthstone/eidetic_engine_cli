@@ -1653,10 +1653,13 @@ fn inline_script_mentions_file_deletion_api(body: &str) -> bool {
         "os.unlink(",
         "shutil.rmtree(",
         "fs.unlink(",
+        ".unlinksync(",
         "fs.unlinksync(",
         "fs.rm(",
+        ".rmsync(",
         "fs.rmsync(",
         "fs.rmdir(",
+        ".rmdirsync(",
         "fs.rmdirsync(",
         "deno.remove(",
         "deno.removesync(",
@@ -2588,7 +2591,7 @@ fn recovery_guidance_for_match(matched: &GuardMatch) -> &'static str {
         "builtin:git_push_force" => {
             "Proceed only with explicit user authorization for the exact history rewrite."
         }
-        _ if matched.action.stops_execution() => {
+        _ if matched.action == GuardAction::Halt => {
             "Stop and obtain explicit human approval for the exact command before proceeding."
         }
         _ => "Review the warning and confirm the command is intentional before proceeding.",
