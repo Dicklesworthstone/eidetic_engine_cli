@@ -2895,6 +2895,23 @@ mod tests {
         }
     }
 
+    fn normalize_package_version(
+        value: &mut serde_json::Value,
+        pointer: &str,
+        ctx: &str,
+    ) -> TestResult {
+        let version = value
+            .pointer_mut(pointer)
+            .ok_or_else(|| format!("{ctx}: missing package version at {pointer}"))?;
+        ensure(
+            version.as_str().is_some(),
+            true,
+            &format!("{ctx}: package version is a string"),
+        )?;
+        *version = serde_json::Value::String("[CARGO_PKG_VERSION]".to_owned());
+        Ok(())
+    }
+
     fn classification_envelope(result: &ClassifyResult) -> serde_json::Value {
         serde_json::json!({
             "schema": SITUATION_CLASSIFY_SCHEMA_V1,
@@ -3179,18 +3196,36 @@ mod tests {
 
     #[test]
     fn low_confidence_broadening_json_matches_golden() -> TestResult {
-        let actual = classification_envelope(&classify_task("docs fix"));
-        let expected: serde_json::Value =
+        let mut actual = classification_envelope(&classify_task("docs fix"));
+        ensure(
+            actual
+                .pointer("/data/version")
+                .and_then(|value| value.as_str()),
+            Some(env!("CARGO_PKG_VERSION")),
+            "low confidence broadening runtime package version",
+        )?;
+        let mut expected: serde_json::Value =
             serde_json::from_str(LOW_CONFIDENCE_BROADENING_GOLDEN).map_err(|e| e.to_string())?;
+        normalize_package_version(&mut actual, "/data/version", "low confidence actual")?;
+        normalize_package_version(&mut expected, "/data/version", "low confidence golden")?;
 
         ensure(actual, expected, "low confidence broadening golden")
     }
 
     #[test]
     fn high_risk_alternative_json_matches_golden() -> TestResult {
-        let actual = classification_envelope(&classify_task("fix failing release workflow"));
-        let expected: serde_json::Value =
+        let mut actual = classification_envelope(&classify_task("fix failing release workflow"));
+        ensure(
+            actual
+                .pointer("/data/version")
+                .and_then(|value| value.as_str()),
+            Some(env!("CARGO_PKG_VERSION")),
+            "high risk alternative runtime package version",
+        )?;
+        let mut expected: serde_json::Value =
             serde_json::from_str(HIGH_RISK_ALTERNATIVE_GOLDEN).map_err(|e| e.to_string())?;
+        normalize_package_version(&mut actual, "/data/version", "high risk actual")?;
+        normalize_package_version(&mut expected, "/data/version", "high risk golden")?;
 
         ensure(actual, expected, "high risk alternative golden")
     }
@@ -3414,9 +3449,16 @@ mod tests {
 
     #[test]
     fn situation_fixture_metrics_json_matches_golden() -> TestResult {
-        let actual = evaluate_built_in_situation_fixtures().data_json();
-        let expected: serde_json::Value =
+        let mut actual = evaluate_built_in_situation_fixtures().data_json();
+        ensure(
+            actual.pointer("/version").and_then(|value| value.as_str()),
+            Some(env!("CARGO_PKG_VERSION")),
+            "situation fixture metrics runtime package version",
+        )?;
+        let mut expected: serde_json::Value =
             serde_json::from_str(SITUATION_FIXTURE_METRICS_GOLDEN).map_err(|e| e.to_string())?;
+        normalize_package_version(&mut actual, "/version", "fixture metrics actual")?;
+        normalize_package_version(&mut expected, "/version", "fixture metrics golden")?;
 
         ensure(actual, expected, "situation fixture metrics golden")
     }
