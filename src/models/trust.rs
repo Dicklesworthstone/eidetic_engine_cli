@@ -303,6 +303,142 @@ pub const fn evaluate_local_signing_key_policy(
     }
 }
 
+/// Multiplicity evidence for a memory that was one recorded attempt out of a
+/// declared family of sibling attempts (bd-multiplicity-aware-trust-p0u7g).
+///
+/// The canonical discount and completeness math lives here so the trust
+/// report, pack ranking, and the promotion gate cannot drift apart. A family
+/// is *complete* when at least the declared number of attempts is recorded;
+/// survivor-only evidence (one recorded member drawn from N > 1 declared
+/// attempts) receives the strongest discount.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptFamilyMultiplicity {
+    /// Stable pre-registered family identity.
+    pub family_id: String,
+    /// Largest declared sibling count among recorded members, when any
+    /// member declared one.
+    pub declared_size: Option<u32>,
+    /// Distinct in-range attempt slots covered by live members. Completion
+    /// is measured in slots, never raw rows: re-recording the winner N times
+    /// occupies one slot and cannot launder an incomplete family.
+    pub recorded_slots: u32,
+    /// Live slotted members recorded as `selected` (winners).
+    pub selected_count: u32,
+    /// Live slotted members recorded as `rejected` (negative siblings).
+    pub rejected_count: u32,
+    /// Live members without a slot; they are visible evidence but never
+    /// count toward completion.
+    pub unslotted_count: u32,
+}
+
+impl AttemptFamilyMultiplicity {
+    /// Aggregate member rows (slot, disposition) into the canonical
+    /// multiplicity posture. Slots are deduplicated, and when a declared
+    /// size exists only slots in `1..=declared` count toward completion.
+    #[must_use]
+    pub fn from_members<'a>(
+        family_id: String,
+        declared_size: Option<u32>,
+        members: impl IntoIterator<Item = (Option<u32>, Option<&'a str>)>,
+    ) -> Self {
+        let mut seen_slots = std::collections::BTreeSet::new();
+        let mut selected_count = 0_u32;
+        let mut rejected_count = 0_u32;
+        let mut unslotted_count = 0_u32;
+        for (slot, disposition) in members {
+            match slot {
+                Some(slot) if declared_size.is_none_or(|declared| slot <= declared) => {
+                    if seen_slots.insert(slot) {
+                        match disposition {
+                            Some("selected") => selected_count += 1,
+                            Some("rejected") => rejected_count += 1,
+                            _ => {}
+                        }
+                    }
+                }
+                Some(_) | None => unslotted_count += 1,
+            }
+        }
+        let recorded_slots = u32::try_from(seen_slots.len()).unwrap_or(u32::MAX);
+        Self {
+            family_id,
+            declared_size,
+            recorded_slots,
+            selected_count,
+            rejected_count,
+            unslotted_count,
+        }
+    }
+
+    /// Declared sibling slots that no live member occupies.
+    #[must_use]
+    pub fn unrecorded_count(&self) -> u32 {
+        self.declared_size
+            .map_or(0, |declared| declared.saturating_sub(self.recorded_slots))
+    }
+
+    /// True when every declared sibling slot is occupied by a distinct live
+    /// member (or no sibling count was ever declared, which leaves nothing
+    /// outstanding to require).
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.unrecorded_count() == 0
+    }
+
+    /// True for the selection-bias shape the discount exists for: a declared
+    /// family of more than one whose recorded slot coverage is a lone
+    /// surviving winner.
+    #[must_use]
+    pub fn is_survivor_only(&self) -> bool {
+        self.declared_size.is_some_and(|declared| declared > 1)
+            && self.recorded_slots <= 1
+            && self.selected_count >= 1
+    }
+
+    /// Deterministic multiplicity discount in (0.0, 1.0]: the fraction of
+    /// declared attempt slots that are actually recorded. A complete family
+    /// (or one that never declared a size) is undiscounted at 1.0; "1 of 18"
+    /// yields 1/18. Unslotted members never raise the factor. The factor is
+    /// a pure ratio so identical inputs always produce byte-identical
+    /// scores.
+    #[must_use]
+    pub fn discount_factor(&self) -> f32 {
+        let Some(declared) = self.declared_size else {
+            return 1.0;
+        };
+        if declared <= 1 || self.recorded_slots >= declared {
+            return 1.0;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let factor = (f64::from(self.recorded_slots) / f64::from(declared)) as f32;
+        factor.clamp(f32::MIN_POSITIVE, 1.0)
+    }
+
+    /// Human-facing summary of the recorded/declared posture, e.g.
+    /// `"1 of 18 attempt slots recorded; 17 unrecorded"`.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let mut summary = match self.declared_size {
+            Some(declared) => format!(
+                "{} of {declared} attempt slots recorded; {} unrecorded",
+                self.recorded_slots,
+                self.unrecorded_count()
+            ),
+            None => format!(
+                "{} attempt slots recorded; no declared sibling count",
+                self.recorded_slots
+            ),
+        };
+        if self.unslotted_count > 0 {
+            summary.push_str(&format!(
+                " ({} unslotted member(s) excluded from completion)",
+                self.unslotted_count
+            ));
+        }
+        summary
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -311,8 +447,80 @@ mod tests {
     use crate::models::rule::RuleMaturity;
 
     use super::{
-        LocalSigningKeyPosture, ParseTrustClassError, TrustClass, evaluate_local_signing_key_policy,
+        AttemptFamilyMultiplicity, LocalSigningKeyPosture, ParseTrustClassError, TrustClass,
+        evaluate_local_signing_key_policy,
     };
+
+    #[test]
+    fn multiplicity_completion_counts_distinct_slots_not_raw_rows() {
+        let survivor_only = AttemptFamilyMultiplicity::from_members(
+            "fam-a".to_owned(),
+            Some(18),
+            [(Some(1), Some("selected"))],
+        );
+        assert!(survivor_only.is_survivor_only());
+        assert!(!survivor_only.is_complete());
+        assert_eq!(survivor_only.recorded_slots, 1);
+        assert_eq!(survivor_only.unrecorded_count(), 17);
+        assert!((survivor_only.discount_factor() - 1.0 / 18.0).abs() < 1.0e-7);
+        assert_eq!(
+            survivor_only.summary(),
+            "1 of 18 attempt slots recorded; 17 unrecorded"
+        );
+
+        // Anti-laundering: recording the same winning slot three times covers
+        // one slot, and members without slots never advance completion.
+        let laundered = AttemptFamilyMultiplicity::from_members(
+            "fam-b".to_owned(),
+            Some(3),
+            [
+                (Some(1), Some("selected")),
+                (Some(1), Some("selected")),
+                (Some(1), Some("selected")),
+                (None, Some("rejected")),
+            ],
+        );
+        assert!(!laundered.is_complete());
+        assert_eq!(laundered.recorded_slots, 1);
+        assert_eq!(laundered.unslotted_count, 1);
+        assert_eq!(laundered.unrecorded_count(), 2);
+        assert!((laundered.discount_factor() - 1.0 / 3.0).abs() < 1.0e-7);
+
+        let complete = AttemptFamilyMultiplicity::from_members(
+            "fam-c".to_owned(),
+            Some(3),
+            [
+                (Some(1), Some("selected")),
+                (Some(2), Some("rejected")),
+                (Some(3), Some("rejected")),
+            ],
+        );
+        assert!(complete.is_complete());
+        assert!(!complete.is_survivor_only());
+        assert_eq!(complete.selected_count, 1);
+        assert_eq!(complete.rejected_count, 2);
+        assert_eq!(complete.unrecorded_count(), 0);
+        assert!((complete.discount_factor() - 1.0).abs() < f32::EPSILON);
+
+        // Slots above the declared size are visible but never complete a
+        // family they do not belong to.
+        let out_of_range = AttemptFamilyMultiplicity::from_members(
+            "fam-d".to_owned(),
+            Some(2),
+            [(Some(1), Some("selected")), (Some(9), Some("rejected"))],
+        );
+        assert!(!out_of_range.is_complete());
+        assert_eq!(out_of_range.recorded_slots, 1);
+        assert_eq!(out_of_range.unslotted_count, 1);
+
+        let undeclared = AttemptFamilyMultiplicity::from_members(
+            "fam-e".to_owned(),
+            None,
+            [(Some(1), Some("selected")), (Some(2), Some("rejected"))],
+        );
+        assert!(undeclared.is_complete());
+        assert!((undeclared.discount_factor() - 1.0).abs() < f32::EPSILON);
+    }
 
     #[test]
     fn trust_class_round_trip_for_every_variant() {

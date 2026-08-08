@@ -353,7 +353,7 @@ pub use task_lens::{
     builtin_task_lens, builtin_task_lenses,
 };
 pub use timing::{DiagnosticTiming, TimingCapture, TimingPhase};
-pub use trust::{ParseTrustClassError, TrustClass};
+pub use trust::{AttemptFamilyMultiplicity, ParseTrustClassError, TrustClass};
 pub use verification::{
     CompileBlockerCacheEntry, CompileBlockerCacheInput, CompileBlockerCacheStatus,
     CompileBlockerLookup, CompileBlockerLookupRequest, GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1,
