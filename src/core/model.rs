@@ -4178,7 +4178,6 @@ mod tests {
         )
     }
 
-    #[test]
     /// The status source string is a bijection over the shared embedder
     /// stack's (semantic, pending) state. That stack is PROCESS-GLOBAL and
     /// its pending -> failed-fallback transition can fire at any moment of a
