@@ -4,39 +4,184 @@
 # regression_factor = 1.5 emits an advisory when elapsed time exceeds p50 * 1.5.
 # scripts/verify.sh fails the run when elapsed time exceeds p50 * 3.
 #
-# Non-benchmark p50 values sum to 880s, matching the roughly 15-minute target for the
-# full readiness gate. Benchmarks are optional behind --include-bench.
-total_expected_seconds = 880
+# Non-benchmark p50 values sum to 600s, matching the 10-minute readiness target.
+# Benchmarks are optional behind --include-bench and excluded from that total.
+total_expected_seconds = 600
 total_regression_factor = 1.5
 
 [[stage]]
+name = "Plan Doc Smoke (bd-3usjw.23)"
+expected_seconds_p50 = 2
+regression_factor = 1.5
+
+[[stage]]
+name = "Forbidden Dependency Contract"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
 name = "Forbidden Dependencies"
-expected_seconds_p50 = 20
-regression_factor = 1.5
-
-[[stage]]
-name = "Closure Linter"
-expected_seconds_p50 = 60
-regression_factor = 1.5
-
-[[stage]]
-name = "Verification Drift Guard"
 expected_seconds_p50 = 10
 regression_factor = 1.5
 
 [[stage]]
+name = "Closure Linter"
+expected_seconds_p50 = 12
+regression_factor = 1.5
+
+[[stage]]
+name = "Verification Drift Guard"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
 name = "Snapshot Proposal Guard"
-expected_seconds_p50 = 5
+expected_seconds_p50 = 2
+regression_factor = 1.5
+
+[[stage]]
+name = "Untracked Work Audit Contract"
+expected_seconds_p50 = 2
 regression_factor = 1.5
 
 [[stage]]
 name = "Untracked Work Audit (advisory)"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "Bridge Staleness Contract"
+expected_seconds_p50 = 2
+regression_factor = 1.5
+
+[[stage]]
+name = "Bridge Staleness Advisory"
+expected_seconds_p50 = 2
+regression_factor = 1.5
+
+[[stage]]
+name = "Plan Drift Contract"
+expected_seconds_p50 = 2
+regression_factor = 1.5
+
+[[stage]]
+name = "Plan Drift Advisory"
+expected_seconds_p50 = 2
+regression_factor = 1.5
+
+[[stage]]
+name = "Tracing Field Contract"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "Contract Drift Radar Advisory"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "Contract Drift Radar Self-Test"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "E2E Event Contract Radar Contract"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "E2E Event Contract Radar Advisory"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "Work Packet No-Mutation Contract"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "Agent Mail Snapshot Contract"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "Panic Helper Radar Contract"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "Swarm SLO Replay Contract"
 expected_seconds_p50 = 5
 regression_factor = 1.5
 
 [[stage]]
+name = "CI Proof-Lane Snapshot Contract"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "CI Proof-Lane Hygiene Contract"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "CI Proof-Lane Hygiene Advisory"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "Release Provenance Contract"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "RCH Doc Examples Contract"
+expected_seconds_p50 = 2
+regression_factor = 1.5
+
+[[stage]]
+name = "RCH Doc Examples Lint"
+expected_seconds_p50 = 2
+regression_factor = 1.5
+
+[[stage]]
+name = "Local Cargo Tripwire Contract"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "RCH Portability Diagnostic Contract"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "Package Artifact Leak Contract"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "Package Artifact Leak Check (bd-2ifvx)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Fuzz Target Audit Contract"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "Fuzz Target Audit (bd-bife.10)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Fuzz Smoke: search query parser (bd-2j2h0)"
+expected_seconds_p50 = 30
+regression_factor = 1.5
+
+[[stage]]
 name = "Vision Coverage"
-expected_seconds_p50 = 20
+expected_seconds_p50 = 10
 regression_factor = 1.5
 
 [[stage]]
@@ -46,57 +191,242 @@ regression_factor = 1.5
 
 [[stage]]
 name = "Unit, Contract, and Golden Tests"
-expected_seconds_p50 = 180
+expected_seconds_p50 = 120
 regression_factor = 1.5
 
 [[stage]]
 name = "Basic E2E Scripts"
-expected_seconds_p50 = 90
+expected_seconds_p50 = 20
+regression_factor = 1.5
+
+[[stage]]
+name = "Output Budget E2E (bd-kua65)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Output Governor E2E (bd-7lvbg.4)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Pack Delta E2E (bd-7lvbg.6)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Install Freshness Claim-Gate E2E (bd-3utv2.7)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Recall Hooks E2E (bd-u875s.5)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Replay Lab Smoke E2E (bd-ppbue.8)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Dueling Wizards Why-Not E2E"
+expected_seconds_p50 = 4
+regression_factor = 1.5
+
+[[stage]]
+name = "Primer/AGENTS.md Bridge E2E (bd-39tzu.5)"
+expected_seconds_p50 = 4
+regression_factor = 1.5
+
+[[stage]]
+name = "Dueling Wizards Cross-Cutting Static E2E"
+expected_seconds_p50 = 3
+regression_factor = 1.5
+
+[[stage]]
+name = "Dueling Wizards Evidence Harvester E2E"
+expected_seconds_p50 = 4
+regression_factor = 1.5
+
+[[stage]]
+name = "Dueling Wizards LOD Packing E2E"
+expected_seconds_p50 = 4
+regression_factor = 1.5
+
+[[stage]]
+name = "Dueling Wizards House Rules E2E"
+expected_seconds_p50 = 4
+regression_factor = 1.5
+
+[[stage]]
+name = "Dueling Wizards Typed Kinds E2E"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Ask E2E (bd-169v0.5)"
+expected_seconds_p50 = 5
 regression_factor = 1.5
 
 [[stage]]
 name = "Journal Capture E2E (bd-1pi9m.6)"
-expected_seconds_p50 = 40
+expected_seconds_p50 = 7
 regression_factor = 1.5
 
 [[stage]]
-name = "Consolidation E2E (bd-1oep7)"
-expected_seconds_p50 = 40
-regression_factor = 1.5
-
-[[stage]]
-name = "Native Reranker E2E (bd-1nl13.14)"
-expected_seconds_p50 = 45
-regression_factor = 1.5
-
-[[stage]]
-name = "Agent Ergonomics E2E (F1-F5)"
-expected_seconds_p50 = 100
-regression_factor = 1.5
-
-[[stage]]
-name = "Overhaul Integration E2E (J4)"
-expected_seconds_p50 = 45
-regression_factor = 1.5
-
-[[stage]]
-name = "Graph Determinism E2E (F4.a)"
-expected_seconds_p50 = 45
-regression_factor = 1.5
-
-[[stage]]
-name = "Fake OIDC IdP Matrix Self-Check E2E (T7.7)"
+name = "Capture Track E2E (bd-2vq2z.20)"
 expected_seconds_p50 = 10
 regression_factor = 1.5
 
 [[stage]]
+name = "Ergonomics E2E (bd-1et0v.22)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Doctor Concise E2E (bd-1et0v.15)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Doctor Health E2E (bd-1et0v.21)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Health Scorecard E2E (bd-2vq2z.14)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Consolidation E2E (bd-1oep7)"
+expected_seconds_p50 = 10
+regression_factor = 1.5
+
+[[stage]]
+name = "Embedding Native E2E (bd-2vq2z.19)"
+expected_seconds_p50 = 7
+regression_factor = 1.5
+
+[[stage]]
+name = "Bundled Embeddings E2E (bd-1et0v.19)"
+expected_seconds_p50 = 7
+regression_factor = 1.5
+
+[[stage]]
+name = "Native Reranker E2E (bd-1nl13.14)"
+expected_seconds_p50 = 10
+regression_factor = 1.5
+
+[[stage]]
+name = "Dueling Wizards Docs Bootstrap E2E"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Dueling Wizards Attestation E2E"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Dueling Wizards Feedback-Gated E2E"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Dueling Wizards Trauma-Guard Learn E2E"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Agent Ergonomics E2E (F1-F5)"
+expected_seconds_p50 = 15
+regression_factor = 1.5
+
+[[stage]]
+name = "Overhaul Integration E2E (J4)"
+expected_seconds_p50 = 15
+regression_factor = 1.5
+
+[[stage]]
+name = "Swarm Next-Action Recommendation Cards E2E (bd-3vwx0.6)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Graph Determinism E2E (F4.a)"
+expected_seconds_p50 = 7
+regression_factor = 1.5
+
+[[stage]]
+name = "Fake Tailscale Harness E2E (SRR6.46.10)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Fake OIDC IdP Harness E2E (T7.7)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Fake OIDC IdP Defects E2E (T7.7)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Fake OIDC IdP Matrix Self-Check E2E (T7.7)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Tailscale Local Probe E2E (SRR6.46.1)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Tailscale Peer Autodiscovery E2E (SRR6.46.2)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Mesh Hello Handshake E2E (SRR6.46.6)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Mesh Hello Responder Lifecycle E2E (SRR6.46.12)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
 name = "Advanced E2E Scripts"
-expected_seconds_p50 = 90
+expected_seconds_p50 = 20
 regression_factor = 1.5
 
 [[stage]]
 name = "Boundary Migration Scripts"
-expected_seconds_p50 = 70
+expected_seconds_p50 = 15
+regression_factor = 1.5
+
+[[stage]]
+name = "ee doctor Safety Harness (bd-21joy)"
+expected_seconds_p50 = 8
+regression_factor = 1.5
+
+[[stage]]
+name = "Eval Regression Contract (bd-bife.18)"
+expected_seconds_p50 = 5
+regression_factor = 1.5
+
+[[stage]]
+name = "Ask Eval Quality Gate (bd-169v0.4)"
+expected_seconds_p50 = 7
+regression_factor = 1.5
+
+[[stage]]
+name = "Eval Regression (bd-bife.18)"
+expected_seconds_p50 = 10
 regression_factor = 1.5
 
 [[stage]]
