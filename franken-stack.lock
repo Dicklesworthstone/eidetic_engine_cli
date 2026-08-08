@@ -1,12 +1,12 @@
 # ee.franken-stack.lock.v1
 #
-# Full commit IDs are mandatory. This set pins the synchronized 0.3.10 runtime
-# with its ambient-free request-Cx boundary, 0.3.2 search/SQLModel, and 0.1.19
-# FrankenSQLite dependency closure used by ee.
-asupersync	24eb7ec6c62e9ba037d70fed4a69c4e733785926
+# Full commit IDs are mandatory. This set pins the sibling path revisions
+# represented by Cargo.lock, including its unused-patch records, while ee's
+# direct registry dependencies remain on their explicit versions.
+asupersync	8563d55a7947ff6bd7eb1cf21752397f358b6cdf
 franken_agent_detection	f839b370a91e0d403fc4e2e16c1dc9d19b5a5ceb
 franken_networkx	bec1d4b9edfd832bc31c3a56713c918a0bf682b9
 frankensearch	b559c92e03242336614b995c562a13dfd1269eed
-frankensqlite	6a86c07176830dcab0fd845a71a3dd070694ea28
+frankensqlite	98232375fa5f5cbf2c5c2190e9b08a8e76bbaaf6
 sqlmodel_rust	84e4f0a9d2f1098afeeae19142442d8208c0f265
 toon_rust	e46b71957fad5397d4bae9eef9d428c8ac8b52aa
