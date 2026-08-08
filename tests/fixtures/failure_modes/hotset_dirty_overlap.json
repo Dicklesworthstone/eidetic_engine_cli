@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "hotset_dirty_overlap",
+  "introduced_by": {
+    "bead": "bd-ty3pl.2",
+    "epic_letter": "T"
+  },
+  "surfaces": [
+    "cache"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "One or more git-dirty paths overlap Agent Mail reservations, reducing hotset ranking confidence for contested paths.",
+    "setup_commands": [
+      "dirty a file inside a path another agent has reserved, then collect"
+    ],
+    "invocation": "ee cache hotset-manifest --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "hotset_dirty_overlap",
+    "severity": "medium",
+    "message_contains": [
+      "overlap Agent Mail reservations"
+    ]
+  }
+}

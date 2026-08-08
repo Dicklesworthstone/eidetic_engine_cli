@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "hotset_bv_timeout",
+  "introduced_by": {
+    "bead": "bd-ty3pl.2",
+    "epic_letter": "T"
+  },
+  "surfaces": [
+    "cache"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The bounded bv --robot-next probe exceeds the per-probe watchdog deadline.",
+    "setup_commands": [
+      "ee cache hotset-manifest --probe-timeout-ms 50 --bv-program <slow-bv> --json"
+    ],
+    "invocation": "ee cache hotset-manifest --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "hotset_bv_timeout",
+    "severity": "medium",
+    "message_contains": [
+      "bv --robot-next exceeded the"
+    ]
+  }
+}

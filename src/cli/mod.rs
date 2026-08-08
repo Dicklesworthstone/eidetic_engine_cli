@@ -1117,8 +1117,51 @@ pub enum Command {
 /// Subcommands for `ee cache`.
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum CacheCommand {
+    /// Collect a read-only hotset manifest from bounded coordination evidence.
+    #[command(name = "hotset-manifest")]
+    HotsetManifest(CacheHotsetManifestArgs),
     /// Build an explicit cache prewarm report from a redaction-safe hotset manifest.
     Prewarm(CachePrewarmArgs),
+}
+
+/// Arguments for `ee cache hotset-manifest` (bd-ty3pl.2). Every probe is
+/// read-only and watchdog-bounded; degraded sources emit explicit codes
+/// instead of fabricated signals.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct CacheHotsetManifestArgs {
+    /// Hard per-probe watchdog in milliseconds for git/bv subprocess probes.
+    #[arg(long = "probe-timeout-ms", value_name = "MS", default_value_t = 4_000)]
+    pub probe_timeout_ms: u64,
+
+    /// Maximum prewarm candidates in the emitted plan.
+    #[arg(long = "max-candidates", value_name = "N", default_value_t = 16)]
+    pub max_candidates: usize,
+
+    /// Maximum signals collected per evidence source.
+    #[arg(
+        long = "max-signals-per-source",
+        value_name = "N",
+        default_value_t = 32
+    )]
+    pub max_signals_per_source: usize,
+
+    /// Read-only Agent Mail snapshot path (ee.agent_mail.snapshot.v1).
+    /// Defaults to <workspace>/.ee/agent-mail-snapshot.json.
+    #[arg(long = "agent-mail-snapshot", value_name = "PATH")]
+    pub agent_mail_snapshot: Option<PathBuf>,
+
+    /// Read-only source-authority snapshot path.
+    /// Defaults to <workspace>/.ee/source-authority-snapshot.json.
+    #[arg(long = "source-authority-snapshot", value_name = "PATH")]
+    pub source_authority_snapshot: Option<PathBuf>,
+
+    /// Override the git binary used for the bounded status probe.
+    #[arg(long = "git-program", value_name = "PATH")]
+    pub git_program: Option<PathBuf>,
+
+    /// Override the bv binary used for the bounded frontier probe.
+    #[arg(long = "bv-program", value_name = "PATH")]
+    pub bv_program: Option<PathBuf>,
 }
 
 /// Arguments for `ee cache prewarm`.
@@ -12670,6 +12713,9 @@ where
                 ),
             }
         }
+        Some(Command::Cache(CacheCommand::HotsetManifest(ref args))) => {
+            handle_cache_hotset_manifest(&cli, args, stdout, stderr)
+        }
         Some(Command::Cache(CacheCommand::Prewarm(ref args))) => {
             handle_cache_prewarm(&cli, args, stdout, stderr)
         }
@@ -17874,6 +17920,852 @@ where
             lines.push(format!("Previous binary backed up to: {backup}"));
         }
         write_stdout(stdout, &(lines.join("\n") + "\n"))
+    }
+}
+
+// ============================================================================
+// bd-ty3pl.2: bounded read-only hotset collectors (CLI orchestration seam)
+// ============================================================================
+//
+// The pure record/manifest layer lives in `cache::hotset`; this seam owns the
+// actual bounded probes because the CLI may depend downward on both
+// `core::source_run` (the watchdog) and `cache` without creating the
+// core<->cache cycle that placing probes inside `cache::hotset` would cause
+// (`core::context` already depends on `cache::hotset`). Every subprocess
+// probe has a hard timeout; every file read is size-capped; a degraded
+// source contributes an explicit record and zero signals. Nothing here
+// mutates the tracker, mail, memory, packs, or caches.
+
+/// Bound on captured probe stdout via the source-run tail capture.
+const HOTSET_PROBE_TAIL_BYTES_MAX: usize = 262_144;
+/// Bound on the Beads JSONL export read; larger exports abstain.
+const HOTSET_BEADS_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Bound on parsed git status lines.
+const HOTSET_GIT_MAX_LINES: usize = 400;
+/// Bound on reservation paths retained for overlap detection.
+const HOTSET_MAX_RESERVED_PATHS: usize = 200;
+/// Bound on the persisted retrieval-provenance manifest read.
+const HOTSET_RETRIEVAL_MANIFEST_MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// Bound on Agent Mail and source-authority snapshot reads.
+const HOTSET_SNAPSHOT_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Bounded, symlink-refusing regular-file read for hotset evidence inputs.
+/// The pre-read cap uses `symlink_metadata` (never following links) and the
+/// post-read cap re-checks the actual bytes so a file grown between stat and
+/// read still cannot exceed the bound.
+fn hotset_bounded_regular_file_read(path: &Path, max_bytes: u64) -> Result<Vec<u8>, &'static str> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| "missing or unreadable")?;
+    if !metadata.file_type().is_file() {
+        return Err("not a regular file (symlinks are refused)");
+    }
+    if metadata.len() > max_bytes {
+        return Err("exceeds the bounded-read cap");
+    }
+    let bytes = fs::read(path).map_err(|_| "missing or unreadable")?;
+    if bytes.len() as u64 > max_bytes {
+        return Err("exceeds the bounded-read cap");
+    }
+    Ok(bytes)
+}
+
+/// Options for [`collect_hotset_signals`]. Program overrides exist so
+/// operators (and hermetic tests) can pin exact binaries; snapshot paths
+/// default to the workspace-local `.ee/` artifacts their producers write.
+#[derive(Clone, Debug)]
+struct HotsetCollectOptions {
+    workspace_path: PathBuf,
+    probe_timeout_ms: u64,
+    max_signals_per_source: usize,
+    git_program: Option<PathBuf>,
+    bv_program: Option<PathBuf>,
+    agent_mail_snapshot_path: Option<PathBuf>,
+    source_authority_snapshot_path: Option<PathBuf>,
+}
+
+impl HotsetCollectOptions {
+    fn new(workspace_path: impl Into<PathBuf>) -> Self {
+        Self {
+            workspace_path: workspace_path.into(),
+            probe_timeout_ms: 4_000,
+            max_signals_per_source: 32,
+            git_program: None,
+            bv_program: None,
+            agent_mail_snapshot_path: None,
+            source_authority_snapshot_path: None,
+        }
+    }
+}
+
+/// Collect prewarm signals from bounded, read-only coordination evidence.
+///
+/// Sources run in a fixed order (git workspace, Beads tracker, BV frontier,
+/// Agent Mail snapshot, source authority, retrieval provenance) so the
+/// resulting manifest is deterministic for identical source bytes. Each
+/// source degrades independently; a degraded source contributes zero signals
+/// and an explicit record instead of a guess.
+fn collect_hotset_signals(
+    options: &HotsetCollectOptions,
+) -> crate::cache::hotset::HotsetCollection {
+    use crate::cache::hotset::{
+        HOTSET_RETRIEVAL_PROVENANCE_UNAVAILABLE_CODE, HotsetCollection, dirty_overlap_hashes,
+    };
+
+    let mut signals = Vec::new();
+    let mut sources = Vec::new();
+
+    let (git_signals, git_record, dirty_paths) = collect_hotset_git_source(options);
+    signals.extend(git_signals);
+    sources.push(git_record);
+
+    let (beads_signals, beads_record) = collect_hotset_beads_source(options);
+    signals.extend(beads_signals);
+    sources.push(beads_record);
+
+    let (bv_signals, bv_record) = collect_hotset_bv_source(options);
+    signals.extend(bv_signals);
+    sources.push(bv_record);
+
+    let (mail_signals, mail_record, reserved_paths) = collect_hotset_agent_mail_source(options);
+    signals.extend(mail_signals);
+    sources.push(mail_record);
+
+    let (authority_signals, authority_record) = collect_hotset_source_authority(options);
+    signals.extend(authority_signals);
+    sources.push(authority_record);
+
+    let (retrieval_record, retrieval_provenance) =
+        collect_hotset_retrieval_provenance(options, HOTSET_RETRIEVAL_PROVENANCE_UNAVAILABLE_CODE);
+    sources.push(retrieval_record);
+
+    let overlap = dirty_overlap_hashes(&dirty_paths, &reserved_paths);
+    HotsetCollection::from_parts(signals, sources, overlap, retrieval_provenance)
+}
+
+fn hotset_bounded_probe(
+    kind: crate::core::source_run::SourceRunKind,
+    source_id: &str,
+    operation: &str,
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    timeout_ms: u64,
+) -> crate::core::source_run::SourceRunEvidence {
+    use crate::core::source_run::{
+        SourceRunCommand, SourceRunRequest, SourceRunSource, run_source_command,
+    };
+    let command = SourceRunCommand::new(program)
+        .with_args(args.iter().cloned())
+        .with_cwd(cwd);
+    let request = SourceRunRequest::new(
+        SourceRunSource::new(kind, source_id, operation),
+        command,
+        std::time::Duration::from_millis(timeout_ms),
+    )
+    .with_tail_bytes_max(HOTSET_PROBE_TAIL_BYTES_MAX);
+    run_source_command(&request)
+}
+
+fn hotset_program_string(program: Option<&PathBuf>, default: &str) -> String {
+    program.map_or_else(|| default.to_owned(), |path| path.display().to_string())
+}
+
+fn collect_hotset_git_source(
+    options: &HotsetCollectOptions,
+) -> (
+    Vec<crate::cache::hotset::PrewarmSignal>,
+    crate::cache::hotset::HotsetSourceRecord,
+    std::collections::BTreeSet<String>,
+) {
+    use crate::cache::hotset::{
+        HOTSET_GIT_TIMEOUT_CODE, HOTSET_GIT_UNAVAILABLE_CODE, HotsetSourceRecord,
+        HotsetSourceStatus, PrewarmSignal, PrewarmSignalSource,
+    };
+    use crate::core::source_run::{SourceRunKind, SourceRunStatus};
+
+    let program = hotset_program_string(options.git_program.as_ref(), "git");
+    let workspace = options.workspace_path.display().to_string();
+    let args = vec![
+        "-C".to_owned(),
+        workspace,
+        "status".to_owned(),
+        "--porcelain".to_owned(),
+    ];
+    let evidence = hotset_bounded_probe(
+        SourceRunKind::Git,
+        "git",
+        "status_porcelain",
+        &program,
+        &args,
+        &options.workspace_path,
+        options.probe_timeout_ms,
+    );
+    match evidence.status {
+        SourceRunStatus::Passed => {
+            let stdout = evidence.output.stdout_tail.clone().unwrap_or_default();
+            let mut dirty = std::collections::BTreeSet::new();
+            for line in stdout.lines().take(HOTSET_GIT_MAX_LINES) {
+                let Some(raw_path) = line.get(3..) else {
+                    continue;
+                };
+                let path = raw_path
+                    .split(" -> ")
+                    .next_back()
+                    .unwrap_or(raw_path)
+                    .trim()
+                    .trim_matches('"');
+                if path.is_empty() || path.starts_with(".beads") {
+                    continue;
+                }
+                dirty.insert(path.to_owned());
+            }
+            let git_signals: Vec<PrewarmSignal> = dirty
+                .iter()
+                .take(options.max_signals_per_source)
+                .map(|path| {
+                    PrewarmSignal::new(
+                        PrewarmSignalSource::HostProfile,
+                        format!("git:{path}"),
+                        path.clone(),
+                    )
+                    .with_labels(path.split('/').take(4))
+                    .with_priority(6)
+                })
+                .collect();
+            let record = HotsetSourceRecord::fresh(
+                "git_workspace",
+                git_signals.len(),
+                evidence.output.stdout_hash.clone(),
+            );
+            (git_signals, record, dirty)
+        }
+        SourceRunStatus::TimedOut => (
+            Vec::new(),
+            HotsetSourceRecord::degraded(
+                "git_workspace",
+                HotsetSourceStatus::TimedOut,
+                HOTSET_GIT_TIMEOUT_CODE,
+                format!(
+                    "git status probe exceeded the {}ms watchdog; abstaining from \
+                     workspace-hygiene signals",
+                    options.probe_timeout_ms
+                ),
+                "Raise --probe-timeout-ms or check repository responsiveness with \
+                 `git status --porcelain`.",
+            ),
+            std::collections::BTreeSet::new(),
+        ),
+        _ => (
+            Vec::new(),
+            HotsetSourceRecord::degraded(
+                "git_workspace",
+                HotsetSourceStatus::Unavailable,
+                HOTSET_GIT_UNAVAILABLE_CODE,
+                "git status probe could not run (spawn failure or nonzero exit); \
+                 abstaining from workspace-hygiene signals",
+                "Run `git status --porcelain` in the workspace to inspect, or pass \
+                 --git-program.",
+            ),
+            std::collections::BTreeSet::new(),
+        ),
+    }
+}
+
+fn collect_hotset_beads_source(
+    options: &HotsetCollectOptions,
+) -> (
+    Vec<crate::cache::hotset::PrewarmSignal>,
+    crate::cache::hotset::HotsetSourceRecord,
+) {
+    use crate::cache::hotset::{
+        HOTSET_BEADS_STALE_CODE, HOTSET_BEADS_UNAVAILABLE_CODE, HotsetSourceRecord,
+        HotsetSourceStatus, PrewarmSignal, PrewarmSignalSource,
+    };
+
+    let path = options.workspace_path.join(".beads").join("issues.jsonl");
+    let unavailable = |message: String| {
+        HotsetSourceRecord::degraded(
+            "beads_tracker",
+            HotsetSourceStatus::Unavailable,
+            HOTSET_BEADS_UNAVAILABLE_CODE,
+            message,
+            "Run `br sync --flush-only` to export tracker state, then re-collect.",
+        )
+    };
+    let bytes = match hotset_bounded_regular_file_read(&path, HOTSET_BEADS_MAX_BYTES) {
+        Ok(bytes) => bytes,
+        Err(reason) => {
+            return (
+                Vec::new(),
+                unavailable(format!("Beads JSONL export is {reason}")),
+            );
+        }
+    };
+    let source_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+    let text = String::from_utf8_lossy(&bytes);
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(row) => rows.push(row),
+            Err(_) => {
+                // A malformed row usually means a concurrent flush was caught
+                // mid-write. Abstain entirely: a half-parsed frontier must not
+                // look authoritative.
+                return (
+                    Vec::new(),
+                    HotsetSourceRecord::degraded(
+                        "beads_tracker",
+                        HotsetSourceStatus::Stale,
+                        HOTSET_BEADS_STALE_CODE,
+                        "Beads JSONL export has an unparseable row (concurrent flush \
+                         suspected); abstaining from tracker signals",
+                        "Retry after the tracker flush settles, e.g. \
+                         `scripts/br_retry.sh list --status open --json`.",
+                    ),
+                );
+            }
+        }
+    }
+    let mut beads_signals: Vec<PrewarmSignal> = rows
+        .iter()
+        .filter_map(|row| {
+            let status = row.get("status").and_then(serde_json::Value::as_str)?;
+            if !matches!(status, "open" | "in_progress") {
+                return None;
+            }
+            if row.get("issue_type").and_then(serde_json::Value::as_str) == Some("epic") {
+                return None;
+            }
+            let id = row.get("id").and_then(serde_json::Value::as_str)?;
+            let title = row.get("title").and_then(serde_json::Value::as_str)?;
+            let priority = row
+                .get("priority")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(2);
+            let labels: Vec<String> = row
+                .get("labels")
+                .and_then(serde_json::Value::as_array)
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .take(6)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let signal_priority = 9_u8.saturating_sub(u8::try_from(priority.min(4)).unwrap_or(4));
+            Some(
+                PrewarmSignal::new(PrewarmSignalSource::Beads, id, title)
+                    .with_labels(labels)
+                    .with_priority(signal_priority),
+            )
+        })
+        .collect();
+    beads_signals.sort_by(|left, right| left.stable_id().cmp(right.stable_id()));
+    beads_signals.truncate(options.max_signals_per_source);
+    let record = HotsetSourceRecord::fresh("beads_tracker", beads_signals.len(), Some(source_hash));
+    (beads_signals, record)
+}
+
+fn collect_hotset_bv_source(
+    options: &HotsetCollectOptions,
+) -> (
+    Vec<crate::cache::hotset::PrewarmSignal>,
+    crate::cache::hotset::HotsetSourceRecord,
+) {
+    use crate::cache::hotset::{
+        HOTSET_BV_NO_OUTPUT_CODE, HOTSET_BV_TIMEOUT_CODE, HOTSET_BV_UNAVAILABLE_CODE,
+        HotsetSourceRecord, HotsetSourceStatus,
+    };
+    use crate::core::source_run::{SourceRunKind, SourceRunStatus};
+
+    let program = hotset_program_string(options.bv_program.as_ref(), "bv");
+    let args = vec!["--robot-next".to_owned()];
+    let evidence = hotset_bounded_probe(
+        SourceRunKind::Bv,
+        "bv",
+        "robot_next",
+        &program,
+        &args,
+        &options.workspace_path,
+        options.probe_timeout_ms,
+    );
+    let no_output = |message: &str| {
+        HotsetSourceRecord::degraded(
+            "bv_frontier",
+            HotsetSourceStatus::Unavailable,
+            HOTSET_BV_NO_OUTPUT_CODE,
+            message.to_owned(),
+            "Run `bv --robot-next` manually; empty or unusable robot output usually \
+             means a tracker JSONL read race.",
+        )
+    };
+    match evidence.status {
+        SourceRunStatus::TimedOut => (
+            Vec::new(),
+            HotsetSourceRecord::degraded(
+                "bv_frontier",
+                HotsetSourceStatus::TimedOut,
+                HOTSET_BV_TIMEOUT_CODE,
+                format!(
+                    "bv --robot-next exceeded the {}ms watchdog; abstaining from \
+                     frontier signals",
+                    options.probe_timeout_ms
+                ),
+                "Raise --probe-timeout-ms or run `bv --robot-next` manually to check \
+                 triage health.",
+            ),
+        ),
+        SourceRunStatus::Passed => {
+            let stdout = evidence.output.stdout_tail.clone().unwrap_or_default();
+            if stdout.trim().is_empty() {
+                return (
+                    Vec::new(),
+                    no_output(
+                        "bv --robot-next produced no output; abstaining from frontier signals",
+                    ),
+                );
+            }
+            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(stdout.trim()) else {
+                return (
+                    Vec::new(),
+                    no_output(
+                        "bv --robot-next output was not parseable JSON; abstaining from \
+                         frontier signals",
+                    ),
+                );
+            };
+            let bv_signals =
+                hotset_bv_signals_from_robot_json(&parsed, options.max_signals_per_source);
+            if bv_signals.is_empty() {
+                return (
+                    Vec::new(),
+                    no_output(
+                        "bv --robot-next output carried no actionable pick; abstaining \
+                         from frontier signals",
+                    ),
+                );
+            }
+            let record = HotsetSourceRecord::fresh(
+                "bv_frontier",
+                bv_signals.len(),
+                evidence.output.stdout_hash.clone(),
+            );
+            (bv_signals, record)
+        }
+        _ => (
+            Vec::new(),
+            HotsetSourceRecord::degraded(
+                "bv_frontier",
+                HotsetSourceStatus::Unavailable,
+                HOTSET_BV_UNAVAILABLE_CODE,
+                "bv could not be spawned or exited nonzero; abstaining from frontier \
+                 signals",
+                "Install bv on PATH or pass --bv-program.",
+            ),
+        ),
+    }
+}
+
+fn hotset_bv_signals_from_robot_json(
+    parsed: &serde_json::Value,
+    cap: usize,
+) -> Vec<crate::cache::hotset::PrewarmSignal> {
+    use crate::cache::hotset::{PrewarmSignal, PrewarmSignalSource};
+
+    let mut picks: Vec<(String, String)> = Vec::new();
+    let mut push_pick = |value: &serde_json::Value| {
+        let Some(id) = value.get("id").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        let title = value
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(id);
+        if !picks.iter().any(|(existing, _)| existing == id) {
+            picks.push((id.to_owned(), title.to_owned()));
+        }
+    };
+    push_pick(parsed);
+    if let Some(pick) = parsed.get("pick") {
+        push_pick(pick);
+    }
+    if let Some(recommendations) = parsed
+        .get("recommendations")
+        .and_then(serde_json::Value::as_array)
+    {
+        for recommendation in recommendations.iter().take(4) {
+            push_pick(recommendation);
+        }
+    }
+    picks
+        .into_iter()
+        .take(cap.min(4))
+        .map(|(id, title)| PrewarmSignal::new(PrewarmSignalSource::Bv, id, title).with_priority(7))
+        .collect()
+}
+
+fn collect_hotset_agent_mail_source(
+    options: &HotsetCollectOptions,
+) -> (
+    Vec<crate::cache::hotset::PrewarmSignal>,
+    crate::cache::hotset::HotsetSourceRecord,
+    std::collections::BTreeSet<String>,
+) {
+    use crate::cache::hotset::{
+        HOTSET_AGENT_MAIL_ARCHIVE_MISMATCH_CODE, HOTSET_AGENT_MAIL_UNAVAILABLE_CODE,
+        HotsetSourceRecord, HotsetSourceStatus, PrewarmSignal, PrewarmSignalSource,
+    };
+
+    let path = options.agent_mail_snapshot_path.clone().unwrap_or_else(|| {
+        options
+            .workspace_path
+            .join(".ee")
+            .join("agent-mail-snapshot.json")
+    });
+    let unavailable = |message: String| {
+        (
+            Vec::new(),
+            HotsetSourceRecord::degraded(
+                "agent_mail",
+                HotsetSourceStatus::Unavailable,
+                HOTSET_AGENT_MAIL_UNAVAILABLE_CODE,
+                message,
+                "Produce a read-only snapshot with scripts/agent_mail_snapshot.sh and \
+                 pass it via --agent-mail-snapshot (or write it to \
+                 <workspace>/.ee/agent-mail-snapshot.json).",
+            ),
+            std::collections::BTreeSet::new(),
+        )
+    };
+    let text = match hotset_bounded_regular_file_read(&path, HOTSET_SNAPSHOT_MAX_BYTES) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(reason) => {
+            return unavailable(format!("Agent Mail snapshot is {reason}"));
+        }
+    };
+    let Ok(snapshot) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return unavailable("Agent Mail snapshot was not parseable JSON".to_owned());
+    };
+    if snapshot.get("schema").and_then(serde_json::Value::as_str)
+        != Some("ee.agent_mail.snapshot.v1")
+    {
+        return unavailable(
+            "Agent Mail snapshot schema is not ee.agent_mail.snapshot.v1".to_owned(),
+        );
+    }
+    let archive_count = snapshot
+        .get("archiveMessageCount")
+        .and_then(serde_json::Value::as_u64);
+    let database_count = snapshot
+        .get("databaseMessageCount")
+        .and_then(serde_json::Value::as_u64);
+    if let (Some(archive), Some(database)) = (archive_count, database_count)
+        && archive != database
+    {
+        return (
+            Vec::new(),
+            HotsetSourceRecord::degraded(
+                "agent_mail",
+                HotsetSourceStatus::Stale,
+                HOTSET_AGENT_MAIL_ARCHIVE_MISMATCH_CODE,
+                format!(
+                    "Agent Mail archive/database message counts diverge ({archive} vs \
+                     {database}); abstaining from mail signals"
+                ),
+                "Run `am doctor check` before trusting mail-derived hotset signals, \
+                 then regenerate the snapshot.",
+            ),
+            std::collections::BTreeSet::new(),
+        );
+    }
+    let mut reserved_paths = std::collections::BTreeSet::new();
+    let mut mail_signals = Vec::new();
+    if let Some(reservations) = snapshot
+        .get("reservations")
+        .and_then(serde_json::Value::as_array)
+    {
+        for reservation in reservations {
+            let Some(paths) = reservation
+                .get("paths")
+                .and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+            let path_list: Vec<String> = paths
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .take(8)
+                .map(str::to_owned)
+                .collect();
+            if path_list.is_empty() {
+                continue;
+            }
+            for reserved in &path_list {
+                if reserved_paths.len() < HOTSET_MAX_RESERVED_PATHS {
+                    reserved_paths.insert(reserved.clone());
+                }
+            }
+            let joined = path_list.join(" ");
+            mail_signals.push(
+                PrewarmSignal::new(
+                    PrewarmSignalSource::AgentMail,
+                    format!("mail:res:{}", blake3::hash(joined.as_bytes()).to_hex()),
+                    joined,
+                )
+                .with_labels(path_list)
+                .with_priority(6),
+            );
+        }
+    }
+    if let Some(threads) = snapshot
+        .get("activeThreads")
+        .and_then(serde_json::Value::as_array)
+    {
+        for thread in threads {
+            // Thread IDs only (bead-shaped identifiers); subjects and bodies
+            // are never read into signals.
+            let Some(thread_id) = thread.get("threadId").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            mail_signals.push(
+                PrewarmSignal::new(
+                    PrewarmSignalSource::AgentMail,
+                    format!("mail:thread:{thread_id}"),
+                    thread_id,
+                )
+                .with_priority(5),
+            );
+        }
+    }
+    mail_signals.sort_by(|left, right| left.stable_id().cmp(right.stable_id()));
+    mail_signals.truncate(options.max_signals_per_source);
+    let record = HotsetSourceRecord::fresh(
+        "agent_mail",
+        mail_signals.len(),
+        Some(format!("blake3:{}", blake3::hash(text.as_bytes()).to_hex())),
+    );
+    (mail_signals, record, reserved_paths)
+}
+
+fn collect_hotset_source_authority(
+    options: &HotsetCollectOptions,
+) -> (
+    Vec<crate::cache::hotset::PrewarmSignal>,
+    crate::cache::hotset::HotsetSourceRecord,
+) {
+    use crate::cache::hotset::{
+        HOTSET_SOURCE_AUTHORITY_MISSING_CODE, HotsetSourceRecord, HotsetSourceStatus,
+        PrewarmSignal, PrewarmSignalSource,
+    };
+
+    let path = options
+        .source_authority_snapshot_path
+        .clone()
+        .unwrap_or_else(|| {
+            options
+                .workspace_path
+                .join(".ee")
+                .join("source-authority-snapshot.json")
+        });
+    let missing = |message: String| {
+        HotsetSourceRecord::degraded(
+            "source_authority",
+            HotsetSourceStatus::Unavailable,
+            HOTSET_SOURCE_AUTHORITY_MISSING_CODE,
+            message,
+            "Capture the sourceAuthority block from `ee swarm work-packet --workspace . \
+             --include-rch --json` and pass it via --source-authority-snapshot.",
+        )
+    };
+    let text = match hotset_bounded_regular_file_read(&path, HOTSET_SNAPSHOT_MAX_BYTES) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(reason) => {
+            return (
+                Vec::new(),
+                missing(format!("source-authority snapshot is {reason}")),
+            );
+        }
+    };
+    let Ok(snapshot) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return (
+            Vec::new(),
+            missing("source-authority snapshot was not parseable JSON".to_owned()),
+        );
+    };
+    let rch_remote_only = snapshot
+        .get("rchRemoteOnlyRequired")
+        .or_else(|| snapshot.pointer("/sourceAuthority/rchRemoteOnlyRequired"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let mut authority_signals = Vec::new();
+    if rch_remote_only {
+        authority_signals.push(
+            PrewarmSignal::new(
+                PrewarmSignalSource::VerificationBroker,
+                "source-authority:rch-remote-only",
+                "rch remote only verification required",
+            )
+            .with_priority(8),
+        );
+    }
+    let record = HotsetSourceRecord::fresh(
+        "source_authority",
+        authority_signals.len(),
+        Some(format!("blake3:{}", blake3::hash(text.as_bytes()).to_hex())),
+    );
+    (authority_signals, record)
+}
+
+/// Bounded reader for the persisted retrieval-provenance manifest
+/// (`<workspace>/.ee/cache/hotsets/latest.json`, schema `ee.cache.hotset.v1`).
+/// The manifest's entries are already hashed keys; this collector carries a
+/// reference block (hash + entry counts + generation) for support bundles
+/// and never re-derives signals from it.
+fn collect_hotset_retrieval_provenance(
+    options: &HotsetCollectOptions,
+    unavailable_code: &'static str,
+) -> (
+    crate::cache::hotset::HotsetSourceRecord,
+    Option<serde_json::Value>,
+) {
+    use crate::cache::hotset::{HotsetSourceRecord, HotsetSourceStatus};
+
+    let path = options
+        .workspace_path
+        .join(".ee")
+        .join("cache")
+        .join("hotsets")
+        .join("latest.json");
+    let unavailable = |message: String| {
+        (
+            HotsetSourceRecord::degraded(
+                "retrieval_provenance",
+                HotsetSourceStatus::Unavailable,
+                unavailable_code,
+                message,
+                "Persist an ee.cache.hotset.v1 manifest to \
+                 <workspace>/.ee/cache/hotsets/latest.json (see `ee cache prewarm \
+                 --from-hotset latest`), then re-collect.",
+            ),
+            None,
+        )
+    };
+    let text = match hotset_bounded_regular_file_read(&path, HOTSET_RETRIEVAL_MANIFEST_MAX_BYTES) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(reason) => {
+            return unavailable(format!(
+                "persisted hotset manifest is {reason}; recent pack/search provenance \
+                 is absent from this collection"
+            ));
+        }
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return unavailable("persisted hotset manifest was not parseable JSON".to_owned());
+    };
+    if manifest.get("schema").and_then(serde_json::Value::as_str) != Some("ee.cache.hotset.v1") {
+        return unavailable(
+            "persisted hotset manifest schema is not ee.cache.hotset.v1".to_owned(),
+        );
+    }
+    let search_entry_count = manifest
+        .get("searchEntries")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let pack_entry_count = manifest
+        .get("packEntries")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let manifest_hash = format!("blake3:{}", blake3::hash(text.as_bytes()).to_hex());
+    let provenance = serde_json::json!({
+        "manifestHash": manifest_hash.clone(),
+        "schema": "ee.cache.hotset.v1",
+        "searchEntryCount": search_entry_count,
+        "packEntryCount": pack_entry_count,
+        "workspaceGeneration": manifest.get("workspaceGeneration"),
+        "indexGeneration": manifest.get("indexGeneration"),
+    });
+    let record = HotsetSourceRecord::fresh("retrieval_provenance", 0, Some(manifest_hash));
+    (record, Some(provenance))
+}
+
+fn handle_cache_hotset_manifest<W, E>(
+    cli: &Cli,
+    args: &CacheHotsetManifestArgs,
+    stdout: &mut W,
+    _stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::cache::hotset::HotsetBudget;
+
+    let workspace_path = cli.resolve_workspace();
+    let mut options = HotsetCollectOptions::new(workspace_path);
+    options.probe_timeout_ms = args.probe_timeout_ms.clamp(50, 60_000);
+    options.max_signals_per_source = args.max_signals_per_source.clamp(1, 128);
+    options.agent_mail_snapshot_path = args.agent_mail_snapshot.clone();
+    options.source_authority_snapshot_path = args.source_authority_snapshot.clone();
+    options.git_program = args.git_program.clone();
+    options.bv_program = args.bv_program.clone();
+
+    let collection = collect_hotset_signals(&options);
+    // The plan generation is advisory here: this surface asserts nothing
+    // about index freshness, so the manifest pins generation 0 and consumers
+    // gate admission separately (`ee cache prewarm --current-generation`).
+    let data = collection.manifest_json(
+        0,
+        HotsetBudget::new(64, 262_144),
+        args.max_candidates.clamp(1, 64),
+    );
+    let degraded: Vec<serde_json::Value> = collection
+        .degradations()
+        .into_iter()
+        .map(|(code, severity, message, repair)| {
+            serde_json::json!({
+                "code": code,
+                "severity": severity,
+                "message": message,
+                "repair": repair,
+            })
+        })
+        .collect();
+    let envelope = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+        "degraded": degraded,
+    });
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mut rendered = String::from("Hotset manifest (read-only collection):\n");
+            for source in collection.sources() {
+                rendered.push_str(&format!(
+                    "  {:<22} {}\n",
+                    source.source(),
+                    source.status().as_str()
+                ));
+            }
+            rendered.push_str(&format!(
+                "  candidates: {}\n  degraded: {}\n",
+                envelope["data"]["plan"]["candidateCount"],
+                degraded.len()
+            ));
+            write_stdout(stdout, &rendered)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&envelope.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(envelope.to_string() + "\n")),
     }
 }
 
@@ -60650,7 +61542,7 @@ const ARTIFACT_SUBCOMMANDS: &[&str] = &["register", "inspect", "list"];
 const AUDIT_SUBCOMMANDS: &[&str] = &["timeline", "show", "diff", "verify"];
 const BACKUP_SUBCOMMANDS: &[&str] = &["create", "list", "inspect", "restore", "verify"];
 const BOOTSTRAP_SUBCOMMANDS: &[&str] = &["docs", "apply"];
-const CACHE_SUBCOMMANDS: &[&str] = &["prewarm"];
+const CACHE_SUBCOMMANDS: &[&str] = &["hotset-manifest", "prewarm"];
 const CAUSAL_SUBCOMMANDS: &[&str] = &["trace", "compare", "estimate", "promote-plan"];
 const CERTIFICATE_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
 const CLAIM_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
@@ -60873,6 +61765,7 @@ impl NormalizedInvocation {
                 },
                 Command::Capabilities => "capabilities".to_string(),
                 Command::Cache(cache) => match cache {
+                    CacheCommand::HotsetManifest(_) => "cache hotset-manifest".to_string(),
                     CacheCommand::Prewarm(_) => "cache prewarm".to_string(),
                 },
                 Command::Check => "check".to_string(),
@@ -73334,6 +74227,387 @@ mod tests {
             "Database not found",
             "storage error names the miss",
         )
+    }
+
+    // ---- bd-ty3pl.2: production hotset collector matrix ----
+    //
+    // These tests exercise the REAL collector against controlled evidence:
+    // real file reads and real bounded subprocess probes through the
+    // source_run watchdog, with stub programs pinned via the options
+    // overrides so the matrix is hermetic and deterministic.
+
+    #[cfg(unix)]
+    fn write_stub_program(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write stub program");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod stub program");
+        path
+    }
+
+    #[cfg(unix)]
+    fn hotset_collect_workspace(label: &str) -> tempfile::TempDir {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("ee-hotset-{label}-"))
+            .tempdir()
+            .expect("create collector workspace");
+        fs::create_dir_all(dir.path().join(".ee")).expect("create .ee dir");
+        fs::create_dir_all(dir.path().join(".beads")).expect("create .beads dir");
+        dir
+    }
+
+    #[cfg(unix)]
+    fn healthy_hotset_collect_options(dir: &tempfile::TempDir) -> HotsetCollectOptions {
+        let ws = dir.path();
+        fs::write(
+            ws.join(".beads").join("issues.jsonl"),
+            concat!(
+                "{\"id\":\"bd-aaa\",\"title\":\"collector alpha work\",\"status\":\"open\",",
+                "\"issue_type\":\"task\",\"priority\":1,\"labels\":[\"cache\"]}\n",
+                "{\"id\":\"bd-bbb\",\"title\":\"collector beta work\",\"status\":\"in_progress\",",
+                "\"issue_type\":\"bug\",\"priority\":2}\n",
+                "{\"id\":\"bd-ccc\",\"title\":\"closed row ignored\",\"status\":\"closed\",",
+                "\"issue_type\":\"task\",\"priority\":0}\n",
+            ),
+        )
+        .expect("write issues.jsonl");
+        fs::write(
+            ws.join(".ee").join("agent-mail-snapshot.json"),
+            serde_json::json!({
+                "schema": "ee.agent_mail.snapshot.v1",
+                "archiveMessageCount": 7,
+                "databaseMessageCount": 7,
+                "reservations": [{"paths": ["docs/guide.md"]}],
+                "activeThreads": [{"threadId": "bd-aaa"}],
+            })
+            .to_string(),
+        )
+        .expect("write mail snapshot");
+        fs::write(
+            ws.join(".ee").join("source-authority-snapshot.json"),
+            serde_json::json!({
+                "schema": "ee.source_authority.snapshot.v1",
+                "rchRemoteOnlyRequired": true,
+            })
+            .to_string(),
+        )
+        .expect("write source-authority snapshot");
+        fs::create_dir_all(ws.join(".ee").join("cache").join("hotsets"))
+            .expect("create hotsets dir");
+        fs::write(
+            ws.join(".ee")
+                .join("cache")
+                .join("hotsets")
+                .join("latest.json"),
+            serde_json::json!({
+                "schema": "ee.cache.hotset.v1",
+                "workspaceGeneration": 3,
+                "indexGeneration": 3,
+                "searchEntries": [],
+                "packEntries": [],
+            })
+            .to_string(),
+        )
+        .expect("write retrieval-provenance manifest");
+        let git_stub = write_stub_program(
+            ws,
+            "stub-git",
+            "printf ' M src/lib.rs\\n?? notes/todo.md\\n'",
+        );
+        let bv_stub = write_stub_program(
+            ws,
+            "stub-bv",
+            "printf '{\"id\":\"bd-aaa\",\"title\":\"collector alpha work\"}\\n'",
+        );
+        let mut options = HotsetCollectOptions::new(ws);
+        options.git_program = Some(git_stub);
+        options.bv_program = Some(bv_stub);
+        options.probe_timeout_ms = 4_000;
+        options
+    }
+
+    #[cfg(unix)]
+    fn hotset_degraded_codes(
+        collection: &crate::cache::hotset::HotsetCollection,
+    ) -> Vec<&'static str> {
+        collection
+            .degradations()
+            .into_iter()
+            .map(|(code, _, _, _)| code)
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hotset_collector_healthy_sources_are_fresh_and_manifest_is_deterministic() {
+        use crate::cache::hotset::{HOTSET_COLLECT_SCHEMA, HotsetBudget, HotsetSourceStatus};
+
+        let dir = hotset_collect_workspace("healthy");
+        let options = healthy_hotset_collect_options(&dir);
+
+        let first = collect_hotset_signals(&options);
+        let second = collect_hotset_signals(&options);
+
+        for source in [
+            "git_workspace",
+            "beads_tracker",
+            "bv_frontier",
+            "agent_mail",
+            "source_authority",
+            "retrieval_provenance",
+        ] {
+            let record = first
+                .sources()
+                .iter()
+                .find(|record| record.source() == source)
+                .expect("source record present");
+            assert_eq!(
+                record.status(),
+                HotsetSourceStatus::Fresh,
+                "{source} must be fresh in the healthy fixture"
+            );
+        }
+        assert!(
+            hotset_degraded_codes(&first).is_empty(),
+            "healthy fixture must not degrade"
+        );
+        assert!(
+            first.dirty_overlap_path_hashes().is_empty(),
+            "healthy fixture has no dirty overlap"
+        );
+
+        let budget = HotsetBudget::new(64, 262_144);
+        let manifest_a = first.manifest_json(0, budget, 16).to_string();
+        let manifest_b = second.manifest_json(0, budget, 16).to_string();
+        assert_eq!(
+            manifest_a, manifest_b,
+            "identical evidence must produce byte-identical manifests"
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_str(&manifest_a).expect("manifest parses");
+        assert_eq!(manifest["schema"], HOTSET_COLLECT_SCHEMA);
+        assert!(
+            manifest["plan"]["candidateCount"].as_u64().unwrap_or(0) > 0,
+            "healthy evidence must produce prewarm candidates"
+        );
+        assert!(
+            manifest["retrievalProvenance"]["manifestHash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "retrieval provenance carries the persisted manifest hash"
+        );
+        // Redaction: raw titles, mail paths, and home prefixes never appear.
+        assert!(!manifest_a.contains("collector alpha work"));
+        assert!(!manifest_a.contains("docs/guide.md"));
+        assert!(!manifest_a.contains("/Users/"));
+        assert!(!manifest_a.contains("/home/"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hotset_collector_stale_beads_abstains_with_specific_code() {
+        use crate::cache::hotset::{
+            HOTSET_BEADS_STALE_CODE, HotsetSourceStatus, PrewarmSignalSource,
+        };
+
+        let dir = hotset_collect_workspace("stalebeads");
+        let options = healthy_hotset_collect_options(&dir);
+        // Truncated final row models a concurrent flush caught mid-write.
+        fs::write(
+            dir.path().join(".beads").join("issues.jsonl"),
+            "{\"id\":\"bd-aaa\",\"title\":\"ok row\",\"status\":\"open\",\"issue_type\":\"task\"}\n{\"id\":\"bd-bbb\",\"ti",
+        )
+        .expect("write truncated issues.jsonl");
+
+        let collection = collect_hotset_signals(&options);
+        let beads = collection
+            .sources()
+            .iter()
+            .find(|record| record.source() == "beads_tracker")
+            .expect("beads record");
+        assert_eq!(beads.status(), HotsetSourceStatus::Stale);
+        assert_eq!(beads.degraded_code(), Some(HOTSET_BEADS_STALE_CODE));
+        // Planted negative: the parseable prefix row must NOT leak through as
+        // a signal — stale tracker means abstain, not half-trust.
+        assert!(
+            !collection
+                .signals()
+                .iter()
+                .any(|signal| signal.source() == PrewarmSignalSource::Beads),
+            "stale Beads must contribute zero tracker signals"
+        );
+        assert!(hotset_degraded_codes(&collection).contains(&HOTSET_BEADS_STALE_CODE));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hotset_collector_mail_archive_database_mismatch_abstains() {
+        use crate::cache::hotset::{
+            HOTSET_AGENT_MAIL_ARCHIVE_MISMATCH_CODE, HotsetSourceStatus, PrewarmSignalSource,
+        };
+
+        let dir = hotset_collect_workspace("mailmismatch");
+        let options = healthy_hotset_collect_options(&dir);
+        fs::write(
+            dir.path().join(".ee").join("agent-mail-snapshot.json"),
+            serde_json::json!({
+                "schema": "ee.agent_mail.snapshot.v1",
+                "archiveMessageCount": 9,
+                "databaseMessageCount": 4,
+                "reservations": [{"paths": ["src/lib.rs"]}],
+            })
+            .to_string(),
+        )
+        .expect("write mismatched mail snapshot");
+
+        let collection = collect_hotset_signals(&options);
+        let mail = collection
+            .sources()
+            .iter()
+            .find(|record| record.source() == "agent_mail")
+            .expect("mail record");
+        assert_eq!(mail.status(), HotsetSourceStatus::Stale);
+        assert_eq!(
+            mail.degraded_code(),
+            Some(HOTSET_AGENT_MAIL_ARCHIVE_MISMATCH_CODE)
+        );
+        // Planted negatives: no mail signals, and the reservation must not
+        // reach overlap detection from a mismatched snapshot.
+        assert!(
+            !collection
+                .signals()
+                .iter()
+                .any(|signal| signal.source() == PrewarmSignalSource::AgentMail),
+            "mismatched mail snapshot must contribute zero mail signals"
+        );
+        assert!(
+            collection.dirty_overlap_path_hashes().is_empty(),
+            "mismatched mail snapshot must not feed overlap detection"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hotset_collector_bv_timeout_and_no_output_use_specific_codes() {
+        use crate::cache::hotset::{
+            HOTSET_BV_NO_OUTPUT_CODE, HOTSET_BV_TIMEOUT_CODE, HotsetSourceStatus,
+            PrewarmSignalSource,
+        };
+
+        let dir = hotset_collect_workspace("bvmatrix");
+        let mut options = healthy_hotset_collect_options(&dir);
+        options.bv_program = Some(write_stub_program(dir.path(), "stub-bv-slow", "sleep 2"));
+        options.probe_timeout_ms = 120;
+
+        let timed_out = collect_hotset_signals(&options);
+        let bv = timed_out
+            .sources()
+            .iter()
+            .find(|record| record.source() == "bv_frontier")
+            .expect("bv record");
+        assert_eq!(bv.status(), HotsetSourceStatus::TimedOut);
+        assert_eq!(bv.degraded_code(), Some(HOTSET_BV_TIMEOUT_CODE));
+        assert!(
+            !timed_out
+                .signals()
+                .iter()
+                .any(|signal| signal.source() == PrewarmSignalSource::Bv),
+            "timed-out bv must contribute zero frontier signals"
+        );
+
+        options.probe_timeout_ms = 4_000;
+        options.bv_program = Some(write_stub_program(dir.path(), "stub-bv-empty", "exit 0"));
+        let empty = collect_hotset_signals(&options);
+        let bv_empty = empty
+            .sources()
+            .iter()
+            .find(|record| record.source() == "bv_frontier")
+            .expect("bv record");
+        assert_eq!(bv_empty.degraded_code(), Some(HOTSET_BV_NO_OUTPUT_CODE));
+        assert!(
+            !empty
+                .signals()
+                .iter()
+                .any(|signal| signal.source() == PrewarmSignalSource::Bv),
+            "empty bv output must contribute zero frontier signals"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hotset_collector_dirty_overlap_emits_hashed_paths_only() {
+        use crate::cache::hotset::{HOTSET_DIRTY_OVERLAP_CODE, HotsetBudget};
+
+        let dir = hotset_collect_workspace("overlap");
+        let mut options = healthy_hotset_collect_options(&dir);
+        options.git_program = Some(write_stub_program(
+            dir.path(),
+            "stub-git-overlap",
+            "printf ' M src/foo.rs\\n M docs/other.md\\n'",
+        ));
+        fs::write(
+            dir.path().join(".ee").join("agent-mail-snapshot.json"),
+            serde_json::json!({
+                "schema": "ee.agent_mail.snapshot.v1",
+                "archiveMessageCount": 2,
+                "databaseMessageCount": 2,
+                "reservations": [{"paths": ["src/**"]}],
+            })
+            .to_string(),
+        )
+        .expect("write overlapping mail snapshot");
+
+        let collection = collect_hotset_signals(&options);
+        assert_eq!(
+            collection.dirty_overlap_path_hashes().len(),
+            1,
+            "exactly the src/foo.rs dirty path overlaps the src/** reservation"
+        );
+        assert!(hotset_degraded_codes(&collection).contains(&HOTSET_DIRTY_OVERLAP_CODE));
+        let manifest = collection
+            .manifest_json(0, HotsetBudget::new(64, 262_144), 16)
+            .to_string();
+        // Planted negative: overlapping paths appear as hashes, never raw.
+        assert!(!manifest.contains("src/foo.rs"));
+        assert!(manifest.contains("blake3:"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hotset_collector_missing_optional_sources_degrade_without_fabrication() {
+        use crate::cache::hotset::{
+            HOTSET_AGENT_MAIL_UNAVAILABLE_CODE, HOTSET_GIT_UNAVAILABLE_CODE,
+            HOTSET_RETRIEVAL_PROVENANCE_UNAVAILABLE_CODE, HOTSET_SOURCE_AUTHORITY_MISSING_CODE,
+            PrewarmSignalSource,
+        };
+
+        let dir = hotset_collect_workspace("missing");
+        let ws = dir.path();
+        fs::write(
+            ws.join(".beads").join("issues.jsonl"),
+            "{\"id\":\"bd-aaa\",\"title\":\"only row\",\"status\":\"open\",\"issue_type\":\"task\"}\n",
+        )
+        .expect("write issues.jsonl");
+        let mut options = HotsetCollectOptions::new(ws);
+        options.git_program = Some(write_stub_program(ws, "stub-git-fail", "exit 1"));
+        options.bv_program = Some(write_stub_program(ws, "stub-bv-missing", "exit 0"));
+        // No mail, source-authority, or retrieval snapshots on disk.
+
+        let collection = collect_hotset_signals(&options);
+        let codes = hotset_degraded_codes(&collection);
+        assert!(codes.contains(&HOTSET_GIT_UNAVAILABLE_CODE));
+        assert!(codes.contains(&HOTSET_AGENT_MAIL_UNAVAILABLE_CODE));
+        assert!(codes.contains(&HOTSET_SOURCE_AUTHORITY_MISSING_CODE));
+        assert!(codes.contains(&HOTSET_RETRIEVAL_PROVENANCE_UNAVAILABLE_CODE));
+        // Beads still collects: one signal from the single open row.
+        assert_eq!(
+            collection
+                .signals()
+                .iter()
+                .filter(|signal| signal.source() == PrewarmSignalSource::Beads)
+                .count(),
+            1
+        );
     }
 
     #[test]

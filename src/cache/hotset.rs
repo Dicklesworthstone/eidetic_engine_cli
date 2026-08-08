@@ -2193,6 +2193,327 @@ impl HotsetManifest {
     }
 }
 
+// ============================================================================
+// bd-ty3pl.2: hotset collection domain layer (pure)
+// ============================================================================
+//
+// This section stays inside the module's "no reads" posture: it defines the
+// per-source posture records, degraded-code vocabulary, overlap math, and the
+// deterministic `ee.cache.hotset_collect.v1` manifest assembly. The actual
+// bounded read-only probes (git workspace hygiene, the Beads tracker export,
+// the BV actionable frontier, Agent Mail and source-authority snapshots, and
+// the persisted retrieval-provenance manifest) live in the CLI orchestration
+// seam, which may depend downward on both `core::source_run` and this module
+// — `core::context` already depends on `cache::hotset`, so importing core
+// from here would create a core<->cache dependency cycle. A source that is
+// unavailable, stale, or mismatched is represented by an explicit
+// [`HotsetSourceRecord`] with a stable degraded code and repair guidance,
+// and contributes zero signals rather than fabricated data. No raw
+// coordination text, mail bodies, memory content, or home paths appear in
+// the manifest output — signals feed the hashed-key prewarm planner only.
+
+/// Data schema for the collected hotset manifest emitted by
+/// `ee cache hotset-manifest`.
+pub const HOTSET_COLLECT_SCHEMA: &str = "ee.cache.hotset_collect.v1";
+
+/// The Beads JSONL export is missing or unreadable.
+pub const HOTSET_BEADS_UNAVAILABLE_CODE: &str = "hotset_beads_unavailable";
+/// The Beads JSONL export has unparseable rows (concurrent flush suspected).
+pub const HOTSET_BEADS_STALE_CODE: &str = "hotset_beads_stale";
+/// The BV binary could not be spawned or exited nonzero.
+pub const HOTSET_BV_UNAVAILABLE_CODE: &str = "hotset_bv_unavailable";
+/// The BV probe exceeded its watchdog deadline.
+pub const HOTSET_BV_TIMEOUT_CODE: &str = "hotset_bv_timeout";
+/// The BV probe succeeded but produced empty or unusable robot output.
+pub const HOTSET_BV_NO_OUTPUT_CODE: &str = "hotset_bv_no_output";
+/// No Agent Mail snapshot was readable at the resolved path.
+pub const HOTSET_AGENT_MAIL_UNAVAILABLE_CODE: &str = "hotset_agent_mail_unavailable";
+/// The Agent Mail snapshot's archive and database message counts diverge.
+pub const HOTSET_AGENT_MAIL_ARCHIVE_MISMATCH_CODE: &str = "hotset_agent_mail_archive_mismatch";
+/// The git status probe could not run or exited nonzero.
+pub const HOTSET_GIT_UNAVAILABLE_CODE: &str = "hotset_git_unavailable";
+/// The git status probe exceeded its watchdog deadline.
+pub const HOTSET_GIT_TIMEOUT_CODE: &str = "hotset_git_timeout";
+/// No source-authority snapshot was readable at the resolved path.
+pub const HOTSET_SOURCE_AUTHORITY_MISSING_CODE: &str = "hotset_source_authority_missing";
+/// Recent pack/search provenance has no bounded in-process reader yet.
+pub const HOTSET_RETRIEVAL_PROVENANCE_UNAVAILABLE_CODE: &str =
+    "hotset_retrieval_provenance_unavailable";
+/// Git-dirty paths overlap Agent Mail reservations; ranking confidence drops.
+pub const HOTSET_DIRTY_OVERLAP_CODE: &str = "hotset_dirty_overlap";
+
+/// Posture of one evidence source after a bounded collection attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HotsetSourceStatus {
+    Fresh,
+    Stale,
+    Unavailable,
+    TimedOut,
+}
+
+impl HotsetSourceStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Stale => "stale",
+            Self::Unavailable => "unavailable",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
+/// Per-source collection record: posture, signal count, evidence hash, and —
+/// when the source degraded — a stable code plus repair guidance. Messages
+/// are static or count-only; no raw coordination text is stored.
+#[derive(Clone, Debug)]
+pub struct HotsetSourceRecord {
+    source: &'static str,
+    status: HotsetSourceStatus,
+    signal_count: usize,
+    source_hash: Option<String>,
+    degraded_code: Option<&'static str>,
+    message: String,
+    repair: Option<String>,
+}
+
+impl HotsetSourceRecord {
+    /// Record a source that produced `signal_count` signals from bounded
+    /// evidence with the given content hash.
+    #[must_use]
+    pub fn fresh(source: &'static str, signal_count: usize, source_hash: Option<String>) -> Self {
+        Self {
+            source,
+            status: HotsetSourceStatus::Fresh,
+            signal_count,
+            source_hash,
+            degraded_code: None,
+            message: format!("collected {signal_count} signal(s) from bounded read-only evidence"),
+            repair: None,
+        }
+    }
+
+    /// Record a source that degraded: it contributes zero signals and carries
+    /// a stable degraded code plus repair guidance instead.
+    #[must_use]
+    pub fn degraded(
+        source: &'static str,
+        status: HotsetSourceStatus,
+        code: &'static str,
+        message: impl Into<String>,
+        repair: impl Into<String>,
+    ) -> Self {
+        Self {
+            source,
+            status,
+            signal_count: 0,
+            source_hash: None,
+            degraded_code: Some(code),
+            message: message.into(),
+            repair: Some(repair.into()),
+        }
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> HotsetSourceStatus {
+        self.status
+    }
+
+    #[must_use]
+    pub const fn degraded_code(&self) -> Option<&'static str> {
+        self.degraded_code
+    }
+
+    #[must_use]
+    pub const fn source(&self) -> &'static str {
+        self.source
+    }
+
+    fn severity(&self) -> &'static str {
+        match self.status {
+            HotsetSourceStatus::Fresh => "info",
+            HotsetSourceStatus::Stale | HotsetSourceStatus::TimedOut => "medium",
+            HotsetSourceStatus::Unavailable => "low",
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "source": self.source,
+            "status": self.status.as_str(),
+            "signalCount": self.signal_count,
+            "sourceHash": self.source_hash,
+            "degradedCode": self.degraded_code,
+            "message": self.message,
+            "repair": self.repair,
+        })
+    }
+}
+
+/// Result of one bounded read-only collection pass, assembled by the CLI
+/// orchestration seam from per-source collector outputs.
+#[derive(Clone, Debug)]
+pub struct HotsetCollection {
+    signals: Vec<PrewarmSignal>,
+    sources: Vec<HotsetSourceRecord>,
+    dirty_overlap_path_hashes: Vec<String>,
+    retrieval_provenance: Option<Value>,
+}
+
+impl HotsetCollection {
+    /// Assemble a collection from collector outputs. `retrieval_provenance`
+    /// carries the hashed reference block for the persisted
+    /// `ee.cache.hotset.v1` manifest when one was readable (counts and
+    /// hashes only, never entry content).
+    #[must_use]
+    pub fn from_parts(
+        signals: Vec<PrewarmSignal>,
+        sources: Vec<HotsetSourceRecord>,
+        dirty_overlap_path_hashes: Vec<String>,
+        retrieval_provenance: Option<Value>,
+    ) -> Self {
+        Self {
+            signals,
+            sources,
+            dirty_overlap_path_hashes,
+            retrieval_provenance,
+        }
+    }
+
+    #[must_use]
+    pub fn signals(&self) -> &[PrewarmSignal] {
+        &self.signals
+    }
+
+    #[must_use]
+    pub fn sources(&self) -> &[HotsetSourceRecord] {
+        &self.sources
+    }
+
+    #[must_use]
+    pub fn dirty_overlap_path_hashes(&self) -> &[String] {
+        &self.dirty_overlap_path_hashes
+    }
+
+    /// Degradations to surface in the response envelope:
+    /// `(code, severity, message, repair)` in deterministic source order,
+    /// with the cross-source dirty-overlap entry last.
+    #[must_use]
+    pub fn degradations(&self) -> Vec<(&'static str, &'static str, String, Option<String>)> {
+        let mut out = Vec::new();
+        for record in &self.sources {
+            if let Some(code) = record.degraded_code {
+                out.push((
+                    code,
+                    record.severity(),
+                    record.message.clone(),
+                    record.repair.clone(),
+                ));
+            }
+        }
+        if !self.dirty_overlap_path_hashes.is_empty() {
+            out.push((
+                HOTSET_DIRTY_OVERLAP_CODE,
+                "medium",
+                format!(
+                    "{} git-dirty path(s) overlap Agent Mail reservations; hotset ranking \
+                     confidence is reduced for contested paths",
+                    self.dirty_overlap_path_hashes.len()
+                ),
+                Some(
+                    "Commit or hand off the contested paths, or re-collect after the \
+                     reservation is released."
+                        .to_owned(),
+                ),
+            ));
+        }
+        out
+    }
+
+    /// Deterministic `ee.cache.hotset_collect.v1` manifest: per-source
+    /// posture records plus the hashed-key prewarm plan derived from the
+    /// collected signals. Identical source bytes produce byte-identical JSON
+    /// (no clocks, no randomness; ordering is fixed).
+    #[must_use]
+    pub fn manifest_json(
+        &self,
+        generation: u64,
+        budget: HotsetBudget,
+        max_candidates: usize,
+    ) -> Value {
+        let plan = plan_context_hotset_prewarm(
+            self.signals.iter().cloned(),
+            generation,
+            budget,
+            max_candidates,
+        );
+        json!({
+            "schema": HOTSET_COLLECT_SCHEMA,
+            "redactionStatus": PREWARM_REDACTION_STATUS,
+            "sources": self.sources.iter().map(HotsetSourceRecord::to_json).collect::<Vec<_>>(),
+            "dirtyOverlap": {
+                "count": self.dirty_overlap_path_hashes.len(),
+                "pathHashes": &self.dirty_overlap_path_hashes,
+            },
+            "retrievalProvenance": self.retrieval_provenance,
+            "plan": plan.to_json(),
+            "degraded": self
+                .degradations()
+                .into_iter()
+                .map(|(code, severity, message, repair)| {
+                    json!({
+                        "code": code,
+                        "severity": severity,
+                        "message": message,
+                        "repair": repair,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// Hash the git-dirty paths that fall inside Agent Mail reservation stems.
+/// Pure: emits sorted blake3 hashes only, never raw paths.
+#[must_use]
+pub fn dirty_overlap_hashes(
+    dirty_paths: &BTreeSet<String>,
+    reserved_paths: &BTreeSet<String>,
+) -> Vec<String> {
+    let reserved_stems: Vec<String> = reserved_paths
+        .iter()
+        .map(|reserved| normalize_reserved_path(reserved))
+        .filter(|stem| !stem.is_empty())
+        .collect();
+    let mut hashes: Vec<String> = dirty_paths
+        .iter()
+        .filter(|dirty| {
+            reserved_stems
+                .iter()
+                .any(|stem| dirty.as_str() == stem || dirty.starts_with(&format!("{stem}/")))
+        })
+        .map(|path| {
+            format!(
+                "blake3:{}",
+                blake3::hash(format!("hotset_overlap:{path}").as_bytes()).to_hex()
+            )
+        })
+        .collect();
+    hashes.sort();
+    hashes.dedup();
+    hashes
+}
+
+fn normalize_reserved_path(reserved: &str) -> String {
+    reserved
+        .trim()
+        .trim_end_matches("/**")
+        .trim_end_matches("/*")
+        .trim_end_matches('*')
+        .trim_end_matches('/')
+        .to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

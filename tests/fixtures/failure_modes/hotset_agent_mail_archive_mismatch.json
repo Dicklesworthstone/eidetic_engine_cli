@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "hotset_agent_mail_archive_mismatch",
+  "introduced_by": {
+    "bead": "bd-ty3pl.2",
+    "epic_letter": "T"
+  },
+  "surfaces": [
+    "cache"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The Agent Mail snapshot's archiveMessageCount and databaseMessageCount diverge, indicating archive/database drift; the collector abstains from mail signals.",
+    "setup_commands": [
+      "write a snapshot with archiveMessageCount != databaseMessageCount"
+    ],
+    "invocation": "ee cache hotset-manifest --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "hotset_agent_mail_archive_mismatch",
+    "severity": "medium",
+    "message_contains": [
+      "archive/database message counts diverge"
+    ]
+  }
+}

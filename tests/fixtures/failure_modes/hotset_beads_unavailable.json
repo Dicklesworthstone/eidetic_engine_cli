@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "hotset_beads_unavailable",
+  "introduced_by": {
+    "bead": "bd-ty3pl.2",
+    "epic_letter": "T"
+  },
+  "surfaces": [
+    "cache"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "Beads JSONL export is missing, unreadable, or over the bounded-read cap; the collector abstains from tracker signals.",
+    "setup_commands": [
+      "rm -f <workspace>/.beads/issues.jsonl"
+    ],
+    "invocation": "ee cache hotset-manifest --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "hotset_beads_unavailable",
+    "severity": "low",
+    "message_contains": [
+      "Beads JSONL export"
+    ]
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "hotset_git_timeout",
+  "introduced_by": {
+    "bead": "bd-ty3pl.2",
+    "epic_letter": "T"
+  },
+  "surfaces": [
+    "cache"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The bounded git status probe exceeds the per-probe watchdog deadline.",
+    "setup_commands": [
+      "ee cache hotset-manifest --probe-timeout-ms 50 --git-program <slow-git> --json"
+    ],
+    "invocation": "ee cache hotset-manifest --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "hotset_git_timeout",
+    "severity": "medium",
+    "message_contains": [
+      "git status probe exceeded the"
+    ]
+  }
+}

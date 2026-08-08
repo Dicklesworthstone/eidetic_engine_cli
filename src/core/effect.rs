@@ -1227,6 +1227,10 @@ impl EffectManifest {
             ),
             CommandEffect::read_only("capabilities", "Report feature availability"),
             CommandEffect::read_only(
+                "cache hotset-manifest",
+                "Collect a read-only hotset manifest from bounded coordination evidence",
+            ),
+            CommandEffect::read_only(
                 "cache prewarm",
                 "Plan explicit cache prewarm admission from a hotset manifest",
             ),

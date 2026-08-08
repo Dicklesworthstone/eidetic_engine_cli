@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "hotset_retrieval_provenance_unavailable",
+  "introduced_by": {
+    "bead": "bd-ty3pl.2",
+    "epic_letter": "T"
+  },
+  "surfaces": [
+    "cache"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "Recent pack/search provenance has no bounded in-process reader in the current collector slice; the manifest discloses the abstention.",
+    "setup_commands": [
+      "ee cache hotset-manifest --json"
+    ],
+    "invocation": "ee cache hotset-manifest --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "hotset_retrieval_provenance_unavailable",
+    "severity": "low",
+    "message_contains": [
+      "no bounded in-process reader"
+    ]
+  }
+}
