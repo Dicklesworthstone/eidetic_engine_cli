@@ -6,7 +6,7 @@
 //! and must be both round-trippable through JSON and stable across
 //! tool versions.
 //!
-//! Thirty-two schemes are recognised in v1:
+//! Thirty-three schemes are recognised in v1:
 //!
 //! | Scheme            | Body shape                                          |
 //! |-------------------|-----------------------------------------------------|
@@ -20,6 +20,7 @@
 //! | `git-sha://`      | Opaque commit/revision identifier                   |
 //! | `flamegraph://`   | Opaque profiler artifact reference                  |
 //! | `ee-reflect://`   | Opaque reflection request/result identifier         |
+//! | `journal://`      | A `jrn_`-prefixed UUIDv7 journal entry id           |
 //! | `sec-filing://` `earnings-call://` `analyst-note://` | Opaque investment evidence |
 //! | `case://` `pacer://` `westlaw://` | Opaque legal evidence       |
 //! | `ga4://` `mixpanel://` `campaign://` | Opaque marketing evidence |
@@ -47,7 +48,7 @@ use std::str::FromStr;
 
 use super::id::{MemoryId, ParseIdError};
 
-const ACCEPTED_PROVENANCE_SCHEMES: &str = "cass-session, file, ee-mem, http, https, agent-mail, manual, bench-run, git-sha, flamegraph, ee-reflect, sec-filing, earnings-call, analyst-note, case, pacer, westlaw, ga4, mixpanel, campaign, interview, linear, notion, cve, mitre, incident, pubmed, guideline, emr, crm, salesforce, gong";
+const ACCEPTED_PROVENANCE_SCHEMES: &str = "cass-session, file, ee-mem, http, https, agent-mail, manual, bench-run, git-sha, flamegraph, ee-reflect, journal, sec-filing, earnings-call, analyst-note, case, pacer, westlaw, ga4, mixpanel, campaign, interview, linear, notion, cve, mitre, incident, pubmed, guideline, emr, crm, salesforce, gong";
 
 const REGISTERED_EXTERNAL_SCHEMES: &[&str] = &[
     "manual",
@@ -55,6 +56,7 @@ const REGISTERED_EXTERNAL_SCHEMES: &[&str] = &[
     "git-sha",
     "flamegraph",
     "ee-reflect",
+    "journal",
     "sec-filing",
     "earnings-call",
     "analyst-note",
@@ -250,6 +252,7 @@ impl FromStr for ProvenanceUri {
             "ee-mem" => parse_ee_memory(input, body),
             "http" | "https" => parse_web(input, &scheme, body),
             "agent-mail" => parse_agent_mail(input, body),
+            "journal" => parse_journal(input, body),
             external_scheme if is_registered_external_scheme(external_scheme) => {
                 parse_external(input, &scheme, body)
             }
@@ -259,6 +262,20 @@ impl FromStr for ProvenanceUri {
             }),
         }
     }
+}
+
+fn parse_journal(input: &str, body: &str) -> Result<ProvenanceUri, ProvenanceUriError> {
+    let uuid = body
+        .strip_prefix("jrn_")
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .filter(|value| value.get_version_num() == 7)
+        .ok_or_else(|| ProvenanceUriError::InvalidJournalId {
+            input: input.to_owned(),
+        })?;
+    Ok(ProvenanceUri::External {
+        scheme: "journal".to_owned(),
+        body: format!("jrn_{uuid}"),
+    })
 }
 
 fn parse_cass_session(input: &str, body: &str) -> Result<ProvenanceUri, ProvenanceUriError> {
@@ -468,6 +485,7 @@ pub enum ProvenanceUriError {
     EmptyBody { input: String, scheme: &'static str },
     InvalidWebBody { input: String },
     InvalidAgentMail { input: String },
+    InvalidJournalId { input: String },
     InvalidExternalBody { input: String },
     InvalidFragment { input: String, fragment: String },
     ZeroLineNumber,
@@ -498,6 +516,10 @@ impl fmt::Display for ProvenanceUriError {
             Self::InvalidAgentMail { input } => write!(
                 formatter,
                 "agent-mail URI `{input}` must be `agent-mail://<thread>` or `agent-mail://<thread>/<message>`"
+            ),
+            Self::InvalidJournalId { input } => write!(
+                formatter,
+                "journal provenance URI `{input}` must be `journal://jrn_<uuidv7>`"
             ),
             Self::InvalidExternalBody { input } => write!(
                 formatter,
@@ -789,6 +811,7 @@ mod tests {
             "git-sha://9af3c21-pre-revert",
             "flamegraph://artifacts/9af3c21/cpu-prof.svg",
             "ee-reflect://reflect_req_0123456789abcdef",
+            "journal://jrn_018ff8dc-3d85-7cc0-a6fd-a2d479e6d401",
         ] {
             let parsed = must_parse(input);
             match &parsed {
@@ -844,6 +867,21 @@ mod tests {
     }
 
     #[test]
+    fn journal_provenance_requires_prefixed_uuidv7() {
+        for input in [
+            "journal://018ff8dc-3d85-7cc0-a6fd-a2d479e6d401",
+            "journal://jrn_550e8400-e29b-41d4-a716-446655440000",
+            "journal://jrn_not-a-uuid",
+        ] {
+            let error = must_fail(input);
+            assert!(
+                matches!(error, ProvenanceUriError::InvalidJournalId { .. }),
+                "expected InvalidJournalId for `{input}`, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
     fn external_evidence_rejects_empty_or_control_body() {
         for (input, expected_scheme) in [
             ("manual://", "manual"),
@@ -851,6 +889,7 @@ mod tests {
             ("git-sha://", "git-sha"),
             ("flamegraph://", "flamegraph"),
             ("ee-reflect://", "ee-reflect"),
+            ("journal://", "journal"),
             ("sec-filing://", "sec-filing"),
             ("pubmed://", "pubmed"),
             ("crm://", "crm"),
@@ -910,6 +949,7 @@ mod tests {
             ("git-sha://", "git-sha"),
             ("flamegraph://", "flamegraph"),
             ("ee-reflect://", "ee-reflect"),
+            ("journal://", "journal"),
         ] {
             let err = must_fail(input);
             match err {
@@ -982,6 +1022,10 @@ mod tests {
         assert_eq!(
             must_parse("ee-reflect://reflect_req_abcdef").scheme(),
             "ee-reflect"
+        );
+        assert_eq!(
+            must_parse("journal://jrn_018ff8dc-3d85-7cc0-a6fd-a2d479e6d401").scheme(),
+            "journal"
         );
         assert_eq!(
             must_parse("sec-filing://AAPL/10-K/2026").scheme(),

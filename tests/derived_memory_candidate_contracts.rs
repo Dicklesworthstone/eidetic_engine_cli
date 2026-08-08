@@ -232,6 +232,7 @@ fn provenance_uri_accepts_registered_schemes() -> TestResult {
         "git-sha://9af3c21-pre-revert",
         "flamegraph://artifacts/9af3c21/cpu-prof.svg",
         "ee-reflect://reflect_req_0123456789abcdef",
+        "journal://jrn_018ff8dc-3d85-7cc0-a6fd-a2d479e6d401",
         "sec-filing://AAPL/10-K/2026",
         "earnings-call://AAPL/2026-Q1",
         "analyst-note://firm/report-123",
