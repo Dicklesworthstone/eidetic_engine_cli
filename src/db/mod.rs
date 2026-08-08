@@ -19051,6 +19051,74 @@ impl DbConnection {
             .transpose()
     }
 
+    /// Overwrite an attempt family's origin marker. Restore-path fidelity
+    /// only: re-imported `legacy_v094` families keep their forensic origin
+    /// instead of being relabeled as ledger-native declarations.
+    pub fn set_attempt_family_origin(
+        &self,
+        workspace_id: &str,
+        family_id: &str,
+        origin: &str,
+    ) -> Result<bool> {
+        if !matches!(origin, "declared" | "legacy_v094") {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!(
+                    "attempt family origin must be `declared` or `legacy_v094`, got `{origin}`"
+                ),
+            });
+        }
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE attempt_families SET origin = ?1 \
+             WHERE workspace_id = ?2 AND family_id = ?3",
+            &[
+                Value::Text(origin.to_string()),
+                Value::Text(workspace_id.to_string()),
+                Value::Text(family_id.to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// The revision-stable key the attempt-family ledger uses for a memory
+    /// row: `logical_id` when present, else the row id (pre-V043 rows).
+    pub fn get_memory_attempt_ledger_key(&self, id: &str) -> Result<Option<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT COALESCE(logical_id, id) FROM memories \
+             WHERE id = ?1 ORDER BY id ASC LIMIT 1",
+            &[Value::Text(id.to_string())],
+        )?;
+        rows.first()
+            .map(|row| required_text(row, 0, DbOperation::Query, "logical_id").map(str::to_string))
+            .transpose()
+    }
+
+    /// Family ids holding append-only ledger membership for a memory's
+    /// logical identity, in deterministic order. The ledger is authoritative:
+    /// wiping a row's denormalized pointer columns must never make its family
+    /// membership invisible to the promotion gate.
+    pub fn attempt_family_ids_for_memory_logical(
+        &self,
+        workspace_id: &str,
+        ledger_key: &str,
+    ) -> Result<Vec<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT DISTINCT family_id FROM attempt_family_members \
+             WHERE workspace_id = ?1 AND memory_logical_id = ?2 \
+             ORDER BY family_id ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(ledger_key.to_string()),
+            ],
+        )?;
+        rows.iter()
+            .map(|row| required_text(row, 0, DbOperation::Query, "family_id").map(str::to_string))
+            .collect()
+    }
+
     /// Carry the V094 attempt-family pointer columns from a source revision
     /// row to its replacement (bd-multiplicity-aware-trust-p0u7g). The
     /// authoritative slot/disposition ledger is keyed by the revision

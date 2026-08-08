@@ -1660,16 +1660,45 @@ fn promotion_ineligible_attempt_family_multiplicity(
     workspace_id: &str,
     memory_id: &str,
 ) -> crate::db::Result<Option<AttemptFamilyMultiplicity>> {
-    let Some(family) = connection.get_memory_attempt_family(memory_id)? else {
+    if let Some(family) = connection.get_memory_attempt_family(memory_id)? {
+        let multiplicity = attempt_family_multiplicity_for(
+            connection,
+            workspace_id,
+            &family.family_id,
+            family.declared_size,
+        )?;
+        return Ok((!multiplicity.is_promotion_eligible()).then_some(multiplicity));
+    }
+    // No pointer on the row. The append-only ledger stays authoritative: a
+    // wiped or never-carried pointer must not make membership invisible to
+    // the gate, so fall back to ledger membership by logical identity and
+    // block on the first non-eligible family found (deterministic order).
+    let Some(ledger_key) = connection.get_memory_attempt_ledger_key(memory_id)? else {
         return Ok(None);
     };
-    let members = connection.list_memory_attempt_family(workspace_id, &family.family_id)?;
-    let declaration = connection.get_attempt_family_declaration(workspace_id, &family.family_id)?;
+    for family_id in connection.attempt_family_ids_for_memory_logical(workspace_id, &ledger_key)? {
+        let multiplicity =
+            attempt_family_multiplicity_for(connection, workspace_id, &family_id, None)?;
+        if !multiplicity.is_promotion_eligible() {
+            return Ok(Some(multiplicity));
+        }
+    }
+    Ok(None)
+}
+
+fn attempt_family_multiplicity_for(
+    connection: &DbConnection,
+    workspace_id: &str,
+    family_id: &str,
+    pointer_declared_size: Option<u32>,
+) -> crate::db::Result<AttemptFamilyMultiplicity> {
+    let members = connection.list_memory_attempt_family(workspace_id, family_id)?;
+    let declaration = connection.get_attempt_family_declaration(workspace_id, family_id)?;
     let declared_size = declaration
         .and_then(|(declared, _origin)| declared)
-        .or(family.declared_size);
-    let multiplicity = AttemptFamilyMultiplicity::from_members(
-        family.family_id,
+        .or(pointer_declared_size);
+    Ok(AttemptFamilyMultiplicity::from_members(
+        family_id.to_owned(),
         declared_size,
         members.iter().map(|member| {
             (
@@ -1677,8 +1706,7 @@ fn promotion_ineligible_attempt_family_multiplicity(
                 Some(member.disposition.as_str()),
             )
         }),
-    );
-    Ok((!multiplicity.is_promotion_eligible()).then_some(multiplicity))
+    ))
 }
 
 fn memory_trust_class_promotion_blocked_audit_details(

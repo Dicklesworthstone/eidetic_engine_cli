@@ -709,6 +709,10 @@ struct BackupExportData {
     links: Vec<StoredMemoryLink>,
     audits: Vec<StoredAuditEntry>,
     graph_fields_by_memory: BTreeMap<String, BackupMemoryGraphFields>,
+    /// bd-multiplicity-aware-trust-p0u7g: per-memory attempt-family block
+    /// (pointer + own ledger slot + family origin) so restore can rebuild
+    /// the family ledger without inference.
+    attempt_families_by_memory: BTreeMap<String, crate::models::ExportAttemptFamilyRecord>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -2625,6 +2629,35 @@ fn load_export_data(
                 })?;
         tags_by_memory.insert(memory.id.clone(), tags);
     }
+    let mut attempt_families_by_memory = BTreeMap::new();
+    for memory in &memories {
+        let family = connection
+            .get_memory_attempt_family(&memory.id)
+            .map_err(|error| DomainError::Storage {
+                message: error.to_string(),
+                repair: Some("ee db check --workspace .".to_owned()),
+            })?;
+        let Some(family) = family else {
+            continue;
+        };
+        let origin = connection
+            .get_attempt_family_declaration(&workspace.id, &family.family_id)
+            .map_err(|error| DomainError::Storage {
+                message: error.to_string(),
+                repair: Some("ee db check --workspace .".to_owned()),
+            })?
+            .map(|(_declared, origin)| origin);
+        attempt_families_by_memory.insert(
+            memory.id.clone(),
+            crate::models::ExportAttemptFamilyRecord {
+                family_id: family.family_id,
+                declared_size: family.declared_size,
+                attempt_index: family.attempt_index,
+                disposition: family.disposition,
+                origin,
+            },
+        );
+    }
     let links = connection
         .list_all_memory_links(None)
         .map_err(|error| DomainError::Storage {
@@ -2666,6 +2699,7 @@ fn load_export_data(
         links,
         audits,
         graph_fields_by_memory,
+        attempt_families_by_memory,
     })
 }
 
@@ -2708,6 +2742,7 @@ fn render_records(
                         memory,
                         tombstone_reasons.get(&memory.id).map(String::as_str),
                         data.graph_fields_by_memory.get(&memory.id),
+                        data.attempt_families_by_memory.get(&memory.id),
                     )
                     .map_err(export_build_error("build backup memory record"))?,
                 )
@@ -2785,6 +2820,7 @@ fn memory_record(
     memory: &StoredMemory,
     tombstoned_reason: Option<&str>,
     graph_fields: Option<&BackupMemoryGraphFields>,
+    attempt_family: Option<&crate::models::ExportAttemptFamilyRecord>,
 ) -> Result<ExportMemoryRecord, ExportRecordBuildError> {
     let mut builder = ExportMemoryRecord::builder()
         .memory_id(memory.id.clone())
@@ -2821,6 +2857,9 @@ fn memory_record(
     }
     if let Some(fields) = graph_fields {
         builder = apply_backup_memory_graph_fields(builder, fields);
+    }
+    if let Some(family) = attempt_family {
+        builder = builder.attempt_family(family.clone());
     }
     builder.build()
 }
@@ -5000,6 +5039,7 @@ mod tests {
             },
             Some("outdated rule"),
             None,
+            None,
         )
         .map_err(|error| error.to_string())?;
 
@@ -5030,6 +5070,59 @@ mod tests {
         )
     }
 
+    /// bd-multiplicity-aware-trust-p0u7g: the exported memory record must
+    /// carry the full attempt-family block (pointer + slot + disposition +
+    /// origin) and a family-less memory must serialize without the key, so
+    /// restore can rebuild the ledger without inference and old backups stay
+    /// byte-compatible.
+    #[test]
+    fn memory_record_preserves_attempt_family_block() -> TestResult {
+        let family = crate::models::ExportAttemptFamilyRecord {
+            family_id: "fam-backup-a".to_owned(),
+            declared_size: Some(18),
+            attempt_index: Some(1),
+            disposition: Some("selected".to_owned()),
+            origin: Some("declared".to_owned()),
+        };
+        let record = memory_record(
+            &stored_memory_fixture("mem_00000000000000000000000002"),
+            None,
+            None,
+            Some(&family),
+        )
+        .map_err(|error| error.to_string())?;
+        let exported = record
+            .attempt_family
+            .as_ref()
+            .ok_or_else(|| "attempt family block missing from export record".to_string())?;
+        ensure_equal(exported, &family, "attempt family block round-trips")?;
+        let line = serde_json::to_string(&record).map_err(|error| error.to_string())?;
+        ensure(
+            line.contains("\"attempt_family\"") && line.contains("fam-backup-a"),
+            "serialized record must carry the attempt_family key",
+        )?;
+        let reparsed: crate::models::ExportMemoryRecord =
+            serde_json::from_str(&line).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &reparsed.attempt_family,
+            &Some(family),
+            "attempt family survives serde round-trip",
+        )?;
+
+        let without = memory_record(
+            &stored_memory_fixture("mem_00000000000000000000000003"),
+            None,
+            None,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        let plain_line = serde_json::to_string(&without).map_err(|error| error.to_string())?;
+        ensure(
+            !plain_line.contains("attempt_family"),
+            "family-less memories serialize without the attempt_family key",
+        )
+    }
+
     #[test]
     fn memory_record_preserves_export_graph_fields() -> TestResult {
         let record = memory_record(
@@ -5046,6 +5139,7 @@ mod tests {
                 bayes_alpha: Some(2.5),
                 bayes_beta: Some(1.5),
             }),
+            None,
         )
         .map_err(|error| error.to_string())?;
 

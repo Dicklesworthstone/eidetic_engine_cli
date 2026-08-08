@@ -938,6 +938,25 @@ impl ExportFooterBuilder {
     }
 }
 
+/// Attempt-family multiplicity block on an exported memory
+/// (bd-multiplicity-aware-trust-p0u7g): the family pointer plus this
+/// memory's own ledger slot/disposition, so backup restore can rebuild both
+/// the pointer columns and the attempt-family ledger without inferring
+/// anything. `origin` preserves whether the declaration was ledger-native
+/// (`declared`) or seeded from the pre-ledger V094 columns (`legacy_v094`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportAttemptFamilyRecord {
+    pub family_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_size: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+}
+
 /// Export memory record.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExportMemoryRecord {
@@ -987,6 +1006,8 @@ pub struct ExportMemoryRecord {
     pub supersedes: Option<String>,
     pub redacted: bool,
     pub redaction_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_family: Option<ExportAttemptFamilyRecord>,
 }
 
 impl ExportMemoryRecord {
@@ -1031,6 +1052,7 @@ pub struct ExportMemoryRecordBuilder {
     supersedes: Option<String>,
     redacted: bool,
     redaction_reason: Option<String>,
+    attempt_family: Option<ExportAttemptFamilyRecord>,
 }
 
 impl ExportMemoryRecordBuilder {
@@ -1232,6 +1254,12 @@ impl ExportMemoryRecordBuilder {
         self
     }
 
+    #[must_use]
+    pub fn attempt_family(mut self, attempt_family: ExportAttemptFamilyRecord) -> Self {
+        self.attempt_family = Some(attempt_family);
+        self
+    }
+
     /// Build the memory export record.
     ///
     /// # Errors
@@ -1277,6 +1305,7 @@ impl ExportMemoryRecordBuilder {
             supersedes: self.supersedes,
             redacted: self.redacted,
             redaction_reason: self.redaction_reason,
+            attempt_family: self.attempt_family,
         })
     }
 }

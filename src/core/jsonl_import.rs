@@ -547,6 +547,9 @@ struct PreparedMemory {
     tombstoned_at: Option<String>,
     tombstoned_reason: Option<String>,
     bayes_posterior: Option<(f64, f64)>,
+    /// bd-multiplicity-aware-trust-p0u7g: attempt-family block restored into
+    /// the pointer columns and the family ledger after the memory row lands.
+    attempt_family: Option<crate::models::ExportAttemptFamilyRecord>,
     details: String,
     tag_count: u32,
 }
@@ -616,6 +619,28 @@ pub fn import_jsonl_records(
             connection.insert_memory(&memory.id, &memory.input)?;
             if let Some((alpha, beta)) = memory.bayes_posterior {
                 connection.update_memory_bayes_posterior(&memory.id, alpha, beta)?;
+            }
+            // bd-multiplicity-aware-trust-p0u7g: rebuild the family pointer
+            // and the attempt-family ledger from the exported block; the
+            // ledger keys to the restored row's own logical identity, and the
+            // exported origin is preserved for legacy_v094 forensics.
+            if let Some(family) = &memory.attempt_family {
+                connection.set_memory_attempt_family(
+                    &memory.id,
+                    &crate::db::MemoryAttemptFamily {
+                        family_id: family.family_id.clone(),
+                        declared_size: family.declared_size,
+                        attempt_index: family.attempt_index,
+                        disposition: family.disposition.clone(),
+                    },
+                )?;
+                if let Some(origin) = family.origin.as_deref() {
+                    connection.set_attempt_family_origin(
+                        &memory.input.workspace_id,
+                        &family.family_id,
+                        origin,
+                    )?;
+                }
             }
             if let Some(tombstoned_at) = memory.tombstoned_at.as_deref() {
                 connection.restore_imported_memory_tombstone(&memory.id, tombstoned_at)?;
@@ -1273,6 +1298,7 @@ fn prepare_memory(
         tombstoned_at: memory.tombstoned_at.clone(),
         tombstoned_reason: memory.tombstoned_reason.clone(),
         bayes_posterior,
+        attempt_family: memory.attempt_family.clone(),
         details: json!({
             "schema": IMPORT_JSONL_SCHEMA_V1,
             "sourceMemoryId": memory.memory_id,
