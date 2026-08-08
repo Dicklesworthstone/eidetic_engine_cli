@@ -23,8 +23,8 @@ use ee::mesh::foreground_cli::{
     MeshStorageCounts,
 };
 use ee::mesh::lane_grant::{
-    APPROVAL_TOKEN_PREFIX, APPROVAL_TOKEN_TTL_SECONDS, ApprovalPurpose, compare_snapshot, issue,
-    verify_authentic,
+    APPROVAL_TOKEN_PREFIX, APPROVAL_TOKEN_TTL_SECONDS, ApprovalPurpose, ApprovalTokenError,
+    compare_snapshot, issue, verify_authentic,
 };
 use ee::mesh::peer::build_peer_origin_node_id;
 use ee::policy::store_auth::{StoreAuthRoot, workspace_keys_dir};
@@ -2810,6 +2810,44 @@ fn body_grant_pins_and_releases_hash_bound_metadata_body_fields() -> TestResult 
         "metadata-body approval preview",
     )?;
     let baseline_preview = preview_payload(&ordinary_json, "body approval rejection baseline")?;
+    let canonical_body_preview =
+        canonical_preview_bytes(&ordinary_json, "body-lane approval domain check")?;
+
+    let keys_dir = workspace_keys_dir(Path::new(&fixture.workspace));
+    let root = StoreAuthRoot::open(&keys_dir)
+        .map_err(|error| format!("open body-lane approval store root: {error}"))?;
+    let approval_now = chrono::Utc::now().timestamp();
+    let lane_authenticated = verify_authentic(
+        &root,
+        ApprovalPurpose::Lane,
+        &fixture.workspace_id,
+        GRANT_SCHEMA,
+        &prior_key_bearer,
+        approval_now,
+    )
+    .map_err(|error| format!("authenticate body-lane bearer in lane domain: {error}"))?;
+    compare_snapshot(
+        &root,
+        &lane_authenticated,
+        &canonical_body_preview,
+        approval_now,
+    )
+    .map_err(|error| format!("verify body-lane snapshot in lane domain: {error}"))?;
+    ensure(
+        matches!(
+            verify_authentic(
+                &root,
+                ApprovalPurpose::Body,
+                &fixture.workspace_id,
+                GRANT_SCHEMA,
+                &prior_key_bearer,
+                approval_now,
+            ),
+            Err(ApprovalTokenError::Invalid)
+        ),
+        "body-lane approval bearer must not authenticate in the T5.9 body-sharing domain",
+    )?;
+    drop(root);
 
     let tampered_bearer = tamper_approval_bearer(&prior_key_bearer)?;
     let tampered = run_ee_with_stdin(
@@ -2855,7 +2893,6 @@ fn body_grant_pins_and_releases_hash_bound_metadata_body_fields() -> TestResult 
         "tampered body approval must append no grant audit",
     )?;
 
-    let keys_dir = workspace_keys_dir(Path::new(&fixture.workspace));
     let mut root = StoreAuthRoot::open(&keys_dir)
         .map_err(|error| format!("open body-approval store root for rotation: {error}"))?;
     let prior_key_id = root.current_key_id();

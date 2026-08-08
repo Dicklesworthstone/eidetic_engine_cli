@@ -79,9 +79,9 @@ const AUDIT_ID_PREFIX: &str = "eela1_";
 /// changes all three derived subkeys and makes the envelope invalid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApprovalPurpose {
-    /// Metadata, embedding, graph-link, revision-notice, or curation consent.
+    /// T1.4 material-lane consent, including the lane named `Body`.
     Lane,
-    /// Unredacted body exposure consent.
+    /// T5.9 unredacted body-sharing consent, not a material-lane grant.
     Body,
 }
 
