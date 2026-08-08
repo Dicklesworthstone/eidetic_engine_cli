@@ -5,7 +5,7 @@
   "data": {
     "schema": "ee.journal.distill.v1",
     "command": "journal distill",
-    "version": "0.12.0",
+    "version": "0.13.1",
     "status": "ok",
     "workspaceId": "wsp_journal_capture_fixture",
     "scannedCount": 4,

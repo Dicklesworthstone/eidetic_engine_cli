@@ -74,6 +74,7 @@ fn append_golden() -> Value {
     json!({
         "schema": "ee.response.v2",
         "success": true,
+        "degraded": [],
         "data": {
             "command": "journal append",
             "version": env!("CARGO_PKG_VERSION"),
@@ -90,6 +91,13 @@ fn batch_golden() -> Value {
     json!({
         "schema": "ee.response.v2",
         "success": true,
+        "degraded": [
+            {
+                "code": "journal_redaction_applied",
+                "severity": "info",
+                "message": "Redaction screen replaced 1 secret-like span(s) [api_key] before persistence; the stored entry contains placeholders only."
+            }
+        ],
         "data": {
             "command": "journal append",
             "version": env!("CARGO_PKG_VERSION"),
@@ -141,6 +149,7 @@ fn distill_golden() -> Value {
     json!({
         "schema": "ee.response.v2",
         "success": true,
+        "degraded": [],
         "data": {
             "schema": JOURNAL_DISTILL_SCHEMA_V1,
             "command": "journal distill",

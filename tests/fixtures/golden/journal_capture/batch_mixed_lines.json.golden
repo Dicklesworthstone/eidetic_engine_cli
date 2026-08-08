@@ -10,7 +10,7 @@
   ],
   "data": {
     "command": "journal append",
-    "version": "0.12.0",
+    "version": "0.13.1",
     "status": "stored",
     "lineCount": 3,
     "storedCount": 2,
