@@ -80,6 +80,19 @@ fn assert_config_unchanged(config_path: &Path, seeded: &str, label: &str) -> Tes
     }
 }
 
+fn shell_quote_expected(value: &str) -> String {
+    if value.is_empty() {
+        "''".to_owned()
+    } else if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
 fn string_at<'a>(
     value: &'a serde_json::Value,
     pointer: &str,
@@ -268,6 +281,58 @@ fn peer_dry_run_previews_refusal_honestly_and_writes_nothing() -> TestResult {
         ));
     }
     assert_config_unchanged(&config_path, &seeded, "peer dry-run")
+}
+
+#[test]
+fn peer_recovery_commands_quote_adversarial_workspace_and_database_paths() -> TestResult {
+    let root = temp_workspace()?;
+    let workspace = root.path().join("scope $(touch nope) 'workspace'");
+    fs::create_dir_all(&workspace).map_err(|error| format!("create adversarial scope: {error}"))?;
+    let workspace_str = workspace.to_string_lossy().to_string();
+    init_workspace(&workspace_str)?;
+    let (config_path, seeded) = seed_config(&workspace)?;
+    let database = root.path().join("db `touch nope2` $HOME 'custom'.db");
+    let database_str = database.to_string_lossy().to_string();
+
+    let output = run_ee(
+        &workspace_str,
+        &[
+            "mesh",
+            "disable",
+            "--peer",
+            "peer_alpha",
+            "--database",
+            &database_str,
+            "--dry-run",
+            "--json",
+        ],
+    )?;
+    ensure_exit_code(&output, 0, "adversarial-scope dry-run")?;
+    let envelope = stdout_json(&output, "adversarial-scope dry-run")?;
+    let commands = envelope
+        .pointer("/data/nextCommands")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("adversarial-scope dry-run: no nextCommands: {envelope}"))?;
+    let workspace_argument = shell_quote_expected(&workspace_str);
+    let database_argument = shell_quote_expected(&database_str);
+    for command in commands {
+        let command = command
+            .as_str()
+            .ok_or_else(|| format!("adversarial-scope command is not a string: {command}"))?;
+        if !command.contains(&format!("--workspace {workspace_argument}"))
+            || !command.contains(&format!("--database {database_argument}"))
+        {
+            return Err(format!(
+                "adversarial paths must be emitted as inert shell arguments: {command}"
+            ));
+        }
+        if command.contains("--workspace \"") || command.contains("--database \"") {
+            return Err(format!(
+                "metacharacter-bearing paths must not use expansion-capable double quotes: {command}"
+            ));
+        }
+    }
+    assert_config_unchanged(&config_path, &seeded, "adversarial-scope dry-run")
 }
 
 #[test]

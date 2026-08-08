@@ -190,11 +190,13 @@ impl std::fmt::Display for MeshEmergencyError {
                 workspace_path,
                 database_path,
             } => {
+                let peer_argument = shell_quote_command_arg(peer_id);
+                let workspace_argument =
+                    shell_quote_command_arg(&workspace_path.display().to_string());
                 let database_argument = database_argument_fragment(database_path.as_deref());
                 write!(
                     formatter,
-                    "peer-scoped mesh containment for `{peer_id}` cannot be persisted durably yet; use `ee mesh peer revoke {peer_id} --workspace \"{workspace}\"{database_argument} --json` for durable per-peer containment or `ee mesh disable --workspace \"{workspace}\"{database_argument} --json` (without --peer) for workspace-wide containment",
-                    workspace = workspace_path.display(),
+                    "peer-scoped mesh containment for `{peer_id}` cannot be persisted durably yet; use `ee mesh peer revoke {peer_argument} --workspace {workspace_argument}{database_argument} --json` for durable per-peer containment or `ee mesh disable --workspace {workspace_argument}{database_argument} --json` (without --peer) for workspace-wide containment",
                 )
             }
             Self::PeerScopeConflictsAllWorkspaces { peer_id } => write!(
@@ -217,12 +219,31 @@ impl std::error::Error for MeshEmergencyError {
     }
 }
 
-/// Format the ` --database "<path>"` fragment repair/next commands append
+/// Quote one shell argument for redaction-safe recovery and next-command
+/// strings. Values containing shell metacharacters stay inside single quotes;
+/// embedded single quotes use the standard POSIX close/escape/reopen form.
+fn shell_quote_command_arg(value: &str) -> String {
+    if value.is_empty() {
+        "''".to_owned()
+    } else if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+/// Format the ` --database <path>` fragment repair/next commands append
 /// when the invocation carried an explicit database override; empty when
 /// the workspace-default database applies (bd-3mw86 review).
 fn database_argument_fragment(database_path: Option<&Path>) -> String {
     database_path.map_or_else(String::new, |path| {
-        format!(" --database \"{}\"", path.display())
+        format!(
+            " --database {}",
+            shell_quote_command_arg(&path.display().to_string())
+        )
     })
 }
 
@@ -262,30 +283,21 @@ pub(crate) fn plan_emergency_disable(
         Vec::new()
     };
     let database_argument = database_argument_fragment(input.database_path.as_deref());
+    let workspace_argument = shell_quote_command_arg(&input.workspace_path.display().to_string());
     let next_commands = if let Some(peer_id) = input.peer_id.as_deref() {
+        let peer_argument = shell_quote_command_arg(peer_id);
         vec![
             format!(
-                "ee mesh peer revoke {peer_id} --workspace \"{}\"{database_argument} --json",
-                input.workspace_path.display()
+                "ee mesh peer revoke {peer_argument} --workspace {workspace_argument}{database_argument} --json"
             ),
-            format!(
-                "ee mesh disable --workspace \"{}\"{database_argument} --json",
-                input.workspace_path.display()
-            ),
-            format!(
-                "ee mesh status --workspace \"{}\"{database_argument} --json",
-                input.workspace_path.display()
-            ),
+            format!("ee mesh disable --workspace {workspace_argument}{database_argument} --json"),
+            format!("ee mesh status --workspace {workspace_argument}{database_argument} --json"),
         ]
     } else {
         vec![
+            format!("ee mesh status --workspace {workspace_argument}{database_argument} --json"),
             format!(
-                "ee mesh status --workspace \"{}\"{database_argument} --json",
-                input.workspace_path.display()
-            ),
-            format!(
-                "ee mesh reenable --workspace \"{}\"{database_argument} --confirm-reenable --json",
-                input.workspace_path.display()
+                "ee mesh reenable --workspace {workspace_argument}{database_argument} --confirm-reenable --json"
             ),
         ]
     };
@@ -372,6 +384,7 @@ pub fn emergency_status_report(
     mesh_enabled: bool,
     command_mode: MeshCommandMode,
 ) -> MeshEmergencyStatusReport {
+    let workspace_argument = shell_quote_command_arg(&workspace_path.display().to_string());
     MeshEmergencyStatusReport {
         schema: MESH_EMERGENCY_STATUS_SCHEMA_V1,
         command: "mesh status",
@@ -382,14 +395,8 @@ pub fn emergency_status_report(
         local_cache_readable: true,
         source_of_truth_memories_preserved: true,
         next_commands: vec![
-            format!(
-                "ee mesh disable --workspace \"{}\" --dry-run --json",
-                workspace_path.display()
-            ),
-            format!(
-                "ee mesh reenable --workspace \"{}\" --confirm-reenable --json",
-                workspace_path.display()
-            ),
+            format!("ee mesh disable --workspace {workspace_argument} --dry-run --json"),
+            format!("ee mesh reenable --workspace {workspace_argument} --confirm-reenable --json"),
         ],
     }
 }
@@ -884,12 +891,14 @@ mod tests {
         // operator or agent following it cannot mutate the wrong store.
         let message = error.to_string();
         assert!(message.contains("ee mesh peer revoke peer_alpha"));
+        let workspace_argument = shell_quote_command_arg(&workspace.path().display().to_string());
+        let database_argument = shell_quote_command_arg(&database.display().to_string());
         assert!(
-            message.contains(&format!("--workspace \"{}\"", workspace.path().display())),
+            message.contains(&format!("--workspace {workspace_argument}")),
             "refusal must carry the resolved workspace: {message}"
         );
         assert!(
-            message.contains(&format!("--database \"{}\"", database.display())),
+            message.contains(&format!("--database {database_argument}")),
             "refusal must carry the explicit database override: {message}"
         );
         let after = fs::read_to_string(&config_path).map_err(|error| error.to_string())?;
@@ -976,7 +985,10 @@ mod tests {
         };
 
         let report = apply_emergency_disable(&input).map_err(|error| error.to_string())?;
-        let database_argument = format!("--database \"{}\"", database.display());
+        let database_argument = format!(
+            "--database {}",
+            shell_quote_command_arg(&database.display().to_string())
+        );
         assert!(
             report
                 .next_commands
@@ -985,6 +997,48 @@ mod tests {
             "every next command must reproduce the explicit database override: {:?}",
             report.next_commands
         );
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_commands_shell_quote_adversarial_scope_paths() -> TestResult {
+        let workspace_path = PathBuf::from("/tmp/ee $(touch nope) 'workspace'");
+        let database_path = PathBuf::from("/tmp/ee `touch nope2` $HOME 'database'.db");
+        let input = MeshEmergencyDisableInput {
+            workspace_path: workspace_path.clone(),
+            database_path: Some(database_path.clone()),
+            all_workspaces: false,
+            dry_run: true,
+            reason: None,
+            peer_id: Some("peer_alpha".to_owned()),
+            temporary_for: None,
+            mesh_enabled_before: true,
+            command_mode_before: MeshCommandMode::Cache,
+        };
+
+        let report = apply_emergency_disable(&input).map_err(|error| error.to_string())?;
+        let workspace_argument = shell_quote_command_arg(&workspace_path.display().to_string());
+        let database_argument = shell_quote_command_arg(&database_path.display().to_string());
+        for command in &report.next_commands {
+            assert!(
+                command.contains(&format!("--workspace {workspace_argument}")),
+                "workspace path must be one quoted shell argument: {command}"
+            );
+            assert!(
+                command.contains(&format!("--database {database_argument}")),
+                "database path must be one quoted shell argument: {command}"
+            );
+            assert!(
+                !command.contains("--workspace \"/tmp/ee $("),
+                "command substitutions must never remain active in double quotes: {command}"
+            );
+        }
+
+        let status = emergency_status_report(&workspace_path, true, MeshCommandMode::Cache);
+        assert!(status.next_commands.iter().all(|command| {
+            command.contains(&format!("--workspace {workspace_argument}"))
+                && !command.contains("--workspace \"/tmp/ee $(")
+        }));
         Ok(())
     }
 
