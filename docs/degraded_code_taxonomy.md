@@ -269,7 +269,7 @@ memory bodies in `sources[]`.
 
 ### `response_time` codes — stay in `degraded[]`
 
-#### Cache hotset collection (12)
+#### Cache hotset collection (13)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|
 | `hotset_agent_mail_archive_mismatch` | medium | bd-ty3pl.2 |
@@ -283,6 +283,7 @@ memory bodies in `sources[]`.
 | `hotset_git_timeout` | medium | bd-ty3pl.2 |
 | `hotset_git_unavailable` | low | bd-ty3pl.2 |
 | `hotset_retrieval_provenance_unavailable` | low | bd-ty3pl.2 |
+| `hotset_source_authority_degraded` | medium | bd-ty3pl.2 |
 | `hotset_source_authority_missing` | low | bd-ty3pl.2 |
 
 #### Toolchain provenance (3)
