@@ -120,16 +120,39 @@ assert_pack_contains_distilled_memory() {
 }
 
 assert_database_omits_secret() {
-    local secret="$1" label="$2"
+    local secret="$1" label="$2" scanned=0 marker_seen=false sidecar
     if ! command -v strings >/dev/null 2>&1; then
         _harness_fail "$label: strings(1) is unavailable"
         return
     fi
-    if strings "$EE_DATABASE_PATH" | grep -qF "$secret"; then
-        _harness_fail "$label: raw secret was present in database strings"
-    else
-        e2e_log_assert_eq "redacted" "redacted" "$label" || true
+    # Scan the database AND its WAL/SHM sidecars: an unpheckpointed write can
+    # keep the journal body bytes in ee.db-wal long after ee.db itself looks
+    # clean, so scanning only the main file is a false-green seam.
+    for sidecar in "$EE_DATABASE_PATH" "$EE_DATABASE_PATH-wal" "$EE_DATABASE_PATH-shm"; do
+        [ -f "$sidecar" ] || continue
+        scanned=$((scanned + 1))
+        if strings "$sidecar" | grep -qF "$secret"; then
+            _harness_fail "$label: raw secret present in $(basename "$sidecar") strings"
+            return
+        fi
+        if strings "$sidecar" | grep -qF '[REDACTED:'; then
+            marker_seen=true
+        fi
+    done
+    if [ "$scanned" -eq 0 ]; then
+        _harness_fail "$label: no database files existed to scan"
+        return
+    fi
+    # Positive observable: the redaction placeholder must be visible to the
+    # same strings(1) scan that proved the secret absent. If journal bodies
+    # were invisible to strings, the absence check above would pass
+    # vacuously; requiring the marker keeps the negative proof honest.
+    if [ "$marker_seen" = "true" ]; then
+        e2e_log_assert_eq "marker_present" "marker_present" "$label (redaction marker visible)" || true
         _harness_pass "$label"
+    else
+        e2e_log_assert_eq "marker_absent" "marker_present" "$label (redaction marker visible)" || true
+        _harness_fail "$label: redaction placeholder '[REDACTED:' not found in any scanned database file"
     fi
 }
 
@@ -198,6 +221,13 @@ assert_jq "$dry_out" 'any(.data.abstentions[]?; .reason == "instruction_risk_exc
     "distill excludes high instruction-risk journal evidence"
 assert_jq "$dry_out" 'any(.data.abstentions[]?; .reason == "below_signal_threshold")' \
     "distill logs low-signal note abstentions"
+assert_jq "$dry_out" '((.data.applied.candidateIds // []) | length) == 0' \
+    "dry-run report itself carries no applied candidate ids"
+
+step "dry-run distill mutates nothing durable"
+candidates_after_dry_out="$(ee_json --workspace "$WS" curate candidates --json)"
+assert_jq "$candidates_after_dry_out" '.success == true and .data.totalCount == 0' \
+    "planted negative: zero persisted curation candidates after dry-run"
 
 step "apply distillation and review the generated candidate"
 distill_out="$(ee_json --workspace "$WS" journal distill --session "$SESSION" --apply --json)"
@@ -205,6 +235,12 @@ assert_jq "$distill_out" '.success == true and .data.dryRun == false and (.data.
     "journal distill apply writes a curation candidate"
 candidate_id="$(candidate_id_from_distill "$distill_out")"
 assert_nonempty "$candidate_id" "distill apply returns a candidate id"
+
+# Sensitivity proof for the dry-run probe above: the same candidates query
+# that reported zero after --dry-run must observe the applied candidate now.
+candidates_after_apply_out="$(ee_json --workspace "$WS" curate candidates --json)"
+assert_jq "$candidates_after_apply_out" '.success == true and .data.totalCount >= 1' \
+    "positive observable: distill apply persists a pending curation candidate"
 
 validate_out="$(ee_json --workspace "$WS" curate validate "$candidate_id" --actor e2e_journal_capture --json)"
 assert_jq "$validate_out" '.success == true and .data.validation.decision == "approved" and .data.mutation.toStatus == "approved"' \
@@ -215,6 +251,13 @@ assert_jq "$apply_out" '.success == true and .data.application.status == "applie
     "curate apply creates the derived memory"
 memory_id="$(memory_id_from_apply "$apply_out")"
 assert_nonempty "$memory_id" "curate apply returns created memory id"
+
+# Planted negative for the posterior-move proof: before any feedback the
+# trace must report zero Bayesian updates, so the post-outcome >=1 check
+# below observes a real behavioral delta rather than a standing value.
+baseline_trace_out="$(ee_json --workspace "$WS" outcome trace "$memory_id" --json)"
+assert_jq "$baseline_trace_out" '.success == true and .data.bayesUpdatesApplied == 0' \
+    "planted negative: no bayes updates before feedback"
 
 step "search and outcome trace prove the memory is live"
 search_out="$(ee_json --workspace "$WS" search "linker cache missing object journal capture" --kind failure --json)"
@@ -250,6 +293,16 @@ assert_jq "$outcome_out" '.success == true and .data.status == "recorded" and .d
 trace_out="$(ee_json --workspace "$WS" outcome trace "$memory_id" --json)"
 assert_jq "$trace_out" '.success == true and .data.memoryId == "'"$memory_id"'" and .data.eventCount >= 1 and any(.data.events[]?; .signal == "helpful")' \
     "outcome trace joins feedback for the created memory"
+assert_jq "$trace_out" '.data.bayesUpdatesApplied >= 1' \
+    "outcome trace shows the posterior actually moved after helpful feedback"
+
+step "re-applying distillation is idempotent for already-distilled entries"
+redistill_out="$(ee_json --workspace "$WS" journal distill --session "$SESSION" --apply --json)"
+assert_jq "$redistill_out" '.success == true and ((.data.applied.candidateIds // []) | length) == 0' \
+    "second distill apply mints no duplicate candidate"
+recount_out="$(ee_json --workspace "$WS" search "linker cache missing object journal capture" --kind failure --json)"
+assert_jq "$recount_out" '([.data.results[]? | select((.memoryId // .docId) == "'"$memory_id"'")] | length) == 1' \
+    "distilled memory remains a single row after the idempotent re-apply"
 
 end_temp_workspace
 if [ -s "$EE_JSON_FAILURES_FILE" ]; then
