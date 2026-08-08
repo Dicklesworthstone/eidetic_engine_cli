@@ -236,6 +236,17 @@ fn count_string_values(value: &JsonValue, needle: &str) -> usize {
     }
 }
 
+/// True when `needle` occurs anywhere inside any string value of `value`,
+/// including embedded JSON-encoded payloads such as audit `details` strings.
+fn json_mentions_text(value: &JsonValue, needle: &str) -> bool {
+    match value {
+        JsonValue::String(text) => text.contains(needle),
+        JsonValue::Array(items) => items.iter().any(|item| json_mentions_text(item, needle)),
+        JsonValue::Object(map) => map.values().any(|item| json_mentions_text(item, needle)),
+        _ => false,
+    }
+}
+
 fn first_runner_result(report: &JsonValue) -> Option<&JsonValue> {
     report
         .get("data")?
@@ -603,7 +614,7 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
     let why_duplicate = ws.run_json("why_duplicate", &["why", &duplicate_id])?;
     ws.check(
         "why_duplicate_history_names_candidate",
-        count_string_values(&why_duplicate, &candidate_id) >= 1,
+        json_mentions_text(&why_duplicate, &candidate_id),
         &format!(
             "why history for the absorbed duplicate must cite candidate {candidate_id}: {why_duplicate}"
         ),
@@ -675,16 +686,16 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
         .unwrap_or(JsonValue::Null);
     ws.check(
         "search_selects_consolidated_once",
-        count_string_values(&results, &survivor_id) >= 1
-            && count_string_values(&results, &duplicate_id) == 0,
+        json_mentions_text(&results, &survivor_id)
+            && !json_mentions_text(&results, &duplicate_id),
         &format!(
             "search must select the consolidated survivor and never the absorbed duplicate: {search}"
         ),
     )?;
     ws.check(
         "search_keeps_controls_distinct",
-        count_string_values(&results, &wording_control_id) >= 1
-            && count_string_values(&results, &kind_control_id) >= 1,
+        json_mentions_text(&results, &wording_control_id)
+            && json_mentions_text(&results, &kind_control_id),
         &format!("controls must remain distinct search results: {search}"),
     )?;
     let pack = ws.run_json(
@@ -693,8 +704,7 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
     )?;
     ws.check(
         "pack_excludes_absorbed_duplicate",
-        count_string_values(&pack, &survivor_id) >= 1
-            && count_string_values(&pack, &duplicate_id) == 0,
+        json_mentions_text(&pack, &survivor_id) && !json_mentions_text(&pack, &duplicate_id),
         &format!("pack must include the survivor once and never the duplicate: {pack}"),
     )?;
 
