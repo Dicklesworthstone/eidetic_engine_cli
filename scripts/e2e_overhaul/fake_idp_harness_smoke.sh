@@ -11,7 +11,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=scripts/e2e_overhaul/lib/fake_idp.sh
 . "$SCRIPT_DIR/lib/fake_idp.sh"
 
@@ -19,8 +18,16 @@ FAILS=0
 NOW_EPOCH="$(date +%s)"
 
 emit() {
-    printf '{"schema":"ee.test_event.v1","test":"fake_idp_harness_smoke","case":"%s","outcome":"%s"}\n' \
-        "$1" "$2"
+    python3 -c '
+import datetime, json, sys
+print(json.dumps({
+    "schema": "ee.test_event.v1",
+    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+    "test_id": "fake_idp_harness_smoke",
+    "kind": "assert_ok" if sys.argv[2] == "pass" else "assert_fail",
+    "fields": {"label": sys.argv[1], "expected": "pass", "actual": sys.argv[2]},
+}, separators=(",", ":")))
+' "$1" "$2"
 }
 
 check() {
@@ -65,12 +72,12 @@ except Exception:
     print("")
 '
 
-SCENARIO="$(mktemp "${TMPDIR:-/tmp}/idp-scenario-XXXXXX.json")"
+SCENARIO="$(mktemp "${TMPDIR:-/tmp}/idp-scenario-XXXXXX")"
 cat > "$SCENARIO" <<'JSON'
 {
   "secret_required": false,
   "alg": "RS256",
-  "flow": { "initial_status": "authorization_pending", "interval": 5, "expires_in": 900 },
+  "flow": { "initial_status": "authorization_pending", "expires_in": 900 },
   "claims": {
     "aud": "ee-team-client",
     "sub": "user-priya",
@@ -82,9 +89,10 @@ cat > "$SCENARIO" <<'JSON'
 }
 JSON
 
+# shellcheck disable=SC2329 # invoked indirectly by the EXIT trap
 cleanup() {
     fake_idp_stop
-    rm -f "$SCENARIO"
+    echo "fake_idp_harness_smoke: retained scenario at $SCENARIO" >&2
 }
 trap cleanup EXIT
 
@@ -99,6 +107,7 @@ JWKS_URI="$(json_field jwks_uri "$DISCOVERY")"
 check "discovery_issuer_matches_base" "$([ "$ISSUER" = "$FAKE_IDP_BASE" ] && echo 1 || echo 0)"
 check "discovery_has_device_endpoint" "$([ "$DEVICE_EP" = "$FAKE_IDP_BASE/device" ] && echo 1 || echo 0)"
 check "discovery_has_token_endpoint" "$([ "$TOKEN_EP" = "$FAKE_IDP_BASE/token" ] && echo 1 || echo 0)"
+check "discovery_has_exact_jwks_uri" "$([ "$JWKS_URI" = "$FAKE_IDP_BASE/jwks" ] && echo 1 || echo 0)"
 
 # --- JWKS ------------------------------------------------------------------
 JWKS="$(fake_idp_curl "/jwks")"
@@ -113,7 +122,7 @@ VUC="$(json_field verification_uri_complete "$DEVICE")"
 INTERVAL="$(json_field interval "$DEVICE")"
 check "device_returns_device_code" "$([ -n "$DEVICE_CODE" ] && echo 1 || echo 0)"
 check "device_returns_verification_uri_complete" "$([ -n "$VUC" ] && echo 1 || echo 0)"
-check "device_default_interval_is_5" "$([ "$INTERVAL" = "5" ] && echo 1 || echo 0)"
+check "device_omits_interval_for_rfc_default" "$([ -z "$INTERVAL" ] && echo 1 || echo 0)"
 
 # --- Poll while pending -> authorization_pending ---------------------------
 PENDING="$(fake_idp_curl "/token" -X POST \
@@ -129,10 +138,10 @@ GRANTED="$(fake_idp_curl "/token" -X POST \
 ID_TOKEN="$(json_field id_token "$GRANTED")"
 check "granted_poll_returns_id_token" "$([ -n "$ID_TOKEN" ] && echo 1 || echo 0)"
 
-# --- Verify the RS256 JWT signature via JWKS + openssl (offline) -----------
+# --- Verify the exact RS256 compact signing input against the JWKS ---------
 if [ -n "$ID_TOKEN" ]; then
     VERDICT="$(python3 - "$ID_TOKEN" "$JWKS" "$FAKE_IDP_BASE" "$NOW_EPOCH" <<'PY'
-import base64, json, subprocess, sys
+import base64, hashlib, hmac, json, sys
 
 token, jwks_raw, base, now = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
 
@@ -152,13 +161,16 @@ jwk = next((k for k in jwks["keys"] if k.get("kid") == header.get("kid")), None)
 if jwk is None or header.get("alg") != "RS256":
     print("no_matching_key"); sys.exit(0)
 
-# Rebuild an RSA public key PEM from the JWK (n,e) using openssl asn1parse-free
-# path: construct a DER RSAPublicKey then wrap. Simpler: use `openssl` to build
-# from raw modulus/exponent is awkward, so verify with a minimal pure check
-# that the segments decode and claims are structurally sound; signature
-# verification against openssl is exercised by the ee client (T7.5). Here we
-# assert the JOSE structure and claim integrity the harness must produce.
+n = int.from_bytes(b64d(jwk["n"]), "big")
+e = int.from_bytes(b64d(jwk["e"]), "big")
+signature = b64d(sig_b64)
+encoded = pow(int.from_bytes(signature, "big"), e, n).to_bytes((n.bit_length() + 7) // 8, "big")
+digest_info = bytes.fromhex("3031300d060960864801650304020105000420") + hashlib.sha256(
+    f"{header_b64}.{payload_b64}".encode("ascii")
+).digest()
+expected = b"\x00\x01" + b"\xff" * (len(encoded) - len(digest_info) - 3) + b"\x00" + digest_info
 checks = [
+    hmac.compare_digest(encoded, expected),
     header.get("typ") == "JWT",
     payload.get("iss") == base,
     payload.get("aud") == "ee-team-client",
@@ -168,12 +180,12 @@ checks = [
     isinstance(payload.get("jti"), str) and payload["jti"],
     payload.get("iat", 0) <= now + 5,
     payload.get("exp", 0) > now,
-    len(b64d(sig_b64)) == 256,  # RSA-2048 signature is 256 bytes
+    len(signature) == 256,
 ]
 print("ok" if all(checks) else "claim_mismatch")
 PY
 )"
-    check "id_token_structure_and_claims_valid" "$([ "$VERDICT" = "ok" ] && echo 1 || echo 0)"
+    check "id_token_signature_and_claims_valid" "$([ "$VERDICT" = "ok" ] && echo 1 || echo 0)"
 fi
 
 # --- jti single-use surface: minted jti is recorded ------------------------
@@ -191,7 +203,7 @@ check "rotation_retires_previous_key_from_jwks" "$([ "$OLD_PRESENT" = "0" ] && e
 
 # --- ES256 scenario via a second server ------------------------------------
 fake_idp_stop
-ES_SCENARIO="$(mktemp "${TMPDIR:-/tmp}/idp-es-XXXXXX.json")"
+ES_SCENARIO="$(mktemp "${TMPDIR:-/tmp}/idp-es-XXXXXX")"
 cat > "$ES_SCENARIO" <<'JSON'
 { "alg": "ES256", "flow": { "initial_status": "granted" },
   "claims": { "sub": "user-hana", "aud": "ee-team-client" } }
@@ -206,7 +218,7 @@ ES_ALG="$(printf '%s' "$ES_TOKEN" | cut -d. -f1 | python3 -c 'import base64,json
 ES_SIG_LEN="$(printf '%s' "$ES_TOKEN" | cut -d. -f3 | python3 -c 'import base64,sys; s=sys.stdin.read().strip(); print(len(base64.urlsafe_b64decode(s+"="*(-len(s)%4))))' 2>/dev/null || echo 0)"
 check "es256_scenario_mints_es256_header" "$([ "$ES_ALG" = "ES256" ] && echo 1 || echo 0)"
 check "es256_signature_is_raw_64_bytes" "$([ "$ES_SIG_LEN" = "64" ] && echo 1 || echo 0)"
-rm -f "$ES_SCENARIO"
+echo "fake_idp_harness_smoke: retained ES256 scenario at $ES_SCENARIO" >&2
 
 if [ "$FAILS" -eq 0 ]; then
     emit "harness_smoke_overall" "pass"

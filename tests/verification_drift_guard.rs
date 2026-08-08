@@ -114,6 +114,72 @@ fn verify_stage_names(script: &str) -> BTreeSet<String> {
         .collect()
 }
 
+#[test]
+fn fake_oidc_idp_selfcheck_wiring() {
+    let script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+    let ordered_calls = [
+        "run_stage \"Fake Tailscale Harness E2E (SRR6.46.10)\" \"./scripts/e2e_overhaul/lib/test_fake_tailscale.sh\"",
+        "run_stage \"Fake OIDC IdP Harness E2E (T7.7)\" \"./scripts/e2e_overhaul/fake_idp_harness_smoke.sh\"",
+        "run_stage \"Fake OIDC IdP Defects E2E (T7.7)\" \"./scripts/e2e_overhaul/fake_idp_defects_smoke.sh\"",
+        "run_stage \"Fake OIDC IdP Matrix Self-Check E2E (T7.7)\" \"./scripts/e2e_overhaul/fake_idp_selfcheck.sh\"",
+        "run_stage \"Tailscale Local Probe E2E (SRR6.46.1)\" \"./scripts/e2e_overhaul/tailscale_local_probe.sh\"",
+    ];
+    let run_stage_lines: Vec<_> = script
+        .lines()
+        .enumerate()
+        .filter_map(|(line_number, line)| {
+            let trimmed = line.trim();
+            trimmed
+                .starts_with("run_stage ")
+                .then_some((line_number, trimmed))
+        })
+        .collect();
+    let positions: Vec<_> = ordered_calls
+        .iter()
+        .map(|call| {
+            let matches: Vec<_> = run_stage_lines
+                .iter()
+                .filter(|(_, line)| line == call)
+                .collect();
+            assert_eq!(
+                matches.len(),
+                1,
+                "{call} should be an exact executable stage exactly once"
+            );
+            matches[0].0
+        })
+        .collect();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "fake IdP stages must remain after fake Tailscale and before local probe"
+    );
+
+    let selfcheck = project_root().join("scripts/e2e_overhaul/fake_idp_selfcheck.sh");
+    assert!(selfcheck.is_file(), "matrix self-check should exist");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&selfcheck)
+            .expect("read matrix self-check metadata")
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o111, 0, "matrix self-check should be executable");
+    }
+
+    for label in [
+        "Fake OIDC IdP Harness E2E (T7.7)",
+        "Fake OIDC IdP Defects E2E (T7.7)",
+        "Fake OIDC IdP Matrix Self-Check E2E (T7.7)",
+    ] {
+        let skip = format!("SKIP {label} (ci-smoke)");
+        assert_eq!(
+            script.matches(&skip).count(),
+            1,
+            "{label} should have one explicit ci-smoke skip entry"
+        );
+    }
+}
+
 fn budget_stage_blocks(manifest: &str) -> Vec<Vec<&str>> {
     let mut blocks = Vec::new();
     let mut current = Vec::new();

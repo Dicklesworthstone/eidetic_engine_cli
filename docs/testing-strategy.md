@@ -229,6 +229,36 @@ socket artifacts are retained during agent sessions under the repository
 no-deletion rule; use their event logs as closeout evidence rather than cleaning
 them up implicitly.
 
+### Fake OIDC IdP Harness
+
+Team-confederation tier-2 tests use the loopback-TLS fake IdP under
+`scripts/e2e_overhaul/`; they never require a provider account or outbound
+network. Verification preserves three independent stages, in order:
+
+- `fake_idp_harness_smoke.sh` covers discovery, JWKS, live device polling,
+  exact RS256 verification, rotation, and the ES256 token shape.
+- `fake_idp_defects_smoke.sh` proves the live server can mint adversarial
+  protocol/JOSE shapes, including a signature that fails exact-input
+  verification.
+- `fake_idp_selfcheck.sh` is the deterministic capability/privacy/time matrix.
+  It drives all oracle transitions over HTTPS, performs an actual same-state
+  process restart, verifies RS256 and ES256 signatures, and scans the durable
+  artifact file plus projected database/manifest/audit/log/support views.
+
+The matrix is a provider/stimulus/reference-oracle gate, not a substitute for
+production client acceptance. T7.4–T7.6 consume it for network/device,
+JSON/JOSE/replay, and frame/privacy/lease enforcement respectively. Private
+`/_state` output may contain ceremony secrets for test introspection; only
+`/_artifact`, `/_artifact_views`, and `identity-artifact.json` are scrubbed
+artifact surfaces.
+
+The shell helper invokes curl with config, proxy, netrc, and ambient CA inputs
+disabled, pins the ephemeral CA, and accepts HTTPS loopback URLs only. Logical
+wall and monotonic clocks replace sleeps for poll/rollback/grace boundaries.
+Ephemeral keys, certificates, ports, and ECDSA bytes vary; normalized state
+transitions and assertions remain deterministic. All scenario and server state
+directories are retained as evidence under the no-deletion rule.
+
 ### Opt-In Real Tailscale Smoke
 
 `scripts/e2e_overhaul/mesh_tailscale_smoke.sh` is the only SRR6 shell driver

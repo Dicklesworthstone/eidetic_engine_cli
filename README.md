@@ -438,6 +438,7 @@ This runs all readiness gates in order, stopping at the first failure:
 | 6.06 | Replay lab smoke E2E |
 | 6.5 | Overhaul integration when `VERIFY_OVERHAUL` is enabled |
 | 6.6 | Fake Tailscale harness |
+| 6.7 | Fake OIDC happy-path, defect, and deterministic capability/privacy/time matrix harnesses |
 | 7 | Advanced E2E |
 | 8 | Boundary migration |
 | 8.5 | `ee doctor` safety harness |

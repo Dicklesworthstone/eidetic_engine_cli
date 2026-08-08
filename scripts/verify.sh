@@ -93,7 +93,7 @@ set -euo pipefail
 #   6.1. Agent Ergonomics E2E  - scripts/e2e_lib/run_agent_ergonomics_e2e.sh
 #   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
 #   6.6. Fake Tailscale Harness - deterministic SRR6.46 fake tailnet self-test
-#   6.7. Fake OIDC IdP Harness  - deterministic tier-2 SSO fake IdP self-tests (T7.7)
+#   6.7a-c Fake OIDC IdP Harness - protocol, defect, and matrix self-tests (T7.7)
 #   7. Advanced E2E            - scripts/e2e_advanced.sh
 #   8. Boundary Migration      - scripts/e2e_boundary_migration.sh
 #   8.75. Eval Regression Contract - no-Cargo pack-quality threshold self-test
@@ -1280,11 +1280,12 @@ if [ "$CI_SMOKE" != "true" ]; then
     # e2e scripts import this library, so this self-test runs before those surfaces.
     run_stage "Fake Tailscale Harness E2E (SRR6.46.10)" "./scripts/e2e_overhaul/lib/test_fake_tailscale.sh"
 
-    # Gate 6.7a/6.7b: Fake OIDC IdP harness (team-confed T7.7, bd-tc-epic-qzk7o.8.7).
+    # Gate 6.7a-c: Fake OIDC IdP harness (team-confed T7.7, bd-tc-epic-qzk7o.8.7).
     # The tier-2 SSO client acceptance beads import this harness, so its self-tests
-    # run before those surfaces. Both are no-Cargo (python3 + openssl + curl only).
+    # run before those surfaces. All three are no-Cargo (python3 + openssl + curl only).
     run_stage "Fake OIDC IdP Harness E2E (T7.7)" "./scripts/e2e_overhaul/fake_idp_harness_smoke.sh"
     run_stage "Fake OIDC IdP Defects E2E (T7.7)" "./scripts/e2e_overhaul/fake_idp_defects_smoke.sh"
+    run_stage "Fake OIDC IdP Matrix Self-Check E2E (T7.7)" "./scripts/e2e_overhaul/fake_idp_selfcheck.sh"
 
     # Gate 6.8: Local Tailscale probe status harness (SRR6.46.1). This keeps the
     # no-network status surface covered by the deterministic fake Tailscale CLI.
@@ -1321,6 +1322,9 @@ else
     STAGE_RESULTS="${STAGE_RESULTS}SKIP Swarm Next-Action Recommendation Cards E2E (bd-3vwx0.6) (ci-smoke)\n"
     STAGE_RESULTS="${STAGE_RESULTS}SKIP Graph Determinism E2E (F4.a) (ci-smoke)\n"
     STAGE_RESULTS="${STAGE_RESULTS}SKIP Fake Tailscale Harness E2E (SRR6.46.10) (ci-smoke)\n"
+    STAGE_RESULTS="${STAGE_RESULTS}SKIP Fake OIDC IdP Harness E2E (T7.7) (ci-smoke)\n"
+    STAGE_RESULTS="${STAGE_RESULTS}SKIP Fake OIDC IdP Defects E2E (T7.7) (ci-smoke)\n"
+    STAGE_RESULTS="${STAGE_RESULTS}SKIP Fake OIDC IdP Matrix Self-Check E2E (T7.7) (ci-smoke)\n"
     STAGE_RESULTS="${STAGE_RESULTS}SKIP Tailscale Local Probe E2E (SRR6.46.1) (ci-smoke)\n"
     STAGE_RESULTS="${STAGE_RESULTS}SKIP Tailscale Peer Autodiscovery E2E (SRR6.46.2) (ci-smoke)\n"
     STAGE_RESULTS="${STAGE_RESULTS}SKIP Mesh Hello Handshake E2E (SRR6.46.6) (ci-smoke)\n"

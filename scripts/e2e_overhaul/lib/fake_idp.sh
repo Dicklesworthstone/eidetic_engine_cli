@@ -11,7 +11,8 @@
 #   fake_idp_control '<json>'         -> POST /_control (mutate at runtime)
 #   fake_idp_state                    -> GET /_state (inspect)
 #   fake_idp_curl <path> [curl args]  -> CA-pinned curl against the server
-#   fake_idp_stop                     -> terminate + reap (idempotent)
+#   fake_idp_restart                  -> real process loss, same durable state
+#   fake_idp_stop                     -> terminate + reap; retain evidence
 
 set -euo pipefail
 
@@ -19,15 +20,18 @@ FAKE_IDP_PID="${FAKE_IDP_PID:-}"
 FAKE_IDP_DIR="${FAKE_IDP_DIR:-}"
 FAKE_IDP_BASE="${FAKE_IDP_BASE:-}"
 FAKE_IDP_CA="${FAKE_IDP_CA:-}"
+FAKE_IDP_SCENARIO="${FAKE_IDP_SCENARIO:-}"
+FAKE_IDP_RETAINED_DIR="${FAKE_IDP_RETAINED_DIR:-}"
+FAKE_IDP_PROCESS_GENERATION="${FAKE_IDP_PROCESS_GENERATION:-}"
 
 _fake_idp_script_dir() {
     cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
 }
 
-fake_idp_start() {
-    local scenario="${1:-}"
-    FAKE_IDP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fake-idp-XXXXXX")"
-    local py="$(_fake_idp_script_dir)/fake_idp.py"
+_fake_idp_launch() {
+    local scenario="${FAKE_IDP_SCENARIO:-}"
+    local py
+    py="$(_fake_idp_script_dir)/fake_idp.py"
     local scenario_arg=()
     if [ -n "$scenario" ]; then
         scenario_arg=(--scenario "$scenario")
@@ -38,7 +42,14 @@ fake_idp_start() {
 
     local ready="$FAKE_IDP_DIR/ready"
     local waited=0
-    while [ ! -f "$ready" ]; do
+    local port="" ready_pid="" process_generation=""
+    while :; do
+        if [ -f "$ready" ]; then
+            read -r port ready_pid process_generation < "$ready" || true
+            if [ "$ready_pid" = "$FAKE_IDP_PID" ] && [ -n "$port" ]; then
+                break
+            fi
+        fi
         if ! kill -0 "$FAKE_IDP_PID" 2>/dev/null; then
             echo "fake_idp: server exited before ready" >&2
             return 1
@@ -52,17 +63,75 @@ fake_idp_start() {
         fi
     done
 
-    local port
-    port="$(cat "$ready")"
     FAKE_IDP_BASE="https://127.0.0.1:${port}"
     FAKE_IDP_CA="$FAKE_IDP_DIR/ca.pem"
+    FAKE_IDP_PROCESS_GENERATION="$process_generation"
     export FAKE_IDP_PID FAKE_IDP_DIR FAKE_IDP_BASE FAKE_IDP_CA
+    export FAKE_IDP_SCENARIO FAKE_IDP_RETAINED_DIR FAKE_IDP_PROCESS_GENERATION
+}
+
+fake_idp_start() {
+    FAKE_IDP_SCENARIO="${1:-}"
+    FAKE_IDP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fake-idp-XXXXXX")"
+    FAKE_IDP_RETAINED_DIR="$FAKE_IDP_DIR"
+    _fake_idp_launch
 }
 
 fake_idp_curl() {
     local path="$1"
     shift
-    curl --silent --show-error --cacert "$FAKE_IDP_CA" "$@" "${FAKE_IDP_BASE}${path}"
+    local arg
+    local value_kind=""
+    for arg in "$@"; do
+        if [ -n "$value_kind" ]; then
+            if [ "$value_kind" = "request" ]; then
+                case "$arg" in
+                    GET|POST) ;;
+                    *)
+                        echo "fake_idp_curl: unsupported request method: $arg" >&2
+                        return 2
+                        ;;
+                esac
+            fi
+            value_kind=""
+            continue
+        fi
+        case "$arg" in
+            -X|--request)
+                value_kind="request"
+                ;;
+            -H|--header)
+                value_kind="header"
+                ;;
+            -d|--data|--data-raw|--data-binary|--data-urlencode)
+                value_kind="data"
+                ;;
+            --request=GET|--request=POST|--header=*|--data=*|--data-raw=*|\
+            --data-binary=*|--data-urlencode=*|--fail|--fail-with-body)
+                ;;
+            *)
+                echo "fake_idp_curl: unsafe routing/credential option rejected: $arg" >&2
+                return 2
+                ;;
+        esac
+    done
+    if [ -n "$value_kind" ]; then
+        echo "fake_idp_curl: option is missing its value" >&2
+        return 2
+    fi
+    env \
+        -u ALL_PROXY -u all_proxy \
+        -u HTTPS_PROXY -u https_proxy \
+        -u HTTP_PROXY -u http_proxy \
+        -u NO_PROXY -u no_proxy \
+        -u CURL_CA_BUNDLE -u SSL_CERT_FILE -u SSL_CERT_DIR \
+        -u SSLKEYLOGFILE -u CURL_SSL_BACKEND \
+        -u NETRC -u CURL_HOME \
+        curl -q --silent --show-error "$@" \
+        --noproxy '*' --proxy '' --netrc-file /dev/null \
+        --proto '=https' --proto-redir '=https' --max-redirs 0 \
+        --connect-timeout 3 --max-time 10 \
+        --cacert "$FAKE_IDP_CA" "${FAKE_IDP_BASE}${path}"
 }
 
 fake_idp_control() {
@@ -73,14 +142,37 @@ fake_idp_state() {
     fake_idp_curl "/_state"
 }
 
-fake_idp_stop() {
-    if [ -n "${FAKE_IDP_PID:-}" ] && kill -0 "$FAKE_IDP_PID" 2>/dev/null; then
-        kill "$FAKE_IDP_PID" 2>/dev/null || true
+fake_idp_reap() {
+    if [ -n "${FAKE_IDP_PID:-}" ]; then
+        if kill -0 "$FAKE_IDP_PID" 2>/dev/null; then
+            if [ -n "${FAKE_IDP_BASE:-}" ] && [ -f "${FAKE_IDP_CA:-}" ]; then
+                fake_idp_control '{"action":"cancel_lifecycle_trap"}' \
+                    >/dev/null 2>&1 || true
+            fi
+            kill "$FAKE_IDP_PID" 2>/dev/null || true
+        fi
         wait "$FAKE_IDP_PID" 2>/dev/null || true
     fi
     FAKE_IDP_PID=""
-    if [ -n "${FAKE_IDP_DIR:-}" ] && [ -d "$FAKE_IDP_DIR" ]; then
-        rm -rf "$FAKE_IDP_DIR"
+    export FAKE_IDP_PID
+}
+
+fake_idp_restart() {
+    if [ -z "${FAKE_IDP_DIR:-}" ] || [ ! -d "$FAKE_IDP_DIR" ]; then
+        echo "fake_idp: cannot restart without retained state" >&2
+        return 1
     fi
-    FAKE_IDP_DIR=""
+    fake_idp_reap
+    _fake_idp_launch
+}
+
+fake_idp_stop() {
+    fake_idp_reap
+    if [ -n "${FAKE_IDP_DIR:-}" ]; then
+        FAKE_IDP_RETAINED_DIR="$FAKE_IDP_DIR"
+        export FAKE_IDP_RETAINED_DIR
+        if [ "${EE_E2E_KEEP_WORKSPACE:-1}" = "1" ]; then
+            echo "fake_idp: retained evidence at $FAKE_IDP_RETAINED_DIR" >&2
+        fi
+    fi
 }
