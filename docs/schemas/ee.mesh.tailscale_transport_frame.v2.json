@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ee.mesh.tailscale_transport_frame.v2",
+  "title": "ee.mesh.tailscale_transport_frame.v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "sourceNodeId", "targetNodeId", "teamId", "sourceWorkspaceId", "targetWorkspaceId", "sessionId", "direction", "counter", "correlationId", "kind", "capability", "requestedBudgetMs", "payload", "payloadHash", "mac"],
+  "properties": {
+    "schema": { "const": "ee.mesh.tailscale_transport_frame.v2" },
+    "sourceNodeId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "targetNodeId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "teamId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "sourceWorkspaceId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "targetWorkspaceId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "sessionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "direction": { "enum": ["initiator_to_responder", "responder_to_initiator"] },
+    "counter": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 },
+    "correlationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "kind": { "enum": ["request", "response"] },
+    "capability": { "type": "string", "pattern": "^[a-z0-9_]{1,64}$" },
+    "requestedBudgetMs": { "type": "integer", "minimum": 0 },
+    "payload": true,
+    "payloadHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "mac": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

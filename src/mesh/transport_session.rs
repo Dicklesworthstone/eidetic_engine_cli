@@ -32,18 +32,19 @@
 //! additionally binding the pair-key generation and both current Tailscale
 //! node-key observations — before either side derives directional keys.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::io;
 use std::net::{Shutdown, SocketAddr};
+use std::num::NonZeroU64;
 use std::sync::atomic::{Ordering, compiler_fence};
 use std::time::Duration;
 
+use asupersync::Cx;
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use asupersync::net::TcpStream;
-use asupersync::time::{timeout, wall_now};
-use asupersync::Cx;
+use asupersync::time::{BudgetTimeExt, timeout, wall_now};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -90,13 +91,13 @@ pub const IDENTITY_ATTEST_MAX_PAYLOAD_BYTES: usize = 8192;
 // keyed-MAC wiring; an accidental edit to any of them fails the KAT test.
 #[cfg(test)]
 const KAT_TRANSCRIPT_HASH_HEX: &str =
-    "7c9fc90baec20563de192e24b11246eb1965b3d95a9d66a2e9e34d252d3e571e";
+    "1eabfe34b812d5ee51de0076ce8466fd4b7962052585a8ee6147c2a5d1fdd305";
 #[cfg(test)]
-const KAT_I2R_HEX: &str = "a2124625eaf2ff02018622ad52c592168e5d90e6465013caa005f1269a9a6915";
+const KAT_I2R_HEX: &str = "a1b31732edd1597b49ec1ac73df6269db5083382defad08a415847d0d4bd9c23";
 #[cfg(test)]
-const KAT_R2I_HEX: &str = "3791d4c418b7bc7b6525c4eab9f2126b07fec5875fd7afd66d09c1b4b209650a";
+const KAT_R2I_HEX: &str = "5a34c82a845b7c212b6465427484caf1cf9a0fb54f6b462ef196d88ac2348768";
 #[cfg(test)]
-const KAT_FRAME_MAC_HEX: &str = "126228fbdff27bb7a9a34f451bc91da3de49a9a6a3782a18cf3fa33ec6c3f1d7";
+const KAT_FRAME_MAC_HEX: &str = "a139a76c75b6272f52e3b143f483e018889f3dd5c9e456974950a55e35863c82";
 
 /// Direction of a frame inside an established session.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -211,6 +212,9 @@ impl NegotiatedExtensions {
 pub struct SessionBinding {
     /// Team the session belongs to.
     pub team_id: String,
+    /// Locally verified pinned tailnet identifier. Stable IDs are scoped to
+    /// this value and must never authenticate across tailnets.
+    pub tailnet_id: String,
     /// Random ee node ID of the initiator.
     pub initiator_node_id: String,
     /// Random ee node ID of the responder.
@@ -230,7 +234,7 @@ pub struct SessionBinding {
 impl SessionBinding {
     /// Canonical length-prefixed transcript bytes hashed into the session
     /// transcript. Layout (every field `lp`-prefixed, u32-LE lengths):
-    /// tag, team, initiator/responder node IDs, initiator/responder
+    /// tag, team, tailnet, initiator/responder node IDs, initiator/responder
     /// workspace IDs, initiator/responder stable IDs, session ID, then both
     /// fresh handshake nonces.
     #[must_use]
@@ -242,6 +246,7 @@ impl SessionBinding {
         let mut out = Vec::with_capacity(256);
         push_lp(&mut out, SESSION_TRANSCRIPT_TAG.as_bytes());
         push_lp(&mut out, self.team_id.as_bytes());
+        push_lp(&mut out, self.tailnet_id.as_bytes());
         push_lp(&mut out, self.initiator_node_id.as_bytes());
         push_lp(&mut out, self.responder_node_id.as_bytes());
         push_lp(&mut out, self.initiator_workspace_id.as_bytes());
@@ -545,6 +550,18 @@ impl SessionCounters {
         }
     }
 
+    /// Construct a ledger at an explicitly authenticated checkpoint. The
+    /// caller is responsible for loading `next` from trusted session state;
+    /// ordinary fresh TCP sessions always use [`Self::new`].
+    #[must_use]
+    pub const fn expecting(next: NonZeroU64) -> Self {
+        Self {
+            next: next.get(),
+            closed: false,
+            exhausted: false,
+        }
+    }
+
     /// The next counter this ledger will accept.
     #[must_use]
     pub const fn expected_next(&self) -> u64 {
@@ -600,6 +617,11 @@ pub fn sign_frame(
     keys: &DirectionalSessionKeys,
     draft: FrameDraft,
 ) -> Result<FrameV2, TransportSessionError> {
+    if !valid_capability_token(draft.capability.token()) {
+        return Err(TransportSessionError::MalformedFrame {
+            message: "capability token must match [a-z0-9_]{1,64}".to_owned(),
+        });
+    }
     let payload_bytes = serde_json::to_vec(&draft.payload).map_err(|error| {
         TransportSessionError::MalformedFrame {
             message: format!("serialize payload: {error}"),
@@ -695,6 +717,11 @@ pub fn verify_frame(
     if frame.schema != TRANSPORT_FRAME_SCHEMA_V2 {
         return Err(TransportSessionError::SchemaMismatch {
             observed: frame.schema.clone(),
+        });
+    }
+    if !valid_capability_token(frame.capability.token()) {
+        return Err(TransportSessionError::MalformedFrame {
+            message: "capability token must match [a-z0-9_]{1,64}".to_owned(),
         });
     }
 
@@ -923,16 +950,22 @@ pub const SESSION_CONFIRM_MAC_TAG: &str = "ee.mesh.session_confirm_mac.v1";
 /// Hard outer limit on one encoded handshake message.
 pub const MAX_HANDSHAKE_MESSAGE_BYTES: usize = 4096;
 
+/// Maximum bounded length of one locally verified current node public key.
+pub const MAX_NODE_PUBKEY_BYTES: usize = 256;
+
+/// Maximum bounded length of one identity/binding token in the handshake.
+pub const MAX_SESSION_BINDING_FIELD_BYTES: usize = 256;
+
 // Known-answer vectors captured from the BLAKE3 reference implementation
 // (`b3sum`) over the fixed KAT binding: pair key `0x00..0x1f`, nonces
 // `0x11 * 32` / `0x22 * 32`, generation 1, observations
 // `nodekey:kat-init-observed` / `nodekey:kat-resp-observed`.
 #[cfg(test)]
 const KAT_RESPONDER_CONFIRM_MAC_HEX: &str =
-    "2dcc3285621e01ef65b0c0275ad8422549df8f147b952c98f34359ff5eab5162";
+    "2068c3c915bc8340bd41fe5213ca43b26da731730f6076f3cdf6ee6453d0d530";
 #[cfg(test)]
 const KAT_INITIATOR_FINISH_MAC_HEX: &str =
-    "d4f02ca7ca6cd9585ae3b5d58a4aca7815da0e221fd5f885bf0a648958fb4b6f";
+    "b1a79dedfdcd717737454c4958cf5bdf0749114f411fb05500180883b87f1e2c";
 
 /// Both endpoints' currently observed Tailscale node public keys at handshake
 /// time. Observations are verified transport evidence supplied by the caller
@@ -974,6 +1007,8 @@ pub struct SessionOpenV1 {
     pub schema: String,
     /// Team the session should belong to.
     pub team_id: String,
+    /// Pinned tailnet identifier the responder must verify locally.
+    pub tailnet_id: String,
     /// Random ee node ID of the initiator.
     pub initiator_node_id: String,
     /// Random ee node ID of the intended responder.
@@ -1056,6 +1091,12 @@ pub enum HandshakeError {
         /// Which nonce field was malformed.
         field: &'static str,
     },
+    /// A locally verified current node-key observation was missing or
+    /// unbounded.
+    InvalidObservation {
+        /// Which endpoint observation was invalid.
+        field: &'static str,
+    },
     /// A confirmation MAC failed verification under the pair key.
     ConfirmationFailed {
         /// Which role's confirmation failed.
@@ -1076,6 +1117,7 @@ impl HandshakeError {
             | Self::SchemaMismatch { .. }
             | Self::GenerationMismatch { .. }
             | Self::BadNonce { .. }
+            | Self::InvalidObservation { .. }
             | Self::ConfirmationFailed { .. } => "mesh_frame_auth_failed",
         }
     }
@@ -1100,7 +1142,10 @@ impl HandshakeError {
                 "Mesh session handshake pair-key generation mismatch: expected {expected}, observed {observed}"
             ),
             Self::BadNonce { field } => format!(
-                "Mesh session handshake nonce {field} is not exactly 32 lowercase-hex bytes"
+                "Mesh session handshake nonce {field} is malformed, zero, reused, or not fresh"
+            ),
+            Self::InvalidObservation { field } => format!(
+                "Mesh session handshake node-key observation {field} is missing or exceeds {MAX_NODE_PUBKEY_BYTES} bytes"
             ),
             Self::ConfirmationFailed { role } => format!(
                 "Mesh session handshake {role} confirmation MAC failed verification under the pair key"
@@ -1128,6 +1173,8 @@ impl std::error::Error for HandshakeError {}
 pub struct ResponderExpectations {
     /// Team this responder is registered under.
     pub team_id: String,
+    /// Locally verified pinned tailnet identifier.
+    pub tailnet_id: String,
     /// This responder's random ee node ID.
     pub responder_node_id: String,
     /// The exact registered responder target workspace.
@@ -1177,9 +1224,18 @@ impl InitiatorHandshake {
         observations: HandshakeObservations,
     ) -> Result<(Self, SessionOpenV1), HandshakeError> {
         validate_binding_shape(&binding)?;
+        validate_observations(&observations)?;
+        validate_nonce(&initiator_nonce, "initiator_nonce")?;
+        if pair_key_generation == 0 {
+            return Err(HandshakeError::GenerationMismatch {
+                expected: 1,
+                observed: 0,
+            });
+        }
         let open = SessionOpenV1 {
             schema: SESSION_OPEN_SCHEMA_V1.to_owned(),
             team_id: binding.team_id.clone(),
+            tailnet_id: binding.tailnet_id.clone(),
             initiator_node_id: binding.initiator_node_id.clone(),
             responder_node_id: binding.responder_node_id.clone(),
             initiator_workspace_id: binding.initiator_workspace_id.clone(),
@@ -1285,6 +1341,14 @@ pub fn responder_accept_open(
     observations: HandshakeObservations,
     pair_key: &SecretBytes,
 ) -> Result<(ResponderPendingSession, SessionConfirmV1), HandshakeError> {
+    validate_observations(&observations)?;
+    validate_nonce(&responder_nonce, "responder_nonce")?;
+    if expectations.pair_key_generation == 0 {
+        return Err(HandshakeError::GenerationMismatch {
+            expected: 1,
+            observed: 0,
+        });
+    }
     if open.schema != SESSION_OPEN_SCHEMA_V1 {
         return Err(HandshakeError::SchemaMismatch {
             observed: open.schema.clone(),
@@ -1292,6 +1356,11 @@ pub fn responder_accept_open(
     }
     if open.team_id != expectations.team_id {
         return Err(HandshakeError::BindingMismatch { field: "team_id" });
+    }
+    if open.tailnet_id != expectations.tailnet_id {
+        return Err(HandshakeError::BindingMismatch {
+            field: "tailnet_id",
+        });
     }
     if open.responder_node_id != expectations.responder_node_id {
         return Err(HandshakeError::BindingMismatch {
@@ -1337,8 +1406,14 @@ pub fn responder_accept_open(
         });
     }
     let initiator_nonce = decode_nonce(&open.initiator_nonce, "initiator_nonce")?;
+    if initiator_nonce == responder_nonce {
+        return Err(HandshakeError::BadNonce {
+            field: "nonce_reuse",
+        });
+    }
     let binding = SessionBinding {
         team_id: expectations.team_id.clone(),
+        tailnet_id: expectations.tailnet_id.clone(),
         initiator_node_id: expectations.initiator_node_id.clone(),
         responder_node_id: expectations.responder_node_id.clone(),
         initiator_workspace_id: open.initiator_workspace_id.clone(),
@@ -1464,8 +1539,9 @@ fn decode_handshake_message<T: serde::de::DeserializeOwned>(
 }
 
 fn validate_binding_shape(binding: &SessionBinding) -> Result<(), HandshakeError> {
-    let non_empty: [(&'static str, &str); 8] = [
+    let non_empty: [(&'static str, &str); 9] = [
         ("team_id", &binding.team_id),
+        ("tailnet_id", &binding.tailnet_id),
         ("initiator_node_id", &binding.initiator_node_id),
         ("responder_node_id", &binding.responder_node_id),
         ("initiator_workspace_id", &binding.initiator_workspace_id),
@@ -1475,7 +1551,7 @@ fn validate_binding_shape(binding: &SessionBinding) -> Result<(), HandshakeError
         ("session_id", &binding.session_id),
     ];
     for (field, value) in non_empty {
-        if value.is_empty() {
+        if value.trim().is_empty() || value.len() > MAX_SESSION_BINDING_FIELD_BYTES {
             return Err(HandshakeError::BindingMismatch { field });
         }
     }
@@ -1528,7 +1604,35 @@ fn confirmation_mac(
 }
 
 fn decode_nonce(value: &str, field: &'static str) -> Result<[u8; 32], HandshakeError> {
-    decode_hex_32(value).ok_or(HandshakeError::BadNonce { field })
+    let nonce = decode_hex_32(value).ok_or(HandshakeError::BadNonce { field })?;
+    validate_nonce(&nonce, field)?;
+    Ok(nonce)
+}
+
+fn validate_nonce(nonce: &[u8; 32], field: &'static str) -> Result<(), HandshakeError> {
+    if nonce.iter().all(|byte| *byte == 0) {
+        Err(HandshakeError::BadNonce { field })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_observations(observations: &HandshakeObservations) -> Result<(), HandshakeError> {
+    for (field, value) in [
+        (
+            "initiator_node_pubkey",
+            observations.initiator_node_pubkey.as_str(),
+        ),
+        (
+            "responder_node_pubkey",
+            observations.responder_node_pubkey.as_str(),
+        ),
+    ] {
+        if value.trim().is_empty() || value.len() > MAX_NODE_PUBKEY_BYTES {
+            return Err(HandshakeError::InvalidObservation { field });
+        }
+    }
+    Ok(())
 }
 
 fn ensure_handshake_size<T: Serialize>(message: &T) -> Result<(), HandshakeError> {
@@ -1543,6 +1647,1470 @@ fn ensure_handshake_size<T: Serialize>(message: &T) -> Result<(), HandshakeError
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Real Asupersync TCP session channel (T2.1 slice 4).
+// ---------------------------------------------------------------------------
+
+/// Schema for the MAC-authenticated capability offer/selection payload.
+pub const CAPABILITY_NEGOTIATION_SCHEMA_V1: &str = "ee.mesh.session_capability_negotiation.v1";
+
+/// Maximum number of capabilities one endpoint may offer.
+pub const MAX_SESSION_CAPABILITIES: usize = 16;
+
+/// Maximum verified messages buffered while the caller services the opposite
+/// half of a bidirectional request/response exchange.
+pub const MAX_BUFFERED_SESSION_MESSAGES: usize = 32;
+
+/// One embedded wire-schema descriptor owned by this transport module.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransportWireSchema {
+    pub id: &'static str,
+    pub document: &'static str,
+}
+
+/// Module-local JSON Schema catalog for every length-prefixed session
+/// message. This does not claim CLI `schema list` registration.
+pub const TRANSPORT_WIRE_SCHEMAS: &[TransportWireSchema] = &[
+    TransportWireSchema {
+        id: TRANSPORT_FRAME_SCHEMA_V2,
+        document: include_str!("../../docs/schemas/ee.mesh.tailscale_transport_frame.v2.json"),
+    },
+    TransportWireSchema {
+        id: SESSION_OPEN_SCHEMA_V1,
+        document: include_str!("../../docs/schemas/ee.mesh.session_open.v1.json"),
+    },
+    TransportWireSchema {
+        id: SESSION_CONFIRM_SCHEMA_V1,
+        document: include_str!("../../docs/schemas/ee.mesh.session_confirm.v1.json"),
+    },
+    TransportWireSchema {
+        id: SESSION_FINISH_SCHEMA_V1,
+        document: include_str!("../../docs/schemas/ee.mesh.session_finish.v1.json"),
+    },
+    TransportWireSchema {
+        id: CAPABILITY_NEGOTIATION_SCHEMA_V1,
+        document: include_str!("../../docs/schemas/ee.mesh.session_capability_negotiation.v1.json"),
+    },
+];
+
+/// Default per-operation socket deadline.
+pub const DEFAULT_SESSION_IO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Default upper bound accepted for a peer's application budget request.
+pub const DEFAULT_MAX_REQUEST_BUDGET_MS: u64 = 30_000;
+
+/// Default terminal cap on authenticated frame-v2 messages in both
+/// directions combined, including capability negotiation.
+pub const DEFAULT_MAX_AUTHENTICATED_FRAMES: u64 = 4_096;
+
+/// Default terminal cap on length-prefixed authenticated frame-v2 bytes in
+/// both directions combined, including capability negotiation.
+pub const DEFAULT_MAX_AUTHENTICATED_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Capabilities an endpoint is willing to dispatch on an authenticated
+/// session. Tokens are sorted for stable negotiation; duplicates are refused.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionCapabilities {
+    tokens: Vec<String>,
+}
+
+impl SessionCapabilities {
+    /// The four base T2.1 capabilities.
+    #[must_use]
+    pub fn base() -> Self {
+        Self {
+            tokens: vec![
+                "body_fetch".to_owned(),
+                "event_fetch".to_owned(),
+                "hello".to_owned(),
+                "summary".to_owned(),
+            ],
+        }
+    }
+
+    /// Validate and canonicalize capability tokens. `hello` is mandatory
+    /// because it carries the authenticated negotiation exchange itself.
+    pub fn new(tokens: impl IntoIterator<Item = String>) -> Result<Self, SessionChannelError> {
+        let mut tokens = tokens.into_iter().collect::<Vec<_>>();
+        let original_len = tokens.len();
+        tokens.sort();
+        tokens.dedup();
+        if tokens.len() != original_len {
+            return Err(SessionChannelError::Authentication {
+                message: "capability negotiation contains duplicate tokens".to_owned(),
+            });
+        }
+        if tokens.is_empty() || tokens.len() > MAX_SESSION_CAPABILITIES {
+            return Err(SessionChannelError::Authentication {
+                message: format!(
+                    "capability set must contain 1..={MAX_SESSION_CAPABILITIES} entries"
+                ),
+            });
+        }
+        for token in &tokens {
+            if !valid_capability_token(token) {
+                return Err(SessionChannelError::Authentication {
+                    message: format!("invalid mesh capability token {token:?}"),
+                });
+            }
+        }
+        if !tokens.iter().any(|token| token == "hello") {
+            return Err(SessionChannelError::Authentication {
+                message: "mesh capability negotiation requires hello".to_owned(),
+            });
+        }
+        Ok(Self { tokens })
+    }
+
+    /// Canonical negotiated tokens.
+    #[must_use]
+    pub fn tokens(&self) -> &[String] {
+        &self.tokens
+    }
+
+    /// Whether a frame capability was selected for this session.
+    #[must_use]
+    pub fn allows(&self, capability: &FrameCapability) -> bool {
+        self.tokens.iter().any(|token| token == capability.token())
+    }
+
+    fn extensions(&self) -> NegotiatedExtensions {
+        NegotiatedExtensions::from_names(
+            self.tokens
+                .iter()
+                .filter(|token| {
+                    !matches!(
+                        token.as_str(),
+                        "hello" | "summary" | "event_fetch" | "body_fetch"
+                    )
+                })
+                .cloned(),
+        )
+    }
+
+    fn intersection(&self, offered: &Self) -> Result<Self, SessionChannelError> {
+        Self::new(
+            self.tokens
+                .iter()
+                .filter(|token| offered.tokens.binary_search(token).is_ok())
+                .cloned(),
+        )
+    }
+}
+
+fn valid_capability_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= 64
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+impl Default for SessionCapabilities {
+    fn default() -> Self {
+        Self::base()
+    }
+}
+
+/// Deadlines and peer-budget limits for one socket session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionChannelLimits {
+    /// Deadline for the initiator's TCP connect.
+    pub connect_timeout: Duration,
+    /// Deadline for each complete length-prefixed read or write.
+    pub io_timeout: Duration,
+    /// Largest application processing budget accepted from the peer.
+    pub max_requested_budget_ms: u64,
+    /// Terminal cap on authenticated frames in both directions combined.
+    pub max_authenticated_frames: u64,
+    /// Terminal cap on length-prefixed authenticated frame bytes in both
+    /// directions combined.
+    pub max_authenticated_bytes: u64,
+}
+
+impl Default for SessionChannelLimits {
+    fn default() -> Self {
+        Self {
+            connect_timeout: DEFAULT_SESSION_IO_TIMEOUT,
+            io_timeout: DEFAULT_SESSION_IO_TIMEOUT,
+            max_requested_budget_ms: DEFAULT_MAX_REQUEST_BUDGET_MS,
+            max_authenticated_frames: DEFAULT_MAX_AUTHENTICATED_FRAMES,
+            max_authenticated_bytes: DEFAULT_MAX_AUTHENTICATED_BYTES,
+        }
+    }
+}
+
+/// Authenticated frame-v2 resources consumed by one session. Handshake bytes
+/// are excluded; capability negotiation is included because it uses frame v2.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthenticatedSessionUsage {
+    /// Verified inbound plus successfully written outbound frames.
+    pub frames: u64,
+    /// Four-byte prefixes plus frame bodies for those frames.
+    pub wire_bytes: u64,
+}
+
+/// Initiator inputs supplied from enrolled peer state and fresh transport
+/// observations. The session channel never discovers or persists identity.
+#[derive(Debug)]
+pub struct InitiatorSessionConfig {
+    pub binding: SessionBinding,
+    pub pair_key: SecretBytes,
+    pub pair_key_generation: u64,
+    pub observations: HandshakeObservations,
+    pub capabilities: SessionCapabilities,
+    pub limits: SessionChannelLimits,
+}
+
+/// Responder inputs for a stream already accepted and WhoIs-verified by the
+/// listener owner. This API performs no listen, accept, or WhoIs work.
+#[derive(Debug)]
+pub struct AcceptedSessionConfig {
+    pub expectations: ResponderExpectations,
+    pub pair_key: SecretBytes,
+    pub observations: HandshakeObservations,
+    pub capabilities: SessionCapabilities,
+    pub limits: SessionChannelLimits,
+}
+
+/// One application message returned only after all frame, capability,
+/// budget, direction, counter, and correlation gates have passed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionMessage {
+    pub correlation_id: String,
+    pub capability: FrameCapability,
+    pub requested_budget_ms: u64,
+    pub payload: JsonValue,
+}
+
+/// Fail-closed error surface for real socket setup and frame exchange.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SessionChannelError {
+    /// Global transport kill switch was set before socket/authentication work.
+    TransportDisabled,
+    /// A security-sensitive transport environment value was invalid and
+    /// therefore failed closed.
+    InvalidConfiguration { variable: &'static str },
+    /// Caller-supplied session limits were incapable of bounding a session.
+    InvalidLimits { message: String },
+    /// The `Cx` was cancelled or its budget was exhausted.
+    Cancelled {
+        phase: &'static str,
+        message: String,
+    },
+    /// A bounded operation exceeded its deadline.
+    Timeout { phase: &'static str },
+    /// A connect or socket I/O operation failed.
+    Io {
+        phase: &'static str,
+        message: String,
+    },
+    /// The OS CSPRNG could not mint session freshness.
+    Randomness { message: String },
+    /// The three-message pair-key handshake failed.
+    Handshake(HandshakeError),
+    /// Frame-v2 decoding or authentication failed.
+    Frame(TransportSessionError),
+    /// An authenticated negotiation or request/response invariant failed.
+    Authentication { message: String },
+    /// The peer safely half-closed before the expected response arrived.
+    UnexpectedHalfClose,
+    /// A local terminal per-session resource cap was reached.
+    SessionBudgetExhausted { resource: &'static str },
+    /// This local session is already closed.
+    Closed,
+}
+
+impl SessionChannelError {
+    /// Stable degraded code owned by T2.1.
+    #[must_use]
+    pub const fn degraded_code(&self) -> &'static str {
+        match self {
+            Self::TransportDisabled
+            | Self::InvalidConfiguration { .. }
+            | Self::InvalidLimits { .. }
+            | Self::Cancelled { .. }
+            | Self::Timeout { .. }
+            | Self::Io { .. }
+            | Self::Randomness { .. }
+            | Self::UnexpectedHalfClose
+            | Self::SessionBudgetExhausted { .. }
+            | Self::Closed => "mesh_transport_unreachable",
+            Self::Handshake(error) => error.degraded_code(),
+            Self::Frame(error) => error.degraded_code(),
+            Self::Authentication { .. } => "mesh_frame_auth_failed",
+        }
+    }
+
+    /// Human-readable, secret-free diagnostic.
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self {
+            Self::TransportDisabled => {
+                "Mesh TCP transport is disabled by EE_MESH_TRANSPORT_DISABLED".to_owned()
+            }
+            Self::InvalidConfiguration { variable } => format!(
+                "Mesh TCP transport refused invalid security-sensitive configuration in {variable}"
+            ),
+            Self::InvalidLimits { message } => {
+                format!("Mesh TCP transport refused invalid session limits: {message}")
+            }
+            Self::Cancelled { phase, message } => {
+                format!("Mesh TCP session cancelled during {phase}: {message}")
+            }
+            Self::Timeout { phase } => {
+                format!("Mesh TCP session deadline elapsed during {phase}")
+            }
+            Self::Io { phase, message } => {
+                format!("Mesh TCP session I/O failed during {phase}: {message}")
+            }
+            Self::Randomness { message } => {
+                format!("Mesh TCP session could not mint fresh session material: {message}")
+            }
+            Self::Handshake(error) => error.message(),
+            Self::Frame(error) => error.message(),
+            Self::Authentication { message } => {
+                format!("Mesh TCP session authentication failed: {message}")
+            }
+            Self::UnexpectedHalfClose => {
+                "Mesh TCP peer half-closed before its correlated response".to_owned()
+            }
+            Self::SessionBudgetExhausted { resource } => {
+                format!("Mesh TCP session reached its terminal authenticated {resource} budget")
+            }
+            Self::Closed => "Mesh TCP session is closed".to_owned(),
+        }
+    }
+}
+
+impl fmt::Display for SessionChannelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
+impl std::error::Error for SessionChannelError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionRole {
+    Initiator,
+    Responder,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingRequest {
+    capability: FrameCapability,
+}
+
+impl SessionRole {
+    const fn outbound_direction(self) -> SessionDirection {
+        match self {
+            Self::Initiator => SessionDirection::InitiatorToResponder,
+            Self::Responder => SessionDirection::ResponderToInitiator,
+        }
+    }
+
+    const fn inbound_direction(self) -> SessionDirection {
+        match self {
+            Self::Initiator => SessionDirection::ResponderToInitiator,
+            Self::Responder => SessionDirection::InitiatorToResponder,
+        }
+    }
+}
+
+/// Authenticated, negotiated frame-v2 channel over a real Asupersync TCP
+/// stream. Dropping the stream closes both halves; explicit half-close keeps
+/// the read half available for a final response.
+#[derive(Debug)]
+pub struct AuthenticatedTransportSession {
+    stream: TcpStream,
+    established: EstablishedSession,
+    role: SessionRole,
+    capabilities: SessionCapabilities,
+    limits: SessionChannelLimits,
+    outbound_exhausted: bool,
+    pending_outbound: BTreeMap<String, PendingRequest>,
+    pending_inbound: BTreeMap<String, PendingRequest>,
+    buffered_requests: VecDeque<SessionMessage>,
+    buffered_responses: BTreeMap<String, SessionMessage>,
+    authenticated_frames: u64,
+    authenticated_wire_bytes: u64,
+    write_closed: bool,
+    peer_write_closed: bool,
+    closed: bool,
+}
+
+impl AuthenticatedTransportSession {
+    fn new(
+        stream: TcpStream,
+        established: EstablishedSession,
+        role: SessionRole,
+        capabilities: SessionCapabilities,
+        limits: SessionChannelLimits,
+    ) -> Self {
+        Self {
+            stream,
+            established,
+            role,
+            capabilities,
+            limits,
+            outbound_exhausted: false,
+            pending_outbound: BTreeMap::new(),
+            pending_inbound: BTreeMap::new(),
+            buffered_requests: VecDeque::new(),
+            buffered_responses: BTreeMap::new(),
+            authenticated_frames: 0,
+            authenticated_wire_bytes: 0,
+            write_closed: false,
+            peer_write_closed: false,
+            closed: false,
+        }
+    }
+
+    /// Binding proven by the three-message handshake.
+    #[must_use]
+    pub const fn binding(&self) -> &SessionBinding {
+        &self.established.binding
+    }
+
+    /// Capabilities selected by both authenticated endpoints.
+    #[must_use]
+    pub const fn capabilities(&self) -> &SessionCapabilities {
+        &self.capabilities
+    }
+
+    /// Current cumulative authenticated frame-v2 usage for this session.
+    #[must_use]
+    pub const fn authenticated_usage(&self) -> AuthenticatedSessionUsage {
+        AuthenticatedSessionUsage {
+            frames: self.authenticated_frames,
+            wire_bytes: self.authenticated_wire_bytes,
+        }
+    }
+
+    /// Send a request and remember its correlation until a verified response.
+    pub async fn send_request(
+        &mut self,
+        cx: &Cx,
+        message: SessionMessage,
+    ) -> Result<(), SessionChannelError> {
+        if let Err(error) = self.validate_application_message(&message) {
+            return self.fail(error);
+        }
+        if self.pending_outbound.contains_key(&message.correlation_id) {
+            return self.fail(SessionChannelError::Authentication {
+                message: "duplicate outstanding request correlation".to_owned(),
+            });
+        }
+        if self.pending_outbound.len() >= MAX_BUFFERED_SESSION_MESSAGES {
+            return self.fail(SessionChannelError::Authentication {
+                message: "outstanding outbound request ledger exceeded its bounded capacity"
+                    .to_owned(),
+            });
+        }
+        let correlation = message.correlation_id.clone();
+        let pending = PendingRequest {
+            capability: message.capability.clone(),
+        };
+        self.send_message(cx, FrameKind::Request, message).await?;
+        self.pending_outbound.insert(correlation, pending);
+        Ok(())
+    }
+
+    /// Receive the next verified request. `Ok(None)` is a clean peer
+    /// half-close before a new prefix, and performs no application mutation.
+    pub async fn receive_request(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<Option<SessionMessage>, SessionChannelError> {
+        if let Some(message) = self.buffered_requests.pop_front() {
+            return Ok(Some(message));
+        }
+        loop {
+            let Some(frame) = self.receive_verified(cx).await? else {
+                if !self.pending_outbound.is_empty() {
+                    return self.fail(SessionChannelError::UnexpectedHalfClose);
+                }
+                return Ok(None);
+            };
+            match frame.frame.kind {
+                FrameKind::Request => return self.accept_inbound_request(&frame.frame).map(Some),
+                FrameKind::Response => {
+                    let message = self.accept_inbound_response(&frame.frame)?;
+                    self.buffer_response(message)?;
+                }
+            }
+        }
+    }
+
+    /// Run processing for a verified inbound request under the smaller of its
+    /// authenticated `requestedBudgetMs` and the caller's current `Cx`
+    /// deadline. Callers must apply durable mutation only after this returns
+    /// `Ok`; timeout/cancellation drops the processing future and closes the
+    /// session without authorizing a response.
+    pub async fn process_request<T, F>(
+        &mut self,
+        cx: &Cx,
+        request: &SessionMessage,
+        future: F,
+    ) -> Result<T, SessionChannelError>
+    where
+        F: Future<Output = T>,
+    {
+        let Some(pending) = self.pending_inbound.get(&request.correlation_id) else {
+            return self.fail(SessionChannelError::Authentication {
+                message: "processing input is not a verified outstanding request".to_owned(),
+            });
+        };
+        if pending.capability != request.capability || request.requested_budget_ms == 0 {
+            return self.fail(SessionChannelError::Authentication {
+                message: "processing input does not match its authenticated request metadata"
+                    .to_owned(),
+            });
+        }
+        let requested = Duration::from_millis(request.requested_budget_ms);
+        let now = wall_now();
+        let effective = cx
+            .budget()
+            .remaining_duration(now)
+            .map_or(requested, |remaining| remaining.min(requested));
+        if let Err(error) = checkpoint(cx, "request processing") {
+            return self.fail(error);
+        }
+        let _ambient = Cx::set_current(Some(cx.clone()));
+        match timeout(now, effective, future).await {
+            Ok(value) => {
+                if let Err(error) = checkpoint(cx, "request processing") {
+                    return self.fail(error);
+                }
+                Ok(value)
+            }
+            Err(_) => {
+                let error = match checkpoint(cx, "request processing") {
+                    Ok(()) => SessionChannelError::Timeout {
+                        phase: "request processing",
+                    },
+                    Err(error) => error,
+                };
+                self.fail(error)
+            }
+        }
+    }
+
+    /// Send a response only for a request this session returned successfully.
+    pub async fn send_response(
+        &mut self,
+        cx: &Cx,
+        message: SessionMessage,
+    ) -> Result<(), SessionChannelError> {
+        if let Err(error) = self.validate_application_message(&message) {
+            return self.fail(error);
+        }
+        let Some(pending) = self.pending_inbound.get(&message.correlation_id) else {
+            return self.fail(SessionChannelError::Authentication {
+                message: "response correlation does not name a verified inbound request".to_owned(),
+            });
+        };
+        if pending.capability != message.capability {
+            return self.fail(SessionChannelError::Authentication {
+                message: "response capability does not match the correlated request".to_owned(),
+            });
+        }
+        let correlation = message.correlation_id.clone();
+        self.send_message(cx, FrameKind::Response, message).await?;
+        self.pending_inbound.remove(&correlation);
+        Ok(())
+    }
+
+    /// Receive exactly the response correlated to `correlation_id`.
+    pub async fn receive_response(
+        &mut self,
+        cx: &Cx,
+        correlation_id: &str,
+    ) -> Result<SessionMessage, SessionChannelError> {
+        if !self.pending_outbound.contains_key(correlation_id) {
+            return self.fail(SessionChannelError::Authentication {
+                message: "response wait does not name an outstanding request".to_owned(),
+            });
+        }
+        if let Some(message) = self.buffered_responses.remove(correlation_id) {
+            self.pending_outbound.remove(correlation_id);
+            return Ok(message);
+        }
+        loop {
+            let Some(frame) = self.receive_verified(cx).await? else {
+                return self.fail(SessionChannelError::UnexpectedHalfClose);
+            };
+            match frame.frame.kind {
+                FrameKind::Request => {
+                    let message = self.accept_inbound_request(&frame.frame)?;
+                    self.buffer_request(message)?;
+                }
+                FrameKind::Response => {
+                    let message = self.accept_inbound_response(&frame.frame)?;
+                    if message.correlation_id == correlation_id {
+                        self.pending_outbound.remove(correlation_id);
+                        return Ok(message);
+                    }
+                    self.buffer_response(message)?;
+                }
+            }
+        }
+    }
+
+    fn accept_inbound_request(
+        &mut self,
+        frame: &FrameV2,
+    ) -> Result<SessionMessage, SessionChannelError> {
+        let message = session_message_from_frame(frame);
+        let pending = PendingRequest {
+            capability: message.capability.clone(),
+        };
+        if self.pending_inbound.len() >= MAX_BUFFERED_SESSION_MESSAGES {
+            return self.fail(SessionChannelError::Authentication {
+                message: "outstanding inbound request ledger exceeded its bounded capacity"
+                    .to_owned(),
+            });
+        }
+        if self
+            .pending_inbound
+            .insert(message.correlation_id.clone(), pending)
+            .is_some()
+        {
+            return self.fail(SessionChannelError::Authentication {
+                message: "duplicate outstanding inbound correlation".to_owned(),
+            });
+        }
+        Ok(message)
+    }
+
+    fn accept_inbound_response(
+        &mut self,
+        frame: &FrameV2,
+    ) -> Result<SessionMessage, SessionChannelError> {
+        let message = session_message_from_frame(frame);
+        let Some(pending) = self.pending_outbound.get(&message.correlation_id) else {
+            return self.fail(SessionChannelError::Authentication {
+                message: "response correlation does not name an outstanding request".to_owned(),
+            });
+        };
+        if pending.capability != message.capability {
+            return self.fail(SessionChannelError::Authentication {
+                message: "response capability does not match the correlated request".to_owned(),
+            });
+        }
+        Ok(message)
+    }
+
+    fn buffer_request(&mut self, message: SessionMessage) -> Result<(), SessionChannelError> {
+        if self.buffered_requests.len() >= MAX_BUFFERED_SESSION_MESSAGES {
+            return self.fail(SessionChannelError::Authentication {
+                message: "authenticated request inbox exceeded its bounded capacity".to_owned(),
+            });
+        }
+        self.buffered_requests.push_back(message);
+        Ok(())
+    }
+
+    fn buffer_response(&mut self, message: SessionMessage) -> Result<(), SessionChannelError> {
+        if self.buffered_responses.len() >= MAX_BUFFERED_SESSION_MESSAGES
+            || self
+                .buffered_responses
+                .insert(message.correlation_id.clone(), message)
+                .is_some()
+        {
+            return self.fail(SessionChannelError::Authentication {
+                message: "authenticated response inbox is full or duplicated".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Safely half-close the write side while retaining the read side.
+    pub async fn shutdown_write(&mut self, cx: &Cx) -> Result<(), SessionChannelError> {
+        if self.closed {
+            return Err(SessionChannelError::Closed);
+        }
+        if self.write_closed {
+            return Ok(());
+        }
+        let result = await_io(
+            cx,
+            self.limits.io_timeout,
+            "write half-close",
+            self.stream.shutdown(),
+        )
+        .await;
+        if let Err(error) = result {
+            return self.fail(error);
+        }
+        self.write_closed = true;
+        Ok(())
+    }
+
+    /// Close both directions. Idempotent and best-effort.
+    pub fn close(&mut self) {
+        self.closed = true;
+        self.write_closed = true;
+        self.peer_write_closed = true;
+        let _ = self.stream.shutdown(Shutdown::Both);
+    }
+
+    fn validate_application_message(
+        &self,
+        message: &SessionMessage,
+    ) -> Result<(), SessionChannelError> {
+        if self.closed || self.write_closed {
+            return Err(SessionChannelError::Closed);
+        }
+        if message.correlation_id.is_empty() || message.correlation_id.len() > 128 {
+            return Err(SessionChannelError::Authentication {
+                message: "correlation id must contain 1..=128 bytes".to_owned(),
+            });
+        }
+        if !self.capabilities.allows(&message.capability) {
+            return Err(SessionChannelError::Authentication {
+                message: format!(
+                    "capability {:?} was not selected for this session",
+                    message.capability.token()
+                ),
+            });
+        }
+        if message.requested_budget_ms > self.limits.max_requested_budget_ms {
+            return Err(SessionChannelError::Authentication {
+                message: "requested application budget exceeds the session limit".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn send_message(
+        &mut self,
+        cx: &Cx,
+        kind: FrameKind,
+        message: SessionMessage,
+    ) -> Result<(), SessionChannelError> {
+        if self.outbound_exhausted {
+            return self.fail(SessionChannelError::Frame(
+                TransportSessionError::ReplayRejected {
+                    violation: CounterViolation::Exhausted,
+                    expected: u64::MAX,
+                    observed: u64::MAX,
+                },
+            ));
+        }
+        let counter = self.established.next_outbound;
+        let frame = match sign_frame(
+            &self.established.binding,
+            &self.established.keys,
+            FrameDraft {
+                direction: self.role.outbound_direction(),
+                counter,
+                correlation_id: message.correlation_id,
+                kind,
+                capability: message.capability,
+                requested_budget_ms: message.requested_budget_ms,
+                payload: message.payload,
+            },
+        ) {
+            Ok(frame) => frame,
+            Err(error) => return self.fail(SessionChannelError::Frame(error)),
+        };
+        let encoded = match serde_json::to_vec(&frame) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                return self.fail(SessionChannelError::Frame(
+                    TransportSessionError::MalformedFrame {
+                        message: format!("serialize frame: {error}"),
+                    },
+                ));
+            }
+        };
+        if let Err(error) = self.reserve_authenticated_frame(encoded.len()) {
+            return self.fail(error);
+        }
+        if let Err(error) = write_packet(
+            &mut self.stream,
+            cx,
+            self.limits.io_timeout,
+            "frame write",
+            &encoded,
+            MAX_FRAME_BYTES,
+        )
+        .await
+        {
+            return self.fail(error);
+        }
+        if counter == u64::MAX {
+            self.outbound_exhausted = true;
+        } else {
+            self.established.next_outbound += 1;
+        }
+        Ok(())
+    }
+
+    async fn receive_verified(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<Option<VerifiedFrameV2>, SessionChannelError> {
+        if self.closed || self.peer_write_closed {
+            return Err(SessionChannelError::Closed);
+        }
+        let encoded = match read_packet(
+            &mut self.stream,
+            cx,
+            self.limits.io_timeout,
+            "frame read",
+            MAX_FRAME_BYTES,
+        )
+        .await
+        {
+            Ok(Some(encoded)) => encoded,
+            Ok(None) => {
+                self.peer_write_closed = true;
+                return Ok(None);
+            }
+            Err(error) => return self.fail(error),
+        };
+        let frame = match decode_frame(&encoded) {
+            Ok(frame) => frame,
+            Err(error) => return self.fail(SessionChannelError::Frame(error)),
+        };
+        let verified = match verify_frame(
+            &frame,
+            &self.established.binding,
+            self.role.inbound_direction(),
+            &mut self.established.inbound,
+            &self.established.keys,
+            &self.capabilities.extensions(),
+        ) {
+            Ok(verified) => verified,
+            Err(error) => return self.fail(SessionChannelError::Frame(error)),
+        };
+        if !self.capabilities.allows(&verified.frame.capability) {
+            return self.fail(SessionChannelError::Frame(
+                TransportSessionError::ExtensionNotNegotiated {
+                    name: verified.frame.capability.token().to_owned(),
+                },
+            ));
+        }
+        if verified.frame.requested_budget_ms > self.limits.max_requested_budget_ms {
+            return self.fail(SessionChannelError::Frame(
+                TransportSessionError::MalformedFrame {
+                    message: "requested application budget exceeds the session limit".to_owned(),
+                },
+            ));
+        }
+        if verified.frame.correlation_id.is_empty() || verified.frame.correlation_id.len() > 128 {
+            return self.fail(SessionChannelError::Frame(
+                TransportSessionError::MalformedFrame {
+                    message: "correlation id must contain 1..=128 bytes".to_owned(),
+                },
+            ));
+        }
+        if let Err(error) = self.reserve_authenticated_frame(encoded.len()) {
+            return self.fail(error);
+        }
+        Ok(Some(verified))
+    }
+
+    fn fail<T>(&mut self, error: SessionChannelError) -> Result<T, SessionChannelError> {
+        self.close();
+        Err(error)
+    }
+
+    fn reserve_authenticated_frame(
+        &mut self,
+        body_bytes: usize,
+    ) -> Result<(), SessionChannelError> {
+        let next_frames = self
+            .authenticated_frames
+            .checked_add(1)
+            .ok_or(SessionChannelError::SessionBudgetExhausted { resource: "frame" })?;
+        if next_frames > self.limits.max_authenticated_frames {
+            return Err(SessionChannelError::SessionBudgetExhausted { resource: "frame" });
+        }
+        let packet_bytes = u64::try_from(body_bytes)
+            .ok()
+            .and_then(|bytes| bytes.checked_add(4))
+            .ok_or(SessionChannelError::SessionBudgetExhausted { resource: "byte" })?;
+        let next_bytes = self
+            .authenticated_wire_bytes
+            .checked_add(packet_bytes)
+            .ok_or(SessionChannelError::SessionBudgetExhausted { resource: "byte" })?;
+        if next_bytes > self.limits.max_authenticated_bytes {
+            return Err(SessionChannelError::SessionBudgetExhausted { resource: "byte" });
+        }
+        self.authenticated_frames = next_frames;
+        self.authenticated_wire_bytes = next_bytes;
+        Ok(())
+    }
+}
+
+/// Initiate TCP, run the three-message handshake, and authenticate capability
+/// negotiation. The kill switch is checked before connect or authentication.
+pub async fn connect_authenticated_session(
+    cx: &Cx,
+    address: SocketAddr,
+    mut config: InitiatorSessionConfig,
+) -> Result<AuthenticatedTransportSession, SessionChannelError> {
+    refuse_if_transport_disabled()?;
+    checkpoint(cx, "connect")?;
+    validate_limits(config.limits)?;
+    let initiator_nonce = fresh_bytes()?;
+    config.binding.session_id = fresh_session_id()?;
+    let stream = await_io(
+        cx,
+        config.limits.connect_timeout,
+        "connect",
+        TcpStream::connect(address),
+    )
+    .await?;
+    run_initiator_handshake(cx, stream, config, initiator_nonce).await
+}
+
+/// Authenticate a stream already accepted and WhoIs-verified by the listener
+/// owner. The kill switch is checked before reading or authenticating it.
+pub async fn accept_authenticated_session(
+    cx: &Cx,
+    stream: TcpStream,
+    config: AcceptedSessionConfig,
+) -> Result<AuthenticatedTransportSession, SessionChannelError> {
+    refuse_if_transport_disabled()?;
+    checkpoint(cx, "accepted session")?;
+    validate_limits(config.limits)?;
+    let responder_nonce = fresh_bytes()?;
+    run_responder_handshake(cx, stream, config, responder_nonce).await
+}
+
+async fn run_initiator_handshake(
+    cx: &Cx,
+    mut stream: TcpStream,
+    config: InitiatorSessionConfig,
+    initiator_nonce: [u8; 32],
+) -> Result<AuthenticatedTransportSession, SessionChannelError> {
+    let (state, open) = InitiatorHandshake::open(
+        config.binding,
+        initiator_nonce,
+        config.pair_key_generation,
+        config.observations,
+    )
+    .map_err(SessionChannelError::Handshake)?;
+    if let Err(error) = write_json_packet(
+        &mut stream,
+        cx,
+        config.limits.io_timeout,
+        "session_open write",
+        &open,
+        MAX_HANDSHAKE_MESSAGE_BYTES,
+    )
+    .await
+    {
+        close_stream(&stream);
+        return Err(error);
+    }
+    let confirm_bytes = match required_packet(
+        &mut stream,
+        cx,
+        config.limits.io_timeout,
+        "session_confirm read",
+        MAX_HANDSHAKE_MESSAGE_BYTES,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            close_stream(&stream);
+            return Err(error);
+        }
+    };
+    let confirm = match decode_session_confirm(&confirm_bytes) {
+        Ok(confirm) => confirm,
+        Err(error) => {
+            close_stream(&stream);
+            return Err(SessionChannelError::Handshake(error));
+        }
+    };
+    let (finish, established) = match state.finish(&config.pair_key, &confirm) {
+        Ok(result) => result,
+        Err(error) => {
+            close_stream(&stream);
+            return Err(SessionChannelError::Handshake(error));
+        }
+    };
+    if let Err(error) = write_json_packet(
+        &mut stream,
+        cx,
+        config.limits.io_timeout,
+        "session_finish write",
+        &finish,
+        MAX_HANDSHAKE_MESSAGE_BYTES,
+    )
+    .await
+    {
+        close_stream(&stream);
+        return Err(error);
+    }
+    let mut session = AuthenticatedTransportSession::new(
+        stream,
+        established,
+        SessionRole::Initiator,
+        config.capabilities.clone(),
+        config.limits,
+    );
+    let correlation_id = negotiation_correlation(session.binding());
+    let offer = CapabilityNegotiationV1 {
+        schema: CAPABILITY_NEGOTIATION_SCHEMA_V1.to_owned(),
+        phase: CapabilityNegotiationPhase::Offer,
+        capabilities: config.capabilities.tokens.clone(),
+    };
+    session
+        .send_request(
+            cx,
+            SessionMessage {
+                correlation_id: correlation_id.clone(),
+                capability: FrameCapability::Hello,
+                requested_budget_ms: 0,
+                payload: serde_json::to_value(offer).map_err(|error| {
+                    SessionChannelError::Authentication {
+                        message: format!("encode capability offer: {error}"),
+                    }
+                })?,
+            },
+        )
+        .await?;
+    let response = session.receive_response(cx, &correlation_id).await?;
+    let selection: CapabilityNegotiationV1 = match serde_json::from_value(response.payload) {
+        Ok(selection) => selection,
+        Err(error) => {
+            return session.fail(SessionChannelError::Authentication {
+                message: format!("decode authenticated capability selection: {error}"),
+            });
+        }
+    };
+    if selection.schema != CAPABILITY_NEGOTIATION_SCHEMA_V1
+        || selection.phase != CapabilityNegotiationPhase::Selection
+    {
+        return session.fail(SessionChannelError::Authentication {
+            message: "capability response has the wrong schema or phase".to_owned(),
+        });
+    }
+    let selected = match SessionCapabilities::new(selection.capabilities) {
+        Ok(selected) => selected,
+        Err(error) => return session.fail(error),
+    };
+    if selected
+        .tokens
+        .iter()
+        .any(|token| config.capabilities.tokens.binary_search(token).is_err())
+    {
+        return session.fail(SessionChannelError::Authentication {
+            message: "responder selected a capability the initiator did not offer".to_owned(),
+        });
+    }
+    session.capabilities = selected;
+    Ok(session)
+}
+
+async fn run_responder_handshake(
+    cx: &Cx,
+    mut stream: TcpStream,
+    config: AcceptedSessionConfig,
+    responder_nonce: [u8; 32],
+) -> Result<AuthenticatedTransportSession, SessionChannelError> {
+    let open_bytes = match required_packet(
+        &mut stream,
+        cx,
+        config.limits.io_timeout,
+        "session_open read",
+        MAX_HANDSHAKE_MESSAGE_BYTES,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            close_stream(&stream);
+            return Err(error);
+        }
+    };
+    let open = match decode_session_open(&open_bytes) {
+        Ok(open) => open,
+        Err(error) => {
+            close_stream(&stream);
+            return Err(SessionChannelError::Handshake(error));
+        }
+    };
+    let (pending, confirm) = match responder_accept_open(
+        &open,
+        &config.expectations,
+        responder_nonce,
+        config.observations,
+        &config.pair_key,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            close_stream(&stream);
+            return Err(SessionChannelError::Handshake(error));
+        }
+    };
+    if let Err(error) = write_json_packet(
+        &mut stream,
+        cx,
+        config.limits.io_timeout,
+        "session_confirm write",
+        &confirm,
+        MAX_HANDSHAKE_MESSAGE_BYTES,
+    )
+    .await
+    {
+        close_stream(&stream);
+        return Err(error);
+    }
+    let finish_bytes = match required_packet(
+        &mut stream,
+        cx,
+        config.limits.io_timeout,
+        "session_finish read",
+        MAX_HANDSHAKE_MESSAGE_BYTES,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            close_stream(&stream);
+            return Err(error);
+        }
+    };
+    let finish = match decode_session_finish(&finish_bytes) {
+        Ok(finish) => finish,
+        Err(error) => {
+            close_stream(&stream);
+            return Err(SessionChannelError::Handshake(error));
+        }
+    };
+    let established = match pending.complete(&config.pair_key, &finish) {
+        Ok(established) => established,
+        Err(error) => {
+            close_stream(&stream);
+            return Err(SessionChannelError::Handshake(error));
+        }
+    };
+    let local_capabilities = config.capabilities;
+    let mut session = AuthenticatedTransportSession::new(
+        stream,
+        established,
+        SessionRole::Responder,
+        local_capabilities.clone(),
+        config.limits,
+    );
+    let correlation_id = negotiation_correlation(session.binding());
+    let Some(offer_frame) = session.receive_verified(cx).await? else {
+        return session.fail(SessionChannelError::UnexpectedHalfClose);
+    };
+    if offer_frame.frame.kind != FrameKind::Request
+        || offer_frame.frame.correlation_id != correlation_id
+        || offer_frame.frame.capability != FrameCapability::Hello
+    {
+        return session.fail(SessionChannelError::Authentication {
+            message: "first authenticated frame is not the capability offer".to_owned(),
+        });
+    }
+    let offer: CapabilityNegotiationV1 = match serde_json::from_value(offer_frame.frame.payload) {
+        Ok(offer) => offer,
+        Err(error) => {
+            return session.fail(SessionChannelError::Authentication {
+                message: format!("decode authenticated capability offer: {error}"),
+            });
+        }
+    };
+    if offer.schema != CAPABILITY_NEGOTIATION_SCHEMA_V1
+        || offer.phase != CapabilityNegotiationPhase::Offer
+    {
+        return session.fail(SessionChannelError::Authentication {
+            message: "capability offer has the wrong schema or phase".to_owned(),
+        });
+    }
+    let offered = match SessionCapabilities::new(offer.capabilities) {
+        Ok(offered) => offered,
+        Err(error) => return session.fail(error),
+    };
+    let selected = match local_capabilities.intersection(&offered) {
+        Ok(selected) => selected,
+        Err(error) => return session.fail(error),
+    };
+    session.pending_inbound.insert(
+        correlation_id.clone(),
+        PendingRequest {
+            capability: FrameCapability::Hello,
+        },
+    );
+    session
+        .send_response(
+            cx,
+            SessionMessage {
+                correlation_id,
+                capability: FrameCapability::Hello,
+                requested_budget_ms: 0,
+                payload: serde_json::to_value(CapabilityNegotiationV1 {
+                    schema: CAPABILITY_NEGOTIATION_SCHEMA_V1.to_owned(),
+                    phase: CapabilityNegotiationPhase::Selection,
+                    capabilities: selected.tokens.clone(),
+                })
+                .map_err(|error| SessionChannelError::Authentication {
+                    message: format!("encode capability selection: {error}"),
+                })?,
+            },
+        )
+        .await?;
+    session.capabilities = selected;
+    Ok(session)
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CapabilityNegotiationPhase {
+    Offer,
+    Selection,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CapabilityNegotiationV1 {
+    schema: String,
+    phase: CapabilityNegotiationPhase,
+    capabilities: Vec<String>,
+}
+
+fn negotiation_correlation(binding: &SessionBinding) -> String {
+    let digest = blake3::hash(binding.session_id.as_bytes()).to_hex();
+    format!("session-capabilities-{}", &digest.as_str()[..24])
+}
+
+fn session_message_from_frame(frame: &FrameV2) -> SessionMessage {
+    SessionMessage {
+        correlation_id: frame.correlation_id.clone(),
+        capability: frame.capability.clone(),
+        requested_budget_ms: frame.requested_budget_ms,
+        payload: frame.payload.clone(),
+    }
+}
+
+fn fresh_bytes() -> Result<[u8; 32], SessionChannelError> {
+    for _ in 0..2 {
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes).map_err(|error| SessionChannelError::Randomness {
+            message: error.to_string(),
+        })?;
+        if bytes.iter().any(|byte| *byte != 0) {
+            return Ok(bytes);
+        }
+    }
+    Err(SessionChannelError::Randomness {
+        message: "OS CSPRNG returned all-zero session material twice".to_owned(),
+    })
+}
+
+fn fresh_session_id() -> Result<String, SessionChannelError> {
+    let bytes = fresh_bytes()?;
+    Ok(format!("session-{}", hex_lower(&bytes[..16])))
+}
+
+fn refuse_if_transport_disabled() -> Result<(), SessionChannelError> {
+    let Some(raw) = read_env_var(EnvVar::MeshTransportDisabled) else {
+        return Ok(());
+    };
+    match crate::config::parse_env_bool_flag(&raw) {
+        Some(true) => Err(SessionChannelError::TransportDisabled),
+        Some(false) => Ok(()),
+        None => Err(SessionChannelError::InvalidConfiguration {
+            variable: EnvVar::MeshTransportDisabled.name(),
+        }),
+    }
+}
+
+fn validate_limits(limits: SessionChannelLimits) -> Result<(), SessionChannelError> {
+    if limits.connect_timeout.is_zero()
+        || limits.io_timeout.is_zero()
+        || limits.max_requested_budget_ms == 0
+        || limits.max_authenticated_frames < 2
+        || limits.max_authenticated_bytes == 0
+    {
+        return Err(SessionChannelError::InvalidLimits {
+            message: "deadlines, request/byte budgets must be non-zero and the frame budget must allow the two negotiation frames".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn checkpoint(cx: &Cx, phase: &'static str) -> Result<(), SessionChannelError> {
+    cx.checkpoint()
+        .map_err(|error| SessionChannelError::Cancelled {
+            phase,
+            message: error.to_string(),
+        })
+}
+
+async fn await_io<T, F>(
+    cx: &Cx,
+    duration: Duration,
+    phase: &'static str,
+    future: F,
+) -> Result<T, SessionChannelError>
+where
+    F: Future<Output = io::Result<T>>,
+{
+    checkpoint(cx, phase)?;
+    let now = wall_now();
+    let effective_duration = cx
+        .budget()
+        .remaining_duration(now)
+        .map_or(duration, |remaining| remaining.min(duration));
+    if effective_duration.is_zero() {
+        checkpoint(cx, phase)?;
+        return Err(SessionChannelError::Timeout { phase });
+    }
+    let _ambient = Cx::set_current(Some(cx.clone()));
+    match timeout(now, effective_duration, future).await {
+        Ok(Ok(value)) => {
+            checkpoint(cx, phase)?;
+            Ok(value)
+        }
+        Ok(Err(error)) => Err(map_io_error(cx, phase, error)),
+        Err(_) => match checkpoint(cx, phase) {
+            Ok(()) => Err(SessionChannelError::Timeout { phase }),
+            Err(cancelled) => Err(cancelled),
+        },
+    }
+}
+
+fn map_io_error(cx: &Cx, phase: &'static str, error: io::Error) -> SessionChannelError {
+    if error.kind() == io::ErrorKind::Interrupted
+        && let Err(cancelled) = cx.checkpoint()
+    {
+        return SessionChannelError::Cancelled {
+            phase,
+            message: cancelled.to_string(),
+        };
+    }
+    if matches!(
+        error.kind(),
+        io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+    ) {
+        return SessionChannelError::Frame(TransportSessionError::MalformedFrame {
+            message: error.to_string(),
+        });
+    }
+    SessionChannelError::Io {
+        phase,
+        message: error.to_string(),
+    }
+}
+
+async fn write_json_packet<T: Serialize>(
+    stream: &mut TcpStream,
+    cx: &Cx,
+    duration: Duration,
+    phase: &'static str,
+    value: &T,
+    max_bytes: usize,
+) -> Result<(), SessionChannelError> {
+    let bytes = serde_json::to_vec(value).map_err(|error| SessionChannelError::Authentication {
+        message: format!("serialize wire message: {error}"),
+    })?;
+    write_packet(stream, cx, duration, phase, &bytes, max_bytes).await
+}
+
+async fn write_packet(
+    stream: &mut TcpStream,
+    cx: &Cx,
+    duration: Duration,
+    phase: &'static str,
+    bytes: &[u8],
+    max_bytes: usize,
+) -> Result<(), SessionChannelError> {
+    if bytes.len() > max_bytes || bytes.len() > u32::MAX as usize {
+        return Err(SessionChannelError::Frame(
+            TransportSessionError::FrameTooLarge {
+                actual_bytes: bytes.len(),
+            },
+        ));
+    }
+    let prefix = u32::try_from(bytes.len())
+        .map_err(|_| SessionChannelError::Authentication {
+            message: "wire message length does not fit u32".to_owned(),
+        })?
+        .to_be_bytes();
+    await_io(cx, duration, phase, async {
+        stream.write_all(&prefix).await?;
+        stream.write_all(bytes).await?;
+        stream.flush().await
+    })
+    .await
+}
+
+async fn required_packet(
+    stream: &mut TcpStream,
+    cx: &Cx,
+    duration: Duration,
+    phase: &'static str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, SessionChannelError> {
+    read_packet(stream, cx, duration, phase, max_bytes)
+        .await?
+        .ok_or(SessionChannelError::UnexpectedHalfClose)
+}
+
+async fn read_packet(
+    stream: &mut TcpStream,
+    cx: &Cx,
+    duration: Duration,
+    phase: &'static str,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, SessionChannelError> {
+    await_io(cx, duration, phase, async {
+        let mut prefix = [0_u8; 4];
+        let mut prefix_read = 0;
+        while prefix_read < prefix.len() {
+            let count = stream.read(&mut prefix[prefix_read..]).await?;
+            if count == 0 {
+                if prefix_read == 0 {
+                    return Ok(None);
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "partial length prefix",
+                ));
+            }
+            prefix_read += count;
+        }
+        let length = u32::from_be_bytes(prefix) as usize;
+        if length > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("length prefix {length} exceeds {max_bytes}-byte cap"),
+            ));
+        }
+        let mut bytes = vec![0_u8; length];
+        let mut body_read = 0;
+        while body_read < length {
+            let count = stream.read(&mut bytes[body_read..]).await?;
+            if count == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "partial length-prefixed body",
+                ));
+            }
+            body_read += count;
+        }
+        Ok(Some(bytes))
+    })
+    .await
+}
+
+fn close_stream(stream: &TcpStream) {
+    let _ = stream.shutdown(Shutdown::Both);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1551,6 +3119,7 @@ mod tests {
     fn kat_binding() -> SessionBinding {
         SessionBinding {
             team_id: "team-kat".to_owned(),
+            tailnet_id: "tailnet-kat.ts.net".to_owned(),
             initiator_node_id: "node-init".to_owned(),
             responder_node_id: "node-resp".to_owned(),
             initiator_workspace_id: "ws-init".to_owned(),
@@ -1639,6 +3208,28 @@ mod tests {
         .expect_err("wrong-direction key must fail");
         assert_eq!(error, TransportSessionError::MacMismatch);
         assert_eq!(error.degraded_code(), "mesh_frame_auth_failed");
+    }
+
+    #[test]
+    fn wrong_tailnet_valid_mac_fails_under_tailnet_bound_session_key() {
+        let original_binding = kat_binding();
+        let original_keys = kat_keys();
+        let frame = kat_frame(&original_keys);
+        let mut wrong_binding = original_binding.clone();
+        wrong_binding.tailnet_id = "other-tailnet.ts.net".to_owned();
+        let wrong_keys =
+            derive_session_keys(&kat_pair_key(), &wrong_binding, &[0x11; 32], &[0x22; 32]);
+        let mut counters = SessionCounters::new();
+        let error = verify_frame(
+            &frame,
+            &wrong_binding,
+            SessionDirection::InitiatorToResponder,
+            &mut counters,
+            &wrong_keys,
+            &NegotiatedExtensions::none(),
+        )
+        .expect_err("MAC valid in one tailnet must fail in another tailnet");
+        assert_eq!(error, TransportSessionError::MacMismatch);
     }
 
     #[test]
@@ -1790,6 +3381,28 @@ mod tests {
             }
         ));
         assert_eq!(error.degraded_code(), "mesh_frame_replay_rejected");
+    }
+
+    #[test]
+    fn counter_max_is_terminal_without_saturating_reuse() {
+        let mut counters = SessionCounters {
+            next: u64::MAX,
+            closed: false,
+            exhausted: false,
+        };
+        counters.accept(u64::MAX).expect("MAX is accepted once");
+        let error = counters
+            .accept(u64::MAX)
+            .expect_err("MAX has no exact successor");
+        assert!(matches!(
+            error,
+            TransportSessionError::ReplayRejected {
+                violation: CounterViolation::Exhausted,
+                expected: u64::MAX,
+                observed: u64::MAX,
+            }
+        ));
+        assert!(counters.is_closed());
     }
 
     #[test]
@@ -2007,6 +3620,7 @@ mod tests {
     fn kat_expectations() -> ResponderExpectations {
         ResponderExpectations {
             team_id: "team-kat".to_owned(),
+            tailnet_id: "tailnet-kat.ts.net".to_owned(),
             responder_node_id: "node-resp".to_owned(),
             responder_workspace_id: "ws-resp".to_owned(),
             responder_stable_id: "stable-resp".to_owned(),
@@ -2060,6 +3674,52 @@ mod tests {
         assert_eq!(initiator_session.binding, responder_session.binding);
         assert_eq!(initiator_session.next_outbound, 1);
         assert_eq!(responder_session.inbound.expected_next(), 1);
+    }
+
+    #[test]
+    fn handshake_rejects_empty_observations_zero_or_reused_nonces_and_wrong_tailnet() {
+        let empty = HandshakeObservations {
+            initiator_node_pubkey: String::new(),
+            responder_node_pubkey: String::new(),
+        };
+        let error = InitiatorHandshake::open(kat_binding(), [0x11; 32], 1, empty)
+            .expect_err("empty current node-key observations must fail");
+        assert!(matches!(error, HandshakeError::InvalidObservation { .. }));
+
+        let error = InitiatorHandshake::open(kat_binding(), [0; 32], 1, kat_observations())
+            .expect_err("zero initiator nonce must fail");
+        assert!(matches!(error, HandshakeError::BadNonce { .. }));
+
+        let (state, open) =
+            InitiatorHandshake::open(kat_binding(), [0x11; 32], 1, kat_observations())
+                .expect("valid open");
+        let _ = state;
+        let error = responder_accept_open(
+            &open,
+            &kat_expectations(),
+            [0x11; 32],
+            kat_observations(),
+            &kat_pair_key(),
+        )
+        .expect_err("responder nonce must differ from initiator nonce");
+        assert!(matches!(error, HandshakeError::BadNonce { .. }));
+
+        let mut wrong_tailnet = kat_expectations();
+        wrong_tailnet.tailnet_id = "other-tailnet.ts.net".to_owned();
+        let error = responder_accept_open(
+            &open,
+            &wrong_tailnet,
+            [0x22; 32],
+            kat_observations(),
+            &kat_pair_key(),
+        )
+        .expect_err("locally verified tailnet mismatch must fail");
+        assert_eq!(
+            error,
+            HandshakeError::BindingMismatch {
+                field: "tailnet_id"
+            }
+        );
     }
 
     #[test]

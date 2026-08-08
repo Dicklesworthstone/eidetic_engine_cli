@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ee.mesh.session_finish.v1",
+  "title": "ee.mesh.session_finish.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "sessionId", "finishMac"],
+  "properties": {
+    "schema": { "const": "ee.mesh.session_finish.v1" },
+    "sessionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "finishMac": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ee.mesh.session_capability_negotiation.v1",
+  "title": "ee.mesh.session_capability_negotiation.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "phase", "capabilities"],
+  "properties": {
+    "schema": { "const": "ee.mesh.session_capability_negotiation.v1" },
+    "phase": { "enum": ["offer", "selection"] },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "contains": { "const": "hello" },
+      "minContains": 1,
+      "maxContains": 1,
+      "items": { "type": "string", "pattern": "^[a-z0-9_]{1,64}$" }
+    }
+  }
+}

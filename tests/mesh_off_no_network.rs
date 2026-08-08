@@ -492,3 +492,19 @@ fn mesh_off_status_reports_capability_without_polluting_ordinary_json() -> TestR
     let after = listener_snapshot()?;
     assert_no_new_mesh_listener(&before, &after)
 }
+
+#[test]
+fn authenticated_transport_kill_switch_is_registered_and_documented() -> TestResult {
+    let variable = ee::config::EnvVar::MeshTransportDisabled;
+    if variable.name() != "EE_MESH_TRANSPORT_DISABLED" {
+        return Err("mesh transport kill-switch registry name drifted".to_owned());
+    }
+    if variable.default_value() != Some("false") || variable.category() != "mesh" {
+        return Err("mesh transport kill-switch registry contract drifted".to_owned());
+    }
+    let docs = include_str!("../docs/env_vars.md");
+    if !docs.contains("`EE_MESH_TRANSPORT_DISABLED`") {
+        return Err("docs/env_vars.md omits EE_MESH_TRANSPORT_DISABLED".to_owned());
+    }
+    Ok(())
+}

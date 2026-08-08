@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ee.mesh.session_open.v1",
+  "title": "ee.mesh.session_open.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "teamId", "tailnetId", "initiatorNodeId", "responderNodeId", "initiatorWorkspaceId", "responderWorkspaceId", "initiatorStableId", "responderStableId", "sessionId", "pairKeyGeneration", "initiatorNonce"],
+  "properties": {
+    "schema": { "const": "ee.mesh.session_open.v1" },
+    "teamId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "tailnetId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "initiatorNodeId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "responderNodeId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "initiatorWorkspaceId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "responderWorkspaceId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "initiatorStableId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "responderStableId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "sessionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "pairKeyGeneration": { "type": "integer", "minimum": 1 },
+    "initiatorNonce": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

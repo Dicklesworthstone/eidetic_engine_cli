@@ -97,6 +97,7 @@ retrieval.
 | `EE_MESH_HELLO_PORT` | mesh | integer port | `41888` | Override the mesh hello responder bind port on the local Tailscale address. | The responder lifecycle job binds only when mesh is enabled and `EE_MESH_HELLO_RESPONDER_DISABLED` is false. |
 | `EE_MESH_HELLO_RESPONDER_DISABLED` | mesh | boolean flag | `false` | Disable the mesh hello responder lifecycle job while leaving other mesh surfaces enabled. | Use this off-switch when discovery should remain caller-only or the daemon lane is being repaired. |
 | `EE_MESH_MODE` | mesh | enum | `off` | Select the default mesh command mode. | Accepted values are `off`, `cache`, `revisable`, and `blocking`; explicit `--mesh` command flags take precedence. |
+| `EE_MESH_TRANSPORT_DISABLED` | mesh | boolean flag | `false` | Disable authenticated mesh TCP connect and accepted-session handling before network or authentication work. | Emergency off-switch for the real frame-v2 session channel; it does not change the foreground Noop transport or claim peer sync capability. |
 | `EE_NO_COLOR` | output | boolean flag | none | Disable colored diagnostics. | Mirrors the behavior of `NO_COLOR` for ee-specific control. |
 | `EE_OUTPUT_FORMAT` | output | output format | none | Select the default output renderer. | Highest-priority environment output format selector. |
 | `EE_PROFILE` | tuning | profile name | none | Override the default context pack profile. | Applies when pack/context profile is not specified explicitly. |

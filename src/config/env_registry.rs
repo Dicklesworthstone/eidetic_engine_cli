@@ -209,6 +209,8 @@ pub enum EnvVar {
     MeshHelloResponderDisabled,
     /// `EE_MESH_MODE`
     MeshMode,
+    /// `EE_MESH_TRANSPORT_DISABLED`
+    MeshTransportDisabled,
     /// `EE_NO_COLOR`
     NoColor,
     /// `EE_OUTPUT_FORMAT`
@@ -384,6 +386,7 @@ impl EnvVar {
             Self::MeshHelloPort,
             Self::MeshHelloResponderDisabled,
             Self::MeshMode,
+            Self::MeshTransportDisabled,
             Self::NoColor,
             Self::OutputFormat,
             Self::Profile,
@@ -513,6 +516,7 @@ impl EnvVar {
             Self::MeshHelloPort => "EE_MESH_HELLO_PORT",
             Self::MeshHelloResponderDisabled => "EE_MESH_HELLO_RESPONDER_DISABLED",
             Self::MeshMode => "EE_MESH_MODE",
+            Self::MeshTransportDisabled => "EE_MESH_TRANSPORT_DISABLED",
             Self::NoColor => "EE_NO_COLOR",
             Self::OutputFormat => "EE_OUTPUT_FORMAT",
             Self::Profile => "EE_PROFILE",
@@ -751,6 +755,9 @@ impl EnvVar {
                 "Disable the mesh hello responder lifecycle job while leaving other mesh surfaces enabled."
             }
             Self::MeshMode => "Select the default mesh command mode.",
+            Self::MeshTransportDisabled => {
+                "Disable authenticated mesh TCP connect and accepted-session handling before network or authentication work."
+            }
             Self::NoColor => "Disable colored diagnostics.",
             Self::OutputFormat => "Select the default output renderer.",
             Self::Profile => "Override the default context pack profile.",
@@ -877,6 +884,7 @@ impl EnvVar {
             Self::MeshDriftHardStaleAfterSeconds => Some("3600"),
             Self::MeshHelloPort => Some("41888"),
             Self::MeshHelloResponderDisabled => Some("false"),
+            Self::MeshTransportDisabled => Some("false"),
             Self::TailscaleDiscoveryMode => Some("service_tag"),
             Self::TailscalePeerProbeTimeoutMs => Some("750"),
             Self::TailscaleDiscoveryBudgetMs => Some("5000"),
@@ -995,6 +1003,7 @@ impl EnvVar {
             | Self::MeshDriftHardStaleAfterSeconds
             | Self::MeshHelloPort
             | Self::MeshHelloResponderDisabled
+            | Self::MeshTransportDisabled
             | Self::TailscaleBinaryOverride
             | Self::TailscaleProbeTimeoutMs
             | Self::TailscaleProbeSocketOverride
