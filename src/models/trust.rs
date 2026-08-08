@@ -667,6 +667,13 @@ mod tests {
     };
 
     #[test]
+    fn attempt_family_promotion_posture_is_exported_by_models_facade() {
+        let posture: crate::models::AttemptFamilyPromotionPosture =
+            AttemptFamilyPromotionPosture::BlockedUndeclared;
+        assert_eq!(posture.as_str(), "blocked_undeclared");
+    }
+
+    #[test]
     fn incomplete_selected_n18_stays_at_one_over_n_at_every_coverage_level() {
         for recorded_slots in [1_u32, 2, 17] {
             let members = (1..=recorded_slots).map(|slot| {
