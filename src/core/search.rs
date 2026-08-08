@@ -2700,7 +2700,11 @@ impl SearchHit {
         let mut redacted_patterns = BTreeSet::new();
 
         if let Some(ref metadata) = self.metadata {
-            for key in ["provenanceUri", "provenance_uri"] {
+            for key in [
+                SEARCH_ANALYSIS_PROVENANCE_URI_KEY,
+                "provenanceUri",
+                "provenance_uri",
+            ] {
                 if let Some(uri) = metadata_string(metadata, key) {
                     let uri = redact_search_provenance_uri(
                         uri,
@@ -11420,7 +11424,10 @@ mod tests {
                 quality_score: None,
                 lexical_score: None,
                 rerank_score: None,
-                metadata: None,
+                metadata: Some(serde_json::json!({
+                    (SEARCH_ANALYSIS_PROVENANCE_URI_KEY):
+                        "journal://jrn_018ff8dc-3d85-7cc0-a6fd-a2d479e6d401",
+                })),
                 explanation: None,
             }],
             elapsed_ms: 12.3,
@@ -11470,6 +11477,14 @@ mod tests {
         assert_eq!(json["results"][0]["calibrated"], serde_json::json!(false));
         assert!(json["results"][0]["why"].is_string());
         assert!(json["results"][0]["provenance"].is_array());
+        assert_eq!(
+            json["results"][0]["provenance"][0],
+            serde_json::json!({
+                "kind": "provenance_uri",
+                "uri": "journal://jrn_018ff8dc-3d85-7cc0-a6fd-a2d479e6d401",
+            }),
+            "public search provenance must include the pinned memory provenance",
+        );
     }
 
     #[test]
