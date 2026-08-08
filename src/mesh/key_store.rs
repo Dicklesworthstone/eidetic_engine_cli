@@ -1367,7 +1367,9 @@ fn open_secure_directory(
                     }
                     rustix::fs::openat(&directory, component, flags, Mode::from_raw_mode(0))
                         .map_err(|open_error| {
-                            key_store_errno(
+                            secure_directory_component_open_error(
+                                &directory,
+                                component,
                                 &current_path,
                                 "open newly created secure directory component",
                                 open_error,
@@ -1375,7 +1377,9 @@ fn open_secure_directory(
                         })?
                 }
                 Err(error) => {
-                    return Err(key_store_errno(
+                    return Err(secure_directory_component_open_error(
+                        &directory,
+                        component,
                         &current_path,
                         "open secure directory component",
                         error,
@@ -1390,6 +1394,35 @@ fn open_secure_directory(
         directory = child;
     }
     Ok(Some(directory))
+}
+
+#[cfg(unix)]
+fn secure_directory_component_open_error(
+    parent: &std::fs::File,
+    component: &std::ffi::OsStr,
+    path: &Path,
+    operation: &str,
+    error: rustix::io::Errno,
+) -> KeyStoreError {
+    use rustix::fs::{AtFlags, FileType};
+
+    if matches!(error, rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR) {
+        match rustix::fs::statat(parent, component, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::Symlink => {
+                return KeyStoreError::SymlinkComponent {
+                    path: path.display().to_string(),
+                };
+            }
+            Ok(_) if error == rustix::io::Errno::NOTDIR => {
+                return KeyStoreError::WrongFileType {
+                    path: path.display().to_string(),
+                    expected: "directory",
+                };
+            }
+            Ok(_) | Err(_) => {}
+        }
+    }
+    key_store_errno(path, operation, error)
 }
 
 #[cfg(unix)]
@@ -1940,6 +1973,22 @@ mod tests {
             std::fs::symlink_metadata(elsewhere.join("keys")).is_err(),
             "no directory may be created through the marker symlink"
         );
+    }
+
+    #[test]
+    fn regular_file_directory_component_is_reported_as_wrong_type() {
+        let workspace = temp_workspace();
+        std::fs::write(workspace.path().join(".ee"), b"not a directory")
+            .expect("write regular-file marker");
+
+        let error = MeshKeyStore::open_or_create(workspace.path()).expect_err("must refuse file");
+        assert!(matches!(
+            error,
+            KeyStoreError::WrongFileType {
+                expected: "directory",
+                ..
+            }
+        ));
     }
 
     #[test]
