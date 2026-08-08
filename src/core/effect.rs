@@ -2364,6 +2364,11 @@ impl EffectManifest {
                 "Expire a memory through an audited tombstone without deleting data",
             ),
             CommandEffect::durable_write(
+                "memory reveal",
+                vec!["memories", "memory_seals", "search_index_jobs", "audit_log"],
+                "Verify supplied bytes against a sealed memory's commitment; on match publish the content through the revise path, mark the seal revealed, and audit memory.reveal — a mismatch mutates nothing and audits memory.reveal_failed (bd-sealed-preregistration-memory-b67be)",
+            ),
+            CommandEffect::durable_write(
                 "memory level",
                 vec!["memories", "search_index_jobs", "audit_log"],
                 "Apply a canonical manual memory-level transition with audit provenance",
