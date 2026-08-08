@@ -479,16 +479,23 @@ impl AttemptFamilyMultiplicity {
             && self.selected_count >= 1
     }
 
-    /// Deterministic multiplicity discount in (0.0, 1.0]. An incomplete
-    /// selected family remains exactly `1 / declared_size`: recording some
-    /// siblings cannot gradually launder survivor-selection bias. Rejected
-    /// evidence remains undiscounted through [`Self::member_discount_factor`].
+    /// Deterministic multiplicity discount in (0.0, 1.0]. A declared family
+    /// larger than one remains exactly `1 / declared_size` until it reaches
+    /// the canonical promotion posture; neither partial coverage nor an
+    /// invalid complete-looking composition can launder selection bias.
+    /// Rejected evidence remains undiscounted through
+    /// [`Self::member_discount_factor`].
     #[must_use]
     pub fn discount_factor(&self) -> f32 {
         let Some(declared) = self.declared_size else {
             return 1.0;
         };
-        if declared <= 1 || self.is_complete() {
+        if declared <= 1
+            || matches!(
+                self.promotion_posture(),
+                AttemptFamilyPromotionPosture::Eligible
+            )
+        {
             return 1.0;
         }
         #[allow(clippy::cast_possible_truncation)]
@@ -668,6 +675,11 @@ mod tests {
             all_selected.promotion_posture(),
             AttemptFamilyPromotionPosture::BlockedInvalidComposition
         );
+        assert_eq!(
+            all_selected.promotion_reason(),
+            "canonical completion requires exactly one selected member and N-1 rejected members"
+        );
+        assert!((all_selected.member_discount_factor(Some("selected")) - 1.0 / 3.0).abs() < 1.0e-7);
 
         let undeclared = AttemptFamilyMultiplicity::from_members(
             "fam-undeclared".to_owned(),
