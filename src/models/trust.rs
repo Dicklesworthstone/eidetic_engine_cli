@@ -414,6 +414,41 @@ impl AttemptFamilyMultiplicity {
         factor.clamp(f32::MIN_POSITIVE, 1.0)
     }
 
+    /// True when the family may support a trust promotion: every declared
+    /// slot is recorded AND the recorded composition is the canonical
+    /// fan-out shape — exactly one `selected` winner with the remaining
+    /// slots `rejected`. Mere slot coverage is deliberately insufficient:
+    /// N rows all recorded as winners fill every slot while recording zero
+    /// negative evidence, which is exactly the all-winners laundering shape.
+    /// Families with several genuine winners are not yet modeled and stay
+    /// ineligible (an explicit, documented limitation rather than a silent
+    /// pass); undeclared or single-attempt families reduce to completeness.
+    #[must_use]
+    pub fn is_promotion_eligible(&self) -> bool {
+        if !self.is_complete() {
+            return false;
+        }
+        match self.declared_size {
+            Some(declared) if declared > 1 => {
+                self.selected_count == 1 && self.rejected_count == declared - 1
+            }
+            _ => true,
+        }
+    }
+
+    /// Per-member ranking discount. The multiplicity discount exists to
+    /// deflate survivor-selection bias, so it applies to `selected` winners
+    /// only; `rejected` siblings are the negative/safety evidence the family
+    /// exists to preserve and are never discounted (deflating them would
+    /// hide the very failures the denominator is meant to surface).
+    #[must_use]
+    pub fn member_discount_factor(&self, disposition: Option<&str>) -> f32 {
+        match disposition {
+            Some("selected") => self.discount_factor(),
+            _ => 1.0,
+        }
+    }
+
     /// Human-facing summary of the recorded/declared posture, e.g.
     /// `"1 of 18 attempt slots recorded; 17 unrecorded"`.
     #[must_use]
@@ -520,6 +555,56 @@ mod tests {
         );
         assert!(undeclared.is_complete());
         assert!((undeclared.discount_factor() - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn promotion_eligibility_requires_canonical_composition_not_just_slots() {
+        // All-winners laundering: every slot filled, zero negative evidence.
+        // Complete for discount purposes, but never promotion-eligible.
+        let all_selected = AttemptFamilyMultiplicity::from_members(
+            "fam-f".to_owned(),
+            Some(3),
+            [
+                (Some(1), Some("selected")),
+                (Some(2), Some("selected")),
+                (Some(3), Some("selected")),
+            ],
+        );
+        assert!(all_selected.is_complete());
+        assert!(!all_selected.is_promotion_eligible());
+
+        let canonical = AttemptFamilyMultiplicity::from_members(
+            "fam-g".to_owned(),
+            Some(3),
+            [
+                (Some(1), Some("selected")),
+                (Some(2), Some("rejected")),
+                (Some(3), Some("rejected")),
+            ],
+        );
+        assert!(canonical.is_promotion_eligible());
+
+        let incomplete = AttemptFamilyMultiplicity::from_members(
+            "fam-h".to_owned(),
+            Some(3),
+            [(Some(1), Some("selected")), (Some(2), Some("rejected"))],
+        );
+        assert!(!incomplete.is_promotion_eligible());
+    }
+
+    #[test]
+    fn member_discount_applies_to_selected_survivors_never_rejected_evidence() {
+        let survivor_only = AttemptFamilyMultiplicity::from_members(
+            "fam-i".to_owned(),
+            Some(18),
+            [(Some(1), Some("selected")), (Some(2), Some("rejected"))],
+        );
+        let selected_factor = survivor_only.member_discount_factor(Some("selected"));
+        assert!((selected_factor - 2.0 / 18.0).abs() < 1.0e-7);
+        let rejected_factor = survivor_only.member_discount_factor(Some("rejected"));
+        assert!((rejected_factor - 1.0).abs() < f32::EPSILON);
+        let unslotted_factor = survivor_only.member_discount_factor(None);
+        assert!((unslotted_factor - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
