@@ -144,7 +144,7 @@ fn transition_by_id<'a>(manifest: &'a Value, id: &str) -> Result<&'a Value, Stri
     Err(format!("{MANIFEST_REL}: missing transition row id {id}"))
 }
 
-fn compiled_migration_versions() -> Result<Vec<u64>, String> {
+fn compiled_migrations() -> Result<Vec<(u64, String)>, String> {
     let text = read_text(DB_MOD_REL)?;
     let start = text
         .find("pub const MIGRATIONS")
@@ -155,7 +155,7 @@ fn compiled_migration_versions() -> Result<Vec<u64>, String> {
         .ok_or_else(|| format!("{DB_MOD_REL}: unterminated MIGRATIONS array"))?;
     let array_text = &tail[..end];
 
-    let mut versions = Vec::new();
+    let mut migrations = Vec::new();
     for line in array_text.lines() {
         let trimmed = line.trim();
         let Some(rest) = trimmed.strip_prefix('V') else {
@@ -169,13 +169,29 @@ fn compiled_migration_versions() -> Result<Vec<u64>, String> {
             let version = digits
                 .parse::<u64>()
                 .map_err(|error| format!("{DB_MOD_REL}: parse migration version: {error}"))?;
-            versions.push(version);
+            let constant = trimmed.trim_end_matches(',');
+            if !constant
+                .chars()
+                .all(|value| value.is_ascii_uppercase() || value.is_ascii_digit() || value == '_')
+            {
+                return Err(format!(
+                    "{DB_MOD_REL}: malformed migration constant {constant:?}"
+                ));
+            }
+            migrations.push((version, constant.to_owned()));
         }
     }
-    if versions.is_empty() {
+    if migrations.is_empty() {
         return Err(format!("{DB_MOD_REL}: no migration versions found"));
     }
-    Ok(versions)
+    Ok(migrations)
+}
+
+fn compiled_migration_versions() -> Result<Vec<u64>, String> {
+    Ok(compiled_migrations()?
+        .into_iter()
+        .map(|(version, _)| version)
+        .collect())
 }
 
 #[test]
@@ -214,6 +230,51 @@ fn registry_identity_matches_current_runtime_tail() -> TestResult {
         return Err(format!(
             "nextPlannedMigration must be current tail + 1: got V{next:03} after V{registered_tail:03}"
         ));
+    }
+    Ok(())
+}
+
+#[test]
+fn registry_names_every_compiled_migration_after_implemented_allocations() -> TestResult {
+    let manifest = read_json(MANIFEST_REL)?;
+    let last_implemented_allocation = array_field(&manifest, "/allocations", MANIFEST_REL)?
+        .iter()
+        .filter(|allocation| {
+            allocation
+                .pointer("/status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| status == "implemented")
+        })
+        .map(|allocation| u64_field(allocation, "/version", "implemented allocation"))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .max()
+        .ok_or_else(|| "registry must contain an implemented allocation".to_owned())?;
+    let non_initiative = manifest
+        .pointer("/policy/nonInitiativeCompiledMigrations/versions")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            format!("{MANIFEST_REL}: nonInitiativeCompiledMigrations.versions must be an object")
+        })?;
+
+    for (version, constant) in compiled_migrations()?
+        .into_iter()
+        .filter(|(version, _)| *version > last_implemented_allocation)
+    {
+        let key = format!("V{version:03}");
+        let description = non_initiative
+            .get(&key)
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                format!(
+                    "{MANIFEST_REL}: shipped migration {constant} must remain visible under {key}"
+                )
+            })?;
+        if !description.starts_with(&constant) {
+            return Err(format!(
+                "{MANIFEST_REL}: {key} must name compiled constant {constant}, got {description:?}"
+            ));
+        }
     }
     Ok(())
 }

@@ -8847,6 +8847,7 @@ fn migration_requires_foreign_key_relaxation(migration: &Migration) -> bool {
         V091_CURATION_PEER_HUMAN_ATTESTED_TRUST.version(),
         V092_PROCEDURAL_RULE_PEER_HUMAN_ATTESTED_TRUST.version(),
         V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST.version(),
+        V096_MEMORY_SENTINEL_POLARITY.version(),
     ]
     .contains(&migration.version())
 }
@@ -8901,7 +8902,8 @@ impl DbConnection {
                 || migration.version == V090_MEMORY_PEER_HUMAN_ATTESTED_TRUST.version
                 || migration.version == V091_CURATION_PEER_HUMAN_ATTESTED_TRUST.version
                 || migration.version == V092_PROCEDURAL_RULE_PEER_HUMAN_ATTESTED_TRUST.version
-                || migration.version == V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST.version;
+                || migration.version == V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST.version
+                || migration.version == V096_MEMORY_SENTINEL_POLARITY.version;
             let outcome =
                 if rebuilds_existing_table && matches!(&self.location, DatabaseLocation::File(_)) {
                     self.apply_file_schema_rebuild_migration(migration, &now)?
@@ -18245,6 +18247,49 @@ impl DbConnection {
         )?;
         rows.iter()
             .map(stored_memory_sentinel_spec_from_row)
+            .collect()
+    }
+
+    /// List current workspace-local revival specs in deterministic order.
+    ///
+    /// The owning-memory join deliberately enforces the same privacy boundary
+    /// as workspace-local retrieval and excludes tombstoned, not-yet-valid,
+    /// and expired memories in the query itself. Gate specs cannot cross this
+    /// boundary because polarity is filtered in SQL, not after retrieval.
+    pub fn list_current_memory_revival_specs(
+        &self,
+        workspace_id: &str,
+        reference_time: &str,
+    ) -> Result<Vec<StoredMemorySentinelSpec>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT s.spec_hash, s.memory_id, s.sentinel_kind, s.target, s.expected_predicate, s.safety_class, s.provenance, s.stale_threshold_seconds, s.created_at, s.updated_at, s.polarity FROM memory_sentinel_specs s JOIN memories m ON m.id = s.memory_id WHERE s.polarity = 'revive' AND m.workspace_id = ?1 AND m.tombstoned_at IS NULL AND (m.valid_from IS NULL OR julianday(m.valid_from) <= julianday(?2)) AND (m.valid_to IS NULL OR julianday(m.valid_to) > julianday(?2)) ORDER BY s.memory_id ASC, s.sentinel_kind ASC, s.target ASC, s.expected_predicate ASC, s.spec_hash ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(reference_time.to_string()),
+            ],
+        )?;
+        rows.iter()
+            .map(stored_memory_sentinel_spec_from_row)
+            .collect()
+    }
+
+    /// Return the latest result for every sentinel attached to one memory.
+    ///
+    /// This is the batched counterpart to `latest_memory_sentinel_result` and
+    /// preserves its checked-at / created-at / hash tie-break ordering without
+    /// issuing one query per spec.
+    pub fn latest_memory_sentinel_results_for_memory(
+        &self,
+        memory_id: &str,
+    ) -> Result<Vec<StoredMemorySentinelResult>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT r.result_hash, r.spec_hash, r.status, r.checked_at, r.evidence_summary, r.stale_threshold_seconds, r.created_at FROM memory_sentinel_results r JOIN memory_sentinel_specs s ON s.spec_hash = r.spec_hash WHERE s.memory_id = ?1 AND NOT EXISTS (SELECT 1 FROM memory_sentinel_results newer WHERE newer.spec_hash = r.spec_hash AND (newer.checked_at > r.checked_at OR (newer.checked_at = r.checked_at AND newer.created_at > r.created_at) OR (newer.checked_at = r.checked_at AND newer.created_at = r.created_at AND newer.result_hash < r.result_hash))) ORDER BY r.spec_hash ASC",
+            &[Value::Text(memory_id.to_string())],
+        )?;
+        rows.iter()
+            .map(stored_memory_sentinel_result_from_row)
             .collect()
     }
 
@@ -32019,14 +32064,11 @@ mod tests {
             result.result_hash, gate.spec_hash,
         ))?;
 
-        let outcome = connection.apply_foreign_key_relaxed_migration(
-            &super::V096_MEMORY_SENTINEL_POLARITY,
-            "2026-08-08T12:00:00Z",
-        )?;
-        ensure_equal(
-            &outcome,
-            &super::ApplyOutcome::Applied,
-            "V096 migration outcome",
+        let migration_result = connection.migrate()?;
+        ensure(
+            migration_result.applied().len() == 1
+                && migration_result.applied()[0] == super::V096_MEMORY_SENTINEL_POLARITY.version(),
+            "production migrate routing applies only V096",
         )?;
 
         ensure_equal(
@@ -32081,6 +32123,78 @@ mod tests {
             &stored_revive.polarity,
             &super::MemorySentinelPolarity::Revive,
             "revive polarity round-trips through storage",
+        )?;
+
+        let expired_memory_id =
+            crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(1)).to_string();
+        let mut expired_input = test_memory_input(
+            "wsp_01234567890123456789012345",
+            "An expired revival owner must not surface.",
+        );
+        expired_input.valid_from = Some("2026-08-08T10:00:00Z".to_owned());
+        expired_input.valid_to = Some("2026-08-08T11:00:00Z".to_owned());
+        connection.insert_memory(&expired_memory_id, &expired_input)?;
+        let expired_revive = super::MemorySentinelSpec::from_raw(
+            &expired_memory_id,
+            "env_var_registered:EE_PACK_TRACE",
+            super::MemorySentinelPolarity::Revive,
+            Some("registered"),
+            "test://sentinel",
+            Some(600),
+        )
+        .map_err(|error| format!("build expired revive spec: {error:?}"))?;
+        connection.upsert_memory_sentinel_spec(&expired_revive)?;
+
+        let future_memory_id =
+            crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(2)).to_string();
+        let mut future_input = test_memory_input(
+            "wsp_01234567890123456789012345",
+            "A not-yet-valid revival owner must not surface.",
+        );
+        future_input.valid_from = Some("2026-08-08T13:00:00Z".to_owned());
+        connection.insert_memory(&future_memory_id, &future_input)?;
+        let future_revive = super::MemorySentinelSpec::from_raw(
+            &future_memory_id,
+            "env_var_registered:EE_PACK_TRACE",
+            super::MemorySentinelPolarity::Revive,
+            Some("registered"),
+            "test://sentinel",
+            Some(600),
+        )
+        .map_err(|error| format!("build future revive spec: {error:?}"))?;
+        connection.upsert_memory_sentinel_spec(&future_revive)?;
+
+        let current_revivals = connection.list_current_memory_revival_specs(
+            "wsp_01234567890123456789012345",
+            "2026-08-08T12:00:00Z",
+        )?;
+        ensure_equal(
+            &current_revivals.len(),
+            &1,
+            "current revival join excludes Gate, expired, and future specs",
+        )?;
+        ensure_equal(
+            &current_revivals[0].spec_hash,
+            &revive.spec_hash,
+            "current revival join selects only the active Revive spec",
+        )?;
+
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET tombstoned_at = ?1 WHERE id = ?2",
+            &[
+                Value::Text("2026-08-08T12:00:00Z".to_owned()),
+                Value::Text(memory_id.clone()),
+            ],
+        )?;
+        ensure(
+            connection
+                .list_current_memory_revival_specs(
+                    "wsp_01234567890123456789012345",
+                    "2026-08-08T12:00:00Z",
+                )?
+                .is_empty(),
+            "current revival join excludes tombstoned owners",
         )?;
         connection.close()?;
         Ok(())

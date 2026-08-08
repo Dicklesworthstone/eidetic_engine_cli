@@ -32,12 +32,37 @@ corresponding v1 surface fails CI, and adding a new v1 string to
 | Support-bundle pack replay summary | `ee.support_bundle.pack_replay_summary.v1` | `ee.support_bundle.pack_replay_summary.v2` | **Breaking for strict parsers.** Unverified metadata becomes `null`, truncation is explicit, and every pack carries an attestation manifest. |
 | Context delta response | `ee.context.delta.v1` | `ee.context.delta.v2` | **Breaking for authority-sensitive consumers.** The server-verification marker is now false for caller-created snapshots and true only after central persisted-ledger validation. |
 | Model status data object | `ee.model.status.v1` | `ee.model.status.v2` | **Breaking for strict parsers.** `data.reranker` was added and active embedder selection is now explicitly embedding-purpose only. See [N8](#n8--model-status-reranker-posture). |
+| Sentinel check data object | `ee.memory_sentinel.check.v1` | `ee.memory_sentinel.check.v2` | **Breaking for strict inner-schema parsers.** Result rows add `polarity`; aggregates add `byPolarity.gate` and `byPolarity.revive`. v1 is no longer emitted. |
+| Why sentinel data object | `ee.memory_sentinel.why.v1` | `ee.memory_sentinel.why.v2` | **Breaking for strict inner-schema parsers.** Spec rows move from `ee.memory_sentinel.spec.v1` to `.spec.v2`, add `polarity`, and expose polarity-specific aggregates. v1 is no longer emitted. |
 | Hook contract | `ee.hook.context_pack.v1` | `ee.hook.context_pack.v1` | **Unchanged.** E2's filter applies; no field shape changes. |
 | Other envelopes (`ee.memory.list.v1`, `ee.rule.list.v1`, `ee.search.v1`, `ee.handoff.capsule.v1`, …) | v1 | v1 | **Unchanged at envelope level.** Some field-level renames; see per-surface sections. |
 
 The v2 response marker makes response-scoped degradation explicit. Agents should
 key success parsing on `schema == "ee.response.v2"` and treat `degraded[]` as
 runtime evidence that affected the emitted response.
+
+### Sentinel check and why inner schemas
+
+`ee sentinel check --json` and `ee why <memory-id> --include-sentinel --json`
+still use the standard `ee.response.v2` envelope. Their nested data markers now
+emit only `ee.memory_sentinel.check.v2` and `ee.memory_sentinel.why.v2`.
+Check result rows add `polarity: "gate" | "revive"`; why spec rows add the same
+field and use `ee.memory_sentinel.spec.v2`. Both containing objects add
+`byPolarity.gate` and `byPolarity.revive` aggregates while retaining the total
+summary. Consumers must stop accepting the corresponding v1 markers because
+the CLI no longer emits them.
+
+These three markers are command-local inner contracts, not standalone public
+schema-registry entries: there are no matching files under `docs/schemas/`, no
+entries in the schema list/export registry, and no schema-list/export goldens to
+update. The emitted contract is pinned directly by `scripts/e2e_sentinels.sh`.
+This registry posture is intentional for this slice; promoting an inner marker
+to `ee schema export` later requires the normal schema file, registry, golden,
+and drift-test changes together.
+
+**Migration tool.** None for the wire change. Databases that predate sentinel
+polarity still require the compiled V096 migration before these read surfaces
+can load dual-polarity rows.
 
 ### Replay, diff, support-summary, and context-delta authority hardening
 
@@ -606,6 +631,9 @@ Already covered as part of [A10](#a10--error-envelope-v1--v2). The recovery stru
 | `ee.pack.diff.v1` | `ee.pack.diff.v2` | integrity-gated comparison |
 | `ee.support_bundle.pack_replay_summary.v1` | `ee.support_bundle.pack_replay_summary.v2` | bounded verified summaries and attestation manifests |
 | `ee.context.delta.v1` | `ee.context.delta.v2` | truthful persisted-record authority marker |
+| `ee.memory_sentinel.check.v1` | `ee.memory_sentinel.check.v2` | polarity on result rows plus `byPolarity` aggregates |
+| `ee.memory_sentinel.why.v1` | `ee.memory_sentinel.why.v2` | polarity on `.spec.v2` rows plus `byPolarity` aggregates |
+| `ee.memory_sentinel.spec.v1` (inside why sentinel data) | `ee.memory_sentinel.spec.v2` | explicit `polarity` |
 | `ee.hook.context_pack.v1` | `ee.hook.context_pack.v1` (unchanged) | — |
 
 ---
@@ -636,6 +664,9 @@ Already covered as part of [A10](#a10--error-envelope-v1--v2). The recovery stru
 - [`tests/contracts/schema_drift.rs`](../tests/contracts/schema_drift.rs) and the
   v2 files under [`docs/schemas/`](./schemas/) — public replay, diff, support-summary,
   and context-delta registration/export closure.
+- [`scripts/e2e_sentinels.sh`](../scripts/e2e_sentinels.sh) — command-local
+  sentinel check/why v2 inner markers, polarity rows, and aggregates. These
+  inner markers are deliberately outside the schema list/export registry.
 - `src/db/mod.rs::v084_pack_profile_rebuild_preserves_parent_children_indexes_and_order`
   — populated V083 database preservation through the V084 parent/FK rebuild.
 

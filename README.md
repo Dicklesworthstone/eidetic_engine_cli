@@ -99,6 +99,8 @@ ee preflight check --cmd "<risky shell command>" --workspace . --json  # advisor
 ee journal append "<observation>" --workspace . --source manual --json
 ee journal distill --workspace . --dry-run --json
 ee remember "<durable lesson>" --workspace . --level procedural --kind rule --json
+ee remember "<blocked lesson>" --workspace . --revive-when path_exists:path/to/marker --json
+ee tripwire check --revivals --workspace . --json
 ee remember --batch --stdin --workspace . --json
 ee remember "<existing lesson>" --workspace . --reinforce --json
 ee outcome <memory-id> --workspace . --signal helpful --reason "<what it changed>"
@@ -117,6 +119,8 @@ ee outcome trace <memory-id> --workspace . --json
 | Capturing raw session observations | `ee journal append "<text>" --workspace . --source manual --json` |
 | Ending a session with reviewable candidates | `ee journal distill --workspace . --dry-run --json` |
 | Learning a durable rule | `ee remember "<text>" --workspace . --level procedural --kind rule --json` |
+| Recording a retired memory that becomes relevant when a condition clears | `ee remember "<text>" --workspace . --revive-when path_exists:path/to/marker --json` |
+| Listing revival conditions that pass now | `ee tripwire check --revivals --workspace . --json` (read-only; no trust or tombstone mutation) |
 | Importing several curated facts | `ee remember --batch --stdin --workspace . --json` |
 | Corroborating an existing lesson | `ee remember "<text>" --workspace . --reinforce --json` |
 | A memory helped or misled you | `ee outcome <id> --signal helpful\|harmful --reason "<one sentence>"` |
@@ -489,7 +493,7 @@ Current top-level groups:
 | `ee ask "<question>" [--require-confidence T] [--json]` | Direct extractive answer from stored memories, with citations, conflict sides, calibrated abstention, and exit 6 fail-closed mode |
 | `ee recall --path <glob>` / `--symbol <name>` / `--diff <ref>` | Fetch memories anchored to a code surface before editing; returns `ee.recall.v1` under the standard response envelope |
 | `ee timeline "<topic>" --as-of <RFC3339> --json` | Reconstruct read-only memory state for a topic at a historical timestamp; returns `ee.timeline.v1` under the standard response envelope |
-| `ee remember "<text>" --level <l> [--kind <k>] [--tags a,b]` | Capture a durable memory |
+| `ee remember "<text>" --level <l> [--kind <k>] [--tags a,b] [--sentinel <kind>:<target>] [--revive-when <kind>:<target>]` | Capture a durable memory with optional Gate and Revive sentinel predicates; both forms are fully validated before any memory, idempotency, or dry-run write |
 | `ee journal append "<text>" [--source hook\|manual] --json` | Append a working-tier observation that can later be distilled; JSONL batches use `ee journal append --stdin --json` |
 | `ee journal distill [--dry-run\|--apply] --json` | Turn repeated or surprising journal entries into reviewable curation candidates; dry-run is the safe default |
 | `ee journal list` / `ee journal show <entry-id>` | Inspect append-only journal entries, truncation/redaction state, and distillation bookkeeping |
@@ -1299,6 +1303,7 @@ base retrieval signal dominant.
 | `ee preflight run "<task>"` / `show` / `close` | Task risk assessment, tripwire context, and post-run feedback |
 | `ee preflight check --cmd "<command>" --json` | Advisory command-risk memory lookup; use `--stdin` or `--cmd-base64` to keep command text off argv when needed. `ee` never denies execution |
 | `ee tripwire list` / `check` | Inspect and check preflight tripwires |
+| `ee tripwire check --revivals --json` | Evaluate only current workspace-local Revive specs and return those whose predicate passes; read-only, with Gate specs excluded, raw targets replaced by domain-separated digests, and no automatic result, trust, or tombstone mutation |
 | `ee diag plan-cache` | EQL query plan-cache counters and integration posture |
 | `ee diag contention [--use-daemon] [--json]` | Read-only swarm hot-path contention posture: write-lock, read-pool, single-flight (plus group-commit / incremental-index / L2 when present), with a severity-ranked `topContention` list (see [`docs/agent-ux/contention-observability.md`](docs/agent-ux/contention-observability.md)) |
 | `ee diag environment-attestation --workspace . --include-rch --json` / `disk-pressure` / `build-admission` / `artifacts` | Read-only environment source-authority, storage, artifact, and build-admission diagnostics |

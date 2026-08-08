@@ -7392,7 +7392,11 @@ pub struct TripwireListArgs {
 pub struct TripwireCheckArgs {
     /// Tripwire ID to check.
     #[arg(value_name = "ID")]
-    pub tripwire_id: String,
+    pub tripwire_id: Option<String>,
+
+    /// Read-only check of current revival sentinels whose predicates now pass.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub revivals: bool,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -46911,6 +46915,71 @@ where
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct SentinelWhyCounts {
+    spec_count: u64,
+    latest_result_count: u64,
+    fresh_pass_count: u64,
+    fail_count: u64,
+    unknown_count: u64,
+    degraded_count: u64,
+    stale_count: u64,
+    missing_result_count: u64,
+}
+
+impl SentinelWhyCounts {
+    fn record(
+        &mut self,
+        result: Option<&crate::models::StoredMemorySentinelResult>,
+        freshness: &str,
+    ) {
+        self.spec_count = self.spec_count.saturating_add(1);
+        let Some(result) = result else {
+            self.missing_result_count = self.missing_result_count.saturating_add(1);
+            return;
+        };
+        self.latest_result_count = self.latest_result_count.saturating_add(1);
+        if freshness == "stale" {
+            self.stale_count = self.stale_count.saturating_add(1);
+        }
+        match result.status {
+            MemorySentinelResultStatus::Pass if freshness == "fresh" => {
+                self.fresh_pass_count = self.fresh_pass_count.saturating_add(1);
+            }
+            MemorySentinelResultStatus::Pass => {}
+            MemorySentinelResultStatus::Fail => {
+                self.fail_count = self.fail_count.saturating_add(1);
+            }
+            MemorySentinelResultStatus::Unknown => {
+                self.unknown_count = self.unknown_count.saturating_add(1);
+            }
+            MemorySentinelResultStatus::Degraded => {
+                self.degraded_count = self.degraded_count.saturating_add(1);
+            }
+        }
+    }
+
+    fn to_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "specCount": self.spec_count,
+            "latestResultCount": self.latest_result_count,
+            "freshPassCount": self.fresh_pass_count,
+            "failCount": self.fail_count,
+            "unknownCount": self.unknown_count,
+            "degradedCount": self.degraded_count,
+            "staleCount": self.stale_count,
+            "missingResultCount": self.missing_result_count,
+        })
+    }
+}
+
+fn sentinel_polarity_slot(polarity: MemorySentinelPolarity) -> usize {
+    match polarity {
+        MemorySentinelPolarity::Gate => 0,
+        MemorySentinelPolarity::Revive => 1,
+    }
+}
+
 fn why_sentinel_data(
     connection: &DbConnection,
     memory_id: &str,
@@ -46921,46 +46990,26 @@ fn why_sentinel_data(
             message: format!("Failed to load memory sentinel specs: {error}"),
             repair: Some("ee migrate status --workspace . --json".to_string()),
         })?;
+    let latest_by_spec = connection
+        .latest_memory_sentinel_results_for_memory(memory_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load latest memory sentinel results: {error}"),
+            repair: Some("ee sentinel check --workspace . --json".to_string()),
+        })?
+        .into_iter()
+        .map(|result| (result.spec_hash.clone(), result))
+        .collect::<BTreeMap<_, _>>();
     let reference_time = chrono::Utc::now();
-    let mut latest_result_count = 0_u64;
-    let mut fresh_pass_count = 0_u64;
-    let mut fail_count = 0_u64;
-    let mut unknown_count = 0_u64;
-    let mut stale_count = 0_u64;
-    let mut missing_result_count = 0_u64;
+    let mut totals = SentinelWhyCounts::default();
+    let mut by_polarity = [SentinelWhyCounts::default(); 2];
     let mut spec_rows = Vec::with_capacity(specs.len());
     for spec in &specs {
-        let latest = connection
-            .latest_memory_sentinel_result(&spec.spec_hash)
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to load latest memory sentinel result: {error}"),
-                repair: Some("ee sentinel check --workspace . --json".to_string()),
-            })?;
-        let freshness = sentinel_result_freshness(
-            latest.as_ref(),
-            spec.stale_threshold_seconds,
-            reference_time,
-        );
-        match latest.as_ref().map(|result| result.status) {
-            Some(MemorySentinelResultStatus::Pass) if freshness == "fresh" => {
-                latest_result_count = latest_result_count.saturating_add(1);
-                fresh_pass_count = fresh_pass_count.saturating_add(1);
-            }
-            Some(MemorySentinelResultStatus::Pass) => {
-                latest_result_count = latest_result_count.saturating_add(1);
-                stale_count = stale_count.saturating_add(1);
-            }
-            Some(MemorySentinelResultStatus::Fail) => {
-                latest_result_count = latest_result_count.saturating_add(1);
-                fail_count = fail_count.saturating_add(1);
-            }
-            Some(MemorySentinelResultStatus::Unknown | MemorySentinelResultStatus::Degraded) => {
-                latest_result_count = latest_result_count.saturating_add(1);
-                unknown_count = unknown_count.saturating_add(1);
-            }
-            None => missing_result_count = missing_result_count.saturating_add(1),
-        }
-        let latest_json = latest.as_ref().map(|result| {
+        let latest = latest_by_spec.get(&spec.spec_hash);
+        let freshness =
+            sentinel_result_freshness(latest, spec.stale_threshold_seconds, reference_time);
+        totals.record(latest, freshness);
+        by_polarity[sentinel_polarity_slot(spec.polarity)].record(latest, freshness);
+        let latest_json = latest.map(|result| {
             serde_json::json!({
                 "schema": "ee.memory_sentinel.result.v1",
                 "resultHash": result.result_hash,
@@ -46974,10 +47023,11 @@ fn why_sentinel_data(
             })
         });
         spec_rows.push(serde_json::json!({
-            "schema": "ee.memory_sentinel.spec.v1",
+            "schema": "ee.memory_sentinel.spec.v2",
             "memoryId": spec.memory_id,
             "specHash": spec.spec_hash,
             "kind": spec.sentinel_kind.as_str(),
+            "polarity": spec.polarity.as_str(),
             "target": spec.target,
             "expectedPredicate": spec.expected_predicate,
             "safetyClass": spec.safety_class.as_str(),
@@ -46987,17 +47037,13 @@ fn why_sentinel_data(
         }));
     }
     Ok(serde_json::json!({
-        "schema": "ee.memory_sentinel.why.v1",
+        "schema": "ee.memory_sentinel.why.v2",
         "memoryId": memory_id,
         "referenceTime": reference_time.to_rfc3339(),
-        "summary": {
-            "specCount": specs.len(),
-            "latestResultCount": latest_result_count,
-            "freshPassCount": fresh_pass_count,
-            "failCount": fail_count,
-            "unknownCount": unknown_count,
-            "staleCount": stale_count,
-            "missingResultCount": missing_result_count,
+        "summary": totals.to_json(),
+        "byPolarity": {
+            "gate": by_polarity[0].to_json(),
+            "revive": by_polarity[1].to_json(),
         },
         "specs": spec_rows,
     }))
@@ -47916,8 +47962,16 @@ fn render_why_sentinel_human(sentinel: &serde_json::Value) -> String {
         .pointer("/summary/missingResultCount")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
+    let gate_specs = sentinel
+        .pointer("/byPolarity/gate/specCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let revive_specs = sentinel
+        .pointer("/byPolarity/revive/specCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     let mut output = format!(
-        "Sentinels:\n  specs: {spec_count}, fresh_pass: {fresh_pass}, fail: {fail}, missing_result: {missing}\n"
+        "Sentinels:\n  specs: {spec_count} (gate: {gate_specs}, revive: {revive_specs}), fresh_pass: {fresh_pass}, fail: {fail}, missing_result: {missing}\n"
     );
     if let Some(specs) = sentinel.get("specs").and_then(serde_json::Value::as_array) {
         for spec in specs {
@@ -47927,6 +47981,10 @@ fn render_why_sentinel_human(sentinel: &serde_json::Value) -> String {
                 .unwrap_or("-");
             let target = spec
                 .get("target")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            let polarity = spec
+                .get("polarity")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("-");
             let latest = spec
@@ -47940,7 +47998,9 @@ fn render_why_sentinel_human(sentinel: &serde_json::Value) -> String {
                 .and_then(|value| value.get("freshness"))
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("missing");
-            output.push_str(&format!("  {kind}:{target} -> {status} ({freshness})\n"));
+            output.push_str(&format!(
+                "  [{polarity}] {kind}:{target} -> {status} ({freshness})\n"
+            ));
         }
     }
     output
@@ -49739,6 +49799,39 @@ where
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct SentinelCheckCounts {
+    spec_count: u64,
+    pass: u64,
+    fail: u64,
+    unknown: u64,
+    degraded: u64,
+}
+
+impl SentinelCheckCounts {
+    fn record(&mut self, status: MemorySentinelResultStatus) {
+        self.spec_count = self.spec_count.saturating_add(1);
+        match status {
+            MemorySentinelResultStatus::Pass => self.pass = self.pass.saturating_add(1),
+            MemorySentinelResultStatus::Fail => self.fail = self.fail.saturating_add(1),
+            MemorySentinelResultStatus::Unknown => self.unknown = self.unknown.saturating_add(1),
+            MemorySentinelResultStatus::Degraded => {
+                self.degraded = self.degraded.saturating_add(1);
+            }
+        }
+    }
+
+    fn to_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "specCount": self.spec_count,
+            "pass": self.pass,
+            "fail": self.fail,
+            "unknown": self.unknown,
+            "degraded": self.degraded,
+        })
+    }
+}
+
 fn sentinel_check_data(
     cli: &Cli,
     args: &SentinelCheckArgs,
@@ -49773,23 +49866,15 @@ fn sentinel_check_data(
 
     let checked_at = chrono::Utc::now().to_rfc3339();
     let ctx = SentinelCheckContext::new(&workspace_path);
-    let mut pass_count = 0_u64;
-    let mut fail_count = 0_u64;
-    let mut unknown_count = 0_u64;
-    let mut degraded_count = 0_u64;
+    let mut totals = SentinelCheckCounts::default();
+    let mut by_polarity = [SentinelCheckCounts::default(); 2];
     let mut result_rows = Vec::with_capacity(stored_specs.len());
     for stored in &stored_specs {
         let spec = sentinel_spec_from_stored(stored)?;
         let observation = observe_sentinel_explicit(&spec, ctx);
         let status = observation.into_status();
-        match status {
-            MemorySentinelResultStatus::Pass => pass_count = pass_count.saturating_add(1),
-            MemorySentinelResultStatus::Fail => fail_count = fail_count.saturating_add(1),
-            MemorySentinelResultStatus::Unknown => unknown_count = unknown_count.saturating_add(1),
-            MemorySentinelResultStatus::Degraded => {
-                degraded_count = degraded_count.saturating_add(1)
-            }
-        }
+        totals.record(status);
+        by_polarity[sentinel_polarity_slot(stored.polarity)].record(status);
         let result = MemorySentinelResult::new(MemorySentinelResultInput {
             spec_hash: stored.spec_hash.clone(),
             status,
@@ -49810,6 +49895,7 @@ fn sentinel_check_data(
             "specHash": stored.spec_hash,
             "resultHash": result.result_hash,
             "kind": stored.sentinel_kind.as_str(),
+            "polarity": stored.polarity.as_str(),
             "target": stored.target,
             "expectedPredicate": stored.expected_predicate,
             "safetyClass": stored.safety_class.as_str(),
@@ -49821,7 +49907,7 @@ fn sentinel_check_data(
     }
 
     Ok(serde_json::json!({
-        "schema": "ee.memory_sentinel.check.v1",
+        "schema": "ee.memory_sentinel.check.v2",
         "command": "sentinel check",
         "workspace": workspace_path,
         "databasePath": database_path,
@@ -49829,11 +49915,10 @@ fn sentinel_check_data(
         "checkedAt": checked_at,
         "specCount": stored_specs.len(),
         "resultCount": result_rows.len(),
-        "summary": {
-            "pass": pass_count,
-            "fail": fail_count,
-            "unknown": unknown_count,
-            "degraded": degraded_count,
+        "summary": totals.to_json(),
+        "byPolarity": {
+            "gate": by_polarity[0].to_json(),
+            "revive": by_polarity[1].to_json(),
         },
         "results": result_rows,
     }))
@@ -49985,8 +50070,16 @@ fn render_sentinel_check_human(data: &serde_json::Value) -> String {
         .get("unknown")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
+    let gate_specs = data
+        .pointer("/byPolarity/gate/specCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let revive_specs = data
+        .pointer("/byPolarity/revive/specCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     let mut output = format!(
-        "Sentinel check: {spec_count} spec(s), pass={pass}, fail={fail}, unknown={unknown}\n"
+        "Sentinel check: {spec_count} spec(s) (gate={gate_specs}, revive={revive_specs}), pass={pass}, fail={fail}, unknown={unknown}\n"
     );
     if let Some(results) = data.get("results").and_then(serde_json::Value::as_array) {
         for item in results {
@@ -50002,6 +50095,10 @@ fn render_sentinel_check_human(data: &serde_json::Value) -> String {
                 .get("target")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("-");
+            let polarity = item
+                .get("polarity")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
             let status = item
                 .get("status")
                 .and_then(serde_json::Value::as_str)
@@ -50011,7 +50108,7 @@ fn render_sentinel_check_human(data: &serde_json::Value) -> String {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("-");
             output.push_str(&format!(
-                "  {memory_id} {kind}:{target} -> {status} ({result_hash})\n"
+                "  {memory_id} [{polarity}] {kind}:{target} -> {status} ({result_hash})\n"
             ));
         }
     }
@@ -50028,6 +50125,9 @@ fn validate_remember_sentinels(args: &RememberArgs) -> Result<(), DomainError> {
         });
     }
     for raw in &args.sentinels {
+        parse_memory_sentinel_spec(raw).map_err(memory_sentinel_validation_to_domain)?;
+    }
+    for raw in &args.revive_when {
         parse_memory_sentinel_spec(raw).map_err(memory_sentinel_validation_to_domain)?;
     }
     Ok(())
@@ -61822,6 +61922,34 @@ where
     W: Write,
     E: Write,
 {
+    if args.revivals {
+        if args.tripwire_id.is_some()
+            || args.task_input.is_some()
+            || !args.source_relevance.is_empty()
+            || args.update_timestamp
+            || args.task_outcome.is_some()
+            || args.dry_run
+        {
+            let error = DomainError::Usage {
+                message: "--revivals is a standalone read-only check and cannot be combined with a tripwire ID or tripwire event/mutation options".to_owned(),
+                repair: Some("ee tripwire check --revivals --workspace . --json".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+        return match revival_sentinel_data(cli, args) {
+            Ok(data) => write_revival_sentinel_data(cli, data, stdout),
+            Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    }
+    let Some(tripwire_id) = args.tripwire_id.as_ref() else {
+        let error = DomainError::Usage {
+            message: "tripwire check requires an ID unless --revivals is used".to_owned(),
+            repair: Some(
+                "ee tripwire check <id> --json, or ee tripwire check --revivals --json".to_owned(),
+            ),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    };
     let task_outcome = match parse_task_outcome_arg(args.task_outcome.as_deref()) {
         Ok(outcome) => outcome,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
@@ -61840,7 +61968,7 @@ where
     let report = match check_tripwire(&TripwireCheckOptions {
         workspace,
         database_path,
-        tripwire_id: args.tripwire_id.clone(),
+        tripwire_id: tripwire_id.clone(),
         event_payload,
         update_timestamp: args.update_timestamp,
         task_outcome,
@@ -61863,6 +61991,178 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => write_stdout(stdout, &(report.to_json() + "\n")),
     }
+}
+
+fn revival_sentinel_data(
+    cli: &Cli,
+    args: &TripwireCheckArgs,
+) -> Result<serde_json::Value, DomainError> {
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace . --json".to_owned()),
+        });
+    }
+    let connection = DbConnection::open_file_read_only(&database_path).map_err(|error| {
+        DomainError::Storage {
+            message: format!(
+                "Failed to open database {} read-only: {error}",
+                database_path.display()
+            ),
+            repair: Some("ee doctor --workspace . --json".to_owned()),
+        }
+    })?;
+    ensure_inspection_database_current(&connection, &database_path, "revival sentinel check")?;
+    let workspace_id = resolve_database_workspace_id(&connection, &workspace_path)?;
+    let checked_at = chrono::Utc::now().to_rfc3339();
+    let stored_specs = connection
+        .list_current_memory_revival_specs(&workspace_id, &checked_at)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load current revival sentinel specs: {error}"),
+            repair: Some("ee migrate status --workspace . --json".to_owned()),
+        })?;
+
+    let ctx = SentinelCheckContext::new(&workspace_path);
+    let mut counts = SentinelCheckCounts::default();
+    let mut revival_rows = Vec::new();
+    for stored in &stored_specs {
+        if stored.polarity != MemorySentinelPolarity::Revive {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Revival query returned non-revival sentinel {}",
+                    stored.spec_hash
+                ),
+                repair: Some("ee doctor --workspace . --json".to_owned()),
+            });
+        }
+        let spec = sentinel_spec_from_stored(stored)?;
+        let observation = observe_sentinel_explicit(&spec, ctx);
+        let status = observation.into_status();
+        counts.record(status);
+        if status != MemorySentinelResultStatus::Pass {
+            continue;
+        }
+        let result = MemorySentinelResult::new(MemorySentinelResultInput {
+            spec_hash: stored.spec_hash.clone(),
+            status,
+            checked_at: checked_at.clone(),
+            evidence_summary: sentinel_evidence_summary(&spec, observation),
+            stale_threshold_seconds: stored.stale_threshold_seconds,
+        })
+        .map_err(memory_sentinel_validation_to_domain)?;
+        let target_digest = revival_sentinel_target_digest(stored);
+        revival_rows.push(serde_json::json!({
+            "schema": "ee.memory_sentinel.revival.v1",
+            "memoryId": stored.memory_id,
+            "specHash": stored.spec_hash,
+            "resultHash": result.result_hash,
+            "kind": stored.sentinel_kind.as_str(),
+            "polarity": stored.polarity.as_str(),
+            "targetDigest": target_digest,
+            "expectedPredicate": stored.expected_predicate,
+            "status": result.status.as_str(),
+            "checkedAt": result.checked_at,
+            "staleThresholdSeconds": result.stale_threshold_seconds,
+        }));
+    }
+
+    Ok(serde_json::json!({
+        "schema": "ee.memory_sentinel.revivals.v1",
+        "command": "tripwire check --revivals",
+        "workspaceId": workspace_id,
+        "checkedAt": checked_at,
+        "evaluatedSpecCount": stored_specs.len(),
+        "revivalCount": revival_rows.len(),
+        "summary": counts.to_json(),
+        "polarity": "revive",
+        "mutationPosture": "read_only_no_result_trust_or_tombstone_mutation",
+        "redactionStatus": "metadata_and_domain_separated_target_digest_no_memory_content_provenance_or_raw_target",
+        "memoryContentIncluded": false,
+        "revivals": revival_rows,
+    }))
+}
+
+fn revival_sentinel_target_digest(stored: &StoredMemorySentinelSpec) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.memory_sentinel.revival_target.v1\0");
+    for value in [stored.sentinel_kind.as_str(), stored.target.as_str()] {
+        hasher.update(&(value.len() as u64).to_le_bytes());
+        hasher.update(value.as_bytes());
+    }
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn write_revival_sentinel_data<W>(
+    cli: &Cli,
+    data: serde_json::Value,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let envelope = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+        "degraded": [],
+    });
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+            stdout,
+            &render_revival_sentinel_human(
+                envelope.get("data").unwrap_or(&serde_json::Value::Null),
+            ),
+        ),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&envelope.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(envelope.to_string() + "\n")),
+    }
+}
+
+fn render_revival_sentinel_human(data: &serde_json::Value) -> String {
+    let evaluated = data
+        .get("evaluatedSpecCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let ready = data
+        .get("revivalCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let mut output =
+        format!("Revival check (read-only): evaluated {evaluated} revive spec(s), ready={ready}\n");
+    if let Some(revivals) = data.get("revivals").and_then(serde_json::Value::as_array) {
+        for revival in revivals {
+            let memory_id = revival
+                .get("memoryId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            let kind = revival
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            let target_digest = revival
+                .get("targetDigest")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            output.push_str(&format!(
+                "  {memory_id} [revive] {kind} target={target_digest} -> pass\n"
+            ));
+        }
+    }
+    if ready == 0 {
+        output.push_str("  No revival predicates currently pass.\n");
+    }
+    output
 }
 
 fn parse_optional_tripwire_state(
