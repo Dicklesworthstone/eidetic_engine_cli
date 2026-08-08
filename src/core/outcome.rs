@@ -41,16 +41,17 @@ use crate::core::sprt::{
 };
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
-    ApplyProcedureFeedbackInput, AuditedFeedbackEventInput, CreateAuditInput,
-    CreateCurationCandidateInput, CreateFeedbackEventInput, CreateFeedbackQuarantineInput,
-    CreateOutcomeEvidenceInput, DbConnection, FeedbackCounts, OutcomeEvidenceSource,
-    StoredFeedbackEvent, StoredFeedbackQuarantine, UpsertAgentContextProfileInput, audit_actions,
-    feedback_scoring, generate_audit_id, generate_audit_id_seeded,
+    ApplyProcedureFeedbackInput, AttemptFamilyMembershipSnapshot, AuditedFeedbackEventInput,
+    CreateAuditInput, CreateCurationCandidateInput, CreateFeedbackEventInput,
+    CreateFeedbackQuarantineInput, CreateOutcomeEvidenceInput, DbConnection, FeedbackCounts,
+    OutcomeEvidenceSource, StoredFeedbackEvent, StoredFeedbackQuarantine,
+    UpsertAgentContextProfileInput, audit_actions, feedback_scoring, generate_audit_id,
+    generate_audit_id_seeded,
 };
 use crate::models::degradation::{HARMFUL_BURST_QUARANTINE_CODE, SPRT_QUARANTINE_CODE};
 use crate::models::{
-    AgentContextProfileCounts, AttemptFamilyMultiplicity, DomainError, ProcessExitCode,
-    RecoveryKind, TrustClass, VerificationEvidenceRecord,
+    AgentContextProfileCounts, DomainError, ProcessExitCode, RecoveryKind, TrustClass,
+    VerificationEvidenceRecord,
 };
 use crate::runtime::determinism::{Deterministic, Seed};
 
@@ -1582,7 +1583,7 @@ fn apply_memory_trust_class_transition(
     connection
         .with_transaction(|| {
             if gate_relevant
-                && let Some(multiplicity) = promotion_ineligible_attempt_family_multiplicity(
+                && let Some(snapshot) = promotion_ineligible_attempt_family_snapshot(
                     connection,
                     workspace_id,
                     memory_id,
@@ -1599,7 +1600,7 @@ fn apply_memory_trust_class_transition(
                         details: Some(memory_trust_class_promotion_blocked_audit_details(
                             feedback_event_id,
                             &transition,
-                            &multiplicity,
+                            &snapshot,
                         )),
                     },
                 );
@@ -1649,72 +1650,54 @@ fn apply_memory_trust_class_transition(
     Ok(())
 }
 
-/// Load the attempt-family multiplicity for a memory and return it only when
-/// the family is NOT promotion-eligible: incomplete slot coverage, or slot
-/// coverage without the canonical one-selected + N-1-rejected composition.
-/// Memories without a family, and promotion-eligible families, return `None`.
-/// Returns db-layer errors so the caller can evaluate it inside the same
-/// transaction as the trust-class CAS (bd-multiplicity-aware-trust-p0u7g).
-fn promotion_ineligible_attempt_family_multiplicity(
+/// Load the authoritative workspace/logical-id membership snapshot and return
+/// it only when multiplicity blocks promotion. The snapshot unions every
+/// ledger membership with V094 pointers across all revisions; no current-row
+/// pointer can short-circuit a second family or an unslotted legacy member.
+fn promotion_ineligible_attempt_family_snapshot(
     connection: &DbConnection,
     workspace_id: &str,
     memory_id: &str,
-) -> crate::db::Result<Option<AttemptFamilyMultiplicity>> {
-    if let Some(family) = connection.get_memory_attempt_family(memory_id)? {
-        let multiplicity = attempt_family_multiplicity_for(
-            connection,
-            workspace_id,
-            &family.family_id,
-            family.declared_size,
-        )?;
-        return Ok((!multiplicity.is_promotion_eligible()).then_some(multiplicity));
-    }
-    // No pointer on the row. The append-only ledger stays authoritative: a
-    // wiped or never-carried pointer must not make membership invisible to
-    // the gate, so fall back to ledger membership by logical identity and
-    // block on the first non-eligible family found (deterministic order).
-    let Some(ledger_key) = connection.get_memory_attempt_ledger_key(memory_id)? else {
+) -> crate::db::Result<Option<AttemptFamilyMembershipSnapshot>> {
+    let Some(ledger_key) = connection.get_memory_attempt_ledger_key(workspace_id, memory_id)?
+    else {
         return Ok(None);
     };
-    for family_id in connection.attempt_family_ids_for_memory_logical(workspace_id, &ledger_key)? {
-        let multiplicity =
-            attempt_family_multiplicity_for(connection, workspace_id, &family_id, None)?;
-        if !multiplicity.is_promotion_eligible() {
-            return Ok(Some(multiplicity));
-        }
-    }
-    Ok(None)
-}
-
-fn attempt_family_multiplicity_for(
-    connection: &DbConnection,
-    workspace_id: &str,
-    family_id: &str,
-    pointer_declared_size: Option<u32>,
-) -> crate::db::Result<AttemptFamilyMultiplicity> {
-    let members = connection.list_memory_attempt_family(workspace_id, family_id)?;
-    let declaration = connection.get_attempt_family_declaration(workspace_id, family_id)?;
-    let declared_size = declaration
-        .and_then(|(declared, _origin)| declared)
-        .or(pointer_declared_size);
-    Ok(AttemptFamilyMultiplicity::from_members(
-        family_id.to_owned(),
-        declared_size,
-        members.iter().map(|member| {
-            (
-                Some(member.attempt_index),
-                Some(member.disposition.as_str()),
-            )
-        }),
-    ))
+    let snapshot = connection.get_attempt_family_membership_snapshot(workspace_id, &ledger_key)?;
+    Ok((!snapshot.is_promotion_eligible()).then_some(snapshot))
 }
 
 fn memory_trust_class_promotion_blocked_audit_details(
     feedback_event_id: &str,
     transition: &TrustClassTransition,
-    multiplicity: &AttemptFamilyMultiplicity,
+    snapshot: &AttemptFamilyMembershipSnapshot,
 ) -> String {
-    let posture = multiplicity.promotion_posture();
+    let posture = snapshot
+        .promotion_posture()
+        .unwrap_or(crate::models::AttemptFamilyPromotionPosture::BlockedUndeclared);
+    let family_ids = snapshot.family_ids();
+    let multiplicity = snapshot
+        .families
+        .first()
+        .map(crate::db::AttemptFamilySnapshot::multiplicity);
+    render_memory_trust_class_promotion_blocked_audit_details(
+        feedback_event_id,
+        transition,
+        posture,
+        &family_ids,
+        snapshot.families.len(),
+        multiplicity.as_ref(),
+    )
+}
+
+fn render_memory_trust_class_promotion_blocked_audit_details(
+    feedback_event_id: &str,
+    transition: &TrustClassTransition,
+    posture: crate::models::AttemptFamilyPromotionPosture,
+    family_ids: &[String],
+    membership_family_count: usize,
+    multiplicity: Option<&crate::models::AttemptFamilyMultiplicity>,
+) -> String {
     serde_json::json!({
         "schema": "ee.audit.trust_class_promotion_blocked.v1",
         "feedbackEventId": feedback_event_id,
@@ -1722,17 +1705,20 @@ fn memory_trust_class_promotion_blocked_audit_details(
         "refusedClass": transition.next_class.as_str(),
         "promotionPosture": posture.as_str(),
         "reason": posture.reason(),
-        "familyId": multiplicity.family_id,
-        "declaredSize": multiplicity.declared_size,
-        "recordedSlots": multiplicity.recorded_slots,
-        "selectedCount": multiplicity.selected_count,
-        "rejectedCount": multiplicity.rejected_count,
-        "unslottedCount": multiplicity.unslotted_count,
-        "memberCount": multiplicity.member_count,
-        "duplicateSlotCount": multiplicity.duplicate_slot_count,
-        "outOfRangeSlotCount": multiplicity.out_of_range_slot_count,
-        "unrecordedCount": multiplicity.unrecorded_count(),
-        "summary": multiplicity.summary(),
+        "familyId": multiplicity.as_ref().map(|family| family.family_id.as_str()),
+        "familyIds": family_ids,
+        "membershipFamilyCount": membership_family_count,
+        "declaredSize": multiplicity.as_ref().and_then(|family| family.declared_size),
+        "recordedSlots": multiplicity.as_ref().map(|family| family.recorded_slots),
+        "selectedCount": multiplicity.as_ref().map(|family| family.selected_count),
+        "rejectedCount": multiplicity.as_ref().map(|family| family.rejected_count),
+        "unslottedCount": multiplicity.as_ref().map(|family| family.unslotted_count),
+        "memberCount": multiplicity.as_ref().map(|family| family.member_count),
+        "duplicateSlotCount": multiplicity.as_ref().map(|family| family.duplicate_slot_count),
+        "duplicateMemberCount": multiplicity.as_ref().map(|family| family.duplicate_member_count),
+        "outOfRangeSlotCount": multiplicity.as_ref().map(|family| family.out_of_range_slot_count),
+        "unrecordedCount": multiplicity.as_ref().map(|family| family.unrecorded_count()),
+        "summary": multiplicity.as_ref().map(|family| family.summary()),
     })
     .to_string()
 }
@@ -4227,9 +4213,9 @@ mod tests {
         OutcomeRecordOptions, OutcomeRecordReport, OutcomeRecordStatus, SPRT_QUARANTINE_CODE,
         cancel_kind_from_backend_reason, default_feedback_weight,
         feedback_quarantine_audit_details, feedback_quarantine_review_audit_details,
-        generate_feedback_event_id, harmful_burst_quarantine_degradation,
-        memory_trust_class_promotion_blocked_audit_details, outcome_audit_details, outcome_class,
-        outcome_exit_code, record_outcome, record_outcome_seeded, validate_feedback_event_id,
+        generate_feedback_event_id, harmful_burst_quarantine_degradation, outcome_audit_details,
+        outcome_class, outcome_exit_code, record_outcome, record_outcome_seeded,
+        render_memory_trust_class_promotion_blocked_audit_details, validate_feedback_event_id,
     };
     use crate::models::{AttemptFamilyMultiplicity, DomainError, ProcessExitCode, TrustClass};
     use crate::runtime::determinism::Deterministic;
@@ -4400,11 +4386,16 @@ mod tests {
         ];
 
         for (multiplicity, expected_posture, expected_reason) in cases {
+            let posture = multiplicity.promotion_posture();
+            let family_ids = vec![multiplicity.family_id.clone()];
             let details: serde_json::Value =
-                serde_json::from_str(&memory_trust_class_promotion_blocked_audit_details(
+                serde_json::from_str(&render_memory_trust_class_promotion_blocked_audit_details(
                     "fb_test",
                     &transition,
-                    &multiplicity,
+                    posture,
+                    &family_ids,
+                    1,
+                    Some(&multiplicity),
                 ))
                 .map_err(|error| error.to_string())?;
             ensure_equal(
@@ -4571,6 +4562,75 @@ mod tests {
             &transitions.len(),
             &0_usize,
             "no trust transition may land while the noncanonical family gate refuses",
+        )
+    }
+
+    #[test]
+    fn multi_family_membership_blocks_promotion_without_pointer_short_circuit() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-family-gate-multiple")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let survivor = "mem_00000000000000000family007";
+        insert_family_memory(
+            &connection,
+            survivor,
+            "One logical memory recorded in two otherwise canonical families.",
+            &crate::db::MemoryAttemptFamily {
+                family_id: "fam-gate-multi-a".to_owned(),
+                declared_size: Some(1),
+                attempt_index: Some(1),
+                disposition: Some("selected".to_owned()),
+            },
+        )?;
+        connection
+            .set_memory_attempt_family(
+                survivor,
+                &crate::db::MemoryAttemptFamily {
+                    family_id: "fam-gate-multi-b".to_owned(),
+                    declared_size: Some(1),
+                    attempt_index: Some(1),
+                    disposition: Some("selected".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        record_helpful_outcomes(&database, survivor, 10)?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let trust_class = connection
+            .get_memory_trust_class(survivor)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "multi-family survivor missing".to_owned())?;
+        ensure_equal(
+            &trust_class.as_str(),
+            &"agent_assertion",
+            "two individually canonical families still fail closed",
+        )?;
+        let blocked = connection
+            .list_audit_by_action(
+                crate::db::audit_actions::TRUST_CLASS_PROMOTION_BLOCKED,
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        let details: serde_json::Value = blocked
+            .iter()
+            .find_map(|row| row.details.as_deref())
+            .ok_or_else(|| "multi-family refusal audit missing".to_owned())
+            .and_then(|details| serde_json::from_str(details).map_err(|error| error.to_string()))?;
+        ensure_equal(
+            &details
+                .get("promotionPosture")
+                .and_then(serde_json::Value::as_str),
+            &Some("blocked_multiple_families"),
+            "promotion audit exposes multi-family posture",
+        )?;
+        ensure_equal(
+            &details
+                .get("familyIds")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            &Some(2_usize),
+            "promotion audit retains every family membership",
         )
     }
 

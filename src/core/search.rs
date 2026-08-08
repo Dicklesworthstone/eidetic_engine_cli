@@ -17839,8 +17839,12 @@ pub struct FamilyRetrievalOptions<'a> {
 pub struct SearchFamilyMember {
     pub memory_id: String,
     pub logical_id: String,
-    pub attempt_index: u32,
-    pub disposition: String,
+    pub attempt_index: Option<u32>,
+    pub disposition: Option<String>,
+    pub discount_factor: f32,
+    pub promotion_posture: String,
+    pub promotion_reason: String,
+    pub membership_family_ids: Vec<String>,
     pub kind: String,
     pub level: String,
     pub trust_class: String,
@@ -17860,10 +17864,14 @@ pub struct SearchFamilyReport {
     pub recorded_slots: u32,
     pub selected_count: u32,
     pub rejected_count: u32,
+    pub unslotted_count: u32,
+    pub duplicate_member_count: u32,
     pub unrecorded_count: u32,
     pub discount_factor: f32,
     pub survivor_only: bool,
     pub promotion_eligible: bool,
+    pub promotion_posture: String,
+    pub promotion_reason: String,
     pub posture_summary: String,
     pub members: Vec<SearchFamilyMember>,
     pub scope_filtered_count: u32,
@@ -17884,10 +17892,14 @@ impl SearchFamilyReport {
             "recordedSlots": self.recorded_slots,
             "selectedCount": self.selected_count,
             "rejectedCount": self.rejected_count,
+            "unslottedCount": self.unslotted_count,
+            "duplicateMemberCount": self.duplicate_member_count,
             "unrecordedCount": self.unrecorded_count,
             "discountFactor": self.discount_factor,
             "survivorOnly": self.survivor_only,
             "promotionEligible": self.promotion_eligible,
+            "promotionPosture": self.promotion_posture,
+            "promotionReason": self.promotion_reason,
             "postureSummary": self.posture_summary,
             "memoryScope": self.memory_scope.as_str(),
             "strictScope": self.strict_scope,
@@ -17902,6 +17914,10 @@ impl SearchFamilyReport {
                         "logicalId": member.logical_id,
                         "attemptIndex": member.attempt_index,
                         "disposition": member.disposition,
+                        "discountFactor": member.discount_factor,
+                        "promotionPosture": member.promotion_posture,
+                        "promotionReason": member.promotion_reason,
+                        "membershipFamilyIds": member.membership_family_ids,
                         "kind": member.kind,
                         "level": member.level,
                         "trustClass": member.trust_class,
@@ -17919,17 +17935,20 @@ impl SearchFamilyReport {
     #[must_use]
     pub fn human_summary(&self) -> String {
         let mut output = format!(
-            "Attempt family {}\n\n  Posture: {}\n  Declared: {}\n  Recorded slots: {} \
-             ({} selected, {} rejected, {} unrecorded)\n  Promotion eligible: {}\n  \
+            "Attempt family {}\n\n  Posture: {}\n  Promotion posture: {} ({})\n  Declared: {}\n  Recorded slots: {} \
+             ({} selected, {} rejected, {} unslotted, {} unrecorded)\n  Promotion eligible: {}\n  \
              Memory scope: {}{}\n  Visible members: {}\n  Scope-filtered members: {}\n  \
              Missing live revisions: {}\n",
             self.family_id,
             self.posture_summary,
+            self.promotion_posture,
+            self.promotion_reason,
             self.declared_size
                 .map_or_else(|| "unknown".to_owned(), |size| size.to_string()),
             self.recorded_slots,
             self.selected_count,
             self.rejected_count,
+            self.unslotted_count,
             self.unrecorded_count,
             self.promotion_eligible,
             self.memory_scope.as_str(),
@@ -17945,13 +17964,16 @@ impl SearchFamilyReport {
         output.push_str("\nMembers:\n");
         for member in &self.members {
             output.push_str(&format!(
-                "\n  {}. slot {} [{}] {}\n     Memory: {}\n     Kind/level/trust: {}/{}/{}\n     \
+                "\n  {}. slot {} [{}] {}\n     Memory: {}\n     Discount: {}\n     Promotion posture: {} ({})\n     Kind/level/trust: {}/{}/{}\n     \
                  Content: {}\n",
-                member.attempt_index,
-                member.attempt_index,
-                member.disposition,
+                member.attempt_index.map_or_else(|| "?".to_owned(), |index| index.to_string()),
+                member.attempt_index.map_or_else(|| "unslotted".to_owned(), |index| index.to_string()),
+                member.disposition.as_deref().unwrap_or("unknown"),
                 member.logical_id,
                 member.memory_id,
+                member.discount_factor,
+                member.promotion_posture,
+                member.promotion_reason,
                 member.kind,
                 member.level,
                 member.trust_class,
@@ -17996,8 +18018,8 @@ pub fn run_family_retrieval(
         .migrate()
         .map_err(|error| storage_error(format!("Failed to migrate database: {error}")))?;
 
-    let members = connection
-        .list_memory_attempt_family(&workspace_id, family_id)
+    let logical_ids = connection
+        .list_attempt_family_membership_logical_ids(&workspace_id, family_id)
         .map_err(|error| storage_error(format!("Failed to list attempt family: {error}")))?;
     let declaration = connection
         .get_attempt_family_declaration(&workspace_id, family_id)
@@ -18006,33 +18028,65 @@ pub fn run_family_retrieval(
                 "Failed to read attempt-family declaration: {error}"
             ))
         })?;
-    let (declared_size, origin) = match declaration {
+    let (fallback_declared_size, fallback_origin) = match declaration {
         Some((declared, origin)) => (declared, Some(origin)),
         None => (None, None),
     };
 
-    let multiplicity = crate::models::AttemptFamilyMultiplicity::from_members(
-        family_id.to_owned(),
-        declared_size,
-        members.iter().map(|member| {
-            (
-                Some(member.attempt_index),
-                Some(member.disposition.as_str()),
+    let mut snapshots = Vec::with_capacity(logical_ids.len());
+    let mut target_family_snapshot = None;
+    let mut multi_family_membership = false;
+    for logical_id in logical_ids {
+        let snapshot = connection
+            .get_attempt_family_membership_snapshot(&workspace_id, &logical_id)
+            .map_err(|error| {
+                storage_error(format!(
+                    "Failed to load attempt-family membership snapshot: {error}"
+                ))
+            })?;
+        let Some(target_family) = snapshot.family(family_id) else {
+            return Err(storage_error(format!(
+                "Attempt-family membership snapshot omitted requested family `{family_id}` for logical memory `{logical_id}`"
+            )));
+        };
+        if target_family_snapshot.is_none() {
+            target_family_snapshot = Some(target_family.clone());
+        }
+        multi_family_membership |= snapshot.families.len() > 1;
+        snapshots.push((logical_id, snapshot));
+    }
+
+    let multiplicity = target_family_snapshot.as_ref().map_or_else(
+        || {
+            crate::models::AttemptFamilyMultiplicity::from_members(
+                family_id.to_owned(),
+                fallback_declared_size,
+                std::iter::empty(),
             )
-        }),
+        },
+        crate::db::AttemptFamilySnapshot::multiplicity,
     );
+    let origin = target_family_snapshot
+        .as_ref()
+        .and_then(|family| family.origin.clone())
+        .or(fallback_origin);
 
     let scope_context = crate::core::memory_scope::MemoryScopeContext::for_workspace(
         &workspace_root,
         options.memory_scope,
         options.strict_scope,
     );
-    let mut admitted = Vec::with_capacity(members.len());
+    let mut admitted = Vec::new();
     let mut scope_filtered_count = 0_u32;
     let mut missing_current_revision_count = 0_u32;
-    for member in &members {
+    for (logical_id, snapshot) in &snapshots {
+        let target_family = snapshot.family(family_id).ok_or_else(|| {
+            storage_error(format!(
+                "Attempt-family membership snapshot omitted requested family `{family_id}` for logical memory `{logical_id}`"
+            ))
+        })?;
         let current_id = connection
-            .get_current_memory_id_for_ledger_key(&workspace_id, &member.memory_logical_id)
+            .get_current_memory_id_for_ledger_key(&workspace_id, logical_id)
             .map_err(|error| {
                 storage_error(format!("Failed to resolve live family revision: {error}"))
             })?;
@@ -18062,21 +18116,51 @@ pub fn run_family_retrieval(
                 let redacted = redacted_uri != uri;
                 (Some(redacted_uri), redacted)
             });
-        admitted.push(SearchFamilyMember {
-            memory_id: memory.id,
-            logical_id: member.memory_logical_id.clone(),
-            attempt_index: member.attempt_index,
-            disposition: member.disposition.clone(),
-            kind: memory.kind,
-            level: memory.level,
-            trust_class: memory.trust_class,
-            content: redaction.content,
-            content_redacted: redaction.redacted,
-            provenance_uri,
-            provenance_redacted,
-            created_at: memory.created_at,
-        });
+        let membership_posture = snapshot
+            .promotion_posture()
+            .unwrap_or(crate::models::AttemptFamilyPromotionPosture::BlockedUndeclared);
+        let mut membership_records = target_family
+            .ledger_members
+            .iter()
+            .filter(|member| member.memory_logical_id == *logical_id)
+            .map(|member| (Some(member.attempt_index), Some(member.disposition.clone())))
+            .collect::<Vec<_>>();
+        if target_family
+            .pointer_only_logical_ids
+            .iter()
+            .any(|pointer_id| pointer_id == logical_id)
+        {
+            membership_records.push((None, None));
+        }
+        for (attempt_index, disposition) in membership_records {
+            admitted.push(SearchFamilyMember {
+                memory_id: memory.id.clone(),
+                logical_id: logical_id.clone(),
+                attempt_index,
+                discount_factor: snapshot.member_discount_factor(family_id, disposition.as_deref()),
+                disposition,
+                promotion_posture: membership_posture.as_str().to_owned(),
+                promotion_reason: membership_posture.reason().to_owned(),
+                membership_family_ids: snapshot.family_ids(),
+                kind: memory.kind.clone(),
+                level: memory.level.clone(),
+                trust_class: memory.trust_class.clone(),
+                content: redaction.content.clone(),
+                content_redacted: redaction.redacted,
+                provenance_uri: provenance_uri.clone(),
+                provenance_redacted,
+                created_at: memory.created_at.clone(),
+            });
+        }
     }
+
+    admitted.sort_by(|left, right| {
+        left.attempt_index
+            .unwrap_or(u32::MAX)
+            .cmp(&right.attempt_index.unwrap_or(u32::MAX))
+            .then_with(|| left.logical_id.cmp(&right.logical_id))
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
 
     if options.strict_scope && scope_filtered_count > 0 {
         // Mirror normal search's strict-scope contract: once any relevant
@@ -18084,6 +18168,12 @@ pub fn run_family_retrieval(
         // family members from the mixed-scope result.
         admitted.clear();
     }
+
+    let promotion_posture = if multi_family_membership {
+        crate::models::AttemptFamilyPromotionPosture::BlockedMultipleFamilies
+    } else {
+        multiplicity.promotion_posture()
+    };
 
     Ok(SearchFamilyReport {
         workspace_id,
@@ -18093,10 +18183,17 @@ pub fn run_family_retrieval(
         recorded_slots: multiplicity.recorded_slots,
         selected_count: multiplicity.selected_count,
         rejected_count: multiplicity.rejected_count,
+        unslotted_count: multiplicity.unslotted_count,
+        duplicate_member_count: multiplicity.duplicate_member_count,
         unrecorded_count: multiplicity.unrecorded_count(),
         discount_factor: multiplicity.discount_factor(),
         survivor_only: multiplicity.is_survivor_only(),
-        promotion_eligible: multiplicity.is_promotion_eligible(),
+        promotion_eligible: matches!(
+            promotion_posture,
+            crate::models::AttemptFamilyPromotionPosture::Eligible
+        ),
+        promotion_posture: promotion_posture.as_str().to_owned(),
+        promotion_reason: promotion_posture.reason().to_owned(),
         posture_summary: multiplicity.summary(),
         members: admitted,
         scope_filtered_count,

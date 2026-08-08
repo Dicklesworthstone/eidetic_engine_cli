@@ -29,17 +29,18 @@ use crate::models::{
     RationaleTraceVisibility, RedactionStatus, validate_rationale_summary,
 };
 use crate::models::{
+    AttemptFamilyMultiplicity, AttemptFamilyPromotionPosture, MemorySentinelKind,
+    MemorySentinelPolarity, MemorySentinelResult, MemorySentinelResultStatus,
+    MemorySentinelSafetyClass, MemorySentinelSpec, StoredMemorySentinelResult,
+    StoredMemorySentinelSpec,
+};
+use crate::models::{
     CreateMemoryAnchorInput, ExtractedAnchorSurface, MemoryAnchorFreshnessState, MemoryAnchorKind,
     MemoryAnchorSource, StoredMemoryAnchor, extract_memory_anchor_surfaces,
     extract_precision_memory_anchors,
 };
 use crate::models::{MemoryKind, MemoryValidationError, canonicalize_typed_memory_fields_json};
 use crate::models::{MemorySeal, validate_memory_seal_commitment};
-use crate::models::{
-    MemorySentinelKind, MemorySentinelPolarity, MemorySentinelResult, MemorySentinelResultStatus,
-    MemorySentinelSafetyClass, MemorySentinelSpec, StoredMemorySentinelResult,
-    StoredMemorySentinelSpec,
-};
 
 pub mod migrate;
 pub mod read_pool;
@@ -17375,6 +17376,106 @@ pub struct MemoryAttemptFamilyMember {
     pub recorded_at: String,
 }
 
+/// One family's complete durable membership evidence as observed from both
+/// the V095 ledger and V094 pointer columns. Pointer-only logical identities
+/// are explicit unslotted members; they are never silently omitted from
+/// multiplicity posture.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AttemptFamilySnapshot {
+    pub family_id: String,
+    pub declared_size: Option<u32>,
+    pub origin: Option<String>,
+    pub ledger_members: Vec<MemoryAttemptFamilyMember>,
+    pub pointer_only_logical_ids: Vec<String>,
+}
+
+impl AttemptFamilySnapshot {
+    /// Canonical multiplicity derived from every durable membership record.
+    #[must_use]
+    pub fn multiplicity(&self) -> AttemptFamilyMultiplicity {
+        AttemptFamilyMultiplicity::from_identified_members(
+            self.family_id.clone(),
+            self.declared_size,
+            self.ledger_members
+                .iter()
+                .map(|member| {
+                    (
+                        member.memory_logical_id.as_str(),
+                        Some(member.attempt_index),
+                        Some(member.disposition.as_str()),
+                    )
+                })
+                .chain(
+                    self.pointer_only_logical_ids
+                        .iter()
+                        .map(|logical_id| (logical_id.as_str(), None, None)),
+                ),
+        )
+    }
+}
+
+/// Authoritative workspace-scoped attempt-family view for one revision-stable
+/// logical memory identity. Every V095 ledger membership and every V094
+/// pointer found on any revision is included in deterministic family order.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AttemptFamilyMembershipSnapshot {
+    pub workspace_id: String,
+    pub memory_logical_id: String,
+    pub families: Vec<AttemptFamilySnapshot>,
+}
+
+impl AttemptFamilyMembershipSnapshot {
+    #[must_use]
+    pub fn family(&self, family_id: &str) -> Option<&AttemptFamilySnapshot> {
+        self.families
+            .iter()
+            .find(|family| family.family_id == family_id)
+    }
+
+    #[must_use]
+    pub fn family_ids(&self) -> Vec<String> {
+        self.families
+            .iter()
+            .map(|family| family.family_id.clone())
+            .collect()
+    }
+
+    /// `None` means the logical memory has no family membership and therefore
+    /// no multiplicity gate. Multiple memberships always fail closed.
+    #[must_use]
+    pub fn promotion_posture(&self) -> Option<AttemptFamilyPromotionPosture> {
+        match self.families.as_slice() {
+            [] => None,
+            [family] => Some(family.multiplicity().promotion_posture()),
+            _ => Some(AttemptFamilyPromotionPosture::BlockedMultipleFamilies),
+        }
+    }
+
+    #[must_use]
+    pub fn promotion_reason(&self) -> Option<&'static str> {
+        self.promotion_posture()
+            .map(AttemptFamilyPromotionPosture::reason)
+    }
+
+    /// Memories outside every family pass this gate; a family-bound memory
+    /// passes only when its sole family is canonically complete.
+    #[must_use]
+    pub fn is_promotion_eligible(&self) -> bool {
+        self.promotion_posture()
+            .is_none_or(|posture| matches!(posture, AttemptFamilyPromotionPosture::Eligible))
+    }
+
+    /// Ranking discount for one explicit family membership. Rejected evidence
+    /// is always undiscounted; selected evidence delegates to that family's
+    /// canonical multiplicity denominator.
+    #[must_use]
+    pub fn member_discount_factor(&self, family_id: &str, disposition: Option<&str>) -> f32 {
+        self.family(family_id).map_or(1.0, |family| {
+            family.multiplicity().member_discount_factor(disposition)
+        })
+    }
+}
+
 /// Persisted 128-bit content SimHash bytes, stored big-endian.
 pub type MemoryContentSimHash = [u8; 16];
 
@@ -19420,12 +19521,19 @@ impl DbConnection {
 
     /// The revision-stable key the attempt-family ledger uses for a memory
     /// row: `logical_id` when present, else the row id (pre-V043 rows).
-    pub fn get_memory_attempt_ledger_key(&self, id: &str) -> Result<Option<String>> {
+    pub fn get_memory_attempt_ledger_key(
+        &self,
+        workspace_id: &str,
+        id: &str,
+    ) -> Result<Option<String>> {
         let rows = self.query_for(
             DbOperation::Query,
             "SELECT COALESCE(logical_id, id) FROM memories \
-             WHERE id = ?1 ORDER BY id ASC LIMIT 1",
-            &[Value::Text(id.to_string())],
+             WHERE workspace_id = ?1 AND id = ?2 ORDER BY id ASC LIMIT 1",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(id.to_string()),
+            ],
         )?;
         rows.first()
             .map(|row| required_text(row, 0, DbOperation::Query, "logical_id").map(str::to_string))
@@ -19458,27 +19566,105 @@ impl DbConnection {
             .transpose()
     }
 
-    /// Family ids holding append-only ledger membership for a memory's
-    /// logical identity, in deterministic order. The ledger is authoritative:
-    /// wiping a row's denormalized pointer columns must never make its family
-    /// membership invisible to the promotion gate.
-    pub fn attempt_family_ids_for_memory_logical(
+    /// Build the one authoritative workspace + logical-id membership snapshot
+    /// used by promotion and queryless family retrieval. The candidate-family
+    /// query unions every append-only V095 ledger membership with V094 pointer
+    /// evidence from every revision of the logical memory. It never returns
+    /// early from a current-row pointer, and every subsequent family read is
+    /// workspace-qualified.
+    pub fn get_attempt_family_membership_snapshot(
         &self,
         workspace_id: &str,
-        ledger_key: &str,
+        memory_logical_id: &str,
+    ) -> Result<AttemptFamilyMembershipSnapshot> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT family_id FROM (\
+                 SELECT family_id FROM attempt_family_members \
+                  WHERE workspace_id = ?1 AND memory_logical_id = ?2 \
+                 UNION \
+                 SELECT attempt_family_id AS family_id FROM memories \
+                  WHERE workspace_id = ?1 AND COALESCE(logical_id, id) = ?2 \
+                    AND attempt_family_id IS NOT NULL\
+             ) ORDER BY family_id ASC",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(memory_logical_id.to_string()),
+            ],
+        )?;
+        let mut families = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let family_id = required_text(row, 0, DbOperation::Query, "family_id")?.to_string();
+            let declaration = self.get_attempt_family_declaration(workspace_id, &family_id)?;
+            let (declared_size, origin) =
+                declaration.map_or((None, None), |(size, origin)| (size, Some(origin)));
+            let ledger_members = self.list_memory_attempt_family(workspace_id, &family_id)?;
+            let pointer_rows = self.query_for(
+                DbOperation::Query,
+                "SELECT DISTINCT COALESCE(memory.logical_id, memory.id) AS logical_id \
+                 FROM memories AS memory \
+                 WHERE memory.workspace_id = ?1 AND memory.attempt_family_id = ?2 \
+                   AND NOT EXISTS (\
+                       SELECT 1 FROM attempt_family_members AS member \
+                       WHERE member.workspace_id = ?1 \
+                         AND member.family_id = ?2 \
+                         AND member.memory_logical_id = COALESCE(memory.logical_id, memory.id)\
+                   ) \
+                 ORDER BY logical_id ASC",
+                &[
+                    Value::Text(workspace_id.to_string()),
+                    Value::Text(family_id.clone()),
+                ],
+            )?;
+            let pointer_only_logical_ids = pointer_rows
+                .iter()
+                .map(|pointer_row| {
+                    required_text(pointer_row, 0, DbOperation::Query, "logical_id")
+                        .map(str::to_string)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            families.push(AttemptFamilySnapshot {
+                family_id,
+                declared_size,
+                origin,
+                ledger_members,
+                pointer_only_logical_ids,
+            });
+        }
+        Ok(AttemptFamilyMembershipSnapshot {
+            workspace_id: workspace_id.to_string(),
+            memory_logical_id: memory_logical_id.to_string(),
+            families,
+        })
+    }
+
+    /// Deterministically enumerate every logical identity associated with a
+    /// family through either the V095 ledger or a V094 pointer. Consumers must
+    /// load each identity through [`Self::get_attempt_family_membership_snapshot`]
+    /// before making trust or ranking decisions.
+    pub fn list_attempt_family_membership_logical_ids(
+        &self,
+        workspace_id: &str,
+        family_id: &str,
     ) -> Result<Vec<String>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT DISTINCT family_id FROM attempt_family_members \
-             WHERE workspace_id = ?1 AND memory_logical_id = ?2 \
-             ORDER BY family_id ASC",
+            "SELECT memory_logical_id FROM (\
+                 SELECT memory_logical_id FROM attempt_family_members \
+                  WHERE workspace_id = ?1 AND family_id = ?2 \
+                 UNION \
+                 SELECT COALESCE(logical_id, id) AS memory_logical_id FROM memories \
+                  WHERE workspace_id = ?1 AND attempt_family_id = ?2\
+             ) ORDER BY memory_logical_id ASC",
             &[
                 Value::Text(workspace_id.to_string()),
-                Value::Text(ledger_key.to_string()),
+                Value::Text(family_id.to_string()),
             ],
         )?;
         rows.iter()
-            .map(|row| required_text(row, 0, DbOperation::Query, "family_id").map(str::to_string))
+            .map(|row| {
+                required_text(row, 0, DbOperation::Query, "memory_logical_id").map(str::to_string)
+            })
             .collect()
     }
 
@@ -30674,10 +30860,10 @@ mod tests {
     };
     use crate::models::memory_anchor::MemoryAnchorFreshnessTransition;
     use crate::models::{
-        AgentContextProfileCounts, EmbeddingMetadataRecord, MemoryAnchorFreshnessState,
-        MemoryAnchorKind, ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
-        RationaleTrace, RationaleTraceKind, RationaleTracePosture, RationaleTraceVisibility,
-        RedactionStatus,
+        AgentContextProfileCounts, AttemptFamilyPromotionPosture, EmbeddingMetadataRecord,
+        MemoryAnchorFreshnessState, MemoryAnchorKind, ModelDistanceMetric, ModelProvider,
+        ModelPurpose, ModelRegistryStatus, RationaleTrace, RationaleTraceKind,
+        RationaleTracePosture, RationaleTraceVisibility, RedactionStatus,
     };
 
     type TestResult = std::result::Result<(), TestFailure>;
@@ -34209,6 +34395,222 @@ mod tests {
             valid_from: None,
             valid_to: None,
         }
+    }
+
+    fn insert_attempt_family_test_workspace(
+        connection: &DbConnection,
+        workspace_id: &str,
+        path: &str,
+    ) -> TestResult {
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: path.to_owned(),
+                name: Some("attempt-family snapshot".to_owned()),
+            },
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn attempt_family_snapshot_includes_unslotted_revisions_and_isolates_workspaces() -> TestResult
+    {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_a = "wsp_afsnap000000000000000000001";
+        let workspace_b = "wsp_afsnap000000000000000000002";
+        insert_attempt_family_test_workspace(&connection, workspace_a, "/tmp/afsnap-a")?;
+        insert_attempt_family_test_workspace(&connection, workspace_b, "/tmp/afsnap-b")?;
+
+        let original_id = "mem_afsnap000000000000000000001";
+        let revision_id = "mem_afsnap000000000000000000002";
+        connection.insert_memory(
+            original_id,
+            &test_memory_input(workspace_a, "V094 pointer-only attempt"),
+        )?;
+        connection.set_memory_attempt_family(
+            original_id,
+            &super::MemoryAttemptFamily {
+                family_id: "fam-unslotted".to_owned(),
+                declared_size: Some(3),
+                attempt_index: None,
+                disposition: None,
+            },
+        )?;
+        ensure(
+            connection.set_attempt_family_origin(workspace_a, "fam-unslotted", "legacy_v094")?,
+            "legacy V094 forensic origin is retained",
+        )?;
+        connection.insert_memory_revision(
+            revision_id,
+            original_id,
+            &test_memory_input(workspace_a, "Current revision without a copied pointer"),
+        )?;
+
+        let revision_key = connection
+            .get_memory_attempt_ledger_key(workspace_a, revision_id)?
+            .ok_or_else(|| "revision ledger key missing".to_owned())?;
+        ensure_equal(
+            &revision_key,
+            &original_id.to_owned(),
+            "revision keeps logical family identity",
+        )?;
+        let snapshot =
+            connection.get_attempt_family_membership_snapshot(workspace_a, &revision_key)?;
+        ensure_equal(
+            &snapshot.family_ids(),
+            &vec!["fam-unslotted".to_owned()],
+            "historical V094 pointer remains visible through the revision",
+        )?;
+        let family = snapshot
+            .family("fam-unslotted")
+            .ok_or_else(|| "unslotted family missing".to_owned())?;
+        ensure_equal(
+            &family.origin.as_deref(),
+            &Some("legacy_v094"),
+            "snapshot preserves pointer-only legacy origin",
+        )?;
+        ensure_equal(
+            &family.pointer_only_logical_ids,
+            &vec![original_id.to_owned()],
+            "revisions deduplicate one pointer-only logical member",
+        )?;
+        let multiplicity = family.multiplicity();
+        ensure_equal(&multiplicity.unslotted_count, &1, "unslotted member count")?;
+        ensure_equal(
+            &snapshot.promotion_posture(),
+            &Some(AttemptFamilyPromotionPosture::BlockedUnslottedMembers),
+            "pointer-only legacy family fails closed",
+        )?;
+
+        let other_workspace_row = "mem_afsnap000000000000000000003";
+        connection.insert_memory_revision(
+            other_workspace_row,
+            original_id,
+            &test_memory_input(workspace_b, "Same logical id in another workspace"),
+        )?;
+        connection.set_memory_attempt_family(
+            other_workspace_row,
+            &super::MemoryAttemptFamily {
+                family_id: "fam-unslotted".to_owned(),
+                declared_size: Some(1),
+                attempt_index: Some(1),
+                disposition: Some("selected".to_owned()),
+            },
+        )?;
+        let isolated =
+            connection.get_attempt_family_membership_snapshot(workspace_a, original_id)?;
+        ensure_equal(
+            &isolated
+                .family("fam-unslotted")
+                .map(|family| family.declared_size),
+            &Some(Some(3)),
+            "same logical and family ids cannot leak declarations across workspaces",
+        )?;
+        ensure_equal(
+            &isolated
+                .family("fam-unslotted")
+                .map(|family| family.ledger_members.len()),
+            &Some(0_usize),
+            "other-workspace ledger member stays isolated",
+        )
+    }
+
+    #[test]
+    fn attempt_family_snapshot_blocks_undeclared_duplicate_and_multiple_memberships() -> TestResult
+    {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_id = "wsp_afsnap000000000000000000003";
+        insert_attempt_family_test_workspace(&connection, workspace_id, "/tmp/afsnap-corrupt")?;
+
+        let undeclared_id = "mem_afsnap000000000000000000004";
+        connection.insert_memory(
+            undeclared_id,
+            &test_memory_input(workspace_id, "Undeclared family member"),
+        )?;
+        connection.set_memory_attempt_family(
+            undeclared_id,
+            &super::MemoryAttemptFamily {
+                family_id: "fam-undeclared".to_owned(),
+                declared_size: None,
+                attempt_index: Some(1),
+                disposition: Some("selected".to_owned()),
+            },
+        )?;
+        let undeclared =
+            connection.get_attempt_family_membership_snapshot(workspace_id, undeclared_id)?;
+        ensure_equal(
+            &undeclared.promotion_posture(),
+            &Some(AttemptFamilyPromotionPosture::BlockedUndeclared),
+            "undeclared family never promotes",
+        )?;
+        ensure(
+            !undeclared
+                .family("fam-undeclared")
+                .ok_or_else(|| "undeclared family missing".to_owned())?
+                .multiplicity()
+                .is_complete(),
+            "undeclared family is never complete",
+        )?;
+
+        let duplicate_id = "mem_afsnap000000000000000000005";
+        connection.insert_memory(
+            duplicate_id,
+            &test_memory_input(workspace_id, "Repeated logical member"),
+        )?;
+        for (attempt_index, disposition) in [(1, "selected"), (2, "rejected")] {
+            connection.set_memory_attempt_family(
+                duplicate_id,
+                &super::MemoryAttemptFamily {
+                    family_id: "fam-duplicate-member".to_owned(),
+                    declared_size: Some(2),
+                    attempt_index: Some(attempt_index),
+                    disposition: Some(disposition.to_owned()),
+                },
+            )?;
+        }
+        let duplicate =
+            connection.get_attempt_family_membership_snapshot(workspace_id, duplicate_id)?;
+        let duplicate_family = duplicate
+            .family("fam-duplicate-member")
+            .ok_or_else(|| "duplicate family missing".to_owned())?
+            .multiplicity();
+        ensure_equal(
+            &duplicate_family.duplicate_member_count,
+            &1,
+            "reusing one logical memory across distinct slots is detected",
+        )?;
+        ensure_equal(
+            &duplicate.promotion_posture(),
+            &Some(AttemptFamilyPromotionPosture::BlockedDuplicateMembers),
+            "duplicate logical membership fails closed",
+        )?;
+
+        connection.set_memory_attempt_family(
+            duplicate_id,
+            &super::MemoryAttemptFamily {
+                family_id: "fam-second-membership".to_owned(),
+                declared_size: Some(1),
+                attempt_index: Some(1),
+                disposition: Some("selected".to_owned()),
+            },
+        )?;
+        let multiple =
+            connection.get_attempt_family_membership_snapshot(workspace_id, duplicate_id)?;
+        ensure_equal(
+            &multiple.family_ids(),
+            &vec![
+                "fam-duplicate-member".to_owned(),
+                "fam-second-membership".to_owned(),
+            ],
+            "snapshot evaluates every ledger family instead of returning from the pointer",
+        )?;
+        ensure_equal(
+            &multiple.promotion_posture(),
+            &Some(AttemptFamilyPromotionPosture::BlockedMultipleFamilies),
+            "multi-family logical membership fails closed",
+        )
     }
 
     fn generation_error_fingerprint(

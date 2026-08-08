@@ -653,8 +653,24 @@ fn search_family_is_queryless_complete_scoped_and_redaction_safe() -> TestResult
         &Some(true),
         "complete family promotion posture",
     )?;
+    ensure_equal(
+        &family_json
+            .pointer("/data/promotionPosture")
+            .and_then(serde_json::Value::as_str),
+        &Some("eligible"),
+        "complete family typed promotion posture",
+    )?;
     let members = json_array(&family_json, "/data/members", "family search")?;
     ensure_equal(&members.len(), &3_usize, "family member count")?;
+    ensure(
+        members.iter().all(|member| {
+            member
+                .get("discountFactor")
+                .and_then(serde_json::Value::as_f64)
+                == Some(1.0)
+        }),
+        "canonical family members are undiscounted",
+    )?;
     let observed_slots = members
         .iter()
         .filter_map(|member| {
@@ -770,6 +786,159 @@ fn search_family_is_queryless_complete_scoped_and_redaction_safe() -> TestResult
             .map(Vec::len),
         &Some(1),
         "same family id remains workspace-isolated",
+    )
+}
+
+#[test]
+fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = temp.path().to_string_lossy().to_string();
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(&init.status.code(), &Some(EXIT_SUCCESS), "family init")?;
+    assert_stderr_empty(&init, "family init")?;
+
+    for (attempt, disposition, content) in [
+        ("1", "selected", "Selected partial family member"),
+        ("2", "rejected", "Rejected partial family evidence"),
+    ] {
+        let remember = run_ee(&[
+            "--workspace",
+            &workspace,
+            "remember",
+            content,
+            "--level",
+            "semantic",
+            "--kind",
+            "fact",
+            "--family",
+            "fam-partial-discount",
+            "--of-n",
+            "3",
+            "--attempt",
+            attempt,
+            "--attempt-outcome",
+            disposition,
+            "--json",
+        ])?;
+        ensure_equal(
+            &remember.status.code(),
+            &Some(EXIT_SUCCESS),
+            "partial family remember",
+        )?;
+        assert_stderr_empty(&remember, "partial family remember")?;
+    }
+    let partial = run_ee(&[
+        "--workspace",
+        &workspace,
+        "search",
+        "--family",
+        "fam-partial-discount",
+        "--json",
+    ])?;
+    ensure_equal(
+        &partial.status.code(),
+        &Some(EXIT_SUCCESS),
+        "partial family search",
+    )?;
+    assert_stderr_empty(&partial, "partial family search")?;
+    let partial_json = stdout_json(&partial)?;
+    ensure_equal(
+        &partial_json
+            .pointer("/data/promotionPosture")
+            .and_then(serde_json::Value::as_str),
+        &Some("blocked_incomplete"),
+        "partial family posture",
+    )?;
+    let partial_members = json_array(&partial_json, "/data/members", "partial family")?;
+    let selected_discount = partial_members
+        .iter()
+        .find(|member| {
+            member
+                .get("disposition")
+                .and_then(serde_json::Value::as_str)
+                == Some("selected")
+        })
+        .and_then(|member| member.get("discountFactor"))
+        .and_then(serde_json::Value::as_f64);
+    ensure(
+        selected_discount.is_some_and(|factor| (factor - 1.0 / 3.0).abs() < 1.0e-7),
+        "selected incomplete member remains exactly 1/N",
+    )?;
+    let rejected_discount = partial_members
+        .iter()
+        .find(|member| {
+            member
+                .get("disposition")
+                .and_then(serde_json::Value::as_str)
+                == Some("rejected")
+        })
+        .and_then(|member| member.get("discountFactor"))
+        .and_then(serde_json::Value::as_f64);
+    ensure_equal(
+        &rejected_discount,
+        &Some(1.0),
+        "rejected evidence is never discounted",
+    )?;
+
+    let unslotted = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "Pointer-only legacy family member",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--family",
+        "fam-unslotted-search",
+        "--of-n",
+        "3",
+        "--json",
+    ])?;
+    ensure_equal(
+        &unslotted.status.code(),
+        &Some(EXIT_SUCCESS),
+        "unslotted family remember",
+    )?;
+    assert_stderr_empty(&unslotted, "unslotted family remember")?;
+    let search = run_ee(&[
+        "--workspace",
+        &workspace,
+        "search",
+        "--family",
+        "fam-unslotted-search",
+        "--json",
+    ])?;
+    ensure_equal(
+        &search.status.code(),
+        &Some(EXIT_SUCCESS),
+        "unslotted family search",
+    )?;
+    assert_stderr_empty(&search, "unslotted family search")?;
+    let search_json = stdout_json(&search)?;
+    ensure_equal(
+        &search_json
+            .pointer("/data/promotionPosture")
+            .and_then(serde_json::Value::as_str),
+        &Some("blocked_unslotted_members"),
+        "unslotted family fails closed",
+    )?;
+    ensure_equal(
+        &search_json
+            .pointer("/data/unslottedCount")
+            .and_then(serde_json::Value::as_u64),
+        &Some(1),
+        "unslotted family count",
+    )?;
+    ensure_equal(
+        &search_json.pointer("/data/members/0/attemptIndex"),
+        &Some(&serde_json::Value::Null),
+        "unslotted member does not invent a slot",
+    )?;
+    ensure_equal(
+        &search_json.pointer("/data/members/0/disposition"),
+        &Some(&serde_json::Value::Null),
+        "unslotted member does not invent a disposition",
     )
 }
 

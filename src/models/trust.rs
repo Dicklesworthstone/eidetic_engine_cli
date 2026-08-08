@@ -320,6 +320,10 @@ pub enum AttemptFamilyPromotionPosture {
     BlockedInvalidDeclaredSize,
     /// A slot was recorded more than once.
     BlockedDuplicateSlots,
+    /// One logical memory was recorded into more than one slot.
+    BlockedDuplicateMembers,
+    /// One logical memory belongs to more than one attempt family.
+    BlockedMultipleFamilies,
     /// The family contains more members than its declared attempt count.
     BlockedOverfull,
     /// An explicit slot is outside `1..=declared_size`.
@@ -341,6 +345,8 @@ impl AttemptFamilyPromotionPosture {
             Self::BlockedUndeclared => "blocked_undeclared",
             Self::BlockedInvalidDeclaredSize => "blocked_invalid_declared_size",
             Self::BlockedDuplicateSlots => "blocked_duplicate_slots",
+            Self::BlockedDuplicateMembers => "blocked_duplicate_members",
+            Self::BlockedMultipleFamilies => "blocked_multiple_families",
             Self::BlockedOverfull => "blocked_overfull",
             Self::BlockedOutOfRangeSlots => "blocked_out_of_range_slots",
             Self::BlockedUnslottedMembers => "blocked_unslotted_members",
@@ -357,6 +363,12 @@ impl AttemptFamilyPromotionPosture {
             Self::BlockedUndeclared => "family has no declared attempt count",
             Self::BlockedInvalidDeclaredSize => "declared attempt count must be greater than zero",
             Self::BlockedDuplicateSlots => "one or more attempt slots were recorded more than once",
+            Self::BlockedDuplicateMembers => {
+                "one or more logical memories were recorded into multiple attempt slots"
+            }
+            Self::BlockedMultipleFamilies => {
+                "the logical memory belongs to more than one attempt family"
+            }
             Self::BlockedOverfull => "family has more members than its declared attempt count",
             Self::BlockedOutOfRangeSlots => {
                 "one or more attempt slots are outside the declared attempt count"
@@ -398,6 +410,10 @@ pub struct AttemptFamilyMultiplicity {
     pub member_count: u32,
     /// Members that repeated a slot already occupied by another member.
     pub duplicate_slot_count: u32,
+    /// Members whose revision-stable logical identity was already recorded in
+    /// another slot. Revisions share one logical identity and therefore cannot
+    /// be counted as distinct sibling attempts.
+    pub duplicate_member_count: u32,
     /// Members whose explicit slot is outside `1..=declared_size`.
     pub out_of_range_slot_count: u32,
 }
@@ -413,16 +429,53 @@ impl AttemptFamilyMultiplicity {
         declared_size: Option<u32>,
         members: impl IntoIterator<Item = (Option<u32>, Option<&'a str>)>,
     ) -> Self {
+        Self::from_member_records(
+            family_id,
+            declared_size,
+            members
+                .into_iter()
+                .map(|(slot, disposition)| (None, slot, disposition)),
+        )
+    }
+
+    /// Aggregate member rows while preserving their revision-stable logical
+    /// identities. Storage-backed consumers use this constructor so one
+    /// logical memory repeated across otherwise distinct slots fails closed.
+    #[must_use]
+    pub fn from_identified_members<'a>(
+        family_id: String,
+        declared_size: Option<u32>,
+        members: impl IntoIterator<Item = (&'a str, Option<u32>, Option<&'a str>)>,
+    ) -> Self {
+        Self::from_member_records(
+            family_id,
+            declared_size,
+            members
+                .into_iter()
+                .map(|(logical_id, slot, disposition)| (Some(logical_id), slot, disposition)),
+        )
+    }
+
+    fn from_member_records<'a>(
+        family_id: String,
+        declared_size: Option<u32>,
+        members: impl IntoIterator<Item = (Option<&'a str>, Option<u32>, Option<&'a str>)>,
+    ) -> Self {
         let mut all_slots = std::collections::BTreeSet::new();
         let mut seen_valid_slots = std::collections::BTreeSet::new();
+        let mut seen_logical_ids = std::collections::BTreeSet::new();
         let mut selected_count = 0_u32;
         let mut rejected_count = 0_u32;
         let mut unslotted_count = 0_u32;
         let mut member_count = 0_u32;
         let mut duplicate_slot_count = 0_u32;
+        let mut duplicate_member_count = 0_u32;
         let mut out_of_range_slot_count = 0_u32;
-        for (slot, disposition) in members {
+        for (logical_id, slot, disposition) in members {
             member_count = member_count.saturating_add(1);
+            if logical_id.is_some_and(|logical_id| !seen_logical_ids.insert(logical_id)) {
+                duplicate_member_count = duplicate_member_count.saturating_add(1);
+            }
             match slot {
                 Some(slot) => {
                     if !all_slots.insert(slot) {
@@ -452,6 +505,7 @@ impl AttemptFamilyMultiplicity {
             unslotted_count,
             member_count,
             duplicate_slot_count,
+            duplicate_member_count,
             out_of_range_slot_count,
         }
     }
@@ -472,6 +526,7 @@ impl AttemptFamilyMultiplicity {
                 && self.recorded_slots == declared
                 && self.member_count == declared
                 && self.duplicate_slot_count == 0
+                && self.duplicate_member_count == 0
                 && self.out_of_range_slot_count == 0
                 && self.unslotted_count == 0
         })
@@ -522,6 +577,9 @@ impl AttemptFamilyMultiplicity {
         }
         if self.duplicate_slot_count > 0 {
             return AttemptFamilyPromotionPosture::BlockedDuplicateSlots;
+        }
+        if self.duplicate_member_count > 0 {
+            return AttemptFamilyPromotionPosture::BlockedDuplicateMembers;
         }
         if self.member_count > declared {
             return AttemptFamilyPromotionPosture::BlockedOverfull;
@@ -724,6 +782,28 @@ mod tests {
         assert_eq!(
             duplicate.promotion_posture(),
             AttemptFamilyPromotionPosture::BlockedDuplicateSlots
+        );
+
+        let duplicate_member = AttemptFamilyMultiplicity::from_identified_members(
+            "fam-duplicate-member".to_owned(),
+            Some(2),
+            [
+                ("logical-winner", Some(1), Some("selected")),
+                ("logical-winner", Some(2), Some("rejected")),
+            ],
+        );
+        assert_eq!(duplicate_member.duplicate_member_count, 1);
+        assert!(!duplicate_member.is_complete());
+        assert_eq!(
+            duplicate_member.promotion_posture(),
+            AttemptFamilyPromotionPosture::BlockedDuplicateMembers
+        );
+        assert_eq!(
+            duplicate_member.promotion_reason(),
+            "one or more logical memories were recorded into multiple attempt slots"
+        );
+        assert!(
+            (duplicate_member.member_discount_factor(Some("selected")) - 0.5).abs() < f32::EPSILON
         );
 
         let overfull = AttemptFamilyMultiplicity::from_members(
