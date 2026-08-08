@@ -241,6 +241,49 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
+/// bd-1oep7: the audit handler error path must fail at the PROCESS level — a
+/// canonical ee.error.v2 envelope with mandatory error.details.recovery[] AND
+/// a nonzero exit code — never an error payload on exit 0.
+#[test]
+fn audit_show_missing_row_exits_nonzero_with_error_envelope() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace = tempdir.path().to_string_lossy().into_owned();
+    let init = run_ee(&["--workspace", &workspace, "--json", "init"])?;
+    assert_success(&init, "init")?;
+
+    let missing = run_ee(&[
+        "--workspace",
+        &workspace,
+        "--json",
+        "audit",
+        "show",
+        "audit_00000000000000000000000000",
+    ])?;
+    if missing.status.success() {
+        return Err(format!(
+            "audit show for a missing row must exit nonzero; stdout={}",
+            String::from_utf8_lossy(&missing.stdout)
+        ));
+    }
+    let value: Value = serde_json::from_slice(&missing.stdout)
+        .map_err(|error| format!("audit show error output must be JSON: {error}"))?;
+    assert_eq!(
+        value.pointer("/schema").and_then(Value::as_str),
+        Some("ee.error.v2"),
+        "error output must be the canonical ee.error.v2 envelope: {value}"
+    );
+    let recovery = value
+        .pointer("/error/details/recovery")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("error envelope must carry details.recovery[]: {value}"))?;
+    if recovery.is_empty() {
+        return Err(format!(
+            "error envelope recovery[] must offer at least one action: {value}"
+        ));
+    }
+    Ok(())
+}
+
 fn assert_success(output: &Output, command: &str) -> TestResult {
     if output.status.success() {
         return Ok(());

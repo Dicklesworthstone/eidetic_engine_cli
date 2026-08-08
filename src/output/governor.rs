@@ -440,18 +440,14 @@ pub fn govern_response_json(
 /// rejected cursor empties the declared truncation point and appends the
 /// `cursor_invalid` / `cursor_stale` degraded entry — an empty page, never a
 /// restarted one.
-/// Machine surfaces whose pagination is owned by their own query-level
-/// `--cursor`/`--limit` lane (ADR 0063: audit timeline pages at the query,
-/// not the output). The governor passes these envelopes through unstamped
-/// and untruncated — moving them under the output ceiling would double-page
-/// one result set and turn large-but-pageable audit reads into
-/// `output_budget_unsatisfiable`.
-pub const QUERY_LANE_EXEMPT_DATA_SCHEMAS: &[&str] = &[
-    "ee.audit.timeline.v1",
-    "ee.audit.show.v1",
-    "ee.audit.diff.v1",
-    "ee.audit.verify.v1",
-];
+/// Machine surfaces whose output size is already bounded by their own
+/// query-level lane and therefore pass through the governor unstamped and
+/// untruncated: audit timeline pages at the query (`--limit`/`--cursor`,
+/// ADR 0063), and audit show returns exactly one row. Unbounded audit
+/// surfaces (diff, verify) are NOT exempt — they carry real truncation
+/// points in `OUTPUT_TRUNCATION_REGISTRY` instead, so an output ceiling is
+/// honored rather than silently ignored.
+pub const QUERY_LANE_EXEMPT_DATA_SCHEMAS: &[&str] = &["ee.audit.timeline.v1", "ee.audit.show.v1"];
 
 pub fn govern_response_json_with_resume(
     json: &str,

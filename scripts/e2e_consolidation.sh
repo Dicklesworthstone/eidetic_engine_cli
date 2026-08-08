@@ -29,8 +29,30 @@ source "$E2E_DIR/e2e_lib.sh"
 
 harness_init "consolidation"
 
+# Evidence command runner: never silences stderr (the logger records the
+# stderr hash + excerpt) and never masks a nonzero exit. Because ee_json runs
+# inside command substitutions (subshells), rc failures are relayed through a
+# file and folded into the harness FAIL counter in the parent shell before
+# the summary — a nonzero evidence command can never green the run.
+EE_JSON_RC_FAILURES="${LOG_DIR:-${EE_E2E_TMPDIR:-/tmp}}/ee_json_rc_failures.txt"
+: >"$EE_JSON_RC_FAILURES"
 ee_json() {
-    e2e_log_command "$EE_BIN" "$@" || true
+    local out rc
+    out="$(e2e_log_command "$EE_BIN" "$@")"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf 'ee %s exited nonzero (rc=%s)\n' "${1:-<none>}" "$rc" >>"$EE_JSON_RC_FAILURES"
+        printf '  [FAIL-rc] ee %s rc=%s\n' "${1:-}" "$rc" >&2
+    fi
+    printf '%s' "$out"
+}
+
+# Variant for the one step whose nonzero exit is part of the contract under
+# test (budget cancellation); the outcome assertion carries the proof.
+ee_json_tolerant() {
+    local out
+    out="$(e2e_log_command "$EE_BIN" "$@")" || true
+    printf '%s' "$out"
 }
 
 json_scalar() {
@@ -48,6 +70,18 @@ assert_envelope() {
         "$label emits a canonical ee.response.v2 success envelope"
 }
 
+# Failure-propagating numeric assertion: logs the ee.test_event.v1 assert AND
+# routes through the harness FAIL counter, so a red numeric check can never
+# green the summary (harness_summary exits nonzero on any _harness_fail).
+assert_num() {
+    local actual="$1" op="$2" expected="$3" label="$4"
+    if e2e_log_assert_num "$actual" "$op" "$expected" "$label"; then
+        _harness_pass "$label ($actual $op $expected)"
+    else
+        _harness_fail "$label: expected $actual $op $expected"
+    fi
+}
+
 with_temp_workspace WS
 
 GROUP_PHRASE="Zephyr quill consolidation gate: run cargo fmt --check before release."
@@ -63,21 +97,28 @@ log_event "consolidation_workspace" \
     bead "bd-1oep7"
 
 step "seed duplicates plus near-but-not-eligible controls"
-remember_memory() {
-    local content="$1" kind="$2" confidence="$3" label="$4"
-    local out
-    out="$(ee_json remember "$content" --workspace "$WS" \
+# Asserts run in the parent shell (never inside command substitutions) so
+# every failure reaches the harness counter.
+remember_memory_json() {
+    local content="$1" kind="$2" confidence="$3"
+    ee_json remember "$content" --workspace "$WS" \
         --level semantic --kind "$kind" --confidence "$confidence" \
-        --no-propose-candidates --no-auto-link --json)"
-    assert_envelope "$out" "remember $label"
-    json_scalar "$out" '.data.memory_id // .data.memoryId // empty'
+        --no-propose-candidates --no-auto-link --json
 }
-SURVIVOR_ID="$(remember_memory "$GROUP_PHRASE" fact 0.9 survivor)"
-DUPLICATE_ID="$(remember_memory "$DUPLICATE_PHRASE" fact 0.4 duplicate)"
-WORDING_CONTROL_ID="$(remember_memory "$WORDING_CONTROL_PHRASE" fact 0.4 wording_control)"
-KIND_CONTROL_ID="$(remember_memory "$GROUP_PHRASE" decision 0.4 kind_control)"
+SURVIVOR_JSON="$(remember_memory_json "$GROUP_PHRASE" fact 0.9)"
+assert_envelope "$SURVIVOR_JSON" "remember survivor"
+SURVIVOR_ID="$(json_scalar "$SURVIVOR_JSON" '.data.memory_id // .data.memoryId // empty')"
+DUPLICATE_JSON="$(remember_memory_json "$DUPLICATE_PHRASE" fact 0.4)"
+assert_envelope "$DUPLICATE_JSON" "remember duplicate"
+DUPLICATE_ID="$(json_scalar "$DUPLICATE_JSON" '.data.memory_id // .data.memoryId // empty')"
+WORDING_CONTROL_JSON="$(remember_memory_json "$WORDING_CONTROL_PHRASE" fact 0.4)"
+assert_envelope "$WORDING_CONTROL_JSON" "remember wording control"
+WORDING_CONTROL_ID="$(json_scalar "$WORDING_CONTROL_JSON" '.data.memory_id // .data.memoryId // empty')"
+KIND_CONTROL_JSON="$(remember_memory_json "$GROUP_PHRASE" decision 0.4)"
+assert_envelope "$KIND_CONTROL_JSON" "remember kind control"
+KIND_CONTROL_ID="$(json_scalar "$KIND_CONTROL_JSON" '.data.memory_id // .data.memoryId // empty')"
 if [ -z "$SURVIVOR_ID" ] || [ -z "$DUPLICATE_ID" ] || [ -z "$WORDING_CONTROL_ID" ] || [ -z "$KIND_CONTROL_ID" ]; then
-    e2e_log_assert_eq "missing" "present" "consolidation fixture memory ids created"
+    assert_eq "missing" "present" "consolidation fixture memory ids created"
     harness_summary
     exit 1
 fi
@@ -132,7 +173,7 @@ assert_eq "$SNAPSHOT_AFTER_DRY" "$SNAPSHOT_BEFORE_DRY" \
     "dry-run leaves the full durable-state snapshot unchanged"
 
 step "zero item budget cancels before any mutation"
-cancel_out="$(ee_json daemon --workspace "$WS" --foreground --once --job consolidation_pass --item-limit 0 --json)"
+cancel_out="$(ee_json_tolerant daemon --workspace "$WS" --foreground --once --job consolidation_pass --item-limit 0 --json)"
 assert_jq "$cancel_out" '.data.ticks[0].runner.results[0].outcome == "cancelled"' \
     "zero item budget cancels the steward job"
 SNAPSHOT_AFTER_CANCEL="$(durable_snapshot)"
@@ -190,7 +231,7 @@ step "why explains lineage and the audit chain stays intact"
 why_out="$(ee_json why "$SURVIVOR_ID" --workspace "$WS" --json)"
 lineage="$(printf '%s' "$why_out" | jq -r --arg id "$DUPLICATE_ID" \
     '[.data.links[]? | select(.relation == "derived_from" and .linkedMemoryId == $id)] | length' 2>/dev/null || echo 0)"
-e2e_log_assert_num "${lineage:-0}" -eq 1 \
+assert_num "${lineage:-0}" -eq 1 \
     "why survivor explains exactly one derived_from lineage edge"
 apply_audit="$(ee_json audit timeline --workspace "$WS" --action curation_candidate.apply --json)"
 assert_envelope "$apply_audit" "audit timeline (apply)"
@@ -220,13 +261,13 @@ count_search_id() {
     printf '%s' "$search_out" | jq -r --arg id "$1" \
         '[.data.results[]? | select(.memoryId == $id)] | length' 2>/dev/null || echo -1
 }
-e2e_log_assert_num "$(count_search_id "$SURVIVOR_ID")" -eq 1 \
+assert_num "$(count_search_id "$SURVIVOR_ID")" -eq 1 \
     "search returns the consolidated survivor exactly once"
-e2e_log_assert_num "$(count_search_id "$DUPLICATE_ID")" -eq 0 \
+assert_num "$(count_search_id "$DUPLICATE_ID")" -eq 0 \
     "search never returns the absorbed duplicate"
-e2e_log_assert_num "$(count_search_id "$WORDING_CONTROL_ID")" -eq 1 \
+assert_num "$(count_search_id "$WORDING_CONTROL_ID")" -eq 1 \
     "wording control remains exactly one distinct result"
-e2e_log_assert_num "$(count_search_id "$KIND_CONTROL_ID")" -eq 1 \
+assert_num "$(count_search_id "$KIND_CONTROL_ID")" -eq 1 \
     "kind control remains exactly one distinct result"
 
 step "pack contains exactly one structured survivor item and distinct controls"
@@ -236,13 +277,13 @@ count_pack_id() {
     printf '%s' "$pack_out" | jq -r --arg id "$1" \
         '[.data.pack.items[]? | select(.memoryId == $id)] | length' 2>/dev/null || echo -1
 }
-e2e_log_assert_num "$(count_pack_id "$SURVIVOR_ID")" -eq 1 \
+assert_num "$(count_pack_id "$SURVIVOR_ID")" -eq 1 \
     "pack contains the consolidated survivor as exactly one item"
-e2e_log_assert_num "$(count_pack_id "$DUPLICATE_ID")" -eq 0 \
+assert_num "$(count_pack_id "$DUPLICATE_ID")" -eq 0 \
     "pack never contains the absorbed duplicate"
-e2e_log_assert_num "$(count_pack_id "$WORDING_CONTROL_ID")" -eq 1 \
+assert_num "$(count_pack_id "$WORDING_CONTROL_ID")" -eq 1 \
     "wording control packs as exactly one distinct item"
-e2e_log_assert_num "$(count_pack_id "$KIND_CONTROL_ID")" -eq 1 \
+assert_num "$(count_pack_id "$KIND_CONTROL_ID")" -eq 1 \
     "kind control packs as exactly one distinct item"
 
 step "steward and apply re-runs are idempotent"
@@ -299,17 +340,29 @@ PY
 case "$EVENT_VALIDATION" in
     valid\ *)
         EVENT_COUNT="${EVENT_VALIDATION#valid }"
-        e2e_log_assert_num "${EVENT_COUNT:-0}" -ge 20 \
+        assert_num "${EVENT_COUNT:-0}" -ge 20 \
             "every emitted test event line is valid ee.test_event.v1 (count=$EVENT_COUNT)"
         ;;
     *)
-        e2e_log_assert_eq "$EVENT_VALIDATION" "valid" \
+        assert_eq "$EVENT_VALIDATION" "valid" \
             "every emitted test event line is valid ee.test_event.v1"
         ;;
 esac
 
+step "no evidence command exited nonzero unexpectedly"
+if [ -s "$EE_JSON_RC_FAILURES" ]; then
+    while IFS= read -r rc_failure; do
+        _harness_fail "$rc_failure"
+    done <"$EE_JSON_RC_FAILURES"
+else
+    _harness_pass "all evidence commands exited zero"
+fi
+
 if [ "${EE_GRAPH_E2E_INJECT_FAILURE:-0}" = "1" ]; then
-    e2e_log_assert_eq "actual-consolidation" "expected-consolidation" "consolidation_injected_failure_diff" || true
+    # Deliberate-negative selftest: this failing assertion routes through the
+    # harness FAIL counter, so the summary MUST go red and exit nonzero. A
+    # green exit under injection is itself a harness defect.
+    assert_eq "actual-consolidation" "expected-consolidation" "consolidation_injected_failure_diff"
 fi
 
 harness_summary

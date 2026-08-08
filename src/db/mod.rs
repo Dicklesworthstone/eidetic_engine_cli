@@ -22910,20 +22910,24 @@ impl DbConnection {
         Ok(affected > 0)
     }
 
-    /// Public retry path for interrupted index work: atomically transition
-    /// every cancelled job in the workspace back to `pending` as the SAME
-    /// logical job (no clone rows, no id churn), clearing run bookkeeping so
-    /// the next workflow-emitted processing tick picks it up. A single
-    /// conditional UPDATE keeps this race-free and idempotent: a second
-    /// caller finds no cancelled rows and changes nothing.
+    /// Public retry path for interrupted or failed index work: atomically
+    /// transition every cancelled/failed job in the workspace back to
+    /// `pending` as the SAME logical job (no clone rows, no id churn),
+    /// clearing run bookkeeping so the next workflow-emitted processing tick
+    /// picks it up. A single conditional UPDATE keeps this race-free and
+    /// idempotent: a second caller finds no requeueable rows and changes
+    /// nothing. A deterministically failing job resurfaces once per
+    /// processing tick — deliberate, budget-bounded pressure that keeps the
+    /// staleness honest instead of silently abandoning the document.
     pub fn requeue_cancelled_search_index_jobs(&self, workspace_id: &str) -> Result<u32> {
         let affected = self.execute_for(
             DbOperation::Execute,
-            "UPDATE search_index_jobs SET status = ?1, started_at = NULL, completed_at = NULL, error_message = NULL, documents_indexed = 0 WHERE workspace_id = ?2 AND status = ?3",
+            "UPDATE search_index_jobs SET status = ?1, started_at = NULL, completed_at = NULL, error_message = NULL, documents_indexed = 0 WHERE workspace_id = ?2 AND status IN (?3, ?4)",
             &[
                 Value::Text(SearchIndexJobStatus::Pending.as_str().to_string()),
                 Value::Text(workspace_id.to_string()),
                 Value::Text(SearchIndexJobStatus::Cancelled.as_str().to_string()),
+                Value::Text(SearchIndexJobStatus::Failed.as_str().to_string()),
             ],
         )?;
         Ok(u32::try_from(affected).unwrap_or(u32::MAX))

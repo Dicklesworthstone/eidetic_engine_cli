@@ -613,19 +613,29 @@ fn audit_timeline_is_not_an_envelope_governor_surface() -> TestResult {
         }),
         "audit timeline pages at the query level (--cursor/--limit) and must not be advertised as an output-governor truncation point",
     )?;
-    // The audit family is enveloped (ee.response.v2) but explicitly exempt
-    // from output-governor stamping/truncation: its pagination is the
-    // query-level cursor lane, and an output ceiling must never convert a
-    // pageable audit read into output_budget_unsatisfiable.
-    for schema in [
-        "ee.audit.timeline.v1",
-        "ee.audit.show.v1",
-        "ee.audit.diff.v1",
-        "ee.audit.verify.v1",
-    ] {
+    // Bounded audit surfaces (timeline: query-level --limit/--cursor lane;
+    // show: single row) are enveloped but exempt from output-governor
+    // stamping/truncation. Unbounded surfaces (diff, verify) must NOT be
+    // exempt — they honor the ceiling through real truncation points.
+    for schema in ["ee.audit.timeline.v1", "ee.audit.show.v1"] {
         ensure(
             QUERY_LANE_EXEMPT_DATA_SCHEMAS.contains(&schema),
             format!("{schema} must stay on the governor's query-lane exemption list"),
+        )?;
+    }
+    for (schema, array_field) in [
+        ("ee.audit.diff.v1", "entries"),
+        ("ee.audit.verify.v1", "issues"),
+    ] {
+        ensure(
+            !QUERY_LANE_EXEMPT_DATA_SCHEMAS.contains(&schema),
+            format!("{schema} is unbounded and must not silently ignore the output ceiling"),
+        )?;
+        ensure(
+            OUTPUT_TRUNCATION_REGISTRY
+                .iter()
+                .any(|point| point.schema_id == schema && point.array_path == [array_field]),
+            format!("{schema} must declare a real truncation point over {array_field}"),
         )?;
     }
     Ok(())

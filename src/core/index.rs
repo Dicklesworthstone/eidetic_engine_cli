@@ -1903,6 +1903,9 @@ pub async fn process_index_jobs_with_cx(
 
     let db = DbConnection::open_file(&database_path)?;
     let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
+    if !options.dry_run {
+        requeue_cancelled_search_index_jobs(&db, &workspace_id)?;
+    }
     let pending_jobs = db.list_pending_search_index_jobs(&workspace_id, effective_job_limit)?;
     let pending_count = u32::try_from(pending_jobs.len()).map_err(|_| {
         IndexRebuildError::Index("Pending search index job count exceeds u32".to_owned())
@@ -2045,6 +2048,27 @@ where
     .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
 }
 
+/// Public retry path for cancelled index jobs: every workflow-emitted
+/// processing tick first transitions each cancelled job in the workspace
+/// atomically back to `pending` as the SAME logical job (one conditional
+/// UPDATE — no clone rows, no id churn, no read-then-write race), so the
+/// tick that follows an interruption converges without manual row surgery.
+fn requeue_cancelled_search_index_jobs(
+    db: &DbConnection,
+    workspace_id: &str,
+) -> Result<u32, IndexRebuildError> {
+    let requeued = db.requeue_cancelled_search_index_jobs(workspace_id)?;
+    if requeued > 0 {
+        tracing::info!(
+            target: "ee::index",
+            workspace_id,
+            requeued,
+            "requeued cancelled search index jobs back to pending"
+        );
+    }
+    Ok(requeued)
+}
+
 pub(crate) async fn process_pending_index_jobs_coalesced_with_cx(
     cx: &asupersync::Cx,
     db: &DbConnection,
@@ -2052,6 +2076,7 @@ pub(crate) async fn process_pending_index_jobs_coalesced_with_cx(
     index_dir: &Path,
     job_limit: Option<u32>,
 ) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError> {
+    requeue_cancelled_search_index_jobs(db, workspace_id)?;
     process_pending_index_jobs_coalesced_after_snapshot_with_cx(
         cx,
         db,
@@ -10122,7 +10147,6 @@ mod tests {
         const DUPLICATE_ID: &str = "mem_consolidx00000000000000002";
         const BASELINE_JOB_ID: &str = "sidx_consolbase0000000000000001";
         const CANCELLED_JOB_ID: &str = "sidx_consolcancel00000000000002";
-        const RETRY_JOB_ID: &str = "sidx_consolretry000000000000003";
 
         let root = unique_test_dir("consolidation-cancel-before-publish");
         let workspace = root.join("workspace");
@@ -10298,16 +10322,40 @@ mod tests {
             format!("cancelled consolidation job must not report done: {cancelled_job:?}"),
         )?;
 
-        // Retry: the next workflow-emitted job converges exactly once.
-        connection
-            .insert_search_index_job(RETRY_JOB_ID, &consolidation_job_input())
-            .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
+
+        // Retry through the PUBLIC path only: the next workflow-emitted
+        // processing tick transitions the cancelled job back to pending as
+        // the SAME logical job and converges — no clone rows, no id churn.
         let retry = process_index_jobs(&processing_options()).map_err(|error| error.to_string())?;
         ensure(
             retry.completed_jobs == 1,
-            format!("retry must process the pending consolidation job: {retry:?}"),
+            format!("public retry must requeue and process the cancelled job: {retry:?}"),
         )?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let requeued_job = connection
+            .get_search_index_job(CANCELLED_JOB_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "requeued job row missing".to_owned())?;
+        ensure(
+            requeued_job.status_enum() == Some(SearchIndexJobStatus::Completed),
+            format!("the same logical job must converge to completed: {requeued_job:?}"),
+        )?;
+        ensure(
+            requeued_job.completed_at.is_some(),
+            format!("converged job must carry a completion timestamp: {requeued_job:?}"),
+        )?;
+        let document_jobs = connection
+            .list_search_index_jobs(WORKSPACE_ID, None)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|job| job.document_id.as_deref() == Some(DUPLICATE_ID))
+            .count();
+        ensure(
+            document_jobs == 1,
+            format!("requeue must never mint duplicate job rows: {document_jobs}"),
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
         let converged = get_index_status(&status_options()).map_err(|error| error.to_string())?;
         ensure(
             converged
@@ -10327,6 +10375,13 @@ mod tests {
                 converged.db_generation, converged.index_generation
             ),
         )?;
+
+        // Idempotency: a further public tick finds nothing to requeue.
+        let idle = process_index_jobs(&processing_options()).map_err(|error| error.to_string())?;
+        ensure(
+            idle.completed_jobs == 0 && idle.pending_jobs == 0,
+            format!("requeue must be idempotent once converged: {idle:?}"),
+        )?;
         Ok(())
     }
 
@@ -10345,7 +10400,6 @@ mod tests {
         const DUPLICATE_ID: &str = "mem_consolpost0000000000000002";
         const BASELINE_JOB_ID: &str = "sidx_consolpostbase000000000001";
         const CANCELLED_JOB_ID: &str = "sidx_consolpostcancel0000000002";
-        const RETRY_JOB_ID: &str = "sidx_consolpostretry00000000003";
 
         let root = unique_test_dir("consolidation-cancel-after-publish");
         let workspace = root.join("workspace");
@@ -10506,7 +10560,7 @@ mod tests {
             .ok_or_else(|| "post-publish consolidation job row missing".to_owned())?;
         let job_status = job.status_enum();
         ensure(
-            job_status == Some(SearchIndexJobStatus::Done)
+            job_status == Some(SearchIndexJobStatus::Completed)
                 || job_status == Some(SearchIndexJobStatus::Cancelled),
             format!("post-publish job must be truthfully terminal: {job:?}"),
         )?;
@@ -10514,18 +10568,41 @@ mod tests {
             job.completed_at.is_some(),
             format!("post-publish terminal job must carry a completion timestamp: {job:?}"),
         )?;
-
-        // Retry converges: a fresh workflow-emitted job processes cleanly and
-        // produces zero additional index effects.
-        connection
-            .insert_search_index_job(RETRY_JOB_ID, &consolidation_job_input())
-            .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
+
+        // Retry through the PUBLIC path only: the next workflow-emitted tick
+        // transitions a cancelled job back to pending as the same logical
+        // job (a completed one needs nothing) and converges with zero
+        // duplicate index effects.
         let retry = process_index_jobs(&processing_options()).map_err(|error| error.to_string())?;
+        let expected_retry_completions =
+            u32::from(job_status == Some(SearchIndexJobStatus::Cancelled));
         ensure(
-            retry.completed_jobs == 1,
-            format!("post-publish retry must process the fresh job: {retry:?}"),
+            retry.completed_jobs == expected_retry_completions,
+            format!(
+                "public retry must process exactly the requeued work (expected {expected_retry_completions}): {retry:?}"
+            ),
         )?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let final_job = connection
+            .get_search_index_job(CANCELLED_JOB_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "post-publish job row missing after retry".to_owned())?;
+        ensure(
+            final_job.status_enum() == Some(SearchIndexJobStatus::Completed),
+            format!("the same logical job must end completed after retry: {final_job:?}"),
+        )?;
+        let document_jobs = connection
+            .list_search_index_jobs(WORKSPACE_ID, None)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|job| job.document_id.as_deref() == Some(DUPLICATE_ID))
+            .count();
+        ensure(
+            document_jobs == 1,
+            format!("retry must never mint duplicate job rows: {document_jobs}"),
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
         let converged = get_index_status(&status_options()).map_err(|error| error.to_string())?;
         ensure(
             converged
@@ -10546,6 +10623,361 @@ mod tests {
             ),
         )?;
         Ok(())
+    }
+
+    /// bd-1oep7: a NON-cancellation failure before index publication must
+    /// leave a truthfully `failed` job row with its error message, and the
+    /// next PUBLIC processing tick must requeue the same logical job and
+    /// converge — failure recovery, not only cancellation recovery.
+    #[test]
+    fn consolidation_index_job_failure_before_publish_recovers_via_public_retry() -> TestResult {
+        const WORKSPACE_ID: &str = "wsp_consolfail0000000000000001";
+        const SURVIVOR_ID: &str = "mem_consolfail0000000000000001";
+        const DUPLICATE_ID: &str = "mem_consolfail0000000000000002";
+        const BASELINE_JOB_ID: &str = "sidx_consolfailbase000000000001";
+        const FAILED_JOB_ID: &str = "sidx_consolfailwork000000000002";
+
+        let root = unique_test_dir("consolidation-failure-before-publish");
+        let workspace = root.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("consolidation-failure-before-publish".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for (memory_id, content, confidence) in [
+            (
+                SURVIVOR_ID,
+                "Zephyr quill failure-recovery survivor stays in the index.",
+                0.92_f32,
+            ),
+            (
+                DUPLICATE_ID,
+                " zephyr   quill failure-recovery survivor stays in the index. ",
+                0.41_f32,
+            ),
+        ] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &crate::db::CreateMemoryInput {
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        level: "semantic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence,
+                        utility: 0.5,
+                        importance: 0.5,
+                        provenance_uri: Some("test://consolidation-failure".to_owned()),
+                        trust_class: "agent_validated".to_owned(),
+                        trust_subclass: None,
+                        tags: vec!["consolidation".to_owned()],
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection
+            .insert_search_index_job(
+                BASELINE_JOB_ID,
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    job_type: SearchIndexJobType::FullRebuild,
+                    document_source: None,
+                    document_id: None,
+                    documents_total: 0,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let processing_options = || IndexProcessingOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+            dry_run: false,
+            job_limit: None,
+        };
+        let baseline =
+            process_index_jobs(&processing_options()).map_err(|error| error.to_string())?;
+        ensure(
+            baseline.completed_jobs == 1,
+            format!("failure-recovery baseline rebuild must complete: {baseline:?}"),
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .tombstone_memory(DUPLICATE_ID)
+                .map_err(|error| error.to_string())?,
+            "duplicate must tombstone for the failure-recovery scenario",
+        )?;
+        connection
+            .insert_search_index_job(
+                FAILED_JOB_ID,
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    job_type: SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_owned()),
+                    document_id: Some(DUPLICATE_ID.to_owned()),
+                    documents_total: 1,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        // Inject a genuine (non-cancellation) failure after the job claim,
+        // before publication.
+        let failed_attempt = process_pending_index_jobs_coalesced_after_snapshot(
+            &connection,
+            WORKSPACE_ID,
+            &index_dir,
+            None,
+            || {
+                Err(IndexRebuildError::Index(
+                    "injected pre-publish failure".to_owned(),
+                ))
+            },
+        );
+        ensure(
+            failed_attempt.is_err(),
+            format!("injected failure must surface: {failed_attempt:?}"),
+        )?;
+        let failed_job = connection
+            .get_search_index_job(FAILED_JOB_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "failed job row missing".to_owned())?;
+        ensure(
+            failed_job.status_enum() == Some(SearchIndexJobStatus::Failed),
+            format!("pre-publish failure must leave a truthful failed row: {failed_job:?}"),
+        )?;
+        ensure(
+            failed_job.error_message.is_some(),
+            format!("failed row must carry its error message: {failed_job:?}"),
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        // Public retry: the next workflow-emitted tick requeues the same
+        // logical job and converges truthfully.
+        let retry = process_index_jobs(&processing_options()).map_err(|error| error.to_string())?;
+        ensure(
+            retry.completed_jobs == 1,
+            format!("public retry must requeue and complete the failed job: {retry:?}"),
+        )?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let recovered = connection
+            .get_search_index_job(FAILED_JOB_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "recovered job row missing".to_owned())?;
+        ensure(
+            recovered.status_enum() == Some(SearchIndexJobStatus::Completed),
+            format!("the same logical job must recover to completed: {recovered:?}"),
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+        let status_options = IndexStatusOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+        };
+        let converged = get_index_status(&status_options).map_err(|error| error.to_string())?;
+        ensure(
+            converged
+                .index_document_counts
+                .as_ref()
+                .map(|counts| counts.memories)
+                == Some(1)
+                && converged.db_generation == converged.index_generation,
+            format!(
+                "failure recovery must converge to a truthful index: memories={:?} db={:?} index={:?}",
+                converged.index_document_counts,
+                converged.db_generation,
+                converged.index_generation
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// bd-1oep7: two concurrent public processing ticks racing over one
+    /// cancelled consolidation job must converge on exactly one completion
+    /// of the SAME logical job — the atomic requeue UPDATE plus the publish
+    /// lock forbid double-processing and duplicate rows.
+    #[test]
+    fn consolidation_requeue_public_retry_is_concurrency_safe() -> TestResult {
+        const WORKSPACE_ID: &str = "wsp_consolconc0000000000000001";
+        const SURVIVOR_ID: &str = "mem_consolconc0000000000000001";
+        const DUPLICATE_ID: &str = "mem_consolconc0000000000000002";
+        const BASELINE_JOB_ID: &str = "sidx_consolconcbase000000000001";
+        const CANCELLED_JOB_ID: &str = "sidx_consolconcwork000000000002";
+
+        let root = unique_test_dir("consolidation-requeue-concurrency");
+        let workspace = root.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("consolidation-requeue-concurrency".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for (memory_id, content, confidence) in [
+            (
+                SURVIVOR_ID,
+                "Zephyr quill concurrency survivor stays in the index.",
+                0.92_f32,
+            ),
+            (
+                DUPLICATE_ID,
+                " zephyr   quill concurrency survivor stays in the index. ",
+                0.41_f32,
+            ),
+        ] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &crate::db::CreateMemoryInput {
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        level: "semantic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence,
+                        utility: 0.5,
+                        importance: 0.5,
+                        provenance_uri: Some("test://consolidation-concurrency".to_owned()),
+                        trust_class: "agent_validated".to_owned(),
+                        trust_subclass: None,
+                        tags: vec!["consolidation".to_owned()],
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection
+            .insert_search_index_job(
+                BASELINE_JOB_ID,
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    job_type: SearchIndexJobType::FullRebuild,
+                    document_source: None,
+                    document_id: None,
+                    documents_total: 0,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let processing_options = || IndexProcessingOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+            dry_run: false,
+            job_limit: None,
+        };
+        let baseline =
+            process_index_jobs(&processing_options()).map_err(|error| error.to_string())?;
+        ensure(
+            baseline.completed_jobs == 1,
+            format!("concurrency baseline rebuild must complete: {baseline:?}"),
+        )?;
+
+        // Produce a genuinely cancelled consolidation job via the publish
+        // seam, exactly like an interrupted workflow tick.
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .tombstone_memory(DUPLICATE_ID)
+                .map_err(|error| error.to_string())?,
+            "duplicate must tombstone for the concurrency scenario",
+        )?;
+        connection
+            .insert_search_index_job(
+                CANCELLED_JOB_ID,
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    job_type: SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_owned()),
+                    document_id: Some(DUPLICATE_ID.to_owned()),
+                    documents_total: 1,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        install_before_index_publish_hook(move |cx| {
+            cx.set_cancel_reason(asupersync::CancelReason::user(
+                "cancel to seed the concurrency retry race",
+            ));
+        });
+        let seed_options = processing_options();
+        let seeded = crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            process_index_jobs_with_cx(&cx, &seed_options).await
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(
+            matches!(seeded, Err(IndexRebuildError::Cancelled(_))),
+            format!("concurrency seed must cancel before publication: {seeded:?}"),
+        )?;
+
+        // Two public retry ticks race; the atomic requeue + publish lock
+        // must yield exactly one completion in total.
+        let options_a = processing_options();
+        let options_b = processing_options();
+        let thread_a = std::thread::spawn(move || process_index_jobs(&options_a));
+        let thread_b = std::thread::spawn(move || process_index_jobs(&options_b));
+        let result_a = thread_a
+            .join()
+            .map_err(|_| "retry thread A panicked".to_owned())?
+            .map_err(|error| error.to_string())?;
+        let result_b = thread_b
+            .join()
+            .map_err(|_| "retry thread B panicked".to_owned())?
+            .map_err(|error| error.to_string())?;
+        let total_completed = result_a.completed_jobs + result_b.completed_jobs;
+        ensure(
+            total_completed == 1,
+            format!(
+                "concurrent public retries must complete the job exactly once: a={result_a:?} b={result_b:?}"
+            ),
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let final_job = connection
+            .get_search_index_job(CANCELLED_JOB_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "concurrency job row missing".to_owned())?;
+        ensure(
+            final_job.status_enum() == Some(SearchIndexJobStatus::Completed),
+            format!("the same logical job must end completed exactly once: {final_job:?}"),
+        )?;
+        let document_jobs = connection
+            .list_search_index_jobs(WORKSPACE_ID, None)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|job| job.document_id.as_deref() == Some(DUPLICATE_ID))
+            .count();
+        ensure(
+            document_jobs == 1,
+            format!("concurrent retries must never mint duplicate job rows: {document_jobs}"),
+        )?;
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]

@@ -11484,6 +11484,23 @@ pub const OUTPUT_TRUNCATION_REGISTRY: &[governor::TruncationPoint] = &[
         per_section_items: false,
         position_key_field: "id",
     },
+    // Unbounded audit surfaces honor the output ceiling with real
+    // truncation points (bd-1oep7); timeline/show stay on the query-level
+    // exemption lane instead.
+    governor::TruncationPoint {
+        schema_id: "ee.audit.diff.v1",
+        command: "audit diff",
+        array_path: &["entries"],
+        per_section_items: false,
+        position_key_field: "id",
+    },
+    governor::TruncationPoint {
+        schema_id: "ee.audit.verify.v1",
+        command: "audit verify",
+        array_path: &["issues"],
+        per_section_items: false,
+        position_key_field: "audit_id",
+    },
     governor::TruncationPoint {
         schema_id: "ee.insights.v1",
         command: "insights",
@@ -18099,7 +18116,7 @@ use crate::core::handoff::{
 
 /// Render an audit timeline report as JSON.
 #[must_use]
-pub fn render_audit_timeline_json(report: &AuditTimelineReport) -> String {
+pub fn render_audit_timeline_json(report: &AuditTimelineReport) -> Result<String, DomainError> {
     audit_response_v2_json(&report.to_json())
 }
 
@@ -18107,18 +18124,15 @@ pub fn render_audit_timeline_json(report: &AuditTimelineReport) -> String {
 /// `ee.response.v2` success envelope, lifting any `degraded[]` array to the
 /// envelope level per the machine-facing response contract. A payload that
 /// fails to parse — including the `serialization_failed` marker emitted by
-/// `serialize_or_error` — is propagated as a canonical `ee.error.v2`
-/// envelope, never wrapped as a hollow success.
-fn audit_response_v2_json(report_json: &str) -> String {
-    let parsed: Result<serde_json::Value, _> = serde_json::from_str(report_json);
-    let mut data = match parsed {
-        Ok(value) => value,
-        Err(error) => {
-            return audit_serialization_error_envelope(&format!(
-                "Audit report payload is not valid JSON: {error}"
-            ));
-        }
-    };
+/// `serialize_or_error` — is a typed `DomainError` so the CLI handler emits
+/// the canonical `ee.error.v2` envelope (with `error.details.recovery[]`)
+/// and exits nonzero, never a hollow success on exit 0.
+fn audit_response_v2_json(report_json: &str) -> Result<String, DomainError> {
+    let mut data: serde_json::Value =
+        serde_json::from_str(report_json).map_err(|error| DomainError::Storage {
+            message: format!("Audit report serialization produced invalid JSON: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
     if data
         .get("error")
         .and_then(serde_json::Value::as_str)
@@ -18129,32 +18143,22 @@ fn audit_response_v2_json(report_json: &str) -> String {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("Audit report serialization failed.")
             .to_owned();
-        return audit_serialization_error_envelope(&message);
+        return Err(DomainError::Storage {
+            message: format!("Audit report serialization failed: {message}"),
+            repair: Some("ee doctor --json".to_owned()),
+        });
     }
     let degraded = data
         .as_object_mut()
         .and_then(|map| map.remove("degraded"))
         .unwrap_or_else(|| serde_json::json!([]));
-    serde_json::json!({
+    Ok(serde_json::json!({
         "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
         "degraded": degraded,
     })
-    .to_string()
-}
-
-fn audit_serialization_error_envelope(message: &str) -> String {
-    serde_json::json!({
-        "schema": ERROR_SCHEMA_V2,
-        "error": {
-            "code": "serialization_failed",
-            "message": message,
-            "severity": "high",
-            "repair": "ee doctor --json",
-        },
-    })
-    .to_string()
+    .to_string())
 }
 
 /// Render an audit timeline report as human-readable text.
@@ -18222,14 +18226,13 @@ pub fn render_audit_timeline_human(report: &AuditTimelineReport) -> String {
 
 /// Render an audit timeline report as TOON: the lossless canonical encoding
 /// of the enveloped JSON, so no entry, cursor, or degraded signal is dropped.
-#[must_use]
-pub fn render_audit_timeline_toon(report: &AuditTimelineReport) -> String {
-    render_toon_from_json(&render_audit_timeline_json(report))
+pub fn render_audit_timeline_toon(report: &AuditTimelineReport) -> Result<String, DomainError> {
+    Ok(render_toon_from_json(&render_audit_timeline_json(report)?))
 }
 
 /// Render an audit show report as JSON.
 #[must_use]
-pub fn render_audit_show_json(report: &AuditShowReport) -> String {
+pub fn render_audit_show_json(report: &AuditShowReport) -> Result<String, DomainError> {
     audit_response_v2_json(&report.to_json())
 }
 
@@ -18270,14 +18273,13 @@ pub fn render_audit_show_human(report: &AuditShowReport) -> String {
 
 /// Render an audit show report as TOON: the lossless canonical encoding of
 /// the enveloped JSON.
-#[must_use]
-pub fn render_audit_show_toon(report: &AuditShowReport) -> String {
-    render_toon_from_json(&render_audit_show_json(report))
+pub fn render_audit_show_toon(report: &AuditShowReport) -> Result<String, DomainError> {
+    Ok(render_toon_from_json(&render_audit_show_json(report)?))
 }
 
 /// Render an audit diff report as JSON.
 #[must_use]
-pub fn render_audit_diff_json(report: &AuditDiffReport) -> String {
+pub fn render_audit_diff_json(report: &AuditDiffReport) -> Result<String, DomainError> {
     audit_response_v2_json(&report.to_json())
 }
 
@@ -18305,14 +18307,13 @@ pub fn render_audit_diff_human(report: &AuditDiffReport) -> String {
 
 /// Render an audit diff report as TOON: the lossless canonical encoding of
 /// the enveloped JSON, preserving every diff entry.
-#[must_use]
-pub fn render_audit_diff_toon(report: &AuditDiffReport) -> String {
-    render_toon_from_json(&render_audit_diff_json(report))
+pub fn render_audit_diff_toon(report: &AuditDiffReport) -> Result<String, DomainError> {
+    Ok(render_toon_from_json(&render_audit_diff_json(report)?))
 }
 
 /// Render an audit verify report as JSON.
 #[must_use]
-pub fn render_audit_verify_json(report: &AuditVerifyReport) -> String {
+pub fn render_audit_verify_json(report: &AuditVerifyReport) -> Result<String, DomainError> {
     audit_response_v2_json(&report.to_json())
 }
 
@@ -18368,9 +18369,8 @@ pub fn render_audit_verify_human(report: &AuditVerifyReport) -> String {
 
 /// Render an audit verify report as TOON: the lossless canonical encoding of
 /// the enveloped JSON, preserving every issue detail.
-#[must_use]
-pub fn render_audit_verify_toon(report: &AuditVerifyReport) -> String {
-    render_toon_from_json(&render_audit_verify_json(report))
+pub fn render_audit_verify_toon(report: &AuditVerifyReport) -> Result<String, DomainError> {
+    Ok(render_toon_from_json(&render_audit_verify_json(report)?))
 }
 
 // ============================================================================
@@ -23339,8 +23339,8 @@ mod tests {
     fn audit_toon_output_is_lossless_canonical_encoding() -> TestResult {
         let timeline = audit_timeline_report_fixture();
         ensure_toon_matches_json(
-            &super::render_audit_timeline_json(&timeline),
-            &super::render_audit_timeline_toon(&timeline),
+            &super::render_audit_timeline_json(&timeline).map_err(|error| error.message())?,
+            &super::render_audit_timeline_toon(&timeline).map_err(|error| error.message())?,
             "audit timeline TOON",
         )?;
 
@@ -23357,8 +23357,8 @@ mod tests {
             hash_chain_valid: true,
         };
         ensure_toon_matches_json(
-            &super::render_audit_show_json(&show),
-            &super::render_audit_show_toon(&show),
+            &super::render_audit_show_json(&show).map_err(|error| error.message())?,
+            &super::render_audit_show_toon(&show).map_err(|error| error.message())?,
             "audit show TOON",
         )?;
 
@@ -23372,8 +23372,8 @@ mod tests {
             row_count: 1,
         };
         ensure_toon_matches_json(
-            &super::render_audit_diff_json(&diff),
-            &super::render_audit_diff_toon(&diff),
+            &super::render_audit_diff_json(&diff).map_err(|error| error.message())?,
+            &super::render_audit_diff_toon(&diff).map_err(|error| error.message())?,
             "audit diff TOON",
         )?;
 
@@ -23394,39 +23394,52 @@ mod tests {
             shards: Vec::new(),
         };
         ensure_toon_matches_json(
-            &super::render_audit_verify_json(&verify),
-            &super::render_audit_verify_toon(&verify),
+            &super::render_audit_verify_json(&verify).map_err(|error| error.message())?,
+            &super::render_audit_verify_toon(&verify).map_err(|error| error.message())?,
             "audit verify TOON",
         )
     }
 
-    /// bd-1oep7: a payload that is not valid JSON must surface as the
-    /// canonical ee.error.v2 envelope — never a hollow success.
+    /// bd-1oep7: a payload that is not valid JSON must surface as a typed
+    /// DomainError whose canonical ee.error.v2 rendering carries mandatory
+    /// error.details.recovery[] — never a hollow success, never exit 0.
     #[test]
     fn audit_response_envelope_propagates_parse_failure_as_error_v2() -> TestResult {
-        let out = super::audit_response_v2_json("this is not json");
-        let value: serde_json::Value = serde_json::from_str(&out)
-            .map_err(|error| format!("error envelope must be JSON: {error}"))?;
+        let error = super::audit_response_v2_json("this is not json")
+            .expect_err("invalid JSON payload must be a typed error");
+        ensure(
+            error.code() == "storage",
+            format!(
+                "parse failure must map to the stable storage code: {}",
+                error.code()
+            ),
+        )?;
+        ensure(
+            error.message().contains("invalid JSON"),
+            format!("parse failure must explain itself: {}", error.message()),
+        )?;
+        let envelope = super::error_response_json(&error);
+        let value: serde_json::Value = serde_json::from_str(&envelope)
+            .map_err(|render_error| format!("error envelope must be JSON: {render_error}"))?;
         ensure(
             value["schema"] == "ee.error.v2",
-            format!("parse failure must emit ee.error.v2: {value}"),
+            format!("parse failure must render ee.error.v2: {value}"),
         )?;
         ensure(
-            value["error"]["code"] == "serialization_failed",
-            format!("parse failure must carry the serialization_failed code: {value}"),
+            value["error"]["details"]["recovery"]
+                .as_array()
+                .is_some_and(|recovery| !recovery.is_empty()),
+            format!("error envelope must carry mandatory details.recovery[]: {value}"),
         )?;
         ensure(
-            value.get("success").is_none(),
-            format!("error envelope must not claim success: {value}"),
-        )?;
-        ensure(
-            value.get("data").is_none(),
-            format!("error envelope must not carry hollow data: {value}"),
+            value.get("success").is_none() && value.get("data").is_none(),
+            format!("error envelope must not claim success or carry hollow data: {value}"),
         )
     }
 
-    /// bd-1oep7: the serialize_or_error marker must propagate as ee.error.v2
-    /// with the original failure message, never be wrapped as success data.
+    /// bd-1oep7: the serialize_or_error marker must propagate as a typed
+    /// error carrying the original failure message, never be wrapped as
+    /// success data.
     #[test]
     fn audit_response_envelope_propagates_serialization_failed_marker() -> TestResult {
         let marker = serde_json::json!({
@@ -23434,20 +23447,27 @@ mod tests {
             "message": "audit row was not serializable",
         })
         .to_string();
-        let out = super::audit_response_v2_json(&marker);
-        let value: serde_json::Value = serde_json::from_str(&out)
-            .map_err(|error| format!("error envelope must be JSON: {error}"))?;
+        let error = super::audit_response_v2_json(&marker)
+            .expect_err("serialization_failed marker must be a typed error");
+        ensure(
+            error.message().contains("audit row was not serializable"),
+            format!(
+                "marker must propagate the original failure message: {}",
+                error.message()
+            ),
+        )?;
+        let envelope = super::error_response_json(&error);
+        let value: serde_json::Value = serde_json::from_str(&envelope)
+            .map_err(|render_error| format!("error envelope must be JSON: {render_error}"))?;
         ensure(
             value["schema"] == "ee.error.v2",
-            format!("marker must emit ee.error.v2: {value}"),
+            format!("marker must render ee.error.v2: {value}"),
         )?;
         ensure(
-            value["error"]["code"] == "serialization_failed",
-            format!("marker must carry the serialization_failed code: {value}"),
-        )?;
-        ensure(
-            value["error"]["message"] == "audit row was not serializable",
-            format!("marker must propagate the original failure message: {value}"),
+            value["error"]["details"]["recovery"]
+                .as_array()
+                .is_some_and(|recovery| !recovery.is_empty()),
+            format!("marker envelope must carry mandatory details.recovery[]: {value}"),
         )
     }
 
@@ -23456,7 +23476,7 @@ mod tests {
     #[test]
     fn audit_response_envelope_lifts_degraded_on_success() -> TestResult {
         let report = audit_timeline_report_fixture();
-        let out = super::render_audit_timeline_json(&report);
+        let out = super::render_audit_timeline_json(&report).map_err(|error| error.message())?;
         let value: serde_json::Value = serde_json::from_str(&out)
             .map_err(|error| format!("success envelope must be JSON: {error}"))?;
         ensure(

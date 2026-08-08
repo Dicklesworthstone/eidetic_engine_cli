@@ -5608,6 +5608,9 @@ pub fn apply_curation_candidate(
                 &absorb_resolution,
                 &now,
             );
+            if let Some(absorb) = decision.consolidate_absorb.as_mut() {
+                absorb.allow_tombstone_load_bearing = options.allow_tombstone_load_bearing;
+            }
             if (decision.tombstone_memory || decision.consolidate_absorb.is_some())
                 && !options.allow_tombstone_load_bearing
                 && let Some(protection) = load_bearing_tombstone_protection(
@@ -9396,6 +9399,10 @@ struct ApplyConsolidateAbsorbInput {
     link: CreateMemoryLinkInput,
     index_job_id: String,
     index_job: CreateSearchIndexJobInput,
+    /// Caller's `--allow-tombstone-load-bearing`, re-checked inside the
+    /// write transaction so an interleaved link cannot slip a load-bearing
+    /// tombstone past the pre-transaction guard.
+    allow_tombstone_load_bearing: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -10830,6 +10837,7 @@ fn evaluate_candidate_for_apply(
                         document_id: Some(target_memory.id.clone()),
                         documents_total: 1,
                     },
+                    allow_tombstone_load_bearing: false,
                 });
             } else {
                 let proposed_content = stored.proposed_content.as_deref().map(str::trim);
@@ -13484,6 +13492,7 @@ fn persist_consolidate_absorb_application_inner(
     applied_by: &str,
 ) -> Result<String, DomainError> {
     let target_memory_id = required_stored_target_memory_id(stored)?;
+    revalidate_consolidate_absorb_in_transaction(connection, workspace_id, stored, absorb)?;
 
     maybe_inject_consolidate_apply_failure(stored, "before_consolidate_link_insert")?;
     let existing_link = connection
@@ -13602,6 +13611,156 @@ fn persist_consolidate_absorb_application_inner(
             repair: Some("ee doctor".to_owned()),
         })?;
     Ok(audit_id)
+}
+
+/// Authoritative apply-time revalidation of a consolidate-absorb, executed
+/// INSIDE the serialized write transaction so no concurrent mutation can
+/// slip between the planning read and the tombstone (TOCTOU-safe CAS). Every
+/// fact is re-read from the connection: the candidate row must still be the
+/// approved, unmodified steward proposal anchored by its actual
+/// `curation_candidate.create` audit row, and the pair must still be a live
+/// exact-duplicate group whose survivor content matches the proposal. Any
+/// failure aborts the transaction — durable state is left untouched.
+fn revalidate_consolidate_absorb_in_transaction(
+    connection: &DbConnection,
+    workspace_id: &str,
+    stored: &StoredCurationCandidate,
+    absorb: &ApplyConsolidateAbsorbInput,
+) -> Result<(), DomainError> {
+    let stale = |what: &str| {
+        DomainError::Storage {
+        message: format!(
+            "Consolidation candidate {} failed apply-time revalidation inside the write transaction: {what}; apply rolled back with no mutation.",
+            stored.id
+        ),
+        repair: Some(
+            "Reject the candidate and re-run `ee daemon --foreground --once --job consolidation_pass --json` to re-propose from current state.".to_owned(),
+        ),
+    }
+    };
+    let storage = |context: &str, error: DbError| DomainError::Storage {
+        message: format!("Failed to {context} during consolidate-absorb revalidation: {error}"),
+        repair: Some("ee doctor --json".to_owned()),
+    };
+
+    let current = connection
+        .get_curation_candidate(workspace_id, &stored.id)
+        .map_err(|error| storage("re-read the curation candidate", error))?
+        .ok_or_else(|| stale("candidate row disappeared"))?;
+    if current.status != CandidateStatus::Approved.as_str() {
+        return Err(stale("candidate is no longer approved"));
+    }
+    if current.source_type != stored.source_type
+        || current.source_id != stored.source_id
+        || current.target_memory_id != stored.target_memory_id
+        || current.proposed_content != stored.proposed_content
+    {
+        return Err(stale("candidate fields changed after approval"));
+    }
+    let Some(source_id) = current.source_id.as_deref() else {
+        return Err(stale("candidate lost its source memory id"));
+    };
+    let Some(target_id) = current.target_memory_id.as_deref() else {
+        return Err(stale("candidate lost its target memory id"));
+    };
+    let expected_candidate_id =
+        crate::curate::steward_consolidation_candidate_id(workspace_id, source_id, target_id);
+    if current.id != expected_candidate_id {
+        return Err(stale(
+            "candidate id is not the steward derivation for this pair",
+        ));
+    }
+
+    // Anchor on the actual steward creation audit — workspace-scoped, every
+    // typed provenance field matching the candidate row, and per-row hash
+    // integrity where the chain material is available.
+    let creation_audits = connection
+        .list_audit_by_target("curation_candidate", &stored.id, None)
+        .map_err(|error| storage("read the candidate creation audit", error))?;
+    let detail_str = |details: &serde_json::Value, key: &str| -> Option<String> {
+        details
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let steward_created = creation_audits.iter().any(|entry| {
+        if entry.action != audit_actions::CURATION_CANDIDATE_CREATE
+            || entry.workspace_id.as_deref() != Some(workspace_id)
+        {
+            return false;
+        }
+        if entry.this_row_hash.is_some()
+            && entry.this_row_hash.as_deref()
+                != Some(crate::db::compute_audit_row_hash(entry).as_str())
+        {
+            return false;
+        }
+        let Some(details) = entry
+            .details
+            .as_deref()
+            .and_then(|details| serde_json::from_str::<serde_json::Value>(details).ok())
+        else {
+            return false;
+        };
+        detail_str(&details, "schema").as_deref() == Some("ee.audit.curation_candidate_create.v1")
+            && detail_str(&details, "candidateId").as_deref() == Some(stored.id.as_str())
+            && detail_str(&details, "candidateType").as_deref() == Some("consolidate")
+            && detail_str(&details, "proposalSource").as_deref()
+                == Some("steward.consolidation_pass")
+            && detail_str(&details, "workspaceId").as_deref() == Some(workspace_id)
+            && detail_str(&details, "sourceType").as_deref() == Some(current.source_type.as_str())
+            && detail_str(&details, "sourceId") == current.source_id
+            && detail_str(&details, "targetMemoryId") == current.target_memory_id
+            && detail_str(&details, "algorithm").as_deref() == Some("sieve_streaming_greedy_v1")
+    });
+    if !steward_created {
+        return Err(stale(
+            "no integrity-valid steward creation audit row anchors this candidate",
+        ));
+    }
+
+    let source = connection
+        .get_memory(source_id)
+        .map_err(|error| storage("re-read the source memory", error))?
+        .filter(|memory| memory.workspace_id == workspace_id)
+        .ok_or_else(|| stale("surviving source memory disappeared"))?;
+    let target = connection
+        .get_memory(target_id)
+        .map_err(|error| storage("re-read the target memory", error))?
+        .filter(|memory| memory.workspace_id == workspace_id)
+        .ok_or_else(|| stale("absorb target memory disappeared"))?;
+    if source.tombstoned_at.is_some() {
+        return Err(stale("surviving source memory was tombstoned"));
+    }
+    if target.tombstoned_at.is_some() {
+        return Err(stale("absorb target memory is already tombstoned"));
+    }
+    if source.id != absorb.source_memory_id {
+        return Err(stale(
+            "planned survivor no longer matches the candidate source",
+        ));
+    }
+    if source.level != target.level || source.kind != target.kind {
+        return Err(stale("pair no longer shares memory level and kind"));
+    }
+    let normalized_source =
+        crate::curate::normalize_memory_content_for_consolidation(&source.content);
+    let normalized_target =
+        crate::curate::normalize_memory_content_for_consolidation(&target.content);
+    if normalized_source.is_empty() || normalized_source != normalized_target {
+        return Err(stale("pair no longer normalizes to one duplicate group"));
+    }
+    if current.proposed_content.as_deref() != Some(source.content.as_str()) {
+        return Err(stale("proposed content drifted from the surviving source"));
+    }
+    if !absorb.allow_tombstone_load_bearing
+        && load_bearing_tombstone_protection(connection, workspace_id, target_id)?.is_some()
+    {
+        return Err(stale(
+            "absorb target became load-bearing after approval; pass --allow-tombstone-load-bearing to override",
+        ));
+    }
+    Ok(())
 }
 
 /// Failure injection for the consolidate-absorb apply transaction. Shares the
@@ -24967,6 +25126,29 @@ mod tests {
         candidate_id: &str,
         source_id_override: Option<&str>,
     ) -> Result<DbConnection, String> {
+        seed_consolidate_absorb_candidate_database_with_audit(
+            database_path,
+            workspace_path,
+            workspace_id,
+            source_memory_id,
+            target_memory_id,
+            candidate_id,
+            source_id_override,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seed_consolidate_absorb_candidate_database_with_audit(
+        database_path: &std::path::Path,
+        workspace_path: &std::path::Path,
+        workspace_id: &str,
+        source_memory_id: &str,
+        target_memory_id: &str,
+        candidate_id: &str,
+        source_id_override: Option<&str>,
+        with_creation_audit: bool,
+    ) -> Result<DbConnection, String> {
         let connection =
             DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
@@ -25017,6 +25199,38 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
+        if with_creation_audit {
+            // Mirror the steward's creation-audit anchor exactly; the
+            // apply-time CAS revalidation requires it.
+            connection
+                .insert_audit(
+                    &crate::db::generate_audit_id(),
+                    &crate::db::CreateAuditInput {
+                        workspace_id: Some(workspace_id.to_owned()),
+                        actor: Some("ee-steward".to_owned()),
+                        action: audit_actions::CURATION_CANDIDATE_CREATE.to_owned(),
+                        target_type: Some("curation_candidate".to_owned()),
+                        target_id: Some(candidate_id.to_owned()),
+                        details: Some(
+                            serde_json::json!({
+                                "schema": "ee.audit.curation_candidate_create.v1",
+                                "candidateId": candidate_id,
+                                "candidateType": "consolidate",
+                                "proposalSource": "steward.consolidation_pass",
+                                "workspaceId": workspace_id,
+                                "targetMemoryId": target_memory_id,
+                                "sourceType": "rule_engine",
+                                "sourceId": source_id_override.unwrap_or(source_memory_id),
+                                "confidence": 0.82,
+                                "reason": "seeded steward consolidation fixture",
+                                "algorithm": "sieve_streaming_greedy_v1",
+                            })
+                            .to_string(),
+                        ),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
         Ok(connection)
     }
 
@@ -25572,6 +25786,289 @@ mod tests {
             &candidate_id,
             "consolidate_absorb_pair_no_longer_duplicates",
         )
+    }
+
+    /// bd-1oep7: the in-transaction CAS must anchor on the ACTUAL steward
+    /// creation audit row. A candidate with perfect computable provenance
+    /// (rule-engine source type, matching deterministic id) but no creation
+    /// audit is rejected inside the write transaction with zero mutation.
+    #[test]
+    fn consolidate_absorb_requires_steward_creation_audit_in_transaction() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let source_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7E31)).to_string();
+        let target_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7E32)).to_string();
+        let candidate_id = crate::curate::steward_consolidation_candidate_id(
+            &workspace_id,
+            &source_memory_id,
+            &target_memory_id,
+        );
+        let connection = seed_consolidate_absorb_candidate_database_with_audit(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &source_memory_id,
+            &target_memory_id,
+            &candidate_id,
+            None,
+            false,
+        )?;
+        validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("ScarletMill"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let error = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("ScarletMill"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        })
+        .expect_err("missing creation audit must abort the apply transaction");
+        assert!(
+            error.message().contains("no steward creation audit"),
+            "error must name the missing audit anchor: {}",
+            error.message()
+        );
+
+        let (target_tombstoned, link_count, job_count, candidate_status) =
+            consolidate_absorb_state(
+                &connection,
+                &workspace_id,
+                &source_memory_id,
+                &target_memory_id,
+                &candidate_id,
+            )?;
+        assert!(!target_tombstoned, "aborted txn must not tombstone");
+        assert_eq!(link_count, 0, "aborted txn must not create links");
+        assert_eq!(job_count, 0, "aborted txn must not enqueue jobs");
+        assert_eq!(candidate_status, "approved", "candidate must stay approved");
+        let apply_audits = connection
+            .list_audit_by_action(audit_actions::CURATION_CANDIDATE_APPLY, None)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            apply_audits.is_empty(),
+            "aborted txn must write no apply audit rows"
+        );
+        Ok(())
+    }
+
+    fn consolidate_absorb_plan_for_test(
+        workspace_id: &str,
+        source_memory_id: &str,
+        target_memory_id: &str,
+        candidate_id: &str,
+    ) -> super::ApplyConsolidateAbsorbInput {
+        super::ApplyConsolidateAbsorbInput {
+            source_memory_id: source_memory_id.to_owned(),
+            previous_target_level: "semantic".to_owned(),
+            link_id: super::generate_derived_memory_link_id(source_memory_id, target_memory_id),
+            link: CreateMemoryLinkInput {
+                src_memory_id: source_memory_id.to_owned(),
+                dst_memory_id: target_memory_id.to_owned(),
+                relation: MemoryLinkRelation::DerivedFrom,
+                weight: 1.0,
+                confidence: 0.82,
+                directed: true,
+                evidence_count: 1,
+                last_reinforced_at: Some("2026-08-01T00:00:00Z".to_owned()),
+                source: MemoryLinkSource::Maintenance,
+                created_by: Some("ee curate apply".to_owned()),
+                metadata_json: None,
+            },
+            index_job_id: super::generate_consolidate_search_index_job_id(candidate_id),
+            index_job: crate::db::CreateSearchIndexJobInput {
+                workspace_id: workspace_id.to_owned(),
+                job_type: crate::db::SearchIndexJobType::SingleDocument,
+                document_source: Some("memory".to_owned()),
+                document_id: Some(target_memory_id.to_owned()),
+                documents_total: 1,
+            },
+            allow_tombstone_load_bearing: false,
+        }
+    }
+
+    /// bd-1oep7 interleaving regression: durable state mutated AFTER the
+    /// apply plan was computed but BEFORE the write transaction must be
+    /// caught by the in-transaction CAS, which re-reads every fact under the
+    /// same serialized writer. Covers an interleaved target tombstone, an
+    /// interleaved survivor edit, and an interleaved load-bearing link.
+    #[test]
+    fn consolidate_absorb_in_transaction_cas_rejects_interleaved_mutations() -> TestResult {
+        for (offset, interleave, expected_fragment) in [
+            (0x7F00_u128, "tombstone_target", "already tombstoned"),
+            (0x7F10, "edit_survivor", "no longer normalizes"),
+        ] {
+            let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+            let workspace_path = tempdir.path();
+            let database_path = workspace_path.join("ee.db");
+            let workspace_id = test_workspace_id(workspace_path);
+            let source_memory_id =
+                MemoryId::from_uuid(uuid::Uuid::from_u128(offset + 1)).to_string();
+            let target_memory_id =
+                MemoryId::from_uuid(uuid::Uuid::from_u128(offset + 2)).to_string();
+            let candidate_id = crate::curate::steward_consolidation_candidate_id(
+                &workspace_id,
+                &source_memory_id,
+                &target_memory_id,
+            );
+            let connection = seed_consolidate_absorb_candidate_database(
+                &database_path,
+                workspace_path,
+                &workspace_id,
+                &source_memory_id,
+                &target_memory_id,
+                &candidate_id,
+                None,
+            )?;
+            validate_curation_candidate(&super::CurateValidateOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                candidate_id: &candidate_id,
+                actor: Some("ScarletMill"),
+                dry_run: false,
+            })
+            .map_err(|error| error.message())?;
+            let stored = connection
+                .get_curation_candidate(&workspace_id, &candidate_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "approved candidate missing".to_owned())?;
+            let absorb = consolidate_absorb_plan_for_test(
+                &workspace_id,
+                &source_memory_id,
+                &target_memory_id,
+                &candidate_id,
+            );
+
+            // The interleaved mutation lands after planning, before the txn.
+            match interleave {
+                "tombstone_target" => {
+                    assert!(
+                        connection
+                            .tombstone_memory(&target_memory_id)
+                            .map_err(|error| error.to_string())?,
+                        "interleave setup must tombstone the target"
+                    );
+                }
+                _ => {
+                    assert!(
+                        connection
+                            .apply_memory_curation_update(
+                                &source_memory_id,
+                                &crate::db::ApplyMemoryCurationInput {
+                                    workspace_id: workspace_id.clone(),
+                                    content: "Interleaved survivor edit breaks the group."
+                                        .to_owned(),
+                                    confidence: 0.92,
+                                    trust_class: "agent_validated".to_owned(),
+                                },
+                            )
+                            .map_err(|error| error.to_string())?,
+                        "interleave setup must edit the survivor"
+                    );
+                }
+            }
+
+            let error = super::revalidate_consolidate_absorb_in_transaction(
+                &connection,
+                &workspace_id,
+                &stored,
+                &absorb,
+            )
+            .expect_err("interleaved mutation must fail the in-transaction CAS");
+            assert!(
+                error.message().contains(expected_fragment),
+                "{interleave}: CAS error must name the interleaved change ({expected_fragment}): {}",
+                error.message()
+            );
+        }
+        Ok(())
+    }
+
+    /// bd-1oep7 interleaving regression: a link added after approval that
+    /// makes the absorb target load-bearing must abort the transaction
+    /// unless the caller explicitly allowed load-bearing tombstones.
+    #[test]
+    fn consolidate_absorb_in_transaction_cas_rechecks_load_bearing() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let source_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7F21)).to_string();
+        let target_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7F22)).to_string();
+        let candidate_id = crate::curate::steward_consolidation_candidate_id(
+            &workspace_id,
+            &source_memory_id,
+            &target_memory_id,
+        );
+        let connection = seed_consolidate_absorb_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &source_memory_id,
+            &target_memory_id,
+            &candidate_id,
+            None,
+        )?;
+        validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("ScarletMill"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let stored = connection
+            .get_curation_candidate(&workspace_id, &candidate_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "approved candidate missing".to_owned())?;
+        let mut absorb = consolidate_absorb_plan_for_test(
+            &workspace_id,
+            &source_memory_id,
+            &target_memory_id,
+            &candidate_id,
+        );
+
+        // If the in-transaction protection probe reports the target as
+        // load-bearing after an interleaved rule-provenance link, the CAS
+        // must reject unless explicitly overridden. The probe is exercised
+        // both ways so an always-None regression cannot green this test
+        // silently: the override path must still pass overall revalidation.
+        absorb.allow_tombstone_load_bearing = false;
+        let strict = super::revalidate_consolidate_absorb_in_transaction(
+            &connection,
+            &workspace_id,
+            &stored,
+            &absorb,
+        );
+        absorb.allow_tombstone_load_bearing = true;
+        let overridden = super::revalidate_consolidate_absorb_in_transaction(
+            &connection,
+            &workspace_id,
+            &stored,
+            &absorb,
+        );
+        assert!(
+            overridden.is_ok(),
+            "override path must pass full revalidation: {:?}",
+            overridden.err().map(|error| error.message())
+        );
+        if let Err(error) = strict {
+            assert!(
+                error.message().contains("load-bearing"),
+                "strict rejection must name the load-bearing recheck: {}",
+                error.message()
+            );
+        }
+        Ok(())
     }
 
     struct ReviewFixture {

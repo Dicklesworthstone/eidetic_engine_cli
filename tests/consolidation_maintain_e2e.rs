@@ -320,18 +320,6 @@ fn audit_action_count_in(
     })
 }
 
-fn audit_total_count(
-    ws: &E2eWorkspace,
-    workspace: &std::path::Path,
-    label: &str,
-) -> Result<u64, String> {
-    let timeline = ws.run_json_in(workspace, label, &["audit", "timeline", "--limit", "1"])?;
-    require_success_envelope(label, &timeline)?;
-    json_u64(&timeline, &["data", "pagination", "total_count"]).ok_or_else(|| {
-        format!("{label}: audit timeline missing data.pagination.total_count: {timeline}")
-    })
-}
-
 /// Structured memory ids of an array of result/item objects (each object's
 /// `memoryId` field). Missing/typeless fields are a defect surfaced by the
 /// caller's exact-count assertions, not silently skipped rows.
@@ -357,19 +345,67 @@ fn id_count(ids: &[String], id: &str) -> usize {
         .count()
 }
 
-/// Full public-surface durable-state snapshot for one workspace: memory rows
-/// (live + tombstoned), consolidate candidates across every status, the total
-/// append-only audit row count, and both generations plus per-kind index
-/// counts. Two equal snapshots prove no durable object changed in between.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Full public-surface durable-state snapshot for one workspace: the EXACT
+/// memory rows (live + tombstoned, every field), the exact consolidate
+/// candidate rows across every status, the exact memory-link and
+/// search-index-job rows (via `ee db inspect`), the append-only audit total
+/// plus its newest row id/hash (chain head), and both generations with the
+/// per-kind index counts and corpus revision. Two equal snapshots prove no
+/// durable row or field changed in between.
+#[derive(Clone, Debug, PartialEq)]
 struct DurableSnapshot {
     memory_rows: usize,
     tombstoned_rows: usize,
     consolidate_candidates: usize,
     audit_total: u64,
+    audit_head: JsonValue,
     db_generation: Option<u64>,
     index_generation: Option<u64>,
     index_memory_documents: Option<u64>,
+    corpus_revision: Option<String>,
+    memory_records: Vec<JsonValue>,
+    candidate_records: Vec<JsonValue>,
+    link_records: Vec<JsonValue>,
+    job_records: Vec<JsonValue>,
+}
+
+/// Rows from `ee db inspect <table>` (`data.report.rows[].values`), sorted by
+/// their JSON encoding for order-stable comparison.
+fn inspect_table_rows(
+    ws: &E2eWorkspace,
+    workspace: &std::path::Path,
+    label: &str,
+    table: &str,
+) -> Result<Vec<JsonValue>, String> {
+    let inspected = ws.run_json_in(
+        workspace,
+        label,
+        &["db", "inspect", table, "--limit", "500"],
+    )?;
+    require_success_envelope(label, &inspected)?;
+    let mut rows = json_at(&inspected, &["data", "report", "rows"])
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| format!("{label}: db inspect {table} missing data.report.rows"))?
+        .iter()
+        .map(|row| row.get("values").cloned().unwrap_or(JsonValue::Null))
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.to_string());
+    Ok(rows)
+}
+
+fn sorted_records(value: &JsonValue, path: &[&str], label: &str) -> Result<Vec<JsonValue>, String> {
+    let mut records = json_at(value, path)
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| format!("{label}: missing array at {path:?}"))?
+        .clone();
+    records.sort_by_key(|record| {
+        record
+            .get("id")
+            .and_then(JsonValue::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| record.to_string())
+    });
+    Ok(records)
 }
 
 fn durable_snapshot(
@@ -379,11 +415,8 @@ fn durable_snapshot(
 ) -> Result<DurableSnapshot, String> {
     let memories = ws.run_json_in(workspace, &format!("{label}_memories"), &["memory", "list"])?;
     require_success_envelope(label, &memories)?;
-    let memory_entries = json_at(&memories, &["data", "memories"])
-        .and_then(JsonValue::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let tombstoned_rows = memory_entries
+    let memory_records = sorted_records(&memories, &["data", "memories"], label)?;
+    let tombstoned_rows = memory_records
         .iter()
         .filter(|entry| {
             entry.get("is_tombstoned").and_then(JsonValue::as_bool) == Some(true)
@@ -396,11 +429,27 @@ fn durable_snapshot(
         &["curate", "candidates", "--type", "consolidate", "--all"],
     )?;
     require_success_envelope(label, &candidates)?;
-    let candidate_count = json_at(&candidates, &["data", "candidates"])
-        .and_then(JsonValue::as_array)
-        .map(Vec::len)
-        .ok_or_else(|| format!("{label}: candidates listing missing data.candidates array"))?;
-    let audit_total = audit_total_count(ws, workspace, &format!("{label}_audit_total"))?;
+    let candidate_records = sorted_records(&candidates, &["data", "candidates"], label)?;
+    let timeline = ws.run_json_in(
+        workspace,
+        &format!("{label}_audit_head"),
+        &["audit", "timeline", "--limit", "1"],
+    )?;
+    require_success_envelope(label, &timeline)?;
+    let audit_total = json_u64(&timeline, &["data", "pagination", "total_count"])
+        .ok_or_else(|| format!("{label}: audit timeline missing total_count"))?;
+    let audit_head = json_at(&timeline, &["data", "entries", "0"])
+        .map(|entry| {
+            serde_json::json!({
+                "id": entry.get("id").cloned().unwrap_or(JsonValue::Null),
+                "this_row_hash": entry.get("this_row_hash").cloned().unwrap_or(JsonValue::Null),
+            })
+        })
+        .unwrap_or(JsonValue::Null);
+    let link_records =
+        inspect_table_rows(ws, workspace, &format!("{label}_links"), "memory_links")?;
+    let job_records =
+        inspect_table_rows(ws, workspace, &format!("{label}_jobs"), "search_index_jobs")?;
     let status = ws.run_json_in(
         workspace,
         &format!("{label}_index_status"),
@@ -408,13 +457,19 @@ fn durable_snapshot(
     )?;
     require_success_envelope(label, &status)?;
     Ok(DurableSnapshot {
-        memory_rows: memory_entries.len(),
+        memory_rows: memory_records.len(),
         tombstoned_rows,
-        consolidate_candidates: candidate_count,
+        consolidate_candidates: candidate_records.len(),
         audit_total,
+        audit_head,
         db_generation: json_u64(&status, &["data", "dbGeneration"]),
         index_generation: json_u64(&status, &["data", "indexGeneration"]),
         index_memory_documents: json_u64(&status, &["data", "indexDocumentCounts", "memories"]),
+        corpus_revision: json_str(&status, &["data", "actualCorpusRevision"]),
+        memory_records,
+        candidate_records,
+        link_records,
+        job_records,
     })
 }
 
