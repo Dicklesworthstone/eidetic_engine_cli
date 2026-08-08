@@ -319,8 +319,7 @@ pub struct RegisteredResponderRoute {
 impl RegisteredResponderRoute {
     fn validate(&self) -> Result<(), ResponderBrokerError> {
         if !self.workspace_path.is_absolute()
-            || self.peer_handle.trim().is_empty()
-            || self.peer_handle.len() > 256
+            || !valid_opaque_peer_handle(&self.peer_handle)
             || self.committed_port < 1024
             || !valid_identity(&self.expectations.team_id)
             || !valid_identity(&self.expectations.tailnet_id)
@@ -1121,6 +1120,15 @@ fn valid_node_key(value: &str) -> bool {
             .is_some_and(|key| !key.is_empty() && !key.chars().any(char::is_whitespace))
 }
 
+fn valid_opaque_peer_handle(value: &str) -> bool {
+    if value.len() > 64 {
+        return false;
+    }
+    value.strip_prefix("peer_").is_some_and(|opaque| {
+        opaque.len() >= 32 && opaque.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
 #[cfg(unix)]
 fn percent_encode_query(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
@@ -1276,6 +1284,13 @@ mod tests {
         empty_node_key.responder_node_pubkey = "nodekey:".to_owned();
         assert!(matches!(
             ResponderRouteRegistry::new([empty_node_key]),
+            Err(ResponderBrokerError::InvalidConfiguration)
+        ));
+
+        let mut guessable_handle = route(PathBuf::from("/tmp/ee-responder-broker-unit"), 41888);
+        guessable_handle.peer_handle = "peer_7".to_owned();
+        assert!(matches!(
+            ResponderRouteRegistry::new([guessable_handle]),
             Err(ResponderBrokerError::InvalidConfiguration)
         ));
     }
