@@ -52,7 +52,8 @@ use crate::config::{EnvVar, read_env_var};
 use crate::mesh::key_store::SecretBytes;
 
 /// Frame v2 schema identifier.
-pub const TRANSPORT_FRAME_SCHEMA_V2: &str = "ee.mesh.tailscale_transport_frame.v2";
+pub const TRANSPORT_FRAME_SCHEMA_V2: &str =
+    crate::models::schema::MESH_TAILSCALE_TRANSPORT_FRAME_SCHEMA_V2;
 
 /// The dead v1 schema. Rejected outright; kept only so the rejection path can
 /// name what it refused.
@@ -933,13 +934,13 @@ fn constant_time_eq_hex(candidate_hex: &str, expected: &[u8; 32]) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Schema id for the initiator's handshake open message.
-pub const SESSION_OPEN_SCHEMA_V1: &str = "ee.mesh.session_open.v1";
+pub const SESSION_OPEN_SCHEMA_V1: &str = crate::models::schema::MESH_SESSION_OPEN_SCHEMA_V1;
 
 /// Schema id for the responder's handshake confirm message.
-pub const SESSION_CONFIRM_SCHEMA_V1: &str = "ee.mesh.session_confirm.v1";
+pub const SESSION_CONFIRM_SCHEMA_V1: &str = crate::models::schema::MESH_SESSION_CONFIRM_SCHEMA_V1;
 
 /// Schema id for the initiator's handshake finish message.
-pub const SESSION_FINISH_SCHEMA_V1: &str = "ee.mesh.session_finish.v1";
+pub const SESSION_FINISH_SCHEMA_V1: &str = crate::models::schema::MESH_SESSION_FINISH_SCHEMA_V1;
 
 /// BLAKE3 `derive_key` context for the handshake confirmation key.
 pub const SESSION_CONFIRM_KEY_CONTEXT: &str = "ee.team.session.confirm.v1";
@@ -1652,7 +1653,8 @@ fn ensure_handshake_size<T: Serialize>(message: &T) -> Result<(), HandshakeError
 // ---------------------------------------------------------------------------
 
 /// Schema for the MAC-authenticated capability offer/selection payload.
-pub const CAPABILITY_NEGOTIATION_SCHEMA_V1: &str = "ee.mesh.session_capability_negotiation.v1";
+pub const CAPABILITY_NEGOTIATION_SCHEMA_V1: &str =
+    crate::models::schema::MESH_SESSION_CAPABILITY_NEGOTIATION_SCHEMA_V1;
 
 /// Maximum number of capabilities one endpoint may offer.
 pub const MAX_SESSION_CAPABILITIES: usize = 16;
@@ -1669,7 +1671,7 @@ pub struct TransportWireSchema {
 }
 
 /// Module-local JSON Schema catalog for every length-prefixed session
-/// message. This does not claim CLI `schema list` registration.
+/// message. The canonical CLI registry exports the same documents.
 pub const TRANSPORT_WIRE_SCHEMAS: &[TransportWireSchema] = &[
     TransportWireSchema {
         id: TRANSPORT_FRAME_SCHEMA_V2,

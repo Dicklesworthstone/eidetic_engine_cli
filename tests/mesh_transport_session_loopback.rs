@@ -1418,6 +1418,46 @@ fn transport_wire_schema_embedded_catalog_matches_documents() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn transport_wire_schemas_are_publicly_registered_once() -> TestResult {
+    let public = ee::output::public_schemas();
+    for schema in ee::mesh::transport_session::TRANSPORT_WIRE_SCHEMAS {
+        let matches = public.iter().filter(|entry| entry.id == schema.id).count();
+        if matches != 1 {
+            return Err(format!(
+                "{} must appear exactly once in public_schemas, found {matches}",
+                schema.id
+            ));
+        }
+        let known_matches = ee::models::schema::KNOWN_SCHEMAS
+            .iter()
+            .filter(|known| **known == schema.id)
+            .count();
+        if known_matches != 1 {
+            return Err(format!(
+                "{} must appear exactly once in KNOWN_SCHEMAS, found {known_matches}",
+                schema.id
+            ));
+        }
+
+        let exported: serde_json::Value =
+            serde_json::from_str(&ee::output::render_schema_export_json(Some(schema.id)))
+                .map_err(|error| format!("{} export is not JSON: {error}", schema.id))?;
+        if exported.get("$id").and_then(serde_json::Value::as_str) != Some(schema.id) {
+            return Err(format!("{} public schema export drifted", schema.id));
+        }
+        let embedded: serde_json::Value = serde_json::from_str(schema.document)
+            .map_err(|error| format!("{} embedded schema is not JSON: {error}", schema.id))?;
+        if exported != embedded {
+            return Err(format!(
+                "{} public export differs from the transport-owned document",
+                schema.id
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn schema_required_fields(schema: &serde_json::Value) -> TestResult<Vec<&str>> {
     schema
         .pointer("/required")

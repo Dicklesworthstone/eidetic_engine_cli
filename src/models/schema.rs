@@ -123,6 +123,18 @@ pub const TIMELINE_SCHEMA_V1: &str = "ee.timeline.v1";
 /// Schema identifier for task-specific capture-demand coverage gaps (bd-2vq2z.17).
 pub const COVERAGE_GAP_SCHEMA_V1: &str = "ee.coverage_gap.v1";
 
+/// Schema identifier for the authenticated mesh transport frame.
+pub const MESH_TAILSCALE_TRANSPORT_FRAME_SCHEMA_V2: &str = "ee.mesh.tailscale_transport_frame.v2";
+/// Schema identifier for the initiator's authenticated mesh session open.
+pub const MESH_SESSION_OPEN_SCHEMA_V1: &str = "ee.mesh.session_open.v1";
+/// Schema identifier for the responder's authenticated mesh session confirmation.
+pub const MESH_SESSION_CONFIRM_SCHEMA_V1: &str = "ee.mesh.session_confirm.v1";
+/// Schema identifier for the initiator's authenticated mesh session finish.
+pub const MESH_SESSION_FINISH_SCHEMA_V1: &str = "ee.mesh.session_finish.v1";
+/// Schema identifier for authenticated mesh session capability negotiation.
+pub const MESH_SESSION_CAPABILITY_NEGOTIATION_SCHEMA_V1: &str =
+    "ee.mesh.session_capability_negotiation.v1";
+
 /// All known schema identifiers for validation.
 pub const KNOWN_SCHEMAS: &[&str] = &[
     RESPONSE_SCHEMA_V0,
@@ -164,6 +176,11 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     MESH_POLICY_DECISION_SCHEMA_V1,
     MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1,
     MESH_STORAGE_STATUS_SCHEMA_V1,
+    MESH_SESSION_CAPABILITY_NEGOTIATION_SCHEMA_V1,
+    MESH_SESSION_CONFIRM_SCHEMA_V1,
+    MESH_SESSION_FINISH_SCHEMA_V1,
+    MESH_SESSION_OPEN_SCHEMA_V1,
+    MESH_TAILSCALE_TRANSPORT_FRAME_SCHEMA_V2,
     CONTEXT_PROFILE_SCHEMA_V1,
     CONTEXT_PROFILE_SCHEMA_CATALOG_V1,
     FOCUS_ITEM_SCHEMA_V1,

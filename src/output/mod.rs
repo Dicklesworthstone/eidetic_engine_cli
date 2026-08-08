@@ -11045,11 +11045,46 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: mesh_revoke_result_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::schema::MESH_SESSION_CAPABILITY_NEGOTIATION_SCHEMA_V1,
+            version: "1",
+            description: "Authenticated mesh session capability offer and selection payload.",
+            category: "mesh",
+            definition: mesh_session_capability_negotiation_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::models::schema::MESH_SESSION_CONFIRM_SCHEMA_V1,
+            version: "1",
+            description: "Responder confirmation for a fresh authenticated mesh session.",
+            category: "mesh",
+            definition: mesh_session_confirm_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::models::schema::MESH_SESSION_FINISH_SCHEMA_V1,
+            version: "1",
+            description: "Initiator finish message for a mutually authenticated mesh session.",
+            category: "mesh",
+            definition: mesh_session_finish_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::models::schema::MESH_SESSION_OPEN_SCHEMA_V1,
+            version: "1",
+            description: "Fresh-nonce mesh session open bound to team, tailnet, endpoints, and workspaces.",
+            category: "mesh",
+            definition: mesh_session_open_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.mesh.surrogate.v1",
             version: "1",
             description: "Compatibility, privacy, and rebuild metadata for a single search surrogate (embedding, summary, minhash, lexical).",
             category: "ops",
             definition: mesh_surrogate_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::models::schema::MESH_TAILSCALE_TRANSPORT_FRAME_SCHEMA_V2,
+            version: "2",
+            description: "Replay-safe directional mesh transport frame authenticated under fresh session keys.",
+            category: "mesh",
+            definition: mesh_tailscale_transport_frame_schema_definition,
         },
         SchemaEntry {
             id: "ee.migration.shard_fanout.v1",
@@ -12497,8 +12532,28 @@ fn mesh_revoke_result_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.mesh.revoke_result.v1.json").to_string()
 }
 
+fn mesh_session_capability_negotiation_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.session_capability_negotiation.v1.json").to_string()
+}
+
+fn mesh_session_confirm_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.session_confirm.v1.json").to_string()
+}
+
+fn mesh_session_finish_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.session_finish.v1.json").to_string()
+}
+
+fn mesh_session_open_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.session_open.v1.json").to_string()
+}
+
 fn mesh_surrogate_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.mesh.surrogate.v1.json").to_string()
+}
+
+fn mesh_tailscale_transport_frame_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.tailscale_transport_frame.v2.json").to_string()
 }
 
 fn migration_shard_fanout_schema_definition() -> String {

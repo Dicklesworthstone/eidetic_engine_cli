@@ -340,6 +340,96 @@
       "forbiddenCurrentClaims": []
     },
     {
+      "schemaId": "ee.mesh.session_capability_negotiation.v1",
+      "status": "current",
+      "surface": "mesh_session_capability_negotiation",
+      "owner": "src/mesh/transport_session.rs::TRANSPORT_WIRE_SCHEMAS",
+      "schemaFile": "docs/schemas/ee.mesh.session_capability_negotiation.v1.json",
+      "canonicalDocs": [
+        "docs/adr/0086-team-memory-confederation.md#tc-d5--pair-keys-establish-replay-safe-directional-sessions",
+        "docs/mesh/team_confederation_plan.md"
+      ],
+      "currentFacingContexts": [
+        "docs/schemas/ee.mesh.session_capability_negotiation.v1.json",
+        "docs/adr/0086-team-memory-confederation.md",
+        "docs/mesh/team_confederation_plan.md"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.mesh.session_confirm.v1",
+      "status": "current",
+      "surface": "mesh_session_confirm",
+      "owner": "src/mesh/transport_session.rs::TRANSPORT_WIRE_SCHEMAS",
+      "schemaFile": "docs/schemas/ee.mesh.session_confirm.v1.json",
+      "canonicalDocs": [
+        "docs/adr/0086-team-memory-confederation.md#tc-d5--pair-keys-establish-replay-safe-directional-sessions",
+        "docs/mesh/team_confederation_plan.md"
+      ],
+      "currentFacingContexts": [
+        "docs/schemas/ee.mesh.session_confirm.v1.json",
+        "docs/adr/0086-team-memory-confederation.md",
+        "docs/mesh/team_confederation_plan.md"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.mesh.session_finish.v1",
+      "status": "current",
+      "surface": "mesh_session_finish",
+      "owner": "src/mesh/transport_session.rs::TRANSPORT_WIRE_SCHEMAS",
+      "schemaFile": "docs/schemas/ee.mesh.session_finish.v1.json",
+      "canonicalDocs": [
+        "docs/adr/0086-team-memory-confederation.md#tc-d5--pair-keys-establish-replay-safe-directional-sessions",
+        "docs/mesh/team_confederation_plan.md"
+      ],
+      "currentFacingContexts": [
+        "docs/schemas/ee.mesh.session_finish.v1.json",
+        "docs/adr/0086-team-memory-confederation.md",
+        "docs/mesh/team_confederation_plan.md"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.mesh.session_open.v1",
+      "status": "current",
+      "surface": "mesh_session_open",
+      "owner": "src/mesh/transport_session.rs::TRANSPORT_WIRE_SCHEMAS",
+      "schemaFile": "docs/schemas/ee.mesh.session_open.v1.json",
+      "canonicalDocs": [
+        "docs/adr/0086-team-memory-confederation.md#tc-d5--pair-keys-establish-replay-safe-directional-sessions",
+        "docs/mesh/team_confederation_plan.md"
+      ],
+      "currentFacingContexts": [
+        "docs/schemas/ee.mesh.session_open.v1.json",
+        "docs/adr/0086-team-memory-confederation.md",
+        "docs/mesh/team_confederation_plan.md"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.mesh.tailscale_transport_frame.v2",
+      "status": "current",
+      "surface": "mesh_authenticated_transport_frame",
+      "owner": "src/mesh/transport_session.rs::TRANSPORT_WIRE_SCHEMAS",
+      "schemaFile": "docs/schemas/ee.mesh.tailscale_transport_frame.v2.json",
+      "canonicalDocs": [
+        "docs/adr/0086-team-memory-confederation.md#tc-d5--pair-keys-establish-replay-safe-directional-sessions",
+        "docs/mesh/team_confederation_plan.md"
+      ],
+      "currentFacingContexts": [
+        "docs/schemas/ee.mesh.tailscale_transport_frame.v2.json",
+        "docs/adr/0086-team-memory-confederation.md",
+        "docs/mesh/team_confederation_plan.md"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
       "schemaId": "ee.daemon.request.v1",
       "status": "experimental",
       "surface": "daemon_uds_rpc_request_envelope",
