@@ -1262,7 +1262,15 @@ fn ensure_no_symlink_components(
 }
 
 fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
-    crate::core::path_safety::first_existing_symlink_component(path)
+    match crate::core::path_safety::first_existing_symlink_component(path) {
+        // A regular-file (non-directory) component terminates the
+        // existing-prefix scan: nothing deeper can exist, and any symlink up
+        // to that component was already detected without following it. The
+        // subsequent filesystem operation reports the honest failure for the
+        // unusable path; every other error kind still propagates.
+        Err(error) if error.kind() == io::ErrorKind::NotADirectory => Ok(None),
+        other => other,
+    }
 }
 
 struct TempPackL2FileGuard<'a> {
