@@ -25,7 +25,7 @@ use ee::mesh::foreground_cli::{
 };
 use ee::mesh::lane_grant::{
     APPROVAL_TOKEN_ENVELOPE_LEN, APPROVAL_TOKEN_PREFIX, APPROVAL_TOKEN_TTL_SECONDS,
-    ApprovalPurpose, ApprovalTokenError, compare_snapshot, issue, verify_authentic,
+    ApprovalPurpose, compare_snapshot, issue, verify_authentic,
 };
 use ee::mesh::peer::build_peer_origin_node_id;
 use ee::policy::store_auth::{StoreAuthRoot, workspace_keys_dir};
@@ -244,7 +244,9 @@ fn decoded_approval_envelope(bearer: &str) -> Result<Vec<u8>, String> {
 fn decoded_approval_bearer_omits_key_id(bearer: &str, key_id: &[u8]) -> TestResult {
     let envelope = decoded_approval_envelope(bearer)?;
     ensure(
-        !envelope.windows(key_id.len()).any(|window| window == key_id),
+        !envelope
+            .windows(key_id.len())
+            .any(|window| window == key_id),
         "decoded approval bearer envelope serialized a store-auth key ID",
     )
 }

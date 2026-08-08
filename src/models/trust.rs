@@ -349,9 +349,7 @@ impl AttemptFamilyPromotionPosture {
         match self {
             Self::Eligible => "family has the canonical selected/rejected composition",
             Self::BlockedUndeclared => "family has no declared attempt count",
-            Self::BlockedInvalidDeclaredSize => {
-                "declared attempt count must be greater than zero"
-            }
+            Self::BlockedInvalidDeclaredSize => "declared attempt count must be greater than zero",
             Self::BlockedDuplicateSlots => "one or more attempt slots were recorded more than once",
             Self::BlockedOverfull => {
                 "family has more members than declared or an out-of-range attempt slot"
@@ -584,47 +582,57 @@ mod tests {
     use crate::models::rule::RuleMaturity;
 
     use super::{
-        AttemptFamilyMultiplicity, LocalSigningKeyPosture, ParseTrustClassError, TrustClass,
-        evaluate_local_signing_key_policy,
+        AttemptFamilyMultiplicity, AttemptFamilyPromotionPosture, LocalSigningKeyPosture,
+        ParseTrustClassError, TrustClass, evaluate_local_signing_key_policy,
     };
 
     #[test]
-    fn multiplicity_completion_counts_distinct_slots_not_raw_rows() {
-        let survivor_only = AttemptFamilyMultiplicity::from_members(
-            "fam-a".to_owned(),
+    fn incomplete_selected_n18_stays_at_one_over_n_at_every_coverage_level() {
+        for recorded_slots in [1_u32, 2, 17] {
+            let members = (1..=recorded_slots).map(|slot| {
+                (
+                    Some(slot),
+                    Some(if slot == 1 { "selected" } else { "rejected" }),
+                )
+            });
+            let family = AttemptFamilyMultiplicity::from_members(
+                format!("fam-n18-{recorded_slots}"),
+                Some(18),
+                members,
+            );
+
+            assert!(!family.is_complete());
+            assert_eq!(
+                family.promotion_posture(),
+                AttemptFamilyPromotionPosture::BlockedIncomplete
+            );
+            assert_eq!(
+                family.promotion_reason(),
+                "not every declared attempt slot is recorded"
+            );
+            assert!((family.member_discount_factor(Some("selected")) - 1.0 / 18.0).abs() < 1.0e-7);
+            assert!((family.member_discount_factor(Some("rejected")) - 1.0).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn canonical_completion_requires_declared_exact_slots_and_composition() {
+        let canonical_n18 = AttemptFamilyMultiplicity::from_members(
+            "fam-canonical-n18".to_owned(),
             Some(18),
-            [(Some(1), Some("selected"))],
+            (1..=18).map(|slot| {
+                (
+                    Some(slot),
+                    Some(if slot == 1 { "selected" } else { "rejected" }),
+                )
+            }),
         );
-        assert!(survivor_only.is_survivor_only());
-        assert!(!survivor_only.is_complete());
-        assert_eq!(survivor_only.recorded_slots, 1);
-        assert_eq!(survivor_only.unrecorded_count(), 17);
-        assert!((survivor_only.discount_factor() - 1.0 / 18.0).abs() < 1.0e-7);
-        assert_eq!(
-            survivor_only.summary(),
-            "1 of 18 attempt slots recorded; 17 unrecorded"
-        );
+        assert!(canonical_n18.is_complete());
+        assert!(canonical_n18.is_promotion_eligible());
+        assert!((canonical_n18.discount_factor() - 1.0).abs() < f32::EPSILON);
 
-        // Anti-laundering: recording the same winning slot three times covers
-        // one slot, and members without slots never advance completion.
-        let laundered = AttemptFamilyMultiplicity::from_members(
-            "fam-b".to_owned(),
-            Some(3),
-            [
-                (Some(1), Some("selected")),
-                (Some(1), Some("selected")),
-                (Some(1), Some("selected")),
-                (None, Some("rejected")),
-            ],
-        );
-        assert!(!laundered.is_complete());
-        assert_eq!(laundered.recorded_slots, 1);
-        assert_eq!(laundered.unslotted_count, 1);
-        assert_eq!(laundered.unrecorded_count(), 2);
-        assert!((laundered.discount_factor() - 1.0 / 3.0).abs() < 1.0e-7);
-
-        let complete = AttemptFamilyMultiplicity::from_members(
-            "fam-c".to_owned(),
+        let canonical = AttemptFamilyMultiplicity::from_members(
+            "fam-canonical".to_owned(),
             Some(3),
             [
                 (Some(1), Some("selected")),
@@ -632,39 +640,21 @@ mod tests {
                 (Some(3), Some("rejected")),
             ],
         );
-        assert!(complete.is_complete());
-        assert!(!complete.is_survivor_only());
-        assert_eq!(complete.selected_count, 1);
-        assert_eq!(complete.rejected_count, 2);
-        assert_eq!(complete.unrecorded_count(), 0);
-        assert!((complete.discount_factor() - 1.0).abs() < f32::EPSILON);
-
-        // Slots above the declared size are visible but never complete a
-        // family they do not belong to.
-        let out_of_range = AttemptFamilyMultiplicity::from_members(
-            "fam-d".to_owned(),
-            Some(2),
-            [(Some(1), Some("selected")), (Some(9), Some("rejected"))],
+        assert!(canonical.is_complete());
+        assert!(canonical.is_promotion_eligible());
+        assert_eq!(
+            canonical.promotion_posture(),
+            AttemptFamilyPromotionPosture::Eligible
         );
-        assert!(!out_of_range.is_complete());
-        assert_eq!(out_of_range.recorded_slots, 1);
-        assert_eq!(out_of_range.unslotted_count, 1);
-
-        let undeclared = AttemptFamilyMultiplicity::from_members(
-            "fam-e".to_owned(),
-            None,
-            [(Some(1), Some("selected")), (Some(2), Some("rejected"))],
+        assert_eq!(
+            canonical.promotion_reason(),
+            "family has the canonical selected/rejected composition"
         );
-        assert!(undeclared.is_complete());
-        assert!((undeclared.discount_factor() - 1.0).abs() < f32::EPSILON);
-    }
+        assert!((canonical.member_discount_factor(Some("selected")) - 1.0).abs() < f32::EPSILON);
 
-    #[test]
-    fn promotion_eligibility_requires_canonical_composition_not_just_slots() {
-        // All-winners laundering: every slot filled, zero negative evidence.
-        // Complete for discount purposes, but never promotion-eligible.
+        // All-winners laundering fills every slot but has no negative evidence.
         let all_selected = AttemptFamilyMultiplicity::from_members(
-            "fam-f".to_owned(),
+            "fam-all-selected".to_owned(),
             Some(3),
             [
                 (Some(1), Some("selected")),
@@ -674,39 +664,67 @@ mod tests {
         );
         assert!(all_selected.is_complete());
         assert!(!all_selected.is_promotion_eligible());
+        assert_eq!(
+            all_selected.promotion_posture(),
+            AttemptFamilyPromotionPosture::BlockedInvalidComposition
+        );
 
-        let canonical = AttemptFamilyMultiplicity::from_members(
-            "fam-g".to_owned(),
+        let undeclared = AttemptFamilyMultiplicity::from_members(
+            "fam-undeclared".to_owned(),
+            None,
+            [(Some(1), Some("selected")), (Some(2), Some("rejected"))],
+        );
+        assert!(!undeclared.is_complete());
+        assert!(!undeclared.is_promotion_eligible());
+        assert_eq!(
+            undeclared.promotion_posture(),
+            AttemptFamilyPromotionPosture::BlockedUndeclared
+        );
+    }
+
+    #[test]
+    fn malformed_or_composition_invalid_families_have_stable_blocking_postures() {
+        let duplicate = AttemptFamilyMultiplicity::from_members(
+            "fam-duplicate".to_owned(),
+            Some(3),
+            [
+                (Some(1), Some("selected")),
+                (Some(1), Some("rejected")),
+                (Some(2), Some("rejected")),
+            ],
+        );
+        assert_eq!(duplicate.duplicate_slot_count, 1);
+        assert_eq!(
+            duplicate.promotion_posture(),
+            AttemptFamilyPromotionPosture::BlockedDuplicateSlots
+        );
+
+        let overfull = AttemptFamilyMultiplicity::from_members(
+            "fam-overfull".to_owned(),
             Some(3),
             [
                 (Some(1), Some("selected")),
                 (Some(2), Some("rejected")),
                 (Some(3), Some("rejected")),
+                (Some(4), Some("rejected")),
             ],
         );
-        assert!(canonical.is_promotion_eligible());
-
-        let incomplete = AttemptFamilyMultiplicity::from_members(
-            "fam-h".to_owned(),
-            Some(3),
-            [(Some(1), Some("selected")), (Some(2), Some("rejected"))],
+        assert_eq!(overfull.out_of_range_slot_count, 1);
+        assert_eq!(
+            overfull.promotion_posture(),
+            AttemptFamilyPromotionPosture::BlockedOverfull
         );
-        assert!(!incomplete.is_promotion_eligible());
-    }
 
-    #[test]
-    fn member_discount_applies_to_selected_survivors_never_rejected_evidence() {
-        let survivor_only = AttemptFamilyMultiplicity::from_members(
-            "fam-i".to_owned(),
-            Some(18),
-            [(Some(1), Some("selected")), (Some(2), Some("rejected"))],
+        let missing_disposition = AttemptFamilyMultiplicity::from_members(
+            "fam-composition".to_owned(),
+            Some(2),
+            [(Some(1), Some("selected")), (Some(2), None)],
         );
-        let selected_factor = survivor_only.member_discount_factor(Some("selected"));
-        assert!((selected_factor - 2.0 / 18.0).abs() < 1.0e-7);
-        let rejected_factor = survivor_only.member_discount_factor(Some("rejected"));
-        assert!((rejected_factor - 1.0).abs() < f32::EPSILON);
-        let unslotted_factor = survivor_only.member_discount_factor(None);
-        assert!((unslotted_factor - 1.0).abs() < f32::EPSILON);
+        assert!(missing_disposition.is_complete());
+        assert_eq!(
+            missing_disposition.promotion_posture(),
+            AttemptFamilyPromotionPosture::BlockedInvalidComposition
+        );
     }
 
     #[test]

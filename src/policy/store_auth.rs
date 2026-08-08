@@ -1072,6 +1072,28 @@ mod tests {
     }
 
     #[test]
+    fn lane_mac_cannot_replay_in_the_reserved_body_approval_domain() {
+        let dir = keys_dir();
+        let root = StoreAuthRoot::create(dir.path()).expect("create");
+        let message = b"T1.4 body metadata lane snapshot";
+        let lane = root
+            .mac(MacDomain::LaneApprovalSnapshotTag, message)
+            .expect("lane MAC");
+
+        assert!(
+            root.verify(MacDomain::LaneApprovalSnapshotTag, message, &lane)
+                .expect("verify in lane domain"),
+            "the generic T1.4 lane domain must accept its own MAC"
+        );
+        assert!(
+            !root
+                .verify(MacDomain::BodyApprovalSnapshotTag, message, &lane)
+                .expect("verify in reserved body domain"),
+            "a T1.4 metadata-body lane MAC must not replay in T5.9's reserved domain"
+        );
+    }
+
+    #[test]
     fn tampered_message_fails_verification() {
         let dir = keys_dir();
         let root = StoreAuthRoot::create(dir.path()).expect("create");

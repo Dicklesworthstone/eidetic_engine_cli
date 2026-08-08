@@ -772,7 +772,9 @@ mod tests {
         let encoded = lane_bearer
             .strip_prefix(APPROVAL_TOKEN_PREFIX)
             .expect("approval prefix");
-        let envelope = URL_SAFE_NO_PAD.decode(encoded).expect("decode fixed bearer envelope");
+        let envelope = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .expect("decode fixed bearer envelope");
         assert_eq!(envelope.len(), APPROVAL_TOKEN_ENVELOPE_LEN);
         assert_eq!(envelope[VERSION_OFFSET], TOKEN_VERSION);
         assert_eq!(&envelope[NONCE_OFFSET..ISSUED_AT_OFFSET], nonce.as_slice());
@@ -818,7 +820,8 @@ mod tests {
     }
 
     #[test]
-    fn every_envelope_byte_tamper_and_cross_surface_replay_are_invalid_before_snapshot_comparison() {
+    fn every_envelope_byte_tamper_and_cross_surface_replay_are_invalid_before_snapshot_comparison()
+    {
         let (_directory, root) = root();
         let issued = issue_deterministic(&root, b"canonical-preview", 0x22);
         for byte_index in 0..ENVELOPE_LEN {
