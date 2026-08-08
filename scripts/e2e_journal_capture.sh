@@ -137,6 +137,20 @@ assert_database_omits_secret() {
     _harness_pass "$label"
 }
 
+assert_persisted_redaction() {
+    local json="$1" secret="$2" label="$3" result
+    result="$(printf '%s' "$json" \
+        | jq -e --arg secret "$secret" \
+            'any(.data.entries[]?; (.body // "") | contains("[REDACTED:")) and all(.data.entries[]?; ((.body // "") | contains($secret) | not))' \
+            >/dev/null 2>&1 && printf true || printf false)"
+    e2e_log_assert_eq "$result" "true" "$label" || true
+    if [ "$result" = "true" ]; then
+        _harness_pass "$label"
+    else
+        _harness_fail "$label: persisted entries lacked a redaction marker or exposed the raw secret"
+    fi
+}
+
 with_temp_workspace WS
 JOURNAL_DATABASE_PATH="$WS/.ee/ee.db"
 SESSION="journal-capture-${BASHPID:-$$}"
@@ -191,9 +205,7 @@ step "list scoped journal entries before distillation"
 list_out="$(ee_json --workspace "$WS" journal list --session "$SESSION" --json)"
 assert_jq "$list_out" '.success == true and .data.entryCount == 6' \
     "journal list returns the six scoped entries"
-# shellcheck disable=SC2016 # `$secret` is a jq variable, not a shell expansion.
-assert_jq "$list_out" --arg secret "$SECRET" \
-    'any(.data.entries[]?; (.body // "") | contains("[REDACTED:")) and all(.data.entries[]?; ((.body // "") | contains($secret) | not))' \
+assert_persisted_redaction "$list_out" "$SECRET" \
     "persisted journal body exposes a redaction marker and never the raw secret"
 assert_jq "$list_out" 'any(.data.entries[]?; .instructionRisk == "high")' \
     "prompt-injection-like journal evidence is graded high risk"
