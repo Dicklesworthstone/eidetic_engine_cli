@@ -1,0 +1,49 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "degraded": [],
+  "data": {
+    "command": "remember",
+    "version": "0.13.1",
+    "mode": "batch",
+    "status": "stored",
+    "dryRun": false,
+    "lineCount": 3,
+    "storedCount": 1,
+    "reinforcedCount": 0,
+    "alreadyRecordedCount": 1,
+    "failedCount": 1,
+    "results": [
+      {
+        "line": 1,
+        "status": "stored",
+        "memoryId": "mem_018ff8dc-3d85-7cc0-a6fd-a2d479e6d411",
+        "errorCode": null,
+        "errorMessage": null,
+        "reinforced": false,
+        "similarity": null,
+        "suggestedLinks": []
+      },
+      {
+        "line": 2,
+        "status": "already_recorded",
+        "memoryId": "mem_018ff8dc-3d85-7cc0-a6fd-a2d479e6d411",
+        "errorCode": null,
+        "errorMessage": null,
+        "reinforced": false,
+        "similarity": null,
+        "suggestedLinks": []
+      },
+      {
+        "line": 3,
+        "status": "failed",
+        "memoryId": null,
+        "errorCode": "remember_validation_failed",
+        "errorMessage": "memory content must not be empty",
+        "reinforced": false,
+        "similarity": null,
+        "suggestedLinks": []
+      }
+    ]
+  }
+}

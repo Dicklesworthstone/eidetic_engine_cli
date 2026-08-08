@@ -1,0 +1,37 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "degraded": [],
+  "data": {
+    "schema": "ee.outcome.trace.v1",
+    "version": "0.13.1",
+    "memoryId": "mem_018ff8dc-3d85-7cc0-a6fd-a2d479e6d411",
+    "eventCount": 2,
+    "quarantinedCount": 1,
+    "bayesUpdatesApplied": 1,
+    "trustTransitions": 1,
+    "events": [
+      {
+        "eventId": "fb_journal_capture_001",
+        "signal": "helpful",
+        "weight": 1.0,
+        "sourceType": "human",
+        "recordedAt": "2026-06-12T12:10:00Z",
+        "reasonPresent": true,
+        "quarantined": false,
+        "priorMean": 0.5,
+        "posteriorMean": 0.6666666666666666,
+        "trustTransition": "agent_assertion -> corroborated"
+      },
+      {
+        "eventId": "fb_journal_capture_002",
+        "signal": "harmful",
+        "weight": 1.0,
+        "sourceType": "automated_check",
+        "recordedAt": "2026-06-12T12:11:00Z",
+        "reasonPresent": false,
+        "quarantined": true
+      }
+    ]
+  }
+}

@@ -9,7 +9,9 @@
   "goldens": [
     "tests/fixtures/golden/journal_capture/append_command_failure.json.golden",
     "tests/fixtures/golden/journal_capture/batch_mixed_lines.json.golden",
-    "tests/fixtures/golden/journal_capture/distill_dry_run.json.golden"
+    "tests/fixtures/golden/journal_capture/distill_dry_run.json.golden",
+    "tests/fixtures/golden/journal_capture/remember_batch.json.golden",
+    "tests/fixtures/golden/journal_capture/outcome_trace.json.golden"
   ],
   "propertyAxes": [
     "journal_jsonl_mixed_valid_invalid_lines",

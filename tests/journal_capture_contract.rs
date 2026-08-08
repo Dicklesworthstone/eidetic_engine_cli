@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use ee::core::journal::{JOURNAL_DISTILL_SCHEMA_V1, JOURNAL_ENTRY_SCHEMA_V1};
+use ee::core::memory::{RememberBatchLineResult, RememberBatchReport};
+use ee::core::outcome::{OUTCOME_TRACE_SCHEMA_V1, OutcomeTraceEvent, OutcomeTraceReport};
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
@@ -199,8 +201,105 @@ fn distill_golden() -> Value {
     })
 }
 
+fn remember_batch_golden() -> Value {
+    let report = RememberBatchReport {
+        version: env!("CARGO_PKG_VERSION"),
+        status: "stored",
+        dry_run: false,
+        line_count: 3,
+        stored_count: 1,
+        reinforced_count: 0,
+        already_recorded_count: 1,
+        failed_count: 1,
+        results: vec![
+            RememberBatchLineResult {
+                line: 1,
+                status: "stored",
+                memory_id: Some("mem_018ff8dc-3d85-7cc0-a6fd-a2d479e6d411".to_owned()),
+                error_code: None,
+                error_message: None,
+                reinforced: false,
+                similarity: None,
+                suggested_links: Vec::new(),
+            },
+            RememberBatchLineResult {
+                line: 2,
+                status: "already_recorded",
+                memory_id: Some("mem_018ff8dc-3d85-7cc0-a6fd-a2d479e6d411".to_owned()),
+                error_code: None,
+                error_message: None,
+                reinforced: false,
+                similarity: None,
+                suggested_links: Vec::new(),
+            },
+            RememberBatchLineResult {
+                line: 3,
+                status: "failed",
+                memory_id: None,
+                error_code: Some("remember_validation_failed"),
+                error_message: Some("memory content must not be empty".to_owned()),
+                reinforced: false,
+                similarity: None,
+                suggested_links: Vec::new(),
+            },
+        ],
+    };
+    json!({
+        "schema": "ee.response.v2",
+        "success": true,
+        "degraded": [],
+        "data": report.data_json(),
+    })
+}
+
+fn outcome_trace_golden() -> Result<Value, String> {
+    let report = OutcomeTraceReport {
+        schema: OUTCOME_TRACE_SCHEMA_V1,
+        version: env!("CARGO_PKG_VERSION"),
+        memory_id: "mem_018ff8dc-3d85-7cc0-a6fd-a2d479e6d411".to_owned(),
+        event_count: 2,
+        quarantined_count: 1,
+        bayes_updates_applied: 1,
+        trust_transitions: 1,
+        events: vec![
+            OutcomeTraceEvent {
+                event_id: "fb_journal_capture_001".to_owned(),
+                signal: "helpful".to_owned(),
+                weight: 1.0,
+                source_type: "human".to_owned(),
+                recorded_at: "2026-06-12T12:10:00Z".to_owned(),
+                reason_present: true,
+                quarantined: false,
+                prior_mean: Some(0.5),
+                posterior_mean: Some(0.666_666_666_666_666_6),
+                trust_transition: Some("agent_assertion -> corroborated".to_owned()),
+            },
+            OutcomeTraceEvent {
+                event_id: "fb_journal_capture_002".to_owned(),
+                signal: "harmful".to_owned(),
+                weight: 1.0,
+                source_type: "automated_check".to_owned(),
+                recorded_at: "2026-06-12T12:11:00Z".to_owned(),
+                reason_present: false,
+                quarantined: true,
+                prior_mean: None,
+                posterior_mean: None,
+                trust_transition: None,
+            },
+        ],
+    };
+    let data = serde_json::to_value(report)
+        .map_err(|error| format!("serialize outcome trace golden: {error}"))?;
+    Ok(json!({
+        "schema": "ee.response.v2",
+        "success": true,
+        "degraded": [],
+        "data": data,
+    }))
+}
+
 #[test]
-fn journal_capture_goldens_pin_append_batch_and_distill_shapes() -> TestResult {
+fn journal_capture_goldens_pin_every_required_output_shape() -> TestResult {
     assert_json_fixture(
         "tests/fixtures/golden/journal_capture/append_command_failure.json.golden",
         append_golden(),
@@ -215,6 +314,16 @@ fn journal_capture_goldens_pin_append_batch_and_distill_shapes() -> TestResult {
         "tests/fixtures/golden/journal_capture/distill_dry_run.json.golden",
         distill_golden(),
         "journal distill",
+    )?;
+    assert_json_fixture(
+        "tests/fixtures/golden/journal_capture/remember_batch.json.golden",
+        remember_batch_golden(),
+        "remember batch",
+    )?;
+    assert_json_fixture(
+        "tests/fixtures/golden/journal_capture/outcome_trace.json.golden",
+        outcome_trace_golden()?,
+        "outcome trace",
     )
 }
 
@@ -476,6 +585,8 @@ fn journal_capture_contract_fixture_lists_required_evidence() -> TestResult {
         "/goldens/0",
         "/goldens/1",
         "/goldens/2",
+        "/goldens/3",
+        "/goldens/4",
         "/propertyAxes/0",
         "/propertyAxes/1",
         "/e2eScript",
