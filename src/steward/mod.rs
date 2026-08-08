@@ -3731,7 +3731,7 @@ impl ManualRunner {
                     &preflight,
                     Some(&report),
                     false,
-                    report.processed_jobs > 0,
+                    report.durable_mutation(),
                 ),
                 &qos_decision,
             )),

@@ -346,7 +346,8 @@ e2e_log_end
     if field(manifest, "phase")? != "command_end" {
         return Err(format!("unexpected phase: {}", field(manifest, "phase")?));
     }
-    if field(manifest, "binary_path")? != fake_binary.to_string_lossy() {
+    let expected_binary_path = fake_binary.to_string_lossy();
+    if field(manifest, "binary_path")? != expected_binary_path.as_ref() {
         return Err(format!(
             "binary_path mismatch: {}",
             field(manifest, "binary_path")?
@@ -547,6 +548,72 @@ e2e_log_end
     }
     if manifest.pointer("/fields/remote_artifact_attestation") != Some(&report) {
         return Err("nested remote artifact attestation was not preserved".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn bash_harness_attests_actual_binary_behind_env_prefix() -> TestResult {
+    let tmp = tempdir()?;
+    let fake_binary = tmp.path().join("fake-ee");
+    let verification_path = tmp.path().join("artifact-verification.json");
+    let log_path = tmp.path().join("j1-env-prefix.jsonl");
+    write_fake_binary(&fake_binary)?;
+    let binary_hash = sha256_file(&fake_binary)?;
+    let report = remote_artifact_verification_report(&binary_hash)?;
+    fs::write(
+        &verification_path,
+        serde_json::to_vec_pretty(&report)
+            .map_err(|error| format!("failed to encode verification report: {error}"))?,
+    )
+    .map_err(|error| format!("failed to write verification report: {error}"))?;
+
+    let script = format!(
+        r#"
+set -uo pipefail
+source "{}/scripts/lib/e2e_logger.sh"
+e2e_log_start "artifact_manifest_env_prefix"
+rc=0
+e2e_log_command env EE_ENV_PREFIX_FIXTURE=1 "{}" --version >/dev/null || rc=$?
+e2e_log_end
+exit "$rc"
+"#,
+        env!("CARGO_MANIFEST_DIR"),
+        fake_binary.display(),
+    );
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(script)
+        .env("EE_TEST_LOG_PATH", &log_path)
+        .env("EE_REMOTE_ARTIFACT_VERIFICATION_REPORT", &verification_path)
+        .env("EE_TEST_EXECUTION_SUBSTRATE", "remote_artifact")
+        .output()
+        .map_err(|error| format!("failed to run env-prefixed bash harness: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "env-prefixed bash harness failed: status={:?} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let events = read_jsonl(&log_path)?;
+    let manifest = events
+        .iter()
+        .find(|event| event["kind"] == "artifact_manifest")
+        .ok_or_else(|| format!("no env-prefixed artifact_manifest event in {events:?}"))?;
+    if field(manifest, "manifest_schema")? != "ee.test_artifact_manifest.v2" {
+        return Err("env-prefixed manifest_schema mismatch".to_owned());
+    }
+    let expected_binary_path = fake_binary.to_string_lossy();
+    if field(manifest, "binary_path")? != expected_binary_path.as_ref() {
+        return Err(format!(
+            "env-prefixed manifest attested the launcher instead of ee: {}",
+            field(manifest, "binary_path")?
+        ));
+    }
+    if field(manifest, "binary_hash")? != binary_hash {
+        return Err("env-prefixed manifest did not bind the exercised ee bytes".to_owned());
     }
     Ok(())
 }

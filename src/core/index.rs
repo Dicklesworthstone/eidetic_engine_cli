@@ -1368,6 +1368,11 @@ impl IndexProcessingJobReport {
 
 impl IndexProcessingReport {
     #[must_use]
+    pub(crate) fn durable_mutation(&self) -> bool {
+        index_processing_jobs_have_durable_mutation(&self.jobs)
+    }
+
+    #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
             "command": "index_process_jobs",
@@ -1899,8 +1904,9 @@ pub async fn process_index_jobs_with_cx(
 /// Process the bounded pending-job set with one source snapshot and one publish.
 ///
 /// Unlike [`process_index_jobs`], this is the production report surface for the
-/// steward's `index_coalesce` job. Dry-run planning intentionally retains the
-/// same report contract without claiming or publishing any job.
+/// steward's `index_coalesce` job. Dry-run reports remain selection-only and
+/// retain ordinary per-job planning labels; they do not claim that a coalesced
+/// snapshot was built, and they neither claim nor publish any job.
 pub(crate) fn process_index_jobs_coalesced(
     options: &IndexProcessingOptions,
 ) -> Result<IndexProcessingReport, IndexRebuildError> {
@@ -2001,33 +2007,18 @@ async fn process_index_jobs_with_drain(
             reports
         }
         IndexJobDrain::Coalesced => {
-            process_pending_index_jobs_coalesced_with_cx(
+            process_selected_index_jobs_coalesced_with_cx(
                 cx,
                 &db,
                 &workspace_id,
                 &index_dir,
-                effective_job_limit,
+                pending_jobs,
             )
             .await?
         }
     };
-    let mut completed_jobs = 0_u32;
-    let mut failed_jobs = 0_u32;
-
-    for result in &jobs {
-        if result.outcome == "failed" {
-            failed_jobs = failed_jobs.saturating_add(1);
-        } else {
-            completed_jobs = completed_jobs.saturating_add(1);
-        }
-    }
-
-    let processed_jobs = completed_jobs.saturating_add(failed_jobs);
-    let status = match (completed_jobs, failed_jobs) {
-        (_, 0) => IndexProcessingStatus::Success,
-        (0, _) => IndexProcessingStatus::Failed,
-        _ => IndexProcessingStatus::PartialFailure,
-    };
+    let (processed_jobs, completed_jobs, failed_jobs, status) =
+        summarize_index_processing_jobs(pending_count, &jobs);
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     Ok(IndexProcessingReport {
@@ -2045,6 +2036,40 @@ async fn process_index_jobs_with_drain(
         jobs,
         runtime_profile,
     })
+}
+
+fn summarize_index_processing_jobs(
+    pending_jobs: u32,
+    jobs: &[IndexProcessingJobReport],
+) -> (u32, u32, u32, IndexProcessingStatus) {
+    let reported_jobs = u32::try_from(jobs.len()).unwrap_or(u32::MAX);
+    let completed_jobs = jobs
+        .iter()
+        .filter(|result| result.outcome == "completed")
+        .count()
+        .try_into()
+        .unwrap_or(u32::MAX);
+    let non_completed_jobs = jobs
+        .iter()
+        .filter(|result| result.outcome != "completed")
+        .count()
+        .try_into()
+        .unwrap_or(u32::MAX);
+    let unreported_jobs = pending_jobs.saturating_sub(reported_jobs);
+    let failed_jobs = non_completed_jobs.saturating_add(unreported_jobs);
+    let processed_jobs = completed_jobs.saturating_add(failed_jobs);
+    let status = match (pending_jobs, completed_jobs, failed_jobs) {
+        (0, 0, 0) => IndexProcessingStatus::NoPendingJobs,
+        (_, _, 0) => IndexProcessingStatus::Success,
+        (_, 0, _) => IndexProcessingStatus::Failed,
+        _ => IndexProcessingStatus::PartialFailure,
+    };
+    (processed_jobs, completed_jobs, failed_jobs, status)
+}
+
+fn index_processing_jobs_have_durable_mutation(jobs: &[IndexProcessingJobReport]) -> bool {
+    jobs.iter()
+        .any(|job| matches!(job.outcome.as_str(), "completed" | "failed"))
 }
 
 /// Drain every pending search-index job for one workspace with a SINGLE
@@ -2092,6 +2117,20 @@ where
     .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
 }
 
+#[cfg(test)]
+fn process_selected_index_jobs_coalesced(
+    db: &DbConnection,
+    workspace_id: &str,
+    index_dir: &Path,
+    selected: Vec<StoredSearchIndexJob>,
+) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError> {
+    crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+        process_selected_index_jobs_coalesced_with_cx(&cx, db, workspace_id, index_dir, selected)
+            .await
+    })
+    .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
+}
+
 /// Public retry path for cancelled index jobs: every workflow-emitted
 /// processing tick first transitions each cancelled job in the workspace
 /// atomically back to `pending` as the SAME logical job (one conditional
@@ -2132,6 +2171,24 @@ pub(crate) async fn process_pending_index_jobs_coalesced_with_cx(
     .await
 }
 
+async fn process_selected_index_jobs_coalesced_with_cx(
+    cx: &asupersync::Cx,
+    db: &DbConnection,
+    workspace_id: &str,
+    index_dir: &Path,
+    selected: Vec<StoredSearchIndexJob>,
+) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError> {
+    process_selected_index_jobs_coalesced_after_snapshot_with_cx(
+        cx,
+        db,
+        workspace_id,
+        index_dir,
+        selected,
+        || Ok(()),
+    )
+    .await
+}
+
 async fn process_pending_index_jobs_coalesced_after_snapshot_with_cx<F>(
     cx: &asupersync::Cx,
     db: &DbConnection,
@@ -2144,12 +2201,35 @@ where
     F: FnOnce() -> Result<(), IndexRebuildError>,
 {
     index_checkpoint(cx)?;
+    let selected = db.list_pending_search_index_jobs(workspace_id, job_limit)?;
+    process_selected_index_jobs_coalesced_after_snapshot_with_cx(
+        cx,
+        db,
+        workspace_id,
+        index_dir,
+        selected,
+        after_snapshot,
+    )
+    .await
+}
+
+async fn process_selected_index_jobs_coalesced_after_snapshot_with_cx<F>(
+    cx: &asupersync::Cx,
+    db: &DbConnection,
+    workspace_id: &str,
+    index_dir: &Path,
+    selected: Vec<StoredSearchIndexJob>,
+    after_snapshot: F,
+) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError>
+where
+    F: FnOnce() -> Result<(), IndexRebuildError>,
+{
+    index_checkpoint(cx)?;
     const COALESCED_MODE: &str = "coalesced_full_rebuild";
-    let pending = db.list_pending_search_index_jobs(workspace_id, job_limit)?;
     let mut claimed = Vec::new();
     let mut job_finalizers = Vec::new();
     let mut reports = Vec::new();
-    for job in pending {
+    for job in selected {
         if db.start_search_index_job(&job.id)? {
             job_finalizers.push(RunningIndexJobFinalizer {
                 cx,
@@ -11656,6 +11736,45 @@ mod tests {
     }
 
     #[test]
+    fn coalesced_processing_dry_run_reports_selection_without_coalesced_claim() -> TestResult {
+        let root = unique_test_dir("process-coalesced-dry-run");
+        let workspace = root.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        seed_reembed_database(&workspace, &database)?;
+        queue_pending_index_job(&database, "sidx_coalesceddryrun00000000000")?;
+
+        let report = process_index_jobs_coalesced(&IndexProcessingOptions {
+            workspace_path: workspace,
+            database_path: Some(database),
+            index_dir: Some(index_dir.clone()),
+            dry_run: true,
+            job_limit: Some(1),
+        })
+        .map_err(|e| e.to_string())?;
+        ensure(
+            report.status == IndexProcessingStatus::DryRun,
+            "coalesced dry-run status",
+        )?;
+        ensure(
+            report.jobs.len() == 1,
+            "coalesced dry-run planned job count",
+        )?;
+        ensure(
+            report.jobs[0].outcome == "planned" && report.jobs[0].processing_mode == "full_rebuild",
+            "dry-run must use ordinary selection labels instead of claiming a coalesced build",
+        )?;
+        ensure(
+            !report.durable_mutation(),
+            "coalesced dry-run must not claim a durable mutation",
+        )?;
+        ensure(
+            !index_dir.join(INDEX_METADATA_FILE).exists(),
+            "coalesced dry-run must not publish index metadata",
+        )
+    }
+
+    #[test]
     fn index_processing_completes_pending_rebuild_job() -> TestResult {
         let root = unique_test_dir("process-completes-job");
         let workspace = root.join("workspace");
@@ -11730,6 +11849,10 @@ mod tests {
         ensure(report.processed_jobs == 2, "coalesced processed job count")?;
         ensure(report.completed_jobs == 2, "coalesced completed job count")?;
         ensure(report.failed_jobs == 0, "coalesced failed job count")?;
+        ensure(
+            report.durable_mutation(),
+            "completed coalesced jobs are durable mutations",
+        )?;
         ensure(report.jobs.len() == 2, "coalesced per-job report count")?;
         for expected_id in [first_job_id, second_job_id] {
             let job = report
@@ -11758,8 +11881,144 @@ mod tests {
         ensure(repeated.pending_jobs == 0, "repeat pending job count")?;
         ensure(repeated.processed_jobs == 0, "repeat processed job count")?;
         ensure(
+            !repeated.durable_mutation(),
+            "no-pending repeat is not a durable mutation",
+        )?;
+        ensure(
             repeated.jobs.is_empty(),
             "repeat per-job report must be empty",
+        )
+    }
+
+    #[test]
+    fn coalesced_selected_batch_reports_mid_claim_race_as_partial_failure() -> TestResult {
+        let root = unique_test_dir("process-coalesced-claim-race");
+        let workspace = root.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        let raced_job_id = "sidx_coalescerace00000000000000";
+        let completed_job_id = "sidx_coalescerace10000000000000";
+        seed_reembed_database(&workspace, &database)?;
+        queue_pending_index_job(&database, raced_job_id)?;
+        queue_pending_index_job(&database, completed_job_id)?;
+
+        let connection = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let selected = connection
+            .list_pending_search_index_jobs("wsp_01234567890123456789012345", Some(2))
+            .map_err(|e| e.to_string())?;
+        ensure(selected.len() == 2, "claim-race selected batch size")?;
+        ensure(
+            connection
+                .start_search_index_job(raced_job_id)
+                .map_err(|e| e.to_string())?,
+            "claim-race fixture must claim the first selected job",
+        )?;
+
+        let reports = process_selected_index_jobs_coalesced(
+            &connection,
+            "wsp_01234567890123456789012345",
+            &index_dir,
+            selected,
+        )
+        .map_err(|e| e.to_string())?;
+        ensure(reports.len() == 2, "claim-race report count")?;
+        let raced = reports
+            .iter()
+            .find(|job| job.job_id == raced_job_id)
+            .ok_or_else(|| "claim-race skipped report missing".to_owned())?;
+        ensure(raced.outcome == "skipped", "claim-race skipped outcome")?;
+        ensure(
+            raced.error.as_deref() == Some("search index job was not pending"),
+            "claim-race skipped reason",
+        )?;
+        let completed = reports
+            .iter()
+            .find(|job| job.job_id == completed_job_id)
+            .ok_or_else(|| "claim-race completed report missing".to_owned())?;
+        ensure(
+            completed.outcome == "completed",
+            "claim-race peer job outcome",
+        )?;
+
+        let (processed_jobs, completed_jobs, failed_jobs, status) =
+            summarize_index_processing_jobs(2, &reports);
+        ensure(processed_jobs == 2, "claim-race accounted job count")?;
+        ensure(completed_jobs == 1, "claim-race completed job count")?;
+        ensure(failed_jobs == 1, "claim-race failed job count")?;
+        ensure(
+            status == IndexProcessingStatus::PartialFailure,
+            "claim-race summary must not report success",
+        )?;
+        connection.close().map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn coalesced_selected_batch_all_skipped_fails_without_claiming_mutation() -> TestResult {
+        let root = unique_test_dir("process-coalesced-all-skipped");
+        let workspace = root.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        let first_job_id = "sidx_coalesceskip00000000000000";
+        let second_job_id = "sidx_coalesceskip10000000000000";
+        seed_reembed_database(&workspace, &database)?;
+        queue_pending_index_job(&database, first_job_id)?;
+        queue_pending_index_job(&database, second_job_id)?;
+
+        let connection = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let selected = connection
+            .list_pending_search_index_jobs("wsp_01234567890123456789012345", Some(2))
+            .map_err(|e| e.to_string())?;
+        ensure(selected.len() == 2, "all-skipped selected batch size")?;
+        for job_id in [first_job_id, second_job_id] {
+            ensure(
+                connection
+                    .start_search_index_job(job_id)
+                    .map_err(|e| e.to_string())?,
+                format!("all-skipped fixture must pre-claim {job_id}"),
+            )?;
+        }
+
+        let reports = process_selected_index_jobs_coalesced(
+            &connection,
+            "wsp_01234567890123456789012345",
+            &index_dir,
+            selected,
+        )
+        .map_err(|e| e.to_string())?;
+        ensure(
+            reports.len() == 2 && reports.iter().all(|job| job.outcome == "skipped"),
+            format!("all pre-claimed jobs must report skipped: {reports:?}"),
+        )?;
+        let (processed_jobs, completed_jobs, failed_jobs, status) =
+            summarize_index_processing_jobs(2, &reports);
+        ensure(processed_jobs == 2, "all-skipped accounted job count")?;
+        ensure(completed_jobs == 0, "all-skipped completed job count")?;
+        ensure(failed_jobs == 2, "all-skipped failed job count")?;
+        ensure(
+            status == IndexProcessingStatus::Failed,
+            "all-skipped summary must fail",
+        )?;
+        ensure(
+            !index_processing_jobs_have_durable_mutation(&reports),
+            "all-skipped batch must not claim a durable mutation",
+        )?;
+        ensure(
+            !index_dir.join(INDEX_METADATA_FILE).exists(),
+            "all-skipped batch must not publish an index",
+        )?;
+        connection.close().map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn index_processing_summary_fails_closed_on_unreported_selected_jobs() -> TestResult {
+        let (processed_jobs, completed_jobs, failed_jobs, status) =
+            summarize_index_processing_jobs(2, &[]);
+        ensure(processed_jobs == 2, "unreported jobs accounted count")?;
+        ensure(completed_jobs == 0, "unreported jobs completed count")?;
+        ensure(failed_jobs == 2, "unreported jobs failed count")?;
+        ensure(
+            status == IndexProcessingStatus::Failed,
+            "unreported selected jobs must fail closed",
         )
     }
 

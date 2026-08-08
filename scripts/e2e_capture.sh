@@ -47,7 +47,8 @@ ee_json_with_env() {
     local env_value="$2"
     shift 2
     local rc=0
-    e2e_log_command env "$env_key=$env_value" "$EE_BIN" "$@" || rc=$?
+    EE_E2E_ARTIFACT_BINARY="$EE_BIN" \
+        e2e_log_command env "$env_key=$env_value" "$EE_BIN" "$@" || rc=$?
     if [ "$rc" -ne 0 ]; then
         printf 'exit=%s env=%s command=%s\n' "$rc" "$env_key" "$*" \
             >>"$EE_JSON_FAILURES_FILE"
@@ -64,6 +65,19 @@ assert_nonempty() {
     else
         e2e_log_assert_eq "empty" "nonempty" "$label" || true
         _harness_fail "$label: value was empty"
+    fi
+}
+
+assert_distinct() {
+    local left="$1"
+    local right="$2"
+    local label="$3"
+    if [ -n "$left" ] && [ -n "$right" ] && [ "$left" != "$right" ]; then
+        e2e_log_assert_eq "distinct" "distinct" "$label" || true
+        _harness_pass "$label"
+    else
+        e2e_log_assert_eq "equal-or-empty" "distinct" "$label" || true
+        _harness_fail "$label: values must both be nonempty and distinct"
     fi
 }
 
@@ -256,6 +270,10 @@ assert_nonempty "$first_session_id" "first imported session exposes its exact ID
 assert_nonempty "$second_session_id" "second imported session exposes its exact ID"
 assert_nonempty "$first_index_job_id" "first import exposes its exact index job ID"
 assert_nonempty "$second_index_job_id" "second import exposes its exact index job ID"
+assert_distinct "$first_session_id" "$second_session_id" \
+    "imported sessions expose distinct IDs"
+assert_distinct "$first_index_job_id" "$second_index_job_id" \
+    "imported sessions queue distinct index job IDs"
 after_import_memories="$(memory_list_count "$WS")"
 assert_zero "$after_import_memories" \
     "cass import creates evidence but does not silently store memories"
@@ -289,12 +307,18 @@ assert_jq "$coalesce_out" ".schema == \"ee.response.v2\" and .success == true
     and .data.job.details.result.completed_jobs == 2
     and .data.job.details.result.failed_jobs == 0
     and (.data.job.details.result.jobs | length == 2)
+    and ([.data.job.details.result.jobs[].processing_mode] | unique | length == 1)
+    and ([.data.job.details.result.jobs[].fallback_to_full] | unique | length == 1)
     and any(.data.job.details.result.jobs[];
         .job_id == \"$first_index_job_id\"
         and .document_id == \"$first_session_id\"
         and .document_source == \"session\"
         and .outcome == \"completed\"
-        and (.processing_mode | startswith(\"coalesced_full_rebuild\"))
+        and ((.processing_mode == \"coalesced_full_rebuild_staged_full_rebuild\"
+                and .fallback_to_full == null)
+            or (.processing_mode == \"coalesced_full_rebuild_fallback_to_full\"
+                and (.fallback_to_full | type) == \"string\"
+                and (.fallback_to_full | length) > 0))
         and .documents_total == (2 + $spans_imported)
         and .documents_indexed == (2 + $spans_imported))
     and any(.data.job.details.result.jobs[];
@@ -302,7 +326,11 @@ assert_jq "$coalesce_out" ".schema == \"ee.response.v2\" and .success == true
         and .document_id == \"$second_session_id\"
         and .document_source == \"session\"
         and .outcome == \"completed\"
-        and (.processing_mode | startswith(\"coalesced_full_rebuild\"))
+        and ((.processing_mode == \"coalesced_full_rebuild_staged_full_rebuild\"
+                and .fallback_to_full == null)
+            or (.processing_mode == \"coalesced_full_rebuild_fallback_to_full\"
+                and (.fallback_to_full | type) == \"string\"
+                and (.fallback_to_full | length) > 0))
         and .documents_total == (2 + $spans_imported)
         and .documents_indexed == (2 + $spans_imported))" \
     "public index_coalesce binds both import jobs to one completed source snapshot"
@@ -328,20 +356,29 @@ evidence_search_out="$(ee_json --workspace "$WS" search \
 assert_jq "$evidence_search_out" '.schema == "ee.response.v2" and .success == true' \
     "search for imported transcript phrase succeeds"
 exact_evidence_uri="cass-session://$first_session_id#L2-2"
-assert_jq "$evidence_search_out" "
-    any(.data.results[]?; . as \$hit
-        | ((\$hit.docId // \"\") | startswith(\"ev_\"))
-        and (\$hit.content | contains(\"Lesson: ambient capture must dedupe accepted suggestions and route storage through explicit curation accept.\"))
-        and \$hit.metadata.session_id == \"$first_session_id\"
-        and \$hit.metadata.start_line == \"2\"
-        and \$hit.metadata.end_line == \"2\"
-        and any(\$hit.provenance[]?; .kind == \"provenance_uri\" and .uri == \"$exact_evidence_uri\")
-        and any(\$hit.provenance[]?; .kind == \"search_document\" and .docId == \$hit.docId))
-" "one imported evidence hit carries its exact ID, content, and safe canonical provenance"
-evidence_doc_id="$(printf '%s' "$evidence_search_out" | jq -r \
-    --arg uri "$exact_evidence_uri" \
-    '.data.results[]? | select(any(.provenance[]?; .kind == "provenance_uri" and .uri == $uri)) | .docId' \
-    | head -n 1)"
+exact_evidence_content='{"role":"assistant","content":"Lesson: ambient capture must dedupe accepted suggestions and route storage through explicit curation accept."}'
+exact_evidence_matches="$(printf '%s' "$evidence_search_out" | jq -c \
+    --arg content "$exact_evidence_content" \
+    --arg session "$first_session_id" \
+    --arg uri "$exact_evidence_uri" '
+    [
+        .data.results[]? as $hit
+        | select(
+            (($hit.docId // "") | startswith("ev_"))
+            and $hit.content == $content
+            and $hit.metadata.session_id == $session
+            and $hit.metadata.start_line == "2"
+            and $hit.metadata.end_line == "2"
+            and any($hit.provenance[]?;
+                .kind == "provenance_uri" and .uri == $uri)
+            and any($hit.provenance[]?;
+                .kind == "search_document" and .docId == $hit.docId)
+        )
+        | {docId: $hit.docId}
+    ]')"
+assert_json "$exact_evidence_matches" 'length' '1' \
+    "exactly one imported evidence hit binds ID, full content, session, line range, and provenance"
+evidence_doc_id="$(printf '%s' "$exact_evidence_matches" | jq -r '.[0].docId // empty')"
 assert_nonempty "$evidence_doc_id" "search exposes the exact imported evidence document ID"
 evidence_pack_out="$(ee_json --workspace "$WS" pack \
     "ambient capture must dedupe accepted suggestions" --max-tokens 2000 --json)"
@@ -352,11 +389,7 @@ assert_jq "$evidence_pack_out" ".data.pack.schema == \"ee.pack.v2\"
     and (.data.pack.items | length == 0)
     and any((.degraded // [])[]?;
         .code == \"context_evidence_hit_unhydrated\"
-        and (.message | contains(\"$evidence_doc_id\")))
-    and all(.data.pack.items[];
-        (.memoryId // \"\") != \"$evidence_doc_id\"
-        and (.docId // \"\") != \"$evidence_doc_id\"
-        and (.entityId // \"\") != \"$evidence_doc_id\")" \
+        and (.message | contains(\"$evidence_doc_id\")))" \
     "undistilled exact evidence hit is explicitly degraded and excluded from a typed empty pack"
 
 ready_generation="$(printf '%s' "$ready_index_out" | jq -r '.data.indexGeneration // empty')"

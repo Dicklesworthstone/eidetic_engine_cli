@@ -409,6 +409,42 @@ _e2e_mktemp_file() {
     mktemp "${root%/}/ee-e2e-${label}.XXXXXX"
 }
 
+_e2e_command_artifact_binary() {
+    local launcher="${1:?command required}"
+    shift
+    if [ -n "${EE_E2E_ARTIFACT_BINARY:-}" ]; then
+        printf '%s\n' "$EE_E2E_ARTIFACT_BINARY"
+        return 0
+    fi
+    if [ "${launcher##*/}" != "env" ]; then
+        printf '%s\n' "$launcher"
+        return 0
+    fi
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --)
+                shift
+                break
+                ;;
+            -u|--unset)
+                shift
+                if [ "$#" -gt 0 ]; then shift; fi
+                ;;
+            --unset=*|-*)
+                shift
+                ;;
+            *=*)
+                shift
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+    printf '%s\n' "${1:-$launcher}"
+}
+
 # ============================================================================
 # Public API
 # ============================================================================
@@ -549,10 +585,16 @@ e2e_log_artifact_manifest() {
 
 # Wrap a command: capture stdout/stderr/exit, emit start+end events, AND
 # write stdout to a temp file so callers can use it after.
+# Set EE_E2E_ARTIFACT_BINARY when a launcher such as `env` precedes the
+# exercised binary; remote attestation always binds that binary's bytes.
 # Usage:  e2e_log_command "$EE" remember "hello" ...
-# Prints stdout (so $(e2e_log_command ...) captures it). Exit code propagates.
+# Prints stdout (so $(e2e_log_command ...) captures it). The command exit code
+# propagates unless manifest verification also fails; in that case the manifest
+# status takes precedence and the command status remains in `command_end`.
 e2e_log_command() {
     local label="${1:?command required}"
+    local artifact_binary
+    artifact_binary="$(_e2e_command_artifact_binary "$@")"
     local args_str=""
     local arg
     for arg in "$@"; do
@@ -583,17 +625,23 @@ e2e_log_command() {
         "exit_code" "$rc" \
         "elapsed_ms" "$elapsed_ms"
     local manifest_rc=0
-    e2e_log_artifact_manifest "command_end" "$label" "$@" || manifest_rc=$?
+    e2e_log_artifact_manifest "command_end" "$artifact_binary" "$@" || manifest_rc=$?
+    if [ "$manifest_rc" -ne 0 ]; then
+        _e2e_emit_event "assert_fail" \
+            "label" "artifact manifest for $artifact_binary" \
+            "expected" "exit 0" \
+            "actual" "exit $manifest_rc"
+    fi
     cat "$out_file"
     if [ "${EE_E2E_KEEP_ARTIFACTS:-${EE_E2E_KEEP_WORKSPACE:-0}}" = "1" ]; then
         e2e_log_note "e2e_log_command_keep_artifacts stdout=$out_file stderr=$err_file"
     else
         rm -f "$out_file" "$err_file"
     fi
-    if [ "$rc" -ne 0 ]; then
-        return "$rc"
+    if [ "$manifest_rc" -ne 0 ]; then
+        return "$manifest_rc"
     fi
-    return "$manifest_rc"
+    return "$rc"
 }
 
 # Assert two strings equal. Emits assert_ok or assert_fail.

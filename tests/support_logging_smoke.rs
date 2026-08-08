@@ -344,6 +344,65 @@ fn bash_command_propagates_artifact_manifest_failure() -> TestResult {
 }
 
 #[test]
+fn bash_command_preserves_command_and_manifest_failures() -> TestResult {
+    let tmp = TempDir::new().map_err(|e| e.to_string())?;
+    let log_path = tmp.path().join("combined_failure.jsonl");
+    let invalid_report_path = tmp.path().join("invalid-combined-report.json");
+    std::fs::write(&invalid_report_path, "{}\n")
+        .map_err(|error| format!("write invalid combined verification report: {error}"))?;
+    let bash_lib = repo_root().join("scripts/lib/e2e_logger.sh");
+
+    let script = format!(
+        r#"
+        set +e
+        source {harness:?}
+        e2e_log_start "combined_failure"
+        e2e_log_command /bin/sh -c "exit 7" >/dev/null
+        rc=$?
+        e2e_log_end
+        exit "$rc"
+        "#,
+        harness = bash_lib.display(),
+    );
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .env("EE_TEST_LOG_PATH", &log_path)
+        .env(
+            "EE_REMOTE_ARTIFACT_VERIFICATION_REPORT",
+            &invalid_report_path,
+        )
+        .output()
+        .map_err(|error| format!("bash spawn: {error}"))?;
+
+    if output.status.code() != Some(2) {
+        return Err(format!(
+            "manifest failure must take precedence, got {:?}; stderr: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let events = read_events(&log_path)?;
+    if !events
+        .iter()
+        .any(|event| event["kind"] == "command_end" && event["exit_code"] == 7)
+    {
+        return Err("command failure exit 7 was not preserved in command_end".to_owned());
+    }
+    if !events.iter().any(|event| {
+        event["kind"] == "assert_fail"
+            && event
+                .pointer("/fields/label")
+                .and_then(Value::as_str)
+                .is_some_and(|label| label.starts_with("artifact manifest for "))
+            && event.pointer("/fields/actual").and_then(Value::as_str) == Some("exit 2")
+    }) {
+        return Err("manifest failure exit 2 was not preserved as a durable event".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
 fn command_recorder_emits_events_when_log_path_set() -> TestResult {
     // Drive CommandRecorder via a subprocess that has EE_TEST_LOG_PATH set,
     // so we never mutate parent env. The subprocess runs a tiny Rust shim
