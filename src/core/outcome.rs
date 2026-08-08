@@ -1564,110 +1564,107 @@ fn apply_memory_trust_class_transition(
         return Ok(());
     }
 
-    // bd-multiplicity-aware-trust-p0u7g: refuse to promote a memory above the
-    // privileged threshold (anything past agent_assertion) while its declared
-    // attempt family is incomplete. A survivor reported out of N declared
-    // sibling attempts keeps agent-assertion authority until the remaining
-    // siblings are recorded; the refusal is audited and leaves the stored
-    // trust class untouched. Demotions are never gated.
-    if matches!(transition.direction, TrustClassTransitionDirection::Promote)
+    // bd-multiplicity-aware-trust-p0u7g: the family-completeness gate, the
+    // trust-class CAS, and the audit row commit or roll back together. The
+    // eligibility read happens INSIDE the same transaction as the update, so
+    // a concurrent sibling write or tombstone can no longer invalidate a
+    // completeness decision after it was checked (TOCTOU), and the SQL CAS
+    // (`trust_class = expected`) makes a transition computed from a stale
+    // read a silent no-op instead of an over-promotion. Demotions are never
+    // gated but share the same atomicity.
+    let gate_relevant = matches!(transition.direction, TrustClassTransitionDirection::Promote)
         && matches!(
             transition.next_class,
             TrustClass::AgentValidated | TrustClass::PeerHumanAttested | TrustClass::HumanExplicit
-        )
-        && let Some(multiplicity) =
-            promotion_ineligible_attempt_family_multiplicity(connection, workspace_id, memory_id)?
-    {
-        connection
-            .insert_audit(
-                &id_source.next_audit_id(),
+        );
+    let audit_id = id_source.next_audit_id();
+    let mut cas_lost = false;
+    connection
+        .with_transaction(|| {
+            if gate_relevant
+                && let Some(multiplicity) = promotion_ineligible_attempt_family_multiplicity(
+                    connection,
+                    workspace_id,
+                    memory_id,
+                )?
+            {
+                return connection.insert_audit(
+                    &audit_id,
+                    &CreateAuditInput {
+                        workspace_id: Some(workspace_id.to_string()),
+                        actor: actor.map(ToOwned::to_owned),
+                        action: audit_actions::TRUST_CLASS_PROMOTION_BLOCKED.to_string(),
+                        target_type: Some("memory".to_string()),
+                        target_id: Some(memory_id.to_string()),
+                        details: Some(memory_trust_class_promotion_blocked_audit_details(
+                            feedback_event_id,
+                            &transition,
+                            &multiplicity,
+                        )),
+                    },
+                );
+            }
+
+            let updated = connection.update_memory_trust_class_if(
+                memory_id,
+                transition.previous_class.as_str(),
+                transition.next_class.as_str(),
+            )?;
+            if !updated {
+                // The stored class moved (or the row tombstoned) since the
+                // posterior was read; applying this transition would encode a
+                // stale decision. Concede the race conservatively.
+                cas_lost = true;
+                return Ok(());
+            }
+
+            connection.insert_audit(
+                &audit_id,
                 &CreateAuditInput {
                     workspace_id: Some(workspace_id.to_string()),
                     actor: actor.map(ToOwned::to_owned),
-                    action: audit_actions::TRUST_CLASS_PROMOTION_BLOCKED.to_string(),
+                    action: audit_actions::TRUST_CLASS_TRANSITION.to_string(),
                     target_type: Some("memory".to_string()),
                     target_id: Some(memory_id.to_string()),
-                    details: Some(memory_trust_class_promotion_blocked_audit_details(
+                    details: Some(memory_trust_class_transition_audit_details(
                         feedback_event_id,
                         &transition,
-                        &multiplicity,
+                        posterior,
                     )),
                 },
             )
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to audit blocked trust-class promotion: {error}"),
-                repair: Some("ee doctor".to_string()),
-            })?;
-        return Ok(());
-    }
-
-    let updated = connection
-        .update_memory_trust_class(memory_id, transition.next_class.as_str())
+        })
         .map_err(|error| DomainError::Storage {
-            message: format!("Failed to update memory trust class: {error}"),
+            message: format!("Failed to apply memory trust-class transition atomically: {error}"),
             repair: Some("ee doctor".to_string()),
         })?;
-    if !updated {
-        return Err(DomainError::Storage {
-            message: format!(
-                "Failed to update memory trust class for {memory_id}: memory no longer exists"
-            ),
-            repair: Some("ee memory show <id> --json".to_string()),
-        });
+    if cas_lost {
+        tracing::debug!(
+            memory_id,
+            previous_class = transition.previous_class.as_str(),
+            refused_class = transition.next_class.as_str(),
+            "trust-class CAS lost to a concurrent change; transition skipped"
+        );
     }
-
-    connection
-        .insert_audit(
-            &id_source.next_audit_id(),
-            &CreateAuditInput {
-                workspace_id: Some(workspace_id.to_string()),
-                actor: actor.map(ToOwned::to_owned),
-                action: audit_actions::TRUST_CLASS_TRANSITION.to_string(),
-                target_type: Some("memory".to_string()),
-                target_id: Some(memory_id.to_string()),
-                details: Some(memory_trust_class_transition_audit_details(
-                    feedback_event_id,
-                    &transition,
-                    posterior,
-                )),
-            },
-        )
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to audit memory trust-class transition: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })
+    Ok(())
 }
 
 /// Load the attempt-family multiplicity for a memory and return it only when
-/// the family is incomplete (declared sibling attempts exceed live recorded
-/// members). Memories without a family, and complete families, return `None`
-/// (bd-multiplicity-aware-trust-p0u7g).
+/// the family is NOT promotion-eligible: incomplete slot coverage, or slot
+/// coverage without the canonical one-selected + N-1-rejected composition.
+/// Memories without a family, and promotion-eligible families, return `None`.
+/// Returns db-layer errors so the caller can evaluate it inside the same
+/// transaction as the trust-class CAS (bd-multiplicity-aware-trust-p0u7g).
 fn promotion_ineligible_attempt_family_multiplicity(
     connection: &DbConnection,
     workspace_id: &str,
     memory_id: &str,
-) -> Result<Option<AttemptFamilyMultiplicity>, DomainError> {
-    let family = connection
-        .get_memory_attempt_family(memory_id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to read memory attempt family: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
-    let Some(family) = family else {
+) -> crate::db::Result<Option<AttemptFamilyMultiplicity>> {
+    let Some(family) = connection.get_memory_attempt_family(memory_id)? else {
         return Ok(None);
     };
-    let members = connection
-        .list_memory_attempt_family(workspace_id, &family.family_id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to list attempt-family members: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
-    let declaration = connection
-        .get_attempt_family_declaration(workspace_id, &family.family_id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to read attempt-family declaration: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
+    let members = connection.list_memory_attempt_family(workspace_id, &family.family_id)?;
+    let declaration = connection.get_attempt_family_declaration(workspace_id, &family.family_id)?;
     let declared_size = declaration
         .and_then(|(declared, _origin)| declared)
         .or(family.declared_size);
@@ -4206,6 +4203,312 @@ mod tests {
     };
     use crate::models::{DomainError, ProcessExitCode};
     use crate::runtime::determinism::Deterministic;
+
+    fn insert_family_memory(
+        connection: &DbConnection,
+        memory_id: &str,
+        content: &str,
+        family: &crate::db::MemoryAttemptFamily,
+    ) -> Result<(), String> {
+        connection
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: OUTCOME_TEST_WORKSPACE_ID.to_string(),
+                    level: "semantic".to_string(),
+                    kind: "decision".to_string(),
+                    content: content.to_string(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "agent_assertion".to_string(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .set_memory_attempt_family(memory_id, family)
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn record_helpful_outcomes(
+        database: &std::path::Path,
+        memory_id: &str,
+        count: usize,
+    ) -> Result<(), String> {
+        for index in 0..count {
+            record_outcome(&OutcomeRecordOptions {
+                database_path: database,
+                target_type: "memory".to_string(),
+                target_id: memory_id.to_string(),
+                workspace_id: None,
+                signal: "helpful".to_string(),
+                weight: None,
+                source_type: "outcome_observed".to_string(),
+                source_id: Some(format!("family-gate-run-{index}")),
+                reason: Some("Family survivor held up in practice.".to_string()),
+                evidence_json: None,
+                session_id: None,
+                event_id: Some(format!("fb_a{index:025}")),
+                actor: Some("test".to_string()),
+                agent_name: None,
+                dry_run: false,
+                harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+                harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+                prompt_injection_guard: true,
+            })
+            .map_err(|error| error.message())?;
+        }
+        Ok(())
+    }
+
+    /// bd-multiplicity-aware-trust-p0u7g: a survivor recorded 1-of-3 with no
+    /// sibling slots must keep agent_assertion no matter how helpful its
+    /// outcomes look, and every refused promotion must be audited while no
+    /// transition audit ever appears.
+    #[test]
+    fn incomplete_family_blocks_promotion_and_audits_the_refusal() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-family-gate-blocked")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let survivor = "mem_00000000000000000family001";
+        insert_family_memory(
+            &connection,
+            survivor,
+            "Winning config out of three parallel attempts.",
+            &crate::db::MemoryAttemptFamily {
+                family_id: "fam-gate-a".to_string(),
+                declared_size: Some(3),
+                attempt_index: Some(1),
+                disposition: Some("selected".to_string()),
+            },
+        )?;
+        drop(connection);
+
+        record_helpful_outcomes(&database, survivor, 10)?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let trust_class = connection
+            .get_memory_trust_class(survivor)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "survivor memory missing".to_string())?;
+        ensure_equal(
+            &trust_class.as_str(),
+            &"agent_assertion",
+            "incomplete family must hold the survivor at agent_assertion",
+        )?;
+
+        let blocked = connection
+            .list_audit_by_action(
+                crate::db::audit_actions::TRUST_CLASS_PROMOTION_BLOCKED,
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            !blocked.is_empty(),
+            "refused promotion must write a trust_class.promotion_blocked audit",
+        )?;
+        let details = blocked[0].details.clone().unwrap_or_default();
+        ensure(
+            details.contains("attempt_family_incomplete") && details.contains("fam-gate-a"),
+            &format!("blocked audit must name the incomplete family: {details}"),
+        )?;
+
+        let transitions = connection
+            .list_audit_by_action(crate::db::audit_actions::TRUST_CLASS_TRANSITION, None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &transitions.len(),
+            &0_usize,
+            "no trust transition may land while the family gate refuses",
+        )
+    }
+
+    /// The near-identical complete family with the canonical 1-selected +
+    /// 2-rejected composition promotes normally, proving the gate blocks on
+    /// family posture rather than breaking promotion generally.
+    #[test]
+    fn complete_canonical_family_promotes_through_the_gate() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-family-gate-complete")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let survivor = "mem_00000000000000000family011";
+        insert_family_memory(
+            &connection,
+            survivor,
+            "Winning config out of three recorded attempts.",
+            &crate::db::MemoryAttemptFamily {
+                family_id: "fam-gate-b".to_string(),
+                declared_size: Some(3),
+                attempt_index: Some(1),
+                disposition: Some("selected".to_string()),
+            },
+        )?;
+        for (index, sibling) in [
+            "mem_00000000000000000family012",
+            "mem_00000000000000000family013",
+        ]
+        .iter()
+        .enumerate()
+        {
+            insert_family_memory(
+                &connection,
+                sibling,
+                "Rejected sibling attempt with its failure context.",
+                &crate::db::MemoryAttemptFamily {
+                    family_id: "fam-gate-b".to_string(),
+                    declared_size: Some(3),
+                    attempt_index: Some(u32::try_from(index).unwrap_or(0) + 2),
+                    disposition: Some("rejected".to_string()),
+                },
+            )?;
+        }
+        drop(connection);
+
+        record_helpful_outcomes(&database, survivor, 10)?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let trust_class = connection
+            .get_memory_trust_class(survivor)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "survivor memory missing".to_string())?;
+        ensure_equal(
+            &trust_class.as_str(),
+            &"agent_validated",
+            "complete canonical family must promote normally",
+        )?;
+        let transitions = connection
+            .list_audit_by_action(crate::db::audit_actions::TRUST_CLASS_TRANSITION, None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            transitions.iter().any(|row| {
+                row.details
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("agent_validated")
+            }),
+            "promotion must write its trust_class.transition audit",
+        )
+    }
+
+    /// Deterministic regression for the promotion race: a transition computed
+    /// from a stale trust-class read must concede via the SQL CAS instead of
+    /// overwriting a concurrent change, and tombstoned rows never CAS.
+    #[test]
+    fn stale_trust_transition_concedes_via_cas() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-family-gate-cas")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let memory_id = "mem_00000000000000000family021";
+        insert_family_memory(
+            &connection,
+            memory_id,
+            "CAS regression fixture memory.",
+            &crate::db::MemoryAttemptFamily {
+                family_id: "fam-gate-c".to_string(),
+                declared_size: None,
+                attempt_index: None,
+                disposition: None,
+            },
+        )?;
+
+        let stale = connection
+            .update_memory_trust_class_if(memory_id, "cass_evidence", "agent_validated")
+            .map_err(|error| error.to_string())?;
+        ensure(!stale, "stale expected class must lose the CAS")?;
+        let trust_class = connection
+            .get_memory_trust_class(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory missing".to_string())?;
+        ensure_equal(
+            &trust_class.as_str(),
+            &"agent_assertion",
+            "losing CAS must leave the stored class untouched",
+        )?;
+
+        let current = connection
+            .update_memory_trust_class_if(memory_id, "agent_assertion", "agent_validated")
+            .map_err(|error| error.to_string())?;
+        ensure(current, "matching expected class must win the CAS")?;
+
+        connection
+            .tombstone_memory(memory_id)
+            .map_err(|error| error.to_string())?;
+        let tombstoned = connection
+            .update_memory_trust_class_if(memory_id, "agent_validated", "human_explicit")
+            .map_err(|error| error.to_string())?;
+        ensure(!tombstoned, "tombstoned rows never CAS")
+    }
+
+    /// Revision inheritance: the family pointer follows the replacement row
+    /// while the slot ledger stays keyed to the original logical identity, so
+    /// revising the survivor cannot launder the family gate.
+    #[test]
+    fn family_pointer_carries_to_replacement_rows() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-family-gate-carry")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let original = "mem_00000000000000000family031";
+        let replacement = "mem_00000000000000000family032";
+        insert_family_memory(
+            &connection,
+            original,
+            "Original survivor row.",
+            &crate::db::MemoryAttemptFamily {
+                family_id: "fam-gate-d".to_string(),
+                declared_size: Some(2),
+                attempt_index: Some(1),
+                disposition: Some("selected".to_string()),
+            },
+        )?;
+        connection
+            .insert_memory(
+                replacement,
+                &CreateMemoryInput {
+                    workspace_id: OUTCOME_TEST_WORKSPACE_ID.to_string(),
+                    level: "semantic".to_string(),
+                    kind: "decision".to_string(),
+                    content: "Replacement revision row.".to_string(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "agent_assertion".to_string(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let carried = connection
+            .carry_memory_attempt_family_pointer(original, replacement)
+            .map_err(|error| error.to_string())?;
+        ensure(carried, "family pointer must carry to the replacement row")?;
+        let family = connection
+            .get_memory_attempt_family(replacement)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "replacement lost the family pointer".to_string())?;
+        ensure_equal(
+            &family.family_id.as_str(),
+            &"fam-gate-d",
+            "family id carried",
+        )?;
+        ensure_equal(&family.declared_size, &Some(2), "declared size carried")?;
+
+        let members = connection
+            .list_memory_attempt_family(OUTCOME_TEST_WORKSPACE_ID, "fam-gate-d")
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &members.len(),
+            &1_usize,
+            "the slot ledger keeps exactly one member; carrying a pointer never mints slots",
+        )
+    }
 
     #[test]
     fn collect_verifier_success_evidence_keeps_only_authoritative_passes() {

@@ -19051,6 +19051,29 @@ impl DbConnection {
             .transpose()
     }
 
+    /// Carry the V094 attempt-family pointer columns from a source revision
+    /// row to its replacement (bd-multiplicity-aware-trust-p0u7g). The
+    /// authoritative slot/disposition ledger is keyed by the revision
+    /// chain's `logical_id` and needs no copying; only the denormalized
+    /// per-row pointer must follow the live revision so family retrieval and
+    /// the promotion gate keep seeing membership on the current row instead
+    /// of laundering it away through `ee memory revise`.
+    pub fn carry_memory_attempt_family_pointer(&self, from_id: &str, to_id: &str) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET \
+             attempt_family_id = (SELECT attempt_family_id FROM memories WHERE id = ?1), \
+             attempt_family_size = (SELECT attempt_family_size FROM memories WHERE id = ?1) \
+             WHERE id = ?2 \
+               AND (SELECT attempt_family_id FROM memories WHERE id = ?1) IS NOT NULL",
+            &[
+                Value::Text(from_id.to_string()),
+                Value::Text(to_id.to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
     /// Tombstone a memory (soft delete).
     pub fn tombstone_memory(&self, id: &str) -> Result<bool> {
         let now = Utc::now().to_rfc3339();
@@ -19252,6 +19275,46 @@ impl DbConnection {
                 Value::Text(PROVENANCE_CHAIN_HASH_VERSION.to_string()),
                 Value::Text(PROVENANCE_STATUS_UNVERIFIED.to_string()),
                 Value::Text(id.to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Compare-and-set variant of [`Self::update_memory_trust_class`] for the
+    /// transactional promotion gate (bd-multiplicity-aware-trust-p0u7g): the
+    /// update lands only while the stored class still equals
+    /// `expected_class`, so a transition computed from a stale posterior read
+    /// can never overwrite a concurrent change. Returns `false` for missing,
+    /// tombstoned, or concurrently-moved rows. Provenance-hash recompute and
+    /// verification-status reset match the unconditional setter.
+    pub fn update_memory_trust_class_if(
+        &self,
+        id: &str,
+        expected_class: &str,
+        new_class: &str,
+    ) -> Result<bool> {
+        let Some(existing) = self.get_memory(id)? else {
+            return Ok(false);
+        };
+        if existing.tombstoned_at.is_some() || existing.trust_class != expected_class {
+            return Ok(false);
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let mut updated = existing.clone();
+        updated.trust_class = new_class.to_string();
+        let provenance_chain_hash = compute_memory_provenance_chain_hash(&updated);
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET trust_class = ?1, updated_at = ?2, provenance_chain_hash = ?3, provenance_chain_hash_version = ?4, provenance_verification_status = ?5, provenance_verified_at = NULL, provenance_verification_note = NULL WHERE id = ?6 AND tombstoned_at IS NULL AND trust_class = ?7",
+            &[
+                Value::Text(new_class.to_string()),
+                Value::Text(now),
+                Value::Text(provenance_chain_hash),
+                Value::Text(PROVENANCE_CHAIN_HASH_VERSION.to_string()),
+                Value::Text(PROVENANCE_STATUS_UNVERIFIED.to_string()),
+                Value::Text(id.to_string()),
+                Value::Text(expected_class.to_string()),
             ],
         )?;
         Ok(affected > 0)

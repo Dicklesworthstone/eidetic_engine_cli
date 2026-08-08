@@ -10417,6 +10417,10 @@ pub fn revise_memory(options: &ReviseMemoryOptions<'_>) -> MemoryReviseReport {
     let result: Result<(), String> = conn
         .with_transaction(|| {
             conn.insert_memory_revision(&new_id, &logical_id, &memory_input)?;
+            // bd-multiplicity-aware-trust-p0u7g: the live revision inherits
+            // the attempt-family pointer; the slot ledger inherits by
+            // logical_id and is never copied.
+            conn.carry_memory_attempt_family_pointer(options.original_memory_id, &new_id)?;
             let prior_updated =
                 conn.expire_memory_valid_to(options.original_memory_id, &revised_at)?;
             if !prior_updated {
