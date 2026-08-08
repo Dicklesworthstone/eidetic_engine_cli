@@ -27,15 +27,32 @@ source "$E2E_DIR/e2e_lib.sh"
 
 harness_init "capture"
 
+# Callers capture command output with `$(ee_json ...)`, which runs the helper
+# in a subshell. Record nonzero results durably and fold them into the parent
+# harness before summary so binary and logger failures cannot be masked.
+EE_JSON_FAILURES_FILE="$LOG_DIR/command-failures.log"
+: >"$EE_JSON_FAILURES_FILE"
+
 ee_json() {
-    e2e_log_command "$EE_BIN" "$@" || true
+    local rc=0
+    e2e_log_command "$EE_BIN" "$@" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf 'exit=%s command=%s\n' "$rc" "$*" >>"$EE_JSON_FAILURES_FILE"
+    fi
+    return "$rc"
 }
 
 ee_json_with_env() {
     local env_key="$1"
     local env_value="$2"
     shift 2
-    e2e_log_command env "$env_key=$env_value" "$EE_BIN" "$@" || true
+    local rc=0
+    e2e_log_command env "$env_key=$env_value" "$EE_BIN" "$@" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf 'exit=%s env=%s command=%s\n' "$rc" "$env_key" "$*" \
+            >>"$EE_JSON_FAILURES_FILE"
+    fi
+    return "$rc"
 }
 
 assert_nonempty() {
@@ -125,6 +142,7 @@ candidate_type_count() {
 write_fake_cass_binary() {
     local path="$1"
     local session_path="$2"
+    local second_session_path="$3"
     cat >"$path" <<FAKECASS
 #!/bin/sh
 set -eu
@@ -132,11 +150,14 @@ cmd="\${1:-}"
 case "\$cmd" in
   sessions)
     cat <<'JSON'
-{"sessions":[{"path":"$session_path","workspace":"$WS","agent":"codex","started_at":"2026-06-17T13:00:00Z","ended_at":"2026-06-17T13:20:00Z","message_count":6,"token_count":920,"content_hash":"blake3:capture-e2e-session"}]}
+{"sessions":[{"path":"$session_path","workspace":"$WS","agent":"codex","started_at":"2026-06-17T13:00:00Z","ended_at":"2026-06-17T13:20:00Z","message_count":4,"token_count":920,"content_hash":"blake3:capture-e2e-session-primary"},{"path":"$second_session_path","workspace":"$WS","agent":"claude","started_at":"2026-06-17T14:00:00Z","ended_at":"2026-06-17T14:10:00Z","message_count":2,"token_count":310,"content_hash":"blake3:capture-e2e-session-secondary"}]}
 JSON
     ;;
   view)
-    cat <<'JSON'
+    source_path=""
+    for arg in "\$@"; do source_path="\$arg"; done
+    if [ "\$source_path" = "$session_path" ]; then
+      cat <<'JSON'
 {"path":"$session_path","target_line":2,"context":3,"lines":[
   {"line":1,"content":"{\"role\":\"user\",\"content\":\"The capture workflow kept reproposing the same lesson after acceptance.\"}","highlighted":false},
   {"line":2,"content":"{\"role\":\"assistant\",\"content\":\"Lesson: ambient capture must dedupe accepted suggestions and route storage through explicit curation accept.\"}","highlighted":true},
@@ -144,6 +165,17 @@ JSON
   {"line":4,"content":"{\"role\":\"user\",\"content\":\"Fix: require accept/reject commands and audit every accepted capture.\"}","highlighted":false}
 ],"total_lines":4}
 JSON
+    elif [ "\$source_path" = "$second_session_path" ]; then
+      cat <<'JSON'
+{"path":"$second_session_path","target_line":1,"context":3,"lines":[
+  {"line":1,"content":"{\"role\":\"user\",\"content\":\"A second session makes coalescing observable instead of inferred.\"}","highlighted":true},
+  {"line":2,"content":"{\"role\":\"assistant\",\"content\":\"Batch both durable index jobs into one published source snapshot.\"}","highlighted":false}
+],"total_lines":2}
+JSON
+    else
+      echo "unexpected cass view path: \$source_path" >&2
+      exit 64
+    fi
     ;;
   *)
     echo "unexpected cass command: \$cmd" >&2
@@ -173,6 +205,7 @@ assert_audit_mentions_capture() {
 with_temp_workspace WS
 FIXTURE_REPO="$WS/capture-fixture-repo"
 SESSION_PATH="$WS/cass-session-capture.jsonl"
+SECOND_SESSION_PATH="$WS/cass-session-capture-secondary.jsonl"
 CASS_BIN="$WS/cass"
 SECRET="sk-proj-capture-e2e-redacted-000000000000000000"
 
@@ -188,60 +221,103 @@ cat >"$SESSION_PATH" <<'SESSION'
 {"role":"assistant","content":"Failure arc: storing silently would violate the no-loop-takeover policy."}
 {"role":"user","content":"Fix: require accept/reject commands and audit every accepted capture."}
 SESSION
-write_fake_cass_binary "$CASS_BIN" "$SESSION_PATH"
+cat >"$SECOND_SESSION_PATH" <<'SESSION'
+{"role":"user","content":"A second session makes coalescing observable instead of inferred."}
+{"role":"assistant","content":"Batch both durable index jobs into one published source snapshot."}
+SESSION
+write_fake_cass_binary "$CASS_BIN" "$SESSION_PATH" "$SECOND_SESSION_PATH"
 log_event "capture_fixture_ready" \
     bead "bd-2vq2z.20" \
     workspace "$WS" \
     fixtureRepo "$FIXTURE_REPO" \
-    cassSession "$SESSION_PATH"
+    cassSession "$SESSION_PATH" \
+    cassSessionSecondary "$SECOND_SESSION_PATH"
 
 step "import fixture CASS session without silent memory mutation"
 before_import_memories="$(memory_list_count "$WS")"
-import_out="$(ee_json_with_env EE_CASS_BINARY "$CASS_BIN" --workspace "$WS" import cass --limit 1 --json)"
+import_out="$(ee_json_with_env EE_CASS_BINARY "$CASS_BIN" --workspace "$WS" import cass --limit 2 --json)"
 assert_jq "$import_out" '.schema == "ee.response.v2" and .success == true' \
     "fixture cass import succeeds"
 assert_jq "$import_out" '
     (.data.schema == "ee.import.cass.v1")
-    and ((.data.sessionsImported // .data.sessions_imported // 0) >= 1)
-    and ((.data.spansImported // .data.spans_imported // 0) >= 1)
-    and (.data.indexJobsQueued == 1)
-    and (.data.sessions[0].indexJobId | type == "string" and length > 0)
-' "fixture cass import stores one session with evidence spans"
+    and (.data.sessionsImported == 2)
+    and (.data.spansImported == 6)
+    and (.data.indexJobsQueued == 2)
+    and (.data.sessions | length == 2)
+    and all(.data.sessions[]; (.sessionId | type == "string" and length > 0)
+        and (.indexJobId | type == "string" and length > 0))
+' "fixture cass import stores two sessions, six evidence spans, and two durable index jobs"
 spans_imported="$(printf '%s' "$import_out" | jq -r '.data.spansImported // 0')"
+first_session_id="$(printf '%s' "$import_out" | jq -r '.data.sessions[0].sessionId // empty')"
+second_session_id="$(printf '%s' "$import_out" | jq -r '.data.sessions[1].sessionId // empty')"
+first_index_job_id="$(printf '%s' "$import_out" | jq -r '.data.sessions[0].indexJobId // empty')"
+second_index_job_id="$(printf '%s' "$import_out" | jq -r '.data.sessions[1].indexJobId // empty')"
+assert_nonempty "$first_session_id" "first imported session exposes its exact ID"
+assert_nonempty "$second_session_id" "second imported session exposes its exact ID"
+assert_nonempty "$first_index_job_id" "first import exposes its exact index job ID"
+assert_nonempty "$second_index_job_id" "second import exposes its exact index job ID"
 after_import_memories="$(memory_list_count "$WS")"
 assert_zero "$after_import_memories" \
     "cass import creates evidence but does not silently store memories"
 assert_zero "$before_import_memories" \
     "capture workspace starts without memories"
 
-# bd-3k1mg: exercise the ordinary durable job path. A manual index rebuild here
+# bd-3k1mg: exercise the coalesced durable job path. A manual index rebuild here
 # would hide a missing or incomplete import job, and an ID-or-content assertion
 # could pass when two different documents accidentally satisfy half the proof.
-step "bd-3k1mg: ordinary index job publishes the complete imported evidence corpus"
+step "bd-3k1mg: two index jobs coalesce into one complete evidence snapshot"
 stale_index_out="$(ee_json --workspace "$WS" index status --json)"
 assert_jq "$stale_index_out" ".schema == \"ee.response.v2\"
     and .success == true
     and .data.health == \"stale\"
-    and .data.dbSessionCount == 1
+    and .data.dbSessionCount == 2
     and .data.dbEvidenceCount == $spans_imported
     and .data.dbEvidenceAdmittedCount == $spans_imported
     and (.data.dbGeneration > .data.indexGeneration)" \
     "atomic CASS import makes the previously ready index truthfully stale"
-coalesce_out="$(ee_json --workspace "$WS" job run index_coalesce --item-limit 1 --json)"
-assert_jq "$coalesce_out" '.schema == "ee.response.v2" and .success == true' \
-    "public index_coalesce drains the import job without a manual rebuild"
+coalesce_out="$(ee_json --workspace "$WS" job run index_coalesce --item-limit 2 --json)"
+assert_jq "$coalesce_out" ".schema == \"ee.response.v2\" and .success == true
+    and .data.requestedJob == \"index_coalesce\"
+    and .data.durableMutation == true
+    and .data.summary == {\"total\":1,\"succeeded\":1,\"skipped\":0,\"failed\":0}
+    and .data.job.outcome == \"success\"
+    and .data.job.details.schema == \"ee.steward.index_coalesce.v1\"
+    and .data.job.details.preflight.pending_jobs == 2
+    and .data.job.details.result.status == \"success\"
+    and .data.job.details.result.pending_jobs == 2
+    and .data.job.details.result.processed_jobs == 2
+    and .data.job.details.result.completed_jobs == 2
+    and .data.job.details.result.failed_jobs == 0
+    and (.data.job.details.result.jobs | length == 2)
+    and any(.data.job.details.result.jobs[];
+        .job_id == \"$first_index_job_id\"
+        and .document_id == \"$first_session_id\"
+        and .document_source == \"session\"
+        and .outcome == \"completed\"
+        and (.processing_mode | startswith(\"coalesced_full_rebuild\"))
+        and .documents_total == (2 + $spans_imported)
+        and .documents_indexed == (2 + $spans_imported))
+    and any(.data.job.details.result.jobs[];
+        .job_id == \"$second_index_job_id\"
+        and .document_id == \"$second_session_id\"
+        and .document_source == \"session\"
+        and .outcome == \"completed\"
+        and (.processing_mode | startswith(\"coalesced_full_rebuild\"))
+        and .documents_total == (2 + $spans_imported)
+        and .documents_indexed == (2 + $spans_imported))" \
+    "public index_coalesce binds both import jobs to one completed source snapshot"
 ready_index_out="$(ee_json --workspace "$WS" index status --json)"
 assert_jq "$ready_index_out" ".schema == \"ee.response.v2\"
     and .success == true
     and .data.health == \"ready\"
     and (.data.dbGeneration == .data.indexGeneration)
-    and .data.dbSessionCount == 1
+    and .data.dbSessionCount == 2
     and .data.dbEvidenceCount == $spans_imported
     and .data.dbEvidenceAdmittedCount == $spans_imported
-    and .data.indexDocumentCounts.sessions == 1
+    and .data.indexDocumentCounts.sessions == 2
     and .data.indexDocumentCounts.evidence == $spans_imported
-    and .data.indexDocumentCount == (1 + $spans_imported)" \
-    "ordinary job drain publishes exact session/evidence counts at the DB generation"
+    and .data.indexDocumentCount == (2 + $spans_imported)" \
+    "coalesced job drain publishes exact session/evidence counts at the DB generation"
 
 # bd-16imy owns direct EvidenceSpan hydration into packs. Until that typed pack
 # path lands, this undistilled span must be searchable with exact provenance and
@@ -251,31 +327,59 @@ evidence_search_out="$(ee_json --workspace "$WS" search \
     "ambient capture must dedupe accepted suggestions" --limit 20 --json)"
 assert_jq "$evidence_search_out" '.schema == "ee.response.v2" and .success == true' \
     "search for imported transcript phrase succeeds"
-assert_jq "$evidence_search_out" '
-    any(.data.results[]?;
-        ((.docId // "") | startswith("ev_"))
-        and ((.content // .metadata.content // "") | test("dedupe accepted suggestions"; "i"))
-        and any(.provenance[]?; ((.uri // "") | startswith("cass-session://"))))
-' "one imported evidence hit carries its exact ID, content, and safe canonical provenance"
+exact_evidence_uri="cass-session://$first_session_id#L2-2"
+assert_jq "$evidence_search_out" "
+    any(.data.results[]?; . as \$hit
+        | ((\$hit.docId // \"\") | startswith(\"ev_\"))
+        and (\$hit.content | contains(\"Lesson: ambient capture must dedupe accepted suggestions and route storage through explicit curation accept.\"))
+        and \$hit.metadata.session_id == \"$first_session_id\"
+        and \$hit.metadata.start_line == \"2\"
+        and \$hit.metadata.end_line == \"2\"
+        and any(\$hit.provenance[]?; .kind == \"provenance_uri\" and .uri == \"$exact_evidence_uri\")
+        and any(\$hit.provenance[]?; .kind == \"search_document\" and .docId == \$hit.docId))
+" "one imported evidence hit carries its exact ID, content, and safe canonical provenance"
+evidence_doc_id="$(printf '%s' "$evidence_search_out" | jq -r \
+    --arg uri "$exact_evidence_uri" \
+    '.data.results[]? | select(any(.provenance[]?; .kind == "provenance_uri" and .uri == $uri)) | .docId' \
+    | head -n 1)"
+assert_nonempty "$evidence_doc_id" "search exposes the exact imported evidence document ID"
 evidence_pack_out="$(ee_json --workspace "$WS" pack \
     "ambient capture must dedupe accepted suggestions" --max-tokens 2000 --json)"
 assert_jq "$evidence_pack_out" '.schema == "ee.response.v2" and .success == true' \
     "pack for imported transcript phrase succeeds"
-assert_jq "$evidence_pack_out" '
-    any((.degraded // [])[]?; .code == "context_evidence_hit_unhydrated")
-    and all(.data.pack.items[]?; ((.memoryId // "") | startswith("ev_") | not))
-' "undistilled evidence is rejected from memory packing with the exact degradation"
+assert_jq "$evidence_pack_out" ".data.pack.schema == \"ee.pack.v2\"
+    and (.data.pack.items | type == \"array\")
+    and (.data.pack.items | length == 0)
+    and any((.degraded // [])[]?;
+        .code == \"context_evidence_hit_unhydrated\"
+        and (.message | contains(\"$evidence_doc_id\")))
+    and all(.data.pack.items[];
+        (.memoryId // \"\") != \"$evidence_doc_id\"
+        and (.docId // \"\") != \"$evidence_doc_id\"
+        and (.entityId // \"\") != \"$evidence_doc_id\")" \
+    "undistilled exact evidence hit is explicitly degraded and excluded from a typed empty pack"
 
 ready_generation="$(printf '%s' "$ready_index_out" | jq -r '.data.indexGeneration // empty')"
 assert_nonempty "$ready_generation" "ready index exposes its published generation"
-repeat_coalesce_out="$(ee_json --workspace "$WS" job run index_coalesce --item-limit 1 --json)"
-assert_jq "$repeat_coalesce_out" '.schema == "ee.response.v2" and .success == true' \
-    "repeating public index_coalesce is idempotent"
+repeat_coalesce_out="$(ee_json --workspace "$WS" job run index_coalesce --item-limit 2 --json)"
+assert_jq "$repeat_coalesce_out" '.schema == "ee.response.v2" and .success == true
+    and .data.requestedJob == "index_coalesce"
+    and .data.durableMutation == false
+    and .data.summary == {"total":1,"succeeded":1,"skipped":0,"failed":0}
+    and .data.job.outcome == "success"
+    and .data.job.details.durableMutation == false
+    and .data.job.details.result.status == "no_pending_jobs"
+    and .data.job.details.result.pending_jobs == 0
+    and .data.job.details.result.processed_jobs == 0
+    and .data.job.details.result.completed_jobs == 0
+    and .data.job.details.result.failed_jobs == 0
+    and (.data.job.details.result.jobs | length == 0)' \
+    "repeating public index_coalesce returns the exact no-pending idempotent result"
 repeat_index_out="$(ee_json --workspace "$WS" index status --json)"
 assert_jq "$repeat_index_out" ".data.health == \"ready\"
     and .data.dbGeneration == $ready_generation
     and .data.indexGeneration == $ready_generation
-    and .data.indexDocumentCount == (1 + $spans_imported)" \
+    and .data.indexDocumentCount == (2 + $spans_imported)" \
     "idempotent repeat preserves the exact ready generation and document count"
 
 step "ambient capture suggest is read-only and proposes one explicit capture"
@@ -476,6 +580,11 @@ else
 fi
 
 end_temp_workspace
+if [ -s "$EE_JSON_FAILURES_FILE" ]; then
+    while IFS= read -r command_failure; do
+        _harness_fail "logged command failure: $command_failure"
+    done <"$EE_JSON_FAILURES_FILE"
+fi
 summary_rc=0
 harness_summary || summary_rc=$?
 printf 'Artifacts: %s\n' "$LOG_DIR" >&2

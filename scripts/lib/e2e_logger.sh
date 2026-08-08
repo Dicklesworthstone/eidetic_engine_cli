@@ -582,14 +582,18 @@ e2e_log_command() {
         "stderr_excerpt" "$stderr_excerpt" \
         "exit_code" "$rc" \
         "elapsed_ms" "$elapsed_ms"
-    e2e_log_artifact_manifest "command_end" "$label" "$@"
+    local manifest_rc=0
+    e2e_log_artifact_manifest "command_end" "$label" "$@" || manifest_rc=$?
     cat "$out_file"
     if [ "${EE_E2E_KEEP_ARTIFACTS:-${EE_E2E_KEEP_WORKSPACE:-0}}" = "1" ]; then
         e2e_log_note "e2e_log_command_keep_artifacts stdout=$out_file stderr=$err_file"
     else
         rm -f "$out_file" "$err_file"
     fi
-    return $rc
+    if [ "$rc" -ne 0 ]; then
+        return "$rc"
+    fi
+    return "$manifest_rc"
 }
 
 # Assert two strings equal. Emits assert_ok or assert_fail.

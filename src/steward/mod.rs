@@ -3685,7 +3685,7 @@ impl ManualRunner {
         }
 
         options.dry_run = false;
-        let report = match crate::core::index::process_index_jobs(&options) {
+        let report = match crate::core::index::process_index_jobs_coalesced(&options) {
             Ok(report) => report,
             Err(error) => {
                 let message = format!("Index coalesce failed: {error}");

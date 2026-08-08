@@ -291,6 +291,59 @@ fn bash_harness_emits_schema_valid_events() -> TestResult {
 }
 
 #[test]
+fn bash_command_propagates_artifact_manifest_failure() -> TestResult {
+    let tmp = TempDir::new().map_err(|e| e.to_string())?;
+    let log_path = tmp.path().join("manifest_failure.jsonl");
+    let invalid_report_path = tmp.path().join("invalid-verification-report.json");
+    std::fs::write(&invalid_report_path, "{}\n")
+        .map_err(|error| format!("write invalid verification report: {error}"))?;
+    let bash_lib = repo_root().join("scripts/lib/e2e_logger.sh");
+
+    let script = format!(
+        r#"
+        set +e
+        source {harness:?}
+        e2e_log_start "manifest_failure"
+        e2e_log_command /bin/true >/dev/null
+        rc=$?
+        e2e_log_end
+        exit "$rc"
+        "#,
+        harness = bash_lib.display(),
+    );
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .env("EE_TEST_LOG_PATH", &log_path)
+        .env(
+            "EE_REMOTE_ARTIFACT_VERIFICATION_REPORT",
+            &invalid_report_path,
+        )
+        .output()
+        .map_err(|error| format!("bash spawn: {error}"))?;
+
+    if output.status.code() != Some(2) {
+        return Err(format!(
+            "expected artifact-manifest failure exit 2, got {:?}; stderr: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.contains("invalid EE_REMOTE_ARTIFACT_VERIFICATION_REPORT") {
+        return Err(format!("missing manifest failure diagnostic: {stderr}"));
+    }
+    let events = read_events(&log_path)?;
+    if !events
+        .iter()
+        .any(|event| event["kind"] == "command_end" && event["exit_code"] == 0)
+    {
+        return Err("successful command result was not logged before manifest failure".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
 fn command_recorder_emits_events_when_log_path_set() -> TestResult {
     // Drive CommandRecorder via a subprocess that has EE_TEST_LOG_PATH set,
     // so we never mutate parent env. The subprocess runs a tiny Rust shim
