@@ -32,12 +32,22 @@
 //! additionally binding the pair-key generation and both current Tailscale
 //! node-key observations — before either side derives directional keys.
 
+use std::collections::BTreeSet;
 use std::fmt;
+use std::future::Future;
+use std::io;
+use std::net::{Shutdown, SocketAddr};
 use std::sync::atomic::{Ordering, compiler_fence};
+use std::time::Duration;
 
+use asupersync::io::{AsyncReadExt, AsyncWriteExt};
+use asupersync::net::TcpStream;
+use asupersync::time::{timeout, wall_now};
+use asupersync::Cx;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+use crate::config::{EnvVar, read_env_var};
 use crate::mesh::key_store::SecretBytes;
 
 /// Frame v2 schema identifier.
@@ -373,6 +383,8 @@ pub enum CounterViolation {
     Skipped,
     /// A counter earlier than the previous one arrived.
     Regressed,
+    /// The receiver already accepted `u64::MAX`; no successor exists.
+    Exhausted,
 }
 
 /// Fail-closed error surface for frame v2 verification. `degraded_code`
@@ -513,6 +525,7 @@ impl std::error::Error for TransportSessionError {}
 pub struct SessionCounters {
     next: u64,
     closed: bool,
+    exhausted: bool,
 }
 
 impl Default for SessionCounters {
@@ -528,6 +541,7 @@ impl SessionCounters {
         Self {
             next: 1,
             closed: false,
+            exhausted: false,
         }
     }
 
@@ -545,11 +559,23 @@ impl SessionCounters {
 
     /// Accept exactly the next counter or close the session.
     pub fn accept(&mut self, observed: u64) -> Result<(), TransportSessionError> {
+        if self.exhausted {
+            return Err(TransportSessionError::ReplayRejected {
+                violation: CounterViolation::Exhausted,
+                expected: u64::MAX,
+                observed,
+            });
+        }
         if self.closed {
             return Err(TransportSessionError::SessionClosed);
         }
         if observed == self.next {
-            self.next = self.next.saturating_add(1);
+            if self.next == u64::MAX {
+                self.closed = true;
+                self.exhausted = true;
+            } else {
+                self.next += 1;
+            }
             return Ok(());
         }
         self.closed = true;
