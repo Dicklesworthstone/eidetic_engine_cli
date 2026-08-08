@@ -8599,6 +8599,105 @@ GROUP BY workspace_id, attempt_family_id;
     "blake3:v095_attempt_family_ledger_2026_08_08",
 );
 
+/// Adds the sentinel polarity column
+/// (bd-wake-on-condition-inverse-sentinel-65uci). Every pre-existing spec is a
+/// gate sentinel; the uniqueness key gains polarity so a revive sentinel may
+/// coexist with a gate sentinel over the same predicate. Both sentinel tables
+/// are rebuilt because `memory_sentinel_results.spec_hash` references the
+/// specs table and a bare RENAME would drag the child's foreign key along to
+/// the retired copy.
+pub const V096_MEMORY_SENTINEL_POLARITY: Migration = Migration::new(
+    96,
+    "memory_sentinel_polarity",
+    r#"
+DROP INDEX IF EXISTS idx_memory_sentinel_specs_memory;
+DROP INDEX IF EXISTS idx_memory_sentinel_specs_safety;
+DROP INDEX IF EXISTS idx_memory_sentinel_results_spec_checked;
+DROP INDEX IF EXISTS idx_memory_sentinel_results_status;
+
+ALTER TABLE memory_sentinel_results RENAME TO memory_sentinel_results_v069;
+ALTER TABLE memory_sentinel_specs RENAME TO memory_sentinel_specs_v069;
+
+CREATE TABLE memory_sentinel_specs (
+    spec_hash TEXT PRIMARY KEY CHECK (
+        length(spec_hash) = 71 AND substr(spec_hash, 1, 7) = 'blake3:'
+    ),
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    sentinel_kind TEXT NOT NULL CHECK (sentinel_kind IN (
+        'path_exists',
+        'file_hash_or_marker',
+        'json_schema_contains_field',
+        'config_key_exists',
+        'env_var_registered',
+        'degraded_code_fixture_exists',
+        'dependency_capability_present',
+        'command_help_contains_flag'
+    )),
+    polarity TEXT NOT NULL DEFAULT 'gate' CHECK (polarity IN ('gate', 'revive')),
+    target TEXT NOT NULL CHECK (length(trim(target)) > 0),
+    expected_predicate TEXT NOT NULL CHECK (length(trim(expected_predicate)) > 0),
+    safety_class TEXT NOT NULL CHECK (safety_class IN (
+        'pure_predicate',
+        'allowlisted_introspection'
+    )),
+    provenance TEXT NOT NULL CHECK (length(trim(provenance)) > 0),
+    stale_threshold_seconds INTEGER CHECK (
+        stale_threshold_seconds IS NULL OR stale_threshold_seconds > 0
+    ),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    UNIQUE (memory_id, sentinel_kind, target, expected_predicate, polarity)
+);
+
+INSERT INTO memory_sentinel_specs (
+    spec_hash, memory_id, sentinel_kind, polarity, target, expected_predicate,
+    safety_class, provenance, stale_threshold_seconds, created_at, updated_at
+)
+SELECT
+    spec_hash, memory_id, sentinel_kind, 'gate', target, expected_predicate,
+    safety_class, provenance, stale_threshold_seconds, created_at, updated_at
+FROM memory_sentinel_specs_v069;
+
+CREATE TABLE memory_sentinel_results (
+    result_hash TEXT PRIMARY KEY CHECK (
+        length(result_hash) = 71 AND substr(result_hash, 1, 7) = 'blake3:'
+    ),
+    spec_hash TEXT NOT NULL REFERENCES memory_sentinel_specs(spec_hash) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('pass', 'fail', 'unknown', 'degraded')),
+    checked_at TEXT NOT NULL CHECK (length(trim(checked_at)) > 0),
+    evidence_summary TEXT NOT NULL CHECK (length(trim(evidence_summary)) > 0),
+    stale_threshold_seconds INTEGER CHECK (
+        stale_threshold_seconds IS NULL OR stale_threshold_seconds > 0
+    ),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0)
+);
+
+INSERT INTO memory_sentinel_results (
+    result_hash, spec_hash, status, checked_at, evidence_summary,
+    stale_threshold_seconds, created_at
+)
+SELECT
+    result_hash, spec_hash, status, checked_at, evidence_summary,
+    stale_threshold_seconds, created_at
+FROM memory_sentinel_results_v069;
+
+DROP TABLE memory_sentinel_results_v069;
+DROP TABLE memory_sentinel_specs_v069;
+
+CREATE INDEX idx_memory_sentinel_specs_memory
+    ON memory_sentinel_specs(memory_id, sentinel_kind);
+CREATE INDEX idx_memory_sentinel_specs_safety
+    ON memory_sentinel_specs(safety_class, sentinel_kind);
+CREATE INDEX idx_memory_sentinel_specs_polarity
+    ON memory_sentinel_specs(polarity, memory_id);
+CREATE INDEX idx_memory_sentinel_results_spec_checked
+    ON memory_sentinel_results(spec_hash, checked_at);
+CREATE INDEX idx_memory_sentinel_results_status
+    ON memory_sentinel_results(status, checked_at);
+"#,
+    "blake3:v096_memory_sentinel_polarity_2026_08_08",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -8696,6 +8795,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST,
     V094_MEMORY_ATTEMPT_FAMILY,
     V095_ATTEMPT_FAMILY_LEDGER,
+    V096_MEMORY_SENTINEL_POLARITY,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -17331,6 +17431,13 @@ fn parse_memory_sentinel_safety_class(row_value: &str) -> Result<MemorySentinelS
     })
 }
 
+fn parse_memory_sentinel_polarity(row_value: &str) -> Result<MemorySentinelPolarity> {
+    MemorySentinelPolarity::parse(row_value).ok_or_else(|| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: format!("memory_sentinel_specs.polarity has unknown value {row_value:?}"),
+    })
+}
+
 fn parse_memory_sentinel_result_status(row_value: &str) -> Result<MemorySentinelResultStatus> {
     MemorySentinelResultStatus::parse(row_value).ok_or_else(|| DbError::MalformedRow {
         operation: DbOperation::Query,
@@ -17453,14 +17560,13 @@ fn stored_memory_sentinel_spec_from_row(row: &Row) -> Result<StoredMemorySentine
         DbOperation::Query,
         "safety_class",
     )?)?;
+    let polarity =
+        parse_memory_sentinel_polarity(required_text(row, 10, DbOperation::Query, "polarity")?)?;
     Ok(StoredMemorySentinelSpec {
         spec_hash: required_text(row, 0, DbOperation::Query, "spec_hash")?.to_string(),
         memory_id: required_text(row, 1, DbOperation::Query, "memory_id")?.to_string(),
         sentinel_kind,
-        // The persisted polarity column arrives with the revive-when slice's
-        // migration; every spec stored before it is a gate sentinel
-        // (bd-wake-on-condition-inverse-sentinel-65uci).
-        polarity: MemorySentinelPolarity::Gate,
+        polarity,
         target: required_text(row, 3, DbOperation::Query, "target")?.to_string(),
         expected_predicate: required_text(row, 4, DbOperation::Query, "expected_predicate")?
             .to_string(),
@@ -18067,11 +18173,12 @@ impl DbConnection {
         let now = Utc::now().to_rfc3339();
         self.execute_for(
             DbOperation::Execute,
-            "INSERT INTO memory_sentinel_specs (spec_hash, memory_id, sentinel_kind, target, expected_predicate, safety_class, provenance, stale_threshold_seconds, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ON CONFLICT(spec_hash) DO UPDATE SET target = excluded.target, expected_predicate = excluded.expected_predicate, safety_class = excluded.safety_class, provenance = excluded.provenance, stale_threshold_seconds = excluded.stale_threshold_seconds, updated_at = excluded.updated_at",
+            "INSERT INTO memory_sentinel_specs (spec_hash, memory_id, sentinel_kind, polarity, target, expected_predicate, safety_class, provenance, stale_threshold_seconds, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) ON CONFLICT(spec_hash) DO UPDATE SET polarity = excluded.polarity, target = excluded.target, expected_predicate = excluded.expected_predicate, safety_class = excluded.safety_class, provenance = excluded.provenance, stale_threshold_seconds = excluded.stale_threshold_seconds, updated_at = excluded.updated_at",
             &[
                 Value::Text(spec.spec_hash.clone()),
                 Value::Text(spec.memory_id.clone()),
                 Value::Text(spec.sentinel_kind.as_str().to_string()),
+                Value::Text(spec.polarity.as_str().to_string()),
                 Value::Text(spec.target.clone()),
                 Value::Text(spec.expected_predicate.clone()),
                 Value::Text(spec.safety_class.as_str().to_string()),
@@ -18120,7 +18227,7 @@ impl DbConnection {
     ) -> Result<Vec<StoredMemorySentinelSpec>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT spec_hash, memory_id, sentinel_kind, target, expected_predicate, safety_class, provenance, stale_threshold_seconds, created_at, updated_at FROM memory_sentinel_specs WHERE memory_id = ?1 ORDER BY sentinel_kind ASC, target ASC, expected_predicate ASC, spec_hash ASC",
+            "SELECT spec_hash, memory_id, sentinel_kind, target, expected_predicate, safety_class, provenance, stale_threshold_seconds, created_at, updated_at, polarity FROM memory_sentinel_specs WHERE memory_id = ?1 ORDER BY sentinel_kind ASC, target ASC, expected_predicate ASC, spec_hash ASC",
             &[Value::Text(memory_id.to_string())],
         )?;
         rows.iter()
@@ -18133,7 +18240,7 @@ impl DbConnection {
     pub fn list_all_memory_sentinel_specs(&self) -> Result<Vec<StoredMemorySentinelSpec>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT spec_hash, memory_id, sentinel_kind, target, expected_predicate, safety_class, provenance, stale_threshold_seconds, created_at, updated_at FROM memory_sentinel_specs ORDER BY memory_id ASC, sentinel_kind ASC, target ASC, expected_predicate ASC, spec_hash ASC",
+            "SELECT spec_hash, memory_id, sentinel_kind, target, expected_predicate, safety_class, provenance, stale_threshold_seconds, created_at, updated_at, polarity FROM memory_sentinel_specs ORDER BY memory_id ASC, sentinel_kind ASC, target ASC, expected_predicate ASC, spec_hash ASC",
             &[],
         )?;
         rows.iter()
@@ -31864,6 +31971,116 @@ mod tests {
             &connection.foreign_key_enforcement_state()?,
             &1,
             "failed rebuild restores foreign-key enforcement",
+        )?;
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn v096_sentinel_polarity_rebuild_preserves_rows_and_allows_dual_polarity() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 95)?;
+        setup_workspace(&connection)?;
+
+        let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::nil()).to_string();
+        connection.insert_memory(
+            &memory_id,
+            &test_memory_input(
+                "wsp_01234567890123456789012345",
+                "V096 preserves sentinel spec and result rows across the rebuild.",
+            ),
+        )?;
+
+        // Seed a v069-shape gate spec + one result the way any pre-polarity
+        // build would have written them (no polarity column exists yet).
+        let gate = super::MemorySentinelSpec::from_raw(
+            &memory_id,
+            "env_var_registered:EE_PACK_TRACE",
+            super::MemorySentinelPolarity::Gate,
+            Some("registered"),
+            "test://sentinel",
+            Some(600),
+        )
+        .map_err(|error| format!("build gate spec: {error:?}"))?;
+        connection.execute_raw(&format!(
+            "INSERT INTO memory_sentinel_specs (spec_hash, memory_id, sentinel_kind, target, expected_predicate, safety_class, provenance, stale_threshold_seconds, created_at, updated_at) VALUES ('{}', '{}', 'env_var_registered', 'EE_PACK_TRACE', 'registered', 'pure_predicate', 'test://sentinel', 600, '2026-08-08T00:00:00Z', '2026-08-08T00:00:00Z')",
+            gate.spec_hash, memory_id,
+        ))?;
+        let result = super::MemorySentinelResult::new(super::MemorySentinelResultInput {
+            spec_hash: gate.spec_hash.clone(),
+            status: super::MemorySentinelResultStatus::Pass,
+            checked_at: "2026-08-08T00:00:00Z".to_owned(),
+            evidence_summary: "EE_PACK_TRACE registered.".to_owned(),
+            stale_threshold_seconds: Some(600),
+        })
+        .map_err(|error| format!("build result: {error:?}"))?;
+        connection.execute_raw(&format!(
+            "INSERT INTO memory_sentinel_results (result_hash, spec_hash, status, checked_at, evidence_summary, stale_threshold_seconds, created_at) VALUES ('{}', '{}', 'pass', '2026-08-08T00:00:00Z', 'EE_PACK_TRACE registered.', 600, '2026-08-08T00:00:00Z')",
+            result.result_hash, gate.spec_hash,
+        ))?;
+
+        let outcome = connection.apply_foreign_key_relaxed_migration(
+            &super::V096_MEMORY_SENTINEL_POLARITY,
+            "2026-08-08T12:00:00Z",
+        )?;
+        ensure_equal(
+            &outcome,
+            &super::ApplyOutcome::Applied,
+            "V096 migration outcome",
+        )?;
+
+        ensure_equal(
+            &table_row_count(&connection, "memory_sentinel_specs")?,
+            &1,
+            "spec rows preserved across the rebuild",
+        )?;
+        ensure_equal(
+            &table_row_count(&connection, "memory_sentinel_results")?,
+            &1,
+            "result rows preserved across the rebuild",
+        )?;
+
+        let listed = connection.list_memory_sentinel_specs(&memory_id)?;
+        ensure_equal(&listed.len(), &1, "one migrated spec listed")?;
+        ensure_equal(
+            &listed[0].polarity,
+            &super::MemorySentinelPolarity::Gate,
+            "migrated spec backfills gate polarity",
+        )?;
+        ensure_equal(
+            &listed[0].spec_hash,
+            &gate.spec_hash,
+            "migrated spec keeps its stored hash identity",
+        )?;
+        ensure(
+            connection
+                .latest_memory_sentinel_result(&gate.spec_hash)?
+                .is_some(),
+            "migrated result still resolves through the rebuilt foreign key",
+        )?;
+
+        // The rebuilt uniqueness key includes polarity: a revive sentinel
+        // over the identical predicate may now coexist with the gate one.
+        let revive = super::MemorySentinelSpec::from_raw(
+            &memory_id,
+            "env_var_registered:EE_PACK_TRACE",
+            super::MemorySentinelPolarity::Revive,
+            Some("registered"),
+            "test://sentinel",
+            Some(600),
+        )
+        .map_err(|error| format!("build revive spec: {error:?}"))?;
+        connection.upsert_memory_sentinel_spec(&revive)?;
+        let listed = connection.list_memory_sentinel_specs(&memory_id)?;
+        ensure_equal(&listed.len(), &2, "gate and revive twins coexist")?;
+        let stored_revive = listed
+            .iter()
+            .find(|spec| spec.spec_hash == revive.spec_hash)
+            .ok_or("revive spec missing from listing")?;
+        ensure_equal(
+            &stored_revive.polarity,
+            &super::MemorySentinelPolarity::Revive,
+            "revive polarity round-trips through storage",
         )?;
         connection.close()?;
         Ok(())

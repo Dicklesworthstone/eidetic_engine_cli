@@ -9177,11 +9177,18 @@ fn sentinel_candidate_freshness(
     memory_id: &str,
     reference_time: DateTime<Utc>,
 ) -> Result<SentinelCandidateFreshness, ContextPackError> {
-    let specs = connection
+    let specs: Vec<_> = connection
         .list_memory_sentinel_specs(memory_id)
         .map_err(|error| {
             ContextPackError::Storage(format!("Failed to load sentinel specs: {error}"))
-        })?;
+        })?
+        .into_iter()
+        // Revive-polarity sentinels watch for a retired memory's blocker to
+        // clear: their predicate is EXPECTED to fail while the memory stays
+        // down, so they must never gate serving. Only gate-polarity specs
+        // participate in freshness (bd-wake-on-condition-inverse-sentinel-65uci).
+        .filter(|spec| spec.polarity == crate::models::MemorySentinelPolarity::Gate)
+        .collect();
     if specs.is_empty() {
         return Ok(SentinelCandidateFreshness::NoSentinels);
     }
