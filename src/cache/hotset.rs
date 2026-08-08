@@ -841,6 +841,7 @@ pub enum PrewarmSignalSource {
     Beads,
     Bv,
     AgentMail,
+    RetrievalProvenance,
     VerificationBroker,
     HostProfile,
 }
@@ -852,6 +853,7 @@ impl PrewarmSignalSource {
             Self::Beads => "beads",
             Self::Bv => "bv",
             Self::AgentMail => "agent_mail",
+            Self::RetrievalProvenance => "retrieval_provenance",
             Self::VerificationBroker => "verification_broker",
             Self::HostProfile => "host_profile",
         }
@@ -862,6 +864,7 @@ impl PrewarmSignalSource {
             Self::Beads => 48,
             Self::Bv => 44,
             Self::AgentMail => 36,
+            Self::RetrievalProvenance => 40,
             Self::VerificationBroker => 32,
             Self::HostProfile => 20,
         }
@@ -2202,8 +2205,8 @@ impl HotsetManifest {
 // deterministic `ee.cache.hotset_collect.v1` manifest assembly. The actual
 // bounded read-only probes (git workspace hygiene, the Beads tracker export,
 // the BV actionable frontier, Agent Mail and source-authority snapshots, and
-// the persisted retrieval-provenance manifest) live in the CLI orchestration
-// seam, which may depend downward on both `core::source_run` and this module
+// bounded retrieval provenance from the workspace database) live in the CLI
+// orchestration seam, which may depend downward on both `core::source_run` and this module
 // — `core::context` already depends on `cache::hotset`, so importing core
 // from here would create a core<->cache dependency cycle. A source that is
 // unavailable, stale, or mismatched is represented by an explicit
@@ -2214,7 +2217,7 @@ impl HotsetManifest {
 
 /// Data schema for the collected hotset manifest emitted by
 /// `ee cache hotset-manifest`.
-pub const HOTSET_COLLECT_SCHEMA: &str = "ee.cache.hotset_collect.v1";
+pub const HOTSET_COLLECT_SCHEMA: &str = crate::models::CACHE_HOTSET_COLLECT_SCHEMA_V1;
 
 /// The Beads JSONL export is missing or unreadable.
 pub const HOTSET_BEADS_UNAVAILABLE_CODE: &str = "hotset_beads_unavailable";
@@ -2236,7 +2239,9 @@ pub const HOTSET_GIT_UNAVAILABLE_CODE: &str = "hotset_git_unavailable";
 pub const HOTSET_GIT_TIMEOUT_CODE: &str = "hotset_git_timeout";
 /// No source-authority snapshot was readable at the resolved path.
 pub const HOTSET_SOURCE_AUTHORITY_MISSING_CODE: &str = "hotset_source_authority_missing";
-/// Recent pack/search provenance has no bounded in-process reader yet.
+/// The source-authority snapshot was valid but explicitly failed closed.
+pub const HOTSET_SOURCE_AUTHORITY_DEGRADED_CODE: &str = "hotset_source_authority_degraded";
+/// Recent pack/search provenance could not be read from the workspace DB.
 pub const HOTSET_RETRIEVAL_PROVENANCE_UNAVAILABLE_CODE: &str =
     "hotset_retrieval_provenance_unavailable";
 /// Git-dirty paths overlap Agent Mail reservations; ranking confidence drops.
@@ -2329,6 +2334,21 @@ impl HotsetSourceRecord {
         self.source
     }
 
+    #[must_use]
+    pub const fn signal_count(&self) -> usize {
+        self.signal_count
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    #[must_use]
+    pub fn repair(&self) -> Option<&str> {
+        self.repair.as_deref()
+    }
+
     fn severity(&self) -> &'static str {
         match self.status {
             HotsetSourceStatus::Fresh => "info",
@@ -2362,9 +2382,9 @@ pub struct HotsetCollection {
 
 impl HotsetCollection {
     /// Assemble a collection from collector outputs. `retrieval_provenance`
-    /// carries the hashed reference block for the persisted
-    /// `ee.cache.hotset.v1` manifest when one was readable (counts and
-    /// hashes only, never entry content).
+    /// carries the hashed reference block for bounded pack/search evidence
+    /// read from the workspace database (counts and hashes only, never entry
+    /// content).
     #[must_use]
     pub fn from_parts(
         signals: Vec<PrewarmSignal>,

@@ -17944,8 +17944,6 @@ const HOTSET_BEADS_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const HOTSET_GIT_MAX_LINES: usize = 400;
 /// Bound on reservation paths retained for overlap detection.
 const HOTSET_MAX_RESERVED_PATHS: usize = 200;
-/// Bound on the persisted retrieval-provenance manifest read.
-const HOTSET_RETRIEVAL_MANIFEST_MAX_BYTES: u64 = 4 * 1024 * 1024;
 /// Bound on Agent Mail and source-authority snapshot reads.
 const HOTSET_SNAPSHOT_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -17954,14 +17952,37 @@ const HOTSET_SNAPSHOT_MAX_BYTES: u64 = 4 * 1024 * 1024;
 /// post-read cap re-checks the actual bytes so a file grown between stat and
 /// read still cannot exceed the bound.
 fn hotset_bounded_regular_file_read(path: &Path, max_bytes: u64) -> Result<Vec<u8>, &'static str> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| "missing or unreadable")?;
-    if !metadata.file_type().is_file() {
+    let before = fs::symlink_metadata(path).map_err(|_| "missing or unreadable")?;
+    if !before.file_type().is_file() {
         return Err("not a regular file (symlinks are refused)");
     }
-    if metadata.len() > max_bytes {
+    if before.len() > max_bytes {
         return Err("exceeds the bounded-read cap");
     }
-    let bytes = fs::read(path).map_err(|_| "missing or unreadable")?;
+
+    let file = fs::File::open(path).map_err(|_| "missing or unreadable")?;
+    let opened = file.metadata().map_err(|_| "missing or unreadable")?;
+    let after = fs::symlink_metadata(path).map_err(|_| "changed during bounded read")?;
+    if !opened.file_type().is_file() || !after.file_type().is_file() {
+        return Err("not a regular file (symlinks are refused)");
+    }
+    if opened.len() > max_bytes || after.len() > max_bytes {
+        return Err("exceeds the bounded-read cap");
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let identity = (opened.dev(), opened.ino());
+        if (before.dev(), before.ino()) != identity || (after.dev(), after.ino()) != identity {
+            return Err("changed during bounded read");
+        }
+    }
+
+    let mut bytes = Vec::with_capacity(usize::try_from(opened.len()).unwrap_or(0));
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| "missing or unreadable")?;
     if bytes.len() as u64 > max_bytes {
         return Err("exceeds the bounded-read cap");
     }
@@ -18033,8 +18054,9 @@ fn collect_hotset_signals(
     signals.extend(authority_signals);
     sources.push(authority_record);
 
-    let (retrieval_record, retrieval_provenance) =
+    let (retrieval_signals, retrieval_record, retrieval_provenance) =
         collect_hotset_retrieval_provenance(options, HOTSET_RETRIEVAL_PROVENANCE_UNAVAILABLE_CODE);
+    signals.extend(retrieval_signals);
     sources.push(retrieval_record);
 
     let overlap = dirty_overlap_hashes(&dirty_paths, &reserved_paths);
@@ -18108,9 +18130,8 @@ fn collect_hotset_git_source(
                     continue;
                 };
                 let path = raw_path
-                    .split(" -> ")
-                    .next_back()
-                    .unwrap_or(raw_path)
+                    .rsplit_once(" -> ")
+                    .map_or(raw_path, |(_, renamed_to)| renamed_to)
                     .trim()
                     .trim_matches('"');
                 if path.is_empty() || path.starts_with(".beads") {
@@ -18559,8 +18580,8 @@ fn collect_hotset_source_authority(
     crate::cache::hotset::HotsetSourceRecord,
 ) {
     use crate::cache::hotset::{
-        HOTSET_SOURCE_AUTHORITY_MISSING_CODE, HotsetSourceRecord, HotsetSourceStatus,
-        PrewarmSignal, PrewarmSignalSource,
+        HOTSET_SOURCE_AUTHORITY_DEGRADED_CODE, HOTSET_SOURCE_AUTHORITY_MISSING_CODE,
+        HotsetSourceRecord, HotsetSourceStatus, PrewarmSignal, PrewarmSignalSource,
     };
 
     let path = options
@@ -18597,18 +18618,103 @@ fn collect_hotset_source_authority(
             missing("source-authority snapshot was not parseable JSON".to_owned()),
         );
     };
-    let rch_remote_only = snapshot
-        .get("rchRemoteOnlyRequired")
-        .or_else(|| snapshot.pointer("/sourceAuthority/rchRemoteOnlyRequired"))
+    if snapshot.get("schema").and_then(serde_json::Value::as_str)
+        != Some(crate::core::swarm_next_action::SOURCE_AUTHORITY_SNAPSHOT_SCHEMA_V1)
+    {
+        return (
+            Vec::new(),
+            missing(
+                "source-authority snapshot schema is not ee.source_authority.snapshot.v1"
+                    .to_owned(),
+            ),
+        );
+    }
+    let Some(source_rows) = snapshot
+        .get("sources")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return (
+            Vec::new(),
+            missing("source-authority snapshot has no source vector".to_owned()),
+        );
+    };
+    if snapshot
+        .pointer("/overall/failClosed")
         .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+        .unwrap_or(true)
+    {
+        return (
+            Vec::new(),
+            HotsetSourceRecord::degraded(
+                "source_authority",
+                HotsetSourceStatus::Stale,
+                HOTSET_SOURCE_AUTHORITY_DEGRADED_CODE,
+                "source-authority snapshot explicitly fails closed; abstaining from authority signals",
+                "Repair the degraded source-authority inputs and regenerate `ee.source_authority.snapshot.v1`.",
+            ),
+        );
+    }
+
+    const SOURCE_KINDS: [&str; 12] = [
+        "actionable_queue",
+        "agent_mail",
+        "beads",
+        "bv",
+        "git",
+        "host_profile",
+        "installed_binary",
+        "memory_drift",
+        "rch",
+        "support_bundle",
+        "toolchain",
+        "workspace_hygiene",
+    ];
+    let mut observed_source_kinds = BTreeSet::new();
+    for source in source_rows {
+        let Some(source_kind) = source.get("sourceKind").and_then(serde_json::Value::as_str) else {
+            return (
+                Vec::new(),
+                missing(
+                    "source-authority snapshot contains a source without sourceKind".to_owned(),
+                ),
+            );
+        };
+        if !SOURCE_KINDS.contains(&source_kind) || !observed_source_kinds.insert(source_kind) {
+            return (
+                Vec::new(),
+                missing(
+                    "source-authority snapshot has unknown or duplicate source kinds".to_owned(),
+                ),
+            );
+        }
+    }
+    if observed_source_kinds.len() != SOURCE_KINDS.len() {
+        return (
+            Vec::new(),
+            missing(
+                "source-authority snapshot does not contain the complete source vector".to_owned(),
+            ),
+        );
+    }
+
     let mut authority_signals = Vec::new();
-    if rch_remote_only {
+    for source in source_rows.iter().take(options.max_signals_per_source) {
+        let source_kind = source["sourceKind"]
+            .as_str()
+            .expect("sourceKind was validated above");
+        if source.get("state").and_then(serde_json::Value::as_str) != Some("ready")
+            || source
+                .get("authoritative")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+        {
+            continue;
+        }
         authority_signals.push(
             PrewarmSignal::new(
                 PrewarmSignalSource::VerificationBroker,
-                "source-authority:rch-remote-only",
-                "rch remote only verification required",
+                format!("source-authority:{source_kind}"),
+                format!("{source_kind} source authority ready"),
             )
             .with_priority(8),
         );
@@ -18621,76 +18727,131 @@ fn collect_hotset_source_authority(
     (authority_signals, record)
 }
 
-/// Bounded reader for the persisted retrieval-provenance manifest
-/// (`<workspace>/.ee/cache/hotsets/latest.json`, schema `ee.cache.hotset.v1`).
-/// The manifest's entries are already hashed keys; this collector carries a
-/// reference block (hash + entry counts + generation) for support bundles
-/// and never re-derives signals from it.
+/// Bounded read-only collector for recent pack and search provenance in the
+/// workspace source-of-truth database. Pack queries may shape candidates in
+/// memory, but the public manifest carries only counts and a domain-separated
+/// evidence hash. Search audit details and pack replay ledgers are never read.
 fn collect_hotset_retrieval_provenance(
     options: &HotsetCollectOptions,
     unavailable_code: &'static str,
 ) -> (
+    Vec<crate::cache::hotset::PrewarmSignal>,
     crate::cache::hotset::HotsetSourceRecord,
     Option<serde_json::Value>,
 ) {
-    use crate::cache::hotset::{HotsetSourceRecord, HotsetSourceStatus};
+    use crate::cache::hotset::{
+        HotsetSourceRecord, HotsetSourceStatus, PrewarmSignal, PrewarmSignalSource,
+    };
 
-    let path = options
-        .workspace_path
-        .join(".ee")
-        .join("cache")
-        .join("hotsets")
-        .join("latest.json");
+    let database_path = options.workspace_path.join(".ee").join("ee.db");
     let unavailable = |message: String| {
         (
+            Vec::new(),
             HotsetSourceRecord::degraded(
                 "retrieval_provenance",
                 HotsetSourceStatus::Unavailable,
                 unavailable_code,
                 message,
-                "Persist an ee.cache.hotset.v1 manifest to \
-                 <workspace>/.ee/cache/hotsets/latest.json (see `ee cache prewarm \
-                 --from-hotset latest`), then re-collect.",
+                "Initialize or repair the workspace database, then run at least one `ee search` \
+                 or `ee pack` command before re-collecting.",
             ),
             None,
         )
     };
-    let text = match hotset_bounded_regular_file_read(&path, HOTSET_RETRIEVAL_MANIFEST_MAX_BYTES) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        Err(reason) => {
-            return unavailable(format!(
-                "persisted hotset manifest is {reason}; recent pack/search provenance \
-                 is absent from this collection"
-            ));
+    let connection = match crate::db::DbConnection::open_file_read_only(&database_path) {
+        Ok(connection) => connection,
+        Err(_) => {
+            return unavailable(
+                "workspace database is missing or unreadable; recent pack/search provenance is unavailable"
+                    .to_owned(),
+            );
         }
     };
-    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return unavailable("persisted hotset manifest was not parseable JSON".to_owned());
+    match connection.needs_migration() {
+        Ok(false) => {}
+        Ok(true) => {
+            return unavailable(
+                "workspace database requires migration before retrieval provenance can be read"
+                    .to_owned(),
+            );
+        }
+        Err(_) => {
+            return unavailable(
+                "workspace database migration posture could not be inspected".to_owned(),
+            );
+        }
+    }
+    let workspace_id = match resolve_database_workspace_id(&connection, &options.workspace_path) {
+        Ok(workspace_id) => workspace_id,
+        Err(_) => {
+            return unavailable(
+                "workspace identity could not be resolved for retrieval provenance".to_owned(),
+            );
+        }
     };
-    if manifest.get("schema").and_then(serde_json::Value::as_str) != Some("ee.cache.hotset.v1") {
-        return unavailable(
-            "persisted hotset manifest schema is not ee.cache.hotset.v1".to_owned(),
+    let limit = u32::try_from(options.max_signals_per_source.min(128)).unwrap_or(128);
+    let pack_records =
+        match connection.list_recent_pack_record_metadata_for_workspace(&workspace_id, limit) {
+            Ok(records) => records,
+            Err(_) => return unavailable("recent pack provenance query failed".to_owned()),
+        };
+    let search_audits = match connection.list_recent_search_audit_provenance(&workspace_id, 128) {
+        Ok(records) => records,
+        Err(_) => return unavailable("recent search provenance query failed".to_owned()),
+    };
+
+    let mut evidence_hasher = blake3::Hasher::new();
+    evidence_hasher.update(b"ee.hotset.retrieval_provenance.v1\0");
+    let mut signals = Vec::new();
+    for pack in &pack_records {
+        evidence_hasher.update(pack.id.as_bytes());
+        evidence_hasher.update(b"\0");
+        evidence_hasher.update(pack.pack_hash.as_bytes());
+        evidence_hasher.update(b"\0");
+        evidence_hasher.update(pack.created_at.as_bytes());
+        evidence_hasher.update(b"\0");
+        signals.push(
+            PrewarmSignal::new(
+                PrewarmSignalSource::RetrievalProvenance,
+                format!("pack:{}", blake3::hash(pack.id.as_bytes()).to_hex()),
+                pack.query.clone(),
+            )
+            .with_labels([pack.profile.clone()])
+            .with_priority(7),
         );
     }
-    let search_entry_count = manifest
-        .get("searchEntries")
-        .and_then(serde_json::Value::as_array)
-        .map_or(0, Vec::len);
-    let pack_entry_count = manifest
-        .get("packEntries")
-        .and_then(serde_json::Value::as_array)
-        .map_or(0, Vec::len);
-    let manifest_hash = format!("blake3:{}", blake3::hash(text.as_bytes()).to_hex());
+    for audit in &search_audits {
+        evidence_hasher.update(audit.id.as_bytes());
+        evidence_hasher.update(b"\0");
+        evidence_hasher.update(audit.action.as_bytes());
+        evidence_hasher.update(b"\0");
+        evidence_hasher.update(audit.timestamp.as_bytes());
+        evidence_hasher.update(b"\0");
+        if let Some(row_hash) = &audit.row_hash {
+            evidence_hasher.update(row_hash.as_bytes());
+        }
+        evidence_hasher.update(b"\0");
+    }
+    if !search_audits.is_empty() && signals.len() < options.max_signals_per_source {
+        signals.push(
+            PrewarmSignal::new(
+                PrewarmSignalSource::RetrievalProvenance,
+                "search-audit:recent",
+                "recent search retrieval activity",
+            )
+            .with_priority(5),
+        );
+    }
+    let evidence_hash = format!("blake3:{}", evidence_hasher.finalize().to_hex());
     let provenance = serde_json::json!({
-        "manifestHash": manifest_hash.clone(),
-        "schema": "ee.cache.hotset.v1",
-        "searchEntryCount": search_entry_count,
-        "packEntryCount": pack_entry_count,
-        "workspaceGeneration": manifest.get("workspaceGeneration"),
-        "indexGeneration": manifest.get("indexGeneration"),
+        "schema": "ee.hotset.retrieval_provenance.v1",
+        "evidenceHash": evidence_hash.clone(),
+        "packRecordCount": pack_records.len(),
+        "searchAuditCount": search_audits.len(),
     });
-    let record = HotsetSourceRecord::fresh("retrieval_provenance", 0, Some(manifest_hash));
-    (record, Some(provenance))
+    let record =
+        HotsetSourceRecord::fresh("retrieval_provenance", signals.len(), Some(evidence_hash));
+    (signals, record, Some(provenance))
 }
 
 fn handle_cache_hotset_manifest<W, E>(
@@ -18746,10 +18907,20 @@ where
             let mut rendered = String::from("Hotset manifest (read-only collection):\n");
             for source in collection.sources() {
                 rendered.push_str(&format!(
-                    "  {:<22} {}\n",
+                    "  {:<22} {} ({} signals)\n",
                     source.source(),
-                    source.status().as_str()
+                    source.status().as_str(),
+                    source.signal_count(),
                 ));
+                if let Some(code) = source.degraded_code() {
+                    rendered.push_str(&format!(
+                        "    code: {code}\n    message: {}\n",
+                        source.message()
+                    ));
+                    if let Some(repair) = source.repair() {
+                        rendered.push_str(&format!("    repair: {repair}\n"));
+                    }
+                }
             }
             rendered.push_str(&format!(
                 "  candidates: {}\n  degraded: {}\n",
@@ -74257,8 +74428,83 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn hotset_source_authority_rows() -> Vec<serde_json::Value> {
+        [
+            "actionable_queue",
+            "agent_mail",
+            "beads",
+            "bv",
+            "git",
+            "host_profile",
+            "installed_binary",
+            "memory_drift",
+            "rch",
+            "support_bundle",
+            "toolchain",
+            "workspace_hygiene",
+        ]
+        .into_iter()
+        .map(|source_kind| {
+            serde_json::json!({
+                "sourceKind": source_kind,
+                "state": "ready",
+                "authoritative": true,
+            })
+        })
+        .collect()
+    }
+
+    #[cfg(unix)]
     fn healthy_hotset_collect_options(dir: &tempfile::TempDir) -> HotsetCollectOptions {
         let ws = dir.path();
+        let database_path = ws.join(".ee").join("ee.db");
+        let database = crate::db::DbConnection::open_file(&database_path)
+            .expect("open hotset fixture database");
+        database.migrate().expect("migrate hotset fixture database");
+        let workspace_id = workspace_core::stable_workspace_id(ws);
+        database
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: ws.to_string_lossy().into_owned(),
+                    name: Some("hotset collector fixture".to_owned()),
+                },
+            )
+            .expect("insert hotset fixture workspace");
+        database
+            .insert_pack_record(
+                "pack_00000000000000000000000001",
+                &crate::db::CreatePackRecordInput {
+                    workspace_id: workspace_id.clone(),
+                    query: "collector alpha cache work".to_owned(),
+                    profile: "compact".to_owned(),
+                    max_tokens: 256,
+                    used_tokens: 0,
+                    item_count: 0,
+                    omitted_count: 0,
+                    pack_hash: format!("blake3:{}", "1".repeat(64)),
+                    degraded_json: None,
+                    created_by: Some("agent:hotset-test".to_owned()),
+                },
+                &[],
+                &[],
+            )
+            .expect("insert hotset fixture pack record");
+        database
+            .insert_audit(
+                "audit_hotset_recent_search",
+                &crate::db::CreateAuditInput {
+                    workspace_id: Some(workspace_id),
+                    actor: Some("agent:hotset-test".to_owned()),
+                    action: "search_completed".to_owned(),
+                    target_type: Some("search".to_owned()),
+                    target_id: None,
+                    details: Some("details deliberately excluded by collector".to_owned()),
+                },
+            )
+            .expect("insert hotset fixture search audit");
+        drop(database);
+
         fs::write(
             ws.join(".beads").join("issues.jsonl"),
             concat!(
@@ -74287,28 +74533,12 @@ mod tests {
             ws.join(".ee").join("source-authority-snapshot.json"),
             serde_json::json!({
                 "schema": "ee.source_authority.snapshot.v1",
-                "rchRemoteOnlyRequired": true,
+                "overall": {"failClosed": false},
+                "sources": hotset_source_authority_rows(),
             })
             .to_string(),
         )
         .expect("write source-authority snapshot");
-        fs::create_dir_all(ws.join(".ee").join("cache").join("hotsets"))
-            .expect("create hotsets dir");
-        fs::write(
-            ws.join(".ee")
-                .join("cache")
-                .join("hotsets")
-                .join("latest.json"),
-            serde_json::json!({
-                "schema": "ee.cache.hotset.v1",
-                "workspaceGeneration": 3,
-                "indexGeneration": 3,
-                "searchEntries": [],
-                "packEntries": [],
-            })
-            .to_string(),
-        )
-        .expect("write retrieval-provenance manifest");
         let git_stub = write_stub_program(
             ws,
             "stub-git",
@@ -74335,6 +74565,43 @@ mod tests {
             .into_iter()
             .map(|(code, _, _, _)| code)
             .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hotset_bounded_reader_refuses_symlinks_and_caps_actual_bytes() {
+        use std::os::unix::fs::symlink;
+
+        let dir = hotset_collect_workspace("bounded-reader");
+        let regular = dir.path().join("evidence.json");
+        fs::write(&regular, b"123456789").expect("write bounded-reader fixture");
+        assert_eq!(
+            hotset_bounded_regular_file_read(&regular, 8),
+            Err("exceeds the bounded-read cap")
+        );
+
+        let linked = dir.path().join("linked-evidence.json");
+        symlink(&regular, &linked).expect("create evidence symlink");
+        assert_eq!(
+            hotset_bounded_regular_file_read(&linked, 32),
+            Err("not a regular file (symlinks are refused)")
+        );
+    }
+
+    #[test]
+    fn hotset_collect_schema_is_registered_with_its_canonical_document() {
+        let entry = crate::output::public_schemas()
+            .into_iter()
+            .find(|entry| entry.id == crate::models::CACHE_HOTSET_COLLECT_SCHEMA_V1)
+            .expect("hotset collect schema is public");
+        assert_eq!(entry.category, "ops");
+        let exported: serde_json::Value =
+            serde_json::from_str(&(entry.definition)()).expect("registered schema parses");
+        let canonical: serde_json::Value = serde_json::from_str(include_str!(
+            "../../docs/schemas/ee.cache.hotset_collect.v1.json"
+        ))
+        .expect("canonical schema parses");
+        assert_eq!(exported, canonical);
     }
 
     #[cfg(unix)]
@@ -74391,14 +74658,24 @@ mod tests {
             "healthy evidence must produce prewarm candidates"
         );
         assert!(
-            manifest["retrievalProvenance"]["manifestHash"]
+            manifest["retrievalProvenance"]["evidenceHash"]
                 .as_str()
                 .is_some_and(|hash| hash.starts_with("blake3:")),
-            "retrieval provenance carries the persisted manifest hash"
+            "retrieval provenance carries the bounded DB evidence hash"
         );
+        assert_eq!(manifest["retrievalProvenance"]["packRecordCount"], 1);
+        assert_eq!(manifest["retrievalProvenance"]["searchAuditCount"], 1);
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../docs/schemas/ee.cache.hotset_collect.v1.json"
+        ))
+        .expect("hotset collector schema parses");
+        crate::testing::validate_json_schema_instance(&manifest, &schema)
+            .expect("healthy hotset manifest validates against its public schema");
         // Redaction: raw titles, mail paths, and home prefixes never appear.
         assert!(!manifest_a.contains("collector alpha work"));
+        assert!(!manifest_a.contains("collector alpha cache work"));
         assert!(!manifest_a.contains("docs/guide.md"));
+        assert!(!manifest_a.contains("details deliberately excluded by collector"));
         assert!(!manifest_a.contains("/Users/"));
         assert!(!manifest_a.contains("/home/"));
     }
@@ -74437,6 +74714,74 @@ mod tests {
             "stale Beads must contribute zero tracker signals"
         );
         assert!(hotset_degraded_codes(&collection).contains(&HOTSET_BEADS_STALE_CODE));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hotset_collector_fail_closed_source_authority_abstains() {
+        use crate::cache::hotset::{HOTSET_SOURCE_AUTHORITY_DEGRADED_CODE, PrewarmSignalSource};
+
+        let dir = hotset_collect_workspace("authority-fail-closed");
+        let options = healthy_hotset_collect_options(&dir);
+        fs::write(
+            dir.path()
+                .join(".ee")
+                .join("source-authority-snapshot.json"),
+            serde_json::json!({
+                "schema": "ee.source_authority.snapshot.v1",
+                "overall": {"failClosed": true},
+                "sources": hotset_source_authority_rows(),
+            })
+            .to_string(),
+        )
+        .expect("write fail-closed authority snapshot");
+
+        let collection = collect_hotset_signals(&options);
+        assert!(
+            hotset_degraded_codes(&collection).contains(&HOTSET_SOURCE_AUTHORITY_DEGRADED_CODE)
+        );
+        assert!(
+            !collection
+                .signals()
+                .iter()
+                .any(|signal| signal.source() == PrewarmSignalSource::VerificationBroker),
+            "fail-closed source authority must contribute zero authority signals"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hotset_collector_incomplete_source_authority_vector_abstains() {
+        use crate::cache::hotset::{HOTSET_SOURCE_AUTHORITY_MISSING_CODE, PrewarmSignalSource};
+
+        let dir = hotset_collect_workspace("authority-incomplete");
+        let options = healthy_hotset_collect_options(&dir);
+        fs::write(
+            dir.path()
+                .join(".ee")
+                .join("source-authority-snapshot.json"),
+            serde_json::json!({
+                "schema": "ee.source_authority.snapshot.v1",
+                "overall": {"failClosed": false},
+                "sources": [{
+                    "sourceKind": "rch",
+                    "state": "ready",
+                    "authoritative": true,
+                }],
+            })
+            .to_string(),
+        )
+        .expect("write incomplete authority snapshot");
+
+        let collection = collect_hotset_signals(&options);
+        assert!(hotset_degraded_codes(&collection).contains(&HOTSET_SOURCE_AUTHORITY_MISSING_CODE));
+        assert!(
+            !collection
+                .signals()
+                .iter()
+                .any(|signal| signal.source() == PrewarmSignalSource::VerificationBroker),
+            "an incomplete authority vector must contribute zero authority signals"
+        );
     }
 
     #[cfg(unix)]

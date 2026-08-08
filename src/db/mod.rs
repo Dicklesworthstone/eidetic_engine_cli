@@ -24393,6 +24393,18 @@ pub struct StoredPackRecordMetadata {
     pub created_by: Option<String>,
 }
 
+/// Bounded identity-only projection of a recent search audit row.
+///
+/// Hotset collection needs proof that recent search activity exists, but it
+/// must not materialize the audit `details` body or expose raw query text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSearchAuditProvenance {
+    pub id: String,
+    pub action: String,
+    pub timestamp: String,
+    pub row_hash: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PackLedgerStatus {
     Available,
@@ -25882,6 +25894,57 @@ impl DbConnection {
 
         rows.iter()
             .map(|row| Ok(required_text(row, 0, DbOperation::Query, "pack_id")?.to_owned()))
+            .collect()
+    }
+
+    /// List bounded recent pack metadata for read-only retrieval hotset
+    /// planning. The query text is capped in SQL and the integrity ledger is
+    /// deliberately excluded, so one collector pass cannot materialize
+    /// unbounded replay bodies.
+    pub fn list_recent_pack_record_metadata_for_workspace(
+        &self,
+        workspace_id: &str,
+        limit: u32,
+    ) -> Result<Vec<StoredPackRecordMetadata>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, substr(query, 1, 2048), profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, ledger_hash, created_at, created_by FROM pack_records WHERE workspace_id = ?1 ORDER BY created_at DESC, id DESC LIMIT ?2",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::BigInt(i64::from(limit)),
+            ],
+        )?;
+
+        rows.iter()
+            .map(stored_pack_record_metadata_from_row)
+            .collect()
+    }
+
+    /// List bounded recent search audit identities without loading audit
+    /// details, actors, targets, or other potentially sensitive bodies.
+    pub fn list_recent_search_audit_provenance(
+        &self,
+        workspace_id: &str,
+        limit: u32,
+    ) -> Result<Vec<StoredSearchAuditProvenance>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT substr(id, 1, 256), substr(action, 1, 128), substr(timestamp, 1, 64), substr(this_row_hash, 1, 256) FROM audit_log WHERE workspace_id = ?1 AND surface = 'search' ORDER BY timestamp DESC, id DESC LIMIT ?2",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::BigInt(i64::from(limit)),
+            ],
+        )?;
+
+        rows.iter()
+            .map(|row| {
+                Ok(StoredSearchAuditProvenance {
+                    id: required_text(row, 0, DbOperation::Query, "audit_id")?.to_owned(),
+                    action: required_text(row, 1, DbOperation::Query, "action")?.to_owned(),
+                    timestamp: required_text(row, 2, DbOperation::Query, "timestamp")?.to_owned(),
+                    row_hash: optional_text(row, 3)?.map(str::to_owned),
+                })
+            })
             .collect()
     }
 

@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.cache.hotset_collect.v1.json",
+  "title": "ee.cache.hotset_collect.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "redactionStatus",
+    "sources",
+    "dirtyOverlap",
+    "retrievalProvenance",
+    "plan",
+    "degraded"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.cache.hotset_collect.v1"
+    },
+    "redactionStatus": {
+      "type": "string",
+      "const": "query_hashes_only"
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": { "$ref": "#/$defs/source" }
+    },
+    "dirtyOverlap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "pathHashes"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "pathHashes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/blake3" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "retrievalProvenance": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "evidenceHash", "packRecordCount", "searchAuditCount"],
+          "properties": {
+            "schema": {
+              "type": "string",
+              "const": "ee.hotset.retrieval_provenance.v1"
+            },
+            "evidenceHash": { "$ref": "#/$defs/blake3" },
+            "packRecordCount": { "type": "integer", "minimum": 0, "maximum": 128 },
+            "searchAuditCount": { "type": "integer", "minimum": 0, "maximum": 128 }
+          }
+        }
+      ]
+    },
+    "plan": {
+      "type": "object",
+      "required": ["schema", "candidateCount", "candidates", "degraded"],
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "ee.cache.hotset_prewarm_plan.v1"
+        },
+        "candidateCount": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "candidates": { "type": "array", "maxItems": 64 },
+        "degraded": { "type": "array" }
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/degraded" }
+    }
+  },
+  "$defs": {
+    "blake3": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "status",
+        "signalCount",
+        "sourceHash",
+        "degradedCode",
+        "message",
+        "repair"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": [
+            "git_workspace",
+            "beads_tracker",
+            "bv_frontier",
+            "agent_mail",
+            "source_authority",
+            "retrieval_provenance"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["fresh", "stale", "unavailable", "timed_out"]
+        },
+        "signalCount": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "sourceHash": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/blake3" }]
+        },
+        "degradedCode": {
+          "type": ["string", "null"]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "repair": { "type": ["string", "null"], "maxLength": 512 }
+      }
+    },
+    "degraded": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message", "repair"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "repair": { "type": ["string", "null"], "maxLength": 512 }
+      }
+    }
+  }
+}

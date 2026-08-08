@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "hotset_source_authority_degraded",
+  "introduced_by": {
+    "bead": "bd-ty3pl.2",
+    "epic_letter": "T"
+  },
+  "surfaces": [
+    "cache"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A valid source-authority snapshot reports overall.failClosed=true; the collector abstains from every authority-derived signal.",
+    "setup_commands": [
+      "write an ee.source_authority.snapshot.v1 fixture with overall.failClosed=true"
+    ],
+    "invocation": "ee cache hotset-manifest --workspace . --source-authority-snapshot <snapshot.json> --json"
+  },
+  "expected_emission": {
+    "code": "hotset_source_authority_degraded",
+    "severity": "medium",
+    "message_contains": [
+      "explicitly fails closed"
+    ]
+  }
+}

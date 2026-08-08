@@ -10701,6 +10701,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: cache_hotset_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::CACHE_HOTSET_COLLECT_SCHEMA_V1,
+            version: "1",
+            description: "Bounded read-only hotset collector manifest with per-source freshness, provenance hashes, and explicit degraded posture.",
+            category: "ops",
+            definition: cache_hotset_collect_schema_definition,
+        },
+        SchemaEntry {
             id: crate::models::HOTSET_MANIFEST_SCHEMA_V1,
             version: "1",
             description: "Read-only swarm hotset manifest contract for redaction-safe prewarm candidate planning.",
@@ -12339,6 +12346,10 @@ fn audit_lane_schema_definition() -> String {
 
 fn cache_hotset_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.cache.hotset.v1.json").to_string()
+}
+
+fn cache_hotset_collect_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.cache.hotset_collect.v1.json").to_string()
 }
 
 fn hotset_manifest_schema_definition() -> String {

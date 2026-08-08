@@ -93,6 +93,8 @@ pub const INDEX_INTAKE_FALLBACK_DELTA_OVER_THRESHOLD: &str = "delta_over_thresho
 
 /// Schema identifier for the read-only swarm hotset manifest contract (bd-ty3pl.1).
 pub const HOTSET_MANIFEST_SCHEMA_V1: &str = "ee.hotset_manifest.v1";
+/// Schema identifier for the bounded production hotset collector (bd-ty3pl.2).
+pub const CACHE_HOTSET_COLLECT_SCHEMA_V1: &str = "ee.cache.hotset_collect.v1";
 
 /// Schema identifier for the active embedding posture block (bd-1et0v.1).
 pub const EMBEDDING_POSTURE_SCHEMA_V1: &str = "ee.embedding_posture.v1";
@@ -230,6 +232,7 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     WRITE_GROUP_COMMIT_SCHEMA_V1,
     INDEX_INTAKE_SCHEMA_V1,
     HOTSET_MANIFEST_SCHEMA_V1,
+    CACHE_HOTSET_COLLECT_SCHEMA_V1,
     EMBEDDING_POSTURE_SCHEMA_V1,
     AMBIENT_CONTEXT_SCHEMA_V1,
     PROVENANCE_HEALTH_SCHEMA_V1,
