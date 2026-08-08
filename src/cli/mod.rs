@@ -235,10 +235,11 @@ use crate::core::rule::{
     protect_rule, show_rule, update_rule,
 };
 use crate::core::search::{
-    SearchDedupMode, SearchDegradation, SearchError, SearchOptions, SearchReport,
-    SearchScoreRecalibrationReport, SearchSourceMode, SimilarError, SimilarOptions, SimilarReport,
-    TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
-    recalibrate_search_score_calibration, run_diag_search, run_search, run_search_with_filters,
+    FamilyRetrievalOptions, SearchDedupMode, SearchDegradation, SearchError, SearchFamilyReport,
+    SearchOptions, SearchReport, SearchScoreRecalibrationReport, SearchSourceMode, SimilarError,
+    SimilarOptions, SimilarReport, TypedMemoryFieldFilter, elapsed_timing_json,
+    normalize_memory_kind_filter, recalibrate_search_score_calibration, run_diag_search,
+    run_family_retrieval, run_search, run_search_with_filters,
     run_search_with_performance_and_filters, run_similar,
 };
 use crate::core::sentinel::{SentinelCheckContext, observe_sentinel_explicit};
@@ -8614,9 +8615,22 @@ pub struct RehearsePromotePlanArgs {
     after_help = "With --json, search documents live at data.results; result count lives at data.resultCount."
 )]
 pub struct SearchArgs {
-    /// Query string to search for.
-    #[arg(value_name = "QUERY")]
-    pub query: String,
+    /// Query string to search for. Omit it when retrieving an attempt family.
+    #[arg(
+        value_name = "QUERY",
+        required_unless_present = "family",
+        conflicts_with = "family"
+    )]
+    pub query: Option<String>,
+
+    /// Retrieve every admitted member of one attempt family without using the search index.
+    #[arg(
+        long,
+        value_name = "FAMILY_ID",
+        required_unless_present = "query",
+        conflicts_with = "query"
+    )]
+    pub family: Option<String>,
 
     /// Maximum number of results to return.
     #[arg(long, short = 'n', default_value_t = 10)]
@@ -42291,6 +42305,103 @@ fn format_impact_human(report: &ImpactReport) -> String {
     output
 }
 
+fn validate_family_search_args(args: &SearchArgs) -> Result<(), DomainError> {
+    let unsupported = [
+        (args.query.is_some(), "a positional query"),
+        (args.limit != 10, "--limit"),
+        (args.speed != crate::search::SpeedMode::Default, "--speed"),
+        (args.index_dir.is_some(), "--index-dir"),
+        (args.explain, "--explain"),
+        (args.include_tombstoned, "--include-tombstoned"),
+        (args.as_of.is_some(), "--as-of"),
+        (args.include_expired, "--include-expired"),
+        (args.include_future, "--include-future"),
+        (args.include_stale, "--include-stale"),
+        (args.kind.is_some(), "--kind"),
+        (!args.field_filters.is_empty(), "--field"),
+        (args.explain_performance, "--explain-performance"),
+        (args.relevance_floor.is_some(), "--relevance-floor"),
+        (args.dedupe != SearchDedupMode::DocId, "--dedupe"),
+        (
+            args.source_mode != SearchSourceMode::Hybrid,
+            "--source-mode",
+        ),
+        (args.strict_source_mode, "--strict-source-mode"),
+        (args.recalibrate_now, "--recalibrate-now"),
+        (args.mesh_mode != MeshCommandMode::Off, "--mesh"),
+        (args.cursor.is_some(), "--cursor"),
+    ]
+    .into_iter()
+    .find_map(|(present, label)| present.then_some(label));
+
+    if let Some(label) = unsupported {
+        return Err(DomainError::Usage {
+            message: format!(
+                "{label} cannot be combined with --family; family retrieval returns the whole \
+                 admitted family directly from the workspace database"
+            ),
+            repair: Some(
+                "Use `ee search --family <id> [--memory-scope <scope>] [--strict-scope] --json`."
+                    .to_owned(),
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn format_search_family_json(report: &SearchFamilyReport) -> String {
+    let data = report.data_json();
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+        "degraded": [],
+    })
+    .to_string()
+}
+
+fn handle_search_family<W, E>(
+    cli: &Cli,
+    args: &SearchArgs,
+    family_id: &str,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if let Err(error) = validate_family_search_args(args) {
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    let workspace_path = cli.resolve_workspace();
+    let options = FamilyRetrievalOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        family_id,
+        memory_scope: args.memory_scope,
+        strict_scope: args.strict_scope,
+    };
+    match run_family_retrieval(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&format_search_family_json(&report)) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(format_search_family_json(&report) + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 fn handle_search<W, E>(
     cli: &Cli,
     args: &SearchArgs,
@@ -42304,6 +42415,20 @@ where
     if let Some(exit_code) = reject_unsupported_mermaid_format(cli, "search", stdout, stderr) {
         return exit_code;
     }
+    if let Some(family_id) = args.family.as_deref() {
+        return handle_search_family(cli, args, family_id, stdout, stderr);
+    }
+    let Some(query) = args.query.as_ref() else {
+        return write_domain_error(
+            &DomainError::Usage {
+                message: "search requires either a positional query or --family <id>".to_owned(),
+                repair: Some("Use `ee search <query>` or `ee search --family <id>`.".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    };
     set_governor_resume_cursor(args.cursor.as_deref());
 
     let handler_start = Instant::now();
@@ -42339,7 +42464,7 @@ where
         workspace_path,
         database_path: args.database.clone(),
         index_dir: args.index_dir.clone(),
-        query: args.query.clone(),
+        query: query.clone(),
         limit: args.limit,
         speed: args.speed,
         explain: args.explain,
@@ -76652,7 +76777,8 @@ mod tests {
 
         match parsed.command {
             Some(Command::Search(ref args)) => {
-                ensure_equal(&args.query, &"test query".to_string(), "search query")?;
+                ensure_equal(&args.query, &Some("test query".to_string()), "search query")?;
+                ensure_equal(&args.family, &None, "search family")?;
                 ensure_equal(&args.limit, &10, "search default limit")?;
                 ensure_equal(
                     &args.speed,
@@ -76662,6 +76788,87 @@ mod tests {
             }
             _ => Err("expected Search command".to_string()),
         }
+    }
+
+    #[test]
+    fn search_command_parses_queryless_attempt_family() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "search",
+            "--family",
+            "experiment.release.v4",
+            "--memory-scope",
+            "workspace",
+            "--strict-scope",
+        ])
+        .map_err(|error| format!("failed to parse family search: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Search(ref args)) => {
+                ensure_equal(&args.query, &None, "family search query")?;
+                ensure_equal(
+                    &args.family,
+                    &Some("experiment.release.v4".to_owned()),
+                    "family search family id",
+                )?;
+                ensure_equal(
+                    &args.memory_scope,
+                    &MemoryScope::Workspace,
+                    "family search memory scope",
+                )?;
+                ensure_equal(&args.strict_scope, &true, "family search strict scope")
+            }
+            _ => Err("expected Search command".to_string()),
+        }
+    }
+
+    #[test]
+    fn search_command_requires_exactly_one_query_authority() -> TestResult {
+        let missing = Cli::try_parse_from(["ee", "search"])
+            .expect_err("search without query or family must fail");
+        ensure_equal(
+            &missing.kind(),
+            &clap::error::ErrorKind::MissingRequiredArgument,
+            "missing search authority",
+        )?;
+
+        let conflict = Cli::try_parse_from([
+            "ee",
+            "search",
+            "ordinary query",
+            "--family",
+            "experiment.release.v4",
+        ])
+        .expect_err("query plus --family must fail");
+        ensure_equal(
+            &conflict.kind(),
+            &clap::error::ErrorKind::ArgumentConflict,
+            "conflicting search authorities",
+        )
+    }
+
+    #[test]
+    fn search_family_rejects_index_only_controls_before_storage() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "search",
+            "--family",
+            "experiment.release.v4",
+            "--limit",
+            "2",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "family limit exit")?;
+        ensure(
+            stderr.is_empty(),
+            "family JSON usage must keep stderr empty",
+        )?;
+        ensure_contains(&stdout, "\"schema\":\"ee.error.v2\"", "family usage schema")?;
+        ensure_contains(
+            &stdout,
+            "--limit cannot be combined with --family",
+            "family usage message",
+        )
     }
 
     #[test]

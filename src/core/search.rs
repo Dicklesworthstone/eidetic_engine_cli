@@ -17847,6 +17847,7 @@ pub struct SearchFamilyMember {
     pub content: String,
     pub content_redacted: bool,
     pub provenance_uri: Option<String>,
+    pub provenance_redacted: bool,
     pub created_at: String,
 }
 
@@ -17875,7 +17876,7 @@ impl SearchFamilyReport {
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
-            "schema": "ee.search.family.v1",
+            "schema": crate::models::schema::SEARCH_FAMILY_SCHEMA_V1,
             "workspaceId": self.workspace_id,
             "familyId": self.family_id,
             "declaredSize": self.declared_size,
@@ -17907,6 +17908,7 @@ impl SearchFamilyReport {
                         "content": member.content,
                         "contentRedacted": member.content_redacted,
                         "provenanceUri": member.provenance_uri,
+                        "provenanceRedacted": member.provenance_redacted,
                         "createdAt": member.created_at,
                     })
                 })
@@ -17916,14 +17918,50 @@ impl SearchFamilyReport {
 
     #[must_use]
     pub fn human_summary(&self) -> String {
-        format!(
-            "Attempt family {}: {} ({} member(s) shown, {} scope-filtered, {} without a live revision)",
+        let mut output = format!(
+            "Attempt family {}\n\n  Posture: {}\n  Declared: {}\n  Recorded slots: {} \
+             ({} selected, {} rejected, {} unrecorded)\n  Promotion eligible: {}\n  \
+             Memory scope: {}{}\n  Visible members: {}\n  Scope-filtered members: {}\n  \
+             Missing live revisions: {}\n",
             self.family_id,
             self.posture_summary,
+            self.declared_size
+                .map_or_else(|| "unknown".to_owned(), |size| size.to_string()),
+            self.recorded_slots,
+            self.selected_count,
+            self.rejected_count,
+            self.unrecorded_count,
+            self.promotion_eligible,
+            self.memory_scope.as_str(),
+            if self.strict_scope { " (strict)" } else { "" },
             self.members.len(),
             self.scope_filtered_count,
-            self.missing_current_revision_count
-        )
+            self.missing_current_revision_count,
+        );
+        if self.members.is_empty() {
+            output.push_str("\n  (no admitted members)\n");
+            return output;
+        }
+        output.push_str("\nMembers:\n");
+        for member in &self.members {
+            output.push_str(&format!(
+                "\n  {}. slot {} [{}] {}\n     Memory: {}\n     Kind/level/trust: {}/{}/{}\n     \
+                 Content: {}\n",
+                member.attempt_index,
+                member.attempt_index,
+                member.disposition,
+                member.logical_id,
+                member.memory_id,
+                member.kind,
+                member.level,
+                member.trust_class,
+                member.content.replace('\n', "\n              "),
+            ));
+            if let Some(provenance_uri) = member.provenance_uri.as_deref() {
+                output.push_str(&format!("     Provenance: {provenance_uri}\n"));
+            }
+        }
+        output
     }
 }
 
@@ -18017,6 +18055,13 @@ pub fn run_family_retrieval(
             continue;
         }
         let redaction = crate::policy::redact_secret_like_content(&memory.content);
+        let (provenance_uri, provenance_redacted) =
+            memory.provenance_uri.map_or((None, false), |uri| {
+                let mut redacted_patterns = BTreeSet::new();
+                let redacted_uri = redact_search_provenance_uri(&uri, true, &mut redacted_patterns);
+                let redacted = redacted_uri != uri;
+                (Some(redacted_uri), redacted)
+            });
         admitted.push(SearchFamilyMember {
             memory_id: memory.id,
             logical_id: member.memory_logical_id.clone(),
@@ -18027,9 +18072,17 @@ pub fn run_family_retrieval(
             trust_class: memory.trust_class,
             content: redaction.content,
             content_redacted: redaction.redacted,
-            provenance_uri: memory.provenance_uri,
+            provenance_uri,
+            provenance_redacted,
             created_at: memory.created_at,
         });
+    }
+
+    if options.strict_scope && scope_filtered_count > 0 {
+        // Mirror normal search's strict-scope contract: once any relevant
+        // family member falls outside the requested trust lane, disclose no
+        // family members from the mixed-scope result.
+        admitted.clear();
     }
 
     Ok(SearchFamilyReport {

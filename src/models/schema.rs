@@ -134,6 +134,8 @@ pub const MESH_SESSION_FINISH_SCHEMA_V1: &str = "ee.mesh.session_finish.v1";
 /// Schema identifier for authenticated mesh session capability negotiation.
 pub const MESH_SESSION_CAPABILITY_NEGOTIATION_SCHEMA_V1: &str =
     "ee.mesh.session_capability_negotiation.v1";
+/// Schema identifier for queryless, workspace-scoped attempt-family retrieval.
+pub const SEARCH_FAMILY_SCHEMA_V1: &str = "ee.search.family.v1";
 
 /// All known schema identifiers for validation.
 pub const KNOWN_SCHEMAS: &[&str] = &[
@@ -168,6 +170,7 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     CASS_EVIDENCE_SPAN_SCHEMA_V1,
     SEARCH_MODULE_SCHEMA_V1,
     SEARCH_DOCUMENT_SCHEMA_V1,
+    SEARCH_FAMILY_SCHEMA_V1,
     "ee.query_assist.v1",
     GRAPH_MODULE_SCHEMA_V1,
     MESH_EVENT_SCHEMA_V1,

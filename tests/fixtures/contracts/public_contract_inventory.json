@@ -340,6 +340,23 @@
       "forbiddenCurrentClaims": []
     },
     {
+      "schemaId": "ee.search.family.v1",
+      "status": "current",
+      "surface": "queryless_attempt_family_retrieval",
+      "owner": "src/core/search.rs::run_family_retrieval",
+      "schemaFile": "docs/schemas/ee.search.family.v1.json",
+      "canonicalDocs": [
+        "README.md#core-workflow",
+        "docs/schemas/ee.search.family.v1.json"
+      ],
+      "currentFacingContexts": [
+        "README.md",
+        "docs/schemas/ee.search.family.v1.json"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
       "schemaId": "ee.mesh.session_capability_negotiation.v1",
       "status": "current",
       "surface": "mesh_session_capability_negotiation",

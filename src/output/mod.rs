@@ -10136,6 +10136,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: search_response_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::schema::SEARCH_FAMILY_SCHEMA_V1,
+            version: "1",
+            description: "Queryless workspace-scoped retrieval of every admitted attempt-family member",
+            category: "search",
+            definition: search_family_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::search::QUERY_ASSIST_SCHEMA_V1,
             version: "1",
             description: "Deterministic query-assist guidance for weak or empty search and ask results",
@@ -11718,6 +11725,10 @@ fn query_request_schema_definition() -> String {
 
 fn search_response_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.search.v1.json").to_string()
+}
+
+fn search_family_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.search.family.v1.json").to_string()
 }
 
 fn query_assist_schema_definition() -> String {

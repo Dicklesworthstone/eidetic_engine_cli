@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ee.search.family.v1",
+  "title": "ee.search.family.v1",
+  "description": "Queryless, workspace-scoped attempt-family retrieval payload emitted under data by ee search --family.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "workspaceId",
+    "familyId",
+    "declaredSize",
+    "origin",
+    "recordedSlots",
+    "selectedCount",
+    "rejectedCount",
+    "unrecordedCount",
+    "discountFactor",
+    "survivorOnly",
+    "promotionEligible",
+    "postureSummary",
+    "memoryScope",
+    "strictScope",
+    "scopeFilteredCount",
+    "missingCurrentRevisionCount",
+    "members"
+  ],
+  "properties": {
+    "schema": { "const": "ee.search.family.v1" },
+    "workspaceId": { "type": "string", "minLength": 1 },
+    "familyId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "declaredSize": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "origin": { "type": ["string", "null"] },
+    "recordedSlots": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+    "selectedCount": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+    "rejectedCount": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+    "unrecordedCount": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+    "discountFactor": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+    "survivorOnly": { "type": "boolean" },
+    "promotionEligible": { "type": "boolean" },
+    "postureSummary": { "type": "string", "minLength": 1 },
+    "memoryScope": {
+      "type": "string",
+      "enum": ["self", "team", "global", "workspace", "verified", "swarm"]
+    },
+    "strictScope": { "type": "boolean" },
+    "scopeFilteredCount": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+    "missingCurrentRevisionCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000000
+    },
+    "members": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/member" }
+    }
+  },
+  "$defs": {
+    "member": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "memoryId",
+        "logicalId",
+        "attemptIndex",
+        "disposition",
+        "kind",
+        "level",
+        "trustClass",
+        "content",
+        "contentRedacted",
+        "provenanceUri",
+        "provenanceRedacted",
+        "createdAt"
+      ],
+      "properties": {
+        "memoryId": { "type": "string", "minLength": 1 },
+        "logicalId": { "type": "string", "minLength": 1 },
+        "attemptIndex": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "disposition": { "type": "string", "enum": ["selected", "rejected"] },
+        "kind": { "type": "string", "minLength": 1 },
+        "level": { "type": "string", "minLength": 1 },
+        "trustClass": { "type": "string", "minLength": 1 },
+        "content": { "type": "string" },
+        "contentRedacted": { "type": "boolean" },
+        "provenanceUri": { "type": ["string", "null"] },
+        "provenanceRedacted": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

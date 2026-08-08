@@ -30,6 +30,7 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
         .args(args)
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
+        .env_remove("EE_AGENT_NAME")
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
@@ -511,6 +512,264 @@ fn remember_creates_searchable_memory() -> TestResult {
     ensure(
         results.map(|r| !r.is_empty()).unwrap_or(false),
         "search for unique content should find the remembered memory",
+    )
+}
+
+#[test]
+fn search_family_is_queryless_complete_scoped_and_redaction_safe() -> TestResult {
+    let first = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let second = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let first_workspace = first.path().to_string_lossy().to_string();
+    let second_workspace = second.path().to_string_lossy().to_string();
+    let family_id = "release-matrix-2026-08";
+
+    for workspace in [&first_workspace, &second_workspace] {
+        let init = run_ee(&["--workspace", workspace, "init", "--json"])?;
+        ensure_equal(
+            &init.status.code(),
+            &Some(EXIT_SUCCESS),
+            "family workspace init",
+        )?;
+        assert_stderr_empty(&init, "family workspace init")?;
+    }
+
+    let source = "file:///Users/alice/private/attempt.md?api_key=redaction-fixture#L1";
+    let raw_secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890";
+    let attempts = [
+        (1_u32, "selected", "Selected safe release procedure", false),
+        (
+            2_u32,
+            "rejected",
+            "Rejected attempt timed out safely",
+            false,
+        ),
+        (3_u32, "rejected", raw_secret, true),
+    ];
+    let mut expected_memory_ids = Vec::new();
+    for (attempt_index, disposition, content, allow_secret_mention) in attempts {
+        let mut owned_args = vec![
+            "--workspace".to_owned(),
+            first_workspace.clone(),
+            "remember".to_owned(),
+            content.to_owned(),
+            "--level".to_owned(),
+            "semantic".to_owned(),
+            "--kind".to_owned(),
+            "fact".to_owned(),
+            "--source".to_owned(),
+            source.to_owned(),
+            "--family".to_owned(),
+            family_id.to_owned(),
+            "--of-n".to_owned(),
+            "3".to_owned(),
+            "--attempt".to_owned(),
+            attempt_index.to_string(),
+            "--attempt-outcome".to_owned(),
+            disposition.to_owned(),
+            "--json".to_owned(),
+        ];
+        if allow_secret_mention {
+            owned_args.push("--allow-secret-mention".to_owned());
+        }
+        let borrowed_args = owned_args.iter().map(String::as_str).collect::<Vec<_>>();
+        let remember = run_ee(&borrowed_args)?;
+        ensure_equal(
+            &remember.status.code(),
+            &Some(EXIT_SUCCESS),
+            &format!("family remember slot {attempt_index}"),
+        )?;
+        assert_stderr_empty(&remember, &format!("family remember slot {attempt_index}"))?;
+        let remember_json = stdout_json(&remember)?;
+        expected_memory_ids
+            .push(json_str(&remember_json, "/data/memory_id", "family remember")?.to_owned());
+    }
+
+    let second_remember = run_ee(&[
+        "--workspace",
+        &second_workspace,
+        "remember",
+        "Same family id in a different workspace",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--family",
+        family_id,
+        "--of-n",
+        "1",
+        "--attempt",
+        "1",
+        "--attempt-outcome",
+        "selected",
+        "--json",
+    ])?;
+    ensure_equal(
+        &second_remember.status.code(),
+        &Some(EXIT_SUCCESS),
+        "second workspace family remember",
+    )?;
+
+    let family = run_ee(&[
+        "--workspace",
+        &first_workspace,
+        "search",
+        "--family",
+        family_id,
+        "--json",
+    ])?;
+    ensure_equal(
+        &family.status.code(),
+        &Some(EXIT_SUCCESS),
+        "queryless family search",
+    )?;
+    assert_stderr_empty(&family, "queryless family search")?;
+    let family_json = stdout_json(&family)?;
+    assert_schema(&family_json, "ee.response.v2", "queryless family search")?;
+    ensure_equal(
+        &family_json.pointer("/data/schema"),
+        &Some(&serde_json::json!("ee.search.family.v1")),
+        "family payload schema",
+    )?;
+    for (pointer, expected) in [
+        ("/data/declaredSize", 3_u64),
+        ("/data/recordedSlots", 3),
+        ("/data/selectedCount", 1),
+        ("/data/rejectedCount", 2),
+        ("/data/unrecordedCount", 0),
+        ("/data/scopeFilteredCount", 0),
+    ] {
+        ensure_equal(
+            &family_json
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_u64),
+            &Some(expected),
+            pointer,
+        )?;
+    }
+    ensure_equal(
+        &family_json
+            .pointer("/data/promotionEligible")
+            .and_then(serde_json::Value::as_bool),
+        &Some(true),
+        "complete family promotion posture",
+    )?;
+    let members = json_array(&family_json, "/data/members", "family search")?;
+    ensure_equal(&members.len(), &3_usize, "family member count")?;
+    let observed_slots = members
+        .iter()
+        .filter_map(|member| {
+            member
+                .get("attemptIndex")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .collect::<Vec<_>>();
+    ensure_equal(
+        &observed_slots,
+        &vec![1_u64, 2, 3],
+        "deterministic family slot order",
+    )?;
+    let observed_ids = members
+        .iter()
+        .filter_map(|member| member.get("memoryId").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    ensure_equal(
+        &observed_ids,
+        &expected_memory_ids,
+        "workspace-local family member ids",
+    )?;
+    ensure(
+        members.iter().all(|member| {
+            member
+                .get("logicalId")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|logical_id| !logical_id.is_empty())
+        }),
+        "every family member must expose revision-stable lineage",
+    )?;
+    ensure_equal(
+        &members[2]
+            .get("contentRedacted")
+            .and_then(serde_json::Value::as_bool),
+        &Some(true),
+        "secret-like rejected member redaction posture",
+    )?;
+    ensure(
+        members[2]
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|content| content.contains("[REDACTED:")),
+        "secret-like rejected member must render a redaction marker",
+    )?;
+    let serialized_family =
+        serde_json::to_string(&family_json).map_err(|error| error.to_string())?;
+    ensure(
+        !serialized_family.contains(raw_secret)
+            && !serialized_family.contains("redaction-fixture")
+            && !serialized_family.contains("/Users/alice"),
+        "family output must not project raw content secrets or local provenance paths",
+    )?;
+    ensure(
+        members.iter().all(|member| {
+            member
+                .get("provenanceRedacted")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        }),
+        "every local secret-bearing provenance URI must report redaction",
+    )?;
+
+    let strict = run_ee(&[
+        "--workspace",
+        &first_workspace,
+        "search",
+        "--family",
+        family_id,
+        "--memory-scope",
+        "self",
+        "--strict-scope",
+        "--json",
+    ])?;
+    ensure_equal(
+        &strict.status.code(),
+        &Some(EXIT_SUCCESS),
+        "strict family search",
+    )?;
+    let strict_json = stdout_json(&strict)?;
+    ensure_equal(
+        &strict_json.pointer("/data/members"),
+        &Some(&serde_json::json!([])),
+        "strict family search fails closed",
+    )?;
+    ensure_equal(
+        &strict_json
+            .pointer("/data/scopeFilteredCount")
+            .and_then(serde_json::Value::as_u64),
+        &Some(3),
+        "strict family excluded count",
+    )?;
+
+    let isolated = run_ee(&[
+        "--workspace",
+        &second_workspace,
+        "search",
+        "--family",
+        family_id,
+        "--json",
+    ])?;
+    ensure_equal(
+        &isolated.status.code(),
+        &Some(EXIT_SUCCESS),
+        "second workspace family search",
+    )?;
+    let isolated_json = stdout_json(&isolated)?;
+    ensure_equal(
+        &isolated_json
+            .pointer("/data/members")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        &Some(1),
+        "same family id remains workspace-isolated",
     )
 }
 

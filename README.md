@@ -484,6 +484,7 @@ Current top-level groups:
 | `ee pack "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Assemble a task-specific context pack (the canonical headline command; `ee context "<task>"` remains a soft-deprecated compatibility alias) |
 | `ee lens list --json` / `ee lens explain <id> --json` | Inspect named task lenses such as `bugfix`, `code-review`, and `release-readiness` before applying them |
 | `ee search "<query>" [--limit N] [--explain] [--json]` | Hybrid retrieval over memories, sessions, rules, evidence |
+| `ee search --family <family-id> [--memory-scope <scope>] [--strict-scope] [--json]` | Queryless, workspace-scoped retrieval of every recorded attempt-family member, including rejected attempts |
 | `ee similar <memory-id> [--limit N] [--min-score T] [--explain] [--json]` | Find embedding-native nearest-neighbor memories for a seed memory; degrades to lexical similarity with an explicit degraded note when semantic vectors are unavailable |
 | `ee ask "<question>" [--require-confidence T] [--json]` | Direct extractive answer from stored memories, with citations, conflict sides, calibrated abstention, and exit 6 fail-closed mode |
 | `ee recall --path <glob>` / `--symbol <name>` / `--diff <ref>` | Fetch memories anchored to a code surface before editing; returns `ee.recall.v1` under the standard response envelope |
@@ -1625,6 +1626,21 @@ operators: `name=value` for exact, `name~value` for contains, and `name^value`
 for prefix. The full registry, bounds, indexed-field status, and v1-to-v2
 compatibility notes live in
 [`docs/memory-typed-fields.md`](docs/memory-typed-fields.md).
+
+Attempt-family multiplicity is a separate source-of-truth ledger, not the
+free-form typed `family` field. Record each sibling with the same `--family`
+and declared denominator plus a unique slot/outcome, then retrieve the whole
+family without a dummy query or an index rebuild:
+
+```bash
+ee remember "selected approach" --family release-v4 --of-n 3 \
+  --attempt 1 --attempt-outcome selected --json
+ee remember "timeout failure" --family release-v4 --of-n 3 \
+  --attempt 2 --attempt-outcome rejected --json
+ee remember "permission failure" --family release-v4 --of-n 3 \
+  --attempt 3 --attempt-outcome rejected --json
+ee search --family release-v4 --json
+```
 
 ```bash
 ee remember "Remote verification won the storage decision." \
