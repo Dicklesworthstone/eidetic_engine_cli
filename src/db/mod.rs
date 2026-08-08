@@ -32006,7 +32006,7 @@ mod tests {
             "INSERT INTO memory_sentinel_specs (spec_hash, memory_id, sentinel_kind, target, expected_predicate, safety_class, provenance, stale_threshold_seconds, created_at, updated_at) VALUES ('{}', '{}', 'env_var_registered', 'EE_PACK_TRACE', 'registered', 'pure_predicate', 'test://sentinel', 600, '2026-08-08T00:00:00Z', '2026-08-08T00:00:00Z')",
             gate.spec_hash, memory_id,
         ))?;
-        let result = super::MemorySentinelResult::new(super::MemorySentinelResultInput {
+        let result = super::MemorySentinelResult::new(crate::models::MemorySentinelResultInput {
             spec_hash: gate.spec_hash.clone(),
             status: super::MemorySentinelResultStatus::Pass,
             checked_at: "2026-08-08T00:00:00Z".to_owned(),

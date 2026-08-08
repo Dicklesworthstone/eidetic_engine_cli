@@ -348,7 +348,8 @@ mod tests {
     };
     use crate::config::env_registry::EnvVar;
     use crate::models::memory_sentinel::{
-        MEMORY_SENTINEL_SPEC_SCHEMA_V1, MemorySentinelKind, MemorySentinelSpec, SentinelObservation,
+        MEMORY_SENTINEL_SPEC_SCHEMA_V1, MemorySentinelKind, MemorySentinelPolarity,
+        MemorySentinelSpec, SentinelObservation,
     };
 
     fn spec(kind: MemorySentinelKind, target: &str) -> MemorySentinelSpec {
@@ -357,6 +358,7 @@ mod tests {
             spec_hash: "blake3:test".to_string(),
             memory_id: "mem_test".to_string(),
             sentinel_kind: kind,
+            polarity: MemorySentinelPolarity::Gate,
             target: target.to_string(),
             expected_predicate: kind.default_predicate().to_string(),
             safety_class: kind.safety_class(),
