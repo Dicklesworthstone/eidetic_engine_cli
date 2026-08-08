@@ -49869,6 +49869,14 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             data.insert("revisionLineage".to_owned(), revision_lineage.clone());
         }
     }
+    if let Some(seal) = &report.seal {
+        if let Some(data) = json
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            data.insert("seal".to_owned(), seal.clone());
+        }
+    }
     if let Some(confidence_intervals) = confidence_intervals
         && let Some(data) = json
             .get_mut("data")

@@ -615,6 +615,10 @@ pub struct WhyReport {
     /// Embedding-dedup link evidence when this memory reused another
     /// memory's embedding. `None` when no dedup link was recorded.
     pub dedup_link: Option<DedupLinkEvidence>,
+    /// Seal state when this memory was written with `ee remember --seal`
+    /// (bd-sealed-preregistration-memory-b67be): contentCommitment,
+    /// sealedAt, revealedAt, revealVerified. `None` for unsealed memories.
+    pub seal: Option<JsonValue>,
 }
 
 /// Schema id for the `dedupLink` evidence block surfaced by `ee why`,
@@ -705,6 +709,7 @@ impl WhyReport {
             degraded: Vec::new(),
             error: None,
             dedup_link: None,
+            seal: None,
         }
     }
 
@@ -722,6 +727,13 @@ impl WhyReport {
     #[must_use]
     pub fn with_optional_dedup_link(mut self, dedup_link: Option<DedupLinkEvidence>) -> Self {
         self.dedup_link = dedup_link;
+        self
+    }
+
+    /// Optionally attach the seal-state block for a sealed memory.
+    #[must_use]
+    pub fn with_optional_seal(mut self, seal: Option<JsonValue>) -> Self {
+        self.seal = seal;
         self
     }
 
@@ -764,6 +776,7 @@ impl WhyReport {
             degraded: Vec::new(),
             error: None,
             dedup_link: None,
+            seal: None,
         }
     }
 
@@ -798,6 +811,7 @@ impl WhyReport {
             degraded: Vec::new(),
             error: Some(message),
             dedup_link: None,
+            seal: None,
         }
     }
 
@@ -1335,6 +1349,7 @@ pub fn explain_memory_with_connection(options: &WhyOptions<'_>, conn: &DbConnect
                     degraded: evidence_degradations,
                     agent_profile,
                     dedup_link: find_embed_dedup_link(&conn, memory_id),
+                    seal: fetch_seal(&conn, memory_id),
                 },
             )
             .with_content(memory.content.clone())
@@ -1378,6 +1393,7 @@ pub fn explain_memory_with_connection(options: &WhyOptions<'_>, conn: &DbConnect
             degraded: evidence_degradations,
             agent_profile,
             dedup_link: find_embed_dedup_link(&conn, memory_id),
+            seal: fetch_seal(&conn, memory_id),
         },
     )
     .with_content(memory.content.clone())
@@ -1974,6 +1990,7 @@ struct ReportSelectionInputs {
     degraded: Vec<WhyDegradation>,
     agent_profile: Option<AgentProfileSelectionExplanation>,
     dedup_link: Option<DedupLinkEvidence>,
+    seal: Option<JsonValue>,
 }
 
 fn why_conformal_candidates(
@@ -2063,6 +2080,22 @@ fn build_report(
         .with_attestation_manifest(selection_inputs.attestation_manifest)
         .with_degradations(selection_inputs.degraded)
         .with_optional_dedup_link(selection_inputs.dedup_link)
+        .with_optional_seal(selection_inputs.seal)
+}
+
+/// Load the seal-state block for `ee why` when the memory was written
+/// sealed (bd-sealed-preregistration-memory-b67be). Read-only; storage
+/// errors degrade to `None` rather than failing the explanation.
+fn fetch_seal(conn: &DbConnection, memory_id: &str) -> Option<JsonValue> {
+    let seal = conn.get_memory_seal(memory_id).ok().flatten()?;
+    Some(serde_json::json!({
+        "schema": crate::models::MEMORY_SEAL_SCHEMA_V1,
+        "contentCommitment": seal.content_commitment,
+        "sealedAt": seal.sealed_at,
+        "revealedAt": seal.revealed_at,
+        "revealVerified": seal.reveal_verified,
+        "sealed": seal.is_sealed(),
+    }))
 }
 
 fn lifecycle_for_memory(
@@ -3647,6 +3680,7 @@ mod tests {
                 degraded: Vec::new(),
                 agent_profile: None,
                 dedup_link: None,
+                seal: None,
             },
         );
 
