@@ -242,6 +242,7 @@ fn import_report_path_starts_at(value: &str, start: usize) -> bool {
 
     let bytes = candidate.as_bytes();
     if bytes.len() >= 3
+        && token_boundary_before
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
         && matches!(bytes[2], b'/' | b'\\')
@@ -2403,6 +2404,16 @@ mod tests {
             &redact_import_report_source_ref("cass://safe-source"),
             &"cass://safe-source".to_owned(),
             "non-file URI remains intact",
+        )?;
+        ensure_equal(
+            &redact_import_report_source_ref("https://example.test/session"),
+            &"https://example.test/session".to_owned(),
+            "multi-letter URI schemes are not mistaken for drive paths",
+        )?;
+        ensure_equal(
+            &redact_import_report_source_ref(r"source=C:\Users\Alice\session.jsonl"),
+            &"source=[REDACTED_PATH]".to_owned(),
+            "embedded drive path at a token boundary is redacted",
         )
     }
 
