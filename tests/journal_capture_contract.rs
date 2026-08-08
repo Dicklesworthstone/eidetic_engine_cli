@@ -369,6 +369,7 @@ fn e2e_journal_capture_script_exercises_full_capture_lifecycle() -> TestResult {
         "assert_database_omits_secret",
         "journal distill --session",
         "journal distill --session \"$SESSION\" --apply --json",
+        ".action == \"reinforce_existing\"",
         "curate validate",
         "curate apply",
         "daemon --foreground --once --job index_coalesce",
