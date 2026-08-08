@@ -18105,10 +18105,32 @@ pub fn render_audit_timeline_json(report: &AuditTimelineReport) -> String {
 
 /// Wrap a bare `ee.audit.*.v1` report payload in the canonical
 /// `ee.response.v2` success envelope, lifting any `degraded[]` array to the
-/// envelope level per the machine-facing response contract.
+/// envelope level per the machine-facing response contract. A payload that
+/// fails to parse — including the `serialization_failed` marker emitted by
+/// `serialize_or_error` — is propagated as a canonical `ee.error.v2`
+/// envelope, never wrapped as a hollow success.
 fn audit_response_v2_json(report_json: &str) -> String {
-    let mut data: serde_json::Value =
-        serde_json::from_str(report_json).unwrap_or_else(|_| serde_json::json!({}));
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(report_json);
+    let mut data = match parsed {
+        Ok(value) => value,
+        Err(error) => {
+            return audit_serialization_error_envelope(&format!(
+                "Audit report payload is not valid JSON: {error}"
+            ));
+        }
+    };
+    if data
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|code| code == "serialization_failed")
+    {
+        let message = data
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Audit report serialization failed.")
+            .to_owned();
+        return audit_serialization_error_envelope(&message);
+    }
     let degraded = data
         .as_object_mut()
         .and_then(|map| map.remove("degraded"))
@@ -18118,6 +18140,19 @@ fn audit_response_v2_json(report_json: &str) -> String {
         "success": true,
         "data": data,
         "degraded": degraded,
+    })
+    .to_string()
+}
+
+fn audit_serialization_error_envelope(message: &str) -> String {
+    serde_json::json!({
+        "schema": ERROR_SCHEMA_V2,
+        "error": {
+            "code": "serialization_failed",
+            "message": message,
+            "severity": "high",
+            "repair": "ee doctor --json",
+        },
     })
     .to_string()
 }
@@ -18157,13 +18192,11 @@ pub fn render_audit_timeline_human(report: &AuditTimelineReport) -> String {
     out
 }
 
-/// Render an audit timeline report as TOON.
+/// Render an audit timeline report as TOON: the lossless canonical encoding
+/// of the enveloped JSON, so no entry, cursor, or degraded signal is dropped.
 #[must_use]
 pub fn render_audit_timeline_toon(report: &AuditTimelineReport) -> String {
-    format!(
-        "AUDIT_TIMELINE|count={}|total={}|has_more={}",
-        report.pagination.returned_count, report.pagination.total_count, report.pagination.has_more
-    )
+    render_toon_from_json(&render_audit_timeline_json(report))
 }
 
 /// Render an audit show report as JSON.
@@ -18207,13 +18240,11 @@ pub fn render_audit_show_human(report: &AuditShowReport) -> String {
     out
 }
 
-/// Render an audit show report as TOON.
+/// Render an audit show report as TOON: the lossless canonical encoding of
+/// the enveloped JSON.
 #[must_use]
 pub fn render_audit_show_toon(report: &AuditShowReport) -> String {
-    format!(
-        "AUDIT_SHOW|{}|surface={}|mutation={}|chain={}",
-        report.row.id, report.row.surface, report.row.mutation_kind, report.hash_chain_valid
-    )
+    render_toon_from_json(&render_audit_show_json(report))
 }
 
 /// Render an audit diff report as JSON.
@@ -18244,13 +18275,11 @@ pub fn render_audit_diff_human(report: &AuditDiffReport) -> String {
     out
 }
 
-/// Render an audit diff report as TOON.
+/// Render an audit diff report as TOON: the lossless canonical encoding of
+/// the enveloped JSON, preserving every diff entry.
 #[must_use]
 pub fn render_audit_diff_toon(report: &AuditDiffReport) -> String {
-    format!(
-        "AUDIT_DIFF|from={}|to={}|rows={}",
-        report.from, report.to, report.row_count
-    )
+    render_toon_from_json(&render_audit_diff_json(report))
 }
 
 /// Render an audit verify report as JSON.
@@ -18309,15 +18338,11 @@ pub fn render_audit_verify_human(report: &AuditVerifyReport) -> String {
     out
 }
 
-/// Render an audit verify report as TOON.
+/// Render an audit verify report as TOON: the lossless canonical encoding of
+/// the enveloped JSON, preserving every issue detail.
 #[must_use]
 pub fn render_audit_verify_toon(report: &AuditVerifyReport) -> String {
-    format!(
-        "AUDIT_VERIFY|rows={}|integrity_ok={}|issues={}",
-        report.rows,
-        report.integrity_ok,
-        report.issues.len()
-    )
+    render_toon_from_json(&render_audit_verify_json(report))
 }
 
 // ============================================================================

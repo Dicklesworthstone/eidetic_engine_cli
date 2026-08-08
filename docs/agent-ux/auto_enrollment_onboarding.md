@@ -438,7 +438,7 @@ Cross-reference via:
 
 ```bash
 ee audit timeline --event-type mesh.auto_enrollment_intended --workspace . --json \
-  | jq '.entries[] | select(.details.summaryHash == "blake3:...")'
+  | jq '.data.entries[] | select(.details.summaryHash == "blake3:...")'
 ```
 
 Rollback rows carry `previousSummaryHash` referencing the materialization
@@ -493,7 +493,7 @@ ee audit timeline \
   --event-type mesh.auto_enrollment_intended \
   --since 7d \
   --json \
-  | jq '.entries[] | {at: .timestamp, peerCount: (.details.intendedPeers | length), outcome: .details.materializationOutcome, reversal: .details.reversalCommand}'
+  | jq '.data.entries[] | {at: .timestamp, peerCount: (.details.intendedPeers | length), outcome: .details.materializationOutcome, reversal: .details.reversalCommand}'
 ```
 
 ## What Mesh Auto-Enrollment Does NOT Do

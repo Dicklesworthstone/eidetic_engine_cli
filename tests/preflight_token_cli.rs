@@ -402,7 +402,7 @@ fn override_token_records_optional_authorization_audit_with_risk_provenance() ->
         return Err("audit timeline leaked raw override token".to_owned());
     }
     let audit_json = parse_stdout(&audit)?;
-    let entries = audit_json["entries"]
+    let entries = audit_json["data"]["entries"]
         .as_array()
         .ok_or_else(|| "audit timeline should include entries".to_owned())?;
     if entries

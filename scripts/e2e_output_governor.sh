@@ -11,10 +11,10 @@
 #     <= the ceiling unless the response honestly fails closed with
 #     output_budget_unsatisfiable; with no ceiling the zero-cost path
 #     leaves the envelope unstamped.
-#   * audit timeline is a top-level report, not an ee.response.v2
-#     envelope: the governor must pass it through unstamped even when a
-#     ceiling is set (its --cursor lane is query-level pagination on
-#     the shared ee.cursor.v1 codec).
+#   * audit timeline emits the canonical ee.response.v2 envelope (its
+#     ee.audit.timeline.v1 report under .data): the governor must leave
+#     it unstamped even when a ceiling is set (its --cursor lane is
+#     query-level pagination on the shared ee.cursor.v1 codec).
 #   * Cursor pagination drains memory list and search to exhaustion
 #     with EXACT counts: concatenated page ids equal the ungoverned id
 #     sequence (no duplicates, no gaps, order preserved).
@@ -125,16 +125,17 @@ sweep_surface "curate_candidates" '.data.candidates // []' curate candidates
 step "ceiling sweep: schema list"
 sweep_surface "schema_list" '.data.schemas // []' schema list
 
-step "audit timeline is a pass-through report (non-envelope), even under a ceiling"
+step "audit timeline emits the ee.response.v2 envelope and stays unstamped, even under a ceiling"
 at_start="$(now_ms)"
 at_out="$(ee_json --workspace "$WS" audit timeline --limit 5 --max-output-tokens 100 --json)"
 at_ms=$(( $(now_ms) - at_start ))
 assert_jq "$at_out" 'true' "audit timeline ceiling=100: output is valid JSON"
-assert_jq "$at_out" '.schema == "ee.audit.timeline.v1"' "audit timeline keeps its report schema"
+assert_jq "$at_out" '.schema == "ee.response.v2" and .data.schema == "ee.audit.timeline.v1"' \
+    "audit timeline keeps its report schema under the ee.response.v2 envelope"
 assert_jq "$at_out" '(.meta.tokensEstimated // null) == null' \
     "audit timeline is never stamped by the envelope governor (pass-through)"
 log_event "governor_sweep" step sweep surface "audit_timeline" ceiling 100 \
-    estimated none items "$(printf '%s' "$at_out" | jq -r '.entries | length')" cursor false ms "$at_ms"
+    estimated none items "$(printf '%s' "$at_out" | jq -r '.data.entries | length')" cursor false ms "$at_ms"
 
 # ---------------------------------------------------------------------------
 # Cursor pagination drains with exact counts.

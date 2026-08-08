@@ -67,9 +67,9 @@ else
     record_pass "reject_audit_id_present"
 fi
 audit_show=$(ee_workspace audit show "$reject_audit" --json)
-assert_jq "$audit_show" '.row.details.reason' "duplicate evidence" \
+assert_jq "$audit_show" '.data.row.details.reason' "duplicate evidence" \
     "reject audit row carries details.reason"
-assert_jq "$audit_show" '.row.target_type' "curation_candidate" \
+assert_jq "$audit_show" '.data.row.target_type' "curation_candidate" \
     "audit row targets curation_candidate"
 
 # ---------------------------------------------------------------------------
@@ -80,7 +80,7 @@ accept_out=$(ee_workspace curate accept "$cand_accept" \
 assert_jq "$accept_out" '.success' "true" "accept succeeds"
 accept_audit=$(printf '%s' "$accept_out" | jq -r '.data.mutation.auditId // ""')
 accept_show=$(ee_workspace audit show "$accept_audit" --json)
-assert_jq "$accept_show" '.row.details.reason' "validated by humans" \
+assert_jq "$accept_show" '.data.row.details.reason' "validated by humans" \
     "accept audit row carries details.reason"
 
 # ---------------------------------------------------------------------------
@@ -104,7 +104,7 @@ no_reason_out=$(ee_workspace curate reject "$cand_no_reason" \
 assert_jq "$no_reason_out" '.success' "true" "reject without --reason succeeds"
 no_reason_audit=$(printf '%s' "$no_reason_out" | jq -r '.data.mutation.auditId // ""')
 no_reason_show=$(ee_workspace audit show "$no_reason_audit" --json)
-assert_jq "$no_reason_show" '.row.details.reason // \"null\"' "null" \
+assert_jq "$no_reason_show" '.data.row.details.reason // \"null\"' "null" \
     "audit row omits reason when none supplied"
 
 # ---------------------------------------------------------------------------

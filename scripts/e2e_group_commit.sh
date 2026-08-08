@@ -284,9 +284,10 @@ fi
 emit_event "assert_ok" "label" "all_writes_indexed_under_concurrency" "actual" "hits=$hits"
 
 # ---- Audit integrity: the audit chain survived the concurrent write storm. ----
-# `ee audit verify --json` emits ee.audit.verify.v1 with a top-level
-# integrity_ok bool and a hash-chain break report. Assert BOTH a clean exit and
-# integrity_ok==true so a tampered/broken chain under concurrency fails loudly.
+# `ee audit verify --json` emits the ee.response.v2 envelope carrying the
+# ee.audit.verify.v1 report (data.integrity_ok bool plus a hash-chain break
+# report). Assert BOTH a clean exit and integrity_ok==true so a
+# tampered/broken chain under concurrency fails loudly.
 if "$EE_BINARY" audit verify --workspace "$WORKSPACE" --json \
     >"$ARTIFACT_ROOT/audit-verify.json" 2>"$ARTIFACT_ROOT/audit-verify.json.stderr"; then
   audit_ok="$(python3 - "$ARTIFACT_ROOT/audit-verify.json" <<'PY'

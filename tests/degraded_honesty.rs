@@ -994,6 +994,12 @@ fn audit_commands_read_persisted_rows_without_unavailable_sentinel() -> TestResu
         ensure_json_pointer(
             &result.parsed,
             "/schema",
+            json!("ee.response.v2"),
+            &format!("{command} envelope schema"),
+        )?;
+        ensure_json_pointer(
+            &result.parsed,
+            "/data/schema",
             json!(schema),
             &format!("{command} schema"),
         )?;
@@ -1002,14 +1008,14 @@ fn audit_commands_read_persisted_rows_without_unavailable_sentinel() -> TestResu
             "audit timeline" => {
                 ensure_json_pointer(
                     &result.parsed,
-                    "/entries/0/surface",
+                    "/data/entries/0/surface",
                     json!("memory"),
                     "timeline filtered surface",
                 )?;
                 ensure(
                     result
                         .parsed
-                        .pointer("/entries/0/this_row_hash")
+                        .pointer("/data/entries/0/this_row_hash")
                         .and_then(Value::as_str)
                         .is_some_and(|hash| hash.starts_with("blake3:")),
                     "timeline entry must expose persisted row hash",
@@ -1018,28 +1024,33 @@ fn audit_commands_read_persisted_rows_without_unavailable_sentinel() -> TestResu
             "audit show" => {
                 ensure_json_pointer(
                     &result.parsed,
-                    "/linked_snapshot/found",
+                    "/data/linked_snapshot/found",
                     json!(true),
                     "show linked memory snapshot",
                 )?;
                 ensure_json_pointer(
                     &result.parsed,
-                    "/hash_chain_valid",
+                    "/data/hash_chain_valid",
                     json!(true),
                     "show verifies the surrounding hash chain",
                 )?;
             }
             "audit diff" => {
-                ensure_json_pointer(&result.parsed, "/row_count", json!(2), "diff row count")?;
+                ensure_json_pointer(
+                    &result.parsed,
+                    "/data/row_count",
+                    json!(2),
+                    "diff row count",
+                )?;
             }
             "audit verify" => {
                 ensure_json_pointer(
                     &result.parsed,
-                    "/integrity_ok",
+                    "/data/integrity_ok",
                     json!(true),
                     "verify integrity flag",
                 )?;
-                ensure_json_pointer(&result.parsed, "/rows", json!(2), "verify row count")?;
+                ensure_json_pointer(&result.parsed, "/data/rows", json!(2), "verify row count")?;
             }
             other => return Err(format!("unknown audit command case: {other}")),
         }

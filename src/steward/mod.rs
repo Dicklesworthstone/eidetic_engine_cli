@@ -10492,10 +10492,64 @@ mod tests {
         Ok((candidates.len(), create_audits.len()))
     }
 
+    /// Full direct-DB durable-state snapshot for the consolidation fixture:
+    /// memory rows (including tombstoned), curation candidates across every
+    /// status, creation-audit rows, memory links incident to both fixture
+    /// memories, search-index job rows, and the workspace generation.
+    #[derive(Debug, PartialEq, Eq)]
+    struct ConsolidationDbSnapshot {
+        memories: usize,
+        candidates: usize,
+        create_audits: usize,
+        links: usize,
+        index_jobs: usize,
+        generation: Option<u64>,
+    }
+
+    fn consolidation_pass_db_snapshot(
+        database_path: &std::path::Path,
+    ) -> Result<ConsolidationDbSnapshot, String> {
+        let connection =
+            DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+        let memories = connection
+            .list_memories(SCORE_WORKSPACE_ID, None, true)
+            .map_err(|error| error.to_string())?;
+        let candidates = connection
+            .list_curation_candidates(SCORE_WORKSPACE_ID, None, None, None)
+            .map_err(|error| error.to_string())?;
+        let create_audits = connection
+            .list_audit_by_action(audit_actions::CURATION_CANDIDATE_CREATE, None)
+            .map_err(|error| error.to_string())?;
+        let mut links = 0_usize;
+        for memory in &memories {
+            links += connection
+                .list_memory_links_for_memory(&memory.id, None)
+                .map_err(|error| error.to_string())?
+                .len();
+        }
+        let index_jobs = connection
+            .list_search_index_jobs(SCORE_WORKSPACE_ID, None)
+            .map_err(|error| error.to_string())?;
+        let generation = connection
+            .get_workspace_generation(SCORE_WORKSPACE_ID)
+            .map_err(|error| error.to_string())?;
+        Ok(ConsolidationDbSnapshot {
+            memories: memories.len(),
+            candidates: candidates.len(),
+            create_audits: create_audits.len(),
+            links,
+            index_jobs: index_jobs.len(),
+            generation,
+        })
+    }
+
     #[test]
     fn manual_runner_consolidation_pass_dry_run_plans_without_mutation() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let database_path = seed_consolidation_pass_database(temp.path())?;
+        let before = consolidation_pass_db_snapshot(&database_path)?;
+        ensure(before.memories, 2, "fixture seeds two live memories")?;
+        ensure(before.candidates, 0, "fixture starts with no candidates")?;
 
         let opts = RunnerOptions::new()
             .with_database_path(database_path.clone())
@@ -10509,6 +10563,11 @@ mod tests {
         );
 
         ensure(result.outcome, RunOutcome::Success, "dry-run outcome")?;
+        ensure(
+            result.items_processed,
+            Some(1),
+            "dry-run bounded item accounting",
+        )?;
         let details = result
             .details
             .as_ref()
@@ -10525,14 +10584,20 @@ mod tests {
             "dry-run planned candidates",
         )?;
         ensure(
+            details["selector"]["maxCandidates"].as_u64(),
+            Some(64),
+            "dry-run bounded selector budget",
+        )?;
+        ensure(
             details["durableMutation"].as_bool(),
             Some(false),
             "dry-run durable mutation",
         )?;
 
-        let (candidates, create_audits) = consolidation_pass_durable_counts(&database_path)?;
-        ensure(candidates, 0, "dry-run must insert no candidates")?;
-        ensure(create_audits, 0, "dry-run must write no creation audits")
+        // Full durable-state comparison: memories, candidates, audits,
+        // links, index jobs, and the workspace generation are all untouched.
+        let after = consolidation_pass_db_snapshot(&database_path)?;
+        ensure(after, before, "dry-run full DB snapshot unchanged")
     }
 
     #[test]

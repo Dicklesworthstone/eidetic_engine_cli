@@ -242,10 +242,10 @@ else
         e2e_log_assert_eq "false" "true" "g8_audit_timeline_json_parses"
     else
         G8_MEMORY_SHOW_COUNT=$(printf '%s' "$G8_AUDIT_JSON" \
-            | jq -r --arg id "$G7_MEMORY_ID" '[.entries[]? | select((.mutation_kind // .mutationKind // "") == "memory.show" and (.target_id // .targetId // "") == $id)] | length' \
+            | jq -r --arg id "$G7_MEMORY_ID" '[.data.entries[]? | select((.mutation_kind // .mutationKind // "") == "memory.show" and (.target_id // .targetId // "") == $id)] | length' \
             2>/dev/null || echo 0)
         G8_MEMORY_TARGET_COUNT=$(printf '%s' "$G8_AUDIT_JSON" \
-            | jq -r --arg id "$G7_MEMORY_ID" '[.entries[]? | select((.target_type // .targetType // "") == "memory" and (.target_id // .targetId // "") == $id)] | length' \
+            | jq -r --arg id "$G7_MEMORY_ID" '[.data.entries[]? | select((.target_type // .targetType // "") == "memory" and (.target_id // .targetId // "") == $id)] | length' \
             2>/dev/null || echo 0)
 
         e2e_log_assert_num "$G8_MEMORY_SHOW_COUNT" -ge 1 \

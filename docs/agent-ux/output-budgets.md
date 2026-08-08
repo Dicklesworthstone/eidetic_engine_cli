@@ -39,11 +39,12 @@ Three outcomes are possible, and all are honest:
    with `output_budget_unsatisfiable` (severity `medium`), no
    elements, and no cursor. Raise the ceiling or narrow `--fields`.
 
-Non-envelope output — human text, raw schema dumps, NDJSON stream
-frames, and top-level reports such as `ee.audit.timeline.v1` — passes
-through the governor unchanged and unstamped. The audit timeline pages
-through its own query-level `--cursor` lane on the same `ee.cursor.v1`
-codec instead.
+Non-envelope output — human text, raw schema dumps, and NDJSON stream
+frames — passes through the governor unchanged and unstamped. The
+audit timeline emits an `ee.response.v2` envelope (its
+`ee.audit.timeline.v1` report under `data`, `degraded` lifted to the
+envelope) but is likewise left unstamped: it pages through its own
+query-level `--cursor` lane on the same `ee.cursor.v1` codec instead.
 
 ## Truncation points
 
@@ -64,9 +65,10 @@ only envelope-governed `ee.response.v2` surfaces:
 | `journal list` | — | `data.entries[]` | `entryId` |
 | `schema list` | — | `data.schemas[]` | `id` |
 
-`ee audit timeline` is intentionally absent: it emits a top-level
-`ee.audit.timeline.v1` report and uses its own query-level `--cursor` lane on
-the same cursor codec, so `--max-output-tokens` does not truncate it.
+`ee audit timeline` is intentionally absent: its `ee.response.v2` envelope
+carries the `ee.audit.timeline.v1` report (`data.schema`, `data.entries[]`) and
+it uses its own query-level `--cursor` lane on the same cursor codec, so
+`--max-output-tokens` does not truncate it.
 
 Hard rule: **pack `data.pack.items[]` is never a truncation point.**
 Pack content is governed solely by its own `--max-tokens` retrieval

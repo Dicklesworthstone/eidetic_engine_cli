@@ -76,14 +76,24 @@ impl E2eWorkspace {
     }
 
     fn run(&self, label: &str, args: &[&str]) -> Result<Output, String> {
+        let workspace = self.workspace.clone();
+        self.run_in(&workspace, label, args)
+    }
+
+    fn run_in(
+        &self,
+        workspace: &std::path::Path,
+        label: &str,
+        args: &[&str],
+    ) -> Result<Output, String> {
         let index = self.command_counter.get();
         self.command_counter.set(index + 1);
-        let workspace_arg = self.workspace.display().to_string();
+        let workspace_arg = workspace.display().to_string();
         let mut full_args = vec!["--workspace", workspace_arg.as_str(), "--json"];
         full_args.extend_from_slice(args);
         let started = Instant::now();
         let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
-        command.current_dir(&self.workspace);
+        command.current_dir(workspace);
         for (name, _) in std::env::vars_os() {
             if name.to_string_lossy().starts_with("EE_") {
                 command.env_remove(name);
@@ -111,7 +121,7 @@ impl E2eWorkspace {
 
         let mut event = TestEvent::new(TEST_ID, EventKind::CommandEnd)
             .with_field("label", label.to_owned())
-            .with_field("workspace", self.workspace.display().to_string())
+            .with_field("workspace", workspace.display().to_string())
             .with_field("stdout_artifact_path", stdout_path.display().to_string())
             .with_field("stderr_artifact_path", stderr_path.display().to_string())
             .with_field(
@@ -145,7 +155,17 @@ impl E2eWorkspace {
     }
 
     fn run_json(&self, label: &str, args: &[&str]) -> Result<JsonValue, String> {
-        let output = self.run(label, args)?;
+        let workspace = self.workspace.clone();
+        self.run_json_in(&workspace, label, args)
+    }
+
+    fn run_json_in(
+        &self,
+        workspace: &std::path::Path,
+        label: &str,
+        args: &[&str],
+    ) -> Result<JsonValue, String> {
+        let output = self.run_in(workspace, label, args)?;
         ensure(
             output.status.success(),
             format!(
@@ -220,24 +240,10 @@ fn memory_id_from_remember(label: &str, response: &JsonValue) -> Result<String, 
         .ok_or_else(|| format!("{label}: remember response missing memory id: {response}"))
 }
 
-/// Number of times `needle` occurs as a JSON string value anywhere in `value`.
-fn count_string_values(value: &JsonValue, needle: &str) -> usize {
-    match value {
-        JsonValue::String(text) => usize::from(text == needle),
-        JsonValue::Array(items) => items
-            .iter()
-            .map(|item| count_string_values(item, needle))
-            .sum(),
-        JsonValue::Object(map) => map
-            .values()
-            .map(|item| count_string_values(item, needle))
-            .sum(),
-        _ => 0,
-    }
-}
-
-/// True when `needle` occurs anywhere inside any string value of `value`,
-/// including embedded JSON-encoded payloads such as audit `details` strings.
+/// True when `needle` occurs anywhere inside any string value of `value`.
+/// Reserved for the one intentionally JSON-encoded payload (the audit
+/// `details` string inside `ee why` history); every structured identity
+/// assertion uses typed extraction instead.
 fn json_mentions_text(value: &JsonValue, needle: &str) -> bool {
     match value {
         JsonValue::String(text) => text.contains(needle),
@@ -274,19 +280,142 @@ fn index_truth(ws: &E2eWorkspace, label: &str) -> Result<IndexTruth, String> {
     })
 }
 
+/// Reject any machine-facing response that is not a canonical ee.response.v2
+/// success envelope. Unenveloped (bare-report) output is a contract defect.
+fn require_success_envelope(label: &str, response: &JsonValue) -> Result<(), String> {
+    if json_str(response, &["schema"]).as_deref() == Some("ee.response.v2")
+        && json_bool(response, &["success"]) == Some(true)
+        && json_at(response, &["data"]).is_some_and(JsonValue::is_object)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label}: expected a canonical ee.response.v2 success envelope, got: {response}"
+        ))
+    }
+}
+
 fn audit_action_count(ws: &E2eWorkspace, label: &str, action: &str) -> Result<u64, String> {
-    let timeline = ws.run_json(
+    audit_action_count_in(ws, &ws.workspace.clone(), label, action)
+}
+
+fn audit_action_count_in(
+    ws: &E2eWorkspace,
+    workspace: &std::path::Path,
+    label: &str,
+    action: &str,
+) -> Result<u64, String> {
+    let timeline = ws.run_json_in(
+        workspace,
         label,
         &["audit", "timeline", "--action", action, "--limit", "50"],
     )?;
-    // `ee audit timeline --json` emits the ee.audit.timeline.v1 report at the
-    // top level; accept an enveloped shape too so the assertion survives a
-    // future envelope migration.
-    json_u64(&timeline, &["pagination", "total_count"])
-        .or_else(|| json_u64(&timeline, &["data", "pagination", "total_count"]))
-        .ok_or_else(|| {
-            format!("{label}: audit timeline missing pagination.total_count: {timeline}")
+    require_success_envelope(label, &timeline)?;
+    ensure(
+        json_str(&timeline, &["data", "schema"]).as_deref() == Some("ee.audit.timeline.v1"),
+        format!("{label}: audit timeline data schema must be ee.audit.timeline.v1: {timeline}"),
+    )?;
+    json_u64(&timeline, &["data", "pagination", "total_count"]).ok_or_else(|| {
+        format!("{label}: audit timeline missing data.pagination.total_count: {timeline}")
+    })
+}
+
+fn audit_total_count(
+    ws: &E2eWorkspace,
+    workspace: &std::path::Path,
+    label: &str,
+) -> Result<u64, String> {
+    let timeline = ws.run_json_in(workspace, label, &["audit", "timeline", "--limit", "1"])?;
+    require_success_envelope(label, &timeline)?;
+    json_u64(&timeline, &["data", "pagination", "total_count"]).ok_or_else(|| {
+        format!("{label}: audit timeline missing data.pagination.total_count: {timeline}")
+    })
+}
+
+/// Structured memory ids of an array of result/item objects (each object's
+/// `memoryId` field). Missing/typeless fields are a defect surfaced by the
+/// caller's exact-count assertions, not silently skipped rows.
+fn item_memory_ids(value: &JsonValue, path: &[&str], label: &str) -> Result<Vec<String>, String> {
+    let items = json_at(value, path)
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| format!("{label}: missing array at {path:?}: {value}"))?;
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            item.get("memoryId")
+                .and_then(JsonValue::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{label}: item {index} has no string memoryId: {item}"))
         })
+        .collect()
+}
+
+fn id_count(ids: &[String], id: &str) -> usize {
+    ids.iter()
+        .filter(|candidate| candidate.as_str() == id)
+        .count()
+}
+
+/// Full public-surface durable-state snapshot for one workspace: memory rows
+/// (live + tombstoned), consolidate candidates across every status, the total
+/// append-only audit row count, and both generations plus per-kind index
+/// counts. Two equal snapshots prove no durable object changed in between.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DurableSnapshot {
+    memory_rows: usize,
+    tombstoned_rows: usize,
+    consolidate_candidates: usize,
+    audit_total: u64,
+    db_generation: Option<u64>,
+    index_generation: Option<u64>,
+    index_memory_documents: Option<u64>,
+}
+
+fn durable_snapshot(
+    ws: &E2eWorkspace,
+    workspace: &std::path::Path,
+    label: &str,
+) -> Result<DurableSnapshot, String> {
+    let memories = ws.run_json_in(workspace, &format!("{label}_memories"), &["memory", "list"])?;
+    require_success_envelope(label, &memories)?;
+    let memory_entries = json_at(&memories, &["data", "memories"])
+        .and_then(JsonValue::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let tombstoned_rows = memory_entries
+        .iter()
+        .filter(|entry| {
+            entry.get("is_tombstoned").and_then(JsonValue::as_bool) == Some(true)
+                || entry.get("isTombstoned").and_then(JsonValue::as_bool) == Some(true)
+        })
+        .count();
+    let candidates = ws.run_json_in(
+        workspace,
+        &format!("{label}_candidates"),
+        &["curate", "candidates", "--type", "consolidate", "--all"],
+    )?;
+    require_success_envelope(label, &candidates)?;
+    let candidate_count = json_at(&candidates, &["data", "candidates"])
+        .and_then(JsonValue::as_array)
+        .map(Vec::len)
+        .ok_or_else(|| format!("{label}: candidates listing missing data.candidates array"))?;
+    let audit_total = audit_total_count(ws, workspace, &format!("{label}_audit_total"))?;
+    let status = ws.run_json_in(
+        workspace,
+        &format!("{label}_index_status"),
+        &["index", "status"],
+    )?;
+    require_success_envelope(label, &status)?;
+    Ok(DurableSnapshot {
+        memory_rows: memory_entries.len(),
+        tombstoned_rows,
+        consolidate_candidates: candidate_count,
+        audit_total,
+        db_generation: json_u64(&status, &["data", "dbGeneration"]),
+        index_generation: json_u64(&status, &["data", "indexGeneration"]),
+        index_memory_documents: json_u64(&status, &["data", "indexDocumentCounts", "memories"]),
+    })
 }
 
 #[test]
@@ -370,7 +499,20 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
     let create_audits_baseline =
         audit_action_count(&ws, "baseline_create_audits", "curation_candidate.create")?;
 
-    // --- Dry run: plans the candidate but mutates nothing.
+    // --- Dry run: plans the candidate but mutates nothing, proven by a full
+    // public durable-state snapshot (memory rows incl. tombstones, candidate
+    // rows across every status, total append-only audit count, workspace and
+    // index generations, per-kind index counts) taken on either side.
+    let workspace_a = ws.workspace.clone();
+    let before_dry = durable_snapshot(&ws, &workspace_a, "before_dry_run")?;
+    ws.check(
+        "dry_run_baseline_shape",
+        before_dry.memory_rows == 4
+            && before_dry.tombstoned_rows == 0
+            && before_dry.consolidate_candidates == 0
+            && before_dry.index_memory_documents == Some(4),
+        &format!("pre-dry-run fixture must be four live memories: {before_dry:?}"),
+    )?;
     let dry_run = ws.run_json(
         "consolidation_dry_run",
         &[
@@ -392,42 +534,22 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
             && json_bool(dry_result, &["details", "durableMutation"]) == Some(false),
         &format!("dry-run must plan exactly one candidate without mutation: {dry_result}"),
     )?;
-    let candidates_after_dry_run = ws.run_json(
-        "candidates_after_dry_run",
-        &["curate", "candidates", "--type", "consolidate", "--all"],
-    )?;
-    let dry_candidates = json_at(&candidates_after_dry_run, &["data", "candidates"])
-        .and_then(JsonValue::as_array)
-        .map(Vec::len);
     ws.check(
-        "dry_run_no_candidate_rows",
-        dry_candidates == Some(0),
-        &format!("dry-run must persist no candidates: {candidates_after_dry_run}"),
-    )?;
-    let after_dry = index_truth(&ws, "index_after_dry_run")?;
-    ws.check(
-        "dry_run_no_generation_or_index_mutation",
-        after_dry.db_generation == baseline.db_generation
-            && after_dry.index_generation == baseline.index_generation
-            && after_dry.memory_documents == baseline.memory_documents,
+        "dry_run_budget_bounded",
+        json_u64(dry_result, &["itemsProcessed"]) == Some(1)
+            && json_u64(dry_result, &["details", "selector", "maxCandidates"]) == Some(64)
+            && json_u64(dry_result, &["details", "selector", "selectedCandidates"])
+                .is_some_and(|selected| selected <= 64),
         &format!(
-            "dry-run must not move generation or index: before db={:?}/idx={:?} after db={:?}/idx={:?}",
-            baseline.db_generation,
-            baseline.index_generation,
-            after_dry.db_generation,
-            after_dry.index_generation
+            "dry-run must report an actual bounded selector budget and item count: {dry_result}"
         ),
     )?;
-    let create_audits_after_dry = audit_action_count(
-        &ws,
-        "create_audits_after_dry_run",
-        "curation_candidate.create",
-    )?;
+    let after_dry = durable_snapshot(&ws, &workspace_a, "after_dry_run")?;
     ws.check(
-        "dry_run_no_audit_mutation",
-        create_audits_after_dry == create_audits_baseline,
+        "dry_run_full_snapshot_unchanged",
+        before_dry == after_dry,
         &format!(
-            "dry-run must write no creation audits: before={create_audits_baseline} after={create_audits_after_dry}"
+            "dry-run must not mutate any durable object: before={before_dry:?} after={after_dry:?}"
         ),
     )?;
 
@@ -484,10 +606,16 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
         "real_run_inserts_one_candidate",
         json_u64(real_result, &["details", "insertedCandidates"]) == Some(1)
             && json_u64(real_result, &["details", "plannedCandidates"]) == Some(1)
-            && json_bool(real_result, &["details", "durableMutation"]) == Some(true)
-            && json_at(real_result, &["budgetUsed"]).is_some(),
+            && json_bool(real_result, &["details", "durableMutation"]) == Some(true),
+        &format!("real run must insert exactly one deduplicated candidate: {real_result}"),
+    )?;
+    ws.check(
+        "real_run_budget_accounted_and_clean",
+        json_u64(real_result, &["budgetUsed", "violations"]) == Some(0)
+            && json_u64(real_result, &["itemsProcessed"]) == Some(1)
+            && json_u64(real_result, &["details", "selector", "maxCandidates"]) == Some(64),
         &format!(
-            "real run must insert exactly one candidate with budget accounting: {real_result}"
+            "real run must report zero budget violations within the bounded selector: {real_result}"
         ),
     )?;
 
@@ -522,7 +650,8 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
         "candidate_row_shape",
         json_str(&candidates, &["data", "candidates", "0", "id"]).as_deref()
             == Some(candidate_id.as_str())
-            && count_string_values(&candidates, &duplicate_id) >= 1,
+            && json_str(&candidates, &["data", "candidates", "0", "targetMemoryId"]).as_deref()
+                == Some(duplicate_id.as_str()),
         &format!("pending candidate must target the duplicate {duplicate_id}: {candidates}"),
     )?;
     let create_audits_after_real =
@@ -532,6 +661,96 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
         create_audits_after_real == create_audits_baseline + 1,
         &format!(
             "real run must write exactly one creation audit: before={create_audits_baseline} after={create_audits_after_real}"
+        ),
+    )?;
+
+    // --- Workspace isolation: a sibling workspace with its own duplicate
+    // pair sees nothing from workspace A's steward runs, and running the
+    // pass in B leaves A's full durable snapshot untouched.
+    let workspace_b = ws.root.join("workspace-b");
+    fs::create_dir_all(&workspace_b)
+        .map_err(|error| format!("failed to create workspace-b: {error}"))?;
+    let init_b = ws.run_json_in(&workspace_b, "init_workspace_b", &["init"])?;
+    require_success_envelope("init_workspace_b", &init_b)?;
+    for (label, content) in [
+        (
+            "remember_b_survivor",
+            "Quillmarsh isolation gate: workspace B duplicate one.",
+        ),
+        (
+            "remember_b_duplicate",
+            "  quillmarsh   isolation gate: workspace B duplicate one. ",
+        ),
+    ] {
+        let response = ws.run_json_in(
+            &workspace_b,
+            label,
+            &[
+                "remember",
+                content,
+                "--level",
+                "semantic",
+                "--kind",
+                "fact",
+                "--confidence",
+                "0.7",
+                "--no-propose-candidates",
+                "--no-auto-link",
+            ],
+        )?;
+        require_success_envelope(label, &response)?;
+    }
+    let b_candidates_before = ws.run_json_in(
+        &workspace_b,
+        "workspace_b_candidates_before",
+        &["curate", "candidates", "--type", "consolidate", "--all"],
+    )?;
+    ws.check(
+        "workspace_b_untouched_by_a_runs",
+        json_at(&b_candidates_before, &["data", "candidates"])
+            .and_then(JsonValue::as_array)
+            .map(Vec::len)
+            == Some(0)
+            && audit_action_count_in(
+                &ws,
+                &workspace_b,
+                "workspace_b_create_audits_before",
+                "curation_candidate.create",
+            )? == 0,
+        &format!(
+            "workspace A's consolidation runs must not leak candidates or audits into B: {b_candidates_before}"
+        ),
+    )?;
+    let a_before_b_run = durable_snapshot(&ws, &workspace_a, "a_before_b_run")?;
+    let b_run = ws.run_json_in(
+        &workspace_b,
+        "consolidation_pass_workspace_b",
+        &[
+            "daemon",
+            "--foreground",
+            "--once",
+            "--job",
+            "consolidation_pass",
+        ],
+    )?;
+    let b_result = first_runner_result(&b_run)
+        .ok_or_else(|| format!("workspace B run missing runner result: {b_run}"))?;
+    let b_candidate_id = json_str(b_result, &["details", "candidateIds", "0"])
+        .ok_or_else(|| format!("workspace B run must emit its own candidate id: {b_result}"))?;
+    ws.check(
+        "workspace_b_pass_stays_local",
+        json_u64(b_result, &["details", "insertedCandidates"]) == Some(1)
+            && b_candidate_id != candidate_id,
+        &format!(
+            "workspace B must mint its own candidate, distinct from A's {candidate_id}: {b_result}"
+        ),
+    )?;
+    let a_after_b_run = durable_snapshot(&ws, &workspace_a, "a_after_b_run")?;
+    ws.check(
+        "workspace_a_snapshot_immune_to_b",
+        a_before_b_run == a_after_b_run,
+        &format!(
+            "workspace B's pass must not mutate A's durable state: before={a_before_b_run:?} after={a_after_b_run:?}"
         ),
     )?;
 
@@ -557,13 +776,29 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
             && json_bool(&apply, &["data", "durableMutation"]) == Some(true),
         &format!("apply must run the consolidate-absorb decision: {apply}"),
     )?;
+    let apply_changes = json_at(&apply, &["data", "application", "changes"])
+        .and_then(JsonValue::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let change_after = |field: &str| -> Option<String> {
+        apply_changes.iter().find_map(|change| {
+            (change.get("field").and_then(JsonValue::as_str) == Some(field))
+                .then(|| {
+                    change
+                        .get("after")
+                        .and_then(JsonValue::as_str)
+                        .map(str::to_owned)
+                })
+                .flatten()
+        })
+    };
     ws.check(
         "apply_changes_name_survivor_and_lineage",
-        count_string_values(&apply, &survivor_id) >= 1
-            && json_at(&apply, &["data", "application", "changes"])
-                .and_then(JsonValue::as_array)
-                .is_some_and(|changes| !changes.is_empty()),
-        &format!("apply changes must record the survivor and lineage: {apply}"),
+        change_after("consolidatedIntoMemoryId").as_deref() == Some(survivor_id.as_str())
+            && change_after("tombstoned").as_deref() == Some("true")
+            && change_after("derivedFromLinkId").is_some()
+            && change_after("searchIndexJobId").is_some(),
+        &format!("apply changes must record the survivor and lineage structurally: {apply}"),
     )?;
 
     // Source preservation + lifecycle posture via a different read surface.
@@ -627,12 +862,14 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
         "apply must write exactly one apply audit row",
     )?;
     let verify = ws.run_json("audit_verify", &["audit", "verify"])?;
+    require_success_envelope("audit_verify", &verify)?;
     ws.check(
         "audit_chain_intact",
-        json_bool(&verify, &["integrity_ok"])
-            .or_else(|| json_bool(&verify, &["data", "integrity_ok"]))
-            == Some(true),
-        &format!("audit hash chain must verify after the full loop: {verify}"),
+        json_str(&verify, &["data", "schema"]).as_deref() == Some("ee.audit.verify.v1")
+            && json_bool(&verify, &["data", "integrity_ok"]) == Some(true),
+        &format!(
+            "audit verify must emit the canonical envelope with an intact hash chain: {verify}"
+        ),
     )?;
 
     // --- Index truth: stale is reported honestly, then the workflow-emitted
@@ -675,40 +912,50 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
         ),
     )?;
 
-    // --- Deduplicated retrieval: survivor once, duplicate gone, controls
-    // distinct.
+    // --- Deduplicated retrieval, proven on structured identity fields:
+    // exactly one survivor result/item, zero absorbed duplicate, each
+    // control exactly once.
     let search = ws.run_json(
         "search_group_phrase",
         &["search", SEARCH_QUERY, "--limit", "10"],
     )?;
-    let results = json_at(&search, &["data", "results"])
-        .cloned()
-        .unwrap_or(JsonValue::Null);
+    require_success_envelope("search_group_phrase", &search)?;
+    let search_ids = item_memory_ids(&search, &["data", "results"], "search_group_phrase")?;
     ws.check(
         "search_selects_consolidated_once",
-        json_mentions_text(&results, &survivor_id)
-            && !json_mentions_text(&results, &duplicate_id),
+        id_count(&search_ids, &survivor_id) == 1 && id_count(&search_ids, &duplicate_id) == 0,
         &format!(
-            "search must select the consolidated survivor and never the absorbed duplicate: {search}"
+            "search must return the survivor exactly once and the duplicate never: {search_ids:?}"
         ),
     )?;
     ws.check(
         "search_keeps_controls_distinct",
-        json_mentions_text(&results, &wording_control_id)
-            && json_mentions_text(&results, &kind_control_id),
-        &format!("controls must remain distinct search results: {search}"),
+        id_count(&search_ids, &wording_control_id) == 1
+            && id_count(&search_ids, &kind_control_id) == 1,
+        &format!("each control must remain exactly one distinct result: {search_ids:?}"),
     )?;
     let pack = ws.run_json(
         "pack_group_phrase",
         &["pack", SEARCH_QUERY, "--max-tokens", "2000"],
     )?;
+    require_success_envelope("pack_group_phrase", &pack)?;
+    let pack_ids = item_memory_ids(&pack, &["data", "pack", "items"], "pack_group_phrase")?;
     ws.check(
-        "pack_excludes_absorbed_duplicate",
-        json_mentions_text(&pack, &survivor_id) && !json_mentions_text(&pack, &duplicate_id),
-        &format!("pack must include the survivor once and never the duplicate: {pack}"),
+        "pack_includes_survivor_once_never_duplicate",
+        id_count(&pack_ids, &survivor_id) == 1 && id_count(&pack_ids, &duplicate_id) == 0,
+        &format!(
+            "pack must contain the survivor as exactly one item and the duplicate never: {pack_ids:?}"
+        ),
+    )?;
+    ws.check(
+        "pack_keeps_controls_distinct",
+        id_count(&pack_ids, &wording_control_id) == 1 && id_count(&pack_ids, &kind_control_id) == 1,
+        &format!("each control must pack as exactly one distinct item: {pack_ids:?}"),
     )?;
 
-    // --- Idempotency: steward re-run and apply replay create nothing new.
+    // --- Idempotency: steward re-run and apply replay create nothing new,
+    // proven by a full durable snapshot bracketing both replays.
+    let before_replay = durable_snapshot(&ws, &workspace_a, "before_replay")?;
     let idempotent_run = ws.run_json(
         "consolidation_idempotent_rerun",
         &[
@@ -754,6 +1001,48 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
         &format!(
             "idempotent re-runs must not move generation: db={:?} index={:?}",
             final_truth.db_generation, final_truth.index_generation
+        ),
+    )?;
+    // Full durable-object census after the replays: every count identical to
+    // the pre-replay snapshot, and the absolute values match the closed loop
+    // (4 memory rows with exactly the absorbed duplicate tombstoned, one
+    // candidate across all statuses, 3 live index documents).
+    let after_replay = durable_snapshot(&ws, &workspace_a, "after_replay")?;
+    ws.check(
+        "replay_full_snapshot_unchanged",
+        before_replay == after_replay,
+        &format!(
+            "replays must not change any durable object: before={before_replay:?} after={after_replay:?}"
+        ),
+    )?;
+    ws.check(
+        "replay_absolute_census",
+        after_replay.memory_rows == 4
+            && after_replay.tombstoned_rows == 1
+            && after_replay.consolidate_candidates == 1
+            && after_replay.index_memory_documents == Some(3)
+            && after_replay.db_generation == after_replay.index_generation,
+        &format!("closed-loop census must hold after replay: {after_replay:?}"),
+    )?;
+    let why_after_replay = ws.run_json("why_survivor_after_replay", &["why", &survivor_id])?;
+    let lineage_links_after_replay = json_at(&why_after_replay, &["data", "links"])
+        .and_then(JsonValue::as_array)
+        .map(|links| {
+            links
+                .iter()
+                .filter(|link| {
+                    link.get("relation").and_then(JsonValue::as_str) == Some("derived_from")
+                        && link.get("linkedMemoryId").and_then(JsonValue::as_str)
+                            == Some(duplicate_id.as_str())
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    ws.check(
+        "replay_single_lineage_link",
+        lineage_links_after_replay == 1,
+        &format!(
+            "exactly one derived_from lineage link must survive the replays: {why_after_replay}"
         ),
     )?;
 

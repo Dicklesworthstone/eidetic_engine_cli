@@ -256,25 +256,25 @@ fn eight_agents_persist_all_remember_writes_without_leaking_locks() -> TestResul
     ensure_equal(
         &audit_verify
             .json
-            .pointer("/integrity_ok")
+            .pointer("/data/integrity_ok")
             .and_then(Value::as_bool),
         &Some(true),
         "audit verify integrity_ok",
     )?;
     let verified_rows = audit_verify
         .json
-        .pointer("/rows")
+        .pointer("/data/rows")
         .and_then(Value::as_u64)
-        .ok_or_else(|| format!("audit verify missing /rows: {}", audit_verify.json))?;
+        .ok_or_else(|| format!("audit verify missing /data/rows: {}", audit_verify.json))?;
     ensure(
         verified_rows >= EXPECTED_WRITE_COUNT as u64,
         format!("audit verify rows {verified_rows} should cover {EXPECTED_WRITE_COUNT} writes"),
     )?;
     let audit_issues = audit_verify
         .json
-        .pointer("/issues")
+        .pointer("/data/issues")
         .and_then(Value::as_array)
-        .ok_or_else(|| format!("audit verify missing /issues: {}", audit_verify.json))?;
+        .ok_or_else(|| format!("audit verify missing /data/issues: {}", audit_verify.json))?;
     ensure(
         audit_issues.is_empty(),
         format!("audit verify reported issues: {audit_issues:?}"),

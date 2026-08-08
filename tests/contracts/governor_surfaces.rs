@@ -605,27 +605,44 @@ fn journal_list_cursor_drain_partitions_exactly() -> TestResult {
 #[test]
 fn audit_timeline_is_not_an_envelope_governor_surface() -> TestResult {
     use ee::output::OUTPUT_TRUNCATION_REGISTRY;
+    use ee::output::governor::QUERY_LANE_EXEMPT_DATA_SCHEMAS;
 
     ensure(
         !OUTPUT_TRUNCATION_REGISTRY.iter().any(|point| {
             point.schema_id == "ee.audit.timeline.v1" || point.command == "audit timeline"
         }),
-        "audit timeline emits a top-level ee.audit.timeline.v1 report and must not be advertised as an ee.response.v2 output-governor truncation point",
-    )
+        "audit timeline pages at the query level (--cursor/--limit) and must not be advertised as an output-governor truncation point",
+    )?;
+    // The audit family is enveloped (ee.response.v2) but explicitly exempt
+    // from output-governor stamping/truncation: its pagination is the
+    // query-level cursor lane, and an output ceiling must never convert a
+    // pageable audit read into output_budget_unsatisfiable.
+    for schema in [
+        "ee.audit.timeline.v1",
+        "ee.audit.show.v1",
+        "ee.audit.diff.v1",
+        "ee.audit.verify.v1",
+    ] {
+        ensure(
+            QUERY_LANE_EXEMPT_DATA_SCHEMAS.contains(&schema),
+            format!("{schema} must stay on the governor's query-lane exemption list"),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]
 fn audit_timeline_cursor_drain_partitions_exactly() -> TestResult {
     let workspace = isolated_workspace("audit-drain")?;
     seed_memories(&workspace, 6)?;
-    // audit timeline emits a top-level ee.audit.timeline.v1 report (not an
-    // ee.response.v2 envelope), so the output governor passes it through and
-    // its --cursor is the query-level pagination lane on the shared codec.
+    // audit timeline emits the ee.audit.timeline.v1 report under the
+    // canonical ee.response.v2 envelope's `data`; its --cursor is the
+    // query-level pagination lane on the shared codec.
     let full = run_ee_in(
         &workspace,
         &["audit", "timeline", "--limit", "100", "--json"],
     )?;
-    let full_ids = element_ids(&full, "/entries", "id");
+    let full_ids = element_ids(&full, "/data/entries", "id");
     ensure(
         full_ids.len() >= 6,
         format!("seeding must leave >= 6 audit rows, got {}", full_ids.len()),
@@ -643,9 +660,9 @@ fn audit_timeline_cursor_drain_partitions_exactly() -> TestResult {
             args.push(Box::leak(token.into_boxed_str()));
         }
         let value = run_ee_in(&workspace, &args)?;
-        drained.extend(element_ids(&value, "/entries", "id"));
+        drained.extend(element_ids(&value, "/data/entries", "id"));
         let next = value
-            .pointer("/pagination/next_cursor")
+            .pointer("/data/pagination/next_cursor")
             .and_then(JsonValue::as_str)
             .map(str::to_owned);
         match next {
@@ -673,7 +690,7 @@ fn audit_timeline_legacy_offset_cursor_is_an_empty_cursor_invalid_page() -> Test
         ],
     )?;
     ensure(
-        element_ids(&value, "/entries", "id").is_empty(),
+        element_ids(&value, "/data/entries", "id").is_empty(),
         "a legacy bare-offset cursor must yield an empty page",
     )?;
     ensure(
@@ -1154,13 +1171,13 @@ fn audit_timeline_paged_report_matches_golden() -> TestResult {
     let value = run_ee_in(&workspace, &["audit", "timeline", "--limit", "2", "--json"])?;
     ensure(
         value
-            .pointer("/pagination/next_cursor")
+            .pointer("/data/pagination/next_cursor")
             .and_then(JsonValue::as_str)
             .is_some(),
         "a 2-row page over >= 6 audit rows must offer a next_cursor",
     )?;
     assert_golden(
         "audit_timeline_paged_report",
-        &normalize_surface_golden(&value, &["/entries"])?,
+        &normalize_surface_golden(&value, &["/data/entries"])?,
     )
 }

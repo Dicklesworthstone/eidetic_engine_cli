@@ -5591,20 +5591,21 @@ pub fn apply_curation_candidate(
                         message: format!("Failed to load target memory: {error}"),
                         repair: Some("ee memory show <memory-id> --json".to_owned()),
                     })?;
-            let absorb_source = if matches!(parsed_candidate_type, Ok(CandidateType::Consolidate)) {
-                resolve_consolidate_absorb_source(
-                    &connection,
-                    &prepared.workspace_id,
-                    &stored,
-                    target_memory_id,
-                )?
-            } else {
-                None
-            };
+            let absorb_resolution =
+                if matches!(parsed_candidate_type, Ok(CandidateType::Consolidate)) {
+                    resolve_consolidate_absorb(
+                        &connection,
+                        &prepared.workspace_id,
+                        &stored,
+                        target_memory.as_ref(),
+                    )?
+                } else {
+                    ConsolidateAbsorbResolution::LegacyUpdate
+                };
             let mut decision = evaluate_candidate_for_apply(
                 &stored,
                 target_memory.as_ref(),
-                absorb_source.as_ref(),
+                &absorb_resolution,
                 &now,
             );
             if (decision.tombstone_memory || decision.consolidate_absorb.is_some())
@@ -10406,36 +10407,142 @@ fn finish_candidate_validation(
     }
 }
 
-/// Resolve the surviving source memory for a steward-shaped `Consolidate`
-/// candidate. Absorb semantics only engage when the candidate's `source_id`
-/// names a distinct, live memory in the same workspace; every other
-/// `Consolidate` candidate keeps the legacy content-update apply path.
-fn resolve_consolidate_absorb_source(
+/// Apply-time disposition of a `Consolidate` candidate.
+enum ConsolidateAbsorbResolution {
+    /// Not a steward-shaped candidate (no rule-engine provenance naming a
+    /// memory source): keep the legacy content-update apply path.
+    LegacyUpdate,
+    /// Steward-shaped and fully revalidated: absorb the duplicate into this
+    /// surviving source memory.
+    Absorb(Box<StoredMemory>),
+    /// Steward-shaped but stale or tampered: block the apply with these
+    /// issues and leave every durable object unchanged.
+    Blocked(Vec<CurateValidationIssue>),
+}
+
+/// Revalidate a `Consolidate` candidate at apply time. A candidate only
+/// earns absorb semantics (lineage link + duplicate tombstone) when it is
+/// provably steward-derived for exactly this (workspace, source, target)
+/// triple AND the pair is still a live exact-duplicate group. A candidate
+/// that claims steward provenance but fails any check is blocked outright —
+/// never silently downgraded to a content rewrite, and never trusted to
+/// tombstone on the strength of two distinct memory ids alone.
+fn resolve_consolidate_absorb(
     connection: &DbConnection,
     workspace_id: &str,
     stored: &StoredCurationCandidate,
-    target_memory_id: &str,
-) -> Result<Option<StoredMemory>, DomainError> {
+    target_memory: Option<&StoredMemory>,
+) -> Result<ConsolidateAbsorbResolution, DomainError> {
+    let steward_source_type = crate::curate::CandidateSource::RuleEngine.as_str();
     let Some(source_id) = stored.source_id.as_deref() else {
-        return Ok(None);
+        return Ok(ConsolidateAbsorbResolution::LegacyUpdate);
     };
-    if !source_id.starts_with("mem_") || source_id == target_memory_id {
-        return Ok(None);
+    if stored.source_type != steward_source_type || !source_id.starts_with("mem_") {
+        return Ok(ConsolidateAbsorbResolution::LegacyUpdate);
     }
-    let memory = connection
+
+    let mut issues = Vec::new();
+    let Some(target_id) = stored.target_memory_id.as_deref() else {
+        return Ok(ConsolidateAbsorbResolution::Blocked(vec![
+            validation_issue(
+                "consolidate_absorb_target_missing",
+                "Steward consolidation candidate has no target memory id.",
+                "Reject the candidate; re-run `ee daemon --foreground --once --job consolidation_pass`.",
+            ),
+        ]));
+    };
+    if source_id == target_id {
+        issues.push(validation_issue(
+            "consolidate_absorb_source_target_identical",
+            "Steward consolidation candidate names the same memory as source and target.",
+            "Reject the candidate; a memory cannot absorb itself.",
+        ));
+    }
+    let expected_candidate_id =
+        crate::curate::steward_consolidation_candidate_id(workspace_id, source_id, target_id);
+    if stored.id != expected_candidate_id {
+        issues.push(validation_issue(
+            "consolidate_absorb_candidate_id_mismatch",
+            "Candidate id does not match the steward derivation for this workspace/source/target; refusing to tombstone from an unverified proposal.",
+            "Reject the candidate and re-run `ee daemon --foreground --once --job consolidation_pass` to mint a verifiable proposal.",
+        ));
+    }
+
+    let source_memory = connection
         .get_memory(source_id)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to load consolidation source memory: {error}"),
             repair: Some("ee memory show <memory-id> --json".to_owned()),
-        })?;
-    Ok(memory
-        .filter(|memory| memory.workspace_id == workspace_id && memory.tombstoned_at.is_none()))
+        })?
+        .filter(|memory| memory.workspace_id == workspace_id);
+    let Some(source) = source_memory else {
+        issues.push(validation_issue(
+            "consolidate_absorb_source_missing",
+            "Surviving source memory no longer exists in this workspace.",
+            "Reject the candidate; the duplicate group has changed since proposal.",
+        ));
+        return Ok(ConsolidateAbsorbResolution::Blocked(issues));
+    };
+    if source.tombstoned_at.is_some() {
+        issues.push(validation_issue(
+            "consolidate_absorb_source_tombstoned",
+            "Surviving source memory was tombstoned after the candidate was proposed.",
+            "Reject the candidate; re-run the consolidation pass against live memories.",
+        ));
+    }
+    let Some(target) = target_memory else {
+        issues.push(validation_issue(
+            "consolidate_absorb_target_missing",
+            "Absorb target memory no longer exists.",
+            "Reject the candidate; the duplicate group has changed since proposal.",
+        ));
+        return Ok(ConsolidateAbsorbResolution::Blocked(issues));
+    };
+    if target.tombstoned_at.is_some() {
+        issues.push(validation_issue(
+            "consolidate_absorb_target_tombstoned",
+            "Absorb target memory is already tombstoned.",
+            "No apply action is required; re-run the consolidation pass for a fresh plan.",
+        ));
+    }
+    if source.level != target.level || source.kind != target.kind {
+        issues.push(validation_issue(
+            "consolidate_absorb_pair_no_longer_duplicates",
+            "Source and target no longer share the same memory level and kind.",
+            "Reject the candidate; the pair is no longer an exact-duplicate group.",
+        ));
+    } else {
+        let normalized_source =
+            crate::curate::normalize_memory_content_for_consolidation(&source.content);
+        let normalized_target =
+            crate::curate::normalize_memory_content_for_consolidation(&target.content);
+        if normalized_source.is_empty() || normalized_source != normalized_target {
+            issues.push(validation_issue(
+                "consolidate_absorb_pair_no_longer_duplicates",
+                "Source and target content no longer normalize to the same duplicate group.",
+                "Reject the candidate; one memory changed after the consolidation pass ran.",
+            ));
+        }
+    }
+    if stored.proposed_content.as_deref() != Some(source.content.as_str()) {
+        issues.push(validation_issue(
+            "consolidate_absorb_candidate_content_drift",
+            "Candidate proposed content no longer matches the surviving source memory.",
+            "Reject the candidate; re-run the consolidation pass to re-propose from current content.",
+        ));
+    }
+
+    if issues.is_empty() {
+        Ok(ConsolidateAbsorbResolution::Absorb(Box::new(source)))
+    } else {
+        Ok(ConsolidateAbsorbResolution::Blocked(issues))
+    }
 }
 
 fn evaluate_candidate_for_apply(
     stored: &StoredCurationCandidate,
     target_memory: Option<&StoredMemory>,
-    absorb_source: Option<&StoredMemory>,
+    absorb_resolution: &ConsolidateAbsorbResolution,
     now_rfc3339: &str,
 ) -> ApplyDecision {
     let mut errors = Vec::new();
@@ -10647,7 +10754,15 @@ fn evaluate_candidate_for_apply(
         | CandidateType::ParaphraseDedupProposal
         | CandidateType::Split => {
             if candidate_type == CandidateType::Consolidate
-                && let Some(source) = absorb_source
+                && let ConsolidateAbsorbResolution::Blocked(issues) = absorb_resolution
+            {
+                // Steward-shaped candidate that failed apply-time
+                // revalidation: surface every issue and mutate nothing. A
+                // stale or tampered proposal must never fall back to a
+                // content rewrite or reach the tombstone path.
+                errors.extend(issues.iter().cloned());
+            } else if candidate_type == CandidateType::Consolidate
+                && let ConsolidateAbsorbResolution::Absorb(source) = absorb_resolution
             {
                 // Steward-shaped consolidation: absorb the duplicate target
                 // into the surviving source memory. The survivor keeps its
@@ -24943,7 +25058,11 @@ mod tests {
         let workspace_id = test_workspace_id(workspace_path);
         let source_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7A01)).to_string();
         let target_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7A02)).to_string();
-        let candidate_id = curate_id(0x7A03);
+        let candidate_id = crate::curate::steward_consolidation_candidate_id(
+            &workspace_id,
+            &source_memory_id,
+            &target_memory_id,
+        );
         let connection = seed_consolidate_absorb_candidate_database(
             &database_path,
             workspace_path,
@@ -25083,7 +25202,11 @@ mod tests {
                 MemoryId::from_uuid(uuid::Uuid::from_u128(0x7B01 + id_offset)).to_string();
             let target_memory_id =
                 MemoryId::from_uuid(uuid::Uuid::from_u128(0x7B02 + id_offset)).to_string();
-            let candidate_id = curate_id(0x7B03 + id_offset);
+            let candidate_id = crate::curate::steward_consolidation_candidate_id(
+                &workspace_id,
+                &source_memory_id,
+                &target_memory_id,
+            );
             let connection = seed_consolidate_absorb_candidate_database(
                 &database_path,
                 workspace_path,
@@ -25227,6 +25350,228 @@ mod tests {
         assert_eq!(link_count, 0, "legacy path must not create lineage links");
         assert_eq!(candidate_status, "applied");
         Ok(())
+    }
+
+    /// Assert that a steward-shaped Consolidate candidate whose revalidation
+    /// fails is blocked with the expected issue code and leaves every durable
+    /// object unchanged (candidate still approved, no tombstone, no links,
+    /// no jobs, no apply audit).
+    fn assert_consolidate_absorb_blocked_without_mutation(
+        connection: &DbConnection,
+        workspace_path: &Path,
+        database_path: &std::path::Path,
+        workspace_id: &str,
+        source_memory_id: &str,
+        target_memory_id: &str,
+        candidate_id: &str,
+        expected_issue_code: &str,
+    ) -> TestResult {
+        let report = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(database_path),
+            candidate_id,
+            actor: Some("ScarletMill"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(
+            report.application.status, "blocked",
+            "stale/tampered steward candidate must block, not apply"
+        );
+        assert_eq!(report.application.decision, "unchanged");
+        assert!(!report.durable_mutation, "blocked apply must not mutate");
+        assert!(
+            report
+                .application
+                .errors
+                .iter()
+                .any(|issue| issue.code == expected_issue_code),
+            "blocked apply must carry issue {expected_issue_code}: {:?}",
+            report.application.errors
+        );
+
+        let (target_tombstoned, link_count, job_count, candidate_status) =
+            consolidate_absorb_state(
+                connection,
+                workspace_id,
+                source_memory_id,
+                target_memory_id,
+                candidate_id,
+            )?;
+        assert!(
+            !target_tombstoned,
+            "{expected_issue_code}: blocked apply must not tombstone the target"
+        );
+        assert_eq!(
+            link_count, 0,
+            "{expected_issue_code}: blocked apply must not create lineage links"
+        );
+        assert_eq!(
+            job_count, 0,
+            "{expected_issue_code}: blocked apply must not enqueue index jobs"
+        );
+        assert_eq!(
+            candidate_status, "approved",
+            "{expected_issue_code}: blocked apply must leave the candidate approved"
+        );
+        let apply_audits = connection
+            .list_audit_by_action(audit_actions::CURATION_CANDIDATE_APPLY, None)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            apply_audits.is_empty(),
+            "{expected_issue_code}: blocked apply must write no apply audit rows"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn consolidate_absorb_blocks_tampered_candidate_id_without_mutation() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let source_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7E01)).to_string();
+        let target_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7E02)).to_string();
+        // Deliberately NOT the steward derivation for this triple.
+        let candidate_id = curate_id(0x7E03);
+        let connection = seed_consolidate_absorb_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &source_memory_id,
+            &target_memory_id,
+            &candidate_id,
+            None,
+        )?;
+        validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("ScarletMill"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_consolidate_absorb_blocked_without_mutation(
+            &connection,
+            workspace_path,
+            &database_path,
+            &workspace_id,
+            &source_memory_id,
+            &target_memory_id,
+            &candidate_id,
+            "consolidate_absorb_candidate_id_mismatch",
+        )
+    }
+
+    #[test]
+    fn consolidate_absorb_blocks_tombstoned_source_without_mutation() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let source_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7E11)).to_string();
+        let target_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7E12)).to_string();
+        let candidate_id = crate::curate::steward_consolidation_candidate_id(
+            &workspace_id,
+            &source_memory_id,
+            &target_memory_id,
+        );
+        let connection = seed_consolidate_absorb_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &source_memory_id,
+            &target_memory_id,
+            &candidate_id,
+            None,
+        )?;
+        validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("ScarletMill"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        // The survivor is tombstoned after approval but before apply.
+        assert!(
+            connection
+                .tombstone_memory(&source_memory_id)
+                .map_err(|error| error.to_string())?,
+            "test setup must tombstone the source"
+        );
+
+        assert_consolidate_absorb_blocked_without_mutation(
+            &connection,
+            workspace_path,
+            &database_path,
+            &workspace_id,
+            &source_memory_id,
+            &target_memory_id,
+            &candidate_id,
+            "consolidate_absorb_source_tombstoned",
+        )
+    }
+
+    #[test]
+    fn consolidate_absorb_blocks_drifted_pair_without_mutation() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let source_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7E21)).to_string();
+        let target_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7E22)).to_string();
+        let candidate_id = crate::curate::steward_consolidation_candidate_id(
+            &workspace_id,
+            &source_memory_id,
+            &target_memory_id,
+        );
+        let connection = seed_consolidate_absorb_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &source_memory_id,
+            &target_memory_id,
+            &candidate_id,
+            None,
+        )?;
+        validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("ScarletMill"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        // The survivor's content is edited after approval, so the pair is no
+        // longer an exact-duplicate group and the proposal is stale.
+        assert!(
+            connection
+                .apply_memory_curation_update(
+                    &source_memory_id,
+                    &crate::db::ApplyMemoryCurationInput {
+                        workspace_id: workspace_id.clone(),
+                        content: "Zephyr quill consolidation now says run clippy too.".to_owned(),
+                        confidence: 0.92,
+                        trust_class: "agent_validated".to_owned(),
+                    },
+                )
+                .map_err(|error| error.to_string())?,
+            "test setup must update the source content"
+        );
+
+        assert_consolidate_absorb_blocked_without_mutation(
+            &connection,
+            workspace_path,
+            &database_path,
+            &workspace_id,
+            &source_memory_id,
+            &target_memory_id,
+            &candidate_id,
+            "consolidate_absorb_pair_no_longer_duplicates",
+        )
     }
 
     struct ReviewFixture {

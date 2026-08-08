@@ -31,12 +31,7 @@ pub(super) struct ConsolidationCandidateSelection {
 }
 
 fn normalize_memory_content_for_consolidation(content: &str) -> String {
-    content
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_ascii_lowercase()
+    crate::curate::normalize_memory_content_for_consolidation(content)
 }
 
 pub(super) fn plan_consolidation_candidates(
@@ -217,28 +212,11 @@ fn stable_consolidation_candidate_id(
     source_memory_id: &str,
     target_memory_id: &str,
 ) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"steward.consolidation.v1\0");
-    hasher.update(workspace_id.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(source_memory_id.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(target_memory_id.as_bytes());
-    let hash = hasher.finalize();
-    let candidate =
-        crate::models::CandidateId::from_uuid(uuid::Uuid::from_bytes(blake3_uuid_bytes(&hash)));
-    format!(
-        "curate_{}",
-        candidate.to_string().trim_start_matches("cand_")
+    crate::curate::steward_consolidation_candidate_id(
+        workspace_id,
+        source_memory_id,
+        target_memory_id,
     )
-}
-
-fn blake3_uuid_bytes(hash: &blake3::Hash) -> [u8; 16] {
-    let mut bytes = [0_u8; 16];
-    if let Some(prefix) = hash.as_bytes().get(..16) {
-        bytes.copy_from_slice(prefix);
-    }
-    bytes
 }
 
 #[cfg(test)]

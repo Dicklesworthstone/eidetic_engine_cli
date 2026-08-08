@@ -207,18 +207,28 @@ fn audit_verify_cli_reports_tampered_persisted_row() -> TestResult {
         .map_err(|error| format!("audit verify stdout must be JSON: {error}"))?;
     assert_eq!(
         verified.pointer("/schema").and_then(Value::as_str),
+        Some("ee.response.v2")
+    );
+    assert_eq!(
+        verified.pointer("/data/schema").and_then(Value::as_str),
         Some("ee.audit.verify.v1")
     );
     assert_eq!(
-        verified.pointer("/integrity_ok").and_then(Value::as_bool),
+        verified
+            .pointer("/data/integrity_ok")
+            .and_then(Value::as_bool),
         Some(false)
     );
     assert_eq!(
-        verified.pointer("/first_break").and_then(Value::as_str),
+        verified
+            .pointer("/data/first_break")
+            .and_then(Value::as_str),
         Some(audit_id)
     );
     assert_eq!(
-        verified.pointer("/issues/0/code").and_then(Value::as_str),
+        verified
+            .pointer("/data/issues/0/code")
+            .and_then(Value::as_str),
         Some("row_hash_mismatch")
     );
     Ok(())

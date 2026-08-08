@@ -134,6 +134,36 @@ fn run_before_index_publish_hook(cx: &asupersync::Cx) {
 #[cfg(not(test))]
 fn run_before_index_publish_hook(_cx: &asupersync::Cx) {}
 
+#[cfg(test)]
+type AfterIndexPublishHook = Box<dyn FnOnce(&asupersync::Cx)>;
+#[cfg(test)]
+std::thread_local! {
+    static AFTER_INDEX_PUBLISH_HOOK: RefCell<Option<AfterIndexPublishHook>> =
+        const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn install_after_index_publish_hook(hook: impl FnOnce(&asupersync::Cx) + 'static) {
+    AFTER_INDEX_PUBLISH_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+/// Fired immediately after the staged generation is durably published but
+/// before job bookkeeping resumes — the seam for proving a post-publication
+/// failure cannot fake job completion or corrupt the just-published index.
+#[cfg(test)]
+fn run_after_index_publish_hook(cx: &asupersync::Cx) {
+    AFTER_INDEX_PUBLISH_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(cx);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_after_index_publish_hook(_cx: &asupersync::Cx) {}
+
 /// Generate a unique holder ID for advisory locks.
 fn generate_index_holder_id() -> String {
     let pid = std::process::id();
@@ -2551,6 +2581,7 @@ where
         )?;
         publish_staged_index_with_commit(index_dir, &staging_dir, commit_tail)
     })?;
+    run_after_index_publish_hook(cx);
     Ok(stats)
 }
 
@@ -10293,6 +10324,224 @@ mod tests {
             converged.db_generation == converged.index_generation,
             format!(
                 "retry must restore truthful generation: db={:?} index={:?}",
+                converged.db_generation, converged.index_generation
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// bd-1oep7: a cancellation injected immediately AFTER the consolidation
+    /// index generation is durably published must never fake state in either
+    /// direction: the published index stays current and truthful, the job row
+    /// lands in a truthful terminal state (done because the work really
+    /// finished, or cancelled because bookkeeping aborted — never a leaked
+    /// `running` row and never `failed`), and a retry converges with no
+    /// duplicate index effects.
+    #[test]
+    fn consolidation_index_job_cancel_after_publish_stays_truthful_and_retry_converges()
+    -> TestResult {
+        const WORKSPACE_ID: &str = "wsp_consolpost0000000000000001";
+        const SURVIVOR_ID: &str = "mem_consolpost0000000000000001";
+        const DUPLICATE_ID: &str = "mem_consolpost0000000000000002";
+        const BASELINE_JOB_ID: &str = "sidx_consolpostbase000000000001";
+        const CANCELLED_JOB_ID: &str = "sidx_consolpostcancel0000000002";
+        const RETRY_JOB_ID: &str = "sidx_consolpostretry00000000003";
+
+        let root = unique_test_dir("consolidation-cancel-after-publish");
+        let workspace = root.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+
+        let insert_memory = |connection: &DbConnection,
+                             memory_id: &str,
+                             content: &str,
+                             confidence: f32|
+         -> TestResult {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &crate::db::CreateMemoryInput {
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        level: "semantic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence,
+                        utility: 0.5,
+                        importance: 0.5,
+                        provenance_uri: Some("test://consolidation-index-post".to_owned()),
+                        trust_class: "agent_validated".to_owned(),
+                        trust_subclass: None,
+                        tags: vec!["consolidation".to_owned()],
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())
+        };
+        let consolidation_job_input = || crate::db::CreateSearchIndexJobInput {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            job_type: SearchIndexJobType::SingleDocument,
+            document_source: Some("memory".to_owned()),
+            document_id: Some(DUPLICATE_ID.to_owned()),
+            documents_total: 1,
+        };
+        let processing_options = || IndexProcessingOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+            dry_run: false,
+            job_limit: None,
+        };
+        let status_options = || IndexStatusOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+        };
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("consolidation-index-post-cancel".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        insert_memory(
+            &connection,
+            SURVIVOR_ID,
+            "Zephyr quill post-publish survivor stays in the index.",
+            0.92,
+        )?;
+        insert_memory(
+            &connection,
+            DUPLICATE_ID,
+            " zephyr   quill post-publish survivor stays in the index. ",
+            0.41,
+        )?;
+        connection
+            .insert_search_index_job(
+                BASELINE_JOB_ID,
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    job_type: SearchIndexJobType::FullRebuild,
+                    document_source: None,
+                    document_id: None,
+                    documents_total: 0,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let baseline =
+            process_index_jobs(&processing_options()).map_err(|error| error.to_string())?;
+        ensure(
+            baseline.completed_jobs == 1,
+            format!("baseline rebuild must complete: {baseline:?}"),
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .tombstone_memory(DUPLICATE_ID)
+                .map_err(|error| error.to_string())?,
+            "duplicate must tombstone for the post-publish scenario",
+        )?;
+        connection
+            .insert_search_index_job(CANCELLED_JOB_ID, &consolidation_job_input())
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        install_after_index_publish_hook(move |cx| {
+            cx.set_cancel_reason(asupersync::CancelReason::user(
+                "cancel immediately after consolidation index publication",
+            ));
+        });
+        let cancel_options = processing_options();
+        let cancelled_run = crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            process_index_jobs_with_cx(&cx, &cancel_options).await
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(
+            matches!(cancelled_run, Ok(_) | Err(IndexRebuildError::Cancelled(_))),
+            format!(
+                "post-publish cancellation must surface as clean completion or a typed cancellation, never another failure: {cancelled_run:?}"
+            ),
+        )?;
+
+        // The publication itself is durable and truthful regardless of where
+        // the cancellation interrupted bookkeeping.
+        let published = get_index_status(&status_options()).map_err(|error| error.to_string())?;
+        ensure(
+            published
+                .index_document_counts
+                .as_ref()
+                .map(|counts| counts.memories)
+                == Some(1),
+            format!(
+                "post-publish cancellation must keep the published deduplicated generation: {:?}",
+                published.index_document_counts
+            ),
+        )?;
+        ensure(
+            published.db_generation == published.index_generation,
+            format!(
+                "post-publish cancellation must leave a truthful current generation: db={:?} index={:?}",
+                published.db_generation, published.index_generation
+            ),
+        )?;
+
+        // The job row must land in a truthful terminal state: done (the work
+        // really completed) or cancelled (bookkeeping aborted) — never a
+        // leaked running row and never failed.
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let job = connection
+            .get_search_index_job(CANCELLED_JOB_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "post-publish consolidation job row missing".to_owned())?;
+        let job_status = job.status_enum();
+        ensure(
+            job_status == Some(SearchIndexJobStatus::Done)
+                || job_status == Some(SearchIndexJobStatus::Cancelled),
+            format!("post-publish job must be truthfully terminal: {job:?}"),
+        )?;
+        ensure(
+            job.completed_at.is_some(),
+            format!("post-publish terminal job must carry a completion timestamp: {job:?}"),
+        )?;
+
+        // Retry converges: a fresh workflow-emitted job processes cleanly and
+        // produces zero additional index effects.
+        connection
+            .insert_search_index_job(RETRY_JOB_ID, &consolidation_job_input())
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let retry = process_index_jobs(&processing_options()).map_err(|error| error.to_string())?;
+        ensure(
+            retry.completed_jobs == 1,
+            format!("post-publish retry must process the fresh job: {retry:?}"),
+        )?;
+        let converged = get_index_status(&status_options()).map_err(|error| error.to_string())?;
+        ensure(
+            converged
+                .index_document_counts
+                .as_ref()
+                .map(|counts| counts.memories)
+                == Some(1),
+            format!(
+                "post-publish retry must not duplicate index effects: {:?}",
+                converged.index_document_counts
+            ),
+        )?;
+        ensure(
+            converged.db_generation == converged.index_generation,
+            format!(
+                "post-publish retry must keep the generation truthful: db={:?} index={:?}",
                 converged.db_generation, converged.index_generation
             ),
         )?;

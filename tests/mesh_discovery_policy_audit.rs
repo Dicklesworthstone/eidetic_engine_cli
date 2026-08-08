@@ -95,17 +95,23 @@ fn discovery_policy_mutations_write_readable_hash_only_audit_rows() -> TestResul
     ensure_success(&timeline, "audit timeline")?;
     let timeline_text = stdout_text(&timeline, "audit timeline")?;
 
-    // `ee audit timeline --json` emits a bare `ee.audit.timeline.v1` document
-    // (top-level `entries` + `pagination`), not an `ee.response.v2` envelope,
-    // so assert the schema and that both mutation rows are present.
+    // `ee audit timeline --json` emits the canonical `ee.response.v2`
+    // envelope with the `ee.audit.timeline.v1` report (its `entries` +
+    // `pagination`) under `data`, so assert both schemas and that both
+    // mutation rows are present.
     let document: serde_json::Value = serde_json::from_str(&timeline_text)
         .map_err(|error| format!("audit timeline stdout was not JSON: {error}"))?;
-    if document["schema"] != serde_json::Value::String("ee.audit.timeline.v1".to_owned()) {
+    if document["schema"] != serde_json::Value::String("ee.response.v2".to_owned()) {
         return Err(format!(
-            "audit timeline schema was not ee.audit.timeline.v1: {timeline_text}"
+            "audit timeline envelope schema was not ee.response.v2: {timeline_text}"
         ));
     }
-    let entry_count = document["entries"].as_array().map_or(0, Vec::len);
+    if document["data"]["schema"] != serde_json::Value::String("ee.audit.timeline.v1".to_owned()) {
+        return Err(format!(
+            "audit timeline data schema was not ee.audit.timeline.v1: {timeline_text}"
+        ));
+    }
+    let entry_count = document["data"]["entries"].as_array().map_or(0, Vec::len);
     if entry_count < 2 {
         return Err(format!(
             "expected the set + allow discovery-policy audit rows, saw {entry_count}: {timeline_text}"

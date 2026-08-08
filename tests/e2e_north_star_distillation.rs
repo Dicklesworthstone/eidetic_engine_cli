@@ -285,9 +285,9 @@ fn north_star_procedural_distillation_partial_chain_through_audit_and_why() -> T
     //    each row's prev_row_hash must match the previous row's this_row_hash.
     let audit = run_ee_json(&["--workspace", &ws_arg, "--json", "audit", "timeline"])?;
     let entries = audit
-        .pointer("/entries")
+        .pointer("/data/entries")
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| "audit timeline missing /entries".to_owned())?;
+        .ok_or_else(|| "audit timeline missing /data/entries".to_owned())?;
     ensure(
         entries.len() >= 2,
         format!("expected ≥2 audit entries, got {}", entries.len()),
@@ -307,12 +307,14 @@ fn north_star_procedural_distillation_partial_chain_through_audit_and_why() -> T
     //    we observed in the timeline.
     let verify = run_ee_json(&["--workspace", &ws_arg, "--json", "audit", "verify"])?;
     ensure_equal(
-        &verify.pointer("/integrity_ok").and_then(JsonValue::as_bool),
+        &verify
+            .pointer("/data/integrity_ok")
+            .and_then(JsonValue::as_bool),
         &Some(true),
         "audit chain integrity",
     )?;
     let verified_rows = verify
-        .pointer("/rows")
+        .pointer("/data/rows")
         .and_then(JsonValue::as_u64)
         .unwrap_or_default();
     ensure(
@@ -320,9 +322,9 @@ fn north_star_procedural_distillation_partial_chain_through_audit_and_why() -> T
         format!("audit verify rows {verified_rows} should be ≥2"),
     )?;
     let issues = verify
-        .pointer("/issues")
+        .pointer("/data/issues")
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| "audit verify missing /issues".to_owned())?;
+        .ok_or_else(|| "audit verify missing /data/issues".to_owned())?;
     ensure(
         issues.is_empty(),
         format!("audit verify reported issues: {issues:?}"),
@@ -999,7 +1001,7 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
 
     let audit = run_ee_json(&["--workspace", &ws_arg, "--json", "audit", "timeline"])?;
     let audit_entries = audit
-        .pointer("/entries")
+        .pointer("/data/entries")
         .and_then(JsonValue::as_array)
         .ok_or_else(|| "audit timeline missing entries".to_owned())?;
     ensure(
@@ -1013,7 +1015,9 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
     )?;
     let verify = run_ee_json(&["--workspace", &ws_arg, "--json", "audit", "verify"])?;
     ensure_equal(
-        &verify.pointer("/integrity_ok").and_then(JsonValue::as_bool),
+        &verify
+            .pointer("/data/integrity_ok")
+            .and_then(JsonValue::as_bool),
         &Some(true),
         "audit verify integrity after full flow",
     )?;

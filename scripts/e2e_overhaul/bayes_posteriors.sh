@@ -48,7 +48,7 @@ assert_jq "$WHY_HARMFUL" '.data.bayesPosterior.credibleInterval90.level' "0.9" \
     "bayes_harmful_ci90_level"
 
 AUDIT_JSON=$(ee_workspace audit timeline --action outcome.bayes_update --limit 10 --json)
-assert_jq "$AUDIT_JSON" '[.entries[]? | select(.mutation_kind == "outcome.bayes_update")] | length' \
+assert_jq "$AUDIT_JSON" '[.data.entries[]? | select(.mutation_kind == "outcome.bayes_update")] | length' \
     "2" "bayes_outcome_audit_row_count"
 
 BAYES_GOLDEN_DIR="$REPO_ROOT/tests/fixtures/golden/bayes"

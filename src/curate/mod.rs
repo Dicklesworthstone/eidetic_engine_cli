@@ -363,6 +363,57 @@ fn compare_hebbian_updates(
         .then_with(|| left.link_id.cmp(&right.link_id))
 }
 
+/// Canonical whitespace/case normalization used to decide whether two
+/// memories are exact-duplicate consolidation candidates. The steward
+/// proposer and the apply-time revalidation must share this single
+/// definition or a candidate could tombstone a memory that is no longer a
+/// duplicate.
+#[must_use]
+pub(crate) fn normalize_memory_content_for_consolidation(content: &str) -> String {
+    content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// Canonical deterministic id for a steward-proposed Consolidate candidate:
+/// BLAKE3 over the versioned domain tag, workspace id, surviving source
+/// memory id, and absorbed target memory id. Apply-time hardening recomputes
+/// this id to prove a candidate is genuinely steward-derived for exactly this
+/// (workspace, source, target) triple before any tombstone is planned.
+#[must_use]
+pub(crate) fn steward_consolidation_candidate_id(
+    workspace_id: &str,
+    source_memory_id: &str,
+    target_memory_id: &str,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"steward.consolidation.v1\0");
+    hasher.update(workspace_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(source_memory_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(target_memory_id.as_bytes());
+    let hash = hasher.finalize();
+    let candidate = crate::models::CandidateId::from_uuid(uuid::Uuid::from_bytes(
+        steward_consolidation_uuid_bytes(&hash),
+    ));
+    format!(
+        "curate_{}",
+        candidate.to_string().trim_start_matches("cand_")
+    )
+}
+
+fn steward_consolidation_uuid_bytes(hash: &blake3::Hash) -> [u8; 16] {
+    let mut bytes = [0_u8; 16];
+    if let Some(prefix) = hash.as_bytes().get(..16) {
+        bytes.copy_from_slice(prefix);
+    }
+    bytes
+}
+
 /// Type of curation action being proposed.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CandidateType {
