@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
+use ee::core::init::{InitOptions, init_workspace};
 use ee::core::journal::{JournalAppendOptions, JournalSource, append_journal_entries_stdin};
 use ee::core::memory::{
     RememberBatchOptions, RememberMemoryOptions, RememberOutcome, RememberWriteControls,
@@ -124,6 +125,25 @@ fn temp_workspace(prefix: &str) -> Result<(tempfile::TempDir, PathBuf), TestCase
     Ok((dir, workspace))
 }
 
+fn initialize_workspace(workspace: &Path) -> Result<(), TestCaseError> {
+    let report = init_workspace(&InitOptions {
+        workspace_path: workspace.to_path_buf(),
+        dry_run: false,
+        repair_plan: false,
+        force: false,
+        allow_symlink: false,
+        skip_boilerplate: true,
+    });
+    if report.status.is_success() {
+        Ok(())
+    } else {
+        Err(TestCaseError::fail(format!(
+            "workspace init failed with status {}",
+            report.status.as_str()
+        )))
+    }
+}
+
 fn remember_options<'a>(workspace: &'a Path, content: &'a str) -> RememberMemoryOptions<'a> {
     RememberMemoryOptions {
         workspace_path: workspace,
@@ -163,6 +183,7 @@ proptest! {
         lines in proptest::collection::vec(journal_line_case(), 1..24),
     ) {
         let (_dir, workspace) = temp_workspace("ee-journal-prop")?;
+        initialize_workspace(&workspace)?;
         let input = lines
             .iter()
             .enumerate()
