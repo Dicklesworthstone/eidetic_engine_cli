@@ -708,7 +708,7 @@ fn cumulative_authenticated_frame_budget_counts_both_directions() -> TestResult 
         session
             .send_response(
                 &cx,
-                response(&request.correlation_id, json!({"accepted": true})),
+                request(&request.correlation_id, json!({"accepted": true})),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -779,7 +779,7 @@ fn cumulative_authenticated_byte_budget_counts_both_directions() -> TestResult {
         session
             .send_response(
                 &cx,
-                response(&request.correlation_id, json!({"accepted": true})),
+                request(&request.correlation_id, json!({"accepted": true})),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -843,7 +843,7 @@ fn completed_exchange_usage(
         session
             .send_response(
                 &cx,
-                response(&request.correlation_id, json!({"accepted": true})),
+                request(&request.correlation_id, json!({"accepted": true})),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -2094,15 +2094,15 @@ fn transport_wire_schemas_validate_valid_and_near_identical_invalid_instances() 
         .ok_or("frame-v2 schema is not embedded".to_owned())?;
     let frame_schema: serde_json::Value =
         serde_json::from_str(frame_schema.document).map_err(|error| error.to_string())?;
-    let binding = binding();
+    let session_binding = binding();
     let keys = ee::mesh::transport_session::derive_session_keys(
         &pair_key(),
-        &binding,
+        &session_binding,
         &[0x11; 32],
         &[0x22; 32],
     );
     let frame = sign_frame(
-        &binding,
+        &session_binding,
         &keys,
         FrameDraft {
             direction: SessionDirection::InitiatorToResponder,
