@@ -11,7 +11,10 @@
 //! This slice deliberately does not run application hello, anti-entropy, or
 //! synchronization. Route registration/control-channel ownership, network-map
 //! rebind supervision, durable audit persistence, and grant-target migration
-//! remain later T2.2 slices.
+//! remain later T2.2 slices. Pair-key generation also remains route-owned:
+//! key-store record v1 does not persist a generation, so binding the route's
+//! generation to durable key metadata belongs with rotation/control-plane
+//! ownership rather than this inbound acceptor.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -69,6 +72,7 @@ pub type TailscaleLocalApiFuture<'a, T> =
 pub struct LocalTailscaleIdentity {
     pub stable_id: String,
     pub current_node_pubkey: String,
+    pub tailnet_id: String,
 }
 
 /// Minimal accepted-peer identity returned by LocalAPI WhoIs.
@@ -177,6 +181,16 @@ impl TailscaleLocalApi for TailscaleLocalApiClient {
                 let status: LocalApiStatus = serde_json::from_slice(&body)
                     .map_err(|_| ResponderBrokerError::WhoIsUnverified)?;
                 let local = status.local.ok_or(ResponderBrokerError::WhoIsUnverified)?;
+                let tailnet_id = local
+                    .tailnet_id
+                    .or_else(|| {
+                        status
+                            .current_tailnet
+                            .and_then(|tailnet| tailnet.magic_dns_suffix)
+                    })
+                    .or(status.magic_dns_suffix)
+                    .filter(|value| valid_identity(value))
+                    .ok_or(ResponderBrokerError::WhoIsUnverified)?;
                 let address_verified = local
                     .tailscale_ips
                     .iter()
@@ -191,6 +205,7 @@ impl TailscaleLocalApi for TailscaleLocalApiClient {
                 Ok(LocalTailscaleIdentity {
                     stable_id: local.stable_id,
                     current_node_pubkey: local.current_node_pubkey,
+                    tailnet_id,
                 })
             }
         })
@@ -244,6 +259,10 @@ impl TailscaleLocalApi for TailscaleLocalApiClient {
 struct LocalApiStatus {
     #[serde(rename = "Self")]
     local: Option<LocalApiStatusNode>,
+    #[serde(rename = "CurrentTailnet")]
+    current_tailnet: Option<LocalApiCurrentTailnet>,
+    #[serde(rename = "MagicDNSSuffix")]
+    magic_dns_suffix: Option<String>,
 }
 
 #[cfg(unix)]
@@ -255,6 +274,15 @@ struct LocalApiStatusNode {
     current_node_pubkey: String,
     #[serde(rename = "TailscaleIPs", default)]
     tailscale_ips: Vec<String>,
+    #[serde(rename = "Tailnet")]
+    tailnet_id: Option<String>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Deserialize)]
+struct LocalApiCurrentTailnet {
+    #[serde(rename = "MagicDNSSuffix")]
+    magic_dns_suffix: Option<String>,
 }
 
 #[cfg(unix)]
@@ -736,6 +764,7 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
             let local_identity = local_api.verify_local_address(cx, address).await?;
             if local_identity.stable_id != routes.responder_stable_id
                 || local_identity.current_node_pubkey != routes.responder_node_pubkey
+                || local_identity.tailnet_id != routes.tailnet_id
             {
                 return Err(ResponderBrokerError::WhoIsUnverified);
             }

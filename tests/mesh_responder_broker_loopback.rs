@@ -132,11 +132,22 @@ struct FakeLocalApi {
 
 impl FakeLocalApi {
     fn spawn(dir: &Path, expected_requests: usize) -> TestResult<Self> {
+        Self::spawn_with_tailnets(dir, expected_requests, None, Some("tailnet-loopback"))
+    }
+
+    fn spawn_with_tailnets(
+        dir: &Path,
+        expected_requests: usize,
+        self_tailnet: Option<&str>,
+        current_tailnet: Option<&str>,
+    ) -> TestResult<Self> {
         let socket_path = dir.join("tailscaled.sock");
         let listener = UnixListener::bind(&socket_path)
             .map_err(|error| format!("bind fake localapi: {error}"))?;
         let requests = Arc::new(Mutex::new(Vec::new()));
         let observed = Arc::clone(&requests);
+        let self_tailnet = self_tailnet.map(str::to_owned);
+        let current_tailnet = current_tailnet.map(str::to_owned);
         let join = thread::spawn(move || {
             for _ in 0..expected_requests {
                 let (mut stream, _) = listener
@@ -152,7 +163,11 @@ impl FakeLocalApi {
                         "Self": {
                             "ID": "stable-responder",
                             "PublicKey": "nodekey:responder-current",
-                            "TailscaleIPs": ["127.0.0.1"]
+                            "TailscaleIPs": ["127.0.0.1"],
+                            "Tailnet": self_tailnet
+                        },
+                        "CurrentTailnet": {
+                            "MagicDNSSuffix": current_tailnet
                         }
                     })
                 } else if request.starts_with("GET /localapi/v0/whois?") {
@@ -229,6 +244,58 @@ fn write_http_response(stream: &mut std::os::unix::net::UnixStream, body: &[u8])
         .write_all(header.as_bytes())
         .and_then(|()| stream.write_all(body))
         .map_err(|error| format!("write fake localapi response: {error}"))
+}
+
+#[test]
+fn production_broker_rejects_status_tailnet_mismatch_before_listen_or_pair_auth() -> TestResult {
+    let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
+    let local_api_dir = tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
+    let fake = FakeLocalApi::spawn_with_tailnets(
+        local_api_dir.path(),
+        1,
+        Some("tailnet-wrong"),
+        Some("tailnet-loopback"),
+    )?;
+    let port = available_nonprivileged_port()?;
+    let bind_address: SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .map_err(|error| format!("parse bind address: {error}"))?;
+    let registry = ResponderRouteRegistry::new([route(workspace.path().to_path_buf(), port)])
+        .map_err(|error| error.to_string())?;
+    let requests = run_runtime(|cx| async move {
+        let client = TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT);
+        let error = match ResponderBroker::bind(
+            &cx,
+            bind_address,
+            client,
+            registry,
+            PreAuthAdmissionLimits::default(),
+        )
+        .await
+        {
+            Ok(mut broker) => {
+                broker.shutdown();
+                return Err("wrong-tailnet status allowed a responder broker bind".to_owned());
+            }
+            Err(error) => error,
+        };
+        if !matches!(error, ResponderBrokerError::WhoIsUnverified) {
+            return Err(format!("unexpected wrong-tailnet error: {error:?}"));
+        }
+        fake.finish()
+    })?;
+    if requests.len() != 1 || !requests[0].starts_with("GET /localapi/v0/status ") {
+        return Err(format!(
+            "wrong-tailnet bind performed work beyond status attestation: {requests:?}"
+        ));
+    }
+    if workspace.path().join(".ee/keys/mesh").exists() {
+        return Err("wrong-tailnet bind reached or created pair-key storage".to_owned());
+    }
+    let rebound = StdTcpListener::bind(bind_address)
+        .map_err(|error| format!("wrong-tailnet bind left broker socket bound: {error}"))?;
+    drop(rebound);
+    Ok(())
 }
 
 #[test]
