@@ -352,6 +352,7 @@ pub struct ResponderRouteRegistry {
 struct RouteKey {
     team_id: String,
     target_workspace_id: String,
+    initiator_stable_id: String,
     pair_key_generation: u64,
 }
 
@@ -400,6 +401,7 @@ impl ResponderRouteRegistry {
         let key = RouteKey {
             team_id: route.expectations.team_id.clone(),
             target_workspace_id: route.expectations.responder_workspace_id.clone(),
+            initiator_stable_id: route.expectations.initiator_stable_id.clone(),
             pair_key_generation: route.expectations.pair_key_generation,
         };
         if self.routes.insert(key, route).is_some() {
@@ -412,6 +414,7 @@ impl ResponderRouteRegistry {
         self.routes.get(&RouteKey {
             team_id: selectors.team_id.clone(),
             target_workspace_id: selectors.responder_workspace_id.clone(),
+            initiator_stable_id: selectors.initiator_stable_id.clone(),
             pair_key_generation: selectors.pair_key_generation,
         })
     }
@@ -1265,6 +1268,35 @@ mod tests {
             ResponderRouteRegistry::new([empty_node_key]),
             Err(ResponderBrokerError::InvalidConfiguration)
         ));
+    }
+
+    #[test]
+    fn registry_multiplexes_same_target_for_distinct_initiator_stable_ids() {
+        let path = PathBuf::from("/tmp/ee-responder-broker-multiplex-unit");
+        let first = route(path.clone(), 41888);
+        let mut second = route(path, 41888);
+        second.peer_handle = "peer_fedcba9876543210fedcba9876543210".to_owned();
+        second.expectations.initiator_node_id = "node-initiator-b".to_owned();
+        second.expectations.initiator_stable_id = "stable-initiator-b".to_owned();
+
+        let registry = ResponderRouteRegistry::new([first, second]).expect(
+            "distinct verified initiators may share one team, target, port, and generation",
+        );
+        assert_eq!(registry.route_count(), 2);
+        let selected = registry
+            .resolve(&UntrustedRouteSelectors {
+                team_id: "team-a".to_owned(),
+                responder_workspace_id: "workspace-responder".to_owned(),
+                initiator_stable_id: "stable-initiator-b".to_owned(),
+                pair_key_generation: 1,
+            })
+            .expect(
+                "untrusted stable-id selector chooses only the local route later verified by WhoIs",
+            );
+        assert_eq!(
+            selected.expectations.initiator_stable_id,
+            "stable-initiator-b"
+        );
     }
 
     #[test]

@@ -1575,6 +1575,7 @@ fn untrusted_route_selectors(
 ) -> Result<UntrustedRouteSelectors, SessionChannelError> {
     if !valid_bounded_identity(&open.team_id)
         || !valid_bounded_identity(&open.responder_workspace_id)
+        || !valid_bounded_identity(&open.initiator_stable_id)
     {
         return Err(SessionChannelError::Handshake(
             HandshakeError::BindingMismatch {
@@ -1593,6 +1594,7 @@ fn untrusted_route_selectors(
     Ok(UntrustedRouteSelectors {
         team_id: open.team_id.clone(),
         responder_workspace_id: open.responder_workspace_id.clone(),
+        initiator_stable_id: open.initiator_stable_id.clone(),
         pair_key_generation: open.pair_key_generation,
     })
 }
@@ -1917,6 +1919,7 @@ pub struct AcceptedSessionConfig {
 pub struct UntrustedRouteSelectors {
     pub team_id: String,
     pub responder_workspace_id: String,
+    pub initiator_stable_id: String,
     pub pair_key_generation: u64,
 }
 
