@@ -19095,6 +19095,32 @@ impl DbConnection {
             .transpose()
     }
 
+    /// Resolve the CURRENT live revision row id for a ledger key inside one
+    /// workspace: not tombstoned and not superseded (`valid_to IS NULL`),
+    /// newest first for determinism. Family retrieval uses this so ledger
+    /// members always surface through their live revision, never a
+    /// superseded historical row.
+    pub fn get_current_memory_id_for_ledger_key(
+        &self,
+        workspace_id: &str,
+        ledger_key: &str,
+    ) -> Result<Option<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id FROM memories \
+             WHERE workspace_id = ?1 AND COALESCE(logical_id, id) = ?2 \
+               AND tombstoned_at IS NULL AND valid_to IS NULL \
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(ledger_key.to_string()),
+            ],
+        )?;
+        rows.first()
+            .map(|row| required_text(row, 0, DbOperation::Query, "id").map(str::to_string))
+            .transpose()
+    }
+
     /// Family ids holding append-only ledger membership for a memory's
     /// logical identity, in deterministic order. The ledger is authoritative:
     /// wiping a row's denormalized pointer columns must never make its family

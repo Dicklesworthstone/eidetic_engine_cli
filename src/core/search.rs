@@ -17814,3 +17814,241 @@ mod tests {
         Ok(())
     }
 }
+
+/// Queryless attempt-family retrieval (bd-multiplicity-aware-trust-p0u7g).
+///
+/// `ee search --family <id>` without a positional query is a deterministic,
+/// workspace-scoped DB retrieval of every recorded family member — including
+/// the rejected failures — through the normal admission pipeline rather than
+/// a raw table listing: members surface only through their CURRENT live
+/// revision (tombstoned and superseded rows are skipped and counted), each
+/// candidate passes the same memory-scope context normal search applies
+/// (scope-filtered members are counted, never leaked), and member content
+/// runs through the secret redaction policy before rendering. Frankensearch
+/// stays the owner of query search; this surface never touches the index.
+#[derive(Clone, Copy, Debug)]
+pub struct FamilyRetrievalOptions<'a> {
+    pub workspace_path: &'a Path,
+    pub database_path: Option<&'a Path>,
+    pub family_id: &'a str,
+    pub memory_scope: MemoryScope,
+    pub strict_scope: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchFamilyMember {
+    pub memory_id: String,
+    pub logical_id: String,
+    pub attempt_index: u32,
+    pub disposition: String,
+    pub kind: String,
+    pub level: String,
+    pub trust_class: String,
+    pub content: String,
+    pub content_redacted: bool,
+    pub provenance_uri: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchFamilyReport {
+    pub workspace_id: String,
+    pub family_id: String,
+    pub declared_size: Option<u32>,
+    pub origin: Option<String>,
+    pub recorded_slots: u32,
+    pub selected_count: u32,
+    pub rejected_count: u32,
+    pub unrecorded_count: u32,
+    pub discount_factor: f32,
+    pub survivor_only: bool,
+    pub promotion_eligible: bool,
+    pub posture_summary: String,
+    pub members: Vec<SearchFamilyMember>,
+    pub scope_filtered_count: u32,
+    pub missing_current_revision_count: u32,
+    pub memory_scope: MemoryScope,
+    pub strict_scope: bool,
+}
+
+impl SearchFamilyReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "ee.search.family.v1",
+            "workspaceId": self.workspace_id,
+            "familyId": self.family_id,
+            "declaredSize": self.declared_size,
+            "origin": self.origin,
+            "recordedSlots": self.recorded_slots,
+            "selectedCount": self.selected_count,
+            "rejectedCount": self.rejected_count,
+            "unrecordedCount": self.unrecorded_count,
+            "discountFactor": self.discount_factor,
+            "survivorOnly": self.survivor_only,
+            "promotionEligible": self.promotion_eligible,
+            "postureSummary": self.posture_summary,
+            "memoryScope": self.memory_scope.as_str(),
+            "strictScope": self.strict_scope,
+            "scopeFilteredCount": self.scope_filtered_count,
+            "missingCurrentRevisionCount": self.missing_current_revision_count,
+            "members": self
+                .members
+                .iter()
+                .map(|member| {
+                    serde_json::json!({
+                        "memoryId": member.memory_id,
+                        "logicalId": member.logical_id,
+                        "attemptIndex": member.attempt_index,
+                        "disposition": member.disposition,
+                        "kind": member.kind,
+                        "level": member.level,
+                        "trustClass": member.trust_class,
+                        "content": member.content,
+                        "contentRedacted": member.content_redacted,
+                        "provenanceUri": member.provenance_uri,
+                        "createdAt": member.created_at,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        format!(
+            "Attempt family {}: {} ({} member(s) shown, {} scope-filtered, {} without a live revision)",
+            self.family_id,
+            self.posture_summary,
+            self.members.len(),
+            self.scope_filtered_count,
+            self.missing_current_revision_count
+        )
+    }
+}
+
+/// Run the queryless family retrieval described on
+/// [`FamilyRetrievalOptions`].
+///
+/// # Errors
+///
+/// Returns `DomainError::Storage` when the workspace database cannot be
+/// opened or read.
+pub fn run_family_retrieval(
+    options: &FamilyRetrievalOptions<'_>,
+) -> Result<SearchFamilyReport, DomainError> {
+    let family_id = options.family_id.trim();
+    if family_id.is_empty() {
+        return Err(DomainError::Usage {
+            message: "--family requires a non-empty family id".to_owned(),
+            repair: Some("ee search --family <id> --json".to_owned()),
+        });
+    }
+    let workspace_root = default_workspace_root(options.workspace_path);
+    let workspace_id = crate::core::curate::stable_workspace_id(&workspace_root);
+    let default_database_path = default_workspace_database_path(options.workspace_path);
+    let database_path = options.database_path.unwrap_or(&default_database_path);
+    let storage_error = |message: String| DomainError::Storage {
+        message,
+        repair: Some("ee doctor --workspace . --json".to_owned()),
+    };
+    let connection = DbConnection::open_file(database_path)
+        .map_err(|error| storage_error(format!("Failed to open database: {error}")))?;
+    connection
+        .migrate()
+        .map_err(|error| storage_error(format!("Failed to migrate database: {error}")))?;
+
+    let members = connection
+        .list_memory_attempt_family(&workspace_id, family_id)
+        .map_err(|error| storage_error(format!("Failed to list attempt family: {error}")))?;
+    let declaration = connection
+        .get_attempt_family_declaration(&workspace_id, family_id)
+        .map_err(|error| {
+            storage_error(format!(
+                "Failed to read attempt-family declaration: {error}"
+            ))
+        })?;
+    let (declared_size, origin) = match declaration {
+        Some((declared, origin)) => (declared, Some(origin)),
+        None => (None, None),
+    };
+
+    let multiplicity = crate::models::AttemptFamilyMultiplicity::from_members(
+        family_id.to_owned(),
+        declared_size,
+        members.iter().map(|member| {
+            (
+                Some(member.attempt_index),
+                Some(member.disposition.as_str()),
+            )
+        }),
+    );
+
+    let scope_context = crate::core::memory_scope::MemoryScopeContext::for_workspace(
+        &workspace_root,
+        options.memory_scope,
+        options.strict_scope,
+    );
+    let mut admitted = Vec::with_capacity(members.len());
+    let mut scope_filtered_count = 0_u32;
+    let mut missing_current_revision_count = 0_u32;
+    for member in &members {
+        let current_id = connection
+            .get_current_memory_id_for_ledger_key(&workspace_id, &member.memory_logical_id)
+            .map_err(|error| {
+                storage_error(format!("Failed to resolve live family revision: {error}"))
+            })?;
+        let Some(current_id) = current_id else {
+            missing_current_revision_count = missing_current_revision_count.saturating_add(1);
+            continue;
+        };
+        let Some(memory) = connection
+            .get_memory(&current_id)
+            .map_err(|error| storage_error(format!("Failed to load family member: {error}")))?
+        else {
+            missing_current_revision_count = missing_current_revision_count.saturating_add(1);
+            continue;
+        };
+        let tags = connection
+            .get_memory_tags(&memory.id)
+            .map_err(|error| storage_error(format!("Failed to load member tags: {error}")))?;
+        if !scope_context.memory_in_scope_with_tags(&memory, &tags) {
+            scope_filtered_count = scope_filtered_count.saturating_add(1);
+            continue;
+        }
+        let redaction = crate::policy::redact_secret_like_content(&memory.content);
+        admitted.push(SearchFamilyMember {
+            memory_id: memory.id,
+            logical_id: member.memory_logical_id.clone(),
+            attempt_index: member.attempt_index,
+            disposition: member.disposition.clone(),
+            kind: memory.kind,
+            level: memory.level,
+            trust_class: memory.trust_class,
+            content: redaction.content,
+            content_redacted: redaction.redacted,
+            provenance_uri: memory.provenance_uri,
+            created_at: memory.created_at,
+        });
+    }
+
+    Ok(SearchFamilyReport {
+        workspace_id,
+        family_id: family_id.to_owned(),
+        declared_size: multiplicity.declared_size,
+        origin,
+        recorded_slots: multiplicity.recorded_slots,
+        selected_count: multiplicity.selected_count,
+        rejected_count: multiplicity.rejected_count,
+        unrecorded_count: multiplicity.unrecorded_count(),
+        discount_factor: multiplicity.discount_factor(),
+        survivor_only: multiplicity.is_survivor_only(),
+        promotion_eligible: multiplicity.is_promotion_eligible(),
+        posture_summary: multiplicity.summary(),
+        members: admitted,
+        scope_filtered_count,
+        missing_current_revision_count,
+        memory_scope: options.memory_scope,
+        strict_scope: options.strict_scope,
+    })
+}
