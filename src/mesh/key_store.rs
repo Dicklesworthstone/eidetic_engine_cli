@@ -67,6 +67,54 @@ const MAX_NAME_COMPONENT_LEN: usize = 64;
 #[cfg(unix)]
 static SECURE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+/// Hardened credential-storage adapter compiled for this target.
+///
+/// This reports implementation availability only. It does not claim that an
+/// individual path is safe; every open and record operation still performs
+/// descriptor-relative path, owner, type, mode, and identity verification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MeshCredentialStorePlatform {
+    /// The reviewed Unix `openat`/`O_NOFOLLOW` + owner/mode + atomic
+    /// no-replace publication + fsync adapter is present.
+    HardenedUnix,
+    /// No reviewed adapter with equivalent guarantees is present.
+    Unsupported,
+}
+
+/// Return the credential-store posture of the compiled target without
+/// touching the filesystem.
+#[must_use]
+pub const fn mesh_credential_store_platform() -> MeshCredentialStorePlatform {
+    if cfg!(all(
+        unix,
+        any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "redox",
+            target_vendor = "apple"
+        )
+    )) {
+        MeshCredentialStorePlatform::HardenedUnix
+    } else {
+        MeshCredentialStorePlatform::Unsupported
+    }
+}
+
+/// Gate a credential-bearing operation on a reviewed platform adapter.
+/// Windows and every other unsupported target fail closed; callers must not
+/// substitute ordinary file APIs or shell-based ACL repair.
+pub fn require_mesh_credential_store_platform(
+    operation: impl Into<String>,
+) -> Result<MeshCredentialStorePlatform, KeyStoreError> {
+    let platform = mesh_credential_store_platform();
+    match platform {
+        MeshCredentialStorePlatform::HardenedUnix => Ok(platform),
+        MeshCredentialStorePlatform::Unsupported => Err(KeyStoreError::PlatformUnsupported {
+            operation: operation.into(),
+        }),
+    }
+}
+
 /// Canonical on-disk location of a workspace's mesh credential directory.
 /// Shares the `.ee/keys` root with the store-authentication root so operators
 /// have exactly one hardened keys tree per workspace.
@@ -140,6 +188,41 @@ pub enum KeyStoreError {
     },
 }
 
+/// Stable failure class for callers that must decide whether credential
+/// operations remain blocked without parsing human prose.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeyStoreFailureClass {
+    /// File or directory I/O/durability could not be established.
+    IoOrDurability,
+    /// A path component, entry type, or opened identity was unsafe.
+    PathSafety,
+    /// Owner or permission/ACL protection was insufficient.
+    AccessControl,
+    /// Stored bytes violated the bounded canonical record contract.
+    RecordIntegrity,
+    /// An exclusive publication or retirement target already existed.
+    Conflict,
+    /// The compiled target has no reviewed hardened adapter.
+    PlatformUnsupported,
+}
+
+/// Structured fail-closed guidance shared by key-store consumers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyStoreFailureGuidance {
+    /// Stable degraded code.
+    pub code: &'static str,
+    /// Stable severity.
+    pub severity: &'static str,
+    /// Typed root failure class.
+    pub class: KeyStoreFailureClass,
+    /// Whether the attempted credential-bearing operation was refused.
+    pub credential_operation_blocked: bool,
+    /// Ordinary commands outside the mesh credential boundary remain usable.
+    pub ordinary_local_commands_available: bool,
+    /// Bounded operator repair guidance.
+    pub repair: String,
+}
+
 impl KeyStoreError {
     /// The stable degraded code for this failure.
     #[must_use]
@@ -151,6 +234,35 @@ impl KeyStoreError {
     #[must_use]
     pub const fn severity(&self) -> &'static str {
         MESH_KEY_STORE_UNAVAILABLE_SEVERITY
+    }
+
+    /// Typed failure posture for downstream command/status renderers. Every
+    /// key-store failure blocks the current credential operation; ordinary
+    /// non-team commands remain outside this credential boundary.
+    #[must_use]
+    pub fn guidance(&self) -> KeyStoreFailureGuidance {
+        let class = match self {
+            Self::Io { .. } => KeyStoreFailureClass::IoOrDurability,
+            Self::SymlinkComponent { .. } | Self::WrongFileType { .. } => {
+                KeyStoreFailureClass::PathSafety
+            }
+            Self::InsecurePermissions { .. } | Self::ForeignOwner { .. } => {
+                KeyStoreFailureClass::AccessControl
+            }
+            Self::CapExceeded { .. } | Self::Malformed { .. } => {
+                KeyStoreFailureClass::RecordIntegrity
+            }
+            Self::AlreadyExists { .. } => KeyStoreFailureClass::Conflict,
+            Self::PlatformUnsupported { .. } => KeyStoreFailureClass::PlatformUnsupported,
+        };
+        KeyStoreFailureGuidance {
+            code: self.degraded_code(),
+            severity: self.severity(),
+            class,
+            credential_operation_blocked: true,
+            ordinary_local_commands_available: true,
+            repair: self.repair(),
+        }
     }
 
     /// Human-readable message. Always names the mesh key store so agents can
@@ -410,6 +522,7 @@ impl fmt::Debug for SigningKeyRecord {
 /// [`KeyStoreError::PlatformUnsupported`].
 #[derive(Debug)]
 pub struct SecureLocalDir {
+    boundary: PathBuf,
     dir: PathBuf,
     #[cfg(unix)]
     dir_handle: std::fs::File,
@@ -427,6 +540,7 @@ impl SecureLocalDir {
         boundary: impl AsRef<Path>,
         dir: impl AsRef<Path>,
     ) -> Result<Self, KeyStoreError> {
+        require_mesh_credential_store_platform("open hardened local directory")?;
         let boundary = boundary.as_ref();
         let dir = dir.as_ref();
         let dir_handle =
@@ -435,6 +549,7 @@ impl SecureLocalDir {
                 message: "directory remained absent after descriptor-relative creation".to_owned(),
             })?;
         let this = Self {
+            boundary: boundary.to_path_buf(),
             dir: dir.to_path_buf(),
             dir_handle,
         };
@@ -449,12 +564,14 @@ impl SecureLocalDir {
         boundary: impl AsRef<Path>,
         dir: impl AsRef<Path>,
     ) -> Result<Option<Self>, KeyStoreError> {
+        require_mesh_credential_store_platform("open existing hardened local directory")?;
         let boundary = boundary.as_ref();
         let dir = dir.as_ref();
         let Some(dir_handle) = open_secure_directory(boundary, dir, false)? else {
             return Ok(None);
         };
         let this = Self {
+            boundary: boundary.to_path_buf(),
             dir: dir.to_path_buf(),
             dir_handle,
         };
@@ -469,16 +586,25 @@ impl SecureLocalDir {
     }
 
     fn verify_dir(&self) -> Result<(), KeyStoreError> {
-        use rustix::fs::{AtFlags, FileType};
+        use rustix::fs::FileType;
         let opened = rustix::fs::fstat(&self.dir_handle).map_err(|error| KeyStoreError::Io {
             path: self.dir.display().to_string(),
             message: format!("inspect opened secure directory: {error}"),
         })?;
         verify_directory_stat(&opened, &self.dir, true)?;
-        let named = rustix::fs::statat(rustix::fs::CWD, &self.dir, AtFlags::SYMLINK_NOFOLLOW)
-            .map_err(|error| {
-                key_store_errno(&self.dir, "revalidate secure directory path", error)
+        let named_handle =
+            open_secure_directory(&self.boundary, &self.dir, false)?.ok_or_else(|| {
+                KeyStoreError::Io {
+                    path: self.dir.display().to_string(),
+                    message:
+                        "secure directory path no longer resolves beneath its trusted boundary"
+                            .to_owned(),
+                }
             })?;
+        let named = rustix::fs::fstat(&named_handle).map_err(|error| KeyStoreError::Io {
+            path: self.dir.display().to_string(),
+            message: format!("inspect re-opened secure directory: {error}"),
+        })?;
         if FileType::from_raw_mode(named.st_mode) != FileType::Directory
             || named.st_dev != opened.st_dev
             || named.st_ino != opened.st_ino
@@ -584,40 +710,62 @@ impl SecureLocalDir {
         Ok(())
     }
 
-    /// Exclusively create a record (`O_EXCL | O_NOFOLLOW`, mode `0600`), then
-    /// fsync the file and the directory.
+    /// Exclusively publish a record through a unique `0600` temp sibling,
+    /// file fsync, no-replace rename, and directory fsync. A crash-retained
+    /// temp is never a visible record and cannot wedge a later unique attempt.
     pub fn write_exclusive(&self, name: &str, bytes: &[u8]) -> Result<(), KeyStoreError> {
-        use rustix::fs::{Mode, OFlags};
+        use rustix::fs::{AtFlags, Mode, OFlags};
         validate_file_name(name)?;
         self.verify_dir()?;
         let path = self.dir.join(name);
+        match rustix::fs::statat(&self.dir_handle, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => {
+                verify_record_stat(&stat, &path)?;
+                return Err(KeyStoreError::AlreadyExists {
+                    path: path.display().to_string(),
+                });
+            }
+            Err(error) if error == rustix::io::Errno::NOENT => {}
+            Err(error) => {
+                return Err(key_store_errno(
+                    &path,
+                    "inspect exclusive destination",
+                    error,
+                ));
+            }
+        }
+        let sequence = SECURE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let tmp_name = format!(".{name}.tmp.{}.{}", std::process::id(), sequence);
+        let tmp = self.dir.join(&tmp_name);
         let descriptor = rustix::fs::openat(
             &self.dir_handle,
-            name,
+            tmp_name.as_str(),
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_raw_mode(0o600),
         )
         .map_err(|error| {
             if error == rustix::io::Errno::EXIST {
                 KeyStoreError::AlreadyExists {
-                    path: path.display().to_string(),
+                    path: tmp.display().to_string(),
                 }
             } else {
                 KeyStoreError::Io {
-                    path: path.display().to_string(),
+                    path: tmp.display().to_string(),
                     message: error.to_string(),
                 }
             }
         })?;
         let mut file = std::fs::File::from(descriptor);
         file.write_all(bytes).map_err(|error| KeyStoreError::Io {
-            path: path.display().to_string(),
+            path: tmp.display().to_string(),
             message: error.to_string(),
         })?;
         file.sync_all().map_err(|error| KeyStoreError::Io {
-            path: path.display().to_string(),
+            path: tmp.display().to_string(),
             message: error.to_string(),
         })?;
+        drop(file);
+        publish_noreplace(&self.dir_handle, tmp_name.as_str(), name, &path)?;
         self.sync_dir()
     }
 
@@ -813,6 +961,7 @@ pub struct MeshKeyStore {
 impl MeshKeyStore {
     /// Open (creating if needed) the workspace's mesh credential store.
     pub fn open_or_create(workspace_path: &Path) -> Result<Self, KeyStoreError> {
+        require_mesh_credential_store_platform("open mesh key store")?;
         Ok(Self {
             dir: SecureLocalDir::open_or_create(workspace_path, mesh_keys_dir(workspace_path))?,
         })
@@ -822,6 +971,7 @@ impl MeshKeyStore {
     /// chmodding anything. Returns `Ok(None)` when the store path is absent;
     /// existing unsafe components still fail closed.
     pub fn open_existing(workspace_path: &Path) -> Result<Option<Self>, KeyStoreError> {
+        require_mesh_credential_store_platform("open existing mesh key store")?;
         let Some(dir) =
             SecureLocalDir::open_existing(workspace_path, mesh_keys_dir(workspace_path))?
         else {
@@ -1314,6 +1464,57 @@ fn verify_record_stat(stat: &rustix::fs::Stat, path: &Path) -> Result<(), KeySto
     Ok(())
 }
 
+#[cfg(all(
+    unix,
+    any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "redox",
+        target_vendor = "apple"
+    )
+))]
+fn publish_noreplace(
+    dir: &std::fs::File,
+    from: &str,
+    to: &str,
+    destination: &Path,
+) -> Result<(), KeyStoreError> {
+    use rustix::fs::RenameFlags;
+
+    rustix::fs::renameat_with(dir, from, dir, to, RenameFlags::NOREPLACE).map_err(|error| {
+        if error == rustix::io::Errno::EXIST {
+            KeyStoreError::AlreadyExists {
+                path: destination.display().to_string(),
+            }
+        } else {
+            KeyStoreError::Io {
+                path: destination.display().to_string(),
+                message: format!("atomic exclusive publish: {error}"),
+            }
+        }
+    })
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "redox",
+        target_vendor = "apple"
+    ))
+))]
+fn publish_noreplace(
+    _dir: &std::fs::File,
+    _from: &str,
+    _to: &str,
+    _destination: &Path,
+) -> Result<(), KeyStoreError> {
+    Err(KeyStoreError::PlatformUnsupported {
+        operation: "atomically publish mesh key record without replacement".to_owned(),
+    })
+}
+
 #[cfg(unix)]
 fn key_store_errno(path: &Path, operation: &str, error: rustix::io::Errno) -> KeyStoreError {
     if error == rustix::io::Errno::LOOP {
@@ -1328,7 +1529,16 @@ fn key_store_errno(path: &Path, operation: &str, error: rustix::io::Errno) -> Ke
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(
+    test,
+    unix,
+    any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "redox",
+        target_vendor = "apple"
+    )
+))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -2055,5 +2265,36 @@ mod tests {
         assert!(rendered.contains("<redacted>"));
         assert!(!rendered.contains(&"a5".repeat(SIGNING_KEY_SEED_LEN)));
         assert!(!rendered.contains("165, 165"));
+    }
+}
+
+#[cfg(all(
+    test,
+    not(all(
+        unix,
+        any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "redox",
+            target_vendor = "apple"
+        )
+    ))
+))]
+mod unsupported_platform_tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_target_blocks_credential_operations_without_a_fallback() {
+        assert_eq!(
+            mesh_credential_store_platform(),
+            MeshCredentialStorePlatform::Unsupported
+        );
+        let error = require_mesh_credential_store_platform("join team")
+            .expect_err("an unreviewed platform adapter must fail closed");
+        assert!(matches!(error, KeyStoreError::PlatformUnsupported { .. }));
+        let guidance = error.guidance();
+        assert_eq!(guidance.class, KeyStoreFailureClass::PlatformUnsupported);
+        assert!(guidance.credential_operation_blocked);
+        assert!(guidance.ordinary_local_commands_available);
     }
 }

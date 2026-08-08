@@ -24,11 +24,12 @@ use ee::mesh::transport_session::{
     AcceptedSessionConfig, AcceptedSourceAttestation, CAPABILITY_NEGOTIATION_SCHEMA_V1,
     EstablishedSession, FrameCapability, FrameDraft, FrameKind, HandshakeObservations,
     InitiatorHandshake, InitiatorSessionConfig, MAX_FRAME_BYTES, NegotiatedExtensions,
-    ResolvedAcceptedRoute, ResponderExpectations, SessionBinding, SessionCapabilities,
-    SessionChannelError, SessionChannelLimits, SessionCounters, SessionDirection, SessionMessage,
+    PairingCeremonyAvailability, PairingGuidanceStatus, ResolvedAcceptedRoute,
+    ResponderExpectations, SessionBinding, SessionCapabilities, SessionChannelError,
+    SessionChannelLimits, SessionCounters, SessionDirection, SessionMessage,
     TRANSPORT_FRAME_SCHEMA_V1, accept_authenticated_session_with, connect_authenticated_session,
     decode_frame, decode_session_confirm, decode_session_finish, decode_session_open,
-    responder_accept_open, sign_frame, verify_frame,
+    require_pair_credential, responder_accept_open, sign_frame, verify_frame,
 };
 use regex_lite::Regex;
 use serde_json::json;
@@ -213,6 +214,75 @@ fn accepted_source_attestation_must_match_kernel_peer_before_pair_key_auth() -> 
     let error = join_server(server)?;
     if !matches!(error, SessionChannelError::Authentication { .. }) {
         return Err(format!("unexpected source-mismatch error: {error}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn unkeyed_route_returns_structured_pairing_guidance_before_authentication() -> TestResult {
+    let route_resolution_attempts = Arc::new(AtomicUsize::new(0));
+    let server_resolution_attempts = Arc::clone(&route_resolution_attempts);
+    let (address, server) = spawn_server(move |cx, stream| async move {
+        let error = accept_authenticated_session_with(
+            &cx,
+            stream,
+            limits(),
+            move |_route_cx, peer_address, _selectors| async move {
+                server_resolution_attempts.fetch_add(1, Ordering::SeqCst);
+                let pair_key: SecretBytes = require_pair_credential(None)?;
+                let mut config = accepted_config(limits());
+                config.pair_key = pair_key;
+                Ok(ResolvedAcceptedRoute::new(
+                    config,
+                    accepted_source(peer_address.ip())?,
+                    (),
+                ))
+            },
+        )
+        .await
+        .expect_err("an unkeyed route must stop before pair-key authentication");
+        Ok(error)
+    })?;
+
+    run_runtime(|cx| async move {
+        connect_authenticated_session(&cx, address, initiator_config(limits()))
+            .await
+            .expect_err("the server must close an unkeyed session");
+        Ok(())
+    })?;
+    let error = join_server(server)?;
+    if error.degraded_code() != "mesh_frame_auth_failed" {
+        return Err(format!(
+            "pairing-required classification drifted: {}",
+            error.degraded_code()
+        ));
+    }
+    let guidance = error
+        .pairing_guidance()
+        .ok_or("pairing-required error omitted structured guidance")?;
+    if guidance.status != PairingGuidanceStatus::PairingRequired
+        || guidance.ceremony != PairingCeremonyAvailability::UnavailableInM1
+        || guidance.degraded_code != "mesh_frame_auth_failed"
+        || guidance.severity != "high"
+        || !guidance.blocks_authenticated_transport
+        || !guidance.retry_after_pairing
+        || guidance.command.is_some()
+        || !guidance
+            .repair()
+            .contains("No public pairing ceremony exists in M1")
+    {
+        return Err(format!("unexpected pairing guidance: {guidance:?}"));
+    }
+    if SessionChannelError::Handshake(
+        ee::mesh::transport_session::HandshakeError::ConfirmationFailed { role: "responder" },
+    )
+    .pairing_guidance()
+    .is_some()
+    {
+        return Err("a planted bad-MAC failure was laundered into pairing guidance".to_owned());
+    }
+    if route_resolution_attempts.load(Ordering::SeqCst) != 1 {
+        return Err("pairing-required path did not perform exactly one route lookup".to_owned());
     }
     Ok(())
 }

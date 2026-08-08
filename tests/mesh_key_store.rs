@@ -5,14 +5,24 @@
 //! stable `mesh_key_store_unavailable` degraded contract, and the reusable
 //! [`SecureLocalDir`] primitive T5.9 will consume.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-#![cfg(unix)]
+#![cfg(all(
+    unix,
+    any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "redox",
+        target_vendor = "apple"
+    )
+))]
 
 use std::os::unix::fs::PermissionsExt;
 
 use ee::mesh::key_store::{
-    KEY_STORE_RECORD_SCHEMA, KeyStoreError, MAX_RECORD_BYTES, MESH_KEY_STORE_UNAVAILABLE_CODE,
-    MESH_KEY_STORE_UNAVAILABLE_SEVERITY, MeshKeyStore, PAIR_KEY_LEN, PairKeyClass, SecretBytes,
-    SecureLocalDir, mesh_keys_dir,
+    KEY_STORE_RECORD_SCHEMA, KeyStoreError, KeyStoreFailureClass, MAX_RECORD_BYTES,
+    MESH_KEY_STORE_UNAVAILABLE_CODE, MESH_KEY_STORE_UNAVAILABLE_SEVERITY,
+    MeshCredentialStorePlatform, MeshKeyStore, PAIR_KEY_LEN, PairKeyClass, SecretBytes,
+    SecureLocalDir, mesh_credential_store_platform, mesh_keys_dir,
+    require_mesh_credential_store_platform,
 };
 
 const CREATED_AT: &str = "2026-08-03T00:00:00Z";
@@ -72,6 +82,25 @@ fn degraded_contract_is_stable_high_severity_with_repair() {
     assert_eq!(error.severity(), MESH_KEY_STORE_UNAVAILABLE_SEVERITY);
     assert!(error.message().contains("Mesh key store"));
     assert!(error.repair().contains("team commands"));
+    let guidance = error.guidance();
+    assert_eq!(guidance.code, MESH_KEY_STORE_UNAVAILABLE_CODE);
+    assert_eq!(guidance.severity, MESH_KEY_STORE_UNAVAILABLE_SEVERITY);
+    assert_eq!(guidance.class, KeyStoreFailureClass::PlatformUnsupported);
+    assert!(guidance.credential_operation_blocked);
+    assert!(guidance.ordinary_local_commands_available);
+}
+
+#[test]
+fn compiled_platform_contract_names_only_the_reviewed_unix_adapter() {
+    assert_eq!(
+        mesh_credential_store_platform(),
+        MeshCredentialStorePlatform::HardenedUnix
+    );
+    assert_eq!(
+        require_mesh_credential_store_platform("test credential operation")
+            .expect("Unix adapter is compiled"),
+        MeshCredentialStorePlatform::HardenedUnix
+    );
 }
 
 #[test]
@@ -85,6 +114,26 @@ fn symlinked_keys_directory_fails_closed() {
     let error = MeshKeyStore::open_or_create(workspace.path()).expect_err("must refuse");
     assert!(matches!(error, KeyStoreError::SymlinkComponent { .. }));
     assert_eq!(error.degraded_code(), MESH_KEY_STORE_UNAVAILABLE_CODE);
+    assert_eq!(error.guidance().class, KeyStoreFailureClass::PathSafety);
+    assert!(error.guidance().credential_operation_blocked);
+}
+
+#[test]
+fn opened_store_rejects_planted_intermediate_parent_substitution() {
+    let workspace = temp_workspace();
+    let store = MeshKeyStore::open_or_create(workspace.path()).expect("open store");
+    let marker = workspace.path().join(".ee");
+    let keys = marker.join("keys");
+    let moved_keys = marker.join("keys-real");
+    std::fs::rename(&keys, &moved_keys).expect("move real keys directory");
+    std::os::unix::fs::symlink(&moved_keys, &keys).expect("plant keys-parent symlink");
+
+    let error = store
+        .load_pair_key("peer-77", PairKeyClass::Current)
+        .expect_err("opened store must rewalk and refuse substituted parent");
+
+    assert!(matches!(error, KeyStoreError::SymlinkComponent { .. }));
+    assert_eq!(error.guidance().class, KeyStoreFailureClass::PathSafety);
 }
 
 #[test]
@@ -107,6 +156,42 @@ fn secure_local_dir_primitive_supports_replace_rename_exists() {
             .expect("retired exists")
     );
     assert!(dir.read("missing.json").expect("absent read").is_none());
+}
+
+#[test]
+fn exclusive_publish_ignores_crash_retained_temp_and_exposes_only_complete_record() {
+    let workspace = temp_workspace();
+    let store = MeshKeyStore::open_or_create(workspace.path()).expect("open store");
+    let planted_name = ".pair.peer-77.current.json.tmp.crash-retained";
+    let planted_path = store.secure_dir().path().join(planted_name);
+    std::fs::write(&planted_path, b"planted-incomplete-record").expect("plant crash-retained temp");
+    std::fs::set_permissions(&planted_path, std::fs::Permissions::from_mode(0o600))
+        .expect("make planted temp owner-only");
+
+    let key = SecretBytes::new([0xA5; PAIR_KEY_LEN]);
+    store
+        .store_pair_key("peer-77", PairKeyClass::Current, &key, CREATED_AT, false)
+        .expect("atomically publish complete pair record");
+
+    let record = store
+        .load_pair_key("peer-77", PairKeyClass::Current)
+        .expect("load published record")
+        .expect("published record exists");
+    assert_eq!(record.key.as_bytes(), &[0xA5; PAIR_KEY_LEN]);
+    assert_eq!(
+        std::fs::read(&planted_path).expect("planted temp remains isolated"),
+        b"planted-incomplete-record"
+    );
+    let live_temp_count = std::fs::read_dir(store.secure_dir().path())
+        .expect("read key directory")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".pair.peer-77.current.json.tmp.") && name.as_ref() != planted_name
+        })
+        .count();
+    assert_eq!(live_temp_count, 0, "successful publish left a live temp");
 }
 
 #[test]

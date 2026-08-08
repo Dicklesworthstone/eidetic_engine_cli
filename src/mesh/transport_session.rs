@@ -2010,6 +2010,79 @@ pub struct SessionMessage {
     pub payload: JsonValue,
 }
 
+/// Machine-readable status for an enrolled route that has no pair key.
+///
+/// This is a transport-owned handoff contract, not a claim that a public
+/// pairing ceremony exists. The `.3.3`/`.3.5` broker and caller slices may
+/// render this guidance without reclassifying a missing credential as a bad
+/// MAC.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PairingGuidanceStatus {
+    /// The enrolled route cannot authenticate until a pair key is installed.
+    PairingRequired,
+}
+
+/// Availability of the public pairing ceremony at the current milestone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PairingCeremonyAvailability {
+    /// M1 has the authenticated transport substrate but no public pairing
+    /// command; callers must not invent or print one.
+    UnavailableInM1,
+}
+
+/// Structured, secret-free recovery guidance for a missing pair key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PairingRequiredGuidance {
+    /// Stable typed status for downstream renderers.
+    pub status: PairingGuidanceStatus,
+    /// Whether a real public ceremony can currently satisfy the requirement.
+    pub ceremony: PairingCeremonyAvailability,
+    /// Existing degraded classification owned by T2.1's emission registry.
+    pub degraded_code: &'static str,
+    /// Severity of refusing an unkeyed authenticated transport operation.
+    pub severity: &'static str,
+    /// Missing pair material blocks the authenticated session.
+    pub blocks_authenticated_transport: bool,
+    /// The original operation may be retried after a real ceremony succeeds.
+    pub retry_after_pairing: bool,
+    /// A ready-to-run command only when a real production ceremony exists.
+    /// This remains `None` in M1 rather than advertising a fictional surface.
+    pub command: Option<&'static str>,
+}
+
+impl PairingRequiredGuidance {
+    #[must_use]
+    pub const fn current() -> Self {
+        Self {
+            status: PairingGuidanceStatus::PairingRequired,
+            ceremony: PairingCeremonyAvailability::UnavailableInM1,
+            degraded_code: "mesh_frame_auth_failed",
+            severity: "high",
+            blocks_authenticated_transport: true,
+            retry_after_pairing: true,
+            command: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        "Mesh peer pairing is required before authenticated transport can start"
+    }
+
+    #[must_use]
+    pub const fn repair(self) -> &'static str {
+        "No public pairing ceremony exists in M1; complete the M2/M3 pairing flow when that production surface is installed, then retry."
+    }
+}
+
+/// Convert an absent locally enrolled pair credential into the transport's
+/// typed pairing-required contract. The caller retains ownership of lookup,
+/// enrollment, and persistence; this function performs no I/O and never
+/// creates key material on an inbound path.
+pub fn require_pair_credential<T>(credential: Option<T>) -> Result<T, SessionChannelError> {
+    credential.ok_or(SessionChannelError::PairingRequired)
+}
+
 /// Fail-closed error surface for real socket setup and frame exchange.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionChannelError {
@@ -2036,6 +2109,9 @@ pub enum SessionChannelError {
     Randomness { message: String },
     /// The three-message pair-key handshake failed.
     Handshake(HandshakeError),
+    /// The locally selected route has no pair key. This is distinct from a
+    /// peer presenting an invalid MAC and carries honest M1 recovery guidance.
+    PairingRequired,
     /// Frame-v2 decoding or authentication failed.
     Frame(TransportSessionError),
     /// An authenticated negotiation or request/response invariant failed.
@@ -2067,8 +2143,20 @@ impl SessionChannelError {
             // to the caller; neither condition is peer-frame authentication.
             Self::Randomness { .. } | Self::Closed => "mesh_transport_unreachable",
             Self::Handshake(error) => error.degraded_code(),
+            Self::PairingRequired => "mesh_frame_auth_failed",
             Self::Frame(error) => error.degraded_code(),
             Self::Authentication { .. } => "mesh_frame_auth_failed",
+        }
+    }
+
+    /// Structured guidance is present only for an actually missing local pair
+    /// credential. Bad-MAC and binding failures must never be laundered into a
+    /// pairing prompt.
+    #[must_use]
+    pub const fn pairing_guidance(&self) -> Option<PairingRequiredGuidance> {
+        match self {
+            Self::PairingRequired => Some(PairingRequiredGuidance::current()),
+            _ => None,
         }
     }
 
@@ -2098,6 +2186,7 @@ impl SessionChannelError {
                 format!("Mesh TCP session could not mint fresh session material: {message}")
             }
             Self::Handshake(error) => error.message(),
+            Self::PairingRequired => PairingRequiredGuidance::current().message().to_owned(),
             Self::Frame(error) => error.message(),
             Self::Authentication { message } => {
                 format!("Mesh TCP session authentication failed: {message}")
