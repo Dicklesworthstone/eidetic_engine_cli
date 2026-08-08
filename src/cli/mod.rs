@@ -64938,8 +64938,8 @@ mod tests {
         })?;
         match search.command {
             Some(Command::Search(args)) => ensure_equal(
-                &args.query.as_str(),
-                &"-fix quoted task",
+                &args.query.as_deref(),
+                &Some("-fix quoted task"),
                 "orient search task",
             ),
             other => Err(format!("expected search command, got {other:?}")),

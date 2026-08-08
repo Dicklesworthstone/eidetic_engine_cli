@@ -26,8 +26,8 @@ use crate::models::degradation::{
 use crate::models::model_registry::{ModelPurpose, ModelRegistryStatus};
 use crate::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
 use crate::models::{
-    EvidenceId, GLOBAL_MEMORY_SCOPE_TAG, MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri,
-    TrustClass, UnitScore, degraded_recovery_actions,
+    DomainError, EvidenceId, GLOBAL_MEMORY_SCOPE_TAG, MemoryId, MemoryScope, MemoryScopeStats,
+    ProvenanceUri, TrustClass, UnitScore, degraded_recovery_actions,
 };
 use crate::obs::audit_events::query_hash as audit_query_hash;
 use crate::pack::{

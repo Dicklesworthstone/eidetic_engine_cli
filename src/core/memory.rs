@@ -3862,6 +3862,7 @@ pub(crate) fn record_prepared_remember_txn_write_in_txn(
         &write.finish.index_job_id,
         &write.finish.memory_input,
         write.typed_fields_json.as_deref(),
+        write.finish.prepared.attempt_family.as_ref(),
         &write.embed_dedup_decision,
         write.embed_dedup_link_id.as_deref(),
         &write.audit_details,
@@ -11306,22 +11307,7 @@ mod tests {
             utility: 0.5,
             importance: 0.5,
             provenance_uri: None,
-            trust_class: if prepared.attempt_family.is_some()
-                && super::memory_scope::current_agent_name().is_some()
-            {
-                // bd-multiplicity-aware-trust-p0u7g: an attempt-family write from
-                // a registered agent identity (the same actor signal
-                // remember_trust_subclass records) is an agent fan-out record and
-                // enters at agent_assertion — the class the promotion gate holds
-                // it at until every declared sibling slot is recorded. Human
-                // --family writes keep ADR 0009's human_explicit posture; their
-                // multiplicity still surfaces through reporting and ranking
-                // discounts. The actor signal, never the flag alone, decides the
-                // class.
-                TrustClass::AgentAssertion.as_str().to_owned()
-            } else {
-                TrustClass::HumanExplicit.as_str().to_owned()
-            },
+            trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
             trust_subclass: None,
             tags: Vec::new(),
             valid_from: None,
@@ -11812,22 +11798,7 @@ mod tests {
             utility: 0.5,
             importance: 0.5,
             provenance_uri: None,
-            trust_class: if prepared.attempt_family.is_some()
-                && super::memory_scope::current_agent_name().is_some()
-            {
-                // bd-multiplicity-aware-trust-p0u7g: an attempt-family write from
-                // a registered agent identity (the same actor signal
-                // remember_trust_subclass records) is an agent fan-out record and
-                // enters at agent_assertion — the class the promotion gate holds
-                // it at until every declared sibling slot is recorded. Human
-                // --family writes keep ADR 0009's human_explicit posture; their
-                // multiplicity still surfaces through reporting and ranking
-                // discounts. The actor signal, never the flag alone, decides the
-                // class.
-                TrustClass::AgentAssertion.as_str().to_owned()
-            } else {
-                TrustClass::HumanExplicit.as_str().to_owned()
-            },
+            trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
             trust_subclass: None,
             tags: Vec::new(),
             valid_from: None,
@@ -14597,22 +14568,7 @@ mod tests {
             utility: 0.5,
             importance: 0.5,
             provenance_uri: Some(format!("file:///timeline/{kind}.md:1")),
-            trust_class: if prepared.attempt_family.is_some()
-                && super::memory_scope::current_agent_name().is_some()
-            {
-                // bd-multiplicity-aware-trust-p0u7g: an attempt-family write from
-                // a registered agent identity (the same actor signal
-                // remember_trust_subclass records) is an agent fan-out record and
-                // enters at agent_assertion — the class the promotion gate holds
-                // it at until every declared sibling slot is recorded. Human
-                // --family writes keep ADR 0009's human_explicit posture; their
-                // multiplicity still surfaces through reporting and ranking
-                // discounts. The actor signal, never the flag alone, decides the
-                // class.
-                TrustClass::AgentAssertion.as_str().to_owned()
-            } else {
-                TrustClass::HumanExplicit.as_str().to_owned()
-            },
+            trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
             trust_subclass: None,
             tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
             valid_from: Some(valid_from.to_owned()),
