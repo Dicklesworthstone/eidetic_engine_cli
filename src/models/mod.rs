@@ -2098,6 +2098,27 @@ impl DomainError {
                     "Override the default <workspace>/.ee/ee.db location when the database lives elsewhere.",
                 ),
             ],
+            // Audit render failures are surfaced as storage errors because
+            // the requested report could not cross the stable JSON boundary.
+            // Keep the prose repair and the structured recovery contract in
+            // lockstep so agents never receive an actionable repair string
+            // with an empty `details.recovery[]` array.
+            Self::Storage { repair, .. } if message.contains("audit report serialization") => {
+                vec![RecoveryAction {
+                    priority: 1,
+                    kind: RecoveryKind::Command,
+                    rationale: "Inspect storage and audit integrity before retrying the report."
+                        .to_owned(),
+                    env_name: None,
+                    value_hint: None,
+                    config_path: None,
+                    config_key: None,
+                    flag_name: None,
+                    command: Some(repair.as_deref().unwrap_or("ee doctor --json").to_owned()),
+                    results_in: None,
+                    example: None,
+                }]
+            }
             // No workspace found (planned in D7; here we cover the
             // existing usage-error variant for symmetry).
             Self::Usage { .. }
@@ -2733,6 +2754,19 @@ mod tests {
         assert_eq!(actions[1].flag_name.as_deref(), Some("--workspace"));
         assert_eq!(actions[2].kind, super::RecoveryKind::Env);
         assert_eq!(actions[2].env_name.as_deref(), Some("EE_DATABASE_PATH"));
+    }
+
+    #[test]
+    fn domain_error_recovery_for_audit_serialization_uses_doctor_command() {
+        let error = super::DomainError::Storage {
+            message: "Audit report serialization produced invalid JSON".to_owned(),
+            repair: Some("ee doctor --json".to_owned()),
+        };
+        let actions = error.recovery_actions();
+        assert_eq!(actions.len(), 1, "expected one bounded recovery action");
+        assert_eq!(actions[0].kind, super::RecoveryKind::Command);
+        assert_eq!(actions[0].command.as_deref(), Some("ee doctor --json"));
+        assert!(!actions[0].safety().requires_human_approval);
     }
 
     #[test]
