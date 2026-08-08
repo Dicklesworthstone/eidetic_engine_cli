@@ -159,6 +159,7 @@ map, design docs/ADRs, trust/identity surfaces, beads inventory).
 | Anti-entropy protocol math: tips, cursors, bounded range planner, retry/backoff (1s→60s, max 5), digests, redaction-safe sync summary | `src/mesh/anti_entropy_protocol.rs` | Complete + tested. `MeshRangePlanner` has no production caller; file import advances cursors only after destination-local contiguous accepted replay proves the claimed tip. |
 | Anti-entropy executable model + 13 pinned scenarios | `src/mesh/anti_entropy_model.rs`, ADR 0041 | The contract to satisfy, not code to run. |
 | Signed bounded frame-codec scaffold: blake3-keyed signatures, capability allowlist (`hello`/`summary`/`event_fetch`/`body_fetch`), 64 KiB frame / 32 KiB payload budgets, constant-time compare | `src/mesh/tailscale_transport.rs` (794 LOC) | **Entirely dead — zero callers.** Budgets/enums are reusable; v1's rotating `sourceNodeKey`/`targetNodeKey` identity and long-term-key MAC are not production-safe and are superseded by T2.1 frame v2. |
+| Authenticated frame-v2 session and responder-accept substrate | `src/mesh/transport_session.rs`, `src/mesh/key_store.rs`, `src/mesh/responder_broker.rs` | Real Asupersync TCP, replay-safe directional framing, hardened local key reads, exact-source LocalAPI WhoIs, pre-auth admission, and status-derived tailnet binding are exercised by real-socket integration tests. **Still library-only:** no foreground/daemon owner or registration channel constructs the broker, no anti-entropy round runs over it, and route/key-generation/grant state is not yet derived from the durable peer registry. |
 | Hello wire protocol (`ee.mesh.hello.v1` / `.response.v1` / `.error.v1`), ≤4096-byte payloads, version negotiation, privacy-preserving decline | `src/mesh/hello.rs`; `decide_hello_response` at `:405` | Complete; **zero non-test callers**. |
 | Discovery policy: `service_tag` (default) / `auto_admit` / `allowlist` on both caller and responder axes; denylist overrides all; TOML files under `<ws>/.ee/` | `src/mesh/discovery_policy.rs`; CLI `src/cli/mesh.rs:1322–1477` | Real and wired for policy *decisions*. |
 | Auto-enrollment: 13-step fail-closed flow, forensic audit-before-write, tailnet/node-key identity guard, rollback | `src/mesh/auto_enrollment.rs`, `auto_enrollment_safety.rs`, `identity_change_guard.rs`; CLI `src/cli/mesh.rs:1164–1320` | Real, transactional. But see trust dead-end in §3.3. |
@@ -186,12 +187,15 @@ and `cache.rs` get theirs in the body-lane milestone (P4.6), not before.
 
 ### 3.3 Missing primitives and load-bearing blockers
 
-1. **No transport.** `NoopMeshForegroundSyncTransport` is the only production
-   implementation of the `MeshForegroundSyncTransport` seam
-   (`src/mesh/foreground_cli.rs:623–651`). No `TcpListener`/`UnixListener`/bind
-   exists anywhere under `src/mesh/`. `src/daemon/` and `src/serve.rs` contain
-   zero mesh references, even though `hello_responder_not_running`'s repair
-   text says "Run `ee daemon --foreground`" (`src/mesh/hello_responder.rs:96`).
+1. **No production transport owner.** `NoopMeshForegroundSyncTransport` remains
+   the only implementation reached by the foreground supervisor. The newer
+   frame-v2/session and responder-broker modules can bind and authenticate real
+   sockets in integration tests, but no CLI, steward, daemon, or service startup
+   path constructs the broker or routes a sync round through it. The missing
+   same-EUID registration channel, durable peer/grant/key-generation lookup,
+   network-map rebind ownership, and anti-entropy caller are therefore still
+   release blockers; a successful `ee mesh sync --once` still proves no peer
+   contact.
 2. **Discovery reads metadata nobody publishes.** The production hello probe
    (`TailscaleStatusCapabilityHelloProbe`,
    `src/mesh/tailscale_autodiscovery.rs:194–237`) performs no I/O; it parses
