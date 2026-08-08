@@ -9383,6 +9383,13 @@ pub struct RememberArgs {
     #[arg(long = "revive-when", value_name = "KIND:TARGET", action = ArgAction::Append)]
     pub revive_when: Vec<String>,
 
+    /// Seal this memory: commit to the content by hash now and withhold the
+    /// content itself until `ee memory reveal <id>` supplies matching bytes.
+    /// Proves a protocol or prediction was registered before its outcome was
+    /// seen. Metadata (level/kind/tags/validity) stays first-class.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub seal: bool,
+
     /// Read a JSONL batch of remember inputs (one object per line, content
     /// required per line) from stdin. Requires --stdin; each line is
     /// validated and persisted independently.
@@ -50915,6 +50922,7 @@ fn note_to_remember_args(args: &NoteArgs) -> RememberArgs {
         sentinels: Vec::new(),
         sentinel_stale_threshold_seconds: None,
         revive_when: Vec::new(),
+        seal: false,
         batch: false,
         stdin: false,
         reinforce: false,
@@ -50938,7 +50946,7 @@ where
 {
     let remember_args = note_to_remember_args(args);
     match handle_remember(cli, &remember_args) {
-        Ok(outcome) => write_remember_outcome(cli, &outcome, stdout),
+        Ok((outcome, seal)) => write_remember_outcome(cli, &outcome, seal.as_ref(), stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -51458,9 +51466,34 @@ fn remember_attempt_family_from_args(
         }))
 }
 
-fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, DomainError> {
+fn handle_remember(
+    cli: &Cli,
+    args: &RememberArgs,
+) -> Result<(RememberOutcome, Option<serde_json::Value>), DomainError> {
     let workspace_path = cli.resolve_workspace();
     validate_remember_sentinels(args)?;
+    if args.seal {
+        // Sealed writes commit to content by hash and withhold the bytes, so
+        // every companion that would read, dedupe, or predicate over the
+        // content is contradictory (bd-sealed-preregistration-memory-b67be).
+        let conflict = if args.reinforce {
+            Some("--reinforce (a reinforced write strengthens existing content)")
+        } else if !args.sentinels.is_empty() || !args.revive_when.is_empty() {
+            Some("--sentinel/--revive-when (predicates over a withheld placeholder are meaningless)")
+        } else if args.idempotency_key.is_some() {
+            Some("--idempotency-key (replay identity would be the placeholder, not the sealed content)")
+        } else if args.global {
+            Some("--global (seals are workspace-scoped in v1)")
+        } else {
+            None
+        };
+        if let Some(conflict) = conflict {
+            return Err(DomainError::Usage {
+                message: format!("--seal cannot be combined with {conflict}"),
+                repair: Some("ee remember \"<content>\" --seal --json".to_owned()),
+            });
+        }
+    }
     let attempt_family = remember_attempt_family_from_args(args)?;
     let git_selection =
         validate_remember_git_capture_args(args, remember_git_capture_selection(args)?)?;
@@ -51490,6 +51523,14 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, Do
         });
     }
     if let Some((mode, reference)) = git_selection {
+        if args.seal {
+            return Err(DomainError::Usage {
+                message: "--seal cannot be combined with git capture modes; seal explicit \
+                          content whose exact bytes you control"
+                    .to_owned(),
+                repair: Some("ee remember \"<content>\" --seal --json".to_owned()),
+            });
+        }
         let candidate = remember_git_capture_candidate_from_repo(&RememberGitCaptureOptions {
             workspace_path: &workspace_path,
             mode,
@@ -51541,7 +51582,7 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, Do
         if let RememberOutcome::Created(ref report) = outcome {
             persist_remember_sentinels(args, report)?;
         }
-        return Ok(outcome);
+        return Ok((outcome, None));
     }
     let Some(content) = args.content.as_deref() else {
         return Err(DomainError::Usage {
@@ -51550,10 +51591,29 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, Do
             repair: Some("ee remember \"<content>\" --json".to_owned()),
         });
     };
+    // A sealed write stores only the deterministic placeholder; the exact
+    // content bytes exist solely in the commitment until reveal.
+    let seal_commitment = if args.seal {
+        Some(
+            crate::models::seal_commitment_for_content(content.as_bytes()).map_err(|error| {
+                DomainError::Usage {
+                    message: format!("--seal rejected: {error}"),
+                    repair: Some(error.repair().to_owned()),
+                }
+            })?,
+        )
+    } else {
+        None
+    };
+    let stored_content = if args.seal {
+        crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+    } else {
+        content
+    };
     let options = RememberMemoryOptions {
         workspace_path: &workspace_path,
         database_path: None,
-        content,
+        content: stored_content,
         workflow_id: args.workflow.as_deref(),
         level: &args.level,
         kind: &args.kind,
@@ -51587,29 +51647,121 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, Do
         )
     }?;
     let RememberOutcome::Created(ref report) = outcome else {
-        return Ok(outcome);
+        return Ok((outcome, None));
     };
     persist_remember_sentinels(args, report)?;
-    Ok(outcome)
+    let seal_value = match seal_commitment {
+        Some(commitment) => Some(persist_remember_seal(report, &commitment)?),
+        None => None,
+    };
+    Ok((outcome, seal_value))
 }
 
-/// Render one bd-1pi9m.4 remember outcome with the active renderer.
+/// Persist the seal row for a freshly created sealed memory and return the
+/// seal object surfaced in the report (bd-sealed-preregistration-memory-b67be).
+/// Dry runs return the would-be seal without touching storage.
+fn persist_remember_seal(
+    report: &RememberMemoryReport,
+    content_commitment: &str,
+) -> Result<serde_json::Value, DomainError> {
+    let sealed_at = chrono::Utc::now().to_rfc3339();
+    if !report.dry_run {
+        let connection =
+            DbConnection::open_file(&report.database_path).map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to open database {} for seal metadata: {error}",
+                    report.database_path.display()
+                ),
+                repair: Some("ee doctor --workspace . --json".to_string()),
+            })?;
+        connection
+            .insert_memory_seal(&report.memory_id.to_string(), content_commitment, &sealed_at)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to persist memory seal: {error}"),
+                repair: Some("ee doctor --workspace . --json".to_string()),
+            })?;
+    }
+    Ok(serde_json::json!({
+        "schema": crate::models::MEMORY_SEAL_SCHEMA_V1,
+        "contentCommitment": content_commitment,
+        "sealedAt": sealed_at,
+        "revealed": false,
+        "revealCommand": format!("ee memory reveal {} --content-file <path> --json", report.memory_id),
+    }))
+}
+
+/// Render one bd-1pi9m.4 remember outcome with the active renderer. A sealed
+/// write enriches the created-report payload with the seal object.
 fn write_remember_outcome<W>(
     cli: &Cli,
     outcome: &RememberOutcome,
+    seal: Option<&serde_json::Value>,
     stdout: &mut W,
 ) -> ProcessExitCode
 where
     W: Write,
 {
     match outcome {
-        RememberOutcome::Created(report) => write_remember_report(cli, report, stdout),
+        RememberOutcome::Created(report) => match seal {
+            Some(seal_value) => write_sealed_remember_report(cli, report, seal_value, stdout),
+            None => write_remember_report(cli, report, stdout),
+        },
         RememberOutcome::AlreadyRecorded(report) => {
             write_remember_data_payload(cli, &report.data_json(), &report.human_summary(), stdout)
         }
         RememberOutcome::Reinforced(report) => {
             write_remember_data_payload(cli, &report.data_json(), &report.human_summary(), stdout)
         }
+    }
+}
+
+/// Render a sealed remember report: the standard report payload with the
+/// seal object inserted, and a human summary that names the commitment and
+/// the reveal path instead of implying stored content.
+fn write_sealed_remember_report<W>(
+    cli: &Cli,
+    report: &RememberMemoryReport,
+    seal: &serde_json::Value,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let enriched = match serde_json::from_str::<serde_json::Value>(&report.json_output()) {
+        Ok(mut value) => {
+            value["seal"] = seal.clone();
+            value
+        }
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to enrich sealed remember report: {error}"),
+                repair: Some("Retry with --json and report the serialization failure.".to_owned()),
+            };
+            let mut sink = std::io::sink();
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, &mut sink);
+        }
+    };
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mut text = report.human_output();
+            let commitment = seal
+                .get("contentCommitment")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            text.push_str(&format!(
+                "  Sealed: content withheld; commitment {commitment}\n  Reveal: ee memory reveal {} --content-file <path> --json\n",
+                report.memory_id
+            ));
+            write_stdout(stdout, &text)
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&enriched.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(enriched.to_string() + "\n")),
     }
 }
 
@@ -51668,7 +51820,7 @@ where
         return handle_remember_batch(cli, args, stdout, stderr);
     }
     match handle_remember(cli, args) {
-        Ok(outcome) => write_remember_outcome(cli, &outcome, stdout),
+        Ok((outcome, seal)) => write_remember_outcome(cli, &outcome, seal.as_ref(), stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -51710,6 +51862,10 @@ where
     }
     if !args.sentinels.is_empty() || !args.revive_when.is_empty() {
         let error = usage("--sentinel/--revive-when are not supported with --batch");
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    if args.seal {
+        let error = usage("--seal applies to single-memory mode; seal each protocol write individually");
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
     if args.attempt_family.is_some()
