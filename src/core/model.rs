@@ -3436,6 +3436,41 @@ mod tests {
         Ok((database_path, workspace_id))
     }
 
+    /// Planted negative for the registry id contract (bd-1eeyw): the
+    /// post-migration CHECK (`id GLOB 'mdl_*'` and `length(id) = 30`) must
+    /// reject non-canonical ids at the database boundary. This is the exact
+    /// constraint that silently broke the ensure_bundled fixtures when their
+    /// hand-rolled short ids predated the migration; it now fails loudly and
+    /// guards every future fixture id in this module.
+    #[test]
+    fn registry_insert_rejects_non_canonical_model_ids() -> TestResult {
+        let (_temp, workspace_path) = make_workspace()?;
+        let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+        for invalid_id in ["mdl_planted_invalid", "not_mdl_0000000000000000000000"] {
+            let result = insert_registry_entry(
+                &database_path,
+                &workspace_id,
+                invalid_id,
+                ModelProvider::Model2Vec,
+                BUNDLED_EMBEDDING_MODEL_ID,
+                ModelRegistryStatus::Unavailable,
+            );
+            let error = match result {
+                Ok(()) => {
+                    return Err(format!(
+                        "registry insert must reject non-canonical id `{invalid_id}`"
+                    ));
+                }
+                Err(error) => error,
+            };
+            ensure(
+                error.contains("CHECK"),
+                format!("rejection for `{invalid_id}` must come from the id CHECK: {error}"),
+            )?;
+        }
+        Ok(())
+    }
+
     fn insert_registry_entry(
         database_path: &Path,
         workspace_id: &str,
@@ -3618,7 +3653,7 @@ mod tests {
         insert_registry_entry(
             &database_path,
             &workspace_id,
-            "mdl_preexisting_available",
+            "mdl_01HQ3K5Z000000000000000090",
             ModelProvider::Model2Vec,
             BUNDLED_EMBEDDING_MODEL_ID,
             ModelRegistryStatus::Available,
@@ -3653,7 +3688,7 @@ mod tests {
         insert_embedding_metadata_entry_with_dimension(
             &database_path,
             &workspace_id,
-            "mdl_stale_bundled_unavailable",
+            "mdl_01HQ3K5Z000000000000000091",
             ModelProvider::Model2Vec,
             BUNDLED_EMBEDDING_MODEL_ID,
             ModelRegistryStatus::Unavailable,
@@ -3679,7 +3714,7 @@ mod tests {
             .map_err(|error| format!("find: {error}"))?
             .ok_or("bundled entry must still exist")?;
         ensure(
-            entry.id == "mdl_stale_bundled_unavailable",
+            entry.id == "mdl_01HQ3K5Z000000000000000091",
             "reconcile keeps stable registry id",
         )?;
         ensure(
@@ -3728,7 +3763,7 @@ mod tests {
         insert_embedding_metadata_entry_with_dimension(
             &database_path,
             &workspace_id,
-            "mdl_disabled_bundled_entry",
+            "mdl_01HQ3K5Z000000000000000092",
             ModelProvider::Model2Vec,
             BUNDLED_EMBEDDING_MODEL_ID,
             ModelRegistryStatus::Disabled,
@@ -4144,15 +4179,61 @@ mod tests {
     }
 
     #[test]
+    /// The status source string is a bijection over the shared embedder
+    /// stack's (semantic, pending) state. That stack is PROCESS-GLOBAL and
+    /// its pending -> failed-fallback transition can fire at any moment of a
+    /// full-suite run (any concurrently running test may trigger the lazy
+    /// model2vec load), so pinning one side of the transition is flaky by
+    /// construction — a full-lib run observed both status tests failing in
+    /// opposite directions (bd-1eeyw). Read the state around the report and
+    /// assert the EXACT mapped source for whichever stable state was
+    /// observed; retry the narrow mid-build transition window boundedly.
+    fn stable_status_report_with_expected_source(
+        workspace_path: &Path,
+    ) -> Result<(ModelStatusReport, &'static str), String> {
+        for _ in 0..3 {
+            let stack = crate::core::index::default_search_embedder_stack();
+            let before_pending =
+                crate::core::index::embedder_reports_pending_model2vec_download(stack.fast());
+            let before_semantic = stack.fast().is_semantic()
+                || stack
+                    .quality()
+                    .is_some_and(|embedder| embedder.is_semantic());
+            let report = build_model_status_report(&ModelStatusOptions {
+                workspace_path,
+                database_path: None,
+            })
+            .map_err(|error| format!("status: {error:?}"))?;
+            let stack_after = crate::core::index::default_search_embedder_stack();
+            let after_pending =
+                crate::core::index::embedder_reports_pending_model2vec_download(stack_after.fast());
+            let after_semantic = stack_after.fast().is_semantic()
+                || stack_after
+                    .quality()
+                    .is_some_and(|embedder| embedder.is_semantic());
+            if before_pending == after_pending && before_semantic == after_semantic {
+                // No AVAILABLE embedding registry entry exists in these
+                // fixtures, so `registry_observed` is unreachable and the
+                // production selector reduces to this three-way mapping.
+                let expected = if before_semantic {
+                    "neural_local"
+                } else if before_pending {
+                    "ee_model2vec_download_pending"
+                } else {
+                    "frankensearch_hash_fallback"
+                };
+                return Ok((report, expected));
+            }
+        }
+        Err("global embedder state kept transitioning across status builds".to_owned())
+    }
+
+    #[test]
     fn status_auto_declares_bundled_embedding_model_with_degradation() -> TestResult {
         let (_temp, workspace_path) = make_workspace()?;
         fresh_db_for_workspace(&workspace_path)?;
 
-        let report = build_model_status_report(&ModelStatusOptions {
-            workspace_path: &workspace_path,
-            database_path: None,
-        })
-        .map_err(|error| format!("status: {error:?}"))?;
+        let (report, expected_source) = stable_status_report_with_expected_source(&workspace_path)?;
 
         ensure(report.schema == MODEL_STATUS_SCHEMA_V2, "schema constant")?;
         ensure(report.registered_count == 1, "registered_count")?;
@@ -4162,8 +4243,12 @@ mod tests {
             "reranker counts empty",
         )?;
         ensure(
-            report.active.source == "ee_model2vec_download_pending",
-            "pending bundled model source",
+            report.active.source == expected_source,
+            "active source must match the observed embedder state exactly",
+        )?;
+        ensure(
+            report.active.source != "registry_observed",
+            "an unavailable bundled declaration can never claim registry_observed",
         )?;
         ensure(report.degradations.len() == 1, "degradation count")?;
         ensure(
@@ -4291,16 +4376,16 @@ mod tests {
             ModelRegistryStatus::Available,
         )?;
 
-        let report = build_model_status_report(&ModelStatusOptions {
-            workspace_path: &workspace_path,
-            database_path: None,
-        })
-        .map_err(|error| format!("status: {error:?}"))?;
+        let (report, expected_source) = stable_status_report_with_expected_source(&workspace_path)?;
 
         ensure(report.registered_count == 2, "registered_count")?;
         ensure(report.available_count == 1, "available_count")?;
         ensure(
-            report.active.source == "frankensearch_hash_fallback",
+            report.active.source == expected_source,
+            "active source must match the observed embedder state exactly",
+        )?;
+        ensure(
+            report.active.source != "registry_observed",
             "reranker must not become the active embedder source",
         )?;
         ensure(
@@ -4663,7 +4748,11 @@ mod tests {
             status_json["active"]["fastModelId"].is_string(),
             "fastModelId is string",
         )?;
-        ensure(status_json["registeredCount"] == 0, "registeredCount json")?;
+        // Status auto-declares the bundled embedding model on a fresh
+        // database (see status_auto_declares_bundled_embedding_model_with_
+        // degradation), so a fresh workspace reports exactly one registered
+        // entry — the pre-auto-declaration expectation of zero was stale.
+        ensure(status_json["registeredCount"] == 1, "registeredCount json")?;
 
         let list = build_model_list_report(&ModelListOptions {
             workspace_path: &workspace_path,
