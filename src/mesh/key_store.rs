@@ -41,7 +41,7 @@ pub const MESH_KEY_STORE_UNAVAILABLE_CODE: &str = "mesh_key_store_unavailable";
 pub const MESH_KEY_STORE_UNAVAILABLE_SEVERITY: &str = "high";
 
 /// Schema identifier pinned inside every key-store record document.
-pub const KEY_STORE_RECORD_SCHEMA: &str = "ee.mesh.key_store.record.v1";
+pub const KEY_STORE_RECORD_SCHEMA: &str = "ee.mesh.key_store.record.v2";
 
 /// Schema identifier pinned inside every local origin-signing-key record.
 /// Signing lineage transitions are authorized by T3.6; this schema only
@@ -445,6 +445,7 @@ struct RecordDocument {
     schema: String,
     peer_handle: String,
     key_class: String,
+    generation: NonZeroU64,
     key_hex: SecretHex,
     created_at: String,
 }
@@ -469,6 +470,8 @@ pub struct PairKeyRecord {
     pub peer_handle: String,
     /// Which rotation slot the key occupies.
     pub key_class: PairKeyClass,
+    /// Nonzero pair-key generation bound into the authenticated session.
+    pub generation: NonZeroU64,
     /// The 32-byte pair key.
     pub key: SecretBytes,
     /// Caller-supplied RFC 3339 creation timestamp (informational; rotation
@@ -481,6 +484,7 @@ impl fmt::Debug for PairKeyRecord {
         f.debug_struct("PairKeyRecord")
             .field("peer_handle", &self.peer_handle)
             .field("key_class", &self.key_class)
+            .field("generation", &self.generation)
             .field("key", &"<redacted>")
             .field("created_at", &self.created_at)
             .finish()
@@ -993,6 +997,7 @@ impl MeshKeyStore {
         &self,
         peer_handle: &str,
         class: PairKeyClass,
+        generation: NonZeroU64,
         key: &SecretBytes,
         created_at: &str,
         overwrite: bool,
@@ -1003,6 +1008,7 @@ impl MeshKeyStore {
             schema: KEY_STORE_RECORD_SCHEMA.to_owned(),
             peer_handle: peer_handle.to_owned(),
             key_class: class.token().to_owned(),
+            generation,
             key_hex: SecretHex::new(hex_lower(key.as_bytes())),
             created_at: created_at.to_owned(),
         };
@@ -1060,6 +1066,7 @@ impl MeshKeyStore {
         Ok(Some(PairKeyRecord {
             peer_handle: document.peer_handle,
             key_class: class,
+            generation: document.generation,
             key,
             created_at: document.created_at,
         }))
@@ -1662,6 +1669,7 @@ mod tests {
             .store_pair_key(
                 "peer-a1",
                 PairKeyClass::Current,
+                generation(1),
                 &sample_key(7),
                 CREATED_AT,
                 false,
@@ -1673,6 +1681,7 @@ mod tests {
             .expect("record present");
         assert_eq!(record.peer_handle, "peer-a1");
         assert_eq!(record.key_class, PairKeyClass::Current);
+        assert_eq!(record.generation, generation(1));
         assert_eq!(record.key.as_bytes(), &[7; PAIR_KEY_LEN]);
         assert_eq!(record.created_at, CREATED_AT);
     }
@@ -1814,6 +1823,7 @@ mod tests {
             .store_pair_key(
                 "peer-a1",
                 PairKeyClass::Current,
+                generation(1),
                 &sample_key(1),
                 CREATED_AT,
                 false,
@@ -1844,6 +1854,7 @@ mod tests {
             .store_pair_key(
                 "peer-a1",
                 PairKeyClass::Current,
+                generation(1),
                 &sample_key(1),
                 CREATED_AT,
                 false,
@@ -1853,6 +1864,7 @@ mod tests {
             .store_pair_key(
                 "peer-a1",
                 PairKeyClass::Current,
+                generation(2),
                 &sample_key(2),
                 CREATED_AT,
                 false,
@@ -1869,6 +1881,7 @@ mod tests {
             .store_pair_key(
                 "peer-a1",
                 PairKeyClass::Current,
+                generation(1),
                 &sample_key(1),
                 CREATED_AT,
                 false,
@@ -1878,6 +1891,7 @@ mod tests {
             .store_pair_key(
                 "peer-a1",
                 PairKeyClass::Current,
+                generation(2),
                 &sample_key(9),
                 CREATED_AT,
                 true,
@@ -1887,6 +1901,7 @@ mod tests {
             .load_pair_key("peer-a1", PairKeyClass::Current)
             .expect("load")
             .expect("present");
+        assert_eq!(record.generation, generation(2));
         assert_eq!(record.key.as_bytes(), &[9; PAIR_KEY_LEN]);
         assert!(
             !store
@@ -2051,6 +2066,7 @@ mod tests {
             .store_pair_key(
                 "peer-a1",
                 PairKeyClass::Current,
+                generation(1),
                 &sample_key(1),
                 CREATED_AT,
                 false,
@@ -2128,7 +2144,7 @@ mod tests {
         let store = MeshKeyStore::open_or_create(workspace.path()).expect("open store");
         let name = "pair.peer-a1.current.json";
         let body = format!(
-            "{{\"schema\":\"{KEY_STORE_RECORD_SCHEMA}\",\"peer_handle\":\"peer-a1\",\"key_class\":\"current\",\"key_hex\":\"{}\",\"created_at\":\"{CREATED_AT}\",\"extra\":1}}",
+            "{{\"schema\":\"{KEY_STORE_RECORD_SCHEMA}\",\"peer_handle\":\"peer-a1\",\"key_class\":\"current\",\"generation\":1,\"key_hex\":\"{}\",\"created_at\":\"{CREATED_AT}\",\"extra\":1}}",
             "0".repeat(PAIR_KEY_LEN * 2)
         );
         store
@@ -2138,6 +2154,24 @@ mod tests {
         let error = store
             .load_pair_key("peer-a1", PairKeyClass::Current)
             .expect_err("unknown fields must fail closed");
+        assert!(matches!(error, KeyStoreError::Malformed { .. }));
+    }
+
+    #[test]
+    fn pair_key_generation_zero_fails_closed() {
+        let workspace = temp_workspace();
+        let store = MeshKeyStore::open_or_create(workspace.path()).expect("open store");
+        let key_hex = "a5".repeat(PAIR_KEY_LEN);
+        let body = format!(
+            "{{\"schema\":\"{KEY_STORE_RECORD_SCHEMA}\",\"peer_handle\":\"peer-a1\",\"key_class\":\"current\",\"generation\":0,\"key_hex\":\"{key_hex}\",\"created_at\":\"{CREATED_AT}\"}}"
+        );
+        store
+            .secure_dir()
+            .write_exclusive("pair.peer-a1.current.json", body.as_bytes())
+            .expect("write zero-generation record");
+        let error = store
+            .load_pair_key("peer-a1", PairKeyClass::Current)
+            .expect_err("zero pair-key generation must fail structurally");
         assert!(matches!(error, KeyStoreError::Malformed { .. }));
     }
 
@@ -2199,6 +2233,7 @@ mod tests {
             .store_pair_key(
                 "peer-a1",
                 PairKeyClass::Current,
+                generation(1),
                 &sample_key(1),
                 CREATED_AT,
                 false,
@@ -2221,6 +2256,7 @@ mod tests {
             .store_pair_key(
                 "peer-a1",
                 PairKeyClass::Current,
+                generation(1),
                 &sample_key(1),
                 CREATED_AT,
                 false,
@@ -2296,6 +2332,7 @@ mod tests {
         let record = PairKeyRecord {
             peer_handle: "peer-a1".to_owned(),
             key_class: PairKeyClass::Current,
+            generation: generation(1),
             key: sample_key(3),
             created_at: CREATED_AT.to_owned(),
         };

@@ -1062,13 +1062,7 @@ async fn resolve_route<A: TailscaleLocalApi>(
     if who_is.stable_id != route.expectations.initiator_stable_id {
         return Err(ResponderBrokerError::WhoIsUnverified);
     }
-    let store = MeshKeyStore::open_existing(&route.workspace_path)
-        .map_err(map_key_store_error)?
-        .ok_or(ResponderBrokerError::KeyStoreUnavailable)?;
-    let pair_record = store
-        .load_pair_key(&route.peer_handle, PairKeyClass::Current)
-        .map_err(map_key_store_error)?
-        .ok_or(ResponderBrokerError::PairingRequired)?;
+    let pair_key = load_route_pair_key(route)?;
     let source_attestation = AcceptedSourceAttestation::from_local_whois(
         source.ip(),
         route.expectations.tailnet_id.clone(),
@@ -1079,7 +1073,7 @@ async fn resolve_route<A: TailscaleLocalApi>(
     Ok(ResolvedAcceptedRoute::new(
         AcceptedSessionConfig {
             expectations: route.expectations.clone(),
-            pair_key: pair_record.key,
+            pair_key,
             observations: HandshakeObservations {
                 initiator_node_pubkey: who_is.current_node_pubkey,
                 responder_node_pubkey: route.responder_node_pubkey.clone(),
@@ -1090,6 +1084,22 @@ async fn resolve_route<A: TailscaleLocalApi>(
         source_attestation,
         permit,
     ))
+}
+
+fn load_route_pair_key(
+    route: &RegisteredResponderRoute,
+) -> Result<crate::mesh::key_store::SecretBytes, ResponderBrokerError> {
+    let store = MeshKeyStore::open_existing(&route.workspace_path)
+        .map_err(map_key_store_error)?
+        .ok_or(ResponderBrokerError::KeyStoreUnavailable)?;
+    let pair_record = store
+        .load_pair_key(&route.peer_handle, PairKeyClass::Current)
+        .map_err(map_key_store_error)?
+        .ok_or(ResponderBrokerError::PairingRequired)?;
+    if pair_record.generation.get() != route.expectations.pair_key_generation {
+        return Err(ResponderBrokerError::PairingRequired);
+    }
+    Ok(pair_record.key)
 }
 
 fn map_key_store_error(_error: KeyStoreError) -> ResponderBrokerError {
@@ -1297,6 +1307,27 @@ mod tests {
             selected.expectations.initiator_stable_id,
             "stable-initiator-b"
         );
+    }
+
+    #[test]
+    fn route_pair_key_generation_must_match_durable_record() {
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        let store = MeshKeyStore::open_or_create(workspace.path()).expect("open key store");
+        store
+            .store_pair_key(
+                "peer_0123456789abcdef0123456789abcdef",
+                PairKeyClass::Current,
+                std::num::NonZeroU64::new(2).expect("nonzero generation"),
+                &crate::mesh::key_store::SecretBytes::new([7; 32]),
+                "2026-08-08T00:00:00Z",
+                false,
+            )
+            .expect("store generation-two key");
+        let route = route(workspace.path().to_path_buf(), 41888);
+
+        let error = load_route_pair_key(&route)
+            .expect_err("route generation one must not consume durable generation two");
+        assert!(matches!(error, ResponderBrokerError::PairingRequired));
     }
 
     #[test]

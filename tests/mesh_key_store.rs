@@ -15,6 +15,7 @@
     )
 ))]
 
+use std::num::NonZeroU64;
 use std::os::unix::fs::PermissionsExt;
 
 use ee::mesh::key_store::{
@@ -26,6 +27,10 @@ use ee::mesh::key_store::{
 };
 
 const CREATED_AT: &str = "2026-08-03T00:00:00Z";
+
+fn generation(value: u64) -> NonZeroU64 {
+    NonZeroU64::new(value).expect("test generation must be nonzero")
+}
 
 fn temp_workspace() -> tempfile::TempDir {
     tempfile::TempDir::new().expect("tempdir")
@@ -48,13 +53,21 @@ fn round_trip_preserves_key_material_and_binding() {
     let store = MeshKeyStore::open_or_create(workspace.path()).expect("open store");
     let key = SecretBytes::new([0xA5; PAIR_KEY_LEN]);
     store
-        .store_pair_key("peer-77", PairKeyClass::Current, &key, CREATED_AT, false)
+        .store_pair_key(
+            "peer-77",
+            PairKeyClass::Current,
+            generation(7),
+            &key,
+            CREATED_AT,
+            false,
+        )
         .expect("store");
     let record = store
         .load_pair_key("peer-77", PairKeyClass::Current)
         .expect("load")
         .expect("present");
     assert_eq!(record.peer_handle, "peer-77");
+    assert_eq!(record.generation, generation(7));
     assert_eq!(record.key_class, PairKeyClass::Current);
     assert_eq!(record.key.as_bytes(), &[0xA5; PAIR_KEY_LEN]);
     assert_eq!(record.created_at, CREATED_AT);
@@ -170,7 +183,14 @@ fn exclusive_publish_ignores_crash_retained_temp_and_exposes_only_complete_recor
 
     let key = SecretBytes::new([0xA5; PAIR_KEY_LEN]);
     store
-        .store_pair_key("peer-77", PairKeyClass::Current, &key, CREATED_AT, false)
+        .store_pair_key(
+            "peer-77",
+            PairKeyClass::Current,
+            generation(7),
+            &key,
+            CREATED_AT,
+            false,
+        )
         .expect("atomically publish complete pair record");
 
     let record = store
@@ -224,7 +244,14 @@ fn retirement_renames_and_never_deletes() {
     let store = MeshKeyStore::open_or_create(workspace.path()).expect("open store");
     let key = SecretBytes::new([3; PAIR_KEY_LEN]);
     store
-        .store_pair_key("peer-77", PairKeyClass::Current, &key, CREATED_AT, false)
+        .store_pair_key(
+            "peer-77",
+            PairKeyClass::Current,
+            generation(7),
+            &key,
+            CREATED_AT,
+            false,
+        )
         .expect("store");
     store
         .retire_pair_key("peer-77", PairKeyClass::Current, "gen-2")

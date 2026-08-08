@@ -11,6 +11,7 @@
 use std::future::Future;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
+use std::num::NonZeroU64;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -307,6 +308,7 @@ fn production_broker_path_attests_exact_source_and_authenticates_preexisting_key
         .store_pair_key(
             PEER_HANDLE,
             PairKeyClass::Current,
+            NonZeroU64::new(7).expect("test generation is nonzero"),
             &pair_key(),
             CREATED_AT,
             false,
