@@ -41,7 +41,7 @@ use crate::mesh::discovery_policy::{
 use crate::mesh::emergency_disable::{
     MeshEmergencyDisableInput, MeshEmergencyDisableReport, MeshEmergencyReenableInput,
     MeshEmergencyReenableReport, apply_emergency_disable, apply_emergency_reenable,
-    plan_emergency_disable, plan_emergency_reenable,
+    plan_emergency_reenable,
 };
 use crate::mesh::foreground_cli::{
     MESH_CLI_EXPORT_SCHEMA_V1, MESH_CLI_IMPORT_SCHEMA_V2, MESH_CLI_SYNC_SCHEMA_V1,
@@ -960,7 +960,7 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let lane = preview_lane(args.lane);
-    let approval_purpose = lane_approval_purpose(lane);
+    let approval_purpose = crate::mesh::lane_grant::ApprovalPurpose::Lane;
     let mut prepared = match prepare_lane_grant_preview(
         &connection,
         &snapshot.workspace_id,
@@ -1092,7 +1092,7 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let lane = preview_lane(args.lane);
-    let approval_purpose = lane_approval_purpose(lane);
+    let approval_purpose = crate::mesh::lane_grant::ApprovalPurpose::Lane;
 
     let (authenticated, target_adapter, current_state) = if authenticated_json_flow {
         let token = match read_bounded_token(&mut std::io::stdin().lock()) {
@@ -2303,21 +2303,6 @@ fn config_mesh_lane(lane: crate::mesh::lane_grant_preview::Lane) -> crate::confi
     }
 }
 
-fn lane_approval_purpose(
-    lane: crate::mesh::lane_grant_preview::Lane,
-) -> crate::mesh::lane_grant::ApprovalPurpose {
-    use crate::mesh::lane_grant::ApprovalPurpose;
-    use crate::mesh::lane_grant_preview::Lane;
-    match lane {
-        Lane::Body => ApprovalPurpose::Body,
-        Lane::Metadata
-        | Lane::Embedding
-        | Lane::GraphLink
-        | Lane::CurationSignal
-        | Lane::RevisionNotice => ApprovalPurpose::Lane,
-    }
-}
-
 fn preview_lane(args: MeshPreviewGrantLane) -> crate::mesh::lane_grant_preview::Lane {
     use crate::mesh::lane_grant_preview::Lane;
     match args {
@@ -2599,7 +2584,16 @@ where
     };
     let input = mesh_emergency_disable_input(cli, args, &snapshot);
     let report = if args.dry_run {
-        plan_emergency_disable(&input)
+        // Previews route through apply_emergency_disable too, so domain
+        // validation (contradictory scopes, future durability rules) holds
+        // even when a caller bypasses the Clap-level conflicts_with
+        // (bd-3mw86 review). Dry-run inputs never reach the config write.
+        match apply_emergency_disable(&input).map_err(mesh_emergency_domain_error) {
+            Ok(report) => report,
+            Err(error) => {
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
+        }
     } else {
         let workspace_path = cli.resolve_workspace();
         let database_path = args
@@ -2714,6 +2708,7 @@ fn mesh_emergency_disable_input(
 ) -> MeshEmergencyDisableInput {
     MeshEmergencyDisableInput {
         workspace_path: cli.resolve_workspace(),
+        database_path: args.database.clone(),
         all_workspaces: args.all_workspaces,
         dry_run: args.dry_run,
         reason: args.reason.clone(),
@@ -2763,12 +2758,60 @@ fn mesh_emergency_domain_error(
                 ),
             }
         }
-        crate::mesh::emergency_disable::MeshEmergencyError::PeerScopeNotDurable { peer_id } => {
-            DomainError::Usage {
+        crate::mesh::emergency_disable::MeshEmergencyError::PeerScopeNotDurable {
+            ref peer_id,
+            ref workspace_path,
+            ref database_path,
+        } => {
+            // Repair and structured recovery reproduce the full invoking
+            // scope (resolved workspace + explicit database override) so an
+            // agent following them cannot mutate the wrong or default store
+            // (bd-3mw86 review).
+            let peer_argument = super::shell_quote_cli_arg(peer_id);
+            let workspace_argument =
+                super::shell_quote_cli_arg(&workspace_path.display().to_string());
+            let database_argument = database_path.as_ref().map_or_else(String::new, |path| {
+                format!(
+                    " --database {}",
+                    super::shell_quote_cli_arg(&path.display().to_string())
+                )
+            });
+            let revoke_command = format!(
+                "ee mesh peer revoke {peer_argument} --workspace {workspace_argument}{database_argument} --json"
+            );
+            let workspace_disable_command = format!(
+                "ee mesh disable --workspace {workspace_argument}{database_argument} --json"
+            );
+            DomainError::UsageWithDetails {
                 message,
                 repair: Some(format!(
-                    "Use `ee mesh peer revoke {peer_id} --json` for durable per-peer containment, or `ee mesh disable --json` (without --peer) for workspace-wide containment."
+                    "Use `{revoke_command}` for durable per-peer containment, or `{workspace_disable_command}` (without --peer) for workspace-wide containment."
                 )),
+                details_json: json!({
+                    "recovery": [
+                        {
+                            "priority": 0,
+                            "kind": "command",
+                            "command": revoke_command,
+                            "rationale": "Durably revoke the named peer through the canonical peer state and audit path.",
+                            "riskClass": "durable_local_write",
+                            "requiresHumanApproval": false,
+                            "mutatesExternalState": false,
+                            "mutatesTrackerState": false,
+                        },
+                        {
+                            "priority": 1,
+                            "kind": "command",
+                            "command": workspace_disable_command,
+                            "rationale": "Contain the whole workspace mesh when per-peer revocation is not enough.",
+                            "riskClass": "durable_local_write",
+                            "requiresHumanApproval": false,
+                            "mutatesExternalState": false,
+                            "mutatesTrackerState": false,
+                        },
+                    ],
+                })
+                .to_string(),
             }
         }
         crate::mesh::emergency_disable::MeshEmergencyError::PeerScopeConflictsAllWorkspaces {
@@ -6440,12 +6483,16 @@ fn render_mesh_disable_human(report: &MeshEmergencyDisableReport) -> String {
         output.push_str(&format!("  Reason: {reason}\n"));
     }
     if !report.peer_capabilities_suspended.is_empty() {
-        output.push_str("  Peer suspensions:\n");
+        output.push_str("  Peer containment:\n");
         for peer in &report.peer_capabilities_suspended {
-            output.push_str(&format!(
-                "    - {} capabilities={}\n",
-                peer.peer_id,
+            let capabilities = if peer.capabilities_suspended.is_empty() {
+                "none".to_owned()
+            } else {
                 peer.capabilities_suspended.join(",")
+            };
+            output.push_str(&format!(
+                "    - {} state={} capabilities_suspended={}\n",
+                peer.peer_id, peer.state, capabilities
             ));
         }
     }

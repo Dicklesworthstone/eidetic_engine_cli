@@ -31,6 +31,11 @@ const MESH_EMERGENCY_CONFIG_MAX_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MeshEmergencyDisableInput {
     pub workspace_path: PathBuf,
+    /// Explicit `--database` override from the invocation, when present.
+    /// Carried so refusal messages and `next_commands` reproduce the full
+    /// invoking scope instead of pointing repair commands at the default
+    /// store (bd-3mw86 review).
+    pub database_path: Option<PathBuf>,
     pub all_workspaces: bool,
     pub dry_run: bool,
     pub reason: Option<String>,
@@ -149,6 +154,12 @@ pub enum MeshEmergencyError {
     /// workspace-wide `mesh.enabled=false` flip (bd-3mw86).
     PeerScopeNotDurable {
         peer_id: String,
+        /// Resolved workspace of the refused invocation, so repair
+        /// commands target the same store the operator addressed.
+        workspace_path: PathBuf,
+        /// Explicit `--database` override of the refused invocation, when
+        /// one was passed; `None` means the workspace-default database.
+        database_path: Option<PathBuf>,
     },
     /// `--peer` and `--all-workspaces` name contradictory blast radii; the
     /// domain layer rejects the combination even if a caller bypasses the
@@ -174,10 +185,18 @@ impl std::fmt::Display for MeshEmergencyError {
             Self::WriteConfig { path, source } => {
                 write!(formatter, "failed to write {}: {source}", path.display())
             }
-            Self::PeerScopeNotDurable { peer_id } => write!(
-                formatter,
-                "peer-scoped mesh containment for `{peer_id}` cannot be persisted durably yet; use `ee mesh peer revoke {peer_id}` for durable per-peer containment or `ee mesh disable` (without --peer) for workspace-wide containment"
-            ),
+            Self::PeerScopeNotDurable {
+                peer_id,
+                workspace_path,
+                database_path,
+            } => {
+                let database_argument = database_argument_fragment(database_path.as_deref());
+                write!(
+                    formatter,
+                    "peer-scoped mesh containment for `{peer_id}` cannot be persisted durably yet; use `ee mesh peer revoke {peer_id} --workspace \"{workspace}\"{database_argument} --json` for durable per-peer containment or `ee mesh disable --workspace \"{workspace}\"{database_argument} --json` (without --peer) for workspace-wide containment",
+                    workspace = workspace_path.display(),
+                )
+            }
             Self::PeerScopeConflictsAllWorkspaces { peer_id } => write!(
                 formatter,
                 "--peer {peer_id} and --all-workspaces name contradictory containment scopes; pass exactly one"
@@ -198,8 +217,19 @@ impl std::error::Error for MeshEmergencyError {
     }
 }
 
+/// Format the ` --database "<path>"` fragment repair/next commands append
+/// when the invocation carried an explicit database override; empty when
+/// the workspace-default database applies (bd-3mw86 review).
+fn database_argument_fragment(database_path: Option<&Path>) -> String {
+    database_path.map_or_else(String::new, |path| {
+        format!(" --database \"{}\"", path.display())
+    })
+}
+
 #[must_use]
-pub fn plan_emergency_disable(input: &MeshEmergencyDisableInput) -> MeshEmergencyDisableReport {
+pub(crate) fn plan_emergency_disable(
+    input: &MeshEmergencyDisableInput,
+) -> MeshEmergencyDisableReport {
     let scope = if input.all_workspaces {
         "all_workspaces"
     } else if input.peer_id.is_some() {
@@ -207,49 +237,54 @@ pub fn plan_emergency_disable(input: &MeshEmergencyDisableInput) -> MeshEmergenc
     } else {
         "workspace"
     };
-    let peer_capabilities_suspended = input
-        .peer_id
-        .as_ref()
-        .map(|peer_id| MeshPeerSuspension {
-            peer_id: peer_id.clone(),
-            state: "suspended".to_owned(),
-            new_requests_rejected: true,
-            capabilities_suspended: vec![
-                "body".to_owned(),
-                "embedding".to_owned(),
-                "graphLink".to_owned(),
-                "revisionNotice".to_owned(),
-            ],
-        })
-        .into_iter()
-        .collect();
     // Peer scope leaves the workspace mesh posture untouched: the report
     // must not claim workspace-wide effects a peer-scoped disable does not
     // have (bd-3mw86).
     let peer_scope = scope == "peer";
+    // The peer state model has no durable suspended state (Active | Revoked
+    // only), so the preview must not claim a suspension or rejection that
+    // apply_emergency_disable will refuse to perform. The entry names the
+    // targeted peer with state "unavailable" and suspends nothing; the
+    // durable path lives in next_commands (bd-3mw86 review).
+    let peer_capabilities_suspended: Vec<MeshPeerSuspension> = if peer_scope {
+        input
+            .peer_id
+            .as_ref()
+            .map(|peer_id| MeshPeerSuspension {
+                peer_id: peer_id.clone(),
+                state: "unavailable".to_owned(),
+                new_requests_rejected: false,
+                capabilities_suspended: Vec::new(),
+            })
+            .into_iter()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let database_argument = database_argument_fragment(input.database_path.as_deref());
     let next_commands = if let Some(peer_id) = input.peer_id.as_deref() {
         vec![
             format!(
-                "ee mesh peer revoke {peer_id} --workspace \"{}\" --json",
+                "ee mesh peer revoke {peer_id} --workspace \"{}\"{database_argument} --json",
                 input.workspace_path.display()
             ),
             format!(
-                "ee mesh disable --workspace \"{}\" --json",
+                "ee mesh disable --workspace \"{}\"{database_argument} --json",
                 input.workspace_path.display()
             ),
             format!(
-                "ee mesh status --workspace \"{}\" --json",
+                "ee mesh status --workspace \"{}\"{database_argument} --json",
                 input.workspace_path.display()
             ),
         ]
     } else {
         vec![
             format!(
-                "ee mesh status --workspace \"{}\" --json",
+                "ee mesh status --workspace \"{}\"{database_argument} --json",
                 input.workspace_path.display()
             ),
             format!(
-                "ee mesh reenable --workspace \"{}\" --confirm-reenable --json",
+                "ee mesh reenable --workspace \"{}\"{database_argument} --confirm-reenable --json",
                 input.workspace_path.display()
             ),
         ]
@@ -278,7 +313,10 @@ pub fn plan_emergency_disable(input: &MeshEmergencyDisableInput) -> MeshEmergenc
         listener_stopped: !peer_scope,
         background_sync_stopped: !peer_scope,
         queued_exports_cancelled: 0,
-        new_peer_requests_rejected: true,
+        // Only a workspace-wide (or all-workspaces) disable actually turns
+        // new peer requests away; a peer-scoped invocation has no durable
+        // mechanism, so claiming rejection would be a lie (bd-3mw86 review).
+        new_peer_requests_rejected: !peer_scope,
         peer_capabilities_suspended,
         local_cache_readable: true,
         source_of_truth_memories_preserved: true,
@@ -309,6 +347,8 @@ pub fn apply_emergency_disable(
         if !input.dry_run {
             return Err(MeshEmergencyError::PeerScopeNotDurable {
                 peer_id: peer_id.to_owned(),
+                workspace_path: input.workspace_path.clone(),
+                database_path: input.database_path.clone(),
             });
         }
     }
@@ -632,6 +672,7 @@ mod tests {
 
         let input = MeshEmergencyDisableInput {
             workspace_path: workspace.path().to_path_buf(),
+            database_path: None,
             all_workspaces: false,
             dry_run: false,
             reason: Some("oversized config probe".to_owned()),
@@ -663,6 +704,7 @@ mod tests {
         let workspace = temp_workspace()?;
         let input = MeshEmergencyDisableInput {
             workspace_path: workspace.path().to_path_buf(),
+            database_path: None,
             all_workspaces: false,
             dry_run: false,
             reason: Some("unexpected peer".to_owned()),
@@ -706,6 +748,7 @@ mod tests {
 
         let input = MeshEmergencyDisableInput {
             workspace_path: workspace.path().to_path_buf(),
+            database_path: None,
             all_workspaces: false,
             dry_run: false,
             reason: Some("symlinked workspace config probe".to_owned()),
@@ -736,10 +779,28 @@ mod tests {
         Ok(())
     }
 
+    /// Seed a workspace `.ee/config.toml` with distinctive bytes so a test
+    /// can prove a refused command left the file byte-identical.
+    fn seed_config(workspace: &Path) -> Result<(PathBuf, String), String> {
+        let ee_dir = workspace.join(".ee");
+        fs::create_dir_all(&ee_dir).map_err(|error| format!("create .ee: {error}"))?;
+        let config_path = ee_dir.join("config.toml");
+        let seeded = "# operator marker: bd-3mw86 seeded config\n[mesh]\nenabled = true\ncommand_mode = \"cache\"\n";
+        fs::write(&config_path, seeded).map_err(|error| format!("seed config: {error}"))?;
+        Ok((config_path, seeded.to_owned()))
+    }
+
     #[test]
-    fn peer_specific_disable_suspends_only_the_named_peer_capabilities() {
+    fn peer_scope_dry_run_previews_refusal_without_claiming_suspension() -> TestResult {
+        // bd-3mw86 review: no durable suspended state exists, so the peer
+        // dry-run must not advertise state="suspended", rejected requests,
+        // or suspended capabilities that the non-dry-run path refuses to
+        // deliver. It previews the refusal and points at the durable path.
+        let workspace = temp_workspace()?;
+        let (config_path, seeded) = seed_config(workspace.path())?;
         let input = MeshEmergencyDisableInput {
-            workspace_path: "/tmp/mesh-peer-suspend".into(),
+            workspace_path: workspace.path().to_path_buf(),
+            database_path: None,
             all_workspaces: false,
             dry_run: true,
             reason: Some("unexpected body lane".to_owned()),
@@ -749,19 +810,18 @@ mod tests {
             command_mode_before: MeshCommandMode::Cache,
         };
 
-        let report = plan_emergency_disable(&input);
+        // Dry-run routes through apply so domain validation runs on
+        // previews too; peer dry-run stays available and writes nothing.
+        let report = apply_emergency_disable(&input).map_err(|error| error.to_string())?;
         assert_eq!(report.scope, "peer");
         assert!(!report.applied);
         assert_eq!(report.peer_capabilities_suspended.len(), 1);
         let peer = &report.peer_capabilities_suspended[0];
         assert_eq!(peer.peer_id, "peer_alpha");
-        assert_eq!(peer.state, "suspended");
-        assert!(peer.new_requests_rejected);
-        assert!(peer.capabilities_suspended.contains(&"body".to_owned()));
-        assert!(
-            peer.capabilities_suspended
-                .contains(&"embedding".to_owned())
-        );
+        assert_eq!(peer.state, "unavailable");
+        assert!(!peer.new_requests_rejected);
+        assert!(peer.capabilities_suspended.is_empty());
+        assert!(!report.new_peer_requests_rejected);
         // bd-3mw86: peer scope must not claim workspace-wide effects — the
         // workspace mesh posture is untouched by a peer-scoped disable.
         assert_eq!(report.mesh_enabled_after, input.mesh_enabled_before);
@@ -772,21 +832,31 @@ mod tests {
         assert!(!report.listener_stopped);
         assert!(!report.background_sync_stopped);
         assert!(report.config_actions.is_empty());
+        let workspace_display = workspace.path().display().to_string();
         assert!(
-            report
-                .next_commands
-                .iter()
-                .any(|command| command.contains("mesh peer revoke peer_alpha")),
-            "peer scope must point at the durable per-peer containment path: {:?}",
+            report.next_commands.iter().any(|command| {
+                command.contains("mesh peer revoke peer_alpha")
+                    && command.contains(&workspace_display)
+            }),
+            "peer scope must point at the durable per-peer containment path with the invoking workspace: {:?}",
             report.next_commands
         );
+        let after = fs::read_to_string(&config_path).map_err(|error| error.to_string())?;
+        assert_eq!(
+            after, seeded,
+            "dry-run must leave the seeded config byte-identical"
+        );
+        Ok(())
     }
 
     #[test]
-    fn peer_specific_disable_apply_fails_honestly_without_config_mutation_bd_3mw86() {
-        let workspace: std::path::PathBuf = "/tmp/mesh-peer-apply-refusal-bd-3mw86".into();
+    fn peer_specific_disable_apply_fails_honestly_without_config_mutation_bd_3mw86() -> TestResult {
+        let workspace = temp_workspace()?;
+        let (config_path, seeded) = seed_config(workspace.path())?;
+        let database = workspace.path().join("custom").join("ee.db");
         let input = MeshEmergencyDisableInput {
-            workspace_path: workspace.clone(),
+            workspace_path: workspace.path().to_path_buf(),
+            database_path: Some(database.clone()),
             all_workspaces: false,
             dry_run: false,
             reason: Some("isolate one peer".to_owned()),
@@ -798,25 +868,45 @@ mod tests {
 
         let error = apply_emergency_disable(&input)
             .expect_err("non-dry-run peer disable must fail honestly, not widen scope");
-        assert!(
-            matches!(
-                &error,
-                MeshEmergencyError::PeerScopeNotDurable { peer_id } if peer_id == "peer_alpha"
-            ),
-            "unexpected error: {error}"
-        );
+        match &error {
+            MeshEmergencyError::PeerScopeNotDurable {
+                peer_id,
+                workspace_path,
+                database_path,
+            } => {
+                assert_eq!(peer_id, "peer_alpha");
+                assert_eq!(workspace_path, workspace.path());
+                assert_eq!(database_path.as_deref(), Some(database.as_path()));
+            }
+            other => panic!("expected PeerScopeNotDurable; got {other}"),
+        }
+        // The refusal message must reproduce the full invoking scope so an
+        // operator or agent following it cannot mutate the wrong store.
         let message = error.to_string();
         assert!(message.contains("ee mesh peer revoke peer_alpha"));
         assert!(
-            !workspace.exists(),
-            "peer-scope refusal must not create or mutate workspace config"
+            message.contains(&format!("--workspace \"{}\"", workspace.path().display())),
+            "refusal must carry the resolved workspace: {message}"
         );
+        assert!(
+            message.contains(&format!("--database \"{}\"", database.display())),
+            "refusal must carry the explicit database override: {message}"
+        );
+        let after = fs::read_to_string(&config_path).map_err(|error| error.to_string())?;
+        assert_eq!(
+            after, seeded,
+            "peer-scope refusal must leave the seeded config byte-identical"
+        );
+        Ok(())
     }
 
     #[test]
-    fn peer_and_all_workspaces_scopes_are_rejected_bd_3mw86() {
+    fn peer_and_all_workspaces_scopes_are_rejected_bd_3mw86() -> TestResult {
+        let workspace = temp_workspace()?;
+        let (config_path, seeded) = seed_config(workspace.path())?;
         let input = MeshEmergencyDisableInput {
-            workspace_path: "/tmp/mesh-peer-scope-conflict-bd-3mw86".into(),
+            workspace_path: workspace.path().to_path_buf(),
+            database_path: None,
             all_workspaces: true,
             dry_run: true,
             reason: None,
@@ -826,6 +916,8 @@ mod tests {
             command_mode_before: MeshCommandMode::Revisable,
         };
 
+        // The conflict is rejected even for dry-run previews, and even when
+        // a caller bypasses the CLI-level conflicts_with.
         let error = apply_emergency_disable(&input)
             .expect_err("contradictory --peer/--all-workspaces must be rejected");
         assert!(
@@ -836,12 +928,72 @@ mod tests {
             ),
             "unexpected error: {error}"
         );
+        let after = fs::read_to_string(&config_path).map_err(|error| error.to_string())?;
+        assert_eq!(
+            after, seeded,
+            "scope conflict must not touch workspace config"
+        );
+        Ok(())
     }
 
     #[test]
-    fn all_workspaces_disable_is_supported_without_workspace_file_mutation() {
+    fn plan_never_mixes_all_workspaces_scope_with_peer_suspensions() {
+        // Defense in depth for callers that reach the planner without
+        // apply_emergency_disable's validation: a contradictory input must
+        // not produce an all-workspaces report that also advertises a peer
+        // suspension entry (bd-3mw86 review).
         let input = MeshEmergencyDisableInput {
-            workspace_path: "/tmp/mesh-global-disable".into(),
+            workspace_path: PathBuf::from("unused"),
+            database_path: None,
+            all_workspaces: true,
+            dry_run: true,
+            reason: None,
+            peer_id: Some("peer_alpha".to_owned()),
+            temporary_for: None,
+            mesh_enabled_before: true,
+            command_mode_before: MeshCommandMode::Revisable,
+        };
+
+        let report = plan_emergency_disable(&input);
+        assert_eq!(report.scope, "all_workspaces");
+        assert!(report.peer_capabilities_suspended.is_empty());
+    }
+
+    #[test]
+    fn peer_next_commands_carry_explicit_database_override() -> TestResult {
+        let workspace = temp_workspace()?;
+        let database = workspace.path().join("elsewhere.db");
+        let input = MeshEmergencyDisableInput {
+            workspace_path: workspace.path().to_path_buf(),
+            database_path: Some(database.clone()),
+            all_workspaces: false,
+            dry_run: true,
+            reason: None,
+            peer_id: Some("peer_alpha".to_owned()),
+            temporary_for: None,
+            mesh_enabled_before: true,
+            command_mode_before: MeshCommandMode::Cache,
+        };
+
+        let report = apply_emergency_disable(&input).map_err(|error| error.to_string())?;
+        let database_argument = format!("--database \"{}\"", database.display());
+        assert!(
+            report
+                .next_commands
+                .iter()
+                .all(|command| command.contains(&database_argument)),
+            "every next command must reproduce the explicit database override: {:?}",
+            report.next_commands
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn all_workspaces_disable_is_supported_without_workspace_file_mutation() -> TestResult {
+        let workspace = temp_workspace()?;
+        let input = MeshEmergencyDisableInput {
+            workspace_path: workspace.path().to_path_buf(),
+            database_path: None,
             all_workspaces: true,
             dry_run: false,
             reason: Some("fleet incident".to_owned()),
@@ -851,7 +1003,7 @@ mod tests {
             command_mode_before: MeshCommandMode::Revisable,
         };
 
-        let report = apply_emergency_disable(&input).expect("global disable plan");
+        let report = apply_emergency_disable(&input).map_err(|error| error.to_string())?;
         assert_eq!(report.scope, "all_workspaces");
         assert!(!report.applied);
         assert!(
@@ -860,6 +1012,11 @@ mod tests {
                 .iter()
                 .all(|action| action.target == "operator_global" && !action.applied)
         );
+        assert!(
+            !workspace.path().join(".ee").exists(),
+            "all-workspaces intent must not mutate the invoking workspace config"
+        );
+        Ok(())
     }
 
     #[test]
