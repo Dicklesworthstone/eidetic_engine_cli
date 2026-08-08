@@ -367,6 +367,7 @@ fn e2e_journal_capture_script_exercises_full_capture_lifecycle() -> TestResult {
         "journal append",
         "--stdin --source stdin --json",
         "assert_database_omits_secret",
+        "persisted journal body exposes a redaction marker and never the raw secret",
         "journal distill --session",
         "journal distill --session \"$SESSION\" --apply --json",
         ".action == \"reinforce_existing\"",

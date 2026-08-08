@@ -117,40 +117,24 @@ assert_pack_contains_distilled_memory() {
 }
 
 assert_database_omits_secret() {
-    local database_path="$1" secret="$2" label="$3" scanned=0 marker_seen=false sidecar
-    if ! command -v strings >/dev/null 2>&1; then
-        _harness_fail "$label: strings(1) is unavailable"
-        return
-    fi
-    # Scan the database AND its WAL/SHM sidecars: an unpheckpointed write can
+    local database_path="$1" secret="$2" label="$3" scanned=0 sidecar
+    # Scan the database AND its WAL/SHM sidecars: an uncheckpointed write can
     # keep the journal body bytes in ee.db-wal long after ee.db itself looks
     # clean, so scanning only the main file is a false-green seam.
     for sidecar in "$database_path" "$database_path-wal" "$database_path-shm"; do
         [ -f "$sidecar" ] || continue
         scanned=$((scanned + 1))
-        if strings "$sidecar" | grep -qF "$secret"; then
-            _harness_fail "$label: raw secret present in $(basename "$sidecar") strings"
+        if LC_ALL=C grep -aFq -- "$secret" "$sidecar"; then
+            _harness_fail "$label: raw secret bytes present in $(basename "$sidecar")"
             return
-        fi
-        if strings "$sidecar" | grep -qF '[REDACTED:'; then
-            marker_seen=true
         fi
     done
     if [ "$scanned" -eq 0 ]; then
         _harness_fail "$label: no database files existed to scan"
         return
     fi
-    # Positive observable: the redaction placeholder must be visible to the
-    # same strings(1) scan that proved the secret absent. If journal bodies
-    # were invisible to strings, the absence check above would pass
-    # vacuously; requiring the marker keeps the negative proof honest.
-    if [ "$marker_seen" = "true" ]; then
-        e2e_log_assert_eq "marker_present" "marker_present" "$label (redaction marker visible)" || true
-        _harness_pass "$label"
-    else
-        e2e_log_assert_eq "marker_absent" "marker_present" "$label (redaction marker visible)" || true
-        _harness_fail "$label: redaction placeholder '[REDACTED:' not found in any scanned database file"
-    fi
+    e2e_log_assert_eq "secret_absent" "secret_absent" "$label (raw byte scan)" || true
+    _harness_pass "$label"
 }
 
 with_temp_workspace WS
@@ -207,6 +191,10 @@ step "list scoped journal entries before distillation"
 list_out="$(ee_json --workspace "$WS" journal list --session "$SESSION" --json)"
 assert_jq "$list_out" '.success == true and .data.entryCount == 6' \
     "journal list returns the six scoped entries"
+# shellcheck disable=SC2016 # `$secret` is a jq variable, not a shell expansion.
+assert_jq "$list_out" --arg secret "$SECRET" \
+    'any(.data.entries[]?; (.body // "") | contains("[REDACTED:")) and all(.data.entries[]?; ((.body // "") | contains($secret) | not))' \
+    "persisted journal body exposes a redaction marker and never the raw secret"
 assert_jq "$list_out" 'any(.data.entries[]?; .instructionRisk == "high")' \
     "prompt-injection-like journal evidence is graded high risk"
 
