@@ -135,6 +135,15 @@ pub mod audit_actions {
     /// the (alpha, beta, ci90_lo, ci90_hi) snapshot at transition time.
     pub const TRUST_CLASS_TRANSITION: &str = "trust_class.transition";
 
+    /// A Bayesian trust-class promotion above the privileged threshold was
+    /// refused because the memory belongs to an attempt family whose declared
+    /// sibling count exceeds the recorded members
+    /// (bd-multiplicity-aware-trust-p0u7g). Details carry from_class, the
+    /// refused to_class, family_id, declared_size, recorded_count, and
+    /// unrecorded_count. The block is not a demotion: the stored trust class
+    /// is left unchanged.
+    pub const TRUST_CLASS_PROMOTION_BLOCKED: &str = "trust_class.promotion_blocked";
+
     pub const PROCEDURE_CREATE: &str = "procedure.create";
     pub const PROCEDURE_PROMOTE: &str = "procedure.promote";
     pub const PROCEDURE_RETIRE: &str = "procedure.retire";
@@ -8478,6 +8487,35 @@ CREATE INDEX idx_pack_items_trust_class ON pack_items(trust_class);
     "blake3:v093_pack_item_peer_human_attested_trust_2026_08_04",
 );
 
+/// V094: Persist attempt-family multiplicity identity on memories
+/// (bd-multiplicity-aware-trust-p0u7g). `attempt_family_id` is the stable
+/// pre-registered family a memory was selected from; `attempt_family_size` is
+/// the declared number of sibling attempts the family was drawn from. The
+/// size/id pairing invariant (size requires id) is enforced by the Rust
+/// setter, keeping the column CHECKs local.
+pub const V094_MEMORY_ATTEMPT_FAMILY: Migration = Migration::new(
+    94,
+    "memory_attempt_family",
+    r#"
+ALTER TABLE memories
+ADD COLUMN attempt_family_id TEXT CHECK (
+    attempt_family_id IS NULL
+    OR (length(trim(attempt_family_id)) > 0 AND length(attempt_family_id) <= 64)
+);
+
+ALTER TABLE memories
+ADD COLUMN attempt_family_size INTEGER CHECK (
+    attempt_family_size IS NULL
+    OR (attempt_family_size >= 1 AND attempt_family_size <= 1000000)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memories_attempt_family
+    ON memories(attempt_family_id)
+    WHERE attempt_family_id IS NOT NULL;
+"#,
+    "blake3:v094_memory_attempt_family_2026_08_08",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -8573,6 +8611,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V091_CURATION_PEER_HUMAN_ATTESTED_TRUST,
     V092_PROCEDURAL_RULE_PEER_HUMAN_ATTESTED_TRUST,
     V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST,
+    V094_MEMORY_ATTEMPT_FAMILY,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
