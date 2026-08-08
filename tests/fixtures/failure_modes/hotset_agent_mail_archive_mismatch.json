@@ -11,9 +11,9 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "The Agent Mail snapshot's archiveMessageCount and databaseMessageCount diverge, indicating archive/database drift; the collector abstains from mail signals.",
+    "description": "The Agent Mail snapshot's degraded[] carries archive_index_parity_drift (the live producer's archive/database parity signal); the collector abstains from mail signals.",
     "setup_commands": [
-      "write a snapshot with archiveMessageCount != databaseMessageCount"
+      "write an ee.agent_mail.snapshot.v1 whose degraded[] includes code archive_index_parity_drift"
     ],
     "invocation": "ee cache hotset-manifest --workspace . --json"
   },
@@ -21,7 +21,7 @@
     "code": "hotset_agent_mail_archive_mismatch",
     "severity": "medium",
     "message_contains": [
-      "archive/database message counts diverge"
+      "archive/database parity drift"
     ]
   }
 }

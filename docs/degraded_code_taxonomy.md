@@ -269,6 +269,22 @@ memory bodies in `sources[]`.
 
 ### `response_time` codes — stay in `degraded[]`
 
+#### Cache hotset collection (12)
+| Code | Severity (canonical) | Bead |
+|------|----------------------|------|
+| `hotset_agent_mail_archive_mismatch` | medium | bd-ty3pl.2 |
+| `hotset_agent_mail_unavailable` | low | bd-ty3pl.2 |
+| `hotset_beads_stale` | medium | bd-ty3pl.2 |
+| `hotset_beads_unavailable` | low | bd-ty3pl.2 |
+| `hotset_bv_no_output` | low | bd-ty3pl.2 |
+| `hotset_bv_timeout` | medium | bd-ty3pl.2 |
+| `hotset_bv_unavailable` | low | bd-ty3pl.2 |
+| `hotset_dirty_overlap` | medium | bd-ty3pl.2 |
+| `hotset_git_timeout` | medium | bd-ty3pl.2 |
+| `hotset_git_unavailable` | low | bd-ty3pl.2 |
+| `hotset_retrieval_provenance_unavailable` | low | bd-ty3pl.2 |
+| `hotset_source_authority_missing` | low | bd-ty3pl.2 |
+
 #### Toolchain provenance (3)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|

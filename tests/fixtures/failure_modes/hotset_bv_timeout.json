@@ -11,9 +11,9 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "The bounded bv --robot-next probe exceeds the per-probe watchdog deadline.",
+    "description": "The bounded bv --robot-next probe exceeds the dedicated --bv-timeout-ms watchdog (live probe: large trackers legitimately need 15-90s).",
     "setup_commands": [
-      "ee cache hotset-manifest --probe-timeout-ms 50 --bv-program <slow-bv> --json"
+      "ee cache hotset-manifest --bv-timeout-ms 100 --bv-program <slow-bv> --json"
     ],
     "invocation": "ee cache hotset-manifest --workspace . --json"
   },

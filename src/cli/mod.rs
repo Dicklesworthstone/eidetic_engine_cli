@@ -1129,9 +1129,15 @@ pub enum CacheCommand {
 /// instead of fabricated signals.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct CacheHotsetManifestArgs {
-    /// Hard per-probe watchdog in milliseconds for git/bv subprocess probes.
+    /// Hard per-probe watchdog in milliseconds for the git subprocess probe.
     #[arg(long = "probe-timeout-ms", value_name = "MS", default_value_t = 4_000)]
     pub probe_timeout_ms: u64,
+
+    /// Hard watchdog for the bv frontier probe. Large trackers legitimately
+    /// need 15-90s for `bv --robot-next` (live-probed), so this is budgeted
+    /// separately from the fast git probe.
+    #[arg(long = "bv-timeout-ms", value_name = "MS", default_value_t = 30_000)]
+    pub bv_timeout_ms: u64,
 
     /// Maximum prewarm candidates in the emitted plan.
     #[arg(long = "max-candidates", value_name = "N", default_value_t = 16)]
@@ -18003,6 +18009,11 @@ fn hotset_bounded_regular_file_read(path: &Path, max_bytes: u64) -> Result<Vec<u
 struct HotsetCollectOptions {
     workspace_path: PathBuf,
     probe_timeout_ms: u64,
+    /// Separate watchdog for the bv frontier probe. Live probe 2026-08-08:
+    /// `bv --robot-next` on this repository's tracker takes >15s (it
+    /// completed within a 90s bound), so sharing the 4s git budget would
+    /// make `hotset_bv_timeout` the permanent outcome on real trackers.
+    bv_timeout_ms: u64,
     max_signals_per_source: usize,
     git_program: Option<PathBuf>,
     bv_program: Option<PathBuf>,
@@ -18015,6 +18026,7 @@ impl HotsetCollectOptions {
         Self {
             workspace_path: workspace_path.into(),
             probe_timeout_ms: 4_000,
+            bv_timeout_ms: 30_000,
             max_signals_per_source: 32,
             git_program: None,
             bv_program: None,
@@ -18325,7 +18337,7 @@ fn collect_hotset_bv_source(
         &program,
         &args,
         &options.workspace_path,
-        options.probe_timeout_ms,
+        options.bv_timeout_ms,
     );
     let no_output = |message: &str| {
         HotsetSourceRecord::degraded(
@@ -18347,10 +18359,10 @@ fn collect_hotset_bv_source(
                 format!(
                     "bv --robot-next exceeded the {}ms watchdog; abstaining from \
                      frontier signals",
-                    options.probe_timeout_ms
+                    options.bv_timeout_ms
                 ),
-                "Raise --probe-timeout-ms or run `bv --robot-next` manually to check \
-                 triage health.",
+                "Raise --bv-timeout-ms (large trackers legitimately need 15-90s) or \
+                 run `bv --robot-next` manually to check triage health.",
             ),
         ),
         SourceRunStatus::Passed => {
@@ -18491,29 +18503,30 @@ fn collect_hotset_agent_mail_source(
             "Agent Mail snapshot schema is not ee.agent_mail.snapshot.v1".to_owned(),
         );
     }
-    let archive_count = snapshot
-        .get("archiveMessageCount")
-        .and_then(serde_json::Value::as_u64);
-    let database_count = snapshot
-        .get("databaseMessageCount")
-        .and_then(serde_json::Value::as_u64);
-    let (Some(archive), Some(database)) = (archive_count, database_count) else {
-        return unavailable(
-            "Agent Mail snapshot must include numeric archiveMessageCount and databaseMessageCount"
-                .to_owned(),
-        );
-    };
-    if archive != database {
+    // Live contract (probed 2026-08-08 against scripts/agent_mail_snapshot.sh
+    // output): archive/database parity is reported as a degraded[] entry with
+    // code `archive_index_parity_drift`, not as numeric message counts;
+    // reservations live under `file_reservations[]` with a singular
+    // `path_pattern`; threads live under `threads[]` keyed `thread_id`
+    // (accepting the `threadId` alias the producer also recognizes).
+    let parity_drift = snapshot
+        .get("degraded")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry.get("code").and_then(serde_json::Value::as_str)
+                    == Some("archive_index_parity_drift")
+            })
+        });
+    if parity_drift {
         return (
             Vec::new(),
             HotsetSourceRecord::degraded(
                 "agent_mail",
                 HotsetSourceStatus::Stale,
                 HOTSET_AGENT_MAIL_ARCHIVE_MISMATCH_CODE,
-                format!(
-                    "Agent Mail archive/database message counts diverge ({archive} vs \
-                     {database}); abstaining from mail signals"
-                ),
+                "Agent Mail snapshot reports archive/database parity drift \
+                 (archive_index_parity_drift); abstaining from mail signals",
                 "Run `am doctor check` before trusting mail-derived hotset signals, \
                  then regenerate the snapshot.",
             ),
@@ -18523,50 +18536,49 @@ fn collect_hotset_agent_mail_source(
     let mut reserved_paths = std::collections::BTreeSet::new();
     let mut mail_signals = Vec::new();
     if let Some(reservations) = snapshot
-        .get("reservations")
+        .get("file_reservations")
         .and_then(serde_json::Value::as_array)
     {
         for reservation in reservations {
-            let Some(paths) = reservation
-                .get("paths")
-                .and_then(serde_json::Value::as_array)
+            let Some(path_pattern) = reservation
+                .get("path_pattern")
+                .and_then(serde_json::Value::as_str)
             else {
                 continue;
             };
-            let path_list: Vec<String> = paths
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .take(8)
-                .map(str::to_owned)
-                .collect();
-            if path_list.is_empty() {
+            let path_pattern = path_pattern.trim();
+            if path_pattern.is_empty() {
                 continue;
             }
-            for reserved in &path_list {
-                if reserved_paths.len() < HOTSET_MAX_RESERVED_PATHS {
-                    reserved_paths.insert(reserved.clone());
-                }
+            if reserved_paths.len() < HOTSET_MAX_RESERVED_PATHS {
+                reserved_paths.insert(path_pattern.to_owned());
             }
-            let joined = path_list.join(" ");
             mail_signals.push(
                 PrewarmSignal::new(
                     PrewarmSignalSource::AgentMail,
-                    format!("mail:res:{}", blake3::hash(joined.as_bytes()).to_hex()),
-                    joined,
+                    format!(
+                        "mail:res:{}",
+                        blake3::hash(path_pattern.as_bytes()).to_hex()
+                    ),
+                    path_pattern,
                 )
-                .with_labels(path_list)
+                .with_labels([path_pattern])
                 .with_priority(6),
             );
         }
     }
     if let Some(threads) = snapshot
-        .get("activeThreads")
+        .get("threads")
         .and_then(serde_json::Value::as_array)
     {
         for thread in threads {
             // Thread IDs only (bead-shaped identifiers); subjects and bodies
             // are never read into signals.
-            let Some(thread_id) = thread.get("threadId").and_then(serde_json::Value::as_str) else {
+            let Some(thread_id) = thread
+                .get("thread_id")
+                .or_else(|| thread.get("threadId"))
+                .and_then(serde_json::Value::as_str)
+            else {
                 continue;
             };
             mail_signals.push(
@@ -18899,6 +18911,7 @@ where
     let workspace_path = cli.resolve_workspace();
     let mut options = HotsetCollectOptions::new(workspace_path);
     options.probe_timeout_ms = args.probe_timeout_ms.clamp(50, 60_000);
+    options.bv_timeout_ms = args.bv_timeout_ms.clamp(100, 300_000);
     options.max_signals_per_source = args.max_signals_per_source.clamp(1, 128);
     options.agent_mail_snapshot_path = args.agent_mail_snapshot.clone();
     options.source_authority_snapshot_path = args.source_authority_snapshot.clone();
@@ -74706,14 +74719,17 @@ mod tests {
             ),
         )
         .expect("write issues.jsonl");
+        // Live ee.agent_mail.snapshot.v1 shape (probed 2026-08-08):
+        // file_reservations[].path_pattern + threads[].thread_id.
         fs::write(
             ws.join(".ee").join("agent-mail-snapshot.json"),
             serde_json::json!({
                 "schema": "ee.agent_mail.snapshot.v1",
-                "archiveMessageCount": 7,
-                "databaseMessageCount": 7,
-                "reservations": [{"paths": ["docs/guide.md"]}],
-                "activeThreads": [{"threadId": "bd-aaa"}],
+                "degraded": [],
+                "file_reservations": [
+                    {"exclusive": true, "holder": "PeerAgent", "path_pattern": "docs/guide.md"}
+                ],
+                "threads": [{"thread_id": "bd-aaa"}],
             })
             .to_string(),
         )
@@ -75007,13 +75023,18 @@ mod tests {
 
         let dir = hotset_collect_workspace("mailmismatch");
         let options = healthy_hotset_collect_options(&dir);
+        // Live parity contract: drift arrives as a degraded[] entry, not
+        // numeric counts (probed 2026-08-08).
         fs::write(
             dir.path().join(".ee").join("agent-mail-snapshot.json"),
             serde_json::json!({
                 "schema": "ee.agent_mail.snapshot.v1",
-                "archiveMessageCount": 9,
-                "databaseMessageCount": 4,
-                "reservations": [{"paths": ["src/lib.rs"]}],
+                "degraded": [
+                    {"code": "archive_index_parity_drift", "severity": "warning", "source": "agent_mail"}
+                ],
+                "file_reservations": [
+                    {"exclusive": true, "holder": "PeerAgent", "path_pattern": "src/lib.rs"}
+                ],
             })
             .to_string(),
         )
@@ -75083,7 +75104,7 @@ mod tests {
         let dir = hotset_collect_workspace("bvmatrix");
         let mut options = healthy_hotset_collect_options(&dir);
         options.bv_program = Some(write_stub_program(dir.path(), "stub-bv-slow", "sleep 2"));
-        options.probe_timeout_ms = 120;
+        options.bv_timeout_ms = 120;
 
         let timed_out = collect_hotset_signals(&options);
         let bv = timed_out
@@ -75101,7 +75122,7 @@ mod tests {
             "timed-out bv must contribute zero frontier signals"
         );
 
-        options.probe_timeout_ms = 4_000;
+        options.bv_timeout_ms = 4_000;
         options.bv_program = Some(write_stub_program(dir.path(), "stub-bv-empty", "exit 0"));
         let empty = collect_hotset_signals(&options);
         let bv_empty = empty
@@ -75116,6 +75137,49 @@ mod tests {
                 .iter()
                 .any(|signal| signal.source() == PrewarmSignalSource::Bv),
             "empty bv output must contribute zero frontier signals"
+        );
+    }
+
+    #[test]
+    fn hotset_bv_parser_accepts_live_robot_next_shape() {
+        use crate::cache::hotset::PrewarmSignalSource;
+
+        // Field-faithful copy of a live `bv --robot-next` capture
+        // (2026-08-08, this repository): flat object with top-level id/title
+        // plus advisory command strings that must never become signals.
+        let live_shape = serde_json::json!({
+            "claim_command": "br update bd-live1 --status=in_progress",
+            "data_hash": "0f0e0d0c0b0a",
+            "generated_at": "2026-08-08T12:00:00Z",
+            "id": "bd-live1",
+            "output_format": "robot-next",
+            "reasons": ["highest impact"],
+            "score": 0.91,
+            "show_command": "br show bd-live1",
+            "title": "live frontier pick",
+            "unblocks": 3,
+            "version": "1.0",
+        });
+        let picks = hotset_bv_signals_from_robot_json(&live_shape, 8);
+        assert_eq!(
+            picks.len(),
+            1,
+            "live robot-next shape yields exactly one pick"
+        );
+        assert_eq!(picks[0].stable_id(), "bd-live1");
+        assert_eq!(picks[0].source(), PrewarmSignalSource::Bv);
+
+        // Planted negative: an output with advisory commands but no id must
+        // yield zero picks (the collector then degrades with
+        // hotset_bv_no_output instead of inventing a frontier).
+        let no_id = serde_json::json!({
+            "claim_command": "br update bd-x --status=in_progress",
+            "reasons": ["text"],
+            "title": "orphan title without id",
+        });
+        assert!(
+            hotset_bv_signals_from_robot_json(&no_id, 8).is_empty(),
+            "id-less robot output must not fabricate a pick"
         );
     }
 
@@ -75135,9 +75199,10 @@ mod tests {
             dir.path().join(".ee").join("agent-mail-snapshot.json"),
             serde_json::json!({
                 "schema": "ee.agent_mail.snapshot.v1",
-                "archiveMessageCount": 2,
-                "databaseMessageCount": 2,
-                "reservations": [{"paths": ["src/**"]}],
+                "degraded": [],
+                "file_reservations": [
+                    {"exclusive": true, "holder": "PeerAgent", "path_pattern": "src/**"}
+                ],
             })
             .to_string(),
         )
