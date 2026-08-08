@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 type TestResult = Result<(), String>;
@@ -45,6 +45,7 @@ fn run_script_with_env_in_dir(
         .args(args)
         .env("RCH_VERIFY_NOW", "2026-05-16T04:40:00.000000Z")
         .env("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "0")
+        .env("RCH_VERIFY_PROOF_BROKER_ENABLED", "0")
         .env_remove("CARGO_INCREMENTAL")
         .env_remove("RCH_ENV_ALLOWLIST")
         .current_dir(cwd);
@@ -635,6 +636,7 @@ payload = {
         "schema": "ee.proof_broker.v1",
         "fingerprint": {
             "fingerprintId": "pfp_fake",
+            "beadId": None,
             "commandClass": "cargo_test",
             "commandHash": "blake3:fake-command",
             "normalizedArgvHash": "sha256:fake-argv",
@@ -4161,6 +4163,202 @@ fn proof_broker_dispatch_allowed_launches_single_remote_proof() -> TestResult {
     {
         return Err(format!(
             "dispatch did not append reusable broker ledger row: {ledger_rows}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_broker_is_default_on_without_a_ledger_flag() -> TestResult {
+    let ledger = unique_tmp_path("proof-broker-default-ledger").join("ledger.json");
+    let fake_ee = write_fake_proof_broker_ee("fake-ee-proof-default.sh")?;
+    let fake_ee_log = unique_tmp_path("proof-broker-default-ee-invocations");
+    let ledger_arg = ledger
+        .to_str()
+        .ok_or_else(|| "default proof-broker ledger path is not utf-8".to_owned())?;
+    let fake_ee_arg = fake_ee
+        .to_str()
+        .ok_or_else(|| "default proof-broker fake ee path is not utf-8".to_owned())?;
+    let fake_ee_log_arg = fake_ee_log
+        .to_str()
+        .ok_or_else(|| "default proof-broker ee log path is not utf-8".to_owned())?;
+    let clean_tripwire = r#"{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"ok","count":0,"processes":[],"detectedLocalBuilds":[]}"#;
+
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--skip-build-admission",
+            "--skip-known-blocker",
+            "--",
+            "cargo",
+            "test",
+            "--locked",
+            "--lib",
+            "proof_broker_default",
+        ],
+        &[
+            ("RCH_VERIFY_PROOF_BROKER_ENABLED", "1"),
+            ("RCH_VERIFY_PROOF_BROKER_LEDGER", ledger_arg),
+            ("RCH_VERIFY_PROOF_BROKER_EE_BIN", fake_ee_arg),
+            ("FAKE_EE_INVOCATIONS", fake_ee_log_arg),
+            ("FAKE_PROOF_VERDICT", "dispatch_allowed"),
+            ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire),
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "Selected worker: css\n[RCH] remote css (0.1s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "css"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "css"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "default proof broker should allow one remote proof\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse default proof-broker report: {error}"))?;
+    if report["proof_broker"]["verdict"] != "dispatch_allowed"
+        || report["proof_broker"]["reservation"]["status"] != "acquired"
+        || report["proof_broker"]["remoteCargoLaunched"] != true
+        || !ledger.exists()
+    {
+        return Err(format!(
+            "proof broker was not active by default without a flag: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_broker_atomic_reservation_allows_only_one_concurrent_remote_dispatch() -> TestResult {
+    let ledger = unique_tmp_path("proof-broker-atomic-ledger").join("ledger.json");
+    fs::create_dir_all(
+        ledger
+            .parent()
+            .ok_or_else(|| "atomic ledger path missing parent".to_owned())?,
+    )
+    .map_err(|error| format!("create atomic proof-broker ledger dir: {error}"))?;
+    fs::write(&ledger, "[]")
+        .map_err(|error| format!("write atomic proof-broker ledger: {error}"))?;
+    let fake_ee = write_fake_proof_broker_ee("fake-ee-proof-atomic.sh")?;
+    let fake_ee_log = unique_tmp_path("proof-broker-atomic-ee-invocations");
+    let fake_rch_log = unique_tmp_path("proof-broker-atomic-rch-invocations");
+    let fake_rch = write_fake_rch(
+        "fake-rch-proof-atomic.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+if [[ " $* " == *" exec -- "* ]]; then
+  sleep 1
+  printf 'Selected worker: css\n[RCH] remote css (1.0s)\n'
+else
+  printf '{"client":{"version":"1.0.37"},"daemon":{"version":"0.1.3"}}\n'
+fi
+"#,
+    )?;
+    let clean_tripwire = r#"{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"ok","count":0,"processes":[],"detectedLocalBuilds":[]}"#;
+    let ledger_arg = ledger
+        .to_str()
+        .ok_or_else(|| "atomic ledger path is not utf-8".to_owned())?;
+    let fake_ee_arg = fake_ee
+        .to_str()
+        .ok_or_else(|| "atomic fake ee path is not utf-8".to_owned())?;
+    let fake_ee_log_arg = fake_ee_log
+        .to_str()
+        .ok_or_else(|| "atomic fake ee log path is not utf-8".to_owned())?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "atomic fake rch path is not utf-8".to_owned())?;
+    let fake_rch_log_arg = fake_rch_log
+        .to_str()
+        .ok_or_else(|| "atomic fake rch log path is not utf-8".to_owned())?;
+
+    let spawn = || -> Result<std::process::Child, String> {
+        Command::new("bash")
+            .arg(script_path())
+            .args([
+                "--rch-bin",
+                fake_rch_arg,
+                "--skip-build-admission",
+                "--skip-known-blocker",
+                "--proof-broker-ledger",
+                ledger_arg,
+                "--proof-broker-ee-bin",
+                fake_ee_arg,
+                "--",
+                "cargo",
+                "test",
+                "--locked",
+                "--lib",
+                "proof_broker_atomic",
+            ])
+            .env("RCH_VERIFY_NOW", "2026-05-16T04:40:00.000000Z")
+            .env("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "0")
+            .env("RCH_VERIFY_PROOF_BROKER_ENABLED", "0")
+            .env("RCH_VERIFY_PROOF_BROKER_LEASE_SECONDS", "120")
+            .env("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire)
+            .env("RCH_VERIFY_CONFIGURED_WORKERS", "css")
+            .env("RCH_VERIFY_DAEMON_WORKERS", "css")
+            .env("FAKE_PROOF_VERDICT", "dispatch_allowed")
+            .env("FAKE_EE_INVOCATIONS", fake_ee_log_arg)
+            .env("FAKE_RCH_INVOCATIONS", fake_rch_log_arg)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("spawn concurrent proof-broker wrapper: {error}"))
+    };
+
+    let first = spawn()?;
+    let second = spawn()?;
+    let first_output = first
+        .wait_with_output()
+        .map_err(|error| format!("wait for first proof-broker wrapper: {error}"))?;
+    let second_output = second
+        .wait_with_output()
+        .map_err(|error| format!("wait for second proof-broker wrapper: {error}"))?;
+    let outputs = [first_output, second_output];
+    let success_count = outputs
+        .iter()
+        .filter(|output| output.status.success())
+        .count();
+    if success_count != 1 {
+        return Err(format!(
+            "exactly one concurrent wrapper should dispatch successfully, got {success_count}: {:?}",
+            outputs
+                .iter()
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                .collect::<Vec<_>>()
+        ));
+    }
+    let reports = outputs
+        .iter()
+        .map(|output| {
+            serde_json::from_slice::<Value>(&output.stdout)
+                .map_err(|error| format!("parse atomic proof-broker report: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let remote_launches = reports
+        .iter()
+        .filter(|report| report["proof_broker"]["remoteCargoLaunched"] == true)
+        .count();
+    let refused_duplicates = reports
+        .iter()
+        .filter(|report| {
+            report["proof_broker"]["verdict"] == "wait_for_inflight"
+                && report["proof_broker"]["remoteCargoLaunched"] == false
+        })
+        .count();
+    if remote_launches != 1 || refused_duplicates != 1 {
+        return Err(format!(
+            "atomic reservation did not classify one launch and one wait: {reports:?}"
+        ));
+    }
+    let remote_execs = remote_exec_invocation_lines(&fake_rch_log)?;
+    if remote_execs.len() != 1 {
+        return Err(format!(
+            "concurrent identical proof requests launched {} RCH exec jobs: {remote_execs:?}",
+            remote_execs.len()
         ));
     }
     Ok(())

@@ -54,7 +54,7 @@ Options:
   --known-blocker-override  Run through RCH despite a matching active known blocker
   --skip-known-blocker      Disable known-blocker cache read/write for this run
   --proof-broker-ledger <path>
-                            Opt into read-only ee proof admit before RCH dispatch
+                            Override the always-on proof-broker ledger path
   --proof-broker-ee-bin <path>
                             ee binary to use for proof-broker admission
   --proof-broker-bypass <reason>
@@ -116,6 +116,8 @@ KNOWN_BLOCKER_JSON="null"
 PROOF_BROKER_LEDGER="${RCH_VERIFY_PROOF_BROKER_LEDGER:-}"
 PROOF_BROKER_EE_BIN="${RCH_VERIFY_PROOF_BROKER_EE_BIN:-}"
 PROOF_BROKER_BYPASS_REASON="${RCH_VERIFY_PROOF_BROKER_BYPASS_REASON:-}"
+PROOF_BROKER_ENABLED="${RCH_VERIFY_PROOF_BROKER_ENABLED:-1}"
+PROOF_BROKER_LEASE_SECONDS="${RCH_VERIFY_PROOF_BROKER_LEASE_SECONDS:-}"
 PROOF_BROKER_JSON="null"
 WORKER_ROOT_CANARY=0
 RCH_VERIFY_ATTEMPT_TIMEOUT_MS="${RCH_VERIFY_ATTEMPT_TIMEOUT_MS:-1800000}"
@@ -238,7 +240,7 @@ while [ "$#" -gt 0 ]; do
         --known-blocker-store) KNOWN_BLOCKER_STORE="${2:?--known-blocker-store requires a value}"; KNOWN_BLOCKER_STORE_EXPLICIT=1; shift 2 ;;
         --known-blocker-override) KNOWN_BLOCKER_OVERRIDE=1; shift ;;
         --skip-known-blocker) KNOWN_BLOCKER_ENABLED=0; shift ;;
-        --proof-broker-ledger) PROOF_BROKER_LEDGER="${2:?--proof-broker-ledger requires a value}"; shift 2 ;;
+        --proof-broker-ledger) PROOF_BROKER_LEDGER="${2:?--proof-broker-ledger requires a value}"; PROOF_BROKER_ENABLED=1; shift 2 ;;
         --proof-broker-ee-bin) PROOF_BROKER_EE_BIN="${2:?--proof-broker-ee-bin requires a value}"; shift 2 ;;
         --proof-broker-bypass) PROOF_BROKER_BYPASS_REASON="${2:?--proof-broker-bypass requires a value}"; shift 2 ;;
         --worker-root-canary) WORKER_ROOT_CANARY=1; shift ;;
@@ -261,6 +263,9 @@ fi
 
 if [ -z "$KNOWN_BLOCKER_STORE" ]; then
     KNOWN_BLOCKER_STORE="$PROJECT_ROOT/.ee/derived/rch/known_blockers.jsonl"
+fi
+if [ "$PROOF_BROKER_ENABLED" = "1" ] && [ -z "$PROOF_BROKER_LEDGER" ]; then
+    PROOF_BROKER_LEDGER="$PROJECT_ROOT/.ee/derived/rch/proof_broker_ledger.json"
 fi
 
 SOURCE_PROJECT_ROOT="$PROJECT_ROOT"
@@ -1062,6 +1067,8 @@ elif admission_status == "denied":
     build_admission_posture = "class:admission_blocked"
 elif admission_status == "skipped":
     build_admission_posture = "class:admission_skipped"
+elif admission_status == "unavailable":
+    build_admission_posture = "class:admission_unavailable_nonblocking"
 else:
     build_admission_posture = "class:admission_unknown"
 
@@ -1083,37 +1090,6 @@ payload = {
     "local_cargo_tripwire_class": local_cargo_tripwire_class,
     "build_admission_posture": build_admission_posture,
 }
-print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
-PY
-}
-
-proof_broker_error_json() {
-    local status="${1:?proof broker status required}"
-    local message="${2:?proof broker message required}"
-    PROOF_BROKER_STATUS="$status" \
-    PROOF_BROKER_MESSAGE="$message" \
-    PROOF_BROKER_BYPASS_REASON_VALUE="$PROOF_BROKER_BYPASS_REASON" \
-    python3 - <<'PY'
-import hashlib
-import json
-import os
-
-message = os.environ.get("PROOF_BROKER_MESSAGE") or "proof broker unavailable"
-payload = {
-    "enabled": True,
-    "status": os.environ.get("PROOF_BROKER_STATUS") or "unavailable",
-    "verdict": "unknown_insufficient_evidence",
-    "reasonCodes": ["proof_broker_unavailable"],
-    "nextAction": "rerun_without_broker_only_with_explicit_bypass",
-    "nextCommand": None,
-    "remoteCargoLaunched": False,
-    "readOnly": True,
-    "message": message,
-    "rawHash": "sha256:" + hashlib.sha256(message.encode("utf-8")).hexdigest(),
-}
-bypass = os.environ.get("PROOF_BROKER_BYPASS_REASON_VALUE") or None
-if bypass:
-    payload["bypassReason"] = bypass
 print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 PY
 }
@@ -1211,6 +1187,239 @@ print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 PY
 }
 
+run_native_proof_broker_admission() {
+    local fields command_text
+    fields="$(proof_broker_request_fields_json)"
+    command_text="$(command_string "${ENV_OVERRIDES[@]}" "${COMMAND[@]}")"
+    PROOF_BROKER_FIELDS="$fields" \
+    PROOF_BROKER_COMMAND_TEXT="$command_text" \
+    PROOF_BROKER_LEDGER_PATH="$PROOF_BROKER_LEDGER" \
+    PROOF_BROKER_BEAD_ID="$BEAD_ID" \
+    PROOF_BROKER_NOW="${RCH_VERIFY_NOW:-}" \
+    python3 - <<'PY'
+import datetime as dt
+import fcntl
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+SCHEMA = "ee.proof_broker.v1"
+
+def normalized(value, fallback):
+    value = str(value or "").strip()
+    return value or fallback
+
+def blake3_hex(payload):
+    executable = shutil.which("b3sum")
+    if executable:
+        result = subprocess.run(
+            [executable], input=payload, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
+        if result.returncode == 0:
+            return result.stdout.decode("ascii", "replace").split()[0], "blake3"
+    try:
+        import blake3
+    except Exception:
+        return hashlib.sha256(payload).hexdigest(), "sha256_fallback"
+    return blake3.blake3(payload).hexdigest(), "blake3"
+
+def fingerprint_digest(values):
+    payload = bytearray()
+    for value in values:
+        encoded = value.encode("utf-8")
+        payload.extend(str(len(encoded)).encode("ascii"))
+        payload.extend(b":")
+        payload.extend(encoded)
+        payload.extend(b"\0")
+    return blake3_hex(bytes(payload))
+
+def utc_now():
+    configured = os.environ.get("PROOF_BROKER_NOW", "").strip()
+    if configured:
+        try:
+            return dt.datetime.fromisoformat(configured.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    return dt.datetime.now(dt.timezone.utc)
+
+def semantic_fingerprint(value):
+    if not isinstance(value, dict):
+        return None
+    return {key: item for key, item in value.items() if key != "fingerprintId"}
+
+def admission(verdict, reasons, next_action, reuse_run_id=None, wait_owner=None):
+    return {
+        "verdict": verdict,
+        "reasonCodes": reasons,
+        "nextAction": next_action,
+        "reuseRunId": reuse_run_id,
+        "waitOwner": wait_owner,
+    }
+
+fields = json.loads(os.environ.get("PROOF_BROKER_FIELDS") or "{}")
+command_text = os.environ.get("PROOF_BROKER_COMMAND_TEXT") or ""
+command_hash_hex, command_hash_algorithm = blake3_hex(command_text.encode("utf-8"))
+command_hash = f"blake3:{command_hash_hex}" if command_hash_algorithm == "blake3" else f"sha256:{command_hash_hex}"
+fingerprint = {
+    "fingerprintId": "",
+    "beadId": os.environ.get("PROOF_BROKER_BEAD_ID") or None,
+    "commandClass": normalized(fields.get("command_class"), "class:unknown_command"),
+    "commandHash": command_hash,
+    "normalizedArgvHash": normalized(fields.get("normalized_argv_hash"), "class:unknown_argv_hash"),
+    "sourceTreeFingerprint": normalized(fields.get("source_hash"), "class:unknown_source"),
+    "sourceMaterialization": normalized(fields.get("source_materialization"), "class:unknown_materialization"),
+    "dirtyStatusHash": normalized(fields.get("dirty_status_hash"), "class:clean_or_unknown_dirty_state"),
+    "envFingerprintClass": normalized(fields.get("env_fingerprint_class"), "class:unknown_env"),
+    "targetProfile": str(fields.get("target_profile") or "").strip() or None,
+    "executionSubstrate": normalized(fields.get("execution_substrate"), "unknown"),
+    "rchRuntimeClass": normalized(fields.get("rch_runtime_class"), "class:unknown_rch_runtime"),
+    "workerRequirement": normalized(fields.get("worker_requirement"), "class:any_worker"),
+    "localCargoTripwireClass": normalized(fields.get("local_cargo_tripwire_class"), "class:tripwire_unknown"),
+    "buildAdmissionPosture": normalized(fields.get("build_admission_posture"), "class:admission_unknown"),
+}
+digest, fingerprint_algorithm = fingerprint_digest([
+    SCHEMA,
+    fingerprint["beadId"] or "",
+    fingerprint["commandClass"],
+    fingerprint["commandHash"],
+    fingerprint["normalizedArgvHash"],
+    fingerprint["sourceTreeFingerprint"],
+    fingerprint["sourceMaterialization"],
+    fingerprint["dirtyStatusHash"],
+    fingerprint["envFingerprintClass"],
+    fingerprint["targetProfile"] or "",
+    fingerprint["executionSubstrate"],
+    fingerprint["rchRuntimeClass"],
+    fingerprint["workerRequirement"],
+    fingerprint["localCargoTripwireClass"],
+    fingerprint["buildAdmissionPosture"],
+])
+fingerprint["fingerprintId"] = ("proof_" if fingerprint_algorithm == "blake3" else "proof_sha256_") + digest[:26]
+
+path = Path(os.environ["PROOF_BROKER_LEDGER_PATH"])
+try:
+    records = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    if not isinstance(records, list):
+        raise ValueError("ledger root must be a JSON array")
+except Exception as error:
+    print(json.dumps({
+        "enabled": True,
+        "status": "unavailable",
+        "admissionSurface": "rch_verify_native",
+        "verdict": "unknown_insufficient_evidence",
+        "reasonCodes": ["proof_broker_ledger_invalid"],
+        "nextAction": "repair_proof_broker_ledger_before_dispatch",
+        "remoteCargoLaunched": False,
+        "readOnly": True,
+        "message": f"proof broker ledger is invalid: {type(error).__name__}",
+    }, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(0)
+
+matched = next((record for record in records if isinstance(record, dict) and (
+    (record.get("fingerprint") or {}).get("fingerprintId") == fingerprint["fingerprintId"]
+    or semantic_fingerprint(record.get("fingerprint")) == semantic_fingerprint(fingerprint)
+)), None)
+decision = None
+now = utc_now()
+if matched:
+    state = matched.get("state")
+    prior = matched.get("admission") if isinstance(matched.get("admission"), dict) else {}
+    if state == "in_flight":
+        expires_at = matched.get("expiresAt")
+        try:
+            expiry = dt.datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            expiry = None
+        if expiry is not None and expiry <= now:
+            decision = admission(
+                "dispatch_allowed",
+                ["equivalent_inflight_expired", "owner_expired"],
+                "dispatch_fresh_proof_or_refresh_owner",
+            )
+        elif expiry is None:
+            decision = admission(
+                "unknown_insufficient_evidence",
+                ["equivalent_inflight_expiry_invalid"],
+                "repair_owner_expiry_timestamp",
+                wait_owner=matched.get("owner") or prior.get("waitOwner"),
+            )
+        else:
+            decision = admission(
+                "wait_for_inflight",
+                ["equivalent_inflight", "owner_active"],
+                "wait_for_owner_or_watch_job",
+                wait_owner=matched.get("owner") or prior.get("waitOwner"),
+            )
+    elif state == "completed":
+        decision = admission(
+            "reuse_existing",
+            ["fingerprint_match", "completed_remote_proof"],
+            "cite_existing_proof",
+            reuse_run_id=matched.get("runId") or prior.get("reuseRunId"),
+        )
+    else:
+        decision = admission(
+            prior.get("verdict") or "proof_unusable",
+            prior.get("reasonCodes") or ["matched_nonreusable_record"],
+            prior.get("nextAction") or "inspect_failure_before_rerun",
+            reuse_run_id=prior.get("reuseRunId"),
+            wait_owner=prior.get("waitOwner"),
+        )
+if decision is None:
+    command_match = next((record for record in records if isinstance(record, dict) and
+        isinstance(record.get("fingerprint"), dict) and
+        record["fingerprint"].get("commandHash") == fingerprint["commandHash"] and
+        record["fingerprint"].get("commandClass") == fingerprint["commandClass"] and
+        record["fingerprint"].get("executionSubstrate") == fingerprint["executionSubstrate"]), None)
+    unknown = []
+    if fingerprint["sourceTreeFingerprint"] == "class:unknown_source":
+        unknown.append("source_fingerprint_missing")
+    if fingerprint["envFingerprintClass"] == "class:unknown_env":
+        unknown.append("env_class_missing")
+    if fingerprint["rchRuntimeClass"] == "class:unknown_rch_runtime":
+        unknown.append("rch_runtime_unknown")
+    if fingerprint["localCargoTripwireClass"] == "class:tripwire_unknown":
+        unknown.append("tripwire_unknown")
+    if fingerprint["buildAdmissionPosture"] == "class:admission_unknown":
+        unknown.append("build_admission_unknown")
+    if command_match:
+        decision = admission("source_state_mismatch", ["command_match", "fingerprint_mismatch"], "rerun_current_source")
+    elif unknown:
+        decision = admission("unknown_insufficient_evidence", unknown, "collect_source_and_environment_evidence")
+    elif "mismatch" in fingerprint["rchRuntimeClass"] or "no_worker" in fingerprint["workerRequirement"] or "blocked" in fingerprint["buildAdmissionPosture"]:
+        decision = admission("environment_blocked", ["environment_or_worker_blocked"], "repair_remote_runtime_before_dispatch")
+    elif "bypass" in fingerprint["localCargoTripwireClass"] or "blocked" in fingerprint["localCargoTripwireClass"]:
+        decision = admission("proof_unusable", ["local_cargo_tripwire_blocked", "remote_required"], "discard_local_cargo_evidence_and_rerun_remote")
+    else:
+        decision = admission("dispatch_allowed", ["no_equivalent_record", "read_only_admission"], "launch_single_rch_proof")
+
+print(json.dumps({
+    "enabled": True,
+    "status": "checked",
+    "admissionSurface": "rch_verify_native",
+    "fingerprintAlgorithm": fingerprint_algorithm,
+    "fingerprint": fingerprint,
+    "ledger": {
+        "source": "ledger_json",
+        "recordCount": len(records),
+        "matchedRowId": matched.get("rowId") if matched else None,
+        "matchedState": matched.get("state") if matched else None,
+    },
+    "matchedRecord": matched,
+    "verdict": decision["verdict"],
+    "reasonCodes": decision["reasonCodes"],
+    "nextAction": decision["nextAction"],
+    "reuseRunId": decision.get("reuseRunId"),
+    "waitOwner": decision.get("waitOwner"),
+    "remoteCargoLaunched": False,
+    "readOnly": True,
+}, sort_keys=True, separators=(",", ":")))
+PY
+}
+
 proof_broker_json_field() {
     local field="${1:?proof broker field required}"
     JSON_INPUT="${PROOF_BROKER_JSON:-null}" JSON_FIELD="$field" python3 - <<'PY'
@@ -1274,12 +1483,12 @@ run_proof_broker_admission() {
         return 0
     fi
 
-    local ee_bin
+    local ee_bin=""
     if [ -n "$PROOF_BROKER_EE_BIN" ]; then
         ee_bin="$PROOF_BROKER_EE_BIN"
     elif ! ee_bin="$(candidate_ee_bin)"; then
-        PROOF_BROKER_JSON="$(proof_broker_error_json "unavailable" "no executable ee binary found for proof-broker admission")"
-        return 1
+        PROOF_BROKER_JSON="$(run_native_proof_broker_admission)"
+        return 0
     fi
 
     local fields command_class normalized_argv_hash source_hash source_materialization dirty_status_hash env_fingerprint_class target_profile execution_substrate rch_runtime_class worker_requirement local_cargo_tripwire_class build_admission_posture
@@ -1327,6 +1536,10 @@ run_proof_broker_admission() {
     PROOF_BROKER_JSON="$(proof_broker_wrap_json "$broker_output" "$broker_exit" "$broker_timed_out" "$broker_elapsed")"
 
     if [ "$broker_timed_out" = "true" ] || [ "$broker_exit" != "0" ]; then
+        if [ -z "$PROOF_BROKER_EE_BIN" ]; then
+            PROOF_BROKER_JSON="$(run_native_proof_broker_admission)"
+            return 0
+        fi
         return 1
     fi
     case "$(proof_broker_json_field verdict)" in
@@ -1337,6 +1550,181 @@ run_proof_broker_admission() {
             return 1
             ;;
     esac
+}
+
+reserve_proof_broker_inflight() {
+    PROOF_BROKER_JSON_INPUT="${PROOF_BROKER_JSON:-null}" \
+    PROOF_BROKER_LEDGER_PATH="$PROOF_BROKER_LEDGER" \
+    PROOF_BROKER_LEASE_SECONDS_VALUE="$PROOF_BROKER_LEASE_SECONDS" \
+    PROOF_BROKER_NOW="${RCH_VERIFY_NOW:-}" \
+    PROOF_BROKER_AGENT_NAME="${AGENT_NAME:-rch_verify}" \
+    PROOF_BROKER_BEAD_ID="$BEAD_ID" \
+    python3 - <<'PY'
+import datetime as dt
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+
+def utc_now():
+    configured = os.environ.get("PROOF_BROKER_NOW", "").strip()
+    if configured:
+        try:
+            return dt.datetime.fromisoformat(configured.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    return dt.datetime.now(dt.timezone.utc)
+
+def iso8601(value):
+    return value.astimezone(dt.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+def semantic_fingerprint(value):
+    if not isinstance(value, dict):
+        return None
+    return {key: item for key, item in value.items() if key != "fingerprintId"}
+
+def set_collision(payload, verdict, reasons, next_action, record):
+    admission = record.get("admission") if isinstance(record.get("admission"), dict) else {}
+    payload["verdict"] = verdict
+    payload["reasonCodes"] = reasons
+    payload["nextAction"] = next_action
+    payload["reuseRunId"] = record.get("runId") or admission.get("reuseRunId") if verdict == "reuse_existing" else None
+    payload["waitOwner"] = record.get("owner") or admission.get("waitOwner") if verdict == "wait_for_inflight" else None
+    payload["reservation"] = {
+        "status": "not_acquired",
+        "reason": "equivalent_record_won_atomic_reservation",
+        "matchedRowId": record.get("rowId"),
+        "matchedState": record.get("state"),
+    }
+    return payload
+
+payload = json.loads(os.environ.get("PROOF_BROKER_JSON_INPUT") or "null")
+if not isinstance(payload, dict) or payload.get("verdict") != "dispatch_allowed":
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(0)
+fingerprint = payload.get("fingerprint")
+if not isinstance(fingerprint, dict) or not fingerprint.get("fingerprintId"):
+    payload.update({
+        "status": "unavailable",
+        "verdict": "unknown_insufficient_evidence",
+        "reasonCodes": ["proof_broker_fingerprint_missing"],
+        "nextAction": "repair_proof_broker_response_before_dispatch",
+        "reservation": {"status": "failed", "reason": "fingerprint_missing"},
+    })
+    print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(0)
+fingerprint.setdefault("beadId", os.environ.get("PROOF_BROKER_BEAD_ID") or None)
+
+path = Path(os.environ["PROOF_BROKER_LEDGER_PATH"])
+path.parent.mkdir(parents=True, exist_ok=True)
+lock_path = path.with_name(path.name + ".lock")
+now = utc_now()
+lease_seconds = max(60, int(os.environ.get("PROOF_BROKER_LEASE_SECONDS_VALUE") or "60"))
+expires_at = now + dt.timedelta(seconds=lease_seconds)
+
+try:
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        records = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+        if not isinstance(records, list):
+            raise ValueError("ledger root must be a JSON array")
+        matched = next((record for record in records if isinstance(record, dict) and (
+            (record.get("fingerprint") or {}).get("fingerprintId") == fingerprint["fingerprintId"]
+            or semantic_fingerprint(record.get("fingerprint")) == semantic_fingerprint(fingerprint)
+        )), None)
+        if matched and matched.get("state") == "completed":
+            print(json.dumps(set_collision(
+                payload,
+                "reuse_existing",
+                ["fingerprint_match", "completed_remote_proof", "atomic_reservation_collision"],
+                "cite_existing_proof",
+                matched,
+            ), sort_keys=True, separators=(",", ":")))
+            raise SystemExit(0)
+        if matched and matched.get("state") == "in_flight":
+            try:
+                expiry = dt.datetime.fromisoformat(str(matched.get("expiresAt")).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                expiry = None
+            if expiry is None or expiry > now:
+                print(json.dumps(set_collision(
+                    payload,
+                    "wait_for_inflight" if expiry is not None else "unknown_insufficient_evidence",
+                    ["equivalent_inflight", "atomic_reservation_collision"] if expiry is not None else ["equivalent_inflight_expiry_invalid"],
+                    "wait_for_owner_or_watch_job" if expiry is not None else "repair_owner_expiry_timestamp",
+                    matched,
+                ), sort_keys=True, separators=(",", ":")))
+                raise SystemExit(0)
+
+        run_seed = f"{fingerprint['fingerprintId']}\0{iso8601(now)}\0{os.getpid()}"
+        run_id = "vrun_inflight_" + hashlib.sha256(run_seed.encode("utf-8")).hexdigest()[:24]
+        row_id = "proof_row_" + hashlib.sha256((fingerprint["fingerprintId"] + "\0" + run_id).encode("utf-8")).hexdigest()[:26]
+        owner = {
+            "agentName": os.environ.get("PROOF_BROKER_AGENT_NAME") or "rch_verify",
+            "beadId": os.environ.get("PROOF_BROKER_BEAD_ID") or None,
+            "mailThreadId": None,
+            "buildSlot": "proof:" + (os.environ.get("PROOF_BROKER_BEAD_ID") or fingerprint["fingerprintId"]),
+            "rchJobId": None,
+        }
+        row = {
+            "schema": "ee.proof_broker.v1",
+            "rowId": row_id,
+            "fingerprint": fingerprint,
+            "state": "in_flight",
+            "admission": {
+                "verdict": "wait_for_inflight",
+                "reasonCodes": ["atomic_pre_dispatch_reservation", "equivalent_inflight"],
+                "nextAction": "wait_for_owner_or_watch_job",
+                "reuseRunId": None,
+                "waitOwner": owner,
+            },
+            "runId": run_id,
+            "owner": owner,
+            "createdAt": iso8601(now),
+            "startedAt": iso8601(now),
+            "completedAt": None,
+            "expiresAt": iso8601(expires_at),
+            "sourceStateValidUntil": iso8601(expires_at),
+            "invalidationReasons": [],
+            "evidenceRefs": [],
+            "rawOutputIncluded": False,
+        }
+        records = [record for record in records if not (
+            isinstance(record, dict) and (
+                (record.get("fingerprint") or {}).get("fingerprintId") == fingerprint["fingerprintId"]
+                or semantic_fingerprint(record.get("fingerprint")) == semantic_fingerprint(fingerprint)
+            )
+        )]
+        records.append(row)
+        temporary = path.with_name(path.name + f".tmp.{os.getpid()}")
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(records, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        payload["reservation"] = {
+            "status": "acquired",
+            "rowId": row_id,
+            "runId": run_id,
+            "expiresAt": row["expiresAt"],
+            "owner": owner,
+        }
+        payload["coordinationMutation"] = True
+except SystemExit:
+    raise
+except Exception as error:
+    payload.update({
+        "status": "unavailable",
+        "verdict": "unknown_insufficient_evidence",
+        "reasonCodes": ["proof_broker_reservation_failed"],
+        "nextAction": "repair_proof_broker_reservation_before_dispatch",
+        "reservation": {"status": "failed", "reason": type(error).__name__},
+    })
+
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
 }
 
 csv_contains() {
@@ -4738,6 +5126,7 @@ EOF
     RUN_STARTED_AT="$RUN_STARTED_AT" \
     python3 - <<'PY'
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import os
@@ -5418,9 +5807,6 @@ def persist_proof_broker_ledger(proof, status, command_hash):
     ledger_path = os.environ.get("PROOF_BROKER_LEDGER_PATH") or ""
     if not ledger_path:
         return
-    if no_write:
-        proof_broker["ledgerWrite"] = {"status": "suppressed", "reason": "--no-write"}
-        return
     fingerprint = proof_broker.get("fingerprint")
     if not isinstance(fingerprint, dict) or not fingerprint.get("fingerprintId"):
         proof_broker["ledgerWrite"] = {
@@ -5475,28 +5861,54 @@ def persist_proof_broker_ledger(proof, status, command_hash):
     }
     path = Path(ledger_path)
     try:
-        if path.exists():
-            existing = json.loads(path.read_text(encoding="utf-8") or "[]")
-        else:
-            existing = []
-        if not isinstance(existing, list):
-            existing = []
-        fingerprint_id = fingerprint.get("fingerprintId")
-        records = [
-            item
-            for item in existing
-            if not (
-                isinstance(item, dict)
-                and isinstance(item.get("fingerprint"), dict)
-                and item["fingerprint"].get("fingerprintId") == fingerprint_id
-            )
-        ]
-        records.append(row)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(records, sort_keys=True, separators=(",", ":")) + "\n",
-            encoding="utf-8",
-        )
+        lock_path = path.with_name(path.name + ".lock")
+        with lock_path.open("a+", encoding="utf-8") as lock_handle:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            if path.exists():
+                existing = json.loads(path.read_text(encoding="utf-8") or "[]")
+            else:
+                existing = []
+            if not isinstance(existing, list):
+                raise ValueError("proof broker ledger root must be a JSON array")
+            fingerprint_id = fingerprint.get("fingerprintId")
+            fingerprint_shape = {
+                key: value for key, value in fingerprint.items() if key != "fingerprintId"
+            }
+            prior = next((item for item in existing if isinstance(item, dict) and (
+                (item.get("fingerprint") or {}).get("fingerprintId") == fingerprint_id
+                or {
+                    key: value
+                    for key, value in (item.get("fingerprint") or {}).items()
+                    if key != "fingerprintId"
+                } == fingerprint_shape
+            )), None)
+            if isinstance(prior, dict):
+                row["owner"] = prior.get("owner")
+                row["createdAt"] = prior.get("createdAt") or row["createdAt"]
+            records = [
+                item
+                for item in existing
+                if not (
+                    isinstance(item, dict)
+                    and (
+                        (item.get("fingerprint") or {}).get("fingerprintId") == fingerprint_id
+                        or {
+                            key: value
+                            for key, value in (item.get("fingerprint") or {}).items()
+                            if key != "fingerprintId"
+                        } == fingerprint_shape
+                    )
+                )
+            ]
+            records.append(row)
+            temporary = path.with_name(path.name + f".tmp.{os.getpid()}")
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(records, handle, sort_keys=True, separators=(",", ":"))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
     except OSError as error:
         proof_broker["ledgerWrite"] = {"status": "failed", "message": redact(str(error))}
     except Exception as error:
@@ -5507,6 +5919,7 @@ def persist_proof_broker_ledger(proof, status, command_hash):
             "state": row["state"],
             "rowId": row["rowId"],
             "runId": run_id,
+            "noWriteScope": "verifier_ledger_only" if no_write else None,
         }
 
 raw_stdout_tail = proof.get("stdout_tail") or ""
@@ -5994,6 +6407,17 @@ positive_integer_or_die "RCH_VERIFY_PREFLIGHT_TIMEOUT_MS" "$RCH_VERIFY_PREFLIGHT
 positive_integer_or_die "RCH_VERIFY_TAIL_BYTES" "$RCH_VERIFY_TAIL_BYTES"
 positive_integer_or_die "RCH_VERIFY_DEFAULT_BUILD_TIMEOUT_SEC" "$RCH_VERIFY_DEFAULT_BUILD_TIMEOUT_SEC"
 positive_integer_or_die "RCH_VERIFY_DEFAULT_TEST_TIMEOUT_SEC" "$RCH_VERIFY_DEFAULT_TEST_TIMEOUT_SEC"
+case "$PROOF_BROKER_ENABLED" in
+    0|1) ;;
+    *)
+        echo "rch_verify: RCH_VERIFY_PROOF_BROKER_ENABLED must be 0 or 1, got: $PROOF_BROKER_ENABLED" >&2
+        exit 2
+        ;;
+esac
+if [ -z "$PROOF_BROKER_LEASE_SECONDS" ]; then
+    PROOF_BROKER_LEASE_SECONDS=$(((RCH_VERIFY_ATTEMPT_TIMEOUT_MS + 999) / 1000 + 300))
+fi
+positive_integer_or_die "RCH_VERIFY_PROOF_BROKER_LEASE_SECONDS" "$PROOF_BROKER_LEASE_SECONDS"
 
 if [ "$WORKER_ROOT_CANARY" -eq 1 ]; then
     emit_worker_root_canary_json
@@ -6287,7 +6711,43 @@ if [ "${RCH_VERIFY_FAIL_FAST_STALE_WORKER:-1}" = "1" ]; then
 fi
 
 if [ -n "$PROOF_BROKER_LEDGER" ]; then
-    PROOF_BROKER_JSON="$(proof_broker_mark_json true "$PROOF_BROKER_BYPASS_REASON")"
+    if [ "$(proof_broker_json_field verdict)" = "dispatch_allowed" ]; then
+        PROOF_BROKER_JSON="$(reserve_proof_broker_inflight)"
+    fi
+    proof_broker_verdict="$(proof_broker_json_field verdict)"
+    case "$proof_broker_verdict" in
+        dispatch_allowed)
+            PROOF_BROKER_JSON="$(proof_broker_mark_json true "$PROOF_BROKER_BYPASS_REASON")"
+            ;;
+        reuse_existing)
+            RCH_INVOCATION=()
+            PROOF_BROKER_JSON="$(proof_broker_mark_json false "$PROOF_BROKER_BYPASS_REASON")"
+            emit_json true 0 0 "atomic proof-broker reservation found a completed proof; remote Cargo not launched" "" \
+                "${build_admission_degraded[@]}" \
+                "rch_verify_proof_broker_reuse_existing"
+            exit 0
+            ;;
+        *)
+            proof_broker_code="$(proof_broker_degraded_code "$proof_broker_verdict")"
+            if [ -n "$PROOF_BROKER_BYPASS_REASON" ]; then
+                proof_broker_degraded+=("rch_verify_proof_broker_bypassed")
+                if [ -n "$proof_broker_code" ]; then
+                    proof_broker_degraded+=("$proof_broker_code")
+                fi
+                PROOF_BROKER_JSON="$(proof_broker_mark_json true "$PROOF_BROKER_BYPASS_REASON")"
+            else
+                RCH_INVOCATION=()
+                if [ -z "$proof_broker_code" ]; then
+                    proof_broker_code="rch_verify_proof_broker_unavailable"
+                fi
+                PROOF_BROKER_JSON="$(proof_broker_mark_json false "")"
+                emit_json true 1 0 "atomic proof-broker reservation refused duplicate RCH dispatch; remote Cargo not launched" "" \
+                    "${build_admission_degraded[@]}" \
+                    "$proof_broker_code"
+                exit 1
+            fi
+            ;;
+    esac
 fi
 
 start_ms="$(now_ms)"

@@ -47,8 +47,8 @@ an RCH verdict from the command recipe below.
 | Requirement | Level | Static/public harness | RCH/live harness | Status |
 | --- | --- | --- | --- | --- |
 | Completed equivalent proof returns `reuse_existing` and does not dispatch Cargo. | MUST | `scripts/e2e_overhaul/proof_broker_admission.sh` case `reuse_existing_admit`; `tests/rch_verify_contract.rs` `proof_broker_reuse_existing_skips_remote_dispatch` | RCH recipe for `tests/rch_verify_contract.rs` | Static covered; live RCH pending. |
-| Equivalent in-flight proof returns `wait_for_inflight` with owner/job metadata and no duplicate dispatch. | MUST | `wait_for_inflight_admit`; `proof_broker_wait_for_inflight_refuses_before_remote_dispatch` | RCH recipe for `tests/rch_verify_contract.rs` | Static covered; live RCH pending. |
-| No equivalent proof returns `dispatch_allowed` and launches exactly one remote proof lane. | MUST | `dispatch_allowed_admit`; `proof_broker_dispatch_allowed_launches_single_remote_proof` with fake RCH invocation log | RCH recipe for `tests/rch_verify_contract.rs` | Static covered; live RCH pending. |
+| Equivalent in-flight proof returns `wait_for_inflight` with owner/job metadata and no duplicate dispatch. | MUST | `wait_for_inflight_admit`; `proof_broker_wait_for_inflight_refuses_before_remote_dispatch`; `proof_broker_atomic_reservation_allows_only_one_concurrent_remote_dispatch` | RCH recipe for `tests/rch_verify_contract.rs` | Static covered; live RCH pending. |
+| No equivalent proof returns `dispatch_allowed` and launches exactly one remote proof lane. | MUST | `dispatch_allowed_admit`; `proof_broker_dispatch_allowed_launches_single_remote_proof`; `proof_broker_is_default_on_without_a_ledger_flag` | RCH recipe for `tests/rch_verify_contract.rs` | Static covered; live RCH pending. |
 | Stale or dirty source evidence returns `source_state_mismatch`. | MUST | `source_state_mismatch_admit`; `proof_broker_source_mismatch_refuses_before_remote_dispatch` | RCH recipe for `tests/rch_verify_contract.rs` | Static covered; live RCH pending. |
 | RCH/runtime/worker blockers return `environment_blocked` and do not dispatch. | MUST | `environment_blocked_admit`; `proof_broker_environment_blocked_refuses_before_remote_dispatch` | RCH recipe for `tests/rch_verify_contract.rs` | Static covered; live RCH pending. |
 | Local Cargo bypass evidence returns `proof_unusable` and is not reusable for closeout. | MUST | `proof_unusable_admit`; `proof_broker_local_cargo_bypass_is_unusable_without_bypass` | RCH recipe for `tests/rch_verify_contract.rs` | Static covered; live RCH pending. |
@@ -123,20 +123,39 @@ If those commands show that worker mutation is required, coordinate with the
 RCH owner before changing worker-global state. Do not replace the blocked proof
 with local Cargo output.
 
-The default ledger location for swarm handoffs is:
+The verifier's default broker ledger is:
 
 ```bash
 .ee/derived/rch/proof_broker_ledger.json
 ```
 
-When using `scripts/rch_verify.sh` with proof admission, pass that path unless a
-bead or local runbook says otherwise:
+`scripts/rch_verify.sh` enables broker admission by default and uses that path
+without an extra flag. `--proof-broker-ledger` overrides the location for an
+isolated run or test:
 
 ```bash
 scripts/rch_verify.sh \
   --proof-broker-ledger .ee/derived/rch/proof_broker_ledger.json \
   -- cargo test --workspace --lib proof_
 ```
+
+Admission alone is not the concurrency boundary. Immediately before RCH
+dispatch, the wrapper takes an interprocess lock and atomically replaces any
+expired record with an `in_flight` lease for the exact fingerprint. A concurrent
+equivalent request observes `wait_for_inflight` (or `reuse_existing` if the
+first request already completed) and launches no second RCH job. The lease
+expires after the remote-attempt budget plus a bounded grace period, so a killed
+wrapper does not block the fingerprint forever. Completion or failure replaces
+the lease under the same lock.
+
+If a runnable current `ee` binary is unavailable, the wrapper uses its native
+schema-equivalent admission evaluator and records
+`admissionSurface=rch_verify_native`; it does not silently disable the broker.
+`--proof-broker-ee-bin` remains the strict override for testing the public
+surface. `--no-write` suppresses only the optional `--ledger` verification
+JSONL row: broker coordination and completion state still update, because
+otherwise a nominally read-only closeout could launch duplicate remote work or
+leave an in-flight lease stranded.
 
 `ee handoff preview`, `ee handoff create`, and `ee handoff resume` embed the
 same support summary as a `proof_broker_summary` section. Treat it as
