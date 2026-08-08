@@ -18100,7 +18100,26 @@ use crate::core::handoff::{
 /// Render an audit timeline report as JSON.
 #[must_use]
 pub fn render_audit_timeline_json(report: &AuditTimelineReport) -> String {
-    report.to_json()
+    audit_response_v2_json(&report.to_json())
+}
+
+/// Wrap a bare `ee.audit.*.v1` report payload in the canonical
+/// `ee.response.v2` success envelope, lifting any `degraded[]` array to the
+/// envelope level per the machine-facing response contract.
+fn audit_response_v2_json(report_json: &str) -> String {
+    let mut data: serde_json::Value =
+        serde_json::from_str(report_json).unwrap_or_else(|_| serde_json::json!({}));
+    let degraded = data
+        .as_object_mut()
+        .and_then(|map| map.remove("degraded"))
+        .unwrap_or_else(|| serde_json::json!([]));
+    serde_json::json!({
+        "schema": RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+        "degraded": degraded,
+    })
+    .to_string()
 }
 
 /// Render an audit timeline report as human-readable text.
@@ -18150,7 +18169,7 @@ pub fn render_audit_timeline_toon(report: &AuditTimelineReport) -> String {
 /// Render an audit show report as JSON.
 #[must_use]
 pub fn render_audit_show_json(report: &AuditShowReport) -> String {
-    report.to_json()
+    audit_response_v2_json(&report.to_json())
 }
 
 /// Render an audit show report as human-readable text.
@@ -18200,7 +18219,7 @@ pub fn render_audit_show_toon(report: &AuditShowReport) -> String {
 /// Render an audit diff report as JSON.
 #[must_use]
 pub fn render_audit_diff_json(report: &AuditDiffReport) -> String {
-    report.to_json()
+    audit_response_v2_json(&report.to_json())
 }
 
 /// Render an audit diff report as human-readable text.
@@ -18237,7 +18256,7 @@ pub fn render_audit_diff_toon(report: &AuditDiffReport) -> String {
 /// Render an audit verify report as JSON.
 #[must_use]
 pub fn render_audit_verify_json(report: &AuditVerifyReport) -> String {
-    report.to_json()
+    audit_response_v2_json(&report.to_json())
 }
 
 /// Render an audit verify report as human-readable text.

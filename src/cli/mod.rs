@@ -22183,7 +22183,20 @@ where
     };
 
     match list_timeline(&options) {
-        Ok(report) => write_stdout(stdout, &(report.to_json() + "\n")),
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_audit_timeline_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_audit_timeline_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_audit_timeline_json(&report) + "\n"))
+            }
+        },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -22205,7 +22218,20 @@ where
     };
 
     match show_audit_operation(&options) {
-        Ok(report) => write_stdout(stdout, &(report.to_json() + "\n")),
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_audit_show_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_audit_show_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_audit_show_json(&report) + "\n"))
+            }
+        },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -22228,7 +22254,20 @@ where
     };
 
     match show_audit_diff(&options) {
-        Ok(report) => write_stdout(stdout, &(report.to_json() + "\n")),
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_audit_diff_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_audit_diff_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_audit_diff_json(&report) + "\n"))
+            }
+        },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -22251,7 +22290,20 @@ where
     };
 
     match verify_audit_log(&options) {
-        Ok(report) => write_stdout(stdout, &(report.to_json() + "\n")),
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_audit_verify_human(&report))
+            }
+            output::Renderer::Toon => {
+                write_stdout(stdout, &(output::render_audit_verify_toon(&report) + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(output::render_audit_verify_json(&report) + "\n"))
+            }
+        },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
