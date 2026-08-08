@@ -18,7 +18,7 @@
     "socketPath": {
       "type": "string",
       "minLength": 1,
-      "description": "Absolute path to the Unix-domain socket the stop attempt targeted. Defaults match `ee daemon start` (`${XDG_RUNTIME_DIR}/ee/daemon.sock` on Linux, `/tmp/ee-daemon.sock` on macOS) and may be overridden via `--socket`. Rendered via `Path::display()`; Unix-only at this revision."
+      "description": "Absolute path to the Unix-domain socket the stop attempt targeted. Defaults match `ee daemon start` (`${XDG_RUNTIME_DIR}/ee/daemon.sock` on Linux when the runtime dir is a private per-user directory, otherwise the per-UID `${TMPDIR:-/tmp}/ee-${uid}/daemon.sock` fallback used on macOS and shared-XDG hosts) and may be overridden via `--socket`. Rendered via `Path::display()`; Unix-only at this revision."
     },
     "removed": {
       "type": "boolean",

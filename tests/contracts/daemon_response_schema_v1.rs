@@ -323,6 +323,55 @@ fn daemon_response_schema_rejects_neither_result_nor_error() -> TestResult {
     }
 }
 
+/// bd-2yg7d / bd-1dzhz: the daemon schema descriptions are the machine-facing
+/// contract for where clients should expect the socket. The production
+/// resolver (`default_daemon_socket_path`, ADR 0055) never defaults to a bare
+/// shared socket directly under /tmp — that shape was the bd-3j0td
+/// cross-tenant attack surface — so no daemon schema may describe it as a
+/// default. The forbidden-substring arm is the planted regression trap: it
+/// fails against the pre-fix descriptions that claimed the bare path on
+/// macOS, and fails again if anyone reintroduces the claim.
+#[test]
+fn daemon_schema_descriptions_document_per_uid_socket_default() -> TestResult {
+    const DAEMON_LIFECYCLE_SCHEMAS: &[&str] = &[
+        REQUEST_SCHEMA_PATH,
+        "docs/schemas/ee.daemon.start.v1.json",
+        "docs/schemas/ee.daemon.stop.v1.json",
+    ];
+    // The pre-fix descriptions claimed this bare shared default on macOS.
+    let forbidden_bare_default = "/tmp/ee-daemon.sock";
+    // The true fallback documented by the resolver: a per-UID parent under
+    // the temp root, alongside the XDG-first Linux default.
+    let required_per_uid_fallback = "${TMPDIR:-/tmp}/ee-${uid}/daemon.sock";
+    let required_xdg_default = "${XDG_RUNTIME_DIR}/ee/daemon.sock";
+
+    for schema_path in DAEMON_LIFECYCLE_SCHEMAS {
+        let path = repo_root().join(schema_path);
+        let text = fs::read_to_string(&path)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        if text.contains(forbidden_bare_default) {
+            return Err(format!(
+                "{schema_path} still documents the forbidden bare shared socket default \
+                 {forbidden_bare_default}; the resolver publishes per-UID paths only \
+                 (bd-3j0td, bd-10ex7, ADR 0055)"
+            ));
+        }
+        if !text.contains(required_per_uid_fallback) {
+            return Err(format!(
+                "{schema_path} does not document the per-UID fallback \
+                 {required_per_uid_fallback} that production `default_daemon_socket_path` uses"
+            ));
+        }
+        if !text.contains(required_xdg_default) {
+            return Err(format!(
+                "{schema_path} does not document the XDG-first Linux default \
+                 {required_xdg_default}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_json_schema(value: &Value, schema: &Value, path: &str) -> TestResult {
     if let Some(options) = schema.get("oneOf").and_then(Value::as_array) {
         let matches = options

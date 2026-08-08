@@ -18,7 +18,7 @@
     "socketPath": {
       "type": "string",
       "minLength": 1,
-      "description": "Absolute path to the Unix-domain socket the daemon bound. On Linux this defaults to `${XDG_RUNTIME_DIR}/ee/daemon.sock`; on macOS it defaults to `/tmp/ee-daemon.sock` (XDG_RUNTIME_DIR is not standard on Darwin). May be overridden via the `--socket` flag. Rendered via `Path::display()`, so on Windows targets the value would use backslashes — but `ee daemon start` is currently Unix-only and emits a `DomainError::Configuration` on Windows, so consumers can treat this as a POSIX path."
+      "description": "Absolute path to the Unix-domain socket the daemon bound. On Linux this defaults to `${XDG_RUNTIME_DIR}/ee/daemon.sock` when the runtime dir is a private per-user directory; on macOS — and anywhere XDG_RUNTIME_DIR is unset, empty, or points at a shared temp root — it defaults to the per-UID path `${TMPDIR:-/tmp}/ee-${uid}/daemon.sock` (XDG_RUNTIME_DIR is not standard on Darwin). The daemon never defaults to a bare shared socket name directly under /tmp; that shape collided across local UIDs and was removed as a cross-tenant attack surface (bd-3j0td, bd-10ex7). May be overridden via the `--socket` flag. Rendered via `Path::display()`, so on Windows targets the value would use backslashes — but `ee daemon start` is currently Unix-only and emits a `DomainError::Configuration` on Windows, so consumers can treat this as a POSIX path."
     },
     "foreground": {
       "type": "boolean",
