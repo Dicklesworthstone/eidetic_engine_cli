@@ -4,9 +4,9 @@
 # regression_factor = 1.5 emits an advisory when elapsed time exceeds p50 * 1.5.
 # scripts/verify.sh fails the run when elapsed time exceeds p50 * 3.
 #
-# Non-benchmark p50 values sum to 790s, matching the roughly 13-minute target for the
+# Non-benchmark p50 values sum to 800s, matching the roughly 13-minute target for the
 # full readiness gate. Benchmarks are optional behind --include-bench.
-total_expected_seconds = 790
+total_expected_seconds = 800
 total_regression_factor = 1.5
 
 [[stage]]
@@ -72,6 +72,11 @@ regression_factor = 1.5
 [[stage]]
 name = "Graph Determinism E2E (F4.a)"
 expected_seconds_p50 = 45
+regression_factor = 1.5
+
+[[stage]]
+name = "Fake OIDC IdP Matrix Self-Check E2E (T7.7)"
+expected_seconds_p50 = 10
 regression_factor = 1.5
 
 [[stage]]
