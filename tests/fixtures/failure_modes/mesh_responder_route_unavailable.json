@@ -1,0 +1,20 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_responder_route_unavailable",
+  "introduced_by": { "bead": "bd-tc-epic-qzk7o.3.3", "epic_letter": "TC" },
+  "surfaces": ["mesh responder broker"],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "An accepted session names no exact pre-registered team, target-workspace, and pair-generation route.",
+    "setup_commands": ["start the responder without the exact requested local route"],
+    "invocation": "accept an authenticated mesh session"
+  },
+  "expected_emission": {
+    "code": "mesh_responder_route_unavailable",
+    "severity": "high",
+    "message_contains": ["no exact validated route"],
+    "repair_contains": "Re-register the exact local team/workspace route",
+    "repair_string": "Re-register the exact local team/workspace route with the user-scoped responder owner."
+  }
+}

@@ -708,6 +708,14 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `mesh_event_quarantined` | high | (TBD) |
 | `subscribe_cursor_stale` | warning | (TBD) |
 
+#### Mesh authenticated transport and responder broker (4)
+| Code | Severity | Bead |
+|------|----------|------|
+| `mesh_bootstrap_identity_unverified` | high | bd-tc-epic-qzk7o.3.3 (TC) |
+| `mesh_key_store_unavailable` | high | bd-tc-epic-qzk7o.3.2 (TC) |
+| `mesh_responder_port_conflict` | high | bd-tc-epic-qzk7o.3.3 (TC) |
+| `mesh_responder_route_unavailable` | high | bd-tc-epic-qzk7o.3.3 (TC) |
+
 #### Mesh lane approval and store-local authentication (3)
 | Code | Severity | Bead |
 |------|----------|------|

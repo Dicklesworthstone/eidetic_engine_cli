@@ -1,0 +1,20 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_key_store_unavailable",
+  "introduced_by": { "bead": "bd-tc-epic-qzk7o.3.2", "epic_letter": "TC" },
+  "surfaces": ["mesh authenticated transport", "mesh responder broker"],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "Existing mesh key storage is absent or cannot prove the platform owner, no-link, and durability contract.",
+    "setup_commands": ["remove or make the existing mesh key directory unsafe before inbound authentication"],
+    "invocation": "accept an authenticated mesh session"
+  },
+  "expected_emission": {
+    "code": "mesh_key_store_unavailable",
+    "severity": "high",
+    "message_contains": ["existing hardened pair-key store"],
+    "repair_contains": "Repair owner-only mesh key-store permissions",
+    "repair_string": "Repair owner-only mesh key-store permissions or re-pair without creating inbound credentials."
+  }
+}

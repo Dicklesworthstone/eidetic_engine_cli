@@ -1,0 +1,20 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_bootstrap_identity_unverified",
+  "introduced_by": { "bead": "bd-tc-epic-qzk7o.3.3", "epic_letter": "TC" },
+  "surfaces": ["mesh responder broker"],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "Tailscale LocalAPI WhoIs is unavailable, malformed, does not cover the exact kernel source IP, or disagrees with the pinned stable identity.",
+    "setup_commands": ["make LocalAPI WhoIs unavailable or return a mismatched stable node"],
+    "invocation": "accept an inbound mesh session"
+  },
+  "expected_emission": {
+    "code": "mesh_bootstrap_identity_unverified",
+    "severity": "high",
+    "message_contains": ["verify", "accepted source identity"],
+    "repair_contains": "Restore the local Tailscale daemon",
+    "repair_string": "Restore the local Tailscale daemon and verify the peer remains enrolled on the expected tailnet."
+  }
+}

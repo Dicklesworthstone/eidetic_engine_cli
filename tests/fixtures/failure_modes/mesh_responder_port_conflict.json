@@ -1,0 +1,20 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_responder_port_conflict",
+  "introduced_by": { "bead": "bd-tc-epic-qzk7o.3.3", "epic_letter": "TC" },
+  "surfaces": ["mesh responder broker"],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "The single responder owner cannot bind the exact root-committed nonprivileged address and port.",
+    "setup_commands": ["occupy the committed responder address and port with another process"],
+    "invocation": "start the mesh responder broker"
+  },
+  "expected_emission": {
+    "code": "mesh_responder_port_conflict",
+    "severity": "high",
+    "message_contains": ["committed listener port"],
+    "repair_contains": "Stop the conflicting responder owner",
+    "repair_string": "Stop the conflicting responder owner or align the user-scoped broker on the committed port."
+  }
+}

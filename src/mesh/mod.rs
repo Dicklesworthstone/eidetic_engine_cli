@@ -33,6 +33,7 @@ pub mod peer_state;
 pub mod policy;
 pub mod remote_evidence;
 pub mod repair_action_graph;
+pub mod responder_broker;
 pub mod steward_decision;
 pub mod sync;
 pub mod tailscale_autodiscovery;

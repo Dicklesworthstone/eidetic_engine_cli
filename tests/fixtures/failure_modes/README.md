@@ -157,6 +157,10 @@ in the same commit, keeping the catalog complete by construction.
 | `mesh_secret_export_denied` | mesh export | high | bd-38dqk (SRR6.43) |
 | `mesh_approval_token_invalid` | mesh grant | high | bd-tc-epic-qzk7o.2.2 (TC) |
 | `mesh_approval_token_stale` | mesh grant | warning | bd-tc-epic-qzk7o.2.2 (TC) |
+| `mesh_bootstrap_identity_unverified` | mesh responder broker | high | bd-tc-epic-qzk7o.3.3 (TC) |
+| `mesh_key_store_unavailable` | mesh authenticated transport, mesh responder broker | high | bd-tc-epic-qzk7o.3.2 (TC) |
+| `mesh_responder_port_conflict` | mesh responder broker | high | bd-tc-epic-qzk7o.3.3 (TC) |
+| `mesh_responder_route_unavailable` | mesh responder broker | high | bd-tc-epic-qzk7o.3.3 (TC) |
 | `mesh_store_authentication_unavailable` | backup, export, import, playbook, mesh preview-grant token issuance, mesh grant | high | bd-tc-epic-qzk7o.2.4 (TC) |
 | `mesh_sync_supervisor_backpressure` | mesh sync | info | bd-1ylr3 (SRR6.10) |
 | `mesh_sync_supervisor_budget_exhausted` | mesh sync | warning | bd-1ylr3 (SRR6.10) |
