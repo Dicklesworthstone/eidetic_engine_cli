@@ -2059,10 +2059,13 @@ impl SessionChannelError {
             | Self::Cancelled { .. }
             | Self::Timeout { .. }
             | Self::Io { .. }
-            | Self::Randomness { .. }
             | Self::UnexpectedHalfClose
-            | Self::SessionBudgetExhausted { .. }
-            | Self::Closed => "mesh_transport_unreachable",
+            | Self::SessionBudgetExhausted { .. } => "mesh_transport_unreachable",
+            // Fresh local entropy is a prerequisite for an authenticated
+            // transport session, so callers cannot reach the peer when it is
+            // unavailable. A locally closed channel is likewise unavailable
+            // to the caller; neither condition is peer-frame authentication.
+            Self::Randomness { .. } | Self::Closed => "mesh_transport_unreachable",
             Self::Handshake(error) => error.degraded_code(),
             Self::Frame(error) => error.degraded_code(),
             Self::Authentication { .. } => "mesh_frame_auth_failed",

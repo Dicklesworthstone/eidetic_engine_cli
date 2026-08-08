@@ -688,6 +688,213 @@ fn terminal_authenticated_byte_budget_closes_at_the_exact_boundary() -> TestResu
 }
 
 #[test]
+fn cumulative_authenticated_frame_budget_counts_both_directions() -> TestResult {
+    let mutations = Arc::new(AtomicUsize::new(0));
+    let server_mutations = Arc::clone(&mutations);
+    let mut terminal_limits = limits();
+    // Capability negotiation is two authenticated frames; the request and
+    // response must consume the remaining two slots together.
+    terminal_limits.max_authenticated_frames = 4;
+    let (address, server) = spawn_server(move |cx, stream| async move {
+        let mut session = accept_loopback_session(&cx, stream, terminal_limits)
+            .await
+            .map_err(|error| error.to_string())?;
+        let request = session
+            .receive_request(&cx)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or("peer half-closed before cumulative-frame request")?;
+        server_mutations.fetch_add(1, Ordering::SeqCst);
+        session
+            .send_response(
+                &cx,
+                response(&request.correlation_id, json!({"accepted": true})),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if session.authenticated_usage().frames != 4 {
+            return Err("request/response did not consume the shared frame budget".to_owned());
+        }
+        Ok(session.authenticated_usage())
+    })?;
+    let client_usage = run_runtime(|cx| async move {
+        let mut session =
+            connect_authenticated_session(&cx, address, initiator_config(terminal_limits))
+                .await
+                .map_err(|error| error.to_string())?;
+        session
+            .send_request(&cx, request("cumulative-frame", json!({"mutate": true})))
+            .await
+            .map_err(|error| error.to_string())?;
+        let response = session
+            .receive_response(&cx, "cumulative-frame")
+            .await
+            .map_err(|error| error.to_string())?;
+        if response.payload != json!({"accepted": true}) {
+            return Err("cumulative-frame response drifted".to_owned());
+        }
+        let error = session
+            .send_request(&cx, request("over-frame-budget", json!({"mutate": true})))
+            .await
+            .expect_err("the fifth authenticated frame must exceed the shared budget");
+        if !matches!(
+            error,
+            SessionChannelError::SessionBudgetExhausted { resource: "frame" }
+        ) {
+            return Err(format!(
+                "expected cumulative frame-budget exhaustion, observed {error:?}"
+            ));
+        }
+        Ok(session.authenticated_usage())
+    })?;
+    let server_usage = join_server(server)?;
+    if client_usage != server_usage || client_usage.frames != 4 {
+        return Err(format!(
+            "cumulative frame usage drifted: client={client_usage:?}, server={server_usage:?}"
+        ));
+    }
+    if mutations.load(Ordering::SeqCst) != 1 {
+        return Err("over-frame-budget request reached application processing".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn cumulative_authenticated_byte_budget_counts_both_directions() -> TestResult {
+    let baseline_usage = completed_exchange_usage(limits(), "cumulative-byte")?;
+    let mutations = Arc::new(AtomicUsize::new(0));
+    let server_mutations = Arc::clone(&mutations);
+    let mut terminal_limits = limits();
+    terminal_limits.max_authenticated_bytes = baseline_usage.wire_bytes;
+    let (address, server) = spawn_server(move |cx, stream| async move {
+        let mut session = accept_loopback_session(&cx, stream, terminal_limits)
+            .await
+            .map_err(|error| error.to_string())?;
+        let request = session
+            .receive_request(&cx)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or("peer half-closed before cumulative-byte request")?;
+        server_mutations.fetch_add(1, Ordering::SeqCst);
+        session
+            .send_response(
+                &cx,
+                response(&request.correlation_id, json!({"accepted": true})),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(session.authenticated_usage())
+    })?;
+    let client_usage = run_runtime(|cx| async move {
+        let mut session =
+            connect_authenticated_session(&cx, address, initiator_config(terminal_limits))
+                .await
+                .map_err(|error| error.to_string())?;
+        session
+            .send_request(&cx, request("cumulative-byte", json!({"mutate": true})))
+            .await
+            .map_err(|error| error.to_string())?;
+        let response = session
+            .receive_response(&cx, "cumulative-byte")
+            .await
+            .map_err(|error| error.to_string())?;
+        if response.payload != json!({"accepted": true}) {
+            return Err("cumulative-byte response drifted".to_owned());
+        }
+        let error = session
+            .send_request(&cx, request("over-byte-budget", json!({"mutate": true})))
+            .await
+            .expect_err("the next authenticated frame must exceed the shared byte budget");
+        if !matches!(
+            error,
+            SessionChannelError::SessionBudgetExhausted { resource: "byte" }
+        ) {
+            return Err(format!(
+                "expected cumulative byte-budget exhaustion, observed {error:?}"
+            ));
+        }
+        Ok(session.authenticated_usage())
+    })?;
+    let server_usage = join_server(server)?;
+    if client_usage != server_usage || client_usage != baseline_usage {
+        return Err(format!(
+            "cumulative byte usage drifted: baseline={baseline_usage:?}, client={client_usage:?}, server={server_usage:?}"
+        ));
+    }
+    if mutations.load(Ordering::SeqCst) != 1 {
+        return Err("over-byte-budget request reached application processing".to_owned());
+    }
+    Ok(())
+}
+
+fn completed_exchange_usage(
+    session_limits: SessionChannelLimits,
+    correlation_id: &'static str,
+) -> TestResult<ee::mesh::transport_session::AuthenticatedSessionUsage> {
+    let (address, server) = spawn_server(move |cx, stream| async move {
+        let mut session = accept_loopback_session(&cx, stream, session_limits)
+            .await
+            .map_err(|error| error.to_string())?;
+        let request = session
+            .receive_request(&cx)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or("peer half-closed before baseline exchange")?;
+        session
+            .send_response(
+                &cx,
+                response(&request.correlation_id, json!({"accepted": true})),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(session.authenticated_usage())
+    })?;
+    let client_usage = run_runtime(|cx| async move {
+        let mut session =
+            connect_authenticated_session(&cx, address, initiator_config(session_limits))
+                .await
+                .map_err(|error| error.to_string())?;
+        session
+            .send_request(&cx, request(correlation_id, json!({"mutate": true})))
+            .await
+            .map_err(|error| error.to_string())?;
+        session
+            .receive_response(&cx, correlation_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(session.authenticated_usage())
+    })?;
+    let server_usage = join_server(server)?;
+    if client_usage != server_usage {
+        return Err(format!(
+            "baseline authenticated usage drifted: client={client_usage:?}, server={server_usage:?}"
+        ));
+    }
+    Ok(client_usage)
+}
+
+#[test]
+fn local_entropy_and_closed_channel_errors_are_transport_unreachable() -> TestResult {
+    for (label, error) in [
+        (
+            "entropy failure",
+            SessionChannelError::Randomness {
+                message: "test-only CSPRNG failure".to_owned(),
+            },
+        ),
+        ("locally closed channel", SessionChannelError::Closed),
+    ] {
+        if error.degraded_code() != "mesh_transport_unreachable" {
+            return Err(format!(
+                "{label} must be classified as transport-unreachable, got {}",
+                error.degraded_code()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn peer_half_close_with_outstanding_response_is_not_clean_eof() -> TestResult {
     let mutations = Arc::new(AtomicUsize::new(0));
     let server_mutations = Arc::clone(&mutations);
