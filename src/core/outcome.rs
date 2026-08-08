@@ -1714,22 +1714,23 @@ fn memory_trust_class_promotion_blocked_audit_details(
     transition: &TrustClassTransition,
     multiplicity: &AttemptFamilyMultiplicity,
 ) -> String {
+    let posture = multiplicity.promotion_posture();
     serde_json::json!({
         "schema": "ee.audit.trust_class_promotion_blocked.v1",
         "feedbackEventId": feedback_event_id,
         "fromClass": transition.previous_class.as_str(),
         "refusedClass": transition.next_class.as_str(),
-        "reason": if multiplicity.is_complete() {
-            "attempt_family_composition_not_canonical"
-        } else {
-            "attempt_family_incomplete"
-        },
+        "promotionPosture": posture.as_str(),
+        "reason": posture.reason(),
         "familyId": multiplicity.family_id,
         "declaredSize": multiplicity.declared_size,
         "recordedSlots": multiplicity.recorded_slots,
         "selectedCount": multiplicity.selected_count,
         "rejectedCount": multiplicity.rejected_count,
         "unslottedCount": multiplicity.unslotted_count,
+        "memberCount": multiplicity.member_count,
+        "duplicateSlotCount": multiplicity.duplicate_slot_count,
+        "outOfRangeSlotCount": multiplicity.out_of_range_slot_count,
         "unrecordedCount": multiplicity.unrecorded_count(),
         "summary": multiplicity.summary(),
     })
@@ -4210,6 +4211,7 @@ mod tests {
     use asupersync::Outcome;
     use asupersync::types::{CancelKind, CancelReason, PanicPayload, RegionId, Time};
 
+    use crate::core::bayes::{TrustClassTransition, TrustClassTransitionDirection};
     use crate::db::{
         CreateFeedbackEventInput, CreateFeedbackQuarantineInput, CreateMemoryInput,
         CreateSessionInput, CreateWorkspaceInput, DbConnection, StoredFeedbackQuarantine,
@@ -4225,11 +4227,11 @@ mod tests {
         OutcomeRecordOptions, OutcomeRecordReport, OutcomeRecordStatus, SPRT_QUARANTINE_CODE,
         cancel_kind_from_backend_reason, default_feedback_weight,
         feedback_quarantine_audit_details, feedback_quarantine_review_audit_details,
-        generate_feedback_event_id, harmful_burst_quarantine_degradation, outcome_audit_details,
-        outcome_class, outcome_exit_code, record_outcome, record_outcome_seeded,
-        validate_feedback_event_id,
+        generate_feedback_event_id, harmful_burst_quarantine_degradation,
+        memory_trust_class_promotion_blocked_audit_details, outcome_audit_details, outcome_class,
+        outcome_exit_code, record_outcome, record_outcome_seeded, validate_feedback_event_id,
     };
-    use crate::models::{DomainError, ProcessExitCode};
+    use crate::models::{AttemptFamilyMultiplicity, DomainError, ProcessExitCode, TrustClass};
     use crate::runtime::determinism::Deterministic;
 
     fn insert_family_memory(
@@ -4296,6 +4298,131 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn promotion_blocked_audit_details_preserve_typed_posture_and_reason() -> TestResult {
+        let transition = TrustClassTransition {
+            previous_class: TrustClass::AgentAssertion,
+            next_class: TrustClass::AgentValidated,
+            direction: TrustClassTransitionDirection::Promote,
+            ci90_lower: Some(0.9),
+            ci90_upper: Some(1.0),
+            effective_sample_size: 10.0,
+            validation_events: 10,
+            explicit_human_promotion: false,
+            reason: "test_promotion",
+            audit_required: true,
+        };
+        let cases = [
+            (
+                AttemptFamilyMultiplicity::from_members(
+                    "fam-undeclared".to_owned(),
+                    None,
+                    [(Some(1), Some("selected"))],
+                ),
+                "blocked_undeclared",
+                "family has no declared attempt count",
+            ),
+            (
+                AttemptFamilyMultiplicity::from_members(
+                    "fam-duplicate".to_owned(),
+                    Some(3),
+                    [
+                        (Some(1), Some("selected")),
+                        (Some(1), Some("rejected")),
+                        (Some(2), Some("rejected")),
+                    ],
+                ),
+                "blocked_duplicate_slots",
+                "one or more attempt slots were recorded more than once",
+            ),
+            (
+                AttemptFamilyMultiplicity::from_members(
+                    "fam-out-of-range".to_owned(),
+                    Some(3),
+                    [
+                        (Some(1), Some("selected")),
+                        (Some(2), Some("rejected")),
+                        (Some(4), Some("rejected")),
+                    ],
+                ),
+                "blocked_out_of_range_slots",
+                "one or more attempt slots are outside the declared attempt count",
+            ),
+            (
+                AttemptFamilyMultiplicity::from_members(
+                    "fam-overfull".to_owned(),
+                    Some(3),
+                    [
+                        (Some(1), Some("selected")),
+                        (Some(2), Some("rejected")),
+                        (Some(3), Some("rejected")),
+                        (Some(4), Some("rejected")),
+                    ],
+                ),
+                "blocked_overfull",
+                "family has more members than its declared attempt count",
+            ),
+            (
+                AttemptFamilyMultiplicity::from_members(
+                    "fam-unslotted".to_owned(),
+                    Some(3),
+                    [
+                        (Some(1), Some("selected")),
+                        (Some(2), Some("rejected")),
+                        (None, Some("rejected")),
+                    ],
+                ),
+                "blocked_unslotted_members",
+                "one or more family members have no attempt slot",
+            ),
+            (
+                AttemptFamilyMultiplicity::from_members(
+                    "fam-incomplete".to_owned(),
+                    Some(3),
+                    [(Some(1), Some("selected"))],
+                ),
+                "blocked_incomplete",
+                "not every declared attempt slot is recorded",
+            ),
+            (
+                AttemptFamilyMultiplicity::from_members(
+                    "fam-noncanonical".to_owned(),
+                    Some(3),
+                    [
+                        (Some(1), Some("selected")),
+                        (Some(2), Some("selected")),
+                        (Some(3), Some("selected")),
+                    ],
+                ),
+                "blocked_invalid_composition",
+                "canonical completion requires exactly one selected member and N-1 rejected members",
+            ),
+        ];
+
+        for (multiplicity, expected_posture, expected_reason) in cases {
+            let details: serde_json::Value =
+                serde_json::from_str(&memory_trust_class_promotion_blocked_audit_details(
+                    "fb_test",
+                    &transition,
+                    &multiplicity,
+                ))
+                .map_err(|error| error.to_string())?;
+            ensure_equal(
+                &details
+                    .get("promotionPosture")
+                    .and_then(serde_json::Value::as_str),
+                &Some(expected_posture),
+                "audit must preserve the canonical promotion posture",
+            )?;
+            ensure_equal(
+                &details.get("reason").and_then(serde_json::Value::as_str),
+                &Some(expected_reason),
+                "audit must preserve the canonical promotion reason",
+            )?;
+        }
+        Ok(())
+    }
+
     /// bd-multiplicity-aware-trust-p0u7g: a survivor recorded 1-of-3 with no
     /// sibling slots must keep agent_assertion no matter how helpful its
     /// outcomes look, and every refused promotion must be audited while no
@@ -4341,10 +4468,25 @@ mod tests {
             !blocked.is_empty(),
             "refused promotion must write a trust_class.promotion_blocked audit",
         )?;
-        let details = blocked[0].details.clone().unwrap_or_default();
-        ensure(
-            details.contains("attempt_family_incomplete") && details.contains("fam-gate-a"),
-            &format!("blocked audit must name the incomplete family: {details}"),
+        let details: serde_json::Value =
+            serde_json::from_str(&blocked[0].details.clone().unwrap_or_default())
+                .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &details
+                .get("promotionPosture")
+                .and_then(serde_json::Value::as_str),
+            &Some("blocked_incomplete"),
+            "blocked audit must expose the typed incomplete posture",
+        )?;
+        ensure_equal(
+            &details.get("reason").and_then(serde_json::Value::as_str),
+            &Some("not every declared attempt slot is recorded"),
+            "blocked audit must expose the typed incomplete reason",
+        )?;
+        ensure_equal(
+            &details.get("familyId").and_then(serde_json::Value::as_str),
+            &Some("fam-gate-a"),
+            "blocked audit must name the incomplete family",
         )?;
 
         let transitions = connection
@@ -4354,6 +4496,81 @@ mod tests {
             &transitions.len(),
             &0_usize,
             "no trust transition may land while the family gate refuses",
+        )
+    }
+
+    /// A slot-complete all-selected family is noncanonical and must block the
+    /// transition atomically, just like a family with missing siblings.
+    #[test]
+    fn noncanonical_complete_family_blocks_promotion_and_audits_the_refusal() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-family-gate-noncanonical")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let survivor = "mem_00000000000000000family004";
+        for (memory_id, attempt_index) in [
+            (survivor, 1),
+            ("mem_00000000000000000family005", 2),
+            ("mem_00000000000000000family006", 3),
+        ] {
+            insert_family_memory(
+                &connection,
+                memory_id,
+                "Selected attempt in an all-selected family.",
+                &crate::db::MemoryAttemptFamily {
+                    family_id: "fam-gate-noncanonical".to_string(),
+                    declared_size: Some(3),
+                    attempt_index: Some(attempt_index),
+                    disposition: Some("selected".to_string()),
+                },
+            )?;
+        }
+        drop(connection);
+
+        record_helpful_outcomes(&database, survivor, 10)?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let trust_class = connection
+            .get_memory_trust_class(survivor)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "survivor memory missing".to_string())?;
+        ensure_equal(
+            &trust_class.as_str(),
+            &"agent_assertion",
+            "noncanonical complete family must hold the survivor at agent_assertion",
+        )?;
+
+        let blocked = connection
+            .list_audit_by_action(
+                crate::db::audit_actions::TRUST_CLASS_PROMOTION_BLOCKED,
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        let details: serde_json::Value = blocked
+            .iter()
+            .find_map(|row| row.details.as_deref())
+            .ok_or_else(|| "noncanonical refusal must write a blocked audit".to_string())
+            .and_then(|details| serde_json::from_str(details).map_err(|error| error.to_string()))?;
+        ensure_equal(
+            &details
+                .get("promotionPosture")
+                .and_then(serde_json::Value::as_str),
+            &Some("blocked_invalid_composition"),
+            "all-selected refusal must expose the invalid-composition posture",
+        )?;
+        ensure_equal(
+            &details.get("reason").and_then(serde_json::Value::as_str),
+            &Some(
+                "canonical completion requires exactly one selected member and N-1 rejected members",
+            ),
+            "all-selected refusal must expose the invalid-composition reason",
+        )?;
+
+        let transitions = connection
+            .list_audit_by_action(crate::db::audit_actions::TRUST_CLASS_TRANSITION, None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &transitions.len(),
+            &0_usize,
+            "no trust transition may land while the noncanonical family gate refuses",
         )
     }
 

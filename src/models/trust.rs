@@ -320,8 +320,12 @@ pub enum AttemptFamilyPromotionPosture {
     BlockedInvalidDeclaredSize,
     /// A slot was recorded more than once.
     BlockedDuplicateSlots,
-    /// The family contains more members than declared or an out-of-range slot.
+    /// The family contains more members than its declared attempt count.
     BlockedOverfull,
+    /// An explicit slot is outside `1..=declared_size`.
+    BlockedOutOfRangeSlots,
+    /// A family member lacks an explicit attempt slot.
+    BlockedUnslottedMembers,
     /// One or more declared slots remain unrecorded.
     BlockedIncomplete,
     /// The slots are complete but do not contain one selected and N-1 rejected.
@@ -338,6 +342,8 @@ impl AttemptFamilyPromotionPosture {
             Self::BlockedInvalidDeclaredSize => "blocked_invalid_declared_size",
             Self::BlockedDuplicateSlots => "blocked_duplicate_slots",
             Self::BlockedOverfull => "blocked_overfull",
+            Self::BlockedOutOfRangeSlots => "blocked_out_of_range_slots",
+            Self::BlockedUnslottedMembers => "blocked_unslotted_members",
             Self::BlockedIncomplete => "blocked_incomplete",
             Self::BlockedInvalidComposition => "blocked_invalid_composition",
         }
@@ -351,9 +357,11 @@ impl AttemptFamilyPromotionPosture {
             Self::BlockedUndeclared => "family has no declared attempt count",
             Self::BlockedInvalidDeclaredSize => "declared attempt count must be greater than zero",
             Self::BlockedDuplicateSlots => "one or more attempt slots were recorded more than once",
-            Self::BlockedOverfull => {
-                "family has more members than declared or an out-of-range attempt slot"
+            Self::BlockedOverfull => "family has more members than its declared attempt count",
+            Self::BlockedOutOfRangeSlots => {
+                "one or more attempt slots are outside the declared attempt count"
             }
+            Self::BlockedUnslottedMembers => "one or more family members have no attempt slot",
             Self::BlockedIncomplete => "not every declared attempt slot is recorded",
             Self::BlockedInvalidComposition => {
                 "canonical completion requires exactly one selected member and N-1 rejected members"
@@ -515,8 +523,14 @@ impl AttemptFamilyMultiplicity {
         if self.duplicate_slot_count > 0 {
             return AttemptFamilyPromotionPosture::BlockedDuplicateSlots;
         }
-        if self.member_count > declared || self.out_of_range_slot_count > 0 {
+        if self.member_count > declared {
             return AttemptFamilyPromotionPosture::BlockedOverfull;
+        }
+        if self.out_of_range_slot_count > 0 {
+            return AttemptFamilyPromotionPosture::BlockedOutOfRangeSlots;
+        }
+        if self.unslotted_count > 0 {
+            return AttemptFamilyPromotionPosture::BlockedUnslottedMembers;
         }
         if !self.is_complete() {
             return AttemptFamilyPromotionPosture::BlockedIncomplete;
@@ -726,6 +740,42 @@ mod tests {
         assert_eq!(
             overfull.promotion_posture(),
             AttemptFamilyPromotionPosture::BlockedOverfull
+        );
+
+        let out_of_range = AttemptFamilyMultiplicity::from_members(
+            "fam-out-of-range".to_owned(),
+            Some(3),
+            [
+                (Some(1), Some("selected")),
+                (Some(2), Some("rejected")),
+                (Some(4), Some("rejected")),
+            ],
+        );
+        assert_eq!(
+            out_of_range.promotion_posture(),
+            AttemptFamilyPromotionPosture::BlockedOutOfRangeSlots
+        );
+        assert_eq!(
+            out_of_range.promotion_reason(),
+            "one or more attempt slots are outside the declared attempt count"
+        );
+
+        let unslotted = AttemptFamilyMultiplicity::from_members(
+            "fam-unslotted".to_owned(),
+            Some(3),
+            [
+                (Some(1), Some("selected")),
+                (Some(2), Some("rejected")),
+                (None, Some("rejected")),
+            ],
+        );
+        assert_eq!(
+            unslotted.promotion_posture(),
+            AttemptFamilyPromotionPosture::BlockedUnslottedMembers
+        );
+        assert_eq!(
+            unslotted.promotion_reason(),
+            "one or more family members have no attempt slot"
         );
 
         let missing_disposition = AttemptFamilyMultiplicity::from_members(
