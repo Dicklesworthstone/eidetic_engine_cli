@@ -1,0 +1,26 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "context_candidate_sealed",
+  "introduced_by": { "bead": "bd-sealed-preregistration-memory-b67be" },
+  "surfaces": ["pack", "context"],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "A sealed, not-yet-revealed memory (written with ee remember --seal) matches the pack query; only the deterministic placeholder is stored, so the candidate is excluded from the pack rather than spending budget on withheld content.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'pre-registered protocol: measure X before looking at Y' --workspace . --seal --level semantic --kind decision"
+    ],
+    "invocation": "ee pack 'pre-registered protocol' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "context_candidate_sealed",
+    "severity": "info",
+    "message_contains": [
+      "sealed",
+      "not yet revealed",
+      "excluded from the pack"
+    ],
+    "repair_contains": "ee memory reveal"
+  }
+}

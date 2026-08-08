@@ -339,6 +339,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `context_delta_prior_unknown` | low | bd-muovx.5 (M) |
 | `context_delta_format_unsupported` | info | bd-muovx.6 (M) |
 | `context_delta_larger_than_full` | info | bd-muovx |
+| `context_candidate_sealed` | info | bd-sealed-preregistration-memory-b67be |
 | `context_delta_no_baseline` | info | bd-7lvbg.6 (GOV) |
 | `context_profile_budget_capped` | info | bd-17c65.2.4 (B7) |
 | `context_evidence_hit_unhydrated` | low | bd-16imy |

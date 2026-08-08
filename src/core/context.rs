@@ -6969,6 +6969,29 @@ fn candidates_from_search_with_metrics(
                         metrics.subspans.filtering += filtering_start.elapsed();
                         continue;
                     }
+                    // Sealed, not-yet-revealed memories store only the
+                    // deterministic placeholder; spending pack budget on it
+                    // would serve meaningless bytes while implying content
+                    // (bd-sealed-preregistration-memory-b67be). Explicit
+                    // surfaces (`ee why`, `ee memory show`) still list them.
+                    if memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
+                        metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
+                        push_degradation(
+                            degraded,
+                            "context_candidate_sealed",
+                            ContextResponseSeverity::Info,
+                            format!(
+                                "Memory {} is sealed (content committed by hash, not yet revealed) and was excluded from the pack.",
+                                hit.doc_id
+                            ),
+                            Some(format!(
+                                "ee memory reveal {} --content-file <path> --json",
+                                hit.doc_id
+                            )),
+                        );
+                        metrics.subspans.filtering += filtering_start.elapsed();
+                        continue;
+                    }
                     match temporal_memory_outcome(memory, &filters.temporal) {
                         TemporalCandidateOutcome::Include => {}
                         TemporalCandidateOutcome::Exclude => {
@@ -8776,6 +8799,9 @@ fn apply_graph_hints(
         if memory.tombstoned_at.is_some() && !include_tombstoned {
             continue;
         }
+        if memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
+            continue;
+        }
         if !workspace_ids.contains(&memory.workspace_id) {
             metrics.filtered_candidates = metrics.filtered_candidates.saturating_add(1);
             push_degradation(
@@ -8970,6 +8996,9 @@ fn graph_hint_nodes(
         if seed_memory.tombstoned_at.is_some() && !include_tombstoned {
             continue;
         }
+        if seed_memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
+            continue;
+        }
         nodes.insert(
             seed.clone(),
             GraphHintEvidence {
@@ -9061,6 +9090,9 @@ fn graph_hint_nodes(
                 continue;
             };
             if neighbor_memory.tombstoned_at.is_some() && !include_tombstoned {
+                continue;
+            }
+            if neighbor_memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
                 continue;
             }
             if !workspace_ids.contains(&neighbor_memory.workspace_id) {
