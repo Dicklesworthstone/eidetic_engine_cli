@@ -18743,9 +18743,14 @@ fn collect_hotset_source_authority(
 
     let mut authority_signals = Vec::new();
     for source in source_rows.iter().take(options.max_signals_per_source) {
-        let source_kind = source["sourceKind"]
-            .as_str()
-            .expect("sourceKind was validated above");
+        let Some(source_kind) = source.get("sourceKind").and_then(serde_json::Value::as_str) else {
+            return (
+                Vec::new(),
+                missing(
+                    "source-authority snapshot contains a source without sourceKind".to_owned(),
+                ),
+            );
+        };
         if source.get("state").and_then(serde_json::Value::as_str) != Some("ready")
             || source
                 .get("authoritative")
