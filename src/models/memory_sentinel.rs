@@ -1215,7 +1215,7 @@ mod tests {
     fn revive_polarity_produces_distinct_spec_identity() -> TestResult {
         let gate = MemorySentinelSpec::from_raw(
             &memory_id(),
-            "command_help_contains_flag:cargo --locked",
+            "command_help_contains_flag:ee pack --require-fresh-sentinels",
             MemorySentinelPolarity::Gate,
             None,
             "test://sentinel",
@@ -1224,7 +1224,7 @@ mod tests {
         .map_err(|error| error.to_string())?;
         let revive = MemorySentinelSpec::from_raw(
             &memory_id(),
-            "command_help_contains_flag:cargo --locked",
+            "command_help_contains_flag:ee pack --require-fresh-sentinels",
             MemorySentinelPolarity::Revive,
             None,
             "test://sentinel",

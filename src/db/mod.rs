@@ -33022,13 +33022,17 @@ mod tests {
         ))?;
 
         let migration_result = connection.migrate()?;
+        // Derive the expected tail from the registry so this assertion
+        // survives every future migration instead of hardcoding the tip
+        // (the hardcoded [V096, V097] form went stale the day V098 landed).
+        let expected_applied: Vec<u32> = super::MIGRATIONS
+            .iter()
+            .map(super::Migration::version)
+            .filter(|version| *version > 95)
+            .collect();
         ensure(
-            migration_result.applied()
-                == [
-                    super::V096_MEMORY_SENTINEL_POLARITY.version(),
-                    super::V097_SESSION_INDEX_GENERATIONS.version(),
-                ],
-            "production migrate routing applies contiguous V096 and V097",
+            migration_result.applied() == expected_applied.as_slice(),
+            "production migrate routing applies every post-V095 migration contiguously",
         )?;
 
         ensure_equal(
