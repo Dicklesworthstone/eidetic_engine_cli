@@ -371,6 +371,7 @@ fn e2e_journal_capture_script_exercises_full_capture_lifecycle() -> TestResult {
         "journal distill --session \"$SESSION\" --apply --json",
         "curate validate",
         "curate apply",
+        "daemon --foreground --once --job index_coalesce",
         "pack \"linker cache missing object journal capture\"",
         "outcome trace",
         "harness_summary",

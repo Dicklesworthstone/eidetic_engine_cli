@@ -120,7 +120,7 @@ assert_pack_contains_distilled_memory() {
 }
 
 assert_database_omits_secret() {
-    local secret="$1" label="$2" scanned=0 marker_seen=false sidecar
+    local database_path="$1" secret="$2" label="$3" scanned=0 marker_seen=false sidecar
     if ! command -v strings >/dev/null 2>&1; then
         _harness_fail "$label: strings(1) is unavailable"
         return
@@ -128,7 +128,7 @@ assert_database_omits_secret() {
     # Scan the database AND its WAL/SHM sidecars: an unpheckpointed write can
     # keep the journal body bytes in ee.db-wal long after ee.db itself looks
     # clean, so scanning only the main file is a false-green seam.
-    for sidecar in "$EE_DATABASE_PATH" "$EE_DATABASE_PATH-wal" "$EE_DATABASE_PATH-shm"; do
+    for sidecar in "$database_path" "$database_path-wal" "$database_path-shm"; do
         [ -f "$sidecar" ] || continue
         scanned=$((scanned + 1))
         if strings "$sidecar" | grep -qF "$secret"; then
@@ -157,6 +157,7 @@ assert_database_omits_secret() {
 }
 
 with_temp_workspace WS
+JOURNAL_DATABASE_PATH="$WS/.ee/ee.db"
 SESSION="journal-capture-${BASHPID:-$$}"
 CMD="cargo test --lib journal_capture"
 SECRET="sk-proj-journal-capture-raw-secret-0000000000000000"
@@ -202,7 +203,8 @@ assert_jq "$batch_out" 'any(.data.results[]?; .redactionApplied == true)' \
     "JSONL batch reports redaction on the secret-bearing line"
 assert_jq "$batch_out" 'all(.data.results[]?; .entryId != null)' \
     "JSONL batch returns entry ids for stored lines"
-assert_database_omits_secret "$SECRET" "secret-like journal text is redacted before database storage"
+assert_database_omits_secret "$JOURNAL_DATABASE_PATH" "$SECRET" \
+    "secret-like journal text is redacted before database storage"
 
 step "list scoped journal entries before distillation"
 list_out="$(ee_json --workspace "$WS" journal list --session "$SESSION" --json)"
@@ -258,6 +260,17 @@ assert_nonempty "$memory_id" "curate apply returns created memory id"
 baseline_trace_out="$(ee_json --workspace "$WS" outcome trace "$memory_id" --json)"
 assert_jq "$baseline_trace_out" '.success == true and .data.bayesUpdatesApplied == 0' \
     "planted negative: no bayes updates before feedback"
+
+step "process the workflow-emitted index job without a manual rebuild"
+stale_status_out="$(ee_json --workspace "$WS" index status --json)"
+assert_jq "$stale_status_out" '.success == true and .data.dbGeneration > .data.indexGeneration and .data.health == "stale"' \
+    "curate apply leaves an honestly stale index until its emitted job runs"
+coalesce_out="$(ee_json --workspace "$WS" daemon --foreground --once --job index_coalesce --json)"
+assert_jq "$coalesce_out" '.success == true' \
+    "public index coalescer processes the workflow-emitted job"
+ready_status_out="$(ee_json --workspace "$WS" index status --json)"
+assert_jq "$ready_status_out" '.success == true and .data.dbGeneration == .data.indexGeneration and .data.health == "ready"' \
+    "workflow-emitted indexing restores a truthful ready generation"
 
 step "search and outcome trace prove the memory is live"
 search_out="$(ee_json --workspace "$WS" search "linker cache missing object journal capture" --kind failure --json)"
