@@ -18188,6 +18188,34 @@ pub fn render_audit_timeline_human(report: &AuditTimelineReport) -> String {
         out.push('\n');
     }
 
+    // Cursor-rejection (and any other) degraded entries must be explained in
+    // human output too: an empty page with a silent reason is not honest.
+    for degraded in &report.degraded {
+        let code = degraded
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let severity = degraded
+            .get("severity")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("info");
+        let message = degraded
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        out.push_str(&format!("Degraded [{severity}] {code}: {message}\n"));
+        if let Some(repair) = degraded.get("repair").and_then(serde_json::Value::as_str) {
+            out.push_str(&format!("  Repair: {repair}\n"));
+        }
+        out.push('\n');
+    }
+
+    if let Some(next_cursor) = &report.pagination.next_cursor {
+        out.push_str(&format!(
+            "More rows available. Next page:\n  ee audit timeline --cursor {next_cursor} --json\n\n"
+        ));
+    }
+
     out.push_str("Next:\n  ee audit show <audit-id> --json\n");
     out
 }
@@ -23231,6 +23259,222 @@ mod tests {
         let actual = serde_json::Value::from(decoded);
 
         ensure_equal(&actual, &expected, "decoded status skyline TOON")
+    }
+
+    fn audit_timeline_entry_fixture(id: &str) -> crate::core::audit::AuditTimelineEntry {
+        crate::core::audit::AuditTimelineEntry {
+            id: id.to_owned(),
+            timestamp: "2026-08-01T00:00:00Z".to_owned(),
+            actor: Some("ee".to_owned()),
+            surface: "memory".to_owned(),
+            mutation_kind: "curation_candidate.apply".to_owned(),
+            before_hash: None,
+            after_hash: None,
+            prev_row_hash: Some("blake3:prevfixture".to_owned()),
+            this_row_hash: Some("blake3:thisfixture".to_owned()),
+            workspace_id: Some("wsp_00000000000000000000000001".to_owned()),
+            shard_id: None,
+            target_type: Some("memory".to_owned()),
+            target_id: Some("mem_00000000000000000000000001".to_owned()),
+            producer: crate::models::ProducerMetadata::audit_actor(
+                Some("ee"),
+                Some("2026-08-01T00:00:00Z"),
+            ),
+            details: Some(serde_json::json!({
+                "candidateId": "curate_00000000000000000000000001",
+            })),
+        }
+    }
+
+    fn audit_timeline_report_fixture() -> crate::core::audit::AuditTimelineReport {
+        crate::core::audit::AuditTimelineReport {
+            schema: "ee.audit.timeline.v1".to_owned(),
+            entries: vec![audit_timeline_entry_fixture(
+                "audit_0193c5a37d2f7b7fa3b0c2d4",
+            )],
+            pagination: crate::core::audit::TimelinePagination {
+                total_count: 7,
+                returned_count: 1,
+                has_more: true,
+                next_cursor: Some("eec1.fixture-cursor-token".to_owned()),
+            },
+            degraded: vec![super::governor::cursor_invalid_degraded_entry()],
+        }
+    }
+
+    /// bd-1oep7: paginated / cursor-rejected human output must explain both
+    /// the continuation cursor and every degraded entry — an empty or partial
+    /// page with a silent reason is not honest.
+    #[test]
+    fn audit_timeline_human_renders_cursor_and_degraded() -> TestResult {
+        let report = audit_timeline_report_fixture();
+        let human = super::render_audit_timeline_human(&report);
+        ensure_contains(&human, "Showing 1 of 7 operations", "timeline human count")?;
+        ensure_contains(
+            &human,
+            "Degraded [low] cursor_invalid:",
+            "timeline human degraded code and severity",
+        )?;
+        ensure_contains(
+            &human,
+            "Continuation cursor failed validation",
+            "timeline human degraded message",
+        )?;
+        ensure_contains(
+            &human,
+            "Repair: Re-run the command without --cursor",
+            "timeline human degraded repair",
+        )?;
+        ensure_contains(
+            &human,
+            "ee audit timeline --cursor eec1.fixture-cursor-token --json",
+            "timeline human next-page cursor continuation",
+        )
+    }
+
+    /// bd-1oep7: every audit TOON rendering must be the lossless canonical
+    /// encoding of the enveloped JSON — decoding the TOON yields exactly the
+    /// JSON value, for all four surfaces.
+    #[test]
+    fn audit_toon_output_is_lossless_canonical_encoding() -> TestResult {
+        let timeline = audit_timeline_report_fixture();
+        ensure_toon_matches_json(
+            &super::render_audit_timeline_json(&timeline),
+            &super::render_audit_timeline_toon(&timeline),
+            "audit timeline TOON",
+        )?;
+
+        let show = crate::core::audit::AuditShowReport {
+            schema: "ee.audit.show.v1".to_owned(),
+            row: audit_timeline_entry_fixture("audit_0193c5a37d2f7b7fa3b0c2d4"),
+            linked_snapshot: crate::core::audit::LinkedSnapshot {
+                target_type: Some("memory".to_owned()),
+                target_id: Some("mem_00000000000000000000000001".to_owned()),
+                found: true,
+                snapshot_hash: Some("blake3:snapshotfixture".to_owned()),
+                snapshot: Some(serde_json::json!({"content": "fixture"})),
+            },
+            hash_chain_valid: true,
+        };
+        ensure_toon_matches_json(
+            &super::render_audit_show_json(&show),
+            &super::render_audit_show_toon(&show),
+            "audit show TOON",
+        )?;
+
+        let diff = crate::core::audit::AuditDiffReport {
+            schema: "ee.audit.diff.v1".to_owned(),
+            from: "2026-08-01T00:00:00Z".to_owned(),
+            to: "2026-08-02T00:00:00Z".to_owned(),
+            entries: vec![audit_timeline_entry_fixture(
+                "audit_0193c5a37d2f7b7fa3b0c2d4",
+            )],
+            row_count: 1,
+        };
+        ensure_toon_matches_json(
+            &super::render_audit_diff_json(&diff),
+            &super::render_audit_diff_toon(&diff),
+            "audit diff TOON",
+        )?;
+
+        let verify = crate::core::audit::AuditVerifyReport {
+            schema: "ee.audit.verify.v1".to_owned(),
+            integrity_ok: false,
+            rows: 3,
+            last_hash: Some("blake3:lastfixture".to_owned()),
+            first_break: Some("audit_0193c5a37d2f7b7fa3b0c2d5".to_owned()),
+            issues: vec![crate::core::audit::VerificationIssue {
+                code: "hash_chain_break".to_owned(),
+                audit_id: Some("audit_0193c5a37d2f7b7fa3b0c2d5".to_owned()),
+                shard_id: None,
+                message: "prev hash mismatch at fixture row".to_owned(),
+            }],
+            shard_count: 0,
+            broken_shard_count: 0,
+            shards: Vec::new(),
+        };
+        ensure_toon_matches_json(
+            &super::render_audit_verify_json(&verify),
+            &super::render_audit_verify_toon(&verify),
+            "audit verify TOON",
+        )
+    }
+
+    /// bd-1oep7: a payload that is not valid JSON must surface as the
+    /// canonical ee.error.v2 envelope — never a hollow success.
+    #[test]
+    fn audit_response_envelope_propagates_parse_failure_as_error_v2() -> TestResult {
+        let out = super::audit_response_v2_json("this is not json");
+        let value: serde_json::Value = serde_json::from_str(&out)
+            .map_err(|error| format!("error envelope must be JSON: {error}"))?;
+        ensure(
+            value["schema"] == "ee.error.v2",
+            format!("parse failure must emit ee.error.v2: {value}"),
+        )?;
+        ensure(
+            value["error"]["code"] == "serialization_failed",
+            format!("parse failure must carry the serialization_failed code: {value}"),
+        )?;
+        ensure(
+            value.get("success").is_none(),
+            format!("error envelope must not claim success: {value}"),
+        )?;
+        ensure(
+            value.get("data").is_none(),
+            format!("error envelope must not carry hollow data: {value}"),
+        )
+    }
+
+    /// bd-1oep7: the serialize_or_error marker must propagate as ee.error.v2
+    /// with the original failure message, never be wrapped as success data.
+    #[test]
+    fn audit_response_envelope_propagates_serialization_failed_marker() -> TestResult {
+        let marker = serde_json::json!({
+            "error": "serialization_failed",
+            "message": "audit row was not serializable",
+        })
+        .to_string();
+        let out = super::audit_response_v2_json(&marker);
+        let value: serde_json::Value = serde_json::from_str(&out)
+            .map_err(|error| format!("error envelope must be JSON: {error}"))?;
+        ensure(
+            value["schema"] == "ee.error.v2",
+            format!("marker must emit ee.error.v2: {value}"),
+        )?;
+        ensure(
+            value["error"]["code"] == "serialization_failed",
+            format!("marker must carry the serialization_failed code: {value}"),
+        )?;
+        ensure(
+            value["error"]["message"] == "audit row was not serializable",
+            format!("marker must propagate the original failure message: {value}"),
+        )
+    }
+
+    /// bd-1oep7: the success envelope lifts degraded[] to the envelope level
+    /// and leaves no duplicate degraded key inside data.
+    #[test]
+    fn audit_response_envelope_lifts_degraded_on_success() -> TestResult {
+        let report = audit_timeline_report_fixture();
+        let out = super::render_audit_timeline_json(&report);
+        let value: serde_json::Value = serde_json::from_str(&out)
+            .map_err(|error| format!("success envelope must be JSON: {error}"))?;
+        ensure(
+            value["schema"] == "ee.response.v2" && value["success"] == true,
+            format!("audit timeline must emit a canonical success envelope: {value}"),
+        )?;
+        ensure(
+            value["data"]["schema"] == "ee.audit.timeline.v1",
+            format!("report must nest under data: {value}"),
+        )?;
+        ensure(
+            value["degraded"][0]["code"] == "cursor_invalid",
+            format!("degraded must be lifted to the envelope level: {value}"),
+        )?;
+        ensure(
+            value["data"].get("degraded").is_none(),
+            format!("data must not retain a duplicate degraded key: {value}"),
+        )
     }
 
     #[test]
