@@ -35841,6 +35841,27 @@ where
 
     let learn_gaps = orient_learn_gaps_value(&workspace_path, &mut degraded);
 
+    // Revive-polarity sentinels whose predicate now passes: previously dead
+    // routes whose recorded blocker has cleared. Surfacing them at session
+    // start is the whole point of wake-on-condition sentinels
+    // (bd-wake-on-condition-inverse-sentinel-65uci). Read-only; reuses the
+    // `ee tripwire check --revivals` provider.
+    let revivals = match revival_sentinel_data(cli, &TripwireCheckArgs::default()) {
+        Ok(data) => data,
+        Err(error) => {
+            degraded.push(orient_degradation_value(
+                "orient_revivals_unavailable",
+                "info",
+                format!("Revival sentinel check could not be assembled: {error}"),
+                Some(
+                    "Run `ee tripwire check --revivals --json` to isolate revival state."
+                        .to_string(),
+                ),
+            ));
+            serde_json::Value::Null
+        }
+    };
+
     let data = serde_json::json!({
         "schema": "ee.orient.v1",
         "command": "orient",
@@ -35858,6 +35879,7 @@ where
         "primer": primer,
         "decisions": decisions,
         "learnGaps": learn_gaps,
+        "revivals": revivals,
         "nextCommands": orient_next_commands(&workspace_path, &args.task, args.max_tokens),
     });
 
@@ -36162,9 +36184,18 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
         .pointer("/decisions/dueCount")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
+    let revivable_routes = data
+        .pointer("/revivals/revivalCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     let mut out = format!(
-        "Orientation: {task}\nWorkspace: {workspace}\nMode: {mode}\nDoctor posture: {posture}\nDirty paths: {dirty_paths}\nPack items: {pack_items}\nDecision revisits: {decision_revisits}\n"
+        "Orientation: {task}\nWorkspace: {workspace}\nMode: {mode}\nDoctor posture: {posture}\nDirty paths: {dirty_paths}\nPack items: {pack_items}\nDecision revisits: {decision_revisits}\nRevivable dead routes: {revivable_routes}\n"
     );
+    if revivable_routes > 0 {
+        out.push_str(&format!(
+            "\n{revivable_routes} previously dead route(s) are now unblocked — run `ee tripwire check --revivals --json` for the list.\n"
+        ));
+    }
     if !degraded.is_empty() {
         out.push_str("\nDegraded:\n");
         for entry in degraded {
