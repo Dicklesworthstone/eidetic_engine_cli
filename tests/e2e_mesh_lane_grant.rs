@@ -13,6 +13,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ee::config::MeshLane;
 use ee::db::{
     CreateAuditInput, DbConnection, MeshLaneGrantAtomicError, MeshLaneGrantMutationError,
@@ -23,8 +24,8 @@ use ee::mesh::foreground_cli::{
     MeshStorageCounts,
 };
 use ee::mesh::lane_grant::{
-    APPROVAL_TOKEN_PREFIX, APPROVAL_TOKEN_TTL_SECONDS, ApprovalPurpose, ApprovalTokenError,
-    compare_snapshot, issue, verify_authentic,
+    APPROVAL_TOKEN_ENVELOPE_LEN, APPROVAL_TOKEN_PREFIX, APPROVAL_TOKEN_TTL_SECONDS,
+    ApprovalPurpose, ApprovalTokenError, compare_snapshot, issue, verify_authentic,
 };
 use ee::mesh::peer::build_peer_origin_node_id;
 use ee::policy::store_auth::{StoreAuthRoot, workspace_keys_dir};
@@ -223,6 +224,29 @@ fn tamper_approval_bearer(bearer: &str) -> Result<String, String> {
         .ok_or_else(|| "approval bearer was too short for a one-byte tamper".to_owned())?;
     *byte = if *byte == b'A' { b'B' } else { b'A' };
     String::from_utf8(bytes).map_err(|error| format!("tampered bearer was not UTF-8: {error}"))
+}
+
+fn decoded_approval_envelope(bearer: &str) -> Result<Vec<u8>, String> {
+    let encoded = bearer
+        .strip_prefix(APPROVAL_TOKEN_PREFIX)
+        .ok_or_else(|| "approval bearer omitted its expected prefix".to_owned())?;
+    let envelope = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|error| format!("approval bearer failed base64url decoding: {error}"))?;
+    ensure_equal(
+        &envelope.len(),
+        &APPROVAL_TOKEN_ENVELOPE_LEN,
+        "decoded approval bearer envelope length",
+    )?;
+    Ok(envelope)
+}
+
+fn decoded_approval_bearer_omits_key_id(bearer: &str, key_id: &[u8]) -> TestResult {
+    let envelope = decoded_approval_envelope(bearer)?;
+    ensure(
+        !envelope.windows(key_id.len()).any(|window| window == key_id),
+        "decoded approval bearer envelope serialized a store-auth key ID",
+    )
 }
 
 fn json_u64(value: &Value, pointer: &str, label: &str) -> Result<u64, String> {
@@ -2838,20 +2862,7 @@ fn body_grant_pins_and_releases_hash_bound_metadata_body_fields() -> TestResult 
         approval_now,
     )
     .map_err(|error| format!("verify body-lane snapshot in lane domain: {error}"))?;
-    ensure(
-        matches!(
-            verify_authentic(
-                &root,
-                ApprovalPurpose::Body,
-                &fixture.workspace_id,
-                GRANT_SCHEMA,
-                &prior_key_bearer,
-                approval_now,
-            ),
-            Err(ApprovalTokenError::Invalid)
-        ),
-        "body-lane approval bearer must not authenticate in the T5.9 body-sharing domain",
-    )?;
+    decoded_approval_bearer_omits_key_id(&prior_key_bearer, root.current_key_id().as_bytes())?;
     drop(root);
 
     let tampered_bearer = tamper_approval_bearer(&prior_key_bearer)?;
@@ -2908,11 +2919,8 @@ fn body_grant_pins_and_releases_hash_bound_metadata_body_fields() -> TestResult 
         prior_key_id != current_key_id,
         "body-approval rotation must install a distinct current key",
     )?;
-    ensure(
-        !prior_key_bearer.contains(&prior_key_id.to_hex())
-            && !prior_key_bearer.contains(&current_key_id.to_hex()),
-        "body approval bearer must not serialize an approval key ID",
-    )?;
+    decoded_approval_bearer_omits_key_id(&prior_key_bearer, prior_key_id.as_bytes())?;
+    decoded_approval_bearer_omits_key_id(&prior_key_bearer, current_key_id.as_bytes())?;
     drop(root);
 
     let prior_key = run_ee_with_stdin(

@@ -293,8 +293,9 @@ impl fmt::Debug for Mac {
 
 /// Fixed subkey-derivation domains. Each derives a distinct BLAKE3 subkey from
 /// the same root, so a tag minted for one purpose can never authenticate bytes
-/// for another. The lane/body approval domains are reserved here so T1.4 and
-/// T5.9 consume their own subkeys rather than resharing the import key.
+/// for another. `LaneApproval*` serves all T1.4 generic lane grants, including
+/// the metadata `Lane::Body` permission. `BodyApproval*` is reserved exclusively
+/// for the future T5.9 team-share-bodies consumer; no T1.4 code may select it.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MacDomain {
     /// `ee export` → `ee import jsonl` native-trust header MAC (slice 3).
