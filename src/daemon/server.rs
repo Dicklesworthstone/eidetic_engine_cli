@@ -30,7 +30,7 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -596,6 +596,7 @@ impl SocketBroker {
                     source,
                 })?;
             Self::validate_socket_parent(parent)?;
+            Self::validate_socket_ancestor_chain(parent)?;
         }
         Ok(())
     }
@@ -662,17 +663,24 @@ impl SocketBroker {
         // place. Because the chmod happens on the temp path, the canonical
         // path never exists in a world-connectable (0o755) state for even
         // an instant — a strict improvement over chmod-after-bind. The
-        // temp name carries the pid plus a process-global counter so two
-        // concurrent binds (same process or across processes) never
-        // collide on the temp path and each `rename` is a clean atomic
-        // publish. Sentinel: bd-3ik2d atomic-rename.
+        // temp name carries a UUID v7 so concurrent and post-crash binds
+        // do not reuse a predictable pathname, and each `rename` is a clean
+        // atomic publish. Sentinel: bd-3ik2d atomic-rename.
         let tmp_path = self.temp_bind_path();
-        // Clear any temp left by a crashed prior attempt that happened to
-        // reuse this pid+counter; best-effort, the bind below is the
-        // authoritative step.
-        let _ = fs::remove_file(&tmp_path);
+        self.bind_secured_temp_listener_at(&tmp_path)
+    }
 
-        let listener = UnixListener::bind(&tmp_path).map_err(|source| DaemonStartError::Bind {
+    fn bind_secured_temp_listener_at(
+        &self,
+        tmp_path: &Path,
+    ) -> Result<UnixListener, DaemonStartError> {
+        // Never unlink an unexpected pre-existing temp path. The randomized
+        // UUID makes a collision vanishingly unlikely, while bind(2)'s
+        // create-only behavior turns either a crash remnant or a planted
+        // path into an explicit refusal instead of deleting somebody else's
+        // file under a daemon-controlled name.
+
+        let listener = UnixListener::bind(tmp_path).map_err(|source| DaemonStartError::Bind {
             path: self.socket_path.clone(),
             source,
         })?;
@@ -685,11 +693,11 @@ impl SocketBroker {
         // chmod failure is surfaced (not swallowed) so an operator on a
         // filesystem that rejects `chmod` sees the bind step error rather
         // than a silently world-open socket. Sentinel: bd-3j0td chmod-0600.
-        if let Err(source) = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600)) {
+        if let Err(source) = fs::set_permissions(tmp_path, fs::Permissions::from_mode(0o600)) {
             // The temp socket is bound but world-open at this instant;
             // remove it before returning so a half-secured artifact does
             // not linger under the temp name.
-            let _ = fs::remove_file(&tmp_path);
+            let _ = Self::remove_owned_socket_path(tmp_path);
             return Err(DaemonStartError::Bind {
                 path: self.socket_path.clone(),
                 source,
@@ -699,11 +707,11 @@ impl SocketBroker {
         // Atomically publish the secured socket at the canonical path.
         // `rename(2)` is atomic and replaces a stale socket left by a
         // prior daemon in a single step.
-        if let Err(source) = fs::rename(&tmp_path, &self.socket_path) {
+        if let Err(source) = fs::rename(tmp_path, &self.socket_path) {
             // Publish failed (e.g. cross-device move, or the parent dir
             // was removed underneath us). Drop the temp socket so it does
             // not linger, then surface the failure.
-            let _ = fs::remove_file(&tmp_path);
+            let _ = Self::remove_owned_socket_path(tmp_path);
             return Err(DaemonStartError::Bind {
                 path: self.socket_path.clone(),
                 source,
@@ -714,14 +722,18 @@ impl SocketBroker {
     }
 
     fn remove_owned_socket_file(&self) -> io::Result<()> {
-        match fs::symlink_metadata(&self.socket_path) {
+        Self::remove_owned_socket_path(&self.socket_path)
+    }
+
+    fn remove_owned_socket_path(path: &Path) -> io::Result<()> {
+        match fs::symlink_metadata(path) {
             Ok(metadata) => {
                 if !metadata.file_type().is_socket() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
                             "refusing to remove non-socket daemon path {}",
-                            self.socket_path.display()
+                            path.display()
                         ),
                     ));
                 }
@@ -731,7 +743,7 @@ impl SocketBroker {
                         io::ErrorKind::PermissionDenied,
                         format!(
                             "refusing to remove daemon socket {} owned by uid {}, current uid {euid}",
-                            self.socket_path.display(),
+                            path.display(),
                             metadata.uid()
                         ),
                     ));
@@ -741,7 +753,7 @@ impl SocketBroker {
             Err(error) => return Err(error),
         }
 
-        match fs::remove_file(&self.socket_path) {
+        match fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
@@ -749,19 +761,12 @@ impl SocketBroker {
     }
 
     /// Construct a per-attempt temporary socket path next to `socket_path`,
-    /// of the form `<socket>.tmp.<pid>.<counter>`. The pid plus a
-    /// process-global monotonic counter guarantees the path is unique to
-    /// this bind attempt, so two concurrent [`start_server`] calls — in the
-    /// same process or across processes — never collide on the temp name
-    /// and the subsequent `rename(2)` is always a clean atomic publish.
+    /// of the form `<socket>.tmp.<uuid-v7>`. UUID v7 combines process-local
+    /// monotonicity with random bits, keeping concurrent and post-crash
+    /// attempts distinct without ever deleting a colliding path.
     /// Sentinel: bd-3ik2d atomic-rename.
     fn temp_bind_path(&self) -> PathBuf {
-        static TEMP_BIND_COUNTER: AtomicU64 = AtomicU64::new(0);
-        let suffix = format!(
-            ".tmp.{}.{}",
-            std::process::id(),
-            TEMP_BIND_COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
+        let suffix = format!(".tmp.{}", uuid::Uuid::now_v7().simple());
         let mut file_name = self
             .socket_path
             .file_name()
@@ -817,6 +822,58 @@ impl SocketBroker {
                     "parent mode 0o{mode:o} grants group or other access; expected 0o700 or stricter"
                 ),
             });
+        }
+
+        Ok(())
+    }
+
+    fn validate_socket_ancestor_chain(parent: &Path) -> Result<(), DaemonStartError> {
+        let euid = current_euid();
+        let mut ancestors = parent.ancestors().collect::<Vec<_>>();
+        ancestors.reverse();
+
+        for ancestor in ancestors {
+            let metadata = fs::symlink_metadata(ancestor).map_err(|source| {
+                DaemonStartError::SocketDirCreate {
+                    path: ancestor.to_path_buf(),
+                    source,
+                }
+            })?;
+            if metadata.file_type().is_symlink() {
+                // System-owned compatibility links such as macOS `/var` ->
+                // `/private/var` are stable because their containing parent
+                // is checked earlier in this root-to-leaf walk. A link owned
+                // by an unrelated uid is not a trustworthy socket ancestor.
+                if !matches!(metadata.uid(), 0) && metadata.uid() != euid {
+                    return Err(DaemonStartError::InsecureSocketParent {
+                        path: ancestor.to_path_buf(),
+                        reason: format!(
+                            "ancestor symlink is owned by uid {}, not root or current uid {euid}",
+                            metadata.uid()
+                        ),
+                    });
+                }
+                continue;
+            }
+            if !metadata.file_type().is_dir() {
+                return Err(DaemonStartError::InsecureSocketParent {
+                    path: ancestor.to_path_buf(),
+                    reason: "ancestor is not a directory or trusted symlink".to_owned(),
+                });
+            }
+
+            let mode = metadata.permissions().mode();
+            let writable_by_other_principals = mode & 0o022 != 0;
+            let sticky = mode & 0o1000 != 0;
+            if writable_by_other_principals && !sticky {
+                return Err(DaemonStartError::InsecureSocketParent {
+                    path: ancestor.to_path_buf(),
+                    reason: format!(
+                        "ancestor mode 0o{:o} permits non-owner rename without sticky protection",
+                        mode & 0o7777
+                    ),
+                });
+            }
         }
 
         Ok(())
@@ -4857,6 +4914,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn socket_broker_publish_refuses_nonsticky_writable_ancestor() {
+        let temp = private_tempdir();
+        let shared_ancestor = temp.path().join("shared-ancestor");
+        let private_parent = shared_ancestor.join("private-child");
+        fs::create_dir_all(&private_parent).expect("create nested socket parent");
+        fs::set_permissions(&shared_ancestor, fs::Permissions::from_mode(0o777))
+            .expect("make ancestor replaceable by another uid");
+        fs::set_permissions(&private_parent, fs::Permissions::from_mode(0o700))
+            .expect("keep immediate parent private");
+
+        let socket_path = private_parent.join("ee-daemon.sock");
+        let error = SocketBroker::new(socket_path.clone())
+            .publish_listener()
+            .expect_err("a private leaf under a replaceable ancestor must be refused");
+        match error {
+            DaemonStartError::InsecureSocketParent { path, reason } => {
+                assert_eq!(path, shared_ancestor);
+                assert!(
+                    reason.contains("non-owner rename without sticky protection"),
+                    "ancestor refusal must explain the rename risk; got {reason}",
+                );
+            }
+            other => panic!("writable ancestor must be an insecure-parent error; got {other:?}"),
+        }
+        assert!(
+            !socket_path.exists(),
+            "ancestor refusal must happen before the canonical socket is created",
+        );
+        assert!(
+            !private_parent.join("ee-daemon.sock.start.lock").exists(),
+            "ancestor refusal must happen before the publish lock is created",
+        );
+    }
+
     /// bd-2yg7d.3 (ADR 0055: never overwrite a non-socket path). A
     /// regular file or directory squatting the canonical socket path
     /// must be refused as `SocketPathOccupied` and left untouched —
@@ -5102,8 +5194,8 @@ mod tests {
     /// the publish atomic — a cross-directory temp could land on a
     /// different filesystem and would inherit a different privacy
     /// boundary), must extend the canonical file name, must embed the
-    /// pid, and must be unique per attempt so concurrent publishes
-    /// never collide.
+    /// a valid UUID v7, and must be unique per attempt so concurrent and
+    /// post-crash publishes never collide.
     #[test]
     fn socket_broker_temp_bind_path_is_parent_local_and_unique() {
         let temp = private_tempdir();
@@ -5115,9 +5207,8 @@ mod tests {
 
         assert_ne!(
             first, second,
-            "temp bind paths must be unique per attempt (pid + monotonic counter) so two \
-             concurrent publishes never collide and each rename is a clean atomic publish \
-             (ADR 0055)",
+            "temp bind paths must be unique per attempt so concurrent publishes never collide \
+             and each rename is a clean atomic publish (ADR 0055)",
         );
         for tmp_path in [&first, &second] {
             assert_eq!(
@@ -5135,12 +5226,35 @@ mod tests {
                 "temp bind name must extend the canonical socket name with a .tmp. suffix; \
                  got {name}",
             );
-            assert!(
-                name.contains(&format!(".tmp.{}.", std::process::id())),
-                "temp bind name must embed the publishing pid for cross-process collision \
-                 avoidance; got {name}",
+            let uuid_suffix = name
+                .strip_prefix("ee-daemon-temp-name.sock.tmp.")
+                .expect("prefix was checked above");
+            let parsed = uuid::Uuid::parse_str(uuid_suffix)
+                .expect("temp bind suffix must be a syntactically valid UUID");
+            assert_eq!(
+                parsed.get_version_num(),
+                7,
+                "temp bind suffix must be UUID v7 for time-ordered uniqueness; got {name}",
             );
         }
+    }
+
+    #[test]
+    fn socket_broker_temp_collision_never_unlinks_planted_regular_file() {
+        let temp = private_tempdir();
+        let socket_path = temp.path().join("ee-daemon.sock");
+        let broker = SocketBroker::new(socket_path);
+        let planted_path = broker.temp_bind_path();
+        fs::write(&planted_path, b"operator bytes").expect("plant temp-path regular file");
+
+        broker
+            .bind_secured_temp_listener_at(&planted_path)
+            .expect_err("bind must refuse a pre-existing temp path");
+        assert_eq!(
+            fs::read(&planted_path).expect("planted path must remain readable"),
+            b"operator bytes",
+            "temp collision handling must not unlink or overwrite a non-socket path",
+        );
     }
 
     /// bd-2yg7d.3 (ADR 0055: publish-lock path properties). The publish
