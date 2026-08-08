@@ -699,7 +699,7 @@ fn cumulative_authenticated_frame_budget_counts_both_directions() -> TestResult 
         let mut session = accept_loopback_session(&cx, stream, terminal_limits)
             .await
             .map_err(|error| error.to_string())?;
-        let request = session
+        let inbound_request = session
             .receive_request(&cx)
             .await
             .map_err(|error| error.to_string())?
@@ -708,7 +708,7 @@ fn cumulative_authenticated_frame_budget_counts_both_directions() -> TestResult 
         session
             .send_response(
                 &cx,
-                request(&request.correlation_id, json!({"accepted": true})),
+                request(&inbound_request.correlation_id, json!({"accepted": true})),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -770,7 +770,7 @@ fn cumulative_authenticated_byte_budget_counts_both_directions() -> TestResult {
         let mut session = accept_loopback_session(&cx, stream, terminal_limits)
             .await
             .map_err(|error| error.to_string())?;
-        let request = session
+        let inbound_request = session
             .receive_request(&cx)
             .await
             .map_err(|error| error.to_string())?
@@ -779,7 +779,7 @@ fn cumulative_authenticated_byte_budget_counts_both_directions() -> TestResult {
         session
             .send_response(
                 &cx,
-                request(&request.correlation_id, json!({"accepted": true})),
+                request(&inbound_request.correlation_id, json!({"accepted": true})),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -835,7 +835,7 @@ fn completed_exchange_usage(
         let mut session = accept_loopback_session(&cx, stream, session_limits)
             .await
             .map_err(|error| error.to_string())?;
-        let request = session
+        let inbound_request = session
             .receive_request(&cx)
             .await
             .map_err(|error| error.to_string())?
@@ -843,7 +843,7 @@ fn completed_exchange_usage(
         session
             .send_response(
                 &cx,
-                request(&request.correlation_id, json!({"accepted": true})),
+                request(&inbound_request.correlation_id, json!({"accepted": true})),
             )
             .await
             .map_err(|error| error.to_string())?;
