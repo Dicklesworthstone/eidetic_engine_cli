@@ -6,6 +6,7 @@
 //! the accepted stream to the public T2.1 authenticated-session path.
 
 #![cfg(unix)]
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::future::Future;
 use std::io::{Read, Write};
