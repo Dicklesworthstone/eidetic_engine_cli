@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "orient_revivals_unavailable",
+  "introduced_by": {
+    "bead": "bd-wake-on-condition-inverse-sentinel-65uci",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "orient"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "The read-only orient bundle cannot open or query the current workspace database for Revive-polarity sentinel evaluation.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# make the initialized database unavailable to the orient read-only connection"
+    ],
+    "invocation": "ee orient 'resume work' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "orient_revivals_unavailable",
+    "severity": "info",
+    "message_contains": [
+      "Revival sentinel check could not be assembled"
+    ],
+    "repair_contains": "ee tripwire check --revivals --json",
+    "repair_string": "Run `ee tripwire check --revivals --json` to isolate revival state.",
+    "repair_command_regex": "(?P<cmd>ee tripwire check --revivals --json)"
+  }
+}

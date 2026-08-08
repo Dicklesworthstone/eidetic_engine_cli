@@ -50,6 +50,19 @@ referents): a sentinel is a **user-declared predicate** over any memory.
   command does not persist the ephemeral check result or automatically change
   trust, validity, or tombstone state. Resurfacing remains an explicit future
   curation operation.
+- Revival evaluation has two truthful observation modes. Explicit
+  `ee tripwire check --revivals` may run the allowlisted `ee ... --help`
+  introspection predicate. Implicit consumers such as `ee orient` use only
+  `observe_sentinel`, so `command_help_contains_flag` stays unknown and no
+  process executes; safe path, file, schema, and env-registry predicates remain
+  live. The payload identifies `observationMode`, `evaluationPosture`, and
+  whether command-help process execution is enabled.
+- `ee tripwire check --revivals` evaluates at most 25 deterministically ordered
+  specs by default and accepts validated `--limit 1..=100`. It reports matched,
+  evaluated, and unevaluated counts plus an explicit higher-limit repair so the
+  cap is never silent. It deliberately has no continuation cursor: readiness
+  depends on live filesystem, environment-registry, and (only in explicit mode)
+  command-help observations that can change without a database generation.
 - Adding polarity to check and why rows changes those public aggregates, so the
   containing contracts are `ee.memory_sentinel.check.v2` and
   `ee.memory_sentinel.why.v2`; why spec rows are
@@ -88,4 +101,5 @@ referents): a sentinel is a **user-declared predicate** over any memory.
 - e2e `scripts/e2e_sentinels.sh`: attach → pass → target change → fail → refresh
   candidate + pack downgrade → `--require-fresh-sentinels` enforcement; malformed
   revival byte/row no-mutation proof; read-only revival happy path; Gate exclusion
-  from the revival result set.
+  from the revival result set; explicit-vs-implicit observation; safe predicate
+  parity; provider bounds.

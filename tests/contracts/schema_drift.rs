@@ -3923,6 +3923,66 @@ mod tests {
     }
 
     #[test]
+    fn revival_sentinel_schema_is_registered_once_across_public_contract_layers() -> TestResult {
+        let schema_id = ee::models::schema::MEMORY_SENTINEL_REVIVALS_SCHEMA_V1;
+        ensure_equal(
+            &ee::models::schema::KNOWN_SCHEMAS
+                .iter()
+                .filter(|known| **known == schema_id)
+                .count(),
+            &1,
+            "revival sentinel KNOWN_SCHEMAS registration count",
+        )?;
+        ensure_equal(
+            &ee::output::public_schemas()
+                .iter()
+                .filter(|entry| entry.id == schema_id)
+                .count(),
+            &1,
+            "revival sentinel public_schemas registration count",
+        )?;
+
+        let inventory = contract_inventory()?;
+        ensure_equal(
+            &inventory
+                .contracts
+                .iter()
+                .filter(|entry| entry.schema_id == schema_id)
+                .count(),
+            &1,
+            "revival sentinel public contract inventory count",
+        )?;
+        let entry = inventory_entry(&inventory, schema_id)?;
+        ensure_equal(
+            &entry.status,
+            &"current".to_owned(),
+            "revival schema status",
+        )?;
+        ensure_equal(
+            &entry.schema_file,
+            &Some("docs/schemas/ee.memory_sentinel.revivals.v1.json".to_owned()),
+            "revival schema source file",
+        )?;
+
+        let schema_list: JsonValue = serde_json::from_str(include_str!(
+            "../fixtures/golden/schema/schema_list_json.golden"
+        ))
+        .map_err(|error| format!("parse schema list golden: {error}"))?;
+        let golden_count = schema_list
+            .pointer("/data/schemas")
+            .and_then(JsonValue::as_array)
+            .ok_or("schema list golden must contain data.schemas[]")?
+            .iter()
+            .filter(|entry| entry.get("id").and_then(JsonValue::as_str) == Some(schema_id))
+            .count();
+        ensure_equal(
+            &golden_count,
+            &1,
+            "revival sentinel schema-list golden registration count",
+        )
+    }
+
+    #[test]
     fn public_contract_inventory_legacy_success_envelopes_have_historical_policy() -> TestResult {
         let inventory = contract_inventory()?;
 

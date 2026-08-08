@@ -315,6 +315,50 @@ fn seed_memories(workspace: &Path, count: usize) -> TestResult {
     Ok(())
 }
 
+fn seed_ready_revival_sentinels(workspace: &Path, count: usize) -> TestResult {
+    let init = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("init")
+        .output()
+        .map_err(|error| format!("failed to run ee init: {error}"))?;
+    ensure(
+        init.status.success(),
+        format!(
+            "ee init should succeed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ),
+    )?;
+    fs::write(workspace.join("ready.marker"), b"ready\n")
+        .map_err(|error| format!("failed to write revival marker: {error}"))?;
+    for index in 0..count {
+        let body = format!(
+            "Governor revival contract seed {index:02}: retry this distinct route after the marker appears."
+        );
+        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .arg("--workspace")
+            .arg(workspace)
+            .arg("remember")
+            .arg(&body)
+            .arg("--level")
+            .arg("episodic")
+            .arg("--kind")
+            .arg("failure")
+            .arg("--revive-when")
+            .arg("path_exists:ready.marker")
+            .output()
+            .map_err(|error| format!("failed to run ee remember: {error}"))?;
+        ensure(
+            output.status.success(),
+            format!(
+                "ee remember revival {index} should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )?;
+    }
+    Ok(())
+}
+
 fn seed_journal_entries(workspace: &Path, count: usize) -> TestResult {
     let init = Command::new(env!("CARGO_BIN_EXE_ee"))
         .arg("--workspace")
@@ -834,6 +878,164 @@ fn pack_items_are_never_a_registered_truncation_point() -> TestResult {
             .iter()
             .any(|point| point.array_path.last() == Some(&"items") && point.command == "pack"),
         "data.pack.items[] must NEVER be governor-truncated (hard rule)",
+    )
+}
+
+// ============================================================================
+// revival sentinels — live-observation provider cap (intentionally no cursor)
+// ============================================================================
+
+#[test]
+fn revival_list_declares_bounded_schema_without_governor_cursor() -> TestResult {
+    use ee::output::OUTPUT_TRUNCATION_REGISTRY;
+
+    ensure(
+        OUTPUT_TRUNCATION_REGISTRY
+            .iter()
+            .all(|point| point.schema_id != "ee.memory_sentinel.revivals.v1"),
+        "live revival observations must not advertise a DB-generation-only continuation cursor",
+    )?;
+
+    let schema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("docs")
+        .join("schemas")
+        .join("ee.memory_sentinel.revivals.v1.json");
+    let schema_raw = fs::read_to_string(&schema_path)
+        .map_err(|error| format!("read {}: {error}", schema_path.display()))?;
+    let schema: JsonValue = serde_json::from_str(&schema_raw)
+        .map_err(|error| format!("parse {}: {error}", schema_path.display()))?;
+    ensure(
+        schema.pointer("/title").and_then(JsonValue::as_str)
+            == Some("ee.memory_sentinel.revivals.v1"),
+        "revival data schema must pin its public inner schema id",
+    )?;
+    ensure(
+        schema
+            .pointer("/properties/limit/maximum")
+            .and_then(JsonValue::as_u64)
+            == Some(100)
+            && schema
+                .pointer("/properties/revivals/maxItems")
+                .and_then(JsonValue::as_u64)
+                == Some(100),
+        "revival schema must pin both provider and row-array maxima",
+    )?;
+    ensure(
+        schema
+            .pointer("/properties/revivals/items/$ref")
+            .and_then(JsonValue::as_str)
+            == Some("#/$defs/revival")
+            && schema
+                .pointer("/additionalProperties")
+                .and_then(JsonValue::as_bool)
+                == Some(false),
+        "revival schema must close and type its bounded provider array",
+    )?;
+    ensure(
+        schema
+            .pointer("/allOf/0/if/properties/observationMode/const")
+            .and_then(JsonValue::as_str)
+            == Some("explicit")
+            && schema
+                .pointer("/allOf/0/then/properties/evaluationPosture/const")
+                .and_then(JsonValue::as_str)
+                == Some("local_read_only_predicates_plus_allowlisted_command_help_process")
+            && schema
+                .pointer("/allOf/0/then/properties/commandHelpProcessExecution/const")
+                .and_then(JsonValue::as_bool)
+                == Some(true),
+        "explicit observation mode must couple exactly to the allowlisted command-help posture",
+    )?;
+    ensure(
+        schema
+            .pointer("/allOf/0/else/properties/evaluationPosture/const")
+            .and_then(JsonValue::as_str)
+            == Some("local_read_only_predicates_no_process_execution")
+            && schema
+                .pointer("/allOf/0/else/properties/commandHelpProcessExecution/const")
+                .and_then(JsonValue::as_bool)
+                == Some(false),
+        "implicit observation mode must couple exactly to local read-only predicates with no process execution",
+    )?;
+    ensure(
+        schema
+            .pointer("/allOf/1/if/properties/truncatedByLimit/const")
+            .and_then(JsonValue::as_bool)
+            == Some(true)
+            && schema
+                .pointer("/allOf/1/then/properties/limitRepair/type")
+                .and_then(JsonValue::as_str)
+                == Some("string")
+            && schema
+                .pointer("/allOf/1/else/properties/limitRepair/const")
+                .is_some_and(JsonValue::is_null),
+        "the schema must couple a capped evaluation to a repair and a complete evaluation to null",
+    )
+}
+
+#[test]
+fn revival_list_limit_bounds_output_and_reports_higher_limit_repair() -> TestResult {
+    let workspace = isolated_workspace("revival-list")?;
+    seed_ready_revival_sentinels(&workspace, 12)?;
+
+    let limited = run_ee_in(
+        &workspace,
+        &["tripwire", "check", "--revivals", "--limit", "3", "--json"],
+    )?;
+    ensure(
+        limited
+            .pointer("/data/matchedSpecCount")
+            .and_then(JsonValue::as_u64)
+            == Some(12),
+        "revival provider must report the full matched count",
+    )?;
+    ensure(
+        limited
+            .pointer("/data/evaluatedSpecCount")
+            .and_then(JsonValue::as_u64)
+            == Some(3),
+        "--limit must cap evaluated revival specs before rendering",
+    )?;
+    ensure(
+        limited
+            .pointer("/data/unevaluatedSpecCount")
+            .and_then(JsonValue::as_u64)
+            == Some(9)
+            && limited
+                .pointer("/data/truncatedByLimit")
+                .and_then(JsonValue::as_bool)
+                == Some(true),
+        "provider-level truncation must be explicit rather than silent",
+    )?;
+    ensure(
+        limited
+            .pointer("/data/limitRepair")
+            .and_then(JsonValue::as_str)
+            == Some("ee tripwire check --revivals --limit 12 --workspace . --json"),
+        "provider-level truncation must expose the deterministic higher-limit repair",
+    )?;
+    ensure(
+        element_ids(&limited, "/data/revivals", "specHash").len() == 3,
+        "provider output must contain no more than the requested limit",
+    )?;
+
+    let full = run_ee_in(
+        &workspace,
+        &["tripwire", "check", "--revivals", "--limit", "12", "--json"],
+    )?;
+    let full_ids = element_ids(&full, "/data/revivals", "specHash");
+    ensure(
+        full_ids.len() == 12,
+        "all seeded revival rows must be ready",
+    )?;
+    ensure(
+        full.pointer("/data/limitRepair")
+            .is_some_and(JsonValue::is_null)
+            && full
+                .pointer("/data/truncatedByLimit")
+                .and_then(JsonValue::as_bool)
+                == Some(false),
+        "a complete provider evaluation must clear the higher-limit repair",
     )
 }
 

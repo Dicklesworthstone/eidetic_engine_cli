@@ -146,6 +146,45 @@ assert_jq "$help_pass" \
      and any(.data.results[]?; .status == "pass" and .polarity == "gate")' \
     "allowlisted command-help sentinel passes"
 
+step "explicit revival checks may introspect command help while implicit orient stays process-free"
+help_revive_mem="$(ee_json remember "Retry this route when pack advertises fresh sentinels." \
+    --workspace "$WS" --level episodic --kind failure \
+    --revive-when "command_help_contains_flag:ee pack --require-fresh-sentinels" --json)"
+assert_jq "$help_revive_mem" '.success == true and .data.persisted == true' \
+    "command-help revival memory persists"
+help_revive_id="$(printf '%s' "$help_revive_mem" | jq -r '.data.memory_id // empty')"
+
+env_revive_mem="$(ee_json remember "Retry this route when the output governor env key is registered." \
+    --workspace "$WS" --level episodic --kind failure \
+    --revive-when "env_var_registered:EE_MAX_OUTPUT_TOKENS" --json)"
+assert_jq "$env_revive_mem" '.success == true and .data.persisted == true' \
+    "env-registry revival memory persists"
+env_revive_id="$(printf '%s' "$env_revive_mem" | jq -r '.data.memory_id // empty')"
+
+explicit_revivals="$(ee_json tripwire check --revivals --limit 100 --workspace "$WS" --json)"
+HELP_REVIVE_ID="$help_revive_id" ENV_REVIVE_ID="$env_revive_id" assert_jq "$explicit_revivals" \
+    '.data.observationMode == "explicit"
+     and .data.evaluationPosture == "local_read_only_predicates_plus_allowlisted_command_help_process"
+     and .data.commandHelpProcessExecution == true
+     and any(.data.revivals[]?; .memoryId == env.HELP_REVIVE_ID and .kind == "command_help_contains_flag")
+     and any(.data.revivals[]?; .memoryId == env.ENV_REVIVE_ID and .kind == "env_var_registered")' \
+    "explicit revival check evaluates command-help and safe env predicates"
+
+limited_revivals="$(ee_json tripwire check --revivals --limit 1 --workspace "$WS" --json)"
+assert_jq "$limited_revivals" \
+    '.data.limit == 1
+     and .data.matchedSpecCount >= 3
+     and .data.evaluatedSpecCount == 1
+     and .data.unevaluatedSpecCount == (.data.matchedSpecCount - 1)
+     and .data.truncatedByLimit == true
+     and (.data.limitRepair | startswith("ee tripwire check --revivals --limit "))
+     and (.data.revivals | length) <= 1' \
+    "revival provider limit is deterministic, bounded, and explicit"
+bad_limit="$(ee_json tripwire check --revivals --limit 101 --workspace "$WS" --json)"
+assert_jq "$bad_limit" \
+    '.schema == "ee.error.v2" and .error.code == "usage"' \
+    "revival limit rejects values above the public maximum"
+
 step "read-only revival check reports passing Revive specs and excludes Gate specs"
 printf 'ready\n' >"$WS/revival-ready.marker"
 before_ready_why="$(ee_json why "$revive_mem_id" --workspace "$WS" --include-sentinel --json)"
@@ -164,6 +203,8 @@ REVIVE_ID="$revive_mem_id" GATE_ID="$help_mem_id" assert_jq "$ready_revival" \
     '.success == true
      and .data.schema == "ee.memory_sentinel.revivals.v1"
      and .data.polarity == "revive"
+     and .data.observationMode == "explicit"
+     and .data.commandHelpProcessExecution == true
      and .data.revivalCount >= 1
      and .data.memoryContentIncluded == false
      and .data.redactionStatus == "metadata_and_domain_separated_target_digest_no_memory_content_provenance_or_raw_target"
@@ -176,6 +217,18 @@ assert_jq "$after_ready_why" \
     '.data.sentinel.summary.latestResultCount == 0
      and .data.sentinel.summary.missingResultCount == 1' \
     "read-only revival check does not persist an automatic sentinel result"
+
+implicit_orient="$(ee_json orient "inspect newly unblocked routes" --fast --workspace "$WS" --json)"
+REVIVE_ID="$revive_mem_id" HELP_REVIVE_ID="$help_revive_id" ENV_REVIVE_ID="$env_revive_id" assert_jq "$implicit_orient" \
+    '.success == true
+     and .data.sideEffectFree == true
+     and .data.revivals.observationMode == "implicit"
+     and .data.revivals.evaluationPosture == "local_read_only_predicates_no_process_execution"
+     and .data.revivals.commandHelpProcessExecution == false
+     and any(.data.revivals.revivals[]?; .memoryId == env.REVIVE_ID and .kind == "path_exists")
+     and any(.data.revivals.revivals[]?; .memoryId == env.ENV_REVIVE_ID and .kind == "env_var_registered")
+     and all(.data.revivals.revivals[]?; .memoryId != env.HELP_REVIVE_ID)' \
+    "orient keeps safe revival predicates live but never marks command-help revival ready"
 
 step "revival JSON and human stdout never expose secret-shaped path targets"
 sensitive_target="private/AKIAIOSFODNN7EXAMPLE-token.marker"

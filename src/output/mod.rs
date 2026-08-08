@@ -11367,6 +11367,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: timeline_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::schema::MEMORY_SENTINEL_REVIVALS_SCHEMA_V1,
+            version: "1",
+            description: "Bounded, redaction-safe read-only list of current Revive-polarity sentinel predicates that pass under the selected observation mode.",
+            category: "memory",
+            definition: memory_sentinel_revivals_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::agentsmd::AGENTSMD_EXPORT_SCHEMA_V1,
             version: "1",
             description: "AGENTS.md bridge export report emitted by ee export agentsmd (managed block render, backup, hand-edit refusal).",
@@ -11488,6 +11495,10 @@ fn recall_schema_definition() -> String {
 
 fn timeline_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.timeline.v1.json").to_string()
+}
+
+fn memory_sentinel_revivals_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.memory_sentinel.revivals.v1.json").to_string()
 }
 
 /// Per-schema output-token truncation-point registry (ADR 0063 §2,

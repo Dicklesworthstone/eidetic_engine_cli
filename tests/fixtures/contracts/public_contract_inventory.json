@@ -615,6 +615,24 @@
       ]
     },
     {
+      "schemaId": "ee.memory_sentinel.revivals.v1",
+      "status": "current",
+      "surface": "tripwire_check_revivals_payload",
+      "owner": "src/output/mod.rs::public_schemas",
+      "schemaFile": "docs/schemas/ee.memory_sentinel.revivals.v1.json",
+      "canonicalDocs": [
+        "README.md",
+        "docs/adr/0060-verifiable-memory-sentinels.md"
+      ],
+      "currentFacingContexts": [
+        "README.md",
+        "docs/adr/0060-verifiable-memory-sentinels.md",
+        "docs/schemas/ee.memory_sentinel.revivals.v1.json"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
       "schemaId": "ee.cursor.v1",
       "status": "current",
       "surface": "continuation_cursor_envelope",

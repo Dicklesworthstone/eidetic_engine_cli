@@ -242,7 +242,7 @@ use crate::core::search::{
     run_family_retrieval, run_search, run_search_with_filters,
     run_search_with_performance_and_filters, run_similar,
 };
-use crate::core::sentinel::{SentinelCheckContext, observe_sentinel_explicit};
+use crate::core::sentinel::{SentinelCheckContext, observe_sentinel, observe_sentinel_explicit};
 use crate::core::session_budget::{BudgetPlannerInput, plan_cheapest_next_command};
 // Test-only: referenced via `super::` by the inline `#[cfg(test)]` suite.
 #[cfg(test)]
@@ -7388,6 +7388,21 @@ pub struct TripwireListArgs {
 }
 
 /// Arguments for `ee tripwire check`.
+const DEFAULT_REVIVAL_SENTINEL_LIMIT: usize = 25;
+const MAX_REVIVAL_SENTINEL_LIMIT: usize = 100;
+
+fn parse_revival_sentinel_limit(raw: &str) -> Result<usize, String> {
+    let limit = raw
+        .parse::<usize>()
+        .map_err(|_| format!("invalid revival limit {raw:?}; expected an integer from 1 to 100"))?;
+    if !(1..=MAX_REVIVAL_SENTINEL_LIMIT).contains(&limit) {
+        return Err(format!(
+            "invalid revival limit {limit}; expected 1..={MAX_REVIVAL_SENTINEL_LIMIT}"
+        ));
+    }
+    Ok(limit)
+}
+
 #[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
 pub struct TripwireCheckArgs {
     /// Tripwire ID to check.
@@ -7397,6 +7412,15 @@ pub struct TripwireCheckArgs {
     /// Read-only check of current revival sentinels whose predicates now pass.
     #[arg(long, action = ArgAction::SetTrue)]
     pub revivals: bool,
+
+    /// Maximum number of revival specs to evaluate (default 25, maximum 100).
+    #[arg(
+        long,
+        value_name = "N",
+        requires = "revivals",
+        value_parser = parse_revival_sentinel_limit
+    )]
+    pub limit: Option<usize>,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -35846,7 +35870,11 @@ where
     // start is the whole point of wake-on-condition sentinels
     // (bd-wake-on-condition-inverse-sentinel-65uci). Read-only; reuses the
     // `ee tripwire check --revivals` provider.
-    let revivals = match revival_sentinel_data(cli, &TripwireCheckArgs::default()) {
+    let revivals = match revival_sentinel_data(
+        cli,
+        &TripwireCheckArgs::default(),
+        RevivalObservationMode::Implicit,
+    ) {
         Ok(data) => data,
         Err(error) => {
             degraded.push(orient_degradation_value(
@@ -61967,7 +61995,7 @@ where
             };
             return write_domain_error(&error, cli.wants_json(), stdout, stderr);
         }
-        return match revival_sentinel_data(cli, args) {
+        return match revival_sentinel_data(cli, args, RevivalObservationMode::Explicit) {
             Ok(data) => write_revival_sentinel_data(cli, data, stdout),
             Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
         };
@@ -62024,9 +62052,47 @@ where
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RevivalObservationMode {
+    Explicit,
+    Implicit,
+}
+
+impl RevivalObservationMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Implicit => "implicit",
+        }
+    }
+
+    const fn evaluation_posture(self) -> &'static str {
+        match self {
+            Self::Explicit => "local_read_only_predicates_plus_allowlisted_command_help_process",
+            Self::Implicit => "local_read_only_predicates_no_process_execution",
+        }
+    }
+
+    const fn command_help_process_execution(self) -> bool {
+        matches!(self, Self::Explicit)
+    }
+
+    fn observe(
+        self,
+        spec: &MemorySentinelSpec,
+        ctx: SentinelCheckContext<'_>,
+    ) -> SentinelObservation {
+        match self {
+            Self::Explicit => observe_sentinel_explicit(spec, ctx),
+            Self::Implicit => observe_sentinel(spec, ctx),
+        }
+    }
+}
+
 fn revival_sentinel_data(
     cli: &Cli,
     args: &TripwireCheckArgs,
+    observation_mode: RevivalObservationMode,
 ) -> Result<serde_json::Value, DomainError> {
     let workspace_path = cli.resolve_workspace();
     let database_path = args
@@ -62058,10 +62124,36 @@ fn revival_sentinel_data(
             repair: Some("ee migrate status --workspace . --json".to_owned()),
         })?;
 
+    let limit = args.limit.unwrap_or(DEFAULT_REVIVAL_SENTINEL_LIMIT);
+    if !(1..=MAX_REVIVAL_SENTINEL_LIMIT).contains(&limit) {
+        return Err(DomainError::Usage {
+            message: format!(
+                "invalid revival limit {limit}; expected 1..={MAX_REVIVAL_SENTINEL_LIMIT}"
+            ),
+            repair: Some(format!(
+                "ee tripwire check --revivals --limit {DEFAULT_REVIVAL_SENTINEL_LIMIT} --json"
+            )),
+        });
+    }
+    let matched_spec_count = stored_specs.len();
+    let evaluated_spec_count = matched_spec_count.min(limit);
+    let unevaluated_spec_count = matched_spec_count.saturating_sub(evaluated_spec_count);
+    let limit_repair = (unevaluated_spec_count > 0).then(|| {
+        let next_limit = matched_spec_count.min(MAX_REVIVAL_SENTINEL_LIMIT);
+        if matched_spec_count <= MAX_REVIVAL_SENTINEL_LIMIT {
+            format!(
+                "ee tripwire check --revivals --limit {next_limit} --workspace . --json"
+            )
+        } else {
+            format!(
+                "ee tripwire check --revivals --limit {MAX_REVIVAL_SENTINEL_LIMIT} --workspace . --json; more than {MAX_REVIVAL_SENTINEL_LIMIT} current Revive specs require a future pagination slice"
+            )
+        }
+    });
     let ctx = SentinelCheckContext::new(&workspace_path);
     let mut counts = SentinelCheckCounts::default();
     let mut revival_rows = Vec::new();
-    for stored in &stored_specs {
+    for stored in stored_specs.iter().take(limit) {
         if stored.polarity != MemorySentinelPolarity::Revive {
             return Err(DomainError::Storage {
                 message: format!(
@@ -62072,7 +62164,7 @@ fn revival_sentinel_data(
             });
         }
         let spec = sentinel_spec_from_stored(stored)?;
-        let observation = observe_sentinel_explicit(&spec, ctx);
+        let observation = observation_mode.observe(&spec, ctx);
         let status = observation.into_status();
         counts.record(status);
         if status != MemorySentinelResultStatus::Pass {
@@ -62107,7 +62199,15 @@ fn revival_sentinel_data(
         "command": "tripwire check --revivals",
         "workspaceId": workspace_id,
         "checkedAt": checked_at,
-        "evaluatedSpecCount": stored_specs.len(),
+        "observationMode": observation_mode.as_str(),
+        "evaluationPosture": observation_mode.evaluation_posture(),
+        "commandHelpProcessExecution": observation_mode.command_help_process_execution(),
+        "limit": limit,
+        "matchedSpecCount": matched_spec_count,
+        "evaluatedSpecCount": evaluated_spec_count,
+        "unevaluatedSpecCount": unevaluated_spec_count,
+        "truncatedByLimit": unevaluated_spec_count > 0,
+        "limitRepair": limit_repair,
         "revivalCount": revival_rows.len(),
         "summary": counts.to_json(),
         "polarity": "revive",
@@ -62161,6 +62261,14 @@ where
 }
 
 fn render_revival_sentinel_human(data: &serde_json::Value) -> String {
+    let mode = data
+        .get("observationMode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let matched = data
+        .get("matchedSpecCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     let evaluated = data
         .get("evaluatedSpecCount")
         .and_then(serde_json::Value::as_u64)
@@ -62169,8 +62277,9 @@ fn render_revival_sentinel_human(data: &serde_json::Value) -> String {
         .get("revivalCount")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    let mut output =
-        format!("Revival check (read-only): evaluated {evaluated} revive spec(s), ready={ready}\n");
+    let mut output = format!(
+        "Revival check (read-only, {mode} observation): evaluated {evaluated}/{matched} revive spec(s), ready={ready}\n"
+    );
     if let Some(revivals) = data.get("revivals").and_then(serde_json::Value::as_array) {
         for revival in revivals {
             let memory_id = revival
@@ -62191,7 +62300,24 @@ fn render_revival_sentinel_human(data: &serde_json::Value) -> String {
         }
     }
     if ready == 0 {
-        output.push_str("  No revival predicates currently pass.\n");
+        output.push_str("  No evaluated revival predicates currently pass.\n");
+    }
+    if data
+        .get("truncatedByLimit")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        let limit = data
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let repair = data
+            .get("limitRepair")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("increase --limit to inspect more specs");
+        output.push_str(&format!(
+            "  Evaluation stopped at --limit {limit}. Repair: {repair}\n"
+        ));
     }
     output
 }
@@ -62341,10 +62467,11 @@ mod tests {
         MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat, PackCommand,
         PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, ReflectCommand,
         ReflectRequestLedgerCommand, RegressCommand, RegressExplainArgs, RegressionSurfaceArg,
-        RuleCommand, SESSION_BUDGET_PLAN_SCHEMA_V1, ShadowMode, SituationCommand, StatusArgs,
-        SupportCommand, SwarmBriefArgs, SwarmCommand, SwarmRepairPlanArgs, SwarmWorkPacketArgs,
-        TaskFrameCommand, TaskFrameSubgoalCommand, TrustCommand, VerificationEvidenceAuthority,
-        VerifyCommand, VerifyRchCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
+        RevivalObservationMode, RuleCommand, SESSION_BUDGET_PLAN_SCHEMA_V1, ShadowMode,
+        SituationCommand, StatusArgs, SupportCommand, SwarmBriefArgs, SwarmCommand,
+        SwarmRepairPlanArgs, SwarmWorkPacketArgs, TaskFrameCommand, TaskFrameSubgoalCommand,
+        TripwireCommand, TrustCommand, VerificationEvidenceAuthority, VerifyCommand,
+        VerifyRchCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
         WorkspaceHygieneMode, cass_import_domain_error, context_request_from_options,
         context_stream_header_frame, context_stream_options_for_request,
         db_inspect_redact_source_uri, diag_environment_attestation_response_json,
@@ -62381,14 +62508,102 @@ mod tests {
     };
     use crate::models::error_codes::ALL_ERROR_CODES;
     use crate::models::{
-        ALL_DEGRADATION_CODES, MemoryAnchorKind, MemoryId, MemoryScope, MemoryScopeStats,
-        ProcessExitCode, RedactionLevel,
+        ALL_DEGRADATION_CODES, CreateMemorySentinelSpecInput, MemoryAnchorKind, MemoryId,
+        MemoryScope, MemoryScopeStats, MemorySentinelKind, MemorySentinelPolarity,
+        MemorySentinelSpec, ProcessExitCode, RedactionLevel, SentinelObservation,
     };
     use crate::output;
     use crate::pack::PackResourceProfile;
     use crate::search::plan_cache::{DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, PlanCache};
 
     type TestResult = Result<(), String>;
+
+    fn revival_observation_spec(
+        kind: MemorySentinelKind,
+        target: &str,
+    ) -> Result<MemorySentinelSpec, String> {
+        MemorySentinelSpec::new(CreateMemorySentinelSpecInput {
+            memory_id: "mem_01234567890123456789012345".to_owned(),
+            sentinel_kind: kind,
+            polarity: MemorySentinelPolarity::Revive,
+            target: target.to_owned(),
+            expected_predicate: None,
+            provenance: "test://revival-observation-mode".to_owned(),
+            stale_threshold_seconds: None,
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn implicit_revival_observation_never_executes_command_help_but_keeps_local_read_only_predicates()
+    -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::write(workspace.path().join("ready.marker"), b"ready\n")
+            .map_err(|error| error.to_string())?;
+        let ctx = crate::core::sentinel::SentinelCheckContext::new(workspace.path());
+
+        let command_help = revival_observation_spec(
+            MemorySentinelKind::CommandHelpContainsFlag,
+            "ee pack --require-fresh-sentinels",
+        )?;
+        ensure_equal(
+            &RevivalObservationMode::Implicit.observe(&command_help, ctx),
+            &SentinelObservation::Unverifiable,
+            "implicit/orient observation must not execute command help",
+        )?;
+        ensure(
+            !RevivalObservationMode::Implicit.command_help_process_execution(),
+            "implicit observation posture must truthfully disable command-help process execution",
+        )?;
+
+        let path = revival_observation_spec(MemorySentinelKind::PathExists, "ready.marker")?;
+        ensure_equal(
+            &RevivalObservationMode::Implicit.observe(&path, ctx),
+            &SentinelObservation::Satisfied,
+            "implicit observation keeps safe path predicates live",
+        )?;
+
+        let env =
+            revival_observation_spec(MemorySentinelKind::EnvVarRegistered, "EE_MAX_OUTPUT_TOKENS")?;
+        ensure_equal(
+            &RevivalObservationMode::Implicit.observe(&env, ctx),
+            &SentinelObservation::Satisfied,
+            "implicit observation keeps safe env-registry predicates live",
+        )
+    }
+
+    #[test]
+    fn revival_limit_is_validated_and_requires_revivals() -> TestResult {
+        for invalid in ["0", "101", "not-a-number"] {
+            let error =
+                Cli::try_parse_from(["ee", "tripwire", "check", "--revivals", "--limit", invalid])
+                    .expect_err("invalid revival limit must be rejected by Clap");
+            ensure_equal(
+                &error.kind(),
+                &ErrorKind::ValueValidation,
+                "invalid revival limit error kind",
+            )?;
+        }
+
+        let ordinary_error =
+            Cli::try_parse_from(["ee", "tripwire", "check", "tripwire-123", "--limit", "2"])
+                .expect_err("ordinary tripwire-ID checks must reject revival-only --limit");
+        ensure_equal(
+            &ordinary_error.kind(),
+            &ErrorKind::MissingRequiredArgument,
+            "ordinary tripwire limit requires --revivals",
+        )?;
+
+        let parsed =
+            Cli::try_parse_from(["ee", "tripwire", "check", "--revivals", "--limit", "100"])
+                .map_err(|error| error.to_string())?;
+        match parsed.command {
+            Some(Command::Tripwire(TripwireCommand::Check(args))) => {
+                ensure_equal(&args.limit, &Some(100), "maximum revival limit")
+            }
+            other => Err(format!("expected tripwire check args, got {other:?}")),
+        }
+    }
 
     fn mesh_approval_bearer_canary() -> String {
         // Assemble the fixed-width bearer without checking its recognizable

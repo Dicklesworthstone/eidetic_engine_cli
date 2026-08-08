@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.memory_sentinel.revivals.v1.json",
+  "title": "ee.memory_sentinel.revivals.v1",
+  "description": "Bounded, deterministic, redaction-safe read-only evaluation of current Revive-polarity memory sentinels. Explicit tripwire checks may run allowlisted ee help introspection; implicit orient evaluation never executes a process.",
+  "x-ee-status": {
+    "shipped": true,
+    "available_in_build": true,
+    "tracking_bead": "bd-wake-on-condition-inverse-sentinel-65uci"
+  },
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "workspaceId",
+    "checkedAt",
+    "observationMode",
+    "evaluationPosture",
+    "commandHelpProcessExecution",
+    "limit",
+    "matchedSpecCount",
+    "evaluatedSpecCount",
+    "unevaluatedSpecCount",
+    "truncatedByLimit",
+    "limitRepair",
+    "revivalCount",
+    "summary",
+    "polarity",
+    "mutationPosture",
+    "redactionStatus",
+    "memoryContentIncluded",
+    "revivals"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.memory_sentinel.revivals.v1"
+    },
+    "command": {
+      "type": "string",
+      "const": "tripwire check --revivals"
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "checkedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "observationMode": {
+      "type": "string",
+      "enum": ["explicit", "implicit"]
+    },
+    "evaluationPosture": {
+      "type": "string",
+      "enum": [
+        "local_read_only_predicates_plus_allowlisted_command_help_process",
+        "local_read_only_predicates_no_process_execution"
+      ]
+    },
+    "commandHelpProcessExecution": {
+      "type": "boolean"
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    },
+    "matchedSpecCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "evaluatedSpecCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "unevaluatedSpecCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "truncatedByLimit": {
+      "type": "boolean"
+    },
+    "limitRepair": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "When the provider limit leaves specs unevaluated, a truthful command for raising the limit; null after a complete evaluation."
+    },
+    "revivalCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "summary": {
+      "$ref": "#/$defs/summary"
+    },
+    "polarity": {
+      "type": "string",
+      "const": "revive"
+    },
+    "mutationPosture": {
+      "type": "string",
+      "const": "read_only_no_result_trust_or_tombstone_mutation"
+    },
+    "redactionStatus": {
+      "type": "string",
+      "const": "metadata_and_domain_separated_target_digest_no_memory_content_provenance_or_raw_target"
+    },
+    "memoryContentIncluded": {
+      "type": "boolean",
+      "const": false
+    },
+    "revivals": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/revival"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "observationMode": {"const": "explicit"}
+        },
+        "required": ["observationMode"]
+      },
+      "then": {
+        "properties": {
+          "evaluationPosture": {
+            "const": "local_read_only_predicates_plus_allowlisted_command_help_process"
+          },
+          "commandHelpProcessExecution": {"const": true}
+        }
+      },
+      "else": {
+        "properties": {
+          "evaluationPosture": {
+            "const": "local_read_only_predicates_no_process_execution"
+          },
+          "commandHelpProcessExecution": {"const": false}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "truncatedByLimit": {"const": true}
+        },
+        "required": ["truncatedByLimit"]
+      },
+      "then": {
+        "properties": {
+          "limitRepair": {"type": "string", "minLength": 1}
+        }
+      },
+      "else": {
+        "properties": {
+          "limitRepair": {"const": null}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "summary": {
+      "type": "object",
+      "required": ["specCount", "pass", "fail", "unknown", "degraded"],
+      "properties": {
+        "specCount": {"type": "integer", "minimum": 0, "maximum": 100},
+        "pass": {"type": "integer", "minimum": 0, "maximum": 100},
+        "fail": {"type": "integer", "minimum": 0, "maximum": 100},
+        "unknown": {"type": "integer", "minimum": 0, "maximum": 100},
+        "degraded": {"type": "integer", "minimum": 0, "maximum": 100}
+      },
+      "additionalProperties": false
+    },
+    "revival": {
+      "type": "object",
+      "required": [
+        "schema",
+        "memoryId",
+        "specHash",
+        "resultHash",
+        "kind",
+        "polarity",
+        "targetDigest",
+        "expectedPredicate",
+        "status",
+        "checkedAt",
+        "staleThresholdSeconds"
+      ],
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "ee.memory_sentinel.revival.v1"
+        },
+        "memoryId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "specHash": {
+          "type": "string",
+          "pattern": "^blake3:"
+        },
+        "resultHash": {
+          "type": "string",
+          "pattern": "^blake3:"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "path_exists",
+            "file_hash_or_marker",
+            "json_schema_contains_field",
+            "config_key_exists",
+            "env_var_registered",
+            "degraded_code_fixture_exists",
+            "dependency_capability_present",
+            "command_help_contains_flag"
+          ]
+        },
+        "polarity": {
+          "type": "string",
+          "const": "revive"
+        },
+        "targetDigest": {
+          "type": "string",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "expectedPredicate": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "const": "pass"
+        },
+        "checkedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "staleThresholdSeconds": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

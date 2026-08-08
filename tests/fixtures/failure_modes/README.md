@@ -215,6 +215,7 @@ in the same commit, keeping the catalog complete by construction.
 | `integrity_schema_check_unavailable` | diag integrity | medium | bd-17c65.10.6 (J6) |
 | `integrity_provenance_sample_unavailable` | diag integrity | medium | bd-17c65.10.6 (J6) |
 | `tripwire_inputs_incomplete` | tripwire check, preflight | warning | bd-17c65.10.6 (J6) |
+| `orient_revivals_unavailable` | orient | info | bd-wake-on-condition-inverse-sentinel-65uci |
 | `toolchain_hash_unavailable` | diag toolchain-provenance | info | bd-aunn3.2 |
 | `toolchain_probe_timeout` | diag toolchain-provenance | low | bd-aunn3.2 |
 | `toolchain_tool_unresolved` | diag toolchain-provenance | low | bd-aunn3.2 |

@@ -120,6 +120,9 @@ pub const GLOBAL_MEMORY_SCHEMA_V1: &str = "ee.global_memory.v1";
 /// Schema identifier for the time-travel memory audit report (bd-2vq2z.16).
 pub const TIMELINE_SCHEMA_V1: &str = "ee.timeline.v1";
 
+/// Schema identifier for the bounded read-only Revive-sentinel list.
+pub const MEMORY_SENTINEL_REVIVALS_SCHEMA_V1: &str = "ee.memory_sentinel.revivals.v1";
+
 /// Schema identifier for task-specific capture-demand coverage gaps (bd-2vq2z.17).
 pub const COVERAGE_GAP_SCHEMA_V1: &str = "ee.coverage_gap.v1";
 
@@ -233,6 +236,7 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     TRUST_REPORT_SCHEMA_V1,
     GLOBAL_MEMORY_SCHEMA_V1,
     TIMELINE_SCHEMA_V1,
+    MEMORY_SENTINEL_REVIVALS_SCHEMA_V1,
     COVERAGE_GAP_SCHEMA_V1,
     // Active learning agenda and experiment schemas (EE-440)
     LEARNING_QUESTION_SCHEMA_V1,
