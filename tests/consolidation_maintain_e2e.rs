@@ -1101,9 +1101,160 @@ fn consolidation_closes_maintain_loop_through_apply_and_retrieval() -> TestResul
         ),
     )?;
 
+    // --- Planted negative: a stale/cross-workspace candidate injected
+    // through the PUBLIC diag surface — steward-claiming provenance
+    // (rule_engine + mem_ source id) over a memory that is not part of this
+    // workspace's duplicate group, under a candidate id that is not the
+    // steward derivation. Apply must block with typed issues and mutate
+    // nothing: no tombstone, no lineage, no jobs, no false Ready.
+    let tampered_candidate_id = "curate_00000000000000000000000042";
+    let foreign_source_id = "mem_00000000000000000000000099";
+    let inject = ws.run_json(
+        "inject_tampered_candidate",
+        &[
+            "diag",
+            "curation-candidate",
+            "--candidate-id",
+            tampered_candidate_id,
+            "--candidate-type",
+            "consolidate",
+            "--source-type",
+            "rule_engine",
+            "--source-id",
+            foreign_source_id,
+            "--target-memory-id",
+            &wording_control_id,
+            "--proposed-content",
+            WORDING_CONTROL_PHRASE,
+            "--status",
+            "pending",
+        ],
+    )?;
+    require_success_envelope("inject_tampered_candidate", &inject)?;
+    let tampered_validate = ws.run_json(
+        "validate_tampered_candidate",
+        &["curate", "validate", tampered_candidate_id],
+    )?;
+    require_success_envelope("validate_tampered_candidate", &tampered_validate)?;
+    let tampered_apply = ws.run_json(
+        "apply_tampered_candidate",
+        &["curate", "apply", tampered_candidate_id],
+    )?;
+    require_success_envelope("apply_tampered_candidate", &tampered_apply)?;
+    let tampered_error_codes = json_at(&tampered_apply, &["data", "application", "errors"])
+        .and_then(JsonValue::as_array)
+        .map(|errors| {
+            errors
+                .iter()
+                .filter_map(|issue| issue.get("code").and_then(JsonValue::as_str))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    ws.check(
+        "tampered_candidate_apply_blocked",
+        json_str(&tampered_apply, &["data", "application", "status"]).as_deref() == Some("blocked")
+            && json_bool(&tampered_apply, &["data", "durableMutation"]) == Some(false)
+            && tampered_error_codes
+                .iter()
+                .any(|code| code == "consolidate_absorb_candidate_id_mismatch"),
+        &format!(
+            "tampered candidate must block with the id-mismatch issue, got codes {tampered_error_codes:?}: {tampered_apply}"
+        ),
+    )?;
+    // Durable rows and index effects are untouched by the blocked apply.
+    // (The candidate injection itself legitimately bumps the workspace
+    // generation via the candidate-table trigger, so the proof compares the
+    // exact memory/link/job rows and index document truth, not generations.)
+    let after_tampered = durable_snapshot(&ws, &workspace_a, "after_tampered")?;
+    ws.check(
+        "tampered_candidate_left_rows_untouched",
+        after_tampered.memory_records == after_replay.memory_records
+            && after_tampered.link_records == after_replay.link_records
+            && after_tampered.job_records == after_replay.job_records
+            && after_tampered.tombstoned_rows == 1
+            && after_tampered.index_memory_documents == Some(3),
+        &format!(
+            "blocked tampered apply must not touch memories/links/jobs/index: {after_tampered:?}"
+        ),
+    )?;
+    ws.check(
+        "tampered_candidate_row_recorded_not_applied",
+        after_tampered.consolidate_candidates == after_replay.consolidate_candidates + 1,
+        &format!(
+            "the injected candidate row itself must exist exactly once and never transition to applied: before={} after={}",
+            after_replay.consolidate_candidates, after_tampered.consolidate_candidates
+        ),
+    )?;
+
+    // --- Every emitted ee.test_event.v1 line must parse and validate; a
+    // deliberately corrupted log must FAIL the same validator (planted
+    // negative proving the validator cannot green a broken event stream).
+    let event_count = validate_event_log(&ws.event_log)?;
+    ws.check(
+        "event_log_valid",
+        event_count >= 40,
+        &format!("expected a substantial validated event stream, got {event_count} lines"),
+    )?;
+    let corrupted_log = ws.root.join("corrupted-events.jsonl");
+    let mut corrupted = fs::read_to_string(&ws.event_log)
+        .map_err(|error| format!("read event log for corruption probe: {error}"))?;
+    corrupted.push_str(
+        "{\"schema\":\"ee.wrong_schema.v1\",\"ts\":\"x\",\"test_id\":\"x\",\"kind\":\"note\"}\n",
+    );
+    corrupted.push_str("this line is not json at all\n");
+    fs::write(&corrupted_log, corrupted)
+        .map_err(|error| format!("write corrupted event log: {error}"))?;
+    ws.check(
+        "broken_event_log_fails_validation",
+        validate_event_log(&corrupted_log).is_err(),
+        "a corrupted event log must fail the validator, never green",
+    )?;
+
     let done = TestEvent::new(TEST_ID, EventKind::Note)
         .with_field("label", "maintain_loop_closed")
         .with_field("workspace_root", ws.root.display().to_string());
     let _ = log_event_to(&ws.event_log, LogLevel::Verbose, &done);
     Ok(())
+}
+
+/// Strict ee.test_event.v1 line validator: every non-empty line must parse
+/// as JSON with the exact schema id and non-empty ts/test_id/kind. Returns
+/// the validated line count; any defect is an error naming the line.
+fn validate_event_log(path: &std::path::Path) -> Result<usize, String> {
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("read event log {}: {error}", path.display()))?;
+    let mut validated = 0_usize;
+    for (line_number, line) in contents.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let event: JsonValue = serde_json::from_str(line).map_err(|error| {
+            format!("event log line {}: invalid JSON: {error}", line_number + 1)
+        })?;
+        if event.get("schema").and_then(JsonValue::as_str) != Some("ee.test_event.v1") {
+            return Err(format!(
+                "event log line {}: schema is not ee.test_event.v1: {event}",
+                line_number + 1
+            ));
+        }
+        for field in ["ts", "test_id", "kind"] {
+            if event
+                .get(field)
+                .and_then(JsonValue::as_str)
+                .is_none_or(str::is_empty)
+            {
+                return Err(format!(
+                    "event log line {}: missing or empty required field {field}: {event}",
+                    line_number + 1
+                ));
+            }
+        }
+        validated += 1;
+    }
+    if validated == 0 {
+        return Err(format!("event log {} contains no events", path.display()));
+    }
+    Ok(validated)
 }
