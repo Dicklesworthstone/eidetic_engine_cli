@@ -265,6 +265,12 @@ impl FromStr for ProvenanceUri {
 }
 
 fn parse_journal(input: &str, body: &str) -> Result<ProvenanceUri, ProvenanceUriError> {
+    if body.is_empty() {
+        return Err(ProvenanceUriError::EmptyBody {
+            input: input.to_owned(),
+            scheme: "journal",
+        });
+    }
     let uuid = body
         .strip_prefix("jrn_")
         .and_then(|value| uuid::Uuid::parse_str(value).ok())
