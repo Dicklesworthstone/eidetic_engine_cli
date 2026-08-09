@@ -73,6 +73,7 @@ pub struct ConfigFile {
     pub policy: PolicyConfig,
     pub privacy: PrivacyConfig,
     pub trust: TrustConfig,
+    pub memory: MemoryConfig,
 }
 
 impl ConfigFile {
@@ -133,6 +134,7 @@ impl ConfigFile {
             policy: PolicyConfig::parse(&document)?,
             privacy: PrivacyConfig::parse(&document)?,
             trust: TrustConfig::parse(&document)?,
+            memory: MemoryConfig::parse(&document)?,
         };
 
         validate_config_keys(&document)?;
@@ -1334,6 +1336,25 @@ pub struct PrivacyConfig {
     pub redaction_classes: Option<Vec<String>>,
 }
 
+/// `[memory]` — global-lane posture (ADR 0069 / bd-1bfwa.3).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MemoryConfig {
+    /// Whether retrieval surfaces consult the user-global store at all.
+    pub include_global: Option<bool>,
+    /// Whether this workspace participates in the global tier (the hard
+    /// privacy boundary from ADR 0069 §5).
+    pub participate: Option<bool>,
+}
+
+impl MemoryConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            include_global: optional_bool(document, "memory", "include_global")?,
+            participate: optional_bool(document, "memory", "participate")?,
+        })
+    }
+}
+
 impl PrivacyConfig {
     fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
         Ok(Self {
@@ -1457,6 +1478,7 @@ fn config_key_policy(table_path: &str) -> Option<ConfigKeyPolicy> {
             "privacy",
             "trust",
             "profile",
+            "memory",
         ]),
         "storage" => {
             ConfigKeyPolicy::Closed(&["database_path", "index_dir", "jsonl_export", "read_pool"])
@@ -1673,6 +1695,7 @@ fn config_key_policy(table_path: &str) -> Option<ConfigKeyPolicy> {
         "policy.secret_detector" => ConfigKeyPolicy::Closed(&["allow_phrases", "allow_regex"]),
         "policy.output_redaction" => ConfigKeyPolicy::Closed(&["enabled"]),
         "privacy" => ConfigKeyPolicy::Closed(&["redact_secrets", "redaction_classes"]),
+        "memory" => ConfigKeyPolicy::Closed(&["include_global", "participate"]),
         "trust" => {
             ConfigKeyPolicy::Closed(&["default_class", "prompt_injection_guard", "team_members"])
         }

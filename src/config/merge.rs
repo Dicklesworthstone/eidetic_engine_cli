@@ -21,7 +21,7 @@ use super::file::{
     GraphCausalConfig, GraphConfig, GraphCurateConfig, GraphFeatureFlagsConfig,
     GraphGomoryHuConfig, GraphHealthConfig, GraphHitsConfig, GraphMemoryConfig, GraphPackDnaConfig,
     GraphPprConfig, GraphWitnessesConfig, HandoffConfig, HandoffStaleThresholdConfig,
-    JournalConfig, LearnConfig, LearnDecayConfig, MeshCommandMode, MeshConfig,
+    JournalConfig, LearnConfig, LearnDecayConfig, MemoryConfig, MeshCommandMode, MeshConfig,
     OutputRedactionConfig, PackConfig, PackL2CacheConfig, PolicyConfig, PrimerConfig,
     PrivacyConfig, ReadPoolConfig, RedactionConfig, RedactionDefaultsConfig, RuntimeConfig,
     SearchConfig, SearchLexicalRamTierConfig, SearchRerankMode, SearchSpeed, SecretDetectorConfig,
@@ -51,6 +51,8 @@ pub const CASS_ENABLED_KEY: &str = "cass.enabled";
 pub const CASS_BINARY_KEY: &str = "cass.binary";
 pub const CASS_SINCE_KEY: &str = "cass.since";
 pub const CASS_SUBPROCESS_TIMEOUT_SECS_KEY: &str = "cass.subprocess_timeout_secs";
+pub const MEMORY_INCLUDE_GLOBAL_KEY: &str = "memory.include_global";
+pub const MEMORY_PARTICIPATE_KEY: &str = "memory.participate";
 pub const SEARCH_DEFAULT_SPEED_KEY: &str = "search.default_speed";
 pub const SEARCH_LEXICAL_WEIGHT_KEY: &str = "search.lexical_weight";
 pub const SEARCH_SEMANTIC_WEIGHT_KEY: &str = "search.semantic_weight";
@@ -1050,6 +1052,22 @@ impl MergedConfig {
             ));
         }
 
+        // Memory section (global-lane posture, bd-1bfwa.3)
+        if let Some(include_global) = self.values.memory.include_global {
+            entries.push(ConfigShowEntry::new(
+                MEMORY_INCLUDE_GLOBAL_KEY,
+                include_global.to_string(),
+                self.source(MEMORY_INCLUDE_GLOBAL_KEY),
+            ));
+        }
+        if let Some(participate) = self.values.memory.participate {
+            entries.push(ConfigShowEntry::new(
+                MEMORY_PARTICIPATE_KEY,
+                participate.to_string(),
+                self.source(MEMORY_PARTICIPATE_KEY),
+            ));
+        }
+
         let entry_count = entries.len();
         ConfigShowReport {
             schema: "ee.config.show.v1",
@@ -1315,6 +1333,12 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             prompt_injection_guard: Some(true),
             team_members: None,
         },
+        memory: MemoryConfig {
+            // Defaults preserve the opt-in-by-presence behavior: the global
+            // lane is consulted whenever a store exists (ADR 0069 / bd-1bfwa.3).
+            include_global: Some(true),
+            participate: Some(true),
+        },
     })
 }
 
@@ -1469,6 +1493,7 @@ pub fn config_from_env(
         policy: PolicyConfig::default(),
         privacy: PrivacyConfig::default(),
         trust: TrustConfig::default(),
+        memory: MemoryConfig::default(),
     })
 }
 
@@ -2689,6 +2714,26 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.trust.team_members,
                 &layers.user.trust.team_members,
                 &layers.defaults.trust.team_members,
+            ),
+        },
+        memory: MemoryConfig {
+            include_global: pick_field(
+                &mut sources,
+                MEMORY_INCLUDE_GLOBAL_KEY,
+                &layers.cli.memory.include_global,
+                &layers.environment.memory.include_global,
+                &layers.project.memory.include_global,
+                &layers.user.memory.include_global,
+                &layers.defaults.memory.include_global,
+            ),
+            participate: pick_field(
+                &mut sources,
+                MEMORY_PARTICIPATE_KEY,
+                &layers.cli.memory.participate,
+                &layers.environment.memory.participate,
+                &layers.project.memory.participate,
+                &layers.user.memory.participate,
+                &layers.defaults.memory.participate,
             ),
         },
     };

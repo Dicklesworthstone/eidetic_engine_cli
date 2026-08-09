@@ -28,7 +28,8 @@ use crate::config::{
     GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY, GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY,
     GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY,
     GRAPH_PPR_ALPHA_KEY, GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY,
-    GRAPH_WITNESSES_RETENTION_DAYS_KEY, PathExpander, SEARCH_DEFAULT_SPEED_KEY,
+    GRAPH_WITNESSES_RETENTION_DAYS_KEY, MEMORY_INCLUDE_GLOBAL_KEY, MEMORY_PARTICIPATE_KEY,
+    PathExpander, SEARCH_DEFAULT_SPEED_KEY,
     SEARCH_GRAPH_WEIGHT_KEY, SEARCH_LEXICAL_WEIGHT_KEY, SEARCH_RERANK_KEY, SEARCH_RERANK_TOP_K_KEY,
     SEARCH_SEMANTIC_WEIGHT_KEY, built_in_config, config_from_env, merge_config,
 };
@@ -754,6 +755,16 @@ fn config_key_spec(key: &str) -> Option<GraphKeySpec> {
             key: SEARCH_RERANK_TOP_K_KEY,
             path: &["search", "rerank_top_k"],
             kind: GraphValueKind::PositiveInteger,
+        }),
+        MEMORY_INCLUDE_GLOBAL_KEY => Some(GraphKeySpec {
+            key: MEMORY_INCLUDE_GLOBAL_KEY,
+            path: &["memory", "include_global"],
+            kind: GraphValueKind::Bool,
+        }),
+        MEMORY_PARTICIPATE_KEY => Some(GraphKeySpec {
+            key: MEMORY_PARTICIPATE_KEY,
+            path: &["memory", "participate"],
+            kind: GraphValueKind::Bool,
         }),
         _ => graph_key_spec(key),
     }
