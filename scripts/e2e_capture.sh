@@ -156,16 +156,22 @@ candidate_type_count() {
 write_fake_cass_binary() {
     local path="$1"
     local session_path="$2"
-    local second_session_path="$3"
+    local auxiliary_session_prefix="$3"
     cat >"$path" <<FAKECASS
 #!/bin/sh
 set -eu
 cmd="\${1:-}"
 case "\$cmd" in
   sessions)
-    cat <<'JSON'
-{"sessions":[{"path":"$session_path","workspace":"$WS","agent":"codex","started_at":"2026-06-17T13:00:00Z","ended_at":"2026-06-17T13:20:00Z","message_count":4,"token_count":920,"content_hash":"blake3:capture-e2e-session-primary"},{"path":"$second_session_path","workspace":"$WS","agent":"claude","started_at":"2026-06-17T14:00:00Z","ended_at":"2026-06-17T14:10:00Z","message_count":2,"token_count":310,"content_hash":"blake3:capture-e2e-session-secondary"}]}
-JSON
+    printf '%s' '{"sessions":['
+    printf '%s' '{"path":"$session_path","workspace":"$WS","agent":"codex","started_at":"2026-06-17T13:00:00Z","ended_at":"2026-06-17T13:20:00Z","message_count":4,"token_count":920,"content_hash":"blake3:capture-e2e-session-primary"}'
+    auxiliary_index=1
+    while [ "\$auxiliary_index" -le 129 ]; do
+      auxiliary_path="$auxiliary_session_prefix-\${auxiliary_index}.jsonl"
+      printf '%s' ",{\"path\":\"\$auxiliary_path\",\"workspace\":\"$WS\",\"agent\":\"claude\",\"started_at\":\"2026-06-17T14:00:00Z\",\"ended_at\":\"2026-06-17T14:10:00Z\",\"message_count\":1,\"token_count\":24,\"content_hash\":\"blake3:capture-e2e-session-aux-\$auxiliary_index\"}"
+      auxiliary_index=\$((auxiliary_index + 1))
+    done
+    printf '%s\n' ']}'
     ;;
   view)
     source_path=""
@@ -179,16 +185,19 @@ JSON
   {"line":4,"content":"{\"role\":\"user\",\"content\":\"Fix: require accept/reject commands and audit every accepted capture.\"}","highlighted":false}
 ],"total_lines":4}
 JSON
-    elif [ "\$source_path" = "$second_session_path" ]; then
-      cat <<'JSON'
-{"path":"$second_session_path","target_line":1,"context":3,"lines":[
-  {"line":1,"content":"{\"role\":\"user\",\"content\":\"A second session makes coalescing observable instead of inferred.\"}","highlighted":true},
-  {"line":2,"content":"{\"role\":\"assistant\",\"content\":\"Batch both durable index jobs into one published source snapshot.\"}","highlighted":false}
-],"total_lines":2}
-JSON
     else
-      echo "unexpected cass view path: \$source_path" >&2
-      exit 64
+      case "\$source_path" in
+        "$auxiliary_session_prefix-"*.jsonl)
+          auxiliary_index=\${source_path##*-}
+          auxiliary_index=\${auxiliary_index%.jsonl}
+          printf '{"path":"%s","target_line":1,"context":1,"lines":[{"line":1,"content":"{\\"role\\":\\"assistant\\",\\"content\\":\\"Bounded session fixture %s\\"}","highlighted":false}],"total_lines":1}\n' \
+            "\$source_path" "\$auxiliary_index"
+          ;;
+        *)
+          echo "unexpected cass view path: \$source_path" >&2
+          exit 64
+          ;;
+      esac
     fi
     ;;
   *)
@@ -219,7 +228,6 @@ assert_audit_mentions_capture() {
 with_temp_workspace WS
 FIXTURE_REPO="$WS/capture-fixture-repo"
 SESSION_PATH="$WS/cass-session-capture.jsonl"
-SECOND_SESSION_PATH="$WS/cass-session-capture-secondary.jsonl"
 CASS_BIN="$WS/cass"
 SECRET="sk-proj-capture-e2e-redacted-000000000000000000"
 
@@ -235,32 +243,35 @@ cat >"$SESSION_PATH" <<'SESSION'
 {"role":"assistant","content":"Failure arc: storing silently would violate the no-loop-takeover policy."}
 {"role":"user","content":"Fix: require accept/reject commands and audit every accepted capture."}
 SESSION
-cat >"$SECOND_SESSION_PATH" <<'SESSION'
-{"role":"user","content":"A second session makes coalescing observable instead of inferred."}
-{"role":"assistant","content":"Batch both durable index jobs into one published source snapshot."}
-SESSION
-write_fake_cass_binary "$CASS_BIN" "$SESSION_PATH" "$SECOND_SESSION_PATH"
+AUXILIARY_SESSION_PREFIX="$WS/cass-session-bounded"
+fixture_session=1
+while [ "$fixture_session" -le 129 ]; do
+    printf '{"role":"assistant","content":"Bounded session fixture %s"}\n' \
+        "$fixture_session" >"$AUXILIARY_SESSION_PREFIX-$fixture_session.jsonl"
+    fixture_session=$((fixture_session + 1))
+done
+write_fake_cass_binary "$CASS_BIN" "$SESSION_PATH" "$AUXILIARY_SESSION_PREFIX"
 log_event "capture_fixture_ready" \
     bead "bd-2vq2z.20" \
     workspace "$WS" \
     fixtureRepo "$FIXTURE_REPO" \
     cassSession "$SESSION_PATH" \
-    cassSessionSecondary "$SECOND_SESSION_PATH"
+    cassSessionAuxiliaryPrefix "$AUXILIARY_SESSION_PREFIX"
 
 step "import fixture CASS session without silent memory mutation"
 before_import_memories="$(memory_list_count "$WS")"
-import_out="$(ee_json_with_env EE_CASS_BINARY "$CASS_BIN" --workspace "$WS" import cass --limit 2 --json)"
+import_out="$(ee_json_with_env EE_CASS_BINARY "$CASS_BIN" --workspace "$WS" import cass --limit 130 --json)"
 assert_jq "$import_out" '.schema == "ee.response.v2" and .success == true' \
     "fixture cass import succeeds"
 assert_jq "$import_out" '
     (.data.schema == "ee.import.cass.v1")
-    and (.data.sessionsImported == 2)
-    and (.data.spansImported == 6)
-    and (.data.indexJobsQueued == 2)
-    and (.data.sessions | length == 2)
+    and (.data.sessionsImported == 130)
+    and (.data.spansImported == 133)
+    and (.data.indexJobsQueued == 130)
+    and (.data.sessions | length == 130)
     and all(.data.sessions[]; (.sessionId | type == "string" and length > 0)
         and (.indexJobId | type == "string" and length > 0))
-' "fixture cass import stores two sessions, six evidence spans, and two durable index jobs"
+' "fixture cass import stores 130 sessions and 133 evidence spans, crossing both 128-row source-read bounds with exact job counts"
 spans_imported="$(printf '%s' "$import_out" | jq -r '.data.spansImported // 0')"
 first_session_id="$(printf '%s' "$import_out" | jq -r '.data.sessions[0].sessionId // empty')"
 second_session_id="$(printf '%s' "$import_out" | jq -r '.data.sessions[1].sessionId // empty')"
@@ -283,30 +294,30 @@ assert_zero "$before_import_memories" \
 # bd-3k1mg: exercise the coalesced durable job path. A manual index rebuild here
 # would hide a missing or incomplete import job, and an ID-or-content assertion
 # could pass when two different documents accidentally satisfy half the proof.
-step "bd-3k1mg: two index jobs coalesce into one complete evidence snapshot"
+step "bd-3k1mg: 130 index jobs coalesce into one complete bounded source snapshot"
 stale_index_out="$(ee_json --workspace "$WS" index status --json)"
 assert_jq "$stale_index_out" ".schema == \"ee.response.v2\"
     and .success == true
     and .data.health == \"stale\"
-    and .data.dbSessionCount == 2
+    and .data.dbSessionCount == 130
     and .data.dbEvidenceCount == $spans_imported
     and .data.dbEvidenceAdmittedCount == $spans_imported
     and (.data.dbGeneration > .data.indexGeneration)" \
     "atomic CASS import makes the previously ready index truthfully stale"
-coalesce_out="$(ee_json --workspace "$WS" job run index_coalesce --item-limit 2 --json)"
+coalesce_out="$(ee_json --workspace "$WS" job run index_coalesce --item-limit 130 --json)"
 assert_jq "$coalesce_out" ".schema == \"ee.response.v2\" and .success == true
     and .data.requestedJob == \"index_coalesce\"
     and .data.durableMutation == true
     and .data.summary == {\"total\":1,\"succeeded\":1,\"skipped\":0,\"failed\":0}
     and .data.job.outcome == \"success\"
     and .data.job.details.schema == \"ee.steward.index_coalesce.v1\"
-    and .data.job.details.preflight.pending_jobs == 2
+    and .data.job.details.preflight.pending_jobs == 130
     and .data.job.details.result.status == \"success\"
-    and .data.job.details.result.pending_jobs == 2
-    and .data.job.details.result.processed_jobs == 2
-    and .data.job.details.result.completed_jobs == 2
+    and .data.job.details.result.pending_jobs == 130
+    and .data.job.details.result.processed_jobs == 130
+    and .data.job.details.result.completed_jobs == 130
     and .data.job.details.result.failed_jobs == 0
-    and (.data.job.details.result.jobs | length == 2)
+    and (.data.job.details.result.jobs | length == 130)
     and ([.data.job.details.result.jobs[].processing_mode] | unique | length == 1)
     and ([.data.job.details.result.jobs[].fallback_to_full] | unique | length == 1)
     and any(.data.job.details.result.jobs[];
@@ -319,8 +330,8 @@ assert_jq "$coalesce_out" ".schema == \"ee.response.v2\" and .success == true
             or (.processing_mode == \"coalesced_full_rebuild_fallback_to_full\"
                 and (.fallback_to_full | type) == \"string\"
                 and (.fallback_to_full | length) > 0))
-        and .documents_total == (2 + $spans_imported)
-        and .documents_indexed == (2 + $spans_imported))
+        and .documents_total == (130 + $spans_imported)
+        and .documents_indexed == (130 + $spans_imported))
     and any(.data.job.details.result.jobs[];
         .job_id == \"$second_index_job_id\"
         and .document_id == \"$second_session_id\"
@@ -331,20 +342,20 @@ assert_jq "$coalesce_out" ".schema == \"ee.response.v2\" and .success == true
             or (.processing_mode == \"coalesced_full_rebuild_fallback_to_full\"
                 and (.fallback_to_full | type) == \"string\"
                 and (.fallback_to_full | length) > 0))
-        and .documents_total == (2 + $spans_imported)
-        and .documents_indexed == (2 + $spans_imported))" \
-    "public index_coalesce binds both import jobs to one completed source snapshot"
+        and .documents_total == (130 + $spans_imported)
+        and .documents_indexed == (130 + $spans_imported))" \
+    "public index_coalesce binds all import jobs to one completed, page-bounded source snapshot"
 ready_index_out="$(ee_json --workspace "$WS" index status --json)"
 assert_jq "$ready_index_out" ".schema == \"ee.response.v2\"
     and .success == true
     and .data.health == \"ready\"
     and (.data.dbGeneration == .data.indexGeneration)
-    and .data.dbSessionCount == 2
+    and .data.dbSessionCount == 130
     and .data.dbEvidenceCount == $spans_imported
     and .data.dbEvidenceAdmittedCount == $spans_imported
-    and .data.indexDocumentCounts.sessions == 2
+    and .data.indexDocumentCounts.sessions == 130
     and .data.indexDocumentCounts.evidence == $spans_imported
-    and .data.indexDocumentCount == (2 + $spans_imported)" \
+    and .data.indexDocumentCount == (130 + $spans_imported)" \
     "coalesced job drain publishes exact session/evidence counts at the DB generation"
 
 # bd-16imy: the exact admitted transcript span must flow through search and
@@ -434,7 +445,7 @@ repeat_index_out="$(ee_json --workspace "$WS" index status --json)"
 assert_jq "$repeat_index_out" ".data.health == \"ready\"
     and .data.dbGeneration == $ready_generation
     and .data.indexGeneration == $ready_generation
-    and .data.indexDocumentCount == (2 + $spans_imported)" \
+    and .data.indexDocumentCount == (130 + $spans_imported)" \
     "idempotent repeat preserves the exact ready generation and document count"
 
 step "ambient capture suggest is read-only and proposes one explicit capture"

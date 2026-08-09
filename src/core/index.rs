@@ -3356,11 +3356,13 @@ fn collect_workspace_index_source_snapshot(
     db.with_transaction_error(|| {
         let captured_generation = db.get_workspace_generation(workspace_id)?;
         let memories = db.list_memories_for_retrieval_with_global(workspace_id, None, false)?;
-        let sessions = db.list_sessions(workspace_id)?;
         let artifacts = db.list_artifacts(workspace_id, None)?;
         let memory_docs = memory_documents_with_anchors(db, &memories)?;
-        let session_docs: Vec<CanonicalSearchDocument> =
-            sessions.iter().map(session_to_document).collect();
+        let mut session_docs = Vec::new();
+        db.visit_sessions_for_workspace_in_current_snapshot(workspace_id, |session| {
+            session_docs.push(session_to_document(&session));
+            Ok(())
+        })?;
         let artifact_docs: Vec<CanonicalSearchDocument> =
             artifacts.iter().map(artifact_to_document).collect();
         let rule_docs = rule_documents(db, workspace_id)?;
@@ -4518,10 +4520,15 @@ fn evidence_documents(
     db: &DbConnection,
     workspace_id: &str,
 ) -> Result<EvidenceDocumentSelection, IndexRebuildError> {
-    let (spans, admission) = db.list_search_admitted_evidence_spans_for_workspace(workspace_id)?;
+    let mut documents = Vec::new();
+    let scan =
+        db.visit_search_admitted_evidence_spans_in_current_snapshot(workspace_id, |span| {
+            documents.push(evidence_span_to_document(&span));
+            Ok(())
+        })?;
     Ok(EvidenceDocumentSelection {
-        documents: spans.iter().map(evidence_span_to_document).collect(),
-        admission,
+        documents,
+        admission: scan.admission,
     })
 }
 
@@ -5818,7 +5825,7 @@ fn current_index_corpus_counts(
     workspace_id: &str,
 ) -> Result<(IndexDocumentCounts, EvidenceAdmissionReport), DbError> {
     let memories = db.list_memories_for_retrieval_with_global(workspace_id, None, false)?;
-    let sessions = db.list_sessions(workspace_id)?;
+    let sessions = db.count_sessions_for_workspace(workspace_id)?;
     let artifacts = db.list_artifacts(workspace_id, None)?;
     let rules = db
         .list_procedural_rules(workspace_id, None, None, false)?
@@ -5829,8 +5836,12 @@ fn current_index_corpus_counts(
                 && rule.maturity != crate::models::RuleMaturity::Superseded.as_str()
         })
         .count();
-    let (evidence, evidence_admission) =
-        db.list_search_admitted_evidence_spans_for_workspace(workspace_id)?;
+    let mut evidence = 0_usize;
+    let evidence_scan =
+        db.visit_search_admitted_evidence_spans_for_workspace(workspace_id, |_| {
+            evidence = evidence.saturating_add(1);
+            Ok(())
+        })?;
     let to_u32 = |label: &str, count: usize| {
         u32::try_from(count).map_err(|_| DbError::MalformedRow {
             operation: DbOperation::Query,
@@ -5839,16 +5850,16 @@ fn current_index_corpus_counts(
     };
     let counts = IndexDocumentCounts::checked(
         to_u32("memory", memories.len())?,
-        to_u32("session", sessions.len())?,
+        sessions,
         to_u32("artifact", artifacts.len())?,
         to_u32("rule", rules)?,
-        to_u32("evidence", evidence.len())?,
+        to_u32("evidence", evidence)?,
     )
     .map_err(|message| DbError::MalformedRow {
         operation: DbOperation::Query,
         message,
     })?;
-    Ok((counts, evidence_admission))
+    Ok((counts, evidence_scan.admission))
 }
 
 fn reembed_idempotency_key(

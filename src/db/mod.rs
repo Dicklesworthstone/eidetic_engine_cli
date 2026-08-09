@@ -11028,6 +11028,74 @@ impl DbConnection {
 
         rows.iter().map(stored_session_from_row).collect()
     }
+
+    /// Count CASS session source rows without materializing workspace metadata.
+    pub fn count_sessions_for_workspace(&self, workspace_id: &str) -> Result<u32> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT COUNT(*) FROM sessions WHERE workspace_id = ?1",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        let count = rows.first().map_or(Ok(0_i64), |row| {
+            required_i64(row, 0, DbOperation::Query, "session_count")
+        })?;
+        u32::try_from(count).map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: format!("session_count {count} must fit u32"),
+        })
+    }
+
+    /// Visit session metadata in bounded keyset pages while the caller holds
+    /// the corpus source transaction.
+    pub(crate) fn visit_sessions_for_workspace_in_current_snapshot(
+        &self,
+        workspace_id: &str,
+        mut visitor: impl FnMut(StoredSession) -> Result<()>,
+    ) -> Result<SessionReadScan> {
+        let mut cursor: Option<(String, String)> = None;
+        let mut scan = SessionReadScan::default();
+        loop {
+            let (sql, params) = match cursor.as_ref() {
+                None => (
+                    "SELECT id, workspace_id, cass_session_id, source_path, agent_name, model, started_at, ended_at, message_count, token_count, content_hash, metadata_json, imported_at, updated_at FROM sessions WHERE workspace_id = ?1 ORDER BY cass_session_id ASC, id ASC LIMIT ?2",
+                    vec![
+                        Value::Text(workspace_id.to_owned()),
+                        Value::BigInt(i64::from(INDEX_SOURCE_READ_PAGE_SIZE)),
+                    ],
+                ),
+                Some((cass_session_id, id)) => (
+                    "SELECT id, workspace_id, cass_session_id, source_path, agent_name, model, started_at, ended_at, message_count, token_count, content_hash, metadata_json, imported_at, updated_at FROM sessions WHERE workspace_id = ?1 AND (cass_session_id > ?2 OR (cass_session_id = ?2 AND id > ?3)) ORDER BY cass_session_id ASC, id ASC LIMIT ?4",
+                    vec![
+                        Value::Text(workspace_id.to_owned()),
+                        Value::Text(cass_session_id.clone()),
+                        Value::Text(id.clone()),
+                        Value::BigInt(i64::from(INDEX_SOURCE_READ_PAGE_SIZE)),
+                    ],
+                ),
+            };
+            let rows = self.query_for(DbOperation::Query, sql, &params)?;
+            let page_len = rows.len();
+            if page_len == 0 {
+                break;
+            }
+            scan.pages_read = scan.pages_read.saturating_add(1);
+            scan.rows_read = scan
+                .rows_read
+                .saturating_add(u64::try_from(page_len).unwrap_or(u64::MAX));
+            scan.max_page_rows = scan
+                .max_page_rows
+                .max(u32::try_from(page_len).unwrap_or(u32::MAX));
+            for row in &rows {
+                let session = stored_session_from_row(row)?;
+                cursor = Some((session.cass_session_id.clone(), session.id.clone()));
+                visitor(session)?;
+            }
+            if page_len < usize::try_from(INDEX_SOURCE_READ_PAGE_SIZE).unwrap_or(usize::MAX) {
+                break;
+            }
+        }
+        Ok(scan)
+    }
 }
 
 fn stored_session_from_row(row: &Row) -> Result<StoredSession> {
@@ -11049,11 +11117,54 @@ fn stored_session_from_row(row: &Row) -> Result<StoredSession> {
     })
 }
 
+fn stored_session_from_joined_row(row: &Row, offset: usize) -> Result<Option<StoredSession>> {
+    if optional_text(row, offset)?.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(StoredSession {
+        id: required_text(row, offset, DbOperation::Query, "session_id")?.to_owned(),
+        workspace_id: required_text(row, offset + 1, DbOperation::Query, "session_workspace_id")?
+            .to_owned(),
+        cass_session_id: required_text(
+            row,
+            offset + 2,
+            DbOperation::Query,
+            "cass_session_id",
+        )?
+        .to_owned(),
+        source_path: optional_text(row, offset + 3)?.map(str::to_owned),
+        agent_name: optional_text(row, offset + 4)?.map(str::to_owned),
+        model: optional_text(row, offset + 5)?.map(str::to_owned),
+        started_at: optional_text(row, offset + 6)?.map(str::to_owned),
+        ended_at: optional_text(row, offset + 7)?.map(str::to_owned),
+        message_count: required_u32(row, offset + 8, DbOperation::Query, "message_count")?,
+        token_count: optional_u32(row, offset + 9)?,
+        content_hash: required_text(
+            row,
+            offset + 10,
+            DbOperation::Query,
+            "session_content_hash",
+        )?
+        .to_owned(),
+        metadata_json: optional_text(row, offset + 11)?.map(str::to_owned),
+        imported_at: required_text(row, offset + 12, DbOperation::Query, "imported_at")?
+            .to_owned(),
+        updated_at: required_text(row, offset + 13, DbOperation::Query, "updated_at")?.to_owned(),
+    }))
+}
+
 pub const EVIDENCE_SECURITY_METADATA_SCHEMA_V1: &str = "ee.evidence.security_metadata.v1";
 pub const EVIDENCE_SECURITY_RESCREEN_REPORT_SCHEMA_V1: &str = "ee.evidence.security_rescreen.v1";
 pub const EVIDENCE_SECURITY_RESCREEN_AUDIT_SCHEMA_V1: &str =
     "ee.audit.evidence_security_rescreen.v1";
 pub const EVIDENCE_SECURITY_RESCREEN_MAX_BATCH: u32 = 500;
+/// Maximum session or excerpt-bearing evidence rows fetched by one index-source read.
+///
+/// Full corpus collection may visit multiple pages, but no individual query is
+/// allowed to materialize an unbounded workspace or session transcript. With
+/// the schema's 64 KiB excerpt ceiling this caps one page at 8 MiB of excerpt
+/// payload before row metadata.
+const INDEX_SOURCE_READ_PAGE_SIZE: u32 = 128;
 pub const EVIDENCE_SCREENING_VERSION: u32 = 1;
 pub const EVIDENCE_SECURITY_POLICY_EPOCH: u32 = 1;
 pub const EVIDENCE_CANONICAL_PROVENANCE_REVISION: u32 = 1;
@@ -11123,6 +11234,36 @@ impl EvidenceAdmissionReport {
             counts.denied = counts.denied.saturating_add(1);
         }
     }
+}
+
+/// Internal accounting for one bounded, snapshot-consistent evidence scan.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct EvidenceAdmissionScan {
+    pub admission: EvidenceAdmissionReport,
+    pub pages_read: u32,
+    pub rows_read: u64,
+    pub max_page_rows: u32,
+}
+
+/// Internal accounting for one bounded session-source scan.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SessionReadScan {
+    pub pages_read: u32,
+    pub rows_read: u64,
+    pub max_page_rows: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EvidenceSearchReadCursor {
+    session_id: String,
+    start_line: u32,
+    end_line: u32,
+    evidence_id: String,
+}
+
+struct EvidenceSearchReadRow {
+    span: StoredEvidenceSpan,
+    session: Option<StoredSession>,
 }
 
 /// One redaction-safe decision from a bounded legacy evidence re-screen.
@@ -12305,17 +12446,16 @@ impl DbConnection {
         expected_workspace_id: &str,
         session_id: &str,
     ) -> Result<Vec<StoredEvidenceSpan>> {
-        let Some(session) = self.get_session(session_id)? else {
-            return Ok(Vec::new());
-        };
-        if session.workspace_id != expected_workspace_id {
-            return Ok(Vec::new());
-        }
-        Ok(self
-            .list_evidence_spans_for_session(session_id)?
-            .into_iter()
-            .filter(|span| span.is_search_admitted_for_session(expected_workspace_id, &session))
-            .collect())
+        let mut admitted = Vec::new();
+        self.scan_search_admitted_evidence_in_read_snapshot(
+            expected_workspace_id,
+            Some(session_id),
+            |span| {
+                admitted.push(span);
+                Ok(())
+            },
+        )?;
+        Ok(admitted)
     }
 
     /// List evidence spans for a session in transcript order.
@@ -12356,26 +12496,174 @@ impl DbConnection {
         &self,
         workspace_id: &str,
     ) -> Result<(Vec<StoredEvidenceSpan>, EvidenceAdmissionReport)> {
-        let spans = self.list_evidence_spans_for_workspace(workspace_id)?;
-        let sessions = self
-            .list_sessions(workspace_id)?
-            .into_iter()
-            .map(|session| (session.id.clone(), session))
-            .collect::<BTreeMap<_, _>>();
         let mut admitted = Vec::new();
-        let mut report = EvidenceAdmissionReport::default();
-
-        for span in spans {
-            let validated = sessions
-                .get(&span.session_id)
-                .is_some_and(|session| span.is_search_admitted_for_session(workspace_id, session));
-            report.record(&span.producer_kind, &span.search_eligibility, validated);
-            if validated {
+        let scan =
+            self.scan_search_admitted_evidence_in_read_snapshot(workspace_id, None, |span| {
                 admitted.push(span);
+                Ok(())
+            })?;
+        Ok((admitted, scan.admission))
+    }
+
+    /// Visit admitted CASS evidence without materializing an intermediate span
+    /// or session snapshot. The callback sees rows in canonical transcript
+    /// order while each joined source read remains page-bounded.
+    pub(crate) fn visit_search_admitted_evidence_spans_for_workspace(
+        &self,
+        workspace_id: &str,
+        visitor: impl FnMut(StoredEvidenceSpan) -> Result<()>,
+    ) -> Result<EvidenceAdmissionScan> {
+        self.scan_search_admitted_evidence_in_read_snapshot(workspace_id, None, visitor)
+    }
+
+    /// Visit evidence while the caller already holds the corpus source
+    /// transaction. This avoids a nested transaction in atomic index snapshot
+    /// collection while retaining the same bounded keyset pages.
+    pub(crate) fn visit_search_admitted_evidence_spans_in_current_snapshot(
+        &self,
+        workspace_id: &str,
+        visitor: impl FnMut(StoredEvidenceSpan) -> Result<()>,
+    ) -> Result<EvidenceAdmissionScan> {
+        self.scan_search_admitted_evidence(workspace_id, None, visitor)
+    }
+
+    fn scan_search_admitted_evidence_in_read_snapshot(
+        &self,
+        workspace_id: &str,
+        session_id: Option<&str>,
+        visitor: impl FnMut(StoredEvidenceSpan) -> Result<()>,
+    ) -> Result<EvidenceAdmissionScan> {
+        self.begin_read_snapshot()?;
+        let result = self.scan_search_admitted_evidence(workspace_id, session_id, visitor);
+
+        match result {
+            Ok(scan) => {
+                self.commit_read_snapshot()?;
+                Ok(scan)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = self.rollback_read_snapshot() {
+                    tracing::error!(
+                        error = %error,
+                        rollback_error = %rollback_error,
+                        "failed to roll back bounded evidence read snapshot"
+                    );
+                }
+                Err(error)
             }
         }
+    }
 
-        Ok((admitted, report))
+    fn scan_search_admitted_evidence(
+        &self,
+        workspace_id: &str,
+        session_id: Option<&str>,
+        mut visitor: impl FnMut(StoredEvidenceSpan) -> Result<()>,
+    ) -> Result<EvidenceAdmissionScan> {
+        let mut scan = EvidenceAdmissionScan::default();
+        let mut cursor = None;
+        loop {
+            let page = self.read_evidence_search_page(workspace_id, session_id, cursor.as_ref())?;
+            let page_len = page.len();
+            if page_len == 0 {
+                break;
+            }
+            scan.pages_read = scan.pages_read.saturating_add(1);
+            scan.rows_read = scan
+                .rows_read
+                .saturating_add(u64::try_from(page_len).unwrap_or(u64::MAX));
+            scan.max_page_rows = scan
+                .max_page_rows
+                .max(u32::try_from(page_len).unwrap_or(u32::MAX));
+
+            for row in page {
+                cursor = Some(EvidenceSearchReadCursor {
+                    session_id: row.span.session_id.clone(),
+                    start_line: row.span.start_line,
+                    end_line: row.span.end_line,
+                    evidence_id: row.span.id.clone(),
+                });
+                let validated = row.session.as_ref().is_some_and(|session| {
+                    row.span
+                        .is_search_admitted_for_session(workspace_id, session)
+                });
+                scan.admission.record(
+                    &row.span.producer_kind,
+                    &row.span.search_eligibility,
+                    validated,
+                );
+                if validated {
+                    visitor(row.span)?;
+                }
+            }
+            if page_len < usize::try_from(INDEX_SOURCE_READ_PAGE_SIZE).unwrap_or(usize::MAX) {
+                break;
+            }
+        }
+        Ok(scan)
+    }
+
+    fn read_evidence_search_page(
+        &self,
+        workspace_id: &str,
+        session_id: Option<&str>,
+        cursor: Option<&EvidenceSearchReadCursor>,
+    ) -> Result<Vec<EvidenceSearchReadRow>> {
+        const EVIDENCE_COLUMNS: &str = "e.id, e.workspace_id, e.session_id, e.memory_id, e.cass_span_id, e.span_kind, e.start_line, e.end_line, e.start_byte, e.end_byte, e.role, e.excerpt, e.content_hash, e.metadata_json, e.producer_kind, e.screening_version, e.secret_redaction_status, e.redaction_classes_json, e.instruction_risk, e.search_eligibility, e.pack_eligibility, e.canonical_provenance_revision, e.canonical_excerpt_hash, e.security_policy_epoch, e.upstream_ref_hash, e.created_at, e.updated_at";
+        const SESSION_COLUMNS: &str = "s.id, s.workspace_id, s.cass_session_id, s.source_path, s.agent_name, s.model, s.started_at, s.ended_at, s.message_count, s.token_count, s.content_hash, s.metadata_json, s.imported_at, s.updated_at";
+
+        let (where_clause, params) = match (session_id, cursor) {
+            (None, None) => (
+                "e.workspace_id = ?1",
+                vec![
+                    Value::Text(workspace_id.to_owned()),
+                    Value::BigInt(i64::from(INDEX_SOURCE_READ_PAGE_SIZE)),
+                ],
+            ),
+            (None, Some(cursor)) => (
+                "e.workspace_id = ?1 AND (e.session_id > ?2 OR (e.session_id = ?2 AND e.start_line > ?3) OR (e.session_id = ?2 AND e.start_line = ?3 AND e.end_line > ?4) OR (e.session_id = ?2 AND e.start_line = ?3 AND e.end_line = ?4 AND e.id > ?5))",
+                vec![
+                    Value::Text(workspace_id.to_owned()),
+                    Value::Text(cursor.session_id.clone()),
+                    Value::BigInt(i64::from(cursor.start_line)),
+                    Value::BigInt(i64::from(cursor.end_line)),
+                    Value::Text(cursor.evidence_id.clone()),
+                    Value::BigInt(i64::from(INDEX_SOURCE_READ_PAGE_SIZE)),
+                ],
+            ),
+            (Some(session_id), None) => (
+                "e.workspace_id = ?1 AND e.session_id = ?2",
+                vec![
+                    Value::Text(workspace_id.to_owned()),
+                    Value::Text(session_id.to_owned()),
+                    Value::BigInt(i64::from(INDEX_SOURCE_READ_PAGE_SIZE)),
+                ],
+            ),
+            (Some(session_id), Some(cursor)) => (
+                "e.workspace_id = ?1 AND e.session_id = ?2 AND (e.start_line > ?3 OR (e.start_line = ?3 AND e.end_line > ?4) OR (e.start_line = ?3 AND e.end_line = ?4 AND e.id > ?5))",
+                vec![
+                    Value::Text(workspace_id.to_owned()),
+                    Value::Text(session_id.to_owned()),
+                    Value::BigInt(i64::from(cursor.start_line)),
+                    Value::BigInt(i64::from(cursor.end_line)),
+                    Value::Text(cursor.evidence_id.clone()),
+                    Value::BigInt(i64::from(INDEX_SOURCE_READ_PAGE_SIZE)),
+                ],
+            ),
+        };
+        let limit_parameter = params.len();
+        let sql = format!(
+            "SELECT {EVIDENCE_COLUMNS}, {SESSION_COLUMNS} FROM evidence_spans e LEFT JOIN sessions s ON s.id = e.session_id WHERE {where_clause} ORDER BY e.session_id ASC, e.start_line ASC, e.end_line ASC, e.id ASC LIMIT ?{limit_parameter}"
+        );
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter()
+            .map(|row| {
+                Ok(EvidenceSearchReadRow {
+                    span: stored_evidence_span_from_row(row)?,
+                    session: stored_session_from_joined_row(row, 27)?,
+                })
+            })
+            .collect()
     }
 
     /// Count evidence spans for a workspace.
@@ -40589,6 +40877,137 @@ mod tests {
             ),
             "legacy_unknown cannot enter through the live boundary",
         )
+    }
+
+    #[test]
+    fn search_evidence_admission_pages_excerpt_reads_without_losing_counts() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let workspace_id = "wsp_01234567890123456789012345";
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x850_900)).to_string();
+        connection.insert_session(&session_id, &session_input("paged-evidence-session"))?;
+
+        let session_total = super::INDEX_SOURCE_READ_PAGE_SIZE.saturating_add(3);
+        for index in 1..session_total {
+            let paged_session_id = crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(
+                0x850_b00 + u128::from(index),
+            ))
+            .to_string();
+            connection.insert_session(
+                &paged_session_id,
+                &session_input(&format!("paged-session-{index:03}")),
+            )?;
+        }
+        let mut sessions_visited = 0_u32;
+        let session_scan = connection.with_transaction_error(|| {
+            connection.visit_sessions_for_workspace_in_current_snapshot(workspace_id, |_| {
+                sessions_visited = sessions_visited.saturating_add(1);
+                Ok(())
+            })
+        })?;
+        ensure_equal(
+            &session_scan.pages_read,
+            &2,
+            "session keyset scan crosses exactly two bounded pages",
+        )?;
+        ensure_equal(
+            &session_scan.rows_read,
+            &u64::from(session_total),
+            "session keyset scan accounts for every source row",
+        )?;
+        ensure_equal(
+            &session_scan.max_page_rows,
+            &super::INDEX_SOURCE_READ_PAGE_SIZE,
+            "no session source read exceeds the fixed page bound",
+        )?;
+        ensure_equal(
+            &sessions_visited,
+            &session_total,
+            "session visitor streams every row without a workspace snapshot vector",
+        )?;
+
+        let total = super::INDEX_SOURCE_READ_PAGE_SIZE.saturating_add(3);
+        for index in 0..total {
+            let evidence_id = crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(
+                0x850_a00 + u128::from(index),
+            ))
+            .to_string();
+            let line = index.saturating_add(1);
+            let excerpt = format!("bounded evidence page phrase {line}");
+            let mut input = evidence_span_input(&session_id, &excerpt, line);
+            if index == total.saturating_sub(1) {
+                input.producer_kind = super::EvidenceProducerKind::DocsBootstrap;
+                input.role = Some("docs_bootstrap".to_owned());
+                input.span_kind = "file".to_owned();
+            }
+            connection.insert_evidence_span(&evidence_id, &input)?;
+        }
+
+        let mut visited = 0_u32;
+        let scan = connection.visit_search_admitted_evidence_spans_for_workspace(
+            workspace_id,
+            |_| {
+                visited = visited.saturating_add(1);
+                Ok(())
+            },
+        )?;
+        ensure_equal(
+            &scan.pages_read,
+            &2,
+            "keyset scan crosses exactly two bounded pages",
+        )?;
+        ensure_equal(
+            &scan.rows_read,
+            &u64::from(total),
+            "keyset scan accounts for every admitted and denied source row",
+        )?;
+        ensure_equal(
+            &scan.max_page_rows,
+            &super::INDEX_SOURCE_READ_PAGE_SIZE,
+            "no joined evidence/session source read exceeds the fixed page bound",
+        )?;
+        ensure_equal(
+            &visited,
+            &total.saturating_sub(1),
+            "visitor receives only admitted rows without an intermediate workspace vector",
+        )?;
+
+        let admitted_for_session = connection
+            .list_search_admitted_evidence_spans_for_session(workspace_id, &session_id)?;
+        ensure_equal(
+            &admitted_for_session.len(),
+            &usize::try_from(total.saturating_sub(1)).unwrap_or(usize::MAX),
+            "session admission crosses the fixed read-page boundary",
+        )?;
+
+        let (admitted_for_workspace, report) =
+            connection.list_search_admitted_evidence_spans_for_workspace(workspace_id)?;
+        ensure_equal(
+            &admitted_for_workspace,
+            &admitted_for_session,
+            "workspace and session pagers preserve the same admitted transcript order",
+        )?;
+        ensure_equal(
+            &report
+                .by_producer
+                .get("cass_import")
+                .map(|counts| counts.admitted),
+            &Some(total.saturating_sub(1)),
+            "admitted count includes rows beyond the first bounded page",
+        )?;
+        ensure_equal(
+            &report
+                .by_producer
+                .get("docs_bootstrap")
+                .map(|counts| counts.denied),
+            &Some(1),
+            "denied count includes the final row beyond the first bounded page",
+        )?;
+
+        connection.close()?;
+        Ok(())
     }
 
     #[test]
