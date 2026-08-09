@@ -13193,19 +13193,18 @@ mod tests {
                     50,
                     artifact_content.clone(),
                 )?,
-                // The preview-tier candidate deliberately avoids the
-                // Failures/Risk sections: those are RESERVED by the
-                // anti-pattern-first phase, which would pre-consume
-                // full-share tokens and displace the intended full-tier
-                // items (the four full candidates sum to exactly the 70%
-                // share of this budget). This test's subject is LOD tier
-                // assignment, not anti-pattern reservation.
+                // The anti-pattern-first phase owns Failures/Risk, so make
+                // the original failure larger than the entire 70% full
+                // tier. Its reserved selection must therefore use the 20%
+                // preview tier rather than consume full-share tokens. The
+                // four ordinary full candidates then consume exactly 70%,
+                // leaving the final candidate for the 10% link tier.
                 candidate_in_section(
                     14,
-                    PackSection::Evidence,
+                    PackSection::Failures,
                     0.3,
                     0.3,
-                    200,
+                    701,
                     preview_source.clone(),
                 )?,
                 candidate_in_section(15, PackSection::Artifacts, 0.2, 0.2, 200, link_source)?,
