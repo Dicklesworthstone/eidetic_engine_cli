@@ -502,7 +502,8 @@ fn get_ee_binary_path() -> Result<PathBuf, DomainError> {
 #[cfg(test)]
 fn ensure_hook_dir_is_not_symlink(hook_dir: &Path) -> Result<(), DomainError> {
     if let Some(symlink_path) = first_existing_symlink_component(hook_dir)? {
-        let message = if symlink_path == hook_dir {
+        let inspected_hook_dir = crate::util::path_with_canonical_process_temp_prefix(hook_dir);
+        let message = if symlink_path == inspected_hook_dir {
             format!(
                 "Refusing to write hooks into '{}': hook directory is a symlink",
                 hook_dir.display()
@@ -1949,7 +1950,8 @@ fn harness_settings_path_can_be_written(settings_path: &Path) -> bool {
 
 fn ensure_harness_path_is_not_symlink(path: &Path, role: &str) -> Result<(), DomainError> {
     if let Some(symlink_path) = first_existing_symlink_component(path)? {
-        let message = if symlink_path == path {
+        let inspected_path = crate::util::path_with_canonical_process_temp_prefix(path);
+        let message = if symlink_path == inspected_path {
             format!(
                 "Refusing to use harness {role} '{}': path is a symlink",
                 path.display()
@@ -5816,7 +5818,11 @@ AGENT_NAME = os.environ.get("AGENT_NAME", "").strip()
         }
         use std::os::unix::net::UnixListener;
 
-        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let system_temp_root = fs::canonicalize("/tmp").map_err(|e| e.to_string())?;
+        let temp = tempfile::Builder::new()
+            .prefix("eeh")
+            .tempdir_in(system_temp_root)
+            .map_err(|e| e.to_string())?;
         let hook_dir = temp.path().join("hooks");
         fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
         let _listener =
