@@ -42,7 +42,7 @@ use chrono::{DateTime, Duration, Utc};
 use crate::core::search::{
     SearchDedupMode, SearchFusionWeights, SearchHit, SearchOptions, SearchSourceMode,
     configured_fusion_adjustment, resolved_search_fusion_weights,
-    run_search_with_read_connection_seeded, search_hit_meets_relevance_floor,
+    run_search_with_read_connection_seeded_with_cx, search_hit_meets_relevance_floor,
     sort_search_hits_by_score_order,
 };
 use crate::db::{DbConnection, StoredAuditEntry, StoredFeedbackEvent, audit_actions};
@@ -663,7 +663,11 @@ pub struct ReplayCollection {
 /// audit connection, so no audit rows can be written. The relevance floor is
 /// disabled at replay and re-applied per candidate offline, because floor
 /// membership depends on the adjusted score each candidate produces.
-pub fn collect_query_replays(
+///
+/// Async on the caller's `Cx` so the whole tuning pipeline runs under ONE
+/// runtime root — the sync search wrappers each start their own root, and
+/// nesting roots from inside a running runtime is not a supported shape.
+pub async fn collect_query_replays_with_cx(
     cx: &Cx,
     read_connection: &crate::db::DbConnection,
     workspace_path: &Path,
@@ -698,9 +702,14 @@ pub fn collect_query_replays(
             memory_scope: MemoryScope::default(),
             strict_scope: false,
         };
-        let report =
-            run_search_with_read_connection_seeded(&options, read_connection, &determinism)
-                .map_err(|error| storage_error("replay search failed", &error))?;
+        let report = run_search_with_read_connection_seeded_with_cx(
+            cx,
+            &options,
+            read_connection,
+            determinism.shared_child("search.rerank"),
+        )
+        .await
+        .map_err(|error| storage_error("replay search failed", &error))?;
         let mut hits = Vec::with_capacity(report.results.len());
         for mut hit in report.results {
             // The live pipeline multiplied the raw fusion score by the
@@ -1127,7 +1136,7 @@ pub fn assemble_retrieval_tuning_report(
 ///
 /// Read-only against the workspace; deterministic given the same database,
 /// index, config, and `as_of`.
-pub fn run_retrieval_tuning(
+pub async fn run_retrieval_tuning_with_cx(
     cx: &Cx,
     connection: &DbConnection,
     workspace_path: &Path,
@@ -1150,17 +1159,50 @@ pub fn run_retrieval_tuning(
         .iter()
         .map(|triple| triple.query.clone())
         .collect();
-    let replays = collect_query_replays(
+    let replays = collect_query_replays_with_cx(
         cx,
         connection,
         workspace_path,
         database_path,
         &queries,
         as_of,
-    )?;
+    )
+    .await?;
     let incumbent = TuningWeights::incumbent_for_workspace(workspace_path);
     let evaluation = evaluate_fusion_candidates(cx, &replays.replays, &labels.triples, incumbent)?;
     assemble_retrieval_tuning_report(labels, Some(evaluation), db_generation, gate)
+}
+
+/// Synchronous entry for CLI handlers: runs the full tuning pass under one
+/// fresh runtime root (never nest this inside an existing root).
+pub fn run_retrieval_tuning(
+    workspace_path: &Path,
+    database_path: &Path,
+    workspace_id: &str,
+    as_of: DateTime<Utc>,
+    extraction: &LabelExtractionConfig,
+    gate: &RetrievalTuningGateConfig,
+) -> Result<RetrievalTuningReport, ShadowTuningError> {
+    crate::core::run_cli_with_cx(std::time::Duration::from_secs(600), |cx| async move {
+        let connection =
+            DbConnection::open_file(database_path).map_err(|error| ShadowTuningError::Storage {
+                message: format!("open workspace database: {error}"),
+            })?;
+        run_retrieval_tuning_with_cx(
+            &cx,
+            &connection,
+            workspace_path,
+            database_path,
+            workspace_id,
+            as_of,
+            extraction,
+            gate,
+        )
+        .await
+    })
+    .map_err(|error| ShadowTuningError::Storage {
+        message: format!("start shadow-tuning runtime: {error}"),
+    })?
 }
 
 fn weights_json(weights: TuningWeights) -> serde_json::Value {
