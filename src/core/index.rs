@@ -27,7 +27,7 @@ use crate::models::model_registry::{
 use crate::models::{CorpusRevision, INDEX_INTAKE_FALLBACK_CORPUS_REVISION_MISMATCH, MemoryId};
 use crate::models::{
     EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH, EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
-    EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, EMBEDDING_POSTURE_SCHEMA_V1,
+    EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, EMBEDDING_POSTURE_SCHEMA_V1, EmbedBackend,
 };
 use crate::search::{
     ARTIFACT_INDEX_PROJECTION_SCHEMA_V1, CanonicalSearchDocument,
@@ -4900,8 +4900,8 @@ const EE_MODEL_CACHE_SUBDIR: &str = "models";
 const EE_MODEL2VEC_REGISTRY_SUBDIR: &str = "model2vec";
 const EMBEDDING_REGISTRY_FINGERPRINT_SCHEMA: &str = "ee.embedding_registry_fingerprint.v1";
 pub(crate) const POTION_MODEL_NAME: &str = "potion-multilingual-128M";
-pub(crate) const EMBED_BACKEND_NEURAL_LOCAL: &str = "neural_local";
-pub(crate) const EMBED_BACKEND_HASH_FALLBACK: &str = "hash_fallback";
+pub(crate) const EMBED_BACKEND_NEURAL_LOCAL: &str = EmbedBackend::NeuralLocal.as_str();
+pub(crate) const EMBED_BACKEND_HASH_FALLBACK: &str = EmbedBackend::HashFallback.as_str();
 const EE_EMBED_DOWNLOAD_AUTO: &str = "auto";
 const EE_EMBED_DOWNLOAD_OFF: &str = "off";
 const EE_DOWNLOAD_STATE_PENDING: u8 = 0;
@@ -5065,21 +5065,26 @@ fn verified_potion_model_dir(model_dir: &Path) -> bool {
 /// the stack has not been initialized yet, it performs only manifest-cached
 /// local availability checks and never starts a download.
 #[must_use]
-pub(crate) fn active_embed_backend_token() -> &'static str {
+pub(crate) fn active_embed_backend() -> EmbedBackend {
     if let Some(stack) = DEFAULT_SEARCH_EMBEDDER_STACK.get() {
         return if stack.fast().is_semantic() {
-            EMBED_BACKEND_NEURAL_LOCAL
+            EmbedBackend::NeuralLocal
         } else {
-            EMBED_BACKEND_HASH_FALLBACK
+            EmbedBackend::HashFallback
         };
     }
 
     let settings = default_embedder_settings();
     if verified_potion_model_dir(&potion_model_destination_dir(&settings.model_root)) {
-        EMBED_BACKEND_NEURAL_LOCAL
+        EmbedBackend::NeuralLocal
     } else {
-        EMBED_BACKEND_HASH_FALLBACK
+        EmbedBackend::HashFallback
     }
+}
+
+#[must_use]
+pub(crate) fn active_embed_backend_token() -> &'static str {
+    active_embed_backend().as_str()
 }
 
 fn configured_embedder_model_root() -> Option<PathBuf> {

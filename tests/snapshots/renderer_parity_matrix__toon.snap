@@ -6,6 +6,7 @@ schema: ee.response.v2
 success: true
 data:
   command: pack
+  embed_backend: hash_fallback
   request:
     query: renderer parity release
     profile: compact

@@ -5,6 +5,7 @@
   "data": {
     "command": "search",
     "status": "success",
+    "embed_backend": "hash_fallback",
     "query": "cargo test before release",
     "results": [
       {

@@ -18,6 +18,52 @@ pub const EMBEDDING_METADATA_SCHEMA_V1: &str = "ee.embedding.metadata.v1";
 /// Schema identifier for semantic model admissibility reports.
 pub const SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1: &str = "ee.semantic_model_admissibility.v1";
 
+/// Embedding backend that actually produced or is ready to produce a
+/// retrieval response.
+///
+/// Keep this vocabulary deliberately smaller than the model registry provider
+/// taxonomy: callers need to distinguish verified local neural retrieval from
+/// the deterministic degraded fallback, not infer a particular model file.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbedBackend {
+    NeuralLocal,
+    #[default]
+    HashFallback,
+}
+
+impl EmbedBackend {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NeuralLocal => "neural_local",
+            Self::HashFallback => "hash_fallback",
+        }
+    }
+}
+
+impl fmt::Display for EmbedBackend {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for EmbedBackend {
+    type Err = ParseModelRegistryValueError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match normalized_model_registry_token(input).as_str() {
+            "neural_local" => Ok(Self::NeuralLocal),
+            "hash_fallback" => Ok(Self::HashFallback),
+            _ => Err(ParseModelRegistryValueError::new(
+                "embed_backend",
+                input,
+                "neural_local, hash_fallback",
+            )),
+        }
+    }
+}
+
 fn normalized_model_registry_token(input: &str) -> String {
     let trimmed = input.trim();
     let mut normalized = String::with_capacity(trimmed.len());

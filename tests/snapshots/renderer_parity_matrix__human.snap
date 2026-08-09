@@ -5,6 +5,7 @@ expression: "render_context_response_for_format(&response, case.format)"
 ee pack "renderer parity release"
 
 Profile: compact | Budget: 21/500 tokens | Pack hash: blake3:renderer-parity
+embed_backend: hash_fallback
 
 Advisory: degraded — Context includes 1 degraded signal; validate advisory memory and repair degraded sources before relying on this pack.
 

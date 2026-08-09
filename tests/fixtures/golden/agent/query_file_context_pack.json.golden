@@ -3,6 +3,7 @@
   "success": true,
   "data": {
     "command": "pack",
+    "embed_backend": "hash_fallback",
     "request": {
       "query": "format before release",
       "profile": "compact",

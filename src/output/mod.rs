@@ -2827,7 +2827,7 @@ pub fn render_context_response_json_with_options(
         d.field_str("command", response.data.command);
         d.field_str(
             "embed_backend",
-            crate::core::index::active_embed_backend_token(),
+            response.data.embed_backend.as_str(),
         );
         d.field_object("request", |request| {
             request.field_str("query", &response.data.request.query);
@@ -3215,13 +3215,6 @@ fn context_response_cached_json_with_top_level_degraded(cached_json: &str) -> St
     let Some(object) = value.as_object_mut() else {
         return cached_json.to_owned();
     };
-    if let Some(data) = object
-        .get_mut("data")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        data.entry("embed_backend".to_string())
-            .or_insert_with(|| serde_json::json!(crate::core::index::active_embed_backend_token()));
-    }
     if !object.contains_key("degraded") {
         let degraded = object
             .get("data")
@@ -3307,7 +3300,7 @@ pub fn render_context_response_human(response: &ContextResponse) -> String {
         response.data.pack.used_tokens,
         response.data.pack.budget.max_tokens(),
         context_pack_hash(response),
-        crate::core::index::active_embed_backend_token()
+        response.data.embed_backend.as_str()
     ));
 
     let advisory_banner =
@@ -3540,7 +3533,7 @@ pub fn render_context_response_markdown_with_options(
             heading_end + 2,
             &format!(
                 "**embed_backend:** `{}`\n\n",
-                crate::core::index::active_embed_backend_token()
+                response.data.embed_backend.as_str()
             ),
         );
     }
@@ -21756,23 +21749,20 @@ mod tests {
             &json,
             &format!(
                 "\"embed_backend\":\"{}\"",
-                crate::core::index::active_embed_backend_token()
+                response.data.embed_backend.as_str()
             ),
             "pack embedding backend",
         )?;
         ensure_contains(
             &render_context_response_human(&response),
-            &format!(
-                "embed_backend: {}",
-                crate::core::index::active_embed_backend_token()
-            ),
+            &format!("embed_backend: {}", response.data.embed_backend.as_str()),
             "human pack embedding backend",
         )?;
         ensure_contains(
             &render_context_response_markdown(&response),
             &format!(
                 "**embed_backend:** `{}`",
-                crate::core::index::active_embed_backend_token()
+                response.data.embed_backend.as_str()
             ),
             "markdown pack embedding backend",
         )?;
@@ -22185,6 +22175,7 @@ mod tests {
             "success": true,
             "data": {
                 "command": "pack",
+                "embed_backend": "hash_fallback",
                 "pack": {
                     "schema": crate::models::PACK_SCHEMA_V2,
                     "query": "prepare release"

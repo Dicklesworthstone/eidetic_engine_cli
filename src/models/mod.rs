@@ -204,10 +204,10 @@ pub use memory_sentinel::{
     StoredMemorySentinelSpec, memory_sentinel_spec_repair_hint, parse_memory_sentinel_spec,
 };
 pub use model_registry::{
-    EMBEDDING_METADATA_SCHEMA_V1, EmbeddingMetadataFieldSchema, EmbeddingMetadataObjectSchema,
-    EmbeddingMetadataRecord, EmbeddingMetadataValidationError, EmbeddingPooling,
-    EmbeddingVectorDtype, MODEL_REGISTRY_SCHEMA_V1, ModelDistanceMetric, ModelProvider,
-    ModelPurpose, ModelRegistryStatus, ParseModelRegistryValueError,
+    EMBEDDING_METADATA_SCHEMA_V1, EmbedBackend, EmbeddingMetadataFieldSchema,
+    EmbeddingMetadataObjectSchema, EmbeddingMetadataRecord, EmbeddingMetadataValidationError,
+    EmbeddingPooling, EmbeddingVectorDtype, MODEL_REGISTRY_SCHEMA_V1, ModelDistanceMetric,
+    ModelProvider, ModelPurpose, ModelRegistryStatus, ParseModelRegistryValueError,
     embedding_metadata_schema_catalog_json, embedding_metadata_schemas,
 };
 pub use mutation::{

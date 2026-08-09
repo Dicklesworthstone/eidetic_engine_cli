@@ -2357,6 +2357,10 @@ mod tests {
     ) -> TestResult {
         let output = Command::new(ee_binary_path()?)
             .env("EE_EMBED_DOWNLOAD", "off")
+            .env(
+                "EE_EMBED_MODEL_DIR",
+                workspace.join(".ee").join("empty-model-cache"),
+            )
             .arg("--json")
             .arg("--workspace")
             .arg(workspace)
@@ -2611,6 +2615,10 @@ mod tests {
 
         let output = Command::new(env!("CARGO_BIN_EXE_ee"))
             .env("EE_EMBED_DOWNLOAD", "off")
+            .env(
+                "EE_EMBED_MODEL_DIR",
+                workspace.join(".ee").join("empty-model-cache"),
+            )
             .arg("--json")
             .arg("--workspace")
             .arg(&workspace)
@@ -2832,6 +2840,10 @@ mod tests {
 
         let output = Command::new(env!("CARGO_BIN_EXE_ee"))
             .env("EE_EMBED_DOWNLOAD", "off")
+            .env(
+                "EE_EMBED_MODEL_DIR",
+                workspace.join(".ee").join("empty-model-cache"),
+            )
             .env("EE_L2_PACK_CACHE_DISABLE", "1")
             .arg("--json")
             .arg("--workspace")
@@ -2958,6 +2970,10 @@ mod tests {
 
         let output = Command::new(env!("CARGO_BIN_EXE_ee"))
             .env("EE_EMBED_DOWNLOAD", "off")
+            .env(
+                "EE_EMBED_MODEL_DIR",
+                workspace.join(".ee").join("empty-model-cache"),
+            )
             .env("EE_L2_PACK_CACHE_DISABLE", "1")
             .arg("--json")
             .arg("--workspace")
@@ -3110,6 +3126,10 @@ mod tests {
 
         let output = Command::new(env!("CARGO_BIN_EXE_ee"))
             .env("EE_EMBED_DOWNLOAD", "off")
+            .env(
+                "EE_EMBED_MODEL_DIR",
+                workspace.join(".ee").join("empty-model-cache"),
+            )
             .arg("--workspace")
             .arg(&workspace)
             .arg("pack")
@@ -3180,6 +3200,10 @@ mod tests {
         let legacy_output = Command::new(env!("CARGO_BIN_EXE_ee"))
             .env("EE_LEGACY_SELECTION_CERTIFICATE", "1")
             .env("EE_EMBED_DOWNLOAD", "off")
+            .env(
+                "EE_EMBED_MODEL_DIR",
+                workspace.join(".ee").join("empty-model-cache"),
+            )
             .arg("--workspace")
             .arg(&workspace)
             .arg("pack")
@@ -3269,6 +3293,10 @@ mod tests {
 
         let output = Command::new(env!("CARGO_BIN_EXE_ee"))
             .env("EE_EMBED_DOWNLOAD", "off")
+            .env(
+                "EE_EMBED_MODEL_DIR",
+                workspace.join(".ee").join("empty-model-cache"),
+            )
             .arg("--workspace")
             .arg(&workspace)
             .arg("pack")
@@ -3335,6 +3363,10 @@ mod tests {
 
         let output = Command::new(env!("CARGO_BIN_EXE_ee"))
             .env("EE_EMBED_DOWNLOAD", "off")
+            .env(
+                "EE_EMBED_MODEL_DIR",
+                workspace.join(".ee").join("empty-model-cache"),
+            )
             .env("EE_L2_PACK_CACHE_DISABLE", "1")
             .arg("--format")
             .arg("markdown")

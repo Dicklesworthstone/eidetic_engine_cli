@@ -330,6 +330,7 @@ fn pack_response_sample(deprecated_alias: bool) -> Value {
         "success": true,
         "data": {
             "command": "pack",
+            "embed_backend": "hash_fallback",
             "request": {
                 "query": "response envelope conformance",
                 "profile": "balanced",

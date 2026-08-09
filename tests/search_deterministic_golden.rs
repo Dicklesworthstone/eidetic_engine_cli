@@ -400,6 +400,12 @@ fn run_search_json_for_query(
     limit: u32,
 ) -> Result<String, String> {
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env(
+            "EE_EMBED_MODEL_DIR",
+            workspace.join(".ee").join("empty-model-cache"),
+        )
+        .env_remove("EE_EMBED_MODEL_PATH")
         .arg("--json")
         .arg("--workspace")
         .arg(workspace)

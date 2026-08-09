@@ -5,6 +5,7 @@ expression: context
 {
   "data": {
     "command": "pack",
+    "embed_backend": "hash_fallback",
     "conflicts": [],
     "consensus": [],
     "degraded": [

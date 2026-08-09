@@ -14,8 +14,8 @@ use crate::core::degraded_aggregation::{
 };
 use crate::models::{
     COVERAGE_GAP_SCHEMA_V1, ContextProfile, ContextProfileName, ContextProfileSection,
-    ContextProfileSectionMix, ERROR_SCHEMA_V2, MemoryId, MemoryScopeStats, ProvenanceUri,
-    RESPONSE_SCHEMA_V1, RESPONSE_SCHEMA_V2, RedactionLevel, TrustClass, UnitScore,
+    ContextProfileSectionMix, ERROR_SCHEMA_V2, EmbedBackend, MemoryId, MemoryScopeStats,
+    ProvenanceUri, RESPONSE_SCHEMA_V1, RESPONSE_SCHEMA_V2, RedactionLevel, TrustClass, UnitScore,
 };
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
@@ -4171,6 +4171,7 @@ impl ContextResponse {
             cached_json: None,
             data: ContextResponseData {
                 command: PACK_COMMAND,
+                embed_backend: EmbedBackend::HashFallback,
                 request,
                 pack,
                 agent_profile: None,
@@ -4205,6 +4206,7 @@ impl ContextResponse {
             cached_json: Some(cached_json),
             data: ContextResponseData {
                 command,
+                embed_backend: cached_context_embed_backend(&cached_json),
                 request: request.clone(),
                 pack: PackDraft {
                     query: request.query.clone(),
@@ -4250,6 +4252,7 @@ impl ContextResponse {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContextResponseData {
     pub command: &'static str,
+    pub embed_backend: EmbedBackend,
     pub request: ContextRequest,
     pub pack: PackDraft,
     pub agent_profile: Option<serde_json::Value>,
@@ -4263,6 +4266,18 @@ pub struct ContextResponseData {
     pub adaptive_budget: Option<budget_classifier::AdaptiveBudgetDecision>,
     pub pagination: Option<ContextResponsePagination>,
     pub degraded: Vec<ContextResponseDegradation>,
+}
+
+fn cached_context_embed_backend(cached_json: &str) -> EmbedBackend {
+    serde_json::from_str::<serde_json::Value>(cached_json)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/data/embed_backend")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.parse().ok())
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -4,6 +4,8 @@ expression: "render_context_response_for_format(&response, case.format)"
 ---
 # Context Pack: renderer parity release
 
+**embed_backend:** `hash_fallback`
+
 **Profile:** compact | **Budget:** 21/500 tokens
 
 ## Advisory Memory Banner

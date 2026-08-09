@@ -78,17 +78,17 @@ use crate::db::read_pool::{
 use crate::db::{
     CreatePackBaselineInput, CreatePackEvidenceItemInput, CreatePackItemInput,
     CreatePackOmissionInput, CreatePackRecordInput, CreatePackTaskLensInput, DatabaseConfig,
-    DbConnection, PackRecordInsertTimings,
-    StoredAgentContextProfileForPack, StoredMemory,
+    DbConnection, PackRecordInsertTimings, StoredAgentContextProfileForPack, StoredMemory,
 };
 use crate::models::degradation::{
     GRAPH_PACK_DNA_TIMEOUT_CODE, GRAPH_PPR_EMPTY_SEED_SET_CODE, GRAPH_PPR_SNAPSHOT_STALE_CODE,
 };
 use crate::models::{
     AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_OUTCOMES,
-    AgentContextProfileCounts, EvidenceId, GLOBAL_MEMORY_SCOPE_TAG, MemoryId, MemoryScope,
-    MemoryScopeStats, MemorySentinelResultStatus, PACK_SCHEMA_V2, PackId, ProvenanceUri,
-    RedactionLevel, RuleId, TrustClass, UnitScore, WorkspaceId, posture_for_trust_class,
+    AgentContextProfileCounts, EmbedBackend, EvidenceId, GLOBAL_MEMORY_SCOPE_TAG, MemoryId,
+    MemoryScope, MemoryScopeStats, MemorySentinelResultStatus, PACK_SCHEMA_V2, PackId,
+    ProvenanceUri, RedactionLevel, RuleId, TrustClass, UnitScore, WorkspaceId,
+    posture_for_trust_class,
 };
 use crate::pack::{
     ConflictKind, ConflictRecommendedAction, ConsensusConflictReport, ContextPackProfile,
@@ -100,8 +100,7 @@ use crate::pack::{
     PackFreshnessAnchorFacet, PackFreshnessFacet, PackItemLifecycle, PackOmission,
     PackOmissionReason, PackProvenance, PackRejectionStage, PackResourceProfile,
     PackScoreBreakdown, PackSection, PackTrustSignal, TokenBudget, WhyNotSelectedInput,
-    WhyNotSelectedReport,
-    assemble_draft_with_profile_and_options_seeded,
+    WhyNotSelectedReport, assemble_draft_with_profile_and_options_seeded,
     budget_classifier::{AdaptiveBudgetDecision, AdaptiveBudgetInput, classify_adaptive_budget},
     estimate_tokens_default, explain_why_not_selected, pack_item_provenance_json,
     redact_pack_provenance_text,
@@ -116,7 +115,7 @@ static CONTEXT_PROXIMITY_TREE_CACHE: OnceLock<RwLock<Option<CachedContextProximi
     OnceLock::new();
 const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
 #[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
-pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V3: &str = "ee.pack.l2_cache_key.v3";
+pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V4: &str = "ee.pack.l2_cache_key.v4";
 const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2: &str = "ee.pack.l2_context_response.v2";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
 const CONTEXT_CHANGED_SYMBOL_BOOST: f32 = 0.05;
@@ -3049,6 +3048,7 @@ async fn run_context_pack_with_performance_inner(
     let mut response = ContextResponse::new(request, draft, response_degraded)
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     response.data.command = command;
+    response.data.embed_backend = crate::core::index::active_embed_backend();
     response.data.adaptive_budget = adaptive_budget_decision;
     response.data.agent_profile = agent_profile;
     response.data.slo = Some(slo);
@@ -5440,6 +5440,7 @@ fn context_pack_l2_prepare(
         database_generation,
         index_generation: context_pack_l2_index_generation(options),
         graph_generation,
+        embed_backend: crate::core::index::active_embed_backend(),
         redaction_level: options.redaction_level,
         request: request.clone(),
         output_options: options.output_options,
@@ -5934,6 +5935,14 @@ fn context_pack_l2_cached_response_json(
         .pointer("/data/pack/schema")
         .and_then(serde_json::Value::as_str)
         == Some(PACK_SCHEMA_V2);
+    let embed_backend_is_valid = parsed
+        .pointer("/data/embed_backend")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| value.parse::<EmbedBackend>().ok())
+        .is_some();
+    if !embed_backend_is_valid {
+        return Err("L2 pack cache responseJson is missing a valid data.embed_backend".to_string());
+    }
     if command_matches && pack_schema_matches {
         return Ok(response_json.to_owned());
     }
@@ -6174,6 +6183,7 @@ pub(crate) struct PackL2CacheKeyInput {
     pub(crate) database_generation: u64,
     pub(crate) index_generation: u64,
     pub(crate) graph_generation: Option<u64>,
+    pub(crate) embed_backend: EmbedBackend,
     pub(crate) redaction_level: RedactionLevel,
     pub(crate) request: ContextRequest,
     pub(crate) output_options: ContextPackOutputOptions,
@@ -6191,7 +6201,7 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        PACK_L2_CACHE_KEY_SCHEMA_V3.as_bytes(),
+        PACK_L2_CACHE_KEY_SCHEMA_V4.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "workspace_id", input.workspace_id.as_bytes());
     hash_labeled_u64(
@@ -6201,6 +6211,11 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     );
     hash_labeled_u64(&mut hasher, "index_generation", input.index_generation);
     hash_labeled_optional_u64(&mut hasher, "graph_generation", input.graph_generation);
+    hash_labeled_bytes(
+        &mut hasher,
+        "embed_backend",
+        input.embed_backend.as_str().as_bytes(),
+    );
     hash_labeled_bytes(
         &mut hasher,
         "redaction_level",
@@ -10632,10 +10647,8 @@ fn append_direct_evidence_pack_items(
             .selection_audit
             .candidate_count
             .saturating_add(draft.evidence_items.len());
-        draft.selection_audit.selected_count = draft
-            .items
-            .len()
-            .saturating_add(draft.evidence_items.len());
+        draft.selection_audit.selected_count =
+            draft.items.len().saturating_add(draft.evidence_items.len());
         draft.selection_audit.budget_used = draft.used_tokens;
         draft.hash = None;
     }
@@ -14829,6 +14842,7 @@ pub fn unrelated_context() -> u64 {{
             "success": true,
             "data": {
                 "command": "pack",
+                "embed_backend": "hash_fallback",
                 "pack": {
                     "schema": crate::models::PACK_SCHEMA_V2,
                     "query": "prepare release"
@@ -14856,6 +14870,33 @@ pub fn unrelated_context() -> u64 {{
     }
 
     #[test]
+    fn l2_cached_response_json_rejects_unattributed_embedding_backend() {
+        let payload = serde_json::json!({
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2,
+            "responseJson": serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": {
+                    "command": "pack",
+                    "pack": {
+                        "schema": crate::models::PACK_SCHEMA_V2,
+                        "query": "prepare release"
+                    }
+                },
+                "degraded": []
+            })
+            .to_string(),
+        });
+
+        let error = super::context_pack_l2_cached_response_json(&payload, "pack")
+            .expect_err("cache payloads without an embedding backend must be invalidated");
+        assert!(
+            error.contains("missing a valid data.embed_backend"),
+            "unexpected cache rejection: {error}"
+        );
+    }
+
+    #[test]
     fn l2_cached_response_json_rejects_v1_banner_semantics() -> Result<(), String> {
         let payload = serde_json::json!({
             "schema": "ee.pack.l2_context_response.v1",
@@ -14864,6 +14905,7 @@ pub fn unrelated_context() -> u64 {{
                 "success": true,
                 "data": {
                     "command": "pack",
+                    "embed_backend": "hash_fallback",
                     "pack": {
                         "schema": crate::models::PACK_SCHEMA_V2,
                         "query": "prepare release",
@@ -14903,6 +14945,7 @@ pub fn unrelated_context() -> u64 {{
             "success": true,
             "data": {
                 "command": "pack",
+                "embed_backend": "hash_fallback",
                 "pack": {
                     "query": "prepare release"
                 }
@@ -17948,7 +17991,7 @@ pub fn unrelated_context() -> u64 {{
     #[test]
     fn pack_l2_cache_key_tracks_canonical_inputs() -> Result<(), String> {
         use super::{ContextPackOutputOptions, PackL2CacheKeyInput, compute_pack_l2_cache_key};
-        use crate::models::{MemoryScope, RedactionLevel};
+        use crate::models::{EmbedBackend, MemoryScope, RedactionLevel};
         use crate::pack::{
             ContextPackProfile, ContextRequest, ContextRequestInput, PackResourceProfile,
             PackSection,
@@ -17968,6 +18011,7 @@ pub fn unrelated_context() -> u64 {{
             database_generation: 10,
             index_generation: 20,
             graph_generation: Some(30),
+            embed_backend: EmbedBackend::HashFallback,
             redaction_level: RedactionLevel::Standard,
             request,
             output_options: ContextPackOutputOptions::default()
@@ -18046,6 +18090,14 @@ pub fn unrelated_context() -> u64 {{
             key,
             compute_pack_l2_cache_key(&changed_redaction),
             "redaction level changes must alter the L2 key"
+        );
+
+        let mut changed_embed_backend = base.clone();
+        changed_embed_backend.embed_backend = EmbedBackend::NeuralLocal;
+        assert_ne!(
+            key,
+            compute_pack_l2_cache_key(&changed_embed_backend),
+            "embedding backend changes must alter the L2 key"
         );
 
         let mut changed_legacy_selection_certificate = base.clone();
