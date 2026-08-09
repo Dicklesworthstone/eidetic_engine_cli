@@ -742,7 +742,9 @@ fn sudo_option_is_value_form(word: &str) -> bool {
 }
 
 fn sudo_short_option_has_attached_value(word: &str) -> bool {
-    word.len() > 2
+    word.starts_with('-')
+        && !word.starts_with("--")
+        && word.len() > 2
         && matches!(
             word.as_bytes().get(1).copied(),
             Some(b'C' | b'D' | b'g' | b'h' | b'p' | b'r' | b't' | b'T' | b'U' | b'u')
