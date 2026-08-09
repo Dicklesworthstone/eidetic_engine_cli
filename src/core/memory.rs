@@ -5975,7 +5975,8 @@ pub const REMEMBER_LEVEL_IS_KIND_CODE: &str = "remember_level_is_kind";
 /// reserved as kinds and the nine canonical kind names are rejected as
 /// levels, each with did-you-mean guidance toward the sibling flag. Custom
 /// kinds that merely share a prefix with a level name (for example
-/// `episodic-note`) stay accepted byte-for-byte.
+/// `episodic-note`) stay accepted and continue through the existing
+/// [`MemoryKind`] canonicalization contract.
 #[must_use]
 pub fn remember_level_kind_cross_wire_error(level: &str, kind: &str) -> Option<DomainError> {
     if let Ok(level_token) = MemoryLevel::from_str(kind) {
@@ -11503,6 +11504,7 @@ mod tests {
             ("semantic", "decision"),
             ("working", "anti-pattern"),
             ("episodic", "episodic-note"),
+            ("episodic", "EpisodicNote"),
             ("semantic", "episodic-note"),
             ("procedural", "workingset"),
             ("episodic", "working-set"),

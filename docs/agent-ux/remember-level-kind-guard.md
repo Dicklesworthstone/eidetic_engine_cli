@@ -11,8 +11,9 @@ the retrieval filters the canonical set keeps portable.
 The guard (bd-remember-level-kind-validation-zau2l) rejects exactly the
 cross-wired tokens with did-you-mean guidance. It matches the **normalized
 token exactly** — trim/case (and `_`/`-` unification for kinds) — and never
-by prefix: custom kinds that merely resemble a level name stay accepted
-byte-for-byte.
+by prefix. Custom kinds that merely resemble a level name stay accepted and
+continue through the established `MemoryKind` canonicalization contract
+(trimmed lowercase kebab-case); the guard adds no new normalization.
 
 ## Behavior
 
@@ -20,7 +21,7 @@ byte-for-byte.
 |---|---|
 | `--kind episodic` (any level token) | `remember_kind_is_level` usage error, exit 1 |
 | `--level rule` (any canonical kind token) | `remember_level_is_kind` usage error, exit 1 |
-| `--kind episodic-note` (custom lookalike) | accepted unchanged, stored byte-for-byte |
+| `--kind EpisodicNote` (custom lookalike) | accepted, stored in the established canonical form `episodic-note` |
 | `--kind Episodic`, `--level " decision "` | normalized before matching, then rejected |
 | both flags cross-wired | `remember_kind_is_level` wins deterministically |
 
@@ -69,11 +70,12 @@ ee remember "auth retry works" --level rule --json
 # -> error.details.didYouMean = { "argument": "--kind", "value": "rule" }
 ```
 
-Custom kinds keep working, including level-prefixed ones:
+Custom kinds keep working, including level-prefixed ones. Their existing
+canonicalization remains in force:
 
 ```bash
-ee remember "auth retry works" --kind episodic-note --json
-# -> exit 0, data.kind = "episodic-note" (byte-for-byte)
+ee remember "auth retry works" --kind EpisodicNote --json
+# -> exit 0, data.kind = "episodic-note" (canonical custom-kind form)
 ```
 
 Agents should key on `error.code` and `error.details.didYouMean` — the

@@ -1906,7 +1906,9 @@ fn remember_level_kind_cross_wire_guard_public_cli_contract() -> TestResult {
     let error_json = stdout_json(&kind_as_level)?;
     assert_schema(&error_json, "ee.error.v2", "kind-as-level error envelope")?;
     ensure_equal(
-        &error_json.pointer("/error/code").and_then(serde_json::Value::as_str),
+        &error_json
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
         &Some("remember_kind_is_level"),
         "kind-as-level error code",
     )?;
@@ -1939,12 +1941,16 @@ fn remember_level_kind_cross_wire_guard_public_cli_contract() -> TestResult {
         "kind-as-level provided token",
     )?;
     ensure_equal(
-        &error_json.pointer("/error/severity").and_then(serde_json::Value::as_str),
+        &error_json
+            .pointer("/error/severity")
+            .and_then(serde_json::Value::as_str),
         &Some("low"),
         "kind-as-level severity",
     )?;
     ensure_equal(
-        &error_json.pointer("/error/repairKind").and_then(serde_json::Value::as_str),
+        &error_json
+            .pointer("/error/repairKind")
+            .and_then(serde_json::Value::as_str),
         &Some("template"),
         "kind-as-level repairKind",
     )?;
@@ -1977,9 +1983,15 @@ fn remember_level_kind_cross_wire_guard_public_cli_contract() -> TestResult {
         "level token as note --kind must exit with the usage code",
     )?;
     let note_json = stdout_json(&note_cross_wire)?;
-    assert_schema(&note_json, "ee.error.v2", "note kind-as-level error envelope")?;
+    assert_schema(
+        &note_json,
+        "ee.error.v2",
+        "note kind-as-level error envelope",
+    )?;
     ensure_equal(
-        &note_json.pointer("/error/code").and_then(serde_json::Value::as_str),
+        &note_json
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
         &Some("remember_kind_is_level"),
         "note kind-as-level error code",
     )?;
@@ -2002,7 +2014,9 @@ fn remember_level_kind_cross_wire_guard_public_cli_contract() -> TestResult {
     let inverse_json = stdout_json(&level_as_kind)?;
     assert_schema(&inverse_json, "ee.error.v2", "level-as-kind error envelope")?;
     ensure_equal(
-        &inverse_json.pointer("/error/code").and_then(serde_json::Value::as_str),
+        &inverse_json
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
         &Some("remember_level_is_kind"),
         "level-as-kind error code",
     )?;
@@ -2021,15 +2035,16 @@ fn remember_level_kind_cross_wire_guard_public_cli_contract() -> TestResult {
         "level-as-kind didYouMean value",
     )?;
 
-    // Planted negative: a lookalike custom kind sharing a level prefix must be
-    // accepted byte-for-byte, never prefix-rejected.
+    // Planted negative: a noncanonical lookalike custom kind sharing a level
+    // prefix must be accepted and follow the pre-existing canonicalization
+    // contract, never prefix-rejected by the cross-wire guard.
     let custom_kind = run_ee(&[
         "--workspace",
         &workspace,
         "remember",
         "custom kind lookalike stays accepted",
         "--kind",
-        "episodic-note",
+        "EpisodicNote",
         "--json",
     ])?;
     ensure_equal(
@@ -2045,7 +2060,7 @@ fn remember_level_kind_cross_wire_guard_public_cli_contract() -> TestResult {
             .pointer("/data/kind")
             .and_then(serde_json::Value::as_str),
         &Some("episodic-note"),
-        "custom kind must persist byte-for-byte",
+        "custom kind must use the established canonical form",
     )?;
     let custom_memory_id = custom_json
         .pointer("/data/memory_id")
@@ -2053,9 +2068,15 @@ fn remember_level_kind_cross_wire_guard_public_cli_contract() -> TestResult {
         .ok_or_else(|| "custom kind remember must return a memory_id".to_owned())?
         .to_owned();
 
-    // Read back the persisted row: the stored kind must be the exact bytes
-    // provided, not a normalized or prefix-corrected token.
-    let show = run_ee(&["--workspace", &workspace, "show", &custom_memory_id, "--json"])?;
+    // Read back the persisted row: the guard must not reject the lookalike,
+    // while the stored kind still follows the established canonical form.
+    let show = run_ee(&[
+        "--workspace",
+        &workspace,
+        "show",
+        &custom_memory_id,
+        "--json",
+    ])?;
     ensure_equal(
         &show.status.code(),
         &Some(EXIT_SUCCESS),
@@ -2067,7 +2088,7 @@ fn remember_level_kind_cross_wire_guard_public_cli_contract() -> TestResult {
             .pointer("/data/memory/kind")
             .and_then(serde_json::Value::as_str),
         &Some("episodic-note"),
-        "persisted custom kind read-back must stay byte-for-byte",
+        "persisted custom kind read-back must stay canonical",
     )?;
 
     // Canonical control: valid level plus canonical kind still succeeds.
