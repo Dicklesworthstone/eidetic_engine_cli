@@ -11156,7 +11156,7 @@ fn stored_session_from_joined_row(row: &Row, offset: usize) -> Result<Option<Sto
         started_at: optional_text(row, offset + 6)?.map(str::to_owned),
         ended_at: optional_text(row, offset + 7)?.map(str::to_owned),
         message_count: required_u32(row, offset + 8, DbOperation::Query, "message_count")?,
-        token_count: optional_u32(row, offset + 9)?,
+        token_count: optional_u32(row, offset + 9, DbOperation::Query, "session_token_count")?,
         content_hash: required_text(
             row,
             offset + 10,
