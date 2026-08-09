@@ -3271,7 +3271,10 @@ mod tests {
             "2030-01-08T00:00:00Z",
         )?;
         assert_eq!(report.len(), 1);
-        assert_eq!(report[0].memory_id, memory_id);
+        assert_eq!(
+            report[0].memory_id,
+            crate::models::public_memory_id(&memory_id)
+        );
         assert_eq!(report[0].top_reason, "pack_item_memory_row_missing");
         assert_eq!(report[0].drift_status, MemoryDriftStatus::Unverifiable);
         assert_eq!(
