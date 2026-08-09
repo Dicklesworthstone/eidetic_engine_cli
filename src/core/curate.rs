@@ -13715,7 +13715,7 @@ fn revalidate_consolidate_absorb_in_transaction(
     });
     if !steward_created {
         return Err(stale(
-            "no integrity-valid steward creation audit row anchors this candidate",
+            "no steward creation audit row with valid integrity anchors this candidate",
         ));
     }
 
@@ -15604,7 +15604,14 @@ mod tests {
         let subscriber = Registry::default()
             .with(layer)
             .with(tracing_subscriber::filter::LevelFilter::TRACE);
-        let result = with_default(subscriber, thunk);
+        let result = with_default(subscriber, || {
+            // Other tests install filtered dispatchers in parallel. Refresh
+            // the global callsite interest cache after this thread-local
+            // TRACE dispatcher is active so a callsite previously cached as
+            // disabled cannot make this telemetry contract test flaky.
+            tracing::callsite::rebuild_interest_cache();
+            thunk()
+        });
         let captured = events.lock().expect("curate event capture lock").clone();
         (result, captured)
     }
