@@ -53,8 +53,11 @@ fn ensure_success(output: &Output, label: &str) -> TestResult {
     ensure(
         output.status.success(),
         format!(
-            "{label}: ee exited {:?}; stderr: {}",
+            "{label}: ee exited {:?}; stdout: {}; stderr: {}",
             output.status.code(),
+            // --json errors land on stdout as the ee.error.v2 envelope;
+            // dropping stdout here once cost a debugging round trip.
+            String::from_utf8_lossy(&output.stdout).trim_end(),
             String::from_utf8_lossy(&output.stderr).trim_end()
         ),
     )
