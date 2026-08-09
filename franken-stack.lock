@@ -1,12 +1,15 @@
 # ee.franken-stack.lock.v1
 #
-# Full commit IDs are mandatory. This set pins the synchronized 0.3.10 runtime
-# with its ambient-free request-Cx boundary, 0.3.2 search/SQLModel, and 0.1.19
-# FrankenSQLite dependency closure used by ee.
-asupersync	24eb7ec6c62e9ba037d70fed4a69c4e733785926
-franken_agent_detection	f839b370a91e0d403fc4e2e16c1dc9d19b5a5ceb
-franken_networkx	bec1d4b9edfd832bc31c3a56713c918a0bf682b9
-frankensearch	b559c92e03242336614b995c562a13dfd1269eed
-frankensqlite	6a86c07176830dcab0fd845a71a3dd070694ea28
-sqlmodel_rust	84e4f0a9d2f1098afeeae19142442d8208c0f265
+# Full commit IDs are mandatory. This set pins the newest sibling revisions
+# that stay coherent with ee's Cargo.lock closure: the 0.3.10-line asupersync
+# tip (ee pins asupersync =0.3.10), the 0.1.19-line FrankenSQLite tip
+# (sqlmodel_rust at f034a97b still requires fsqlite ^0.1.19, so the 0.2.0
+# line — and with it a998b05a — stays blocked until sqlmodel gains 0.2
+# support; see bd-022z1), and current heads for the remaining stack.
+asupersync	7ecb98499715b18f24ce48f5022ec187fe03afb6
+franken_agent_detection	5b0d64988b48ec4a8f20cac9413ab8588176dd7d
+franken_networkx	7faf0a1b5d0ff808202194c6b68ef738678a9077
+frankensearch	83ef0195e4f364bb6b150d788c4e236db8a3b767
+frankensqlite	ce412d4196fe48f9c61d4cb001530b8680bb74a9
+sqlmodel_rust	f034a97be341e9a5daee550975f9aa96cff724eb
 toon_rust	e46b71957fad5397d4bae9eef9d428c8ac8b52aa
