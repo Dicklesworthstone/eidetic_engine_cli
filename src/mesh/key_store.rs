@@ -1349,9 +1349,18 @@ fn open_secure_directory(
             });
         };
         current_path.push(component);
+        let observed_before_open =
+            inspect_secure_directory_component(&directory, component, &current_path)?;
         let descriptor =
             match rustix::fs::openat(&directory, component, flags, Mode::from_raw_mode(0)) {
                 Ok(descriptor) => descriptor,
+                Err(error)
+                    if error == rustix::io::Errno::NOENT && observed_before_open.is_some() =>
+                {
+                    return Err(KeyStoreError::SymlinkComponent {
+                        path: current_path.display().to_string(),
+                    });
+                }
                 Err(error) if error == rustix::io::Errno::NOENT && !create => return Ok(None),
                 Err(error) if error == rustix::io::Errno::NOENT => {
                     match rustix::fs::mkdirat(&directory, component, Mode::from_raw_mode(0o700)) {
@@ -1397,10 +1406,47 @@ fn open_secure_directory(
         let stat = rustix::fs::fstat(&child).map_err(|error| {
             key_store_errno(&current_path, "inspect secure directory component", error)
         })?;
+        if let Some(observed) = observed_before_open
+            && (observed.st_dev != stat.st_dev || observed.st_ino != stat.st_ino)
+        {
+            return Err(KeyStoreError::SymlinkComponent {
+                path: current_path.display().to_string(),
+            });
+        }
         verify_directory_stat(&stat, &current_path, components.peek().is_none())?;
         directory = child;
     }
     Ok(Some(directory))
+}
+
+#[cfg(unix)]
+fn inspect_secure_directory_component(
+    parent: &std::fs::File,
+    component: &std::ffi::OsStr,
+    path: &Path,
+) -> Result<Option<rustix::fs::Stat>, KeyStoreError> {
+    use rustix::fs::{AtFlags, FileType};
+
+    match rustix::fs::statat(parent, component, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::Symlink => {
+            Err(KeyStoreError::SymlinkComponent {
+                path: path.display().to_string(),
+            })
+        }
+        Ok(stat) if FileType::from_raw_mode(stat.st_mode) != FileType::Directory => {
+            Err(KeyStoreError::WrongFileType {
+                path: path.display().to_string(),
+                expected: "directory",
+            })
+        }
+        Ok(stat) => Ok(Some(stat)),
+        Err(error) if error == rustix::io::Errno::NOENT => Ok(None),
+        Err(error) => Err(key_store_errno(
+            path,
+            "inspect secure directory component before open",
+            error,
+        )),
+    }
 }
 
 #[cfg(unix)]
