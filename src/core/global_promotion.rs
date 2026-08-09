@@ -272,6 +272,14 @@ use crate::db::{
 pub const GLOBAL_PROMOTION_REPORT_SCHEMA_V1: &str = "ee.global_promotion.report.v1";
 pub const GLOBAL_DEMOTION_REPORT_SCHEMA_V1: &str = "ee.global_demotion.report.v1";
 
+/// Feedback-event ids must satisfy the schema CHECK (`fb_` + 26-char
+/// payload, length 29); mirror `core::outcome`'s private generator.
+fn promotion_feedback_event_id() -> String {
+    let memory_id = crate::models::MemoryId::now().to_string();
+    let payload = memory_id.trim_start_matches("mem_");
+    format!("fb_{payload}")
+}
+
 /// Search-index job ids must satisfy the schema CHECK
 /// (`sidx_` + 26-char payload, length 31); mirror the private generator in
 /// `core::memory` rather than widening its visibility.
@@ -708,7 +716,7 @@ pub fn backflow_global_feedback(options: &BackflowOptions<'_>) -> Result<Backflo
     // 1) Feedback event on the global row itself.
     global_connection
         .insert_feedback_event(
-            &generate_audit_id(),
+            &promotion_feedback_event_id(),
             &crate::db::CreateFeedbackEventInput {
                 workspace_id: global_workspace_id.clone(),
                 target_type: "memory".to_owned(),
