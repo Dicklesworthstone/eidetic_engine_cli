@@ -745,16 +745,25 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
         .and_then(JsonValue::as_array)
         .cloned()
         .unwrap_or_default();
+    // bd-3h6bz: the rule-identified hit is MANDATORY. The previous OR could
+    // pass on a content echo from the source memory with the rule document
+    // entirely absent, or on a bare rule docId while the rule's content
+    // never surfaced. The query itself is the full rule content, so an
+    // id-matched hit proves content indexing; when the hit also emits a
+    // content field it must carry the rule's own text.
+    let rule_hit = results.iter().find(|hit| {
+        hit.get("docId").and_then(JsonValue::as_str) == Some(rule_id.as_str())
+            || hit.get("memoryId").and_then(JsonValue::as_str) == Some(rule_id.as_str())
+    });
+    let rule_hit = rule_hit.ok_or_else(|| {
+        format!("search must return the applied rule {rule_id} by its own content: {results:?}")
+    })?;
     ensure(
-        results.iter().any(|hit| {
-            hit.get("docId").and_then(JsonValue::as_str) == Some(rule_id.as_str())
-                || hit.get("memoryId").and_then(JsonValue::as_str) == Some(rule_id.as_str())
-                || hit
-                    .get("content")
-                    .and_then(JsonValue::as_str)
-                    .is_some_and(|content| content.contains(rule_content.as_str()))
-        }),
-        format!("search should return applied rule {rule_id} by its own content: {results:?}"),
+        rule_hit
+            .get("content")
+            .and_then(JsonValue::as_str)
+            .is_none_or(|content| content.contains(rule_content.as_str())),
+        format!("rule hit content must carry the rule's own text: {rule_hit:?}"),
     )?;
 
     let ready_before_protect = run_ee_json(&["--workspace", &ws_arg, "--json", "index", "status"])?;
