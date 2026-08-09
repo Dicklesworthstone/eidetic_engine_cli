@@ -1,0 +1,39 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "insufficient_outcome_evidence",
+  "introduced_by": {
+    "bead": "bd-2tehh.2",
+    "epic_letter": "SHADOW"
+  },
+  "surfaces": [
+    "shadow"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "The workspace has fewer than 50 labeled outcome triples or fewer than 15 distinct labeled queries when the outcome-tuned retrieval-weights shadow policy runs, so the evaluator abstains per the ADR 0070 evidence gate instead of tuning on noise. The run still succeeds and persists an abstained ee.shadow.retrieval_tuning_report.v1; this info entry is the honest signal that the label corpus is too small.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "ee remember 'Run cargo fmt --check before release.' --workspace . --level procedural --kind rule --json",
+      "ee pack 'prepare release' --workspace . --json",
+      "ee outcome <memory-id> --pack <pack-id> --item 1 --signal helpful --workspace . --json"
+    ],
+    "invocation": "ee shadow run --policy candidate.retrieval.outcome_tuned_weights --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "insufficient_outcome_evidence",
+    "severity": "info",
+    "message_contains": [
+      "below the tuning evidence gate",
+      "abstained"
+    ],
+    "details_contains": [
+      "triples",
+      "distinctQueries",
+      "minTriples",
+      "minQueries",
+      "reportHash"
+    ],
+    "repair_contains": "ee outcome"
+  }
+}
