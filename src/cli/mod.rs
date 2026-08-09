@@ -67957,23 +67957,36 @@ mod tests {
         ensure(sign_stderr.is_empty(), "certificate sign JSON stderr clean")?;
         let sign_json: serde_json::Value =
             serde_json::from_str(&sign_stdout).map_err(|error| error.to_string())?;
+        // Certificate machine output wraps in the canonical ee.response.v2
+        // envelope (bd-awm6r); the command-specific schema and fields live
+        // under data.
         ensure_equal(
             &sign_json["schema"],
+            &serde_json::json!("ee.response.v2"),
+            "certificate sign envelope schema",
+        )?;
+        ensure_equal(
+            &sign_json["data"]["schema"],
             &serde_json::json!("ee.certificate.sign.v1"),
             "certificate sign schema",
         )?;
         ensure_equal(
-            &sign_json["certificateId"],
+            &sign_json["data"]["certificateId"],
             &serde_json::json!("cert_pack_default"),
             "certificate sign default manifest id",
         )?;
         ensure_equal(
-            &sign_json["payloadHash"],
+            &sign_json["data"]["payloadHash"],
             &serde_json::json!(payload_hash),
             "certificate sign default manifest payload hash",
         )?;
         ensure_equal(
             &sign_json["success"],
+            &serde_json::json!(true),
+            "certificate sign envelope success",
+        )?;
+        ensure_equal(
+            &sign_json["data"]["success"],
             &serde_json::json!(true),
             "certificate sign default manifest success",
         )
@@ -73777,7 +73790,21 @@ mod tests {
 
     #[test]
     fn fields_minimal_excludes_arrays() -> TestResult {
-        let (_, stdout, _) = invoke(&["ee", "status", "--json", "--fields", "minimal"]);
+        // Pin the workspace to an isolated temp dir: `invoke` runs in-process
+        // against the ambient cwd/env, and a live ambient workspace with
+        // degradations would otherwise leak state into the minimal
+        // projection under full-suite runs.
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().to_string_lossy().into_owned();
+        let (_, stdout, _) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "status",
+            "--json",
+            "--fields",
+            "minimal",
+        ]);
         ensure(
             !stdout.contains("\"degraded\":["),
             "minimal excludes degraded array",
@@ -79112,10 +79139,33 @@ mod tests {
         )?;
 
         let envelope = super::response_v2_json_from_data(data);
+        // The envelope mirror canonicalizes the data payload's `nextAction`
+        // into the envelope contract's `repair` key; everything else must
+        // survive the mirror verbatim and the action must never be dropped.
         ensure_equal(
-            &envelope["degraded"],
-            &envelope["data"]["degraded"],
-            "export response envelope mirrors data degraded",
+            &envelope["degraded"][0]["code"],
+            &envelope["data"]["degraded"][0]["code"],
+            "export envelope mirrors degraded code",
+        )?;
+        ensure_equal(
+            &envelope["degraded"][0]["severity"],
+            &envelope["data"]["degraded"][0]["severity"],
+            "export envelope mirrors degraded severity",
+        )?;
+        ensure_equal(
+            &envelope["degraded"][0]["message"],
+            &envelope["data"]["degraded"][0]["message"],
+            "export envelope mirrors degraded message",
+        )?;
+        ensure_equal(
+            &envelope["degraded"][0]["sources"],
+            &envelope["data"]["degraded"][0]["sources"],
+            "export envelope mirrors degraded sources",
+        )?;
+        ensure_equal(
+            &envelope["degraded"][0]["repair"],
+            &envelope["data"]["degraded"][0]["nextAction"],
+            "export envelope canonicalizes nextAction into repair",
         )
     }
 

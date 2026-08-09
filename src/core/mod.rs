@@ -709,6 +709,10 @@ mod tests {
             &vec![
                 "response",
                 "error",
+                "typed_memory_fields",
+                "decide_record",
+                "decide_list",
+                "decide_revisit",
                 "version_provenance",
                 "symbol_snapshot",
                 "symbol_evidence_links",

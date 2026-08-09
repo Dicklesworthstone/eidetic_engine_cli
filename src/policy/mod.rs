@@ -1756,6 +1756,26 @@ pub fn redact_public_replay_field(field: &str, value: &str) -> PublicReplayTextR
                 redacted_reasons: Vec::new(),
             };
         }
+        // Idempotence: a value that is already the public-replay placeholder
+        // must pass through unchanged, exactly as redact_public_replay_text
+        // does. Re-hashing the placeholder minted a fresh digest on every
+        // re-projection, so projecting a projection was not a fixed point.
+        if value
+            .strip_prefix("[REDACTED:public_replay_text:")
+            .and_then(|rest| rest.strip_suffix(']'))
+            .is_some_and(|hex| {
+                hex.len() == 64
+                    && hex
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+        {
+            return PublicReplayTextRedactionReport {
+                content: value.to_owned(),
+                redacted: true,
+                redacted_reasons: vec!["public_replay_text_already_redacted"],
+            };
+        }
         return PublicReplayTextRedactionReport {
             content: format!(
                 "[REDACTED:public_replay_text:{}]",

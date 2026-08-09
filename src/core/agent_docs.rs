@@ -1782,9 +1782,13 @@ mod tests {
 
     #[test]
     fn examples_include_preflight_base64_and_stdin_escape_hatches() -> TestResult {
+        // Find the example by its stable command surface rather than its
+        // human title (retitled to "Inspect command-risk memory" when
+        // preflight's advisory-only posture was clarified); the semantic
+        // transport assertions below are the real contract.
         let preflight_example = EXAMPLES
             .iter()
-            .find(|example| example.title == "Preflight a shell command")
+            .find(|example| example.command.contains("preflight check"))
             .ok_or_else(|| "preflight command-transport example is documented".to_string())?;
 
         ensure(

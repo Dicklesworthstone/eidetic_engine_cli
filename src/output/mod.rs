@@ -2522,7 +2522,14 @@ fn normalize_response_degradation(value: &serde_json::Value) -> Option<serde_jso
         serde_json::Value::String(message.to_string()),
     );
 
-    if let Some(repair) = source.get("repair").and_then(serde_json::Value::as_str) {
+    // `repair` is the canonical envelope key. Data payloads that name their
+    // action `nextAction` (backup/export degradations) canonicalize into
+    // `repair` here so the envelope mirror never silently drops the action.
+    if let Some(repair) = source
+        .get("repair")
+        .or_else(|| source.get("nextAction"))
+        .and_then(serde_json::Value::as_str)
+    {
         normalized.insert(
             "repair".to_string(),
             serde_json::Value::String(repair.to_string()),
