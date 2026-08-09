@@ -1027,6 +1027,240 @@ pub fn evaluate_fusion_candidates(
     })
 }
 
+// ================ S3: evidence gate + tuning report (ADR 0070 §4) ================
+
+/// Schema id of the persisted tuning report (normative draft in ADR 0070's
+/// appendix; honest diagnostics ride under `labelSet` and `diagnostics`).
+pub const RETRIEVAL_TUNING_REPORT_SCHEMA_V1: &str = "ee.shadow.retrieval_tuning_report.v1";
+/// Policy id registered in `SHADOW_POLICY_INVENTORY` (src/shadow.rs).
+pub const RETRIEVAL_TUNING_POLICY_ID: &str = "candidate.retrieval.outcome_tuned_weights";
+/// Abstention code (response_time class). The `degraded[]` emission and its
+/// failure-mode fixture land with the CLI surface in bd-2tehh.3.
+pub const INSUFFICIENT_OUTCOME_EVIDENCE_CODE: &str = "insufficient_outcome_evidence";
+const REPORT_HASH_DOMAIN: &str = "ee.shadow.retrieval_tuning_report.hash.v1";
+
+/// ADR §4 evidence gate. Tune the thresholds with data; never remove them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RetrievalTuningGateConfig {
+    pub min_triples: usize,
+    pub min_queries: usize,
+    /// Minimum relative winner-over-incumbent margin for `promotable`.
+    pub promote_margin: f64,
+}
+
+impl Default for RetrievalTuningGateConfig {
+    fn default() -> Self {
+        Self {
+            min_triples: 50,
+            min_queries: 15,
+            promote_margin: 0.03,
+        }
+    }
+}
+
+/// Assembled tuning report (core shape; bd-2tehh.3 persists and renders it
+/// through the shadow CLI surface).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RetrievalTuningReport {
+    pub db_generation: u64,
+    pub labels: LabelExtractionReport,
+    pub abstained: bool,
+    pub abstention_reason: Option<&'static str>,
+    /// Present exactly when the gate passed.
+    pub evaluation: Option<TuningEvaluation>,
+    pub promotable: bool,
+    /// `blake3:<hex>` over the canonical report JSON (without this field).
+    pub report_hash: String,
+}
+
+/// Apply the ADR §4 evidence gate and assemble the report.
+///
+/// `evaluation` must be `Some` exactly when the gate passes — the caller
+/// runs the sweep only after the gate admits the label set (see
+/// [`run_retrieval_tuning`]); a mismatch is reported as a storage-integrity
+/// error rather than guessed around.
+pub fn assemble_retrieval_tuning_report(
+    labels: LabelExtractionReport,
+    evaluation: Option<TuningEvaluation>,
+    db_generation: u64,
+    gate: &RetrievalTuningGateConfig,
+) -> Result<RetrievalTuningReport, ShadowTuningError> {
+    let abstained =
+        labels.triples.len() < gate.min_triples || labels.distinct_queries < gate.min_queries;
+    if abstained != evaluation.is_none() {
+        return Err(ShadowTuningError::Storage {
+            message: format!(
+                "evidence gate and evaluation presence disagree (abstained={abstained}, evaluation={})",
+                if evaluation.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                }
+            ),
+        });
+    }
+    let promotable = !abstained
+        && evaluation.as_ref().is_some_and(|evaluation| {
+            evaluation.winner.is_some()
+                && evaluation
+                    .relative_margin
+                    .is_some_and(|margin| margin >= gate.promote_margin)
+        });
+    let mut report = RetrievalTuningReport {
+        db_generation,
+        labels,
+        abstained,
+        abstention_reason: abstained.then_some(INSUFFICIENT_OUTCOME_EVIDENCE_CODE),
+        evaluation,
+        promotable,
+        report_hash: String::new(),
+    };
+    let canonical = retrieval_tuning_report_json_value(&report, false).to_string();
+    let mut input = Vec::new();
+    append_len_prefixed(&mut input, REPORT_HASH_DOMAIN.as_bytes());
+    append_len_prefixed(&mut input, canonical.as_bytes());
+    report.report_hash = format!("blake3:{}", blake3::hash(&input).to_hex());
+    Ok(report)
+}
+
+/// Full offline tuning pass: extract labels, gate, replay, sweep, assemble.
+///
+/// Read-only against the workspace; deterministic given the same database,
+/// index, config, and `as_of`.
+pub fn run_retrieval_tuning(
+    cx: &Cx,
+    connection: &DbConnection,
+    workspace_path: &Path,
+    database_path: &Path,
+    workspace_id: &str,
+    as_of: DateTime<Utc>,
+    extraction: &LabelExtractionConfig,
+    gate: &RetrievalTuningGateConfig,
+) -> Result<RetrievalTuningReport, ShadowTuningError> {
+    let labels = extract_labeled_triples(cx, connection, workspace_id, extraction, as_of)?;
+    let db_generation = connection
+        .get_workspace_generation(workspace_id)
+        .map_err(|error| storage_error("read workspace generation", &error))?
+        .unwrap_or(0);
+    if labels.triples.len() < gate.min_triples || labels.distinct_queries < gate.min_queries {
+        return assemble_retrieval_tuning_report(labels, None, db_generation, gate);
+    }
+    let queries: BTreeSet<String> = labels
+        .triples
+        .iter()
+        .map(|triple| triple.query.clone())
+        .collect();
+    let replays = collect_query_replays(
+        cx,
+        connection,
+        workspace_path,
+        database_path,
+        &queries,
+        as_of,
+    )?;
+    let incumbent = TuningWeights::incumbent_for_workspace(workspace_path);
+    let evaluation = evaluate_fusion_candidates(cx, &replays.replays, &labels.triples, incumbent)?;
+    assemble_retrieval_tuning_report(labels, Some(evaluation), db_generation, gate)
+}
+
+fn weights_json(weights: TuningWeights) -> serde_json::Value {
+    serde_json::json!({
+        "lexical": f64::from(weights.lexical),
+        "semantic": f64::from(weights.semantic),
+        "graph": f64::from(weights.graph),
+    })
+}
+
+fn candidate_json(candidate: &CandidateScore) -> serde_json::Value {
+    serde_json::json!({
+        "weights": weights_json(candidate.weights),
+        "score": candidate.score,
+        "origin": candidate.origin,
+    })
+}
+
+fn retrieval_tuning_report_json_value(
+    report: &RetrievalTuningReport,
+    include_hash: bool,
+) -> serde_json::Value {
+    let labels = &report.labels;
+    #[allow(clippy::cast_precision_loss)]
+    let dense_share = if labels.triples.is_empty() {
+        0.0
+    } else {
+        labels.dense_count as f64 / labels.triples.len() as f64
+    };
+    let incumbent = report
+        .evaluation
+        .as_ref()
+        .map(|evaluation| candidate_json(&evaluation.incumbent));
+    let candidates = report.evaluation.as_ref().map(|evaluation| {
+        evaluation
+            .candidates
+            .iter()
+            .map(candidate_json)
+            .collect::<Vec<_>>()
+    });
+    let winner = report.evaluation.as_ref().and_then(|evaluation| {
+        evaluation.winner.map(|winner| {
+            let mut value = candidate_json(&winner);
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "relativeMargin".to_owned(),
+                    evaluation
+                        .relative_margin
+                        .map_or(serde_json::Value::Null, serde_json::Value::from),
+                );
+            }
+            value
+        })
+    });
+    let mut value = serde_json::json!({
+        "schema": RETRIEVAL_TUNING_REPORT_SCHEMA_V1,
+        "policyId": RETRIEVAL_TUNING_POLICY_ID,
+        "dbGeneration": report.db_generation,
+        "labelSet": {
+            "triples": labels.triples.len(),
+            "distinctQueries": labels.distinct_queries,
+            "hash": labels.label_set_hash,
+            "denseShare": dense_share,
+            "denseUnresolvable": labels.dense_unresolvable,
+            "weakUnreplayable": labels.weak_unreplayable,
+            "weakUnmatched": labels.weak_unmatched,
+        },
+        "abstained": report.abstained,
+        "abstentionReason": report.abstention_reason,
+        "incumbent": incumbent,
+        "candidates": candidates,
+        "winner": winner,
+        "promotable": report.promotable,
+        "diagnostics": report.evaluation.as_ref().map(|evaluation| {
+            serde_json::json!({
+                "evaluationHash": evaluation.evaluation_hash,
+                "graphAxisDegenerate": evaluation.graph_axis_degenerate,
+                "queriesScored": evaluation.queries_scored,
+                "queriesWithoutGain": evaluation.queries_without_gain,
+                "labelsUnmappedSignal": evaluation.labels_unmapped_signal,
+            })
+        }),
+    });
+    if include_hash {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "reportHash".to_owned(),
+                serde_json::Value::from(report.report_hash.clone()),
+            );
+        }
+    }
+    value
+}
+
+/// Stable JSON rendering of the tuning report.
+#[must_use]
+pub fn render_retrieval_tuning_report_json(report: &RetrievalTuningReport) -> String {
+    retrieval_tuning_report_json_value(report, true).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -1892,6 +2126,140 @@ mod tests {
         match evaluate_fusion_candidates(&cx, &replays, &labels, incumbent()) {
             Err(ShadowTuningError::Cancelled(_)) => Ok(()),
             other => Err(format!("cancelled Cx must abort the sweep: {other:?}")),
+        }
+    }
+
+    // ===== S3: evidence gate + report tests =====
+
+    fn flip_fixture_label_report() -> Result<LabelExtractionReport, String> {
+        // One dense triple: query "q1", mem-b, helpful, weight 1.0.
+        let created = ts(0);
+        let events = [event(
+            "fev-1",
+            "mem-b",
+            created,
+            Some(pack_item_evidence("pack-1")),
+        )];
+        let pack_queries = BTreeMap::from([("pack-1".to_owned(), "q1".to_owned())]);
+        join(&events, &[], &pack_queries, &BTreeMap::new(), created)
+    }
+
+    fn flip_fixture_replays() -> [QueryReplay; 1] {
+        [QueryReplay {
+            query: "q1".to_owned(),
+            hits: vec![
+                hybrid_hit("mem-a", 0.0255, Some(1.0), None),
+                hybrid_hit("mem-b", 0.020, None, Some(1.0)),
+            ],
+        }]
+    }
+
+    #[test]
+    fn evidence_gate_abstains_below_thresholds() -> TestResult {
+        let labels = join(&[], &[], &BTreeMap::new(), &BTreeMap::new(), ts(0))?;
+        let report = assemble_retrieval_tuning_report(
+            labels,
+            None,
+            7,
+            &RetrievalTuningGateConfig::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        if !report.abstained
+            || report.abstention_reason != Some(INSUFFICIENT_OUTCOME_EVIDENCE_CODE)
+            || report.promotable
+            || report.evaluation.is_some()
+        {
+            return Err(format!("abstention shape wrong: {report:?}"));
+        }
+        let rendered: serde_json::Value =
+            serde_json::from_str(&render_retrieval_tuning_report_json(&report))
+                .map_err(|error| error.to_string())?;
+        if rendered["schema"] != RETRIEVAL_TUNING_REPORT_SCHEMA_V1
+            || rendered["abstained"] != true
+            || !rendered["winner"].is_null()
+            || rendered["promotable"] != false
+            || rendered["dbGeneration"] != 7
+        {
+            return Err(format!("abstention rendering wrong: {rendered}"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn gate_pass_produces_promotable_report() -> TestResult {
+        let cx = Cx::for_testing();
+        let labels = flip_fixture_label_report()?;
+        let evaluation =
+            evaluate_fusion_candidates(&cx, &flip_fixture_replays(), &labels.triples, incumbent())
+                .map_err(|error| error.to_string())?;
+        let gate = RetrievalTuningGateConfig {
+            min_triples: 1,
+            min_queries: 1,
+            promote_margin: 0.03,
+        };
+        let report = assemble_retrieval_tuning_report(labels, Some(evaluation), 3, &gate)
+            .map_err(|error| error.to_string())?;
+        if report.abstained || !report.promotable || report.abstention_reason.is_some() {
+            return Err(format!("gate-pass shape wrong: {report:?}"));
+        }
+        let rendered: serde_json::Value =
+            serde_json::from_str(&render_retrieval_tuning_report_json(&report))
+                .map_err(|error| error.to_string())?;
+        if rendered["policyId"] != RETRIEVAL_TUNING_POLICY_ID
+            || rendered["promotable"] != true
+            || rendered["labelSet"]["triples"] != 1
+        {
+            return Err(format!("gate-pass rendering wrong: {rendered}"));
+        }
+        let margin = rendered["winner"]["relativeMargin"]
+            .as_f64()
+            .ok_or("winner must carry relativeMargin")?;
+        if margin <= 0.03 {
+            return Err(format!("relative margin must clear the gate: {margin}"));
+        }
+        if rendered["reportHash"].as_str().map(str::to_owned) != Some(report.report_hash.clone()) {
+            return Err("rendered reportHash must match the struct".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn report_hash_is_deterministic_and_content_bound() -> TestResult {
+        let labels_a = join(&[], &[], &BTreeMap::new(), &BTreeMap::new(), ts(0))?;
+        let labels_b = join(&[], &[], &BTreeMap::new(), &BTreeMap::new(), ts(0))?;
+        let gate = RetrievalTuningGateConfig::default();
+        let first = assemble_retrieval_tuning_report(labels_a, None, 1, &gate)
+            .map_err(|error| error.to_string())?;
+        let second = assemble_retrieval_tuning_report(labels_b.clone(), None, 1, &gate)
+            .map_err(|error| error.to_string())?;
+        if first.report_hash != second.report_hash {
+            return Err("identical reports must share a hash".to_owned());
+        }
+        let generation_shifted = assemble_retrieval_tuning_report(labels_b, None, 2, &gate)
+            .map_err(|error| error.to_string())?;
+        if generation_shifted.report_hash == first.report_hash {
+            return Err("dbGeneration must be hash-bound".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn gate_evaluation_mismatch_is_loud() -> TestResult {
+        let cx = Cx::for_testing();
+        let labels = flip_fixture_label_report()?;
+        let evaluation =
+            evaluate_fusion_candidates(&cx, &flip_fixture_replays(), &labels.triples, incumbent())
+                .map_err(|error| error.to_string())?;
+        // One triple is below the default 50-triple gate, so supplying an
+        // evaluation anyway must fail loudly instead of being guessed around.
+        match assemble_retrieval_tuning_report(
+            labels,
+            Some(evaluation),
+            1,
+            &RetrievalTuningGateConfig::default(),
+        ) {
+            Err(ShadowTuningError::Storage { .. }) => Ok(()),
+            other => Err(format!("gate/evaluation mismatch must be loud: {other:?}")),
         }
     }
 }

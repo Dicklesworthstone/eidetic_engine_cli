@@ -214,6 +214,13 @@ const RESOURCE_ADMISSION_DEGRADED_MODES: &[&str] = &[
     "stale_source_authority",
 ];
 const UNSUPPORTED_DEGRADED_MODES: &[&str] = &["unsupported_policy_domain"];
+const RETRIEVAL_WEIGHTS_INPUTS: &[&str] = &[
+    "feedback_events",
+    "search_returned_mem_audit",
+    "pack_records",
+    "search_index",
+];
+const RETRIEVAL_WEIGHTS_DEGRADED_MODES: &[&str] = &["insufficient_outcome_evidence"];
 
 pub const SHADOW_POLICY_INVENTORY: &[ShadowPolicyInventoryEntry] = &[
     ShadowPolicyInventoryEntry {
@@ -323,6 +330,22 @@ pub const SHADOW_POLICY_INVENTORY: &[ShadowPolicyInventoryEntry] = &[
         side_effect_free: true,
         shadowable_without_mutation: false,
         abstention_reason: Some("unsupported_policy_domain"),
+    },
+    // ADR 0070 (bd-2tehh.2/.3): offline outcome-tuned retrieval fusion
+    // weights. The evaluator in `core::shadow_tuning` is read-only and
+    // deterministic; live ranking changes only through the explicit promote
+    // step (bd-2tehh.3), never from a shadow run.
+    ShadowPolicyInventoryEntry {
+        policy_id: "candidate.retrieval.outcome_tuned_weights",
+        policy_domain: "retrieval_weights",
+        status: PolicyInventoryStatus::Candidate,
+        maturity: PolicyMaturity::Experimental,
+        required_inputs: RETRIEVAL_WEIGHTS_INPUTS,
+        supported_cohorts: ALL_COHORTS,
+        known_degraded_modes: RETRIEVAL_WEIGHTS_DEGRADED_MODES,
+        side_effect_free: true,
+        shadowable_without_mutation: true,
+        abstention_reason: None,
     },
 ];
 
