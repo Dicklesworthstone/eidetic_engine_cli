@@ -236,6 +236,9 @@ mkdir -p "$FIXTURE_REPO"
 init_out="$(ee_json --workspace "$WS" init --json)"
 assert_jq "$init_out" '.schema == "ee.response.v2" and .success == true' \
     "ee init succeeds for capture workspace"
+profile_out="$(ee_json --workspace "$WS" profile config apply --profile swarm --json)"
+assert_jq "$profile_out" '.schema == "ee.response.v2" and .success == true' \
+    "capture fixture pins the public swarm profile so the 130-job boundedness batch is not host-capped"
 
 cat >"$SESSION_PATH" <<'SESSION'
 {"role":"user","content":"The capture workflow kept reproposing the same lesson after acceptance."}
