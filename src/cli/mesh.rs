@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use asupersync::{Cx, Outcome};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
@@ -57,11 +58,17 @@ use crate::mesh::peer::{
     MeshPeerHandshake, MeshPeerRecord, MeshPeerRotateInput, build_peer_origin_node_id, enroll_peer,
     list_peers, revoke_peer, rotate_peer_key, show_peer, unknown_peer_attempt_report,
 };
+use crate::mesh::responder_broker::{
+    DurableResponderRegistration, PreAuthAdmissionLimits, ResponderBrokerError,
+    ResponderBrokerOwner, ResponderRouteRegistry, TailscaleLocalApiClient,
+    resolve_durable_registration,
+};
 use crate::mesh::tailscale_autodiscovery::{
     TailscaleAutodiscoveryConfig, TailscaleAutodiscoveryReport,
     TailscaleStatusCapabilityHelloProbe, autodiscover_tailscale_peers,
     tailscale_discovery_budget_ms_from_env_value, tailscale_peer_probe_timeout_ms_from_env_value,
 };
+use crate::mesh::transport_session::{SessionCapabilities, SessionChannelLimits};
 use crate::models::{DomainError, ProcessExitCode};
 use crate::output;
 use crate::policy::{
@@ -258,6 +265,8 @@ pub struct MeshHelloResponderArgs {
 pub enum MeshHelloResponderCommand {
     /// Report whether the local hello responder lifecycle job is running.
     Status(MeshHelloResponderStatusArgs),
+    /// Own the real Tailscale responder listener in this foreground process.
+    Run(MeshHelloResponderRunArgs),
 }
 
 /// Arguments for `ee mesh hello-responder status`.
@@ -266,6 +275,38 @@ pub struct MeshHelloResponderStatusArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee mesh hello-responder run`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshHelloResponderRunArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Locally configured team route identifier.
+    #[arg(long = "team-id", value_name = "TEAM_ID")]
+    pub team_id: String,
+
+    /// This ee installation's durable node identifier.
+    #[arg(long = "responder-node-id", value_name = "NODE_ID")]
+    pub responder_node_id: String,
+
+    /// Opaque enrolled peer handle. Repeat to register multiple exact routes.
+    #[arg(long = "peer", value_name = "PEER_ID", action = ArgAction::Append, required = true)]
+    pub peers: Vec<String>,
+
+    /// Committed nonprivileged responder port; defaults to EE_MESH_HELLO_PORT, then 41888.
+    #[arg(long)]
+    pub port: Option<u16>,
+
+    /// Explicit tailscaled LocalAPI Unix socket; otherwise discover a real socket.
+    #[arg(long = "localapi-socket", value_name = "PATH")]
+    pub localapi_socket: Option<PathBuf>,
+
+    /// LocalAPI address-set revalidation interval.
+    #[arg(long = "revalidate-ms", default_value_t = 2_000_u64)]
+    pub revalidate_ms: u64,
 }
 
 /// Arguments for `ee mesh preview-grant`.
@@ -3270,7 +3311,223 @@ where
         MeshHelloResponderCommand::Status(args) => {
             handle_mesh_hello_responder_status(cli, args, stdout, stderr)
         }
+        MeshHelloResponderCommand::Run(args) => {
+            handle_mesh_hello_responder_run(cli, args, stdout, stderr)
+        }
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MeshHelloResponderRunReport {
+    schema: &'static str,
+    running: bool,
+    owner_scope: &'static str,
+    bound_addresses: Vec<String>,
+    registered_routes: usize,
+    workspace_id: String,
+}
+
+fn handle_mesh_hello_responder_run<W, E>(
+    cli: &Cli,
+    args: &MeshHelloResponderRunArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
+        Ok(store) => store,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    if !snapshot.mesh_enabled {
+        return write_domain_error(
+            &DomainError::PolicyDenied {
+                message: "Mesh is disabled; refusing to start an inbound responder owner."
+                    .to_owned(),
+                repair: Some("Explicitly re-enable mesh after containment review.".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
+    let configured_port = read_env_var(EnvVar::MeshHelloPort);
+    let port = match (args.port, configured_port.as_deref()) {
+        (Some(port), _) => port,
+        (None, Some(value)) => match value.trim().parse::<u16>() {
+            Ok(port) => port,
+            Err(_) => {
+                return write_domain_error(
+                    &DomainError::Usage {
+                        message: "EE_MESH_HELLO_PORT must be an integer port.".to_owned(),
+                        repair: Some(
+                            "Use EE_MESH_HELLO_PORT=41888 or pass --port 41888.".to_owned(),
+                        ),
+                    },
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                );
+            }
+        },
+        (None, None) => crate::mesh::hello_responder::DEFAULT_HELLO_RESPONDER_PORT,
+    };
+    if !(100..=60_000).contains(&args.revalidate_ms) || port < 1024 {
+        return write_domain_error(
+            &DomainError::Usage {
+                message: "Responder port must be nonprivileged and revalidate-ms must be between 100 and 60000."
+                    .to_owned(),
+                repair: Some("Use --port 41888 --revalidate-ms 2000.".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
+    let workspace_path = match PathBuf::from(&snapshot.workspace_path).canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::Configuration {
+                    message: format!("Cannot canonicalize responder workspace: {error}"),
+                    repair: Some("Use the canonical workspace path and retry.".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+    let database_path = match PathBuf::from(&snapshot.database_path).canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::Configuration {
+                    message: format!("Cannot canonicalize responder database: {error}"),
+                    repair: Some("Run `ee migrate run`, then retry.".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+    let local_api = args
+        .localapi_socket
+        .as_ref()
+        .map(|path| TailscaleLocalApiClient::new(path, Duration::from_secs(2)))
+        .or_else(|| TailscaleLocalApiClient::discover(Duration::from_secs(2)));
+    let Some(local_api) = local_api else {
+        return write_responder_broker_error(
+            &ResponderBrokerError::TransportUnavailable,
+            cli,
+            stdout,
+            stderr,
+        );
+    };
+    let runtime = match crate::core::build_cli_runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::Configuration {
+                    message: format!("Failed to build responder runtime: {error}"),
+                    repair: Some("Run `ee doctor --json` and retry.".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+    let cx = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let registrations = runtime.block_on(async {
+        let _ambient = Cx::set_current(Some(cx.clone()));
+        let mut routes = Vec::with_capacity(args.peers.len());
+        for peer in &args.peers {
+            let resolved = resolve_durable_registration(
+                &cx,
+                &local_api,
+                &connection,
+                &DurableResponderRegistration {
+                    workspace_path: workspace_path.clone(),
+                    database_path: database_path.clone(),
+                    workspace_id: snapshot.workspace_id.clone(),
+                    team_id: args.team_id.clone(),
+                    responder_node_id: args.responder_node_id.clone(),
+                    peer_handle: peer.clone(),
+                    committed_port: port,
+                    capabilities: SessionCapabilities::base(),
+                    limits: SessionChannelLimits::default(),
+                },
+            )
+            .await?;
+            routes.push(resolved.route);
+        }
+        let registry = ResponderRouteRegistry::new(routes)?;
+        ResponderBrokerOwner::start(
+            &cx,
+            local_api,
+            registry,
+            PreAuthAdmissionLimits::default(),
+            Duration::from_millis(args.revalidate_ms),
+        )
+        .await
+    });
+    let mut owner = match registrations {
+        Ok(owner) => owner,
+        Err(error) => return write_responder_broker_error(&error, cli, stdout, stderr),
+    };
+    let report = MeshHelloResponderRunReport {
+        schema: "ee.mesh.hello_responder.run.v1",
+        running: true,
+        owner_scope: "user",
+        bound_addresses: owner
+            .bound_addresses()
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        registered_routes: owner.route_count(),
+        workspace_id: snapshot.workspace_id,
+    };
+    let human = format!(
+        "Mesh responder owner is listening on {} with {} exact route(s).",
+        report.bound_addresses.join(", "),
+        report.registered_routes
+    );
+    let written = write_mesh_report(cli, &report, &human, stdout);
+    if written != ProcessExitCode::Success {
+        owner.shutdown();
+        return written;
+    }
+    let served = runtime.block_on(async {
+        let _ambient = Cx::set_current(Some(cx.clone()));
+        owner.serve_until_cancelled(&cx).await
+    });
+    match served {
+        Ok(()) | Err(ResponderBrokerError::Cancelled) => ProcessExitCode::Success,
+        Err(error) => write_responder_broker_error(&error, cli, stdout, stderr),
+    }
+}
+
+fn write_responder_broker_error<W: Write, E: Write>(
+    error: &ResponderBrokerError,
+    cli: &Cli,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode {
+    let domain_error = DomainError::PolicyDeniedWithDetails {
+        message: error.message(),
+        repair: Some(error.repair().to_owned()),
+        details_json: serde_json::json!({
+            "code": error.code(),
+            "severity": error.severity(),
+        })
+        .to_string(),
+    };
+    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
 }
 
 fn handle_mesh_hello_responder_status<W, E>(

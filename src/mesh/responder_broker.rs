@@ -1,20 +1,14 @@
 //! Accepted-side Unix responder broker for authenticated mesh sessions.
 //!
-//! This is the first bounded production slice of T2.2
-//! (`bd-tc-epic-qzk7o.3.3`). It owns one real Asupersync TCP listener,
-//! verifies the bind address and every kernel-observed peer through the
-//! Tailscale LocalAPI, admits pre-authentication work under global/source
-//! bounds, selects only an exact pre-registered route, opens existing key
-//! storage without creating it, and hands the socket to T2.1's source-coupled
-//! authenticated-session acceptor.
+//! This T2.2 production path (`bd-tc-epic-qzk7o.3.3`) owns the complete
+//! LocalAPI-reported Tailscale address set on one port, revalidates and rebinds
+//! it, verifies every kernel-observed peer with WhoIs, resolves peer identity,
+//! consent generation, and pair-key generation from durable local stores, and
+//! hands the socket to T2.1's public source-coupled session acceptor.
 //!
-//! This slice deliberately does not run application hello, anti-entropy, or
-//! synchronization. Route registration/control-channel ownership, network-map
-//! rebind supervision, durable audit persistence, and grant-target migration
-//! remain later T2.2 slices. Pair-key generation also remains route-owned:
-//! key-store record v1 does not persist a generation, so binding the route's
-//! generation to durable key metadata belongs with rotation/control-plane
-//! ownership rather than this inbound acceptor.
+//! It deliberately does not run application hello, anti-entropy, or
+//! synchronization. Cross-workspace daemon registration, durable lifecycle
+//! audit persistence, and application dispatch remain later T2.2 slices.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -38,13 +32,18 @@ use asupersync::net::TcpListener;
 #[cfg(unix)]
 use asupersync::net::unix::UnixStream;
 #[cfg(unix)]
-use asupersync::time::{BudgetTimeExt, timeout, wall_now};
+use asupersync::time::BudgetTimeExt;
+use asupersync::time::{sleep as asupersync_sleep, timeout, wall_now};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{EnvVar, parse_env_bool_flag, read_env_var};
+use crate::db::{
+    DbConnection, MeshPeerTransportIdentityError, ObserveMeshPeerTransportIdentityInput,
+};
 use crate::mesh::bootstrap_envelope::BootstrapAdmission;
 pub use crate::mesh::key_store::MESH_KEY_STORE_UNAVAILABLE_CODE;
 use crate::mesh::key_store::{KeyStoreError, MeshKeyStore, PairKeyClass};
+use crate::mesh::peer::{MeshPeerRecord, MeshPeerState};
 use crate::mesh::transport_session::{
     AcceptedSessionConfig, AcceptedSourceAttestation, AuthenticatedTransportSession,
     HandshakeObservations, ResolvedAcceptedRoute, ResponderExpectations, SessionCapabilities,
@@ -57,12 +56,16 @@ pub const RESPONDER_BROKER_AUDIT_SCHEMA_V1: &str = "ee.mesh.responder_broker.aud
 pub const MESH_RESPONDER_ROUTE_UNAVAILABLE_CODE: &str = "mesh_responder_route_unavailable";
 pub const MESH_BOOTSTRAP_IDENTITY_UNVERIFIED_CODE: &str = "mesh_bootstrap_identity_unverified";
 pub const MESH_RESPONDER_PORT_CONFLICT_CODE: &str = "mesh_responder_port_conflict";
+pub const MESH_RESPONDER_IDENTITY_UPGRADE_REQUIRED_CODE: &str =
+    "mesh_responder_identity_upgrade_required";
 
 #[cfg(unix)]
 const LOCAL_API_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 #[cfg(unix)]
 const LOCAL_API_MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_RECENT_BROKER_AUDIT_EVENTS: usize = 128;
+const MIN_OWNER_REVALIDATE_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_OWNER_REVALIDATE_INTERVAL: Duration = Duration::from_secs(60);
 
 pub type TailscaleLocalApiFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ResponderBrokerError>> + 'a>>;
@@ -73,6 +76,13 @@ pub struct LocalTailscaleIdentity {
     pub stable_id: String,
     pub current_node_pubkey: String,
     pub tailnet_id: String,
+}
+
+/// Authoritative LocalAPI status snapshot used for full-address-set binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalTailscaleStatus {
+    pub identity: LocalTailscaleIdentity,
+    pub addresses: Vec<IpAddr>,
 }
 
 /// Minimal accepted-peer identity returned by LocalAPI WhoIs.
@@ -86,6 +96,13 @@ pub struct WhoIsIdentity {
 /// needs. Production uses [`TailscaleLocalApiClient`]; tests may host a fake
 /// LocalAPI socket while exercising the same broker path.
 pub trait TailscaleLocalApi: Send + Sync {
+    fn local_status<'a>(
+        &'a self,
+        _cx: &'a Cx,
+    ) -> TailscaleLocalApiFuture<'a, LocalTailscaleStatus> {
+        Box::pin(async { Err(ResponderBrokerError::InvalidConfiguration) })
+    }
+
     fn verify_local_address<'a>(
         &'a self,
         cx: &'a Cx,
@@ -97,6 +114,28 @@ pub trait TailscaleLocalApi: Send + Sync {
         cx: &'a Cx,
         source: SocketAddr,
     ) -> TailscaleLocalApiFuture<'a, WhoIsIdentity>;
+}
+
+impl<T: TailscaleLocalApi + ?Sized> TailscaleLocalApi for Arc<T> {
+    fn local_status<'a>(&'a self, cx: &'a Cx) -> TailscaleLocalApiFuture<'a, LocalTailscaleStatus> {
+        (**self).local_status(cx)
+    }
+
+    fn verify_local_address<'a>(
+        &'a self,
+        cx: &'a Cx,
+        address: SocketAddr,
+    ) -> TailscaleLocalApiFuture<'a, LocalTailscaleIdentity> {
+        (**self).verify_local_address(cx, address)
+    }
+
+    fn who_is<'a>(
+        &'a self,
+        cx: &'a Cx,
+        source: SocketAddr,
+    ) -> TailscaleLocalApiFuture<'a, WhoIsIdentity> {
+        (**self).who_is(cx, source)
+    }
 }
 
 /// Real Tailscale LocalAPI client over tailscaled's Unix-domain socket.
@@ -118,6 +157,31 @@ impl TailscaleLocalApiClient {
     #[must_use]
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    /// Select the first real tailscaled LocalAPI Unix socket present on this
+    /// host. No CLI fallback is used for responder authority.
+    #[must_use]
+    pub fn discover(io_timeout: Duration) -> Option<Self> {
+        let mut candidates = vec![
+            PathBuf::from("/var/run/tailscale/tailscaled.sock"),
+            PathBuf::from("/run/tailscale/tailscaled.sock"),
+            PathBuf::from("/var/run/tailscaled.socket"),
+        ];
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            candidates.push(
+                home.join("Library/Containers/io.tailscale.ipn.macsys/Data/IPN/tailscaled.sock"),
+            );
+            candidates.push(
+                home.join(
+                    "Library/Group Containers/io.tailscale.ipn.macos/Data/IPN/tailscaled.sock",
+                ),
+            );
+        }
+        candidates
+            .into_iter()
+            .find(|candidate| local_api_socket_exists(candidate))
+            .map(|socket_path| Self::new(socket_path, io_timeout))
     }
 
     #[cfg(unix)]
@@ -164,6 +228,21 @@ impl TailscaleLocalApiClient {
 }
 
 impl TailscaleLocalApi for TailscaleLocalApiClient {
+    fn local_status<'a>(&'a self, cx: &'a Cx) -> TailscaleLocalApiFuture<'a, LocalTailscaleStatus> {
+        Box::pin(async move {
+            #[cfg(not(unix))]
+            {
+                let _ = (cx, &self.socket_path, self.io_timeout);
+                return Err(ResponderBrokerError::PlatformUnsupported);
+            }
+            #[cfg(unix)]
+            {
+                let body = self.request_json(cx, "/localapi/v0/status").await?;
+                parse_local_status(&body)
+            }
+        })
+    }
+
     fn verify_local_address<'a>(
         &'a self,
         cx: &'a Cx,
@@ -177,36 +256,11 @@ impl TailscaleLocalApi for TailscaleLocalApiClient {
             }
             #[cfg(unix)]
             {
-                let body = self.request_json(cx, "/localapi/v0/status").await?;
-                let status: LocalApiStatus = serde_json::from_slice(&body)
-                    .map_err(|_| ResponderBrokerError::WhoIsUnverified)?;
-                let local = status.local.ok_or(ResponderBrokerError::WhoIsUnverified)?;
-                let tailnet_id = local
-                    .tailnet_id
-                    .or_else(|| {
-                        status
-                            .current_tailnet
-                            .and_then(|tailnet| tailnet.magic_dns_suffix)
-                    })
-                    .or(status.magic_dns_suffix)
-                    .filter(|value| valid_identity(value))
-                    .ok_or(ResponderBrokerError::WhoIsUnverified)?;
-                let address_verified = local
-                    .tailscale_ips
-                    .iter()
-                    .filter_map(|value| value.parse::<IpAddr>().ok())
-                    .any(|ip| ip == address.ip());
-                if !address_verified
-                    || !valid_identity(&local.stable_id)
-                    || !valid_node_key(&local.current_node_pubkey)
-                {
+                let status = self.local_status(cx).await?;
+                if !status.addresses.contains(&address.ip()) {
                     return Err(ResponderBrokerError::WhoIsUnverified);
                 }
-                Ok(LocalTailscaleIdentity {
-                    stable_id: local.stable_id,
-                    current_node_pubkey: local.current_node_pubkey,
-                    tailnet_id,
-                })
+                Ok(status.identity)
             }
         })
     }
@@ -257,6 +311,10 @@ impl TailscaleLocalApi for TailscaleLocalApiClient {
 #[cfg(unix)]
 #[derive(Debug, Deserialize)]
 struct LocalApiStatus {
+    #[serde(rename = "BackendState")]
+    backend_state: Option<String>,
+    #[serde(rename = "TailscaleIPs", default)]
+    tailscale_ips: Vec<String>,
     #[serde(rename = "Self")]
     local: Option<LocalApiStatusNode>,
     #[serde(rename = "CurrentTailnet")]
@@ -303,22 +361,255 @@ struct LocalApiWhoIsNode {
     addresses: Vec<String>,
 }
 
+#[cfg(unix)]
+fn parse_local_status(body: &[u8]) -> Result<LocalTailscaleStatus, ResponderBrokerError> {
+    let status: LocalApiStatus =
+        serde_json::from_slice(body).map_err(|_| ResponderBrokerError::WhoIsUnverified)?;
+    if status.backend_state.as_deref() != Some("Running") {
+        return Err(ResponderBrokerError::TransportUnavailable);
+    }
+    let local = status.local.ok_or(ResponderBrokerError::WhoIsUnverified)?;
+    let tailnet_id = local
+        .tailnet_id
+        .or_else(|| {
+            status
+                .current_tailnet
+                .and_then(|tailnet| tailnet.magic_dns_suffix)
+        })
+        .or(status.magic_dns_suffix)
+        .filter(|value| valid_identity(value))
+        .ok_or(ResponderBrokerError::WhoIsUnverified)?;
+    let mut addresses = status
+        .tailscale_ips
+        .iter()
+        .chain(&local.tailscale_ips)
+        .filter_map(|value| value.parse::<IpAddr>().ok())
+        .filter(|ip| !ip.is_unspecified())
+        .collect::<Vec<_>>();
+    addresses.sort();
+    addresses.dedup();
+    if addresses.is_empty() {
+        return Err(ResponderBrokerError::TransportUnavailable);
+    }
+    if !valid_identity(&local.stable_id) || !valid_node_key(&local.current_node_pubkey) {
+        return Err(ResponderBrokerError::WhoIsUnverified);
+    }
+    Ok(LocalTailscaleStatus {
+        identity: LocalTailscaleIdentity {
+            stable_id: local.stable_id,
+            current_node_pubkey: local.current_node_pubkey,
+            tailnet_id,
+        },
+        addresses,
+    })
+}
+
+#[cfg(unix)]
+fn local_api_socket_exists(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_socket())
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn local_api_socket_exists(_path: &Path) -> bool {
+    false
+}
+
 /// One locally registered responder route. No network message can introduce
 /// or modify the workspace path or peer handle.
 #[derive(Clone, Debug)]
 pub struct RegisteredResponderRoute {
     pub workspace_path: PathBuf,
+    /// Durable authority store used by production owner registrations. `None`
+    /// is retained only for the lower-level transport conformance seam.
+    pub database_path: Option<PathBuf>,
     pub peer_handle: String,
     pub committed_port: u16,
     pub expectations: ResponderExpectations,
     pub responder_node_pubkey: String,
+    pub peer_transport_key_generation: u64,
+    pub grant_generation: u64,
     pub capabilities: SessionCapabilities,
     pub limits: SessionChannelLimits,
+}
+
+/// Secret-free local registration request. Remote frames cannot supply any
+/// of these fields; peer identity, grants, and pair-key generation are loaded
+/// from their durable stores before the route enters the registry.
+#[derive(Clone, Debug)]
+pub struct DurableResponderRegistration {
+    pub workspace_path: PathBuf,
+    pub database_path: PathBuf,
+    pub workspace_id: String,
+    pub team_id: String,
+    pub responder_node_id: String,
+    pub peer_handle: String,
+    pub committed_port: u16,
+    pub capabilities: SessionCapabilities,
+    pub limits: SessionChannelLimits,
+}
+
+/// Authoritative LocalAPI snapshot plus the exact durable route it resolved.
+#[derive(Clone, Debug)]
+pub struct ResolvedResponderRegistration {
+    pub local_status: LocalTailscaleStatus,
+    pub route: RegisteredResponderRoute,
+}
+
+/// Resolve one route from LocalAPI authority and durable local stores.
+///
+/// The only caller inputs are local registration scope. Stable node ids,
+/// current node keys, key generations, and grant generations are never
+/// accepted from the network or command line.
+pub async fn resolve_durable_registration<A: TailscaleLocalApi>(
+    cx: &Cx,
+    local_api: &A,
+    connection: &DbConnection,
+    registration: &DurableResponderRegistration,
+) -> Result<ResolvedResponderRegistration, ResponderBrokerError> {
+    validate_durable_registration(registration)?;
+    let local_status = local_api.local_status(cx).await.map_err(|error| {
+        if matches!(
+            error,
+            ResponderBrokerError::WhoIsUnavailable | ResponderBrokerError::TransportUnavailable
+        ) {
+            ResponderBrokerError::TransportUnavailable
+        } else {
+            error
+        }
+    })?;
+    let peer = connection
+        .get_mesh_peer(&registration.workspace_id, &registration.peer_handle)
+        .map_err(|_| ResponderBrokerError::RouteUnavailable)?
+        .filter(|peer| peer.enabled)
+        .ok_or(ResponderBrokerError::RouteUnavailable)?;
+    let policy = peer
+        .policy_summary_json
+        .as_deref()
+        .ok_or(ResponderBrokerError::IdentityUpgradeRequired)
+        .and_then(|json| {
+            serde_json::from_str::<MeshPeerRecord>(json)
+                .map_err(|_| ResponderBrokerError::IdentityUpgradeRequired)
+        })?;
+    if policy.peer_id != registration.peer_handle
+        || policy.workspace_id != registration.workspace_id
+        || policy.state != MeshPeerState::Active
+        || !policy.handshake.granted
+        || !policy.handshake.discovery_consent
+        || policy.endpoint.tailnet_id != local_status.identity.tailnet_id
+    {
+        return Err(ResponderBrokerError::RouteUnavailable);
+    }
+
+    let endpoint = peer_endpoint_for_whois(&policy.endpoint.endpoint)?;
+    let who_is = local_api.who_is(cx, endpoint).await?;
+    if peer.transport_identity.is_none()
+        && who_is.current_node_pubkey != policy.endpoint.tailscale_node_key
+    {
+        return Err(ResponderBrokerError::WhoIsUnverified);
+    }
+    let peer = connection
+        .observe_mesh_peer_transport_identity(&ObserveMeshPeerTransportIdentityInput {
+            workspace_id: registration.workspace_id.clone(),
+            peer_id: registration.peer_handle.clone(),
+            tailnet_id: local_status.identity.tailnet_id.clone(),
+            stable_node_id: who_is.stable_id,
+            current_node_pubkey: who_is.current_node_pubkey,
+            observed_at: None,
+        })
+        .map_err(map_peer_identity_error)?;
+    let transport_identity = peer
+        .transport_identity
+        .ok_or(ResponderBrokerError::IdentityUpgradeRequired)?;
+    let grant = connection
+        .get_mesh_lane_grant_state(&registration.workspace_id, &registration.peer_handle)
+        .map_err(|_| ResponderBrokerError::RouteUnavailable)?
+        .filter(|grant| grant.target_matches_current_peer && grant.grant_generation > 0)
+        .ok_or(ResponderBrokerError::RouteUnavailable)?;
+    let pair_record = MeshKeyStore::open_existing(&registration.workspace_path)
+        .map_err(map_key_store_error)?
+        .ok_or(ResponderBrokerError::KeyStoreUnavailable)?
+        .load_pair_key(&registration.peer_handle, PairKeyClass::Current)
+        .map_err(map_key_store_error)?
+        .ok_or(ResponderBrokerError::PairingRequired)?;
+
+    let route = RegisteredResponderRoute {
+        workspace_path: registration.workspace_path.clone(),
+        database_path: Some(registration.database_path.clone()),
+        peer_handle: registration.peer_handle.clone(),
+        committed_port: registration.committed_port,
+        expectations: ResponderExpectations {
+            team_id: registration.team_id.clone(),
+            tailnet_id: local_status.identity.tailnet_id.clone(),
+            responder_node_id: registration.responder_node_id.clone(),
+            responder_workspace_id: registration.workspace_id.clone(),
+            responder_stable_id: local_status.identity.stable_id.clone(),
+            initiator_node_id: peer.origin_node_id,
+            initiator_stable_id: transport_identity.stable_node_id,
+            pair_key_generation: pair_record.generation.get(),
+        },
+        responder_node_pubkey: local_status.identity.current_node_pubkey.clone(),
+        peer_transport_key_generation: transport_identity.key_generation,
+        grant_generation: grant.grant_generation,
+        capabilities: registration.capabilities.clone(),
+        limits: registration.limits,
+    };
+    route.validate()?;
+    Ok(ResolvedResponderRegistration {
+        local_status,
+        route,
+    })
+}
+
+fn validate_durable_registration(
+    registration: &DurableResponderRegistration,
+) -> Result<(), ResponderBrokerError> {
+    if registration.committed_port < 1024
+        || !valid_identity(&registration.team_id)
+        || !valid_identity(&registration.workspace_id)
+        || !valid_identity(&registration.responder_node_id)
+        || !valid_opaque_peer_handle(&registration.peer_handle)
+        || !registration.workspace_path.is_absolute()
+        || !registration.database_path.is_absolute()
+        || registration.workspace_path.canonicalize().ok().as_ref()
+            != Some(&registration.workspace_path)
+        || registration.database_path.canonicalize().ok().as_ref()
+            != Some(&registration.database_path)
+    {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    Ok(())
+}
+
+fn peer_endpoint_for_whois(endpoint: &str) -> Result<SocketAddr, ResponderBrokerError> {
+    endpoint
+        .parse::<SocketAddr>()
+        .or_else(|_| endpoint.parse::<IpAddr>().map(|ip| SocketAddr::new(ip, 1)))
+        .map_err(|_| ResponderBrokerError::IdentityUpgradeRequired)
+}
+
+fn map_peer_identity_error(error: MeshPeerTransportIdentityError) -> ResponderBrokerError {
+    match error {
+        MeshPeerTransportIdentityError::StableIdentityMismatch => {
+            ResponderBrokerError::WhoIsUnverified
+        }
+        MeshPeerTransportIdentityError::InvalidObservation => ResponderBrokerError::WhoIsUnverified,
+        MeshPeerTransportIdentityError::PeerUnavailable
+        | MeshPeerTransportIdentityError::GenerationExhausted
+        | MeshPeerTransportIdentityError::Storage(_) => ResponderBrokerError::RouteUnavailable,
+    }
 }
 
 impl RegisteredResponderRoute {
     fn validate(&self) -> Result<(), ResponderBrokerError> {
         if !self.workspace_path.is_absolute()
+            || self
+                .database_path
+                .as_ref()
+                .is_some_and(|path| !path.is_absolute())
             || !valid_opaque_peer_handle(&self.peer_handle)
             || self.committed_port < 1024
             || !valid_identity(&self.expectations.team_id)
@@ -328,6 +619,8 @@ impl RegisteredResponderRoute {
             || !valid_identity(&self.expectations.initiator_stable_id)
             || !valid_node_key(&self.responder_node_pubkey)
             || self.expectations.pair_key_generation == 0
+            || self.peer_transport_key_generation == 0
+            || self.grant_generation == 0
         {
             return Err(ResponderBrokerError::InvalidConfiguration);
         }
@@ -467,6 +760,7 @@ impl PreAuthAdmissionLimits {
 #[derive(Debug)]
 struct AdmissionState {
     limits: PreAuthAdmissionLimits,
+    started_at: Instant,
     inflight_global: usize,
     inflight_by_source: BTreeMap<IpAddr, usize>,
     rate: BootstrapAdmission,
@@ -592,6 +886,7 @@ pub enum ResponderBrokerError {
     AdmissionLimited,
     WhoIsUnavailable,
     WhoIsUnverified,
+    IdentityUpgradeRequired,
     RouteUnavailable,
     KeyStoreUnavailable,
     PairingRequired,
@@ -606,6 +901,7 @@ impl ResponderBrokerError {
             Self::WhoIsUnavailable | Self::WhoIsUnverified => {
                 MESH_BOOTSTRAP_IDENTITY_UNVERIFIED_CODE
             }
+            Self::IdentityUpgradeRequired => MESH_RESPONDER_IDENTITY_UPGRADE_REQUIRED_CODE,
             Self::RouteUnavailable => MESH_RESPONDER_ROUTE_UNAVAILABLE_CODE,
             Self::KeyStoreUnavailable => MESH_KEY_STORE_UNAVAILABLE_CODE,
             Self::PairingRequired => "mesh_frame_auth_failed",
@@ -623,6 +919,7 @@ impl ResponderBrokerError {
         match self {
             Self::WhoIsUnavailable
             | Self::WhoIsUnverified
+            | Self::IdentityUpgradeRequired
             | Self::RouteUnavailable
             | Self::KeyStoreUnavailable
             | Self::PairingRequired => "high",
@@ -674,6 +971,10 @@ impl ResponderBrokerError {
                 "Mesh responder could not verify the accepted source identity through Tailscale WhoIs"
                     .to_owned()
             }
+            Self::IdentityUpgradeRequired => {
+                "Mesh responder peer requires an authoritative LocalAPI identity observation"
+                    .to_owned()
+            }
             Self::RouteUnavailable => {
                 "Mesh responder has no exact validated route for the authenticated target"
                     .to_owned()
@@ -699,6 +1000,9 @@ impl ResponderBrokerError {
             }
             Self::WhoIsUnavailable | Self::WhoIsUnverified => {
                 "Restore the local Tailscale daemon and verify the peer remains enrolled on the expected tailnet."
+            }
+            Self::IdentityUpgradeRequired => {
+                "Start the responder while the enrolled peer endpoint is reachable through Tailscale LocalAPI."
             }
             Self::RouteUnavailable | Self::InvalidConfiguration => {
                 "Re-register the exact local team/workspace route with the user-scoped responder owner."
@@ -736,7 +1040,6 @@ pub struct ResponderBroker<A> {
     admission: Arc<Mutex<AdmissionState>>,
     runtime: Arc<Mutex<RuntimeStatus>>,
     bound_address: SocketAddr,
-    started_at: Instant,
 }
 
 impl<A: TailscaleLocalApi> ResponderBroker<A> {
@@ -787,6 +1090,7 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
                 routes: Arc::new(routes),
                 admission: Arc::new(Mutex::new(AdmissionState {
                     limits: admission_limits,
+                    started_at: Instant::now(),
                     inflight_global: 0,
                     inflight_by_source: BTreeMap::new(),
                     rate: BootstrapAdmission::with_limits(
@@ -798,7 +1102,6 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
                 })),
                 runtime: Arc::new(Mutex::new(RuntimeStatus::listening())),
                 bound_address,
-                started_at: Instant::now(),
             })
         }
     }
@@ -930,7 +1233,7 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
         {
             return Err(ResponderBrokerError::AdmissionLimited);
         }
-        let now_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let now_ms = u64::try_from(state.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         state
             .rate
             .admit(&source.to_string(), now_ms)
@@ -1044,6 +1347,224 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
     }
 }
 
+/// One user-scoped owner for the complete LocalAPI address set.
+///
+/// The owner periodically re-reads status while serving. Address loss closes
+/// every stale listener before retry; a changed address set or local node-key
+/// rotation is rebound atomically from the owner's perspective. It never
+/// binds loopback, wildcard, or a non-LocalAPI address.
+pub struct ResponderBrokerOwner<A> {
+    local_api: Arc<A>,
+    routes: ResponderRouteRegistry,
+    admission_limits: PreAuthAdmissionLimits,
+    admission: Arc<Mutex<AdmissionState>>,
+    brokers: Vec<ResponderBroker<Arc<A>>>,
+    bound_addresses: Vec<SocketAddr>,
+    revalidate_interval: Duration,
+    last_revalidated_at: Instant,
+}
+
+impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
+    pub async fn start(
+        cx: &Cx,
+        local_api: A,
+        routes: ResponderRouteRegistry,
+        admission_limits: PreAuthAdmissionLimits,
+        revalidate_interval: Duration,
+    ) -> Result<Self, ResponderBrokerError> {
+        if !(MIN_OWNER_REVALIDATE_INTERVAL..=MAX_OWNER_REVALIDATE_INTERVAL)
+            .contains(&revalidate_interval)
+        {
+            return Err(ResponderBrokerError::InvalidConfiguration);
+        }
+        let admission_limits = admission_limits.validate()?;
+        let mut owner = Self {
+            local_api: Arc::new(local_api),
+            routes,
+            admission_limits,
+            admission: Arc::new(Mutex::new(AdmissionState {
+                limits: admission_limits,
+                started_at: Instant::now(),
+                inflight_global: 0,
+                inflight_by_source: BTreeMap::new(),
+                rate: BootstrapAdmission::with_limits(
+                    admission_limits.window_ms,
+                    admission_limits.max_source_per_window,
+                    admission_limits.max_global_per_window,
+                    admission_limits.max_tracked_sources,
+                ),
+            })),
+            brokers: Vec::new(),
+            bound_addresses: Vec::new(),
+            revalidate_interval,
+            last_revalidated_at: Instant::now(),
+        };
+        owner.reconcile(cx).await?;
+        Ok(owner)
+    }
+
+    #[must_use]
+    pub fn bound_addresses(&self) -> &[SocketAddr] {
+        &self.bound_addresses
+    }
+
+    #[must_use]
+    pub fn route_count(&self) -> usize {
+        self.routes.route_count()
+    }
+
+    /// Serve authenticated transport sessions until the caller context is
+    /// cancelled. Application protocol work remains owned by the next mesh
+    /// layer; this loop deliberately drops a completed authenticated session
+    /// only after T2.1 has proven the route and key.
+    pub async fn serve_until_cancelled(&mut self, cx: &Cx) -> Result<(), ResponderBrokerError> {
+        let mut listener_index = 0_usize;
+        loop {
+            checkpoint(cx, "responder owner")?;
+            if self.brokers.is_empty() {
+                match self.reconcile(cx).await {
+                    Ok(()) => {}
+                    Err(ResponderBrokerError::Cancelled) => {
+                        self.shutdown();
+                        return Err(ResponderBrokerError::Cancelled);
+                    }
+                    Err(_) => {
+                        asupersync_sleep(cx.now(), self.revalidate_interval).await;
+                        continue;
+                    }
+                }
+            }
+            if self.brokers.is_empty() {
+                continue;
+            }
+            listener_index %= self.brokers.len();
+            let broker = &self.brokers[listener_index];
+            let now = wall_now();
+            let accept_timed_out = match timeout(
+                now,
+                self.revalidate_interval,
+                broker.accept_authenticated(cx),
+            )
+            .await
+            {
+                Ok(Ok(_session)) => false,
+                Ok(Err(ResponderBrokerError::Cancelled)) => {
+                    self.shutdown();
+                    return Err(ResponderBrokerError::Cancelled);
+                }
+                Ok(Err(_rejected)) => false,
+                Err(_) => true,
+            };
+            if (accept_timed_out || self.last_revalidated_at.elapsed() >= self.revalidate_interval)
+                && let Err(error) = self.reconcile(cx).await
+            {
+                self.shutdown();
+                if matches!(error, ResponderBrokerError::Cancelled) {
+                    return Err(error);
+                }
+                asupersync_sleep(cx.now(), self.revalidate_interval).await;
+            }
+            listener_index = listener_index.saturating_add(1);
+        }
+    }
+
+    pub async fn reconcile(&mut self, cx: &Cx) -> Result<(), ResponderBrokerError> {
+        let status = match self.local_api.local_status(cx).await {
+            Ok(status) => status,
+            Err(error) => {
+                self.shutdown_listeners();
+                return Err(
+                    if matches!(
+                        error,
+                        ResponderBrokerError::WhoIsUnavailable
+                            | ResponderBrokerError::TransportUnavailable
+                    ) {
+                        ResponderBrokerError::TransportUnavailable
+                    } else {
+                        error
+                    },
+                );
+            }
+        };
+        if status.identity.stable_id != self.routes.responder_stable_id
+            || status.identity.tailnet_id != self.routes.tailnet_id
+        {
+            self.shutdown_listeners();
+            return Err(ResponderBrokerError::WhoIsUnverified);
+        }
+        let mut desired = status
+            .addresses
+            .iter()
+            .copied()
+            .map(|ip| SocketAddr::new(ip, self.routes.committed_port))
+            .collect::<Vec<_>>();
+        desired.sort();
+        desired.dedup();
+        if desired.is_empty()
+            || desired
+                .iter()
+                .any(|address| address.ip().is_unspecified() || address.ip().is_loopback())
+        {
+            self.shutdown_listeners();
+            return Err(ResponderBrokerError::TransportUnavailable);
+        }
+        let key_changed = status.identity.current_node_pubkey != self.routes.responder_node_pubkey;
+        if desired == self.bound_addresses && !key_changed {
+            self.last_revalidated_at = Instant::now();
+            return Ok(());
+        }
+
+        self.shutdown_listeners();
+        let mut routes = self.routes.clone();
+        if key_changed {
+            routes.responder_node_pubkey = status.identity.current_node_pubkey.clone();
+            for route in routes.routes.values_mut() {
+                route.responder_node_pubkey = status.identity.current_node_pubkey.clone();
+            }
+        }
+        let mut brokers = Vec::with_capacity(desired.len());
+        for address in &desired {
+            match ResponderBroker::bind(
+                cx,
+                *address,
+                Arc::clone(&self.local_api),
+                routes.clone(),
+                self.admission_limits,
+            )
+            .await
+            {
+                Ok(mut broker) => {
+                    broker.admission = Arc::clone(&self.admission);
+                    brokers.push(broker);
+                }
+                Err(error) => {
+                    for broker in &mut brokers {
+                        broker.shutdown();
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        self.routes = routes;
+        self.bound_addresses = desired;
+        self.brokers = brokers;
+        self.last_revalidated_at = Instant::now();
+        Ok(())
+    }
+
+    pub fn shutdown(&mut self) {
+        self.shutdown_listeners();
+    }
+
+    fn shutdown_listeners(&mut self) {
+        for broker in &mut self.brokers {
+            broker.shutdown();
+        }
+        self.brokers.clear();
+        self.bound_addresses.clear();
+    }
+}
+
 async fn resolve_route<A: TailscaleLocalApi>(
     cx: &Cx,
     local_api: &A,
@@ -1061,6 +1582,7 @@ async fn resolve_route<A: TailscaleLocalApi>(
     if who_is.stable_id != route.expectations.initiator_stable_id {
         return Err(ResponderBrokerError::WhoIsUnverified);
     }
+    refresh_durable_route_authority(route, &who_is)?;
     let pair_key = load_route_pair_key(route)?;
     let source_attestation = AcceptedSourceAttestation::from_local_whois(
         source.ip(),
@@ -1083,6 +1605,53 @@ async fn resolve_route<A: TailscaleLocalApi>(
         source_attestation,
         permit,
     ))
+}
+
+fn refresh_durable_route_authority(
+    route: &RegisteredResponderRoute,
+    who_is: &WhoIsIdentity,
+) -> Result<(), ResponderBrokerError> {
+    let Some(database_path) = route.database_path.as_ref() else {
+        return Ok(());
+    };
+    if !database_path.is_file() {
+        return Err(ResponderBrokerError::RouteUnavailable);
+    }
+    let connection = DbConnection::open_file(database_path)
+        .map_err(|_| ResponderBrokerError::RouteUnavailable)?;
+    let peer = connection
+        .observe_mesh_peer_transport_identity(&ObserveMeshPeerTransportIdentityInput {
+            workspace_id: route.expectations.responder_workspace_id.clone(),
+            peer_id: route.peer_handle.clone(),
+            tailnet_id: route.expectations.tailnet_id.clone(),
+            stable_node_id: who_is.stable_id.clone(),
+            current_node_pubkey: who_is.current_node_pubkey.clone(),
+            observed_at: None,
+        })
+        .map_err(map_peer_identity_error)?;
+    if peer
+        .transport_identity
+        .as_ref()
+        .is_none_or(|identity| identity.key_generation < route.peer_transport_key_generation)
+    {
+        return Err(ResponderBrokerError::WhoIsUnverified);
+    }
+    let grant = connection
+        .get_mesh_lane_grant_state(
+            &route.expectations.responder_workspace_id,
+            &route.peer_handle,
+        )
+        .map_err(|_| ResponderBrokerError::RouteUnavailable)?
+        .filter(|grant| {
+            grant.target_matches_current_peer && grant.grant_generation == route.grant_generation
+        })
+        .ok_or(ResponderBrokerError::RouteUnavailable)?;
+    if grant.target_adapter.peer_id != route.peer_handle
+        || grant.target_adapter.origin_node_id != route.expectations.initiator_node_id
+    {
+        return Err(ResponderBrokerError::RouteUnavailable);
+    }
+    Ok(())
 }
 
 fn load_route_pair_key(
@@ -1125,7 +1694,11 @@ fn valid_opaque_peer_handle(value: &str) -> bool {
         return false;
     }
     value.strip_prefix("peer_").is_some_and(|opaque| {
-        opaque.len() >= 32 && opaque.bytes().all(|byte| byte.is_ascii_hexdigit())
+        // Current enrollment emits 24 hex characters. V099 binds that local
+        // handle to a separately authoritative stable node identity; widening
+        // enrollment handles to 128 random bits remains an explicit migration
+        // and cannot be performed inside the T2.1-owned key-store namespace.
+        opaque.len() >= 24 && opaque.bytes().all(|byte| byte.is_ascii_hexdigit())
     })
 }
 
@@ -1160,12 +1733,21 @@ fn parse_local_api_response(response: &[u8]) -> Result<Vec<u8>, ResponderBrokerE
         return Err(ResponderBrokerError::WhoIsUnavailable);
     }
     let mut content_length = None;
+    let mut chunked = false;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             return Err(ResponderBrokerError::WhoIsUnverified);
         };
         if name.eq_ignore_ascii_case("transfer-encoding") {
-            return Err(ResponderBrokerError::WhoIsUnverified);
+            let tokens = value
+                .split(',')
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .collect::<Vec<_>>();
+            if tokens.len() != 1 || !tokens[0].eq_ignore_ascii_case("chunked") {
+                return Err(ResponderBrokerError::WhoIsUnverified);
+            }
+            chunked = true;
         }
         if name.eq_ignore_ascii_case("content-length") {
             let parsed = value
@@ -1178,10 +1760,56 @@ fn parse_local_api_response(response: &[u8]) -> Result<Vec<u8>, ResponderBrokerE
         }
     }
     let body = &response[header_end + 4..];
+    if chunked {
+        if content_length.is_some() {
+            return Err(ResponderBrokerError::WhoIsUnverified);
+        }
+        return decode_local_api_chunked_body(body);
+    }
     if content_length.is_some_and(|expected| expected != body.len()) {
         return Err(ResponderBrokerError::WhoIsUnverified);
     }
     Ok(body.to_vec())
+}
+
+#[cfg(unix)]
+fn decode_local_api_chunked_body(body: &[u8]) -> Result<Vec<u8>, ResponderBrokerError> {
+    let mut decoded = Vec::new();
+    let mut cursor = 0_usize;
+    loop {
+        let remaining = body
+            .get(cursor..)
+            .ok_or(ResponderBrokerError::WhoIsUnverified)?;
+        let line_end = remaining
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .ok_or(ResponderBrokerError::WhoIsUnverified)?;
+        let size_line = std::str::from_utf8(&remaining[..line_end])
+            .map_err(|_| ResponderBrokerError::WhoIsUnverified)?;
+        let size_token = size_line.split(';').next().unwrap_or_default().trim();
+        let chunk_size = usize::from_str_radix(size_token, 16)
+            .map_err(|_| ResponderBrokerError::WhoIsUnverified)?;
+        cursor = cursor
+            .checked_add(line_end + 2)
+            .ok_or(ResponderBrokerError::WhoIsUnverified)?;
+        if chunk_size == 0 {
+            return Ok(decoded);
+        }
+        let chunk_end = cursor
+            .checked_add(chunk_size)
+            .ok_or(ResponderBrokerError::WhoIsUnverified)?;
+        let chunk = body
+            .get(cursor..chunk_end)
+            .ok_or(ResponderBrokerError::WhoIsUnverified)?;
+        if decoded.len().saturating_add(chunk.len()) > LOCAL_API_MAX_RESPONSE_BYTES {
+            return Err(ResponderBrokerError::WhoIsUnverified);
+        }
+        decoded.extend_from_slice(chunk);
+        if body.get(chunk_end..chunk_end + 2) != Some(b"\r\n") {
+            return Err(ResponderBrokerError::WhoIsUnverified);
+        }
+        cursor = chunk_end + 2;
+    }
 }
 
 #[cfg(unix)]
@@ -1244,6 +1872,7 @@ mod tests {
     fn route(path: PathBuf, port: u16) -> RegisteredResponderRoute {
         RegisteredResponderRoute {
             workspace_path: path,
+            database_path: None,
             peer_handle: "peer_0123456789abcdef0123456789abcdef".to_owned(),
             committed_port: port,
             expectations: ResponderExpectations {
@@ -1257,6 +1886,8 @@ mod tests {
                 pair_key_generation: 1,
             },
             responder_node_pubkey: "nodekey:responder-current".to_owned(),
+            peer_transport_key_generation: 1,
+            grant_generation: 1,
             capabilities: SessionCapabilities::base(),
             limits: SessionChannelLimits::default(),
         }
@@ -1292,6 +1923,52 @@ mod tests {
         assert!(matches!(
             ResponderRouteRegistry::new([guessable_handle]),
             Err(ResponderBrokerError::InvalidConfiguration)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn localapi_http_parser_accepts_bounded_chunked_json() {
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"ok\r\n7\r\n\":true}\r\n0\r\n\r\n";
+        let body = parse_local_api_response(response).expect("decode bounded chunked response");
+        assert_eq!(body, br#"{"ok":true}"#);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn localapi_status_requires_running_backend_and_uses_complete_address_set() {
+        let running = br#"{
+            "BackendState":"Running",
+            "TailscaleIPs":["100.64.0.1"],
+            "Self":{
+                "ID":"node-stable",
+                "PublicKey":"nodekey:current",
+                "TailscaleIPs":["fd7a:115c:a1e0::1"]
+            },
+            "CurrentTailnet":{"MagicDNSSuffix":"example.ts.net"}
+        }"#;
+        let status = parse_local_status(running).expect("running status");
+        assert_eq!(
+            status.addresses,
+            vec![
+                "100.64.0.1".parse::<IpAddr>().expect("v4"),
+                "fd7a:115c:a1e0::1".parse::<IpAddr>().expect("v6"),
+            ]
+        );
+
+        let stopped = br#"{
+            "BackendState":"Stopped",
+            "TailscaleIPs":["100.64.0.1"],
+            "Self":{
+                "ID":"node-stable",
+                "PublicKey":"nodekey:current",
+                "TailscaleIPs":["100.64.0.1"]
+            },
+            "CurrentTailnet":{"MagicDNSSuffix":"example.ts.net"}
+        }"#;
+        assert!(matches!(
+            parse_local_status(stopped),
+            Err(ResponderBrokerError::TransportUnavailable)
         ));
     }
 

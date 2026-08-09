@@ -93,7 +93,7 @@ impl HelloResponderDegradation {
             severity: "medium",
             message: "Mesh is enabled but the hello responder lifecycle job is not running."
                 .to_owned(),
-            repair: "Run `ee daemon --foreground` or disable the responder with EE_MESH_HELLO_RESPONDER_DISABLED=1."
+            repair: "Run `ee mesh hello-responder run --help` and start the user-scoped foreground owner, or disable the responder with EE_MESH_HELLO_RESPONDER_DISABLED=1."
                 .to_owned(),
         }
     }
@@ -116,7 +116,8 @@ impl HelloResponderDegradation {
             message:
                 "Mesh is enabled but no self Tailscale IP is available for the hello responder."
                     .to_owned(),
-            repair: "Authenticate Tailscale, then retry `ee daemon --foreground`.".to_owned(),
+            repair: "Authenticate Tailscale, then retry the user-scoped `ee mesh hello-responder run` owner."
+                .to_owned(),
         }
     }
 
