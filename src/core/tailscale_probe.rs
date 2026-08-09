@@ -1564,7 +1564,7 @@ mod tests {
     #[test]
     fn localapi_http_response_body_decodes_chunked_payload() -> TestResult {
         let body = http_response_body(
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10\r\n{\"BackendState\"\r\nb\r\n:\"Running\"}\r\n0\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nf\r\n{\"BackendState\"\r\nb\r\n:\"Running\"}\r\n0\r\n\r\n",
         )?;
 
         assert_eq!(body.as_slice(), br#"{"BackendState":"Running"}"#);
