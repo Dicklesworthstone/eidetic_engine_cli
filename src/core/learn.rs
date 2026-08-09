@@ -4197,6 +4197,7 @@ mod tests {
         CreateAuditInput, CreateCurationCandidateInput, CreateFeedbackEventInput,
         CreateMemoryInput, CreateWorkspaceInput, DbConnection,
     };
+    use crate::models::TrustClass;
     use std::fs;
 
     type TestResult = Result<(), String>;
