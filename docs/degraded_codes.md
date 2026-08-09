@@ -13116,9 +13116,14 @@ ee remember 'Rerank fixture memory about release verification.' --workspace . --
 ee search 'release verification' --workspace . --json
 ```
 
-**Expected emission.** Message contains: `Search rerank is in auto mode ... fusion-only ranking`
+**Expected emission.** The compact rerank posture carries one structured,
+permanent advisory. Message contains: `No usable local reranker is registered
+... fusion-only ranking`. The code is omitted from the per-query `degraded[]`
+and human degradation prose.
 
-**Repair hint.** `ee model fetch rerank-default`
+**Repair hint.** None. This build cannot fetch or bundle a reranker
+automatically; `ee doctor` reports that an operator-supplied artifact is
+required rather than inventing a placeholder path.
 
 **Fixture.** [`tests/fixtures/failure_modes/rerank_model_unavailable.json`](../tests/fixtures/failure_modes/rerank_model_unavailable.json)
 

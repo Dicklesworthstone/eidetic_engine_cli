@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2154
 # bd-2vq2z.6 - real-binary E2E coverage for embedding-native rerank fallback.
 #
 # This script proves the no-silent-rerank path: a fresh workspace with no
 # registered local reranker must still run real search, emit an explicit
-# ee.rerank_posture.v1 fusion-only degradation, and avoid fake rerankScore
+# ee.rerank_posture.v1 permanent capability advisory, and avoid fake rerankScore
 # fields. A separate central lane can exercise real model-backed reranking once
 # a cached reranker artifact is available.
 
@@ -122,25 +123,29 @@ assert_jq "$search_one" '.data.rerank.mode == "fusion_only_degraded"' "missing r
 assert_jq "$search_one" '.data.rerank.available == false' "missing reranker is not reported available"
 assert_jq "$search_one" '.data.rerank.scoreKind == "rrf_fused"' "fusion-only scoreKind is explicit"
 assert_jq "$search_one" '.data.rerank.degradedCode == "rerank_model_unavailable"' "rerank degraded code is explicit"
+assert_jq "$search_one" '.data.rerank.permanent == true' "rerank capability gap is permanent"
+assert_jq "$search_one" '.data.rerank.advisory.code == "rerank_model_unavailable"' \
+    "rerank posture carries one structured advisory"
+assert_jq "$search_one" '.data.rerank.advisory.permanent == true' \
+    "structured rerank advisory is permanent"
+assert_jq "$search_one" '.data.rerank.advisory.repair == null' \
+    "rerank advisory does not invent an unavailable repair command"
+assert_jq "$search_one" '.data.rerank.advisory.resolution == "operator_supplied_artifact_required"' \
+    "rerank advisory names the real resolution boundary"
 assert_jq "$search_one" '.data.rerank.rerankScoreCount == 0' "no rerank scores are counted"
 assert_jq "$search_one" '.data.metrics.sourceCounts.reranked == 0' "metrics do not fake reranked source hits"
 assert_jq "$search_one" '.data.metrics.fieldCoverage.rerankScoreCount == 0' "field coverage does not fake rerankScore"
 assert_jq "$search_one" '[.data.results[]? | has("rerankScore")] | any | not' "fusion-only results omit rerankScore"
-assert_jq "$search_one" '[.data.degraded[]? | select(.code == "rerank_model_unavailable")] | length >= 1' \
-    "degraded list carries rerank_model_unavailable"
-assert_jq "$search_one" 'first(.data.degraded[]? | select(.code == "rerank_model_unavailable") | .severity) == "low"' \
-    "rerank unavailable degradation has low severity"
-assert_jq "$search_one" \
-    'first(.data.degraded[]? | select(.code == "rerank_model_unavailable") | .repair) == "ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst"' \
-    "rerank unavailable degradation carries fetch repair"
+assert_jq "$search_one" '[.data.degraded[]? | select(.code == "rerank_model_unavailable")] | length == 0' \
+    "permanent reranker posture does not repeat in degraded list"
 
 first_order="$(json_scalar "$search_one" '[.data.results[]?.docId] | join(",")' "first search order")"
 rerank_mode="$(json_scalar "$search_one" '.data.rerank.mode' "rerank mode")"
 degraded_code="$(json_scalar "$search_one" '.data.rerank.degradedCode' "rerank degraded code")"
-degraded_severity="$(json_scalar "$search_one" 'first(.data.degraded[]? | select(.code == "rerank_model_unavailable") | .severity)' "rerank degraded severity")"
-degraded_repair="$(json_scalar "$search_one" 'first(.data.degraded[]? | select(.code == "rerank_model_unavailable") | .repair)' "rerank degraded repair")"
+degraded_severity="$(json_scalar "$search_one" '.data.rerank.advisory.severity' "rerank advisory severity")"
+degraded_resolution="$(json_scalar "$search_one" '.data.rerank.advisory.resolution' "rerank advisory resolution")"
 e2e_log_note "pre_post_rerank_order mode=$rerank_mode degraded=$degraded_code order=$first_order"
-e2e_log_note "rerank_degradation_detail code=$degraded_code severity=$degraded_severity repair=$degraded_repair"
+e2e_log_note "rerank_advisory_detail code=$degraded_code severity=$degraded_severity resolution=$degraded_resolution"
 
 step "repeat same query to prove deterministic fusion-only order"
 run_ee_capture search_two search_fusion_only_repeat search "$QUERY" --workspace "$WS" --limit 5 --json
@@ -155,7 +160,16 @@ assert_jq "$search_two" '.data.rerank == {
     "rerankScoreCount": 0,
     "scoreKind": "rrf_fused",
     "available": false,
-    "degradedCode": "rerank_model_unavailable"
+    "degradedCode": "rerank_model_unavailable",
+    "permanent": true,
+    "advisory": {
+        "code": "rerank_model_unavailable",
+        "severity": "low",
+        "permanent": true,
+        "message": "No usable local reranker is registered; this build cannot fetch or bundle one automatically. Search is using fusion-only ranking.",
+        "repair": null,
+        "resolution": "operator_supplied_artifact_required"
+    }
 }' "repeat search keeps identical rerank posture JSON"
 
 end_temp_workspace

@@ -39,25 +39,19 @@ fn empty_search_report(degraded: Vec<SearchDegradation>) -> SearchReport {
 }
 
 #[test]
-fn empty_results_with_repeated_rerank_degradations_stay_fusion_only_degraded() {
+fn repeated_permanent_rerank_rows_collapse_into_one_structured_posture_advisory() {
     let report = empty_search_report(vec![
         SearchDegradation {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
             message: "No available reranker model is registered for this workspace.".to_string(),
-            repair: Some(
-                "ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst"
-                    .to_string(),
-            ),
+            repair: None,
         },
         SearchDegradation {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
             message: "Registered reranker artifact is cached but incomplete.".to_string(),
-            repair: Some(
-                "ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst"
-                    .to_string(),
-            ),
+            repair: None,
         },
     ]);
 
@@ -75,9 +69,16 @@ fn empty_results_with_repeated_rerank_degradations_stay_fusion_only_degraded() {
         ScoreSource::Hybrid.score_kind()
     );
     assert_eq!(json["rerank"]["degradedCode"], "rerank_model_unavailable");
+    assert_eq!(json["rerank"]["permanent"], true);
+    assert_eq!(
+        json["rerank"]["advisory"]["code"],
+        "rerank_model_unavailable"
+    );
+    assert_eq!(json["rerank"]["advisory"]["permanent"], true);
+    assert!(json["rerank"]["advisory"]["repair"].is_null());
     assert_eq!(
         json["degraded"].as_array().map_or(0, |rows| rows.len()),
-        2,
-        "all degraded rows should remain visible for diagnosis"
+        0,
+        "permanent capability posture must not repeat in per-query degraded output"
     );
 }

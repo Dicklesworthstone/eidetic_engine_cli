@@ -5681,6 +5681,11 @@ pub fn render_doctor_concise_json(report: &DoctorReport) -> String {
         .collect::<Vec<_>>();
     let advisory_counts = DoctorAdvisoryCounts::from_checks(&report.checks);
     let advisory_summary = doctor_advisory_summary_line(advisory_counts);
+    let permanent_capability_gaps = report
+        .checks
+        .iter()
+        .filter(|check| doctor_advisory_is_permanent(check))
+        .collect::<Vec<_>>();
 
     let mut b = JsonBuilder::with_capacity(384);
     b.field_str("schema", RESPONSE_SCHEMA_V2);
@@ -5709,6 +5714,14 @@ pub fn render_doctor_concise_json(report: &DoctorReport) -> String {
             summary.field_str("summary", &advisory_summary);
             summary.field_str("fullCommand", "ee doctor --full --json");
         });
+        d.field_array_of_objects(
+            "permanentCapabilityGaps",
+            &permanent_capability_gaps,
+            |obj, check| {
+                render_doctor_check_json(obj, check, true, true);
+                obj.field_bool("permanent", true);
+            },
+        );
     });
     b.finish()
 }
@@ -5774,7 +5787,14 @@ fn render_doctor_advisories_json(
         .collect::<Vec<_>>();
     parent.field_array_of_objects("advisories", &advisories, |obj, check| {
         render_doctor_check_json(obj, check, include_message, include_verbose_details);
+        obj.field_bool("permanent", doctor_advisory_is_permanent(check));
     });
+}
+
+fn doctor_advisory_is_permanent(check: &CheckResult) -> bool {
+    check.name == "reranker_posture"
+        && check.tier == CheckTier::Advisory
+        && !check.severity.is_healthy()
 }
 
 fn render_doctor_check_json(
@@ -5923,6 +5943,17 @@ pub fn render_doctor_concise_human(report: &DoctorReport) -> String {
     }
 
     let _ = writeln!(output, "{}", doctor_advisory_summary_line(counts));
+    let permanent_capability_gaps = report
+        .checks
+        .iter()
+        .filter(|check| doctor_advisory_is_permanent(check))
+        .collect::<Vec<_>>();
+    if !permanent_capability_gaps.is_empty() {
+        output.push_str("permanent capability gaps:\n");
+        for check in permanent_capability_gaps {
+            let _ = writeln!(output, "  - {}: {}", check.name, check.message);
+        }
+    }
     output.push_str("full: ee doctor --full --json\n");
     output
 }
@@ -24066,6 +24097,14 @@ mod tests {
                 repair: Some("ee import cass --dry-run --json"),
                 tier: CheckTier::Advisory,
             },
+            CheckResult {
+                name: "reranker_posture",
+                severity: CheckSeverity::Warning,
+                message: "Permanent capability gap: fusion-only ranking.".to_owned(),
+                error_code: None,
+                repair: None,
+                tier: CheckTier::Advisory,
+            },
             CheckResult::ok("rch_worker_pressure", "worker pressure ok").advisory(),
         ];
 
@@ -24073,6 +24112,8 @@ mod tests {
         let full = render_doctor_json_filtered(&report, FieldProfile::Full);
         let value = serde_json::from_str::<serde_json::Value>(&concise)
             .map_err(|error| format!("doctor concise JSON should parse: {error}"))?;
+        let full_value = serde_json::from_str::<serde_json::Value>(&full)
+            .map_err(|error| format!("doctor full JSON should parse: {error}"))?;
         let data = value["data"]
             .as_object()
             .ok_or_else(|| "doctor concise data must be an object".to_string())?;
@@ -24135,15 +24176,35 @@ mod tests {
 
         ensure_equal(
             &data["advisorySummary"]["nonOk"],
-            &serde_json::json!(1),
+            &serde_json::json!(2),
             "advisory non-ok count",
         )?;
         ensure_contains(
             data["advisorySummary"]["summary"]
                 .as_str()
                 .unwrap_or_default(),
-            "1 non-ok of 2",
+            "2 non-ok of 3",
             "advisory summary counts non-ok advisories",
+        )?;
+        ensure_equal(
+            &data["permanentCapabilityGaps"][0]["name"],
+            &serde_json::json!("reranker_posture"),
+            "concise permanent capability gap",
+        )?;
+        ensure_equal(
+            &data["permanentCapabilityGaps"][0]["permanent"],
+            &serde_json::json!(true),
+            "concise permanent marker",
+        )?;
+        ensure_equal(
+            &full_value["data"]["advisories"][0]["permanent"],
+            &serde_json::json!(false),
+            "transient advisory marker",
+        )?;
+        ensure_equal(
+            &full_value["data"]["advisories"][1]["permanent"],
+            &serde_json::json!(true),
+            "permanent advisory marker",
         )?;
         ensure_contains(
             data["advisorySummary"]["summary"]

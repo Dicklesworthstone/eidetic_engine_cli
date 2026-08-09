@@ -96,8 +96,7 @@ const SEARCH_ANALYSIS_PROVENANCE_URI_KEY: &str = "_ee_analysis_provenance_uri";
 const SEARCH_ANALYSIS_CREATED_AT_KEY: &str = "_ee_analysis_created_at";
 const EMBED_MODEL_UNAVAILABLE_MODEL_ID: &str = "EE_EMBED_MODEL_PATH";
 const DEFAULT_SEARCH_RERANK_TOP_K: usize = 50;
-const RERANK_MODEL_UNAVAILABLE_REPAIR: &str =
-    "ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst";
+const RERANK_MODEL_UNAVAILABLE_ADVISORY: &str = "No usable local reranker is registered; this build cannot fetch or bundle one automatically. Search is using fusion-only ranking.";
 const RERANK_MODEL_TOKENIZER: &str = "tokenizer.json";
 const RERANK_MODEL_SAFETENSORS_PRIMARY: &str = "model_f32.safetensors";
 const RERANK_MODEL_SAFETENSORS_FALLBACK: &str = "model.safetensors";
@@ -1398,6 +1397,13 @@ pub struct SearchDegradation {
 }
 
 impl SearchDegradation {
+    /// Whether this entry describes a stable capability posture rather than a
+    /// transient degradation that belongs in every query response.
+    #[must_use]
+    pub fn is_permanent(&self) -> bool {
+        self.code == "rerank_model_unavailable"
+    }
+
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         let mut value = serde_json::json!({
@@ -1405,6 +1411,7 @@ impl SearchDegradation {
             "severity": self.severity,
             "message": self.message,
             "repair": self.repair,
+            "permanent": self.is_permanent(),
         });
         append_degradation_recovery_details(&mut value, &self.code);
         value
@@ -1428,7 +1435,7 @@ impl SearchDegradation {
             message: format!(
                 "Search rerank is in auto mode, but the local reranker is unavailable; returning fusion-only ranking. {reason}"
             ),
-            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_string()),
+            repair: None,
         }
     }
 
@@ -2203,9 +2210,14 @@ impl SearchReport {
             }
         }
 
-        if !self.degraded.is_empty() {
+        let transient_degraded = self
+            .degraded
+            .iter()
+            .filter(|degradation| !degradation.is_permanent())
+            .collect::<Vec<_>>();
+        if !transient_degraded.is_empty() {
             output.push_str("\nDegraded:\n");
-            for degraded in &self.degraded {
+            for degraded in transient_degraded {
                 output.push_str(&format!("  - {}: {}\n", degraded.code, degraded.message));
             }
         }
@@ -2537,15 +2549,20 @@ pub(crate) fn search_degraded_data_json(
     source: &'static str,
     degraded: &[SearchDegradation],
 ) -> Vec<serde_json::Value> {
-    aggregate_degraded_entries(degraded.iter().map(|entry| {
-        DegradationAggregationInput::new(
-            source,
-            entry.code.clone(),
-            entry.severity.clone(),
-            entry.message.clone(),
-            entry.repair.clone().unwrap_or_default(),
-        )
-    }))
+    aggregate_degraded_entries(
+        degraded
+            .iter()
+            .filter(|entry| !entry.is_permanent())
+            .map(|entry| {
+                DegradationAggregationInput::new(
+                    source,
+                    entry.code.clone(),
+                    entry.severity.clone(),
+                    entry.message.clone(),
+                    entry.repair.clone().unwrap_or_default(),
+                )
+            }),
+    )
     .into_iter()
     .map(|entry| {
         let mut value = serde_json::json!({
@@ -5012,6 +5029,15 @@ fn search_rerank_posture_json(
         "scoreKind": if rerank_score_count > 0 { "reranked" } else { "rrf_fused" },
         "available": rerank_score_count > 0,
         "degradedCode": unavailable.map(|degradation| degradation.code.as_str()),
+        "permanent": unavailable.is_some(),
+        "advisory": unavailable.map(|degradation| serde_json::json!({
+            "code": degradation.code,
+            "severity": degradation.severity,
+            "permanent": true,
+            "message": RERANK_MODEL_UNAVAILABLE_ADVISORY,
+            "repair": serde_json::Value::Null,
+            "resolution": "operator_supplied_artifact_required",
+        })),
     })
 }
 
@@ -15656,6 +15682,7 @@ mod tests {
         assert_eq!(json["severity"], "high");
         assert!(json["message"].as_str().is_some_and(|m| !m.is_empty()));
         assert!(json["repair"].as_str().is_some());
+        assert_eq!(json["permanent"], false);
     }
 
     #[test]
@@ -16702,6 +16729,8 @@ mod tests {
         assert_eq!(posture["scoreKind"], "reranked");
         assert_eq!(posture["available"], true);
         assert!(posture["degradedCode"].is_null());
+        assert_eq!(posture["permanent"], false);
+        assert!(posture["advisory"].is_null());
     }
 
     #[test]
@@ -16781,6 +16810,14 @@ mod tests {
         assert_eq!(posture["scoreKind"], "rrf_fused");
         assert_eq!(posture["available"], false);
         assert_eq!(posture["degradedCode"], "rerank_model_unavailable");
+        assert_eq!(posture["permanent"], true);
+        assert_eq!(posture["advisory"]["code"], "rerank_model_unavailable");
+        assert_eq!(posture["advisory"]["permanent"], true);
+        assert!(posture["advisory"]["repair"].is_null());
+        assert_eq!(
+            posture["advisory"]["resolution"],
+            "operator_supplied_artifact_required"
+        );
     }
 
     #[test]
@@ -16800,7 +16837,9 @@ mod tests {
         assert_eq!(json["rerank"]["scoreKind"], "rrf_fused");
         assert_eq!(json["rerank"]["available"], false);
         assert_eq!(json["rerank"]["degradedCode"], "rerank_model_unavailable");
-        assert_eq!(json["degraded"][0]["code"], "rerank_model_unavailable");
+        assert_eq!(json["rerank"]["permanent"], true);
+        assert_eq!(json["rerank"]["advisory"]["permanent"], true);
+        assert_eq!(json["degraded"], serde_json::json!([]));
     }
 
     #[test]
@@ -16811,10 +16850,31 @@ mod tests {
         assert_eq!(degraded.severity, "low");
         assert!(degraded.message.contains("Search rerank is in auto mode"));
         assert!(degraded.message.contains("fusion-only ranking"));
-        assert_eq!(
-            degraded.repair.as_deref(),
-            Some(RERANK_MODEL_UNAVAILABLE_REPAIR)
+        assert!(degraded.repair.is_none());
+        assert!(degraded.is_permanent());
+        assert_eq!(degraded.data_json()["permanent"], true);
+    }
+
+    #[test]
+    fn permanent_rerank_advisory_is_omitted_from_default_degraded_prose() {
+        let mut report = rerank_test_report(
+            Vec::new(),
+            vec![SearchDegradation::rerank_model_unavailable(
+                "No available reranker model is registered for this workspace.",
+            )],
         );
+        report
+            .degraded
+            .push(SearchDegradation::stale_index(Some(2), Some(1)));
+
+        let human = report.human_summary();
+        let json = report.data_json();
+
+        assert!(!human.contains("rerank_model_unavailable"));
+        assert!(human.contains("search_index_stale"));
+        assert_eq!(json["degraded"].as_array().map(Vec::len), Some(1));
+        assert_eq!(json["degraded"][0]["code"], "search_index_stale");
+        assert_eq!(json["rerank"]["advisory"]["permanent"], true);
     }
 
     #[test]

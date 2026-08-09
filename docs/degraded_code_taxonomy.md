@@ -259,13 +259,14 @@ memory bodies in `sources[]`.
 | `storage_unimplemented` | status | `fsqlite` core feature | Whole storage subsystem disabled. |
 | `toon_unavailable` | status, doctor | TOON renderer feature | TOON format renderer unavailable or explicitly disabled. |
 
-### `mixed` (4 codes — feature + state)
+### `mixed` (5 codes — feature + state)
 
 | Code | Surface | Notes |
 |------|---------|-------|
 | `cass_unavailable` | doctor, import cass | Build-time: `cass` not on PATH at install. Response-time: PATH check fails per call. After E5, presence in capabilities.available[]; per-call resolution failure stays in degraded[]. |
 | `embed_model_unavailable` | search, context | Build-time/capability: the default `embed-fast` path should compile Frankensearch Model2Vec plus download support; absence is a capability gap, not the normal response path. Response-time: the pinned bundled model cannot be loaded/downloaded, `EE_EMBED_MODEL_PATH` explicitly points at a missing fault-injection path, or the active embedder has fallen back to deterministic hash (`semantic=false`) while lexical fallback remains available. |
 | `graph_unavailable` | doctor, diag graph | Build-time: `fnx-*` feature. Response-time: snapshot generation failed. Split per E5. |
+| `rerank_model_unavailable` | search rerank posture, doctor | Permanent capability posture when no usable local reranker is registered and this build has no bundled/network fetch. It is structured under `rerank.advisory` and doctor capability gaps, not repeated in per-query `degraded[]`. |
 | `search_unavailable` | status, dependency contract | Build-time: `frankensearch`. Response-time: index manifest missing. Split per E5. |
 
 ### `response_time` codes — stay in `degraded[]`
@@ -379,7 +380,6 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `swarm_scale_nondeterminism` | high | bd-1zb7k.8 (S7) |
 | `profile_search_limit_capped` | low | bd-17c65.2.4 (B7) |
 | `recent_hours_window_clamped` | warning | bd-1idcb (G) |
-| `rerank_model_unavailable` | low | bd-2vq2z.6 |
 | `scope_agent_unavailable` | warning | bd-17c65.10.6 (J6) |
 | `scope_excluded_evidence` | low | bd-17c65.10.6 (J6) |
 | `scope_metadata_unavailable` | medium | bd-17c65.10.6 (J6) |

@@ -35,7 +35,8 @@ use crate::mesh::repair_action_graph::{
 };
 use crate::models::error_codes::{self, ErrorCode};
 use crate::models::{
-    EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, SingleFlightPostureReport, TrustClass,
+    EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, ModelPurpose, ModelRegistryStatus,
+    SingleFlightPostureReport, TrustClass,
 };
 use crate::search::lexical_ram_tier::{
     LEXICAL_RAM_TIER_HUGEPAGES_ENV, LEXICAL_RAM_TIER_PIN_RAM_ENV, LexicalRamTierConfig,
@@ -344,6 +345,7 @@ impl DoctorReport {
             check_runtime(),
             check_ee_install_path(),
             check_embedding_posture(workspace_path),
+            check_reranker_posture(workspace_path),
             check_workspace(workspace_path),
             check_database(workspace_path),
             check_shard_fanout(workspace_path).advisory(),
@@ -2953,6 +2955,75 @@ fn check_embedding_posture(workspace_path: Option<&Path>) -> CheckResult {
     }
 }
 
+/// Build the stable doctor projection for the optional reranker capability.
+///
+/// A missing reranker is a permanent capability gap for the current process,
+/// not a transient failure of the memory loop. It therefore stays advisory
+/// and never changes the top-line doctor posture. There is deliberately no
+/// `repair` command: this build has no bundled or network reranker fetch, and
+/// inventing a placeholder artifact path would be misleading.
+fn reranker_posture_check_result(available: Option<bool>, reason: Option<&str>) -> CheckResult {
+    match available {
+        Some(true) => CheckResult::ok(
+            "reranker_posture",
+            "Local reranker capability is available; search can apply reranked scoring when configured.",
+        )
+        .advisory(),
+        Some(false) => CheckResult {
+            name: "reranker_posture",
+            severity: CheckSeverity::Warning,
+            message: "Permanent capability gap: no usable local reranker is registered. Search uses fusion-only ranking. This build cannot fetch or bundle a reranker automatically; no automatic repair command exists. An operator-supplied artifact is required to enable reranking."
+                .to_owned(),
+            error_code: None,
+            repair: None,
+            tier: CheckTier::Advisory,
+        },
+        None => CheckResult::ok(
+            "reranker_posture",
+            format!(
+                "Reranker capability could not be inspected ({}); run `ee model status --workspace . --json` after workspace initialization.",
+                reason.unwrap_or("workspace model registry unavailable")
+            ),
+        )
+        .advisory(),
+    }
+}
+
+/// Read-only doctor check for the local reranker registry posture.
+fn check_reranker_posture(workspace_path: Option<&Path>) -> CheckResult {
+    let Some(workspace_path) = workspace_path else {
+        return reranker_posture_check_result(None, Some("no workspace path"));
+    };
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.is_file() {
+        return reranker_posture_check_result(None, Some("workspace database not found"));
+    }
+
+    let connection = match DbConnection::open_file_read_only(&database_path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            return reranker_posture_check_result(
+                None,
+                Some(&format!("model registry read failed: {error}")),
+            );
+        }
+    };
+    let workspace_id = stable_workspace_id(workspace_path);
+    match connection.list_model_registry_entries(&workspace_id) {
+        Ok(entries) => reranker_posture_check_result(
+            Some(entries.iter().any(|entry| {
+                entry.purpose == ModelPurpose::Reranker
+                    && entry.status == ModelRegistryStatus::Available
+            })),
+            None,
+        ),
+        Err(error) => reranker_posture_check_result(
+            None,
+            Some(&format!("model registry query failed: {error}")),
+        ),
+    }
+}
+
 fn check_shard_fanout(workspace_path: Option<&Path>) -> CheckResult {
     let enabled =
         shard_fanout_enabled_from_env_value(read_env_var(EnvVar::ShardFanoutEnabled).as_deref());
@@ -4250,6 +4321,46 @@ mod tests {
         )?;
 
         Ok(())
+    }
+
+    #[test]
+    fn reranker_posture_reports_permanent_gap_without_fake_repair() -> TestResult {
+        let check = reranker_posture_check_result(Some(false), None);
+
+        ensure(check.name, "reranker_posture", "check name")?;
+        ensure(
+            check.severity,
+            CheckSeverity::Warning,
+            "missing reranker severity",
+        )?;
+        ensure(check.tier, CheckTier::Advisory, "check tier")?;
+        ensure(check.repair.is_none(), true, "no fake repair command")?;
+        ensure(
+            check.message.contains("Permanent capability gap"),
+            true,
+            "message classifies permanent gap",
+        )?;
+        ensure(
+            check.message.contains("no automatic repair command exists"),
+            true,
+            "message is honest about unavailable repair",
+        )
+    }
+
+    #[test]
+    fn reranker_posture_available_and_uninspectable_are_non_blocking() -> TestResult {
+        let available = reranker_posture_check_result(Some(true), None);
+        let unknown = reranker_posture_check_result(None, Some("no workspace path"));
+
+        ensure(available.severity, CheckSeverity::Ok, "available severity")?;
+        ensure(available.tier, CheckTier::Advisory, "available tier")?;
+        ensure(unknown.severity, CheckSeverity::Ok, "unknown severity")?;
+        ensure(unknown.tier, CheckTier::Advisory, "unknown tier")?;
+        ensure(
+            unknown.message.contains("could not be inspected"),
+            true,
+            "unknown posture remains explicit",
+        )
     }
 
     #[test]

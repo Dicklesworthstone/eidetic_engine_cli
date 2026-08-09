@@ -3819,7 +3819,7 @@ fn push_search_degradations(
     degraded: &mut Vec<ContextResponseDegradation>,
     search_degraded: &[SearchDegradation],
 ) {
-    for entry in search_degraded {
+    for entry in search_degraded.iter().filter(|entry| !entry.is_permanent()) {
         let severity = ContextResponseSeverity::parse_lossy(entry.severity.as_str());
         push_degradation(
             degraded,
@@ -11823,6 +11823,35 @@ mod tests {
             &super::context_severity_for_memory_drift_hint(&hint),
             &ContextResponseSeverity::Critical,
             "memory drift critical severity",
+        )
+    }
+
+    #[test]
+    fn permanent_search_capability_posture_does_not_repeat_in_pack_degraded() -> TestResult {
+        let mut degraded = Vec::new();
+        push_search_degradations(
+            &mut degraded,
+            &[
+                SearchDegradation {
+                    code: "rerank_model_unavailable".to_owned(),
+                    severity: "low".to_owned(),
+                    message: "Fusion-only ranking is active.".to_owned(),
+                    repair: None,
+                },
+                SearchDegradation {
+                    code: "search_index_stale".to_owned(),
+                    severity: "medium".to_owned(),
+                    message: "Search index is stale.".to_owned(),
+                    repair: Some("ee index rebuild --workspace .".to_owned()),
+                },
+            ],
+        );
+
+        ensure_equal(&degraded.len(), &1, "only transient degradation imported")?;
+        ensure_equal(
+            &degraded[0].code,
+            &"search_index_stale".to_owned(),
+            "transient code remains visible",
         )
     }
 
