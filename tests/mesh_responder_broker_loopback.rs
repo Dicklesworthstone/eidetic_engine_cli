@@ -72,7 +72,7 @@ fn expectations() -> ResponderExpectations {
         responder_node_id: "node-responder".to_owned(),
         responder_workspace_id: "workspace-responder".to_owned(),
         responder_stable_id: "stable-responder".to_owned(),
-        initiator_node_id: "node-initiator".to_owned(),
+        initiator_node_id: "node_0123456789abcdef0123456789abcdef".to_owned(),
         initiator_stable_id: "stable-initiator".to_owned(),
         pair_key_generation: 7,
     }
@@ -99,7 +99,7 @@ fn initiator_config() -> InitiatorSessionConfig {
         binding: SessionBinding {
             team_id: "team-loopback".to_owned(),
             tailnet_id: "tailnet-loopback".to_owned(),
-            initiator_node_id: "node-initiator".to_owned(),
+            initiator_node_id: "node_0123456789abcdef0123456789abcdef".to_owned(),
             responder_node_id: "node-responder".to_owned(),
             initiator_workspace_id: "workspace-initiator".to_owned(),
             responder_workspace_id: "workspace-responder".to_owned(),
@@ -422,32 +422,32 @@ fn real_tailscale_localapi_binds_status_and_whois_to_kernel_source() -> TestResu
             .map_err(|error| format!("store real responder pair key: {error}"))?;
 
         let port = available_nonprivileged_port()?;
-        let resolved = resolve_durable_registration(
-            &cx,
-            &client,
-            &connection,
-            &DurableResponderRegistration {
-                workspace_path,
-                database_path: database_path
-                    .canonicalize()
-                    .map_err(|error| format!("canonicalize real responder database: {error}"))?,
-                workspace_id: workspace_id.to_owned(),
-                team_id: "team-real-responder-proof".to_owned(),
-                responder_node_id: "node-real-responder-proof".to_owned(),
-                peer_handle: peer.peer_id,
-                committed_port: port,
-                capabilities: SessionCapabilities::base(),
-                limits: session_limits(),
-            },
-        )
-        .await
-        .map_err(|error| format!("resolve real durable responder route: {error}"))?;
-        let registry = ResponderRouteRegistry::new([resolved.route])
-            .map_err(|error| format!("register real responder route: {error}"))?;
-        let mut owner = ResponderBrokerOwner::start(
+        let peer_id = peer.peer_id.clone();
+        let registration = DurableResponderRegistration {
+            workspace_path,
+            database_path: database_path
+                .canonicalize()
+                .map_err(|error| format!("canonicalize real responder database: {error}"))?,
+            workspace_id: workspace_id.to_owned(),
+            team_id: "team-real-responder-proof".to_owned(),
+            responder_node_id: "node-real-responder-proof".to_owned(),
+            peer_handle: peer_id.clone(),
+            committed_port: port,
+            capabilities: SessionCapabilities::base(),
+            limits: session_limits(),
+        };
+        let resolved = resolve_durable_registration(&cx, &client, &connection, &registration)
+            .await
+            .map_err(|error| format!("resolve real durable responder route: {error}"))?;
+        if resolved.route.expectations.initiator_node_id == origin_node_id
+            || resolved.route.expectations.initiator_node_id.len() != 37
+        {
+            return Err("real LocalAPI observation did not migrate the legacy grant to a random ee-node principal".to_owned());
+        }
+        let mut owner = ResponderBrokerOwner::start_durable(
             &cx,
             client,
-            registry,
+            vec![registration],
             PreAuthAdmissionLimits::default(),
             Duration::from_millis(250),
         )
@@ -462,6 +462,50 @@ fn real_tailscale_localapi_binds_status_and_whois_to_kernel_source() -> TestResu
             return Err(format!(
                 "real owner bound {:?}, expected full LocalAPI set {expected_addresses:?}",
                 owner.bound_addresses()
+            ));
+        }
+        if owner.route_generations(&peer_id) != Some((1, 1, 1)) {
+            return Err(format!(
+                "real durable owner started with unexpected route generations: {:?}",
+                owner.route_generations(&peer_id)
+            ));
+        }
+        let current_peer = connection
+            .get_mesh_peer(workspace_id, &peer_id)
+            .map_err(|error| format!("reload real responder peer: {error}"))?
+            .ok_or_else(|| "real responder peer disappeared".to_owned())?;
+        connection
+            .revoke_mesh_lane(&MeshLaneGrantMutationInput {
+                workspace_id: workspace_id.to_owned(),
+                peer_id: peer_id.clone(),
+                target_adapter: MeshLaneGrantTargetAdapter::new(
+                    &peer_id,
+                    current_peer.origin_node_id,
+                ),
+                material_lane: MeshLane::Metadata,
+                expected_generation: 1,
+                approval_config_digest: None,
+                updated_at: Some("2026-08-09T00:02:00Z".to_owned()),
+            })
+            .map_err(|error| format!("revoke real responder lane: {error}"))?;
+        store
+            .store_pair_key(
+                &peer_id,
+                PairKeyClass::Current,
+                NonZeroU64::new(2).expect("real refresh generation is nonzero"),
+                &pair_key(),
+                "2026-08-09T00:02:00Z",
+                true,
+            )
+            .map_err(|error| format!("rotate real responder pair key: {error}"))?;
+        owner
+            .reconcile(&cx)
+            .await
+            .map_err(|error| format!("refresh real durable responder authority: {error}"))?;
+        if owner.route_generations(&peer_id) != Some((2, 1, 2)) {
+            return Err(format!(
+                "real durable owner did not refresh pair/grant generations: {:?}",
+                owner.route_generations(&peer_id)
             ));
         }
         owner.shutdown();

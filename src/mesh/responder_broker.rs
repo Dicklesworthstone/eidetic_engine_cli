@@ -593,11 +593,14 @@ fn peer_endpoint_for_whois(endpoint: &str) -> Result<SocketAddr, ResponderBroker
 
 fn map_peer_identity_error(error: MeshPeerTransportIdentityError) -> ResponderBrokerError {
     match error {
-        MeshPeerTransportIdentityError::StableIdentityMismatch => {
+        MeshPeerTransportIdentityError::StableIdentityMismatch
+        | MeshPeerTransportIdentityError::AmbiguousStableIdentity => {
             ResponderBrokerError::WhoIsUnverified
         }
         MeshPeerTransportIdentityError::InvalidObservation => ResponderBrokerError::WhoIsUnverified,
         MeshPeerTransportIdentityError::PeerUnavailable
+        | MeshPeerTransportIdentityError::AmbiguousGrantTarget
+        | MeshPeerTransportIdentityError::RandomnessUnavailable
         | MeshPeerTransportIdentityError::GenerationExhausted
         | MeshPeerTransportIdentityError::Storage(_) => ResponderBrokerError::RouteUnavailable,
     }
@@ -616,6 +619,7 @@ impl RegisteredResponderRoute {
             || !valid_identity(&self.expectations.tailnet_id)
             || !valid_identity(&self.expectations.responder_workspace_id)
             || !valid_identity(&self.expectations.responder_stable_id)
+            || !valid_durable_node_principal(&self.expectations.initiator_node_id)
             || !valid_identity(&self.expectations.initiator_stable_id)
             || !valid_node_key(&self.responder_node_pubkey)
             || self.expectations.pair_key_generation == 0
@@ -1356,6 +1360,7 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
 pub struct ResponderBrokerOwner<A> {
     local_api: Arc<A>,
     routes: ResponderRouteRegistry,
+    durable_registrations: Option<Vec<DurableResponderRegistration>>,
     admission_limits: PreAuthAdmissionLimits,
     admission: Arc<Mutex<AdmissionState>>,
     brokers: Vec<ResponderBroker<Arc<A>>>,
@@ -1381,6 +1386,69 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
         let mut owner = Self {
             local_api: Arc::new(local_api),
             routes,
+            durable_registrations: None,
+            admission_limits,
+            admission: Arc::new(Mutex::new(AdmissionState {
+                limits: admission_limits,
+                started_at: Instant::now(),
+                inflight_global: 0,
+                inflight_by_source: BTreeMap::new(),
+                rate: BootstrapAdmission::with_limits(
+                    admission_limits.window_ms,
+                    admission_limits.max_source_per_window,
+                    admission_limits.max_global_per_window,
+                    admission_limits.max_tracked_sources,
+                ),
+            })),
+            brokers: Vec::new(),
+            bound_addresses: Vec::new(),
+            revalidate_interval,
+            last_revalidated_at: Instant::now(),
+        };
+        owner.reconcile(cx).await?;
+        Ok(owner)
+    }
+
+    /// Start the production owner from durable local registration scope.
+    /// Every reconciliation re-resolves LocalAPI identity, the peer principal
+    /// and key generation, the lane-grant generation, and T2.1's public
+    /// pair-key seam before retaining or rebinding listeners.
+    pub async fn start_durable(
+        cx: &Cx,
+        local_api: A,
+        registrations: Vec<DurableResponderRegistration>,
+        admission_limits: PreAuthAdmissionLimits,
+        revalidate_interval: Duration,
+    ) -> Result<Self, ResponderBrokerError> {
+        if registrations.is_empty() {
+            return Err(ResponderBrokerError::InvalidConfiguration);
+        }
+        let local_api = Arc::new(local_api);
+        let routes = resolve_durable_route_registry(cx, local_api.as_ref(), &registrations).await?;
+        let mut owner =
+            Self::start_with_arc(cx, local_api, routes, admission_limits, revalidate_interval)
+                .await?;
+        owner.durable_registrations = Some(registrations);
+        Ok(owner)
+    }
+
+    async fn start_with_arc(
+        cx: &Cx,
+        local_api: Arc<A>,
+        routes: ResponderRouteRegistry,
+        admission_limits: PreAuthAdmissionLimits,
+        revalidate_interval: Duration,
+    ) -> Result<Self, ResponderBrokerError> {
+        if !(MIN_OWNER_REVALIDATE_INTERVAL..=MAX_OWNER_REVALIDATE_INTERVAL)
+            .contains(&revalidate_interval)
+        {
+            return Err(ResponderBrokerError::InvalidConfiguration);
+        }
+        let admission_limits = admission_limits.validate()?;
+        let mut owner = Self {
+            local_api,
+            routes,
+            durable_registrations: None,
             admission_limits,
             admission: Arc::new(Mutex::new(AdmissionState {
                 limits: admission_limits,
@@ -1411,6 +1479,24 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
     #[must_use]
     pub fn route_count(&self) -> usize {
         self.routes.route_count()
+    }
+
+    /// Return the currently bound pair, transport-key, and grant generations
+    /// for one opaque peer handle. This is a secret-free owner diagnostic and
+    /// proves reconciliation actually replaced stale durable authority.
+    #[must_use]
+    pub fn route_generations(&self, peer_handle: &str) -> Option<(u64, u64, u64)> {
+        self.routes
+            .routes
+            .values()
+            .find(|route| route.peer_handle == peer_handle)
+            .map(|route| {
+                (
+                    route.expectations.pair_key_generation,
+                    route.peer_transport_key_generation,
+                    route.grant_generation,
+                )
+            })
     }
 
     /// Serve authenticated transport sessions until the caller context is
@@ -1486,6 +1572,23 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
                 );
             }
         };
+        let refreshed_routes = if let Some(registrations) = &self.durable_registrations {
+            match resolve_durable_route_registry(cx, self.local_api.as_ref(), registrations).await {
+                Ok(routes) => Some(routes),
+                Err(error) => {
+                    self.shutdown_listeners();
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        let routes_changed = refreshed_routes
+            .as_ref()
+            .is_some_and(|routes| !same_route_authority(&self.routes, routes));
+        if let Some(routes) = refreshed_routes {
+            self.routes = routes;
+        }
         if status.identity.stable_id != self.routes.responder_stable_id
             || status.identity.tailnet_id != self.routes.tailnet_id
         {
@@ -1509,7 +1612,7 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             return Err(ResponderBrokerError::TransportUnavailable);
         }
         let key_changed = status.identity.current_node_pubkey != self.routes.responder_node_pubkey;
-        if desired == self.bound_addresses && !key_changed {
+        if desired == self.bound_addresses && !key_changed && !routes_changed {
             self.last_revalidated_at = Instant::now();
             return Ok(());
         }
@@ -1563,6 +1666,52 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
         self.brokers.clear();
         self.bound_addresses.clear();
     }
+}
+
+async fn resolve_durable_route_registry<A: TailscaleLocalApi>(
+    cx: &Cx,
+    local_api: &A,
+    registrations: &[DurableResponderRegistration],
+) -> Result<ResponderRouteRegistry, ResponderBrokerError> {
+    let mut routes = Vec::with_capacity(registrations.len());
+    for registration in registrations {
+        let connection = DbConnection::open_file(&registration.database_path)
+            .map_err(|_| ResponderBrokerError::RouteUnavailable)?;
+        routes.push(
+            resolve_durable_registration(cx, local_api, &connection, registration)
+                .await?
+                .route,
+        );
+    }
+    ResponderRouteRegistry::new(routes)
+}
+
+fn same_route_authority(
+    current: &ResponderRouteRegistry,
+    refreshed: &ResponderRouteRegistry,
+) -> bool {
+    if current.committed_port != refreshed.committed_port
+        || current.tailnet_id != refreshed.tailnet_id
+        || current.responder_stable_id != refreshed.responder_stable_id
+        || current.responder_node_pubkey != refreshed.responder_node_pubkey
+        || current.routes.len() != refreshed.routes.len()
+    {
+        return false;
+    }
+    current.routes.iter().all(|(selectors, route)| {
+        refreshed.routes.get(selectors).is_some_and(|candidate| {
+            route.workspace_path == candidate.workspace_path
+                && route.database_path == candidate.database_path
+                && route.peer_handle == candidate.peer_handle
+                && route.committed_port == candidate.committed_port
+                && route.expectations == candidate.expectations
+                && route.responder_node_pubkey == candidate.responder_node_pubkey
+                && route.peer_transport_key_generation == candidate.peer_transport_key_generation
+                && route.grant_generation == candidate.grant_generation
+                && route.capabilities == candidate.capabilities
+                && route.limits == candidate.limits
+        })
+    })
 }
 
 async fn resolve_route<A: TailscaleLocalApi>(
@@ -1632,7 +1781,7 @@ fn refresh_durable_route_authority(
     if peer
         .transport_identity
         .as_ref()
-        .is_none_or(|identity| identity.key_generation < route.peer_transport_key_generation)
+        .is_none_or(|identity| identity.key_generation != route.peer_transport_key_generation)
     {
         return Err(ResponderBrokerError::WhoIsUnverified);
     }
@@ -1690,15 +1839,20 @@ fn valid_node_key(value: &str) -> bool {
 }
 
 fn valid_opaque_peer_handle(value: &str) -> bool {
-    if value.len() > 64 {
-        return false;
-    }
     value.strip_prefix("peer_").is_some_and(|opaque| {
-        // Current enrollment emits 24 hex characters. V099 binds that local
-        // handle to a separately authoritative stable node identity; widening
-        // enrollment handles to 128 random bits remains an explicit migration
-        // and cannot be performed inside the T2.1-owned key-store namespace.
-        opaque.len() >= 24 && opaque.bytes().all(|byte| byte.is_ascii_hexdigit())
+        opaque.len() == 32
+            && opaque
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn valid_durable_node_principal(value: &str) -> bool {
+    value.strip_prefix("node_").is_some_and(|opaque| {
+        opaque.len() == 32
+            && opaque
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     })
 }
 
@@ -1911,7 +2065,7 @@ mod tests {
                 responder_node_id: "node-responder".to_owned(),
                 responder_workspace_id: "workspace-responder".to_owned(),
                 responder_stable_id: "stable-responder".to_owned(),
-                initiator_node_id: "node-initiator".to_owned(),
+                initiator_node_id: "node_0123456789abcdef0123456789abcdef".to_owned(),
                 initiator_stable_id: "stable-initiator".to_owned(),
                 pair_key_generation: 1,
             },
@@ -2043,7 +2197,7 @@ mod tests {
         let first = route(path.clone(), 41888);
         let mut second = route(path, 41888);
         second.peer_handle = "peer_fedcba9876543210fedcba9876543210".to_owned();
-        second.expectations.initiator_node_id = "node-initiator-b".to_owned();
+        second.expectations.initiator_node_id = "node_fedcba9876543210fedcba9876543210".to_owned();
         second.expectations.initiator_stable_id = "stable-initiator-b".to_owned();
 
         let registry = ResponderRouteRegistry::new([first, second]).expect(
@@ -2064,6 +2218,21 @@ mod tests {
             selected.expectations.initiator_stable_id,
             "stable-initiator-b"
         );
+    }
+
+    #[test]
+    fn durable_owner_authority_comparison_detects_generation_refreshes() {
+        let path = PathBuf::from("/tmp/ee-responder-broker-refresh-unit");
+        let current = ResponderRouteRegistry::new([route(path.clone(), 41888)])
+            .expect("current route registry");
+        let mut refreshed_route = route(path, 41888);
+        refreshed_route.expectations.pair_key_generation = 2;
+        refreshed_route.peer_transport_key_generation = 2;
+        refreshed_route.grant_generation = 2;
+        let refreshed =
+            ResponderRouteRegistry::new([refreshed_route]).expect("refreshed route registry");
+        assert!(!same_route_authority(&current, &refreshed));
+        assert!(same_route_authority(&refreshed, &refreshed));
     }
 
     #[test]

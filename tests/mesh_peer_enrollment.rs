@@ -5,8 +5,8 @@ use ee::mesh::peer::{
     MeshPeerCapabilityProfile, MeshPeerEndpoint, MeshPeerEnrollInput, MeshPeerHandshake,
     MeshPeerRotateInput, MeshPeerState, PEER_ENROLLMENT_EXPLICIT_CONSENT_REQUIRED_CODE,
     PEER_ENROLLMENT_HANDSHAKE_DENIED_CODE, PEER_ENROLLMENT_NETWORK_ONLY_DENIED_CODE,
-    PEER_KEY_ROTATION_REVOKED_CODE, PEER_UNKNOWN_ATTEMPT_DENIED_CODE, build_peer_id,
-    build_peer_origin_node_id, enroll_peer, list_peers, revoke_peer, rotate_peer_key, show_peer,
+    PEER_KEY_ROTATION_REVOKED_CODE, PEER_UNKNOWN_ATTEMPT_DENIED_CODE, enroll_peer,
+    generate_peer_origin_node_id, list_peers, revoke_peer, rotate_peer_key, show_peer,
     unknown_peer_attempt_report,
 };
 
@@ -189,9 +189,21 @@ fn add_show_list_rotate_revoke_reports_are_stable_json_shapes() {
     assert_eq!(parsed.peer_id, revoked_peer.peer_id);
     assert_eq!(parsed.endpoint.tailscale_node_key, NODE_KEY);
 
-    let origin_node_id = build_peer_origin_node_id(&parsed.endpoint.tailscale_node_key);
+    assert!(parsed.peer_id.starts_with("peer_"));
+    assert_eq!(parsed.peer_id.len(), 37);
+    assert!(
+        parsed.peer_id[5..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    );
+    let second = enroll(MeshPeerCapabilityProfile::MetadataOnly)
+        .peer
+        .expect("second peer");
+    assert_ne!(parsed.peer_id, second.peer_id);
+
+    let origin_node_id = generate_peer_origin_node_id().expect("OS randomness");
     assert!(origin_node_id.starts_with("node_"));
-    assert_eq!(origin_node_id.len(), 29);
+    assert_eq!(origin_node_id.len(), 37);
 }
 
 #[test]
@@ -223,7 +235,8 @@ fn unknown_peer_attempt_is_denied_even_when_node_is_reachable() {
     let peer = enroll(MeshPeerCapabilityProfile::MetadataOnly)
         .peer
         .expect("peer");
+    let peer_id = peer.peer_id.clone();
     let known = unknown_peer_attempt_report(&[peer], WORKSPACE_ID, NODE_KEY);
     assert!(known.success);
-    assert_eq!(known.peer_id, Some(build_peer_id(WORKSPACE_ID, NODE_KEY)));
+    assert_eq!(known.peer_id, Some(peer_id));
 }

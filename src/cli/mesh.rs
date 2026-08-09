@@ -55,13 +55,13 @@ use crate::mesh::foreground_cli::{
 use crate::mesh::hello_responder::HelloResponderStatusReport;
 use crate::mesh::peer::{
     MeshPeerCapabilityProfile, MeshPeerCommandReport, MeshPeerEndpoint, MeshPeerEnrollInput,
-    MeshPeerHandshake, MeshPeerRecord, MeshPeerRotateInput, build_peer_origin_node_id, enroll_peer,
-    list_peers, revoke_peer, rotate_peer_key, show_peer, unknown_peer_attempt_report,
+    MeshPeerHandshake, MeshPeerRecord, MeshPeerRotateInput, enroll_peer,
+    generate_peer_origin_node_id, list_peers, revoke_peer, rotate_peer_key, show_peer,
+    unknown_peer_attempt_report,
 };
 use crate::mesh::responder_broker::{
     DurableResponderRegistration, PreAuthAdmissionLimits, ResponderBrokerError,
-    ResponderBrokerOwner, ResponderRouteRegistry, TailscaleLocalApiClient,
-    resolve_durable_registration,
+    ResponderBrokerOwner, TailscaleLocalApiClient,
 };
 use crate::mesh::tailscale_autodiscovery::{
     TailscaleAutodiscoveryConfig, TailscaleAutodiscoveryReport,
@@ -1157,7 +1157,7 @@ where
                 return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
             }
         };
-        let (target, state) = match load_lane_grant_target_state(
+        let (target, state, _) = match load_lane_grant_target_state(
             &connection,
             &snapshot.workspace_id,
             &args.peer_id,
@@ -1326,7 +1326,7 @@ where
                     crate::mesh::lane_grant::ApprovalTokenError::Stale,
                 ));
             }
-            let (transaction_target, transaction_state) =
+            let (transaction_target, transaction_state, transport_key_generation) =
                 load_lane_grant_target_state(&connection, &snapshot.workspace_id, &args.peer_id)
                     .map_err(|error| match error {
                         LaneGrantTargetStateError::Missing
@@ -1349,6 +1349,7 @@ where
                 &config_bytes,
                 transaction_target,
                 transaction_state,
+                transport_key_generation,
             )
             .map_err(authenticated_preview_reconstruction_error)?;
             let canonical_snapshot = prepared
@@ -1459,7 +1460,7 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let lane = preview_lane(args.lane);
-    let (target_adapter, state) =
+    let (target_adapter, state, _) =
         match load_lane_grant_target_state(&connection, &snapshot.workspace_id, &args.peer_id) {
             Ok(target) => target,
             Err(error) => {
@@ -1608,6 +1609,7 @@ fn load_lane_grant_target_state(
     (
         crate::db::MeshLaneGrantTargetAdapter,
         Option<crate::db::StoredMeshLaneGrantState>,
+        u64,
     ),
     LaneGrantTargetStateError,
 > {
@@ -1622,6 +1624,37 @@ fn load_lane_grant_target_state(
         .ok_or(LaneGrantTargetStateError::Missing)?;
     if !peer.enabled {
         return Err(LaneGrantTargetStateError::Disabled);
+    }
+    let transport_key_generation = peer
+        .transport_identity
+        .as_ref()
+        .filter(|identity| identity.key_generation > 0)
+        .map(|identity| identity.key_generation)
+        .ok_or_else(|| {
+            LaneGrantTargetStateError::Domain(DomainError::PolicyDenied {
+                message: format!(
+                    "Mesh peer {peer_id} has no authoritative LocalAPI identity binding"
+                ),
+                repair: Some(
+                    "Start the responder against live Tailscale LocalAPI before granting or revoking lanes."
+                        .to_owned(),
+                ),
+            })
+        })?;
+    if !valid_random_mesh_principal(&peer.peer_id, "peer_")
+        || !valid_random_mesh_principal(&peer.origin_node_id, "node_")
+    {
+        return Err(LaneGrantTargetStateError::Domain(
+            DomainError::PolicyDenied {
+                message: format!(
+                    "Mesh peer {peer_id} still uses a legacy derived identity and cannot receive lane authority"
+                ),
+                repair: Some(
+                    "Re-enroll the peer to allocate random 128-bit peer and ee-node principals."
+                        .to_owned(),
+                ),
+            },
+        ));
     }
     let target_adapter =
         crate::db::MeshLaneGrantTargetAdapter::new(peer.peer_id, peer.origin_node_id);
@@ -1639,7 +1672,16 @@ fn load_lane_grant_target_state(
                 error,
             ))
         })?;
-    Ok((target_adapter, state))
+    Ok((target_adapter, state, transport_key_generation))
+}
+
+fn valid_random_mesh_principal(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|opaque| {
+        opaque.len() == 32
+            && opaque
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1654,7 +1696,7 @@ fn prepare_lane_grant_preview(
     config: &crate::config::ConfigFile,
     config_bytes: &[u8],
 ) -> Result<PreparedLaneGrantPreview, DomainError> {
-    let (target_adapter, current_state) =
+    let (target_adapter, current_state, transport_key_generation) =
         load_lane_grant_target_state(connection, workspace_id, peer_id)
             .map_err(|error| error.into_domain(peer_id))?;
     prepare_lane_grant_preview_for_state(
@@ -1669,6 +1711,7 @@ fn prepare_lane_grant_preview(
         config_bytes,
         target_adapter,
         current_state,
+        transport_key_generation,
     )
 }
 
@@ -1685,6 +1728,7 @@ fn prepare_lane_grant_preview_for_state(
     config_bytes: &[u8],
     target_adapter: crate::db::MeshLaneGrantTargetAdapter,
     current_state: Option<crate::db::StoredMeshLaneGrantState>,
+    transport_key_generation: u64,
 ) -> Result<PreparedLaneGrantPreview, DomainError> {
     use crate::mesh::lane_grant_preview::{
         LaneGrantApprovalContext, LaneGrantPreviewInput, MemoryView,
@@ -1724,12 +1768,14 @@ fn prepare_lane_grant_preview_for_state(
     let current_policy_generation = lane_grant_policy_generation(
         config_bytes,
         &target_adapter_json,
+        transport_key_generation,
         grant_generation,
         &current_policy,
     );
     let proposed_policy_generation = lane_grant_policy_generation(
         config_bytes,
         &target_adapter_json,
+        transport_key_generation,
         proposed_generation,
         &proposed_policy,
     );
@@ -2433,6 +2479,7 @@ fn apply_lane_grant_state_to_policy(
 fn lane_grant_policy_generation(
     config_bytes: &[u8],
     target_adapter_json: &str,
+    transport_key_generation: u64,
     generation: u64,
     policy: &crate::mesh::auto_enrollment_safety::IntendedLanePolicy,
 ) -> String {
@@ -2442,6 +2489,7 @@ fn lane_grant_policy_generation(
     hasher.update(config_bytes);
     hasher.update(&(target_adapter_json.len() as u64).to_be_bytes());
     hasher.update(target_adapter_json.as_bytes());
+    hasher.update(&transport_key_generation.to_be_bytes());
     hasher.update(&generation.to_be_bytes());
     for decision in [
         policy.metadata,
@@ -3053,6 +3101,7 @@ where
             discovery.tailnet_display_name.as_deref(),
             discovery.self_node_key.as_deref(),
             &now,
+            &snapshot.peers,
             &report.materialization.peers_to_upsert,
         ) {
             Ok(upserts) => upserts,
@@ -3338,7 +3387,7 @@ where
     W: Write,
     E: Write,
 {
-    let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
+    let (snapshot, _connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
         Ok(store) => store,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
@@ -3443,40 +3492,33 @@ where
         }
     };
     let cx = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
-    let registrations = runtime.block_on(async {
+    let registrations = args
+        .peers
+        .iter()
+        .map(|peer| DurableResponderRegistration {
+            workspace_path: workspace_path.clone(),
+            database_path: database_path.clone(),
+            workspace_id: snapshot.workspace_id.clone(),
+            team_id: args.team_id.clone(),
+            responder_node_id: args.responder_node_id.clone(),
+            peer_handle: peer.clone(),
+            committed_port: port,
+            capabilities: SessionCapabilities::base(),
+            limits: SessionChannelLimits::default(),
+        })
+        .collect::<Vec<_>>();
+    let owner = runtime.block_on(async {
         let _ambient = Cx::set_current(Some(cx.clone()));
-        let mut routes = Vec::with_capacity(args.peers.len());
-        for peer in &args.peers {
-            let resolved = resolve_durable_registration(
-                &cx,
-                &local_api,
-                &connection,
-                &DurableResponderRegistration {
-                    workspace_path: workspace_path.clone(),
-                    database_path: database_path.clone(),
-                    workspace_id: snapshot.workspace_id.clone(),
-                    team_id: args.team_id.clone(),
-                    responder_node_id: args.responder_node_id.clone(),
-                    peer_handle: peer.clone(),
-                    committed_port: port,
-                    capabilities: SessionCapabilities::base(),
-                    limits: SessionChannelLimits::default(),
-                },
-            )
-            .await?;
-            routes.push(resolved.route);
-        }
-        let registry = ResponderRouteRegistry::new(routes)?;
-        ResponderBrokerOwner::start(
+        ResponderBrokerOwner::start_durable(
             &cx,
             local_api,
-            registry,
+            registrations,
             PreAuthAdmissionLimits::default(),
             Duration::from_millis(args.revalidate_ms),
         )
         .await
     });
-    let mut owner = match registrations {
+    let mut owner = match owner {
         Ok(owner) => owner,
         Err(error) => return write_responder_broker_error(&error, cli, stdout, stderr),
     };
@@ -5040,6 +5082,7 @@ fn auto_enrollment_peer_upserts(
     tailnet_display_name: Option<&str>,
     self_node_key: Option<&str>,
     now: &str,
+    existing_rows: &[crate::mesh::foreground_cli::MeshPeerRow],
     candidates: &[AutoEnrollmentCandidate],
 ) -> Result<Vec<UpsertMeshPeerInput>, DomainError> {
     let mut upserts = Vec::new();
@@ -5075,6 +5118,31 @@ fn auto_enrollment_peer_upserts(
                 "Inspect the candidate hello response and retry auto-enrollment.".to_owned(),
             ),
         })?;
+        let matching_rows = existing_rows
+            .iter()
+            .filter_map(|row| {
+                auto_enrollment_node_key_for_row(row)
+                    .ok()
+                    .filter(|node_key| node_key == &candidate.node_key)
+                    .map(|_| row)
+            })
+            .collect::<Vec<_>>();
+        if matching_rows.len() > 1 {
+            return Err(DomainError::PolicyDenied {
+                message: format!(
+                    "Auto-enrollment found ambiguous durable principals for {}",
+                    candidate.node_key
+                ),
+                repair: Some(
+                    "Disable the duplicate peer rows and repeat authoritative enrollment."
+                        .to_owned(),
+                ),
+            });
+        }
+        let existing = matching_rows.first().copied();
+        if let Some(existing) = existing {
+            peer.peer_id.clone_from(&existing.peer_id);
+        }
         peer.trust_established_by = "tailscale_auto_enrollment".to_owned();
         peer.materialized_on_node_key = self_node_key.map(str::to_owned);
         let policy_summary_json =
@@ -5085,7 +5153,10 @@ fn auto_enrollment_peer_upserts(
         upserts.push(UpsertMeshPeerInput {
             workspace_id: workspace_id.to_owned(),
             peer_id: peer.peer_id,
-            origin_node_id: build_peer_origin_node_id(&candidate.node_key),
+            origin_node_id: existing.map_or_else(
+                || random_peer_origin_node_id("auto-enroll peer"),
+                |row| Ok(row.origin_node_id.clone()),
+            )?,
             display_name: Some(candidate.hostname.clone()),
             policy_summary_json: Some(policy_summary_json),
             enabled: true,
@@ -5305,11 +5376,18 @@ fn persist_mesh_peer_record(
         .clone()
         .or_else(|| peer.key.rotated_at.clone())
         .unwrap_or_else(|| peer.enrolled_at.clone());
+    let origin_node_id = connection
+        .get_mesh_peer(workspace_id, &peer.peer_id)
+        .map_err(|error| storage_error("Failed to load existing mesh peer principal", error))?
+        .map_or_else(
+            || random_peer_origin_node_id("mesh peer enrollment"),
+            |stored| Ok(stored.origin_node_id),
+        )?;
     connection
         .upsert_mesh_peer(&UpsertMeshPeerInput {
             workspace_id: workspace_id.to_owned(),
             peer_id: peer.peer_id.clone(),
-            origin_node_id: build_peer_origin_node_id(&peer.endpoint.tailscale_node_key),
+            origin_node_id,
             display_name: Some(peer.alias.clone()),
             policy_summary_json: Some(policy_summary_json),
             enabled: peer.state == crate::mesh::peer::MeshPeerState::Active,
@@ -5317,6 +5395,13 @@ fn persist_mesh_peer_record(
         })
         .map_err(|error| storage_error("Failed to persist mesh peer enrollment", error))?;
     Ok(())
+}
+
+fn random_peer_origin_node_id(context: &str) -> Result<String, DomainError> {
+    generate_peer_origin_node_id().map_err(|error| DomainError::Storage {
+        message: format!("Failed to allocate a random ee-node principal for {context}: {error}"),
+        repair: Some("Restore operating-system cryptographic randomness and retry.".to_owned()),
+    })
 }
 
 fn list_enrolled_peer_records(
@@ -7775,6 +7860,7 @@ mod tests {
             Some("alpha.example"),
             Some("nodekey:self"),
             "2026-05-20T00:00:00Z",
+            &[],
             &candidates,
         )
         .expect("auto-enrollment peer upsert should build");
@@ -7792,6 +7878,77 @@ mod tests {
         assert_eq!(value["materializedOnNodeKey"], "nodekey:self");
         assert_eq!(value["endpoint"]["tailnetId"], "tailnet-alpha");
         assert_eq!(value["trustEstablishedBy"], "tailscale_auto_enrollment");
+    }
+
+    #[test]
+    fn auto_enrollment_reuses_one_random_principal_and_rejects_ambiguity() {
+        let candidate = AutoEnrollmentCandidate {
+            node_key: "nodekey:alpha".to_owned(),
+            tailscale_ip: "100.64.0.2".to_owned(),
+            magic_dns_name: None,
+            hostname: "alpha".to_owned(),
+            ee_protocol_version: "1.0".to_owned(),
+            discovery_policy_decision: "service_tag_match".to_owned(),
+        };
+        let peer_id = "peer_0123456789abcdef0123456789abcdef";
+        let mut existing_record = enroll_peer(MeshPeerEnrollInput {
+            workspace_id: "wsp_test_workspace".to_owned(),
+            alias: "alpha".to_owned(),
+            endpoint: MeshPeerEndpoint {
+                tailscale_node_key: candidate.node_key.clone(),
+                tailnet_id: "tailnet-alpha".to_owned(),
+                tailnet_display_name: None,
+                endpoint: candidate.tailscale_ip.clone(),
+                magic_dns_name: None,
+            },
+            capability_profile: MeshPeerCapabilityProfile::MetadataOnly,
+            handshake: MeshPeerHandshake::granted(
+                "existing-auto",
+                "1.0",
+                candidate.node_key.clone(),
+                vec!["mesh:metadata".to_owned()],
+            ),
+            public_key_fingerprint: "auto:existing".to_owned(),
+            now: "2026-08-09T00:00:00Z".to_owned(),
+            explicit_human_consent: true,
+        })
+        .peer
+        .expect("existing peer record");
+        existing_record.peer_id = peer_id.to_owned();
+        let row = crate::mesh::foreground_cli::MeshPeerRow {
+            peer_id: peer_id.to_owned(),
+            origin_node_id: "node_0123456789abcdef0123456789abcdef".to_owned(),
+            display_name: Some("alpha".to_owned()),
+            enabled: true,
+            last_seen_at: "2026-08-09T00:00:00Z".to_owned(),
+            policy_summary_json: Some(
+                serde_json::to_string(&existing_record).expect("serialize existing peer"),
+            ),
+        };
+        let reused = auto_enrollment_peer_upserts(
+            "wsp_test_workspace",
+            "tailnet-alpha",
+            None,
+            None,
+            "2026-08-09T00:01:00Z",
+            std::slice::from_ref(&row),
+            std::slice::from_ref(&candidate),
+        )
+        .expect("unambiguous principal reuse");
+        assert_eq!(reused[0].peer_id, row.peer_id);
+        assert_eq!(reused[0].origin_node_id, row.origin_node_id);
+
+        let ambiguous = auto_enrollment_peer_upserts(
+            "wsp_test_workspace",
+            "tailnet-alpha",
+            None,
+            None,
+            "2026-08-09T00:01:00Z",
+            &[row.clone(), row],
+            &[candidate],
+        )
+        .expect_err("duplicate principals must fail closed");
+        assert!(ambiguous.message().contains("ambiguous durable principals"));
     }
 
     #[test]

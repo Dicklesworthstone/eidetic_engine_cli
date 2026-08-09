@@ -13477,6 +13477,9 @@ pub enum MeshPeerTransportIdentityError {
     Storage(DbError),
     PeerUnavailable,
     InvalidObservation,
+    AmbiguousStableIdentity,
+    AmbiguousGrantTarget,
+    RandomnessUnavailable,
     StableIdentityMismatch,
     GenerationExhausted,
 }
@@ -13488,6 +13491,15 @@ impl fmt::Display for MeshPeerTransportIdentityError {
             Self::PeerUnavailable => formatter.write_str("mesh peer is unavailable"),
             Self::InvalidObservation => {
                 formatter.write_str("mesh peer identity observation is invalid")
+            }
+            Self::AmbiguousStableIdentity => {
+                formatter.write_str("mesh peer stable transport identity is ambiguous")
+            }
+            Self::AmbiguousGrantTarget => {
+                formatter.write_str("mesh peer lane-grant target is ambiguous")
+            }
+            Self::RandomnessUnavailable => {
+                formatter.write_str("mesh peer principal randomness is unavailable")
             }
             Self::StableIdentityMismatch => {
                 formatter.write_str("mesh peer stable transport identity changed")
@@ -14555,6 +14567,26 @@ impl DbConnection {
                 .get_mesh_peer(&input.workspace_id, &input.peer_id)?
                 .filter(|peer| peer.enabled)
                 .ok_or(MeshPeerTransportIdentityError::PeerUnavailable)?;
+            let conflicting = self.query_for(
+                DbOperation::Query,
+                "SELECT peer_id FROM mesh_peers
+                  WHERE workspace_id = ?1
+                    AND peer_id <> ?2
+                    AND enabled = 1
+                    AND transport_tailnet_id = ?3
+                    AND transport_stable_node_id = ?4
+                  ORDER BY peer_id ASC
+                  LIMIT 1",
+                &[
+                    Value::Text(input.workspace_id.clone()),
+                    Value::Text(input.peer_id.clone()),
+                    Value::Text(input.tailnet_id.clone()),
+                    Value::Text(input.stable_node_id.clone()),
+                ],
+            )?;
+            if !conflicting.is_empty() {
+                return Err(MeshPeerTransportIdentityError::AmbiguousStableIdentity);
+            }
             let next_generation = match peer.transport_identity.as_ref() {
                 None => 1,
                 Some(identity)
@@ -14577,27 +14609,85 @@ impl DbConnection {
                 .observed_at
                 .clone()
                 .unwrap_or_else(|| Utc::now().to_rfc3339());
+            let prior_origin_node_id = peer.origin_node_id.clone();
+            let durable_origin_node_id = if valid_durable_mesh_node_principal(&prior_origin_node_id)
+            {
+                prior_origin_node_id.clone()
+            } else {
+                random_mesh_node_principal()
+                    .map_err(|_| MeshPeerTransportIdentityError::RandomnessUnavailable)?
+            };
+            let migrated_grant = if durable_origin_node_id != prior_origin_node_id {
+                self.get_mesh_lane_grant_state(&input.workspace_id, &input.peer_id)?
+            } else {
+                None
+            };
+            if migrated_grant.as_ref().is_some_and(|grant| {
+                grant.target_adapter.peer_id != input.peer_id
+                    || grant.target_adapter.origin_node_id != prior_origin_node_id
+                    || !grant.target_matches_current_peer
+            }) {
+                return Err(MeshPeerTransportIdentityError::AmbiguousGrantTarget);
+            }
             let affected = self.execute_for(
                 DbOperation::Execute,
                 "UPDATE mesh_peers
-                    SET transport_tailnet_id = ?3,
-                        transport_stable_node_id = ?4,
-                        transport_current_node_pubkey = ?5,
-                        transport_key_generation = ?6,
-                        last_seen_at = ?7
+                    SET origin_node_id = ?3,
+                        transport_tailnet_id = ?4,
+                        transport_stable_node_id = ?5,
+                        transport_current_node_pubkey = ?6,
+                        transport_key_generation = ?7,
+                        last_seen_at = ?8
                   WHERE workspace_id = ?1 AND peer_id = ?2 AND enabled = 1",
                 &[
                     Value::Text(input.workspace_id.clone()),
                     Value::Text(input.peer_id.clone()),
+                    Value::Text(durable_origin_node_id.clone()),
                     Value::Text(input.tailnet_id.clone()),
                     Value::Text(input.stable_node_id.clone()),
                     Value::Text(input.current_node_pubkey.clone()),
                     Value::BigInt(next_generation),
-                    Value::Text(observed_at),
+                    Value::Text(observed_at.clone()),
                 ],
             )?;
             if affected != 1 {
                 return Err(MeshPeerTransportIdentityError::PeerUnavailable);
+            }
+            if let Some(grant) = migrated_grant {
+                let adapter =
+                    MeshLaneGrantTargetAdapter::new(input.peer_id.clone(), durable_origin_node_id);
+                let adapter_json = adapter
+                    .canonical_json()
+                    .map_err(|_| MeshPeerTransportIdentityError::AmbiguousGrantTarget)?;
+                let affected = self.execute_for(
+                    DbOperation::Execute,
+                    "UPDATE mesh_lane_grant_states
+                        SET target_origin_node_id = ?3,
+                            target_adapter_json = ?4,
+                            updated_at = ?5
+                      WHERE workspace_id = ?1
+                        AND peer_id = ?2
+                        AND target_adapter_version = 1
+                        AND target_origin_node_id = ?6
+                        AND target_adapter_json = ?7
+                        AND grant_generation = ?8",
+                    &[
+                        Value::Text(input.workspace_id.clone()),
+                        Value::Text(input.peer_id.clone()),
+                        Value::Text(adapter.origin_node_id),
+                        Value::Text(adapter_json),
+                        Value::Text(observed_at),
+                        Value::Text(prior_origin_node_id),
+                        Value::Text(grant.target_adapter_json),
+                        Value::BigInt(
+                            i64::try_from(grant.grant_generation)
+                                .map_err(|_| MeshPeerTransportIdentityError::GenerationExhausted)?,
+                        ),
+                    ],
+                )?;
+                if affected != 1 {
+                    return Err(MeshPeerTransportIdentityError::AmbiguousGrantTarget);
+                }
             }
             self.get_mesh_peer(&input.workspace_id, &input.peer_id)?
                 .ok_or(MeshPeerTransportIdentityError::PeerUnavailable)
@@ -17271,6 +17361,28 @@ fn valid_mesh_transport_node_key(value: &str) -> bool {
         && value
             .strip_prefix("nodekey:")
             .is_some_and(|key| !key.is_empty() && !key.chars().any(char::is_whitespace))
+}
+
+fn valid_durable_mesh_node_principal(value: &str) -> bool {
+    value.strip_prefix("node_").is_some_and(|suffix| {
+        suffix.len() == 32
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn random_mesh_node_principal() -> std::result::Result<String, getrandom::Error> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random)?;
+    let mut principal = String::with_capacity(37);
+    principal.push_str("node_");
+    for byte in random {
+        principal.push(char::from(HEX[usize::from(byte >> 4)]));
+        principal.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    Ok(principal)
 }
 
 fn stored_mesh_lane_grant_state_from_row(row: &Row) -> Result<StoredMeshLaneGrantState> {
@@ -42191,6 +42303,8 @@ mod tests {
 
     #[test]
     fn mesh_peer_transport_identity_rotates_by_stable_node_and_blocks_substitution() -> TestResult {
+        use crate::config::{MeshLane, MeshLaneDecision};
+
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
         setup_workspace(&connection)?;
@@ -42209,6 +42323,20 @@ mod tests {
             &None,
             "legacy enrollment starts unverified",
         )?;
+        let legacy_grant = connection
+            .apply_mesh_lane_grant(&super::MeshLaneGrantMutationInput {
+                workspace_id: enrollment.workspace_id.clone(),
+                peer_id: enrollment.peer_id.clone(),
+                target_adapter: super::MeshLaneGrantTargetAdapter::new(
+                    enrollment.peer_id.clone(),
+                    enrollment.origin_node_id.clone(),
+                ),
+                material_lane: MeshLane::Metadata,
+                expected_generation: 0,
+                approval_config_digest: Some(format!("blake3:{}", "a".repeat(64))),
+                updated_at: Some("2026-08-09T00:00:30Z".to_owned()),
+            })
+            .map_err(|error| TestFailure::new(error.to_string()))?;
 
         let first_input = super::ObserveMeshPeerTransportIdentityInput {
             workspace_id: enrollment.workspace_id.clone(),
@@ -42228,6 +42356,33 @@ mod tests {
             &1,
             "first observed generation",
         )?;
+        ensure(
+            super::valid_durable_mesh_node_principal(&first.origin_node_id),
+            "first authoritative observation allocates a random 128-bit ee-node principal",
+        )?;
+        ensure(
+            first.origin_node_id != enrollment.origin_node_id,
+            "legacy derived node identity must not survive authoritative handoff",
+        )?;
+        let migrated_grant = connection
+            .get_mesh_lane_grant_state(&enrollment.workspace_id, &enrollment.peer_id)?
+            .ok_or("authoritative handoff lost the existing grant")?;
+        ensure_equal(
+            &migrated_grant.grant_generation,
+            &legacy_grant.grant_generation,
+            "grant handoff preserves consent generation",
+        )?;
+        ensure_equal(
+            &migrated_grant.metadata_override,
+            &Some(MeshLaneDecision::Allow),
+            "grant handoff preserves reviewed lane state",
+        )?;
+        ensure_equal(
+            &migrated_grant.target_adapter.origin_node_id,
+            &first.origin_node_id,
+            "grant handoff targets the random ee-node principal",
+        )?;
+        let durable_origin_node_id = first.origin_node_id.clone();
 
         let repeated = connection.observe_mesh_peer_transport_identity(&first_input)?;
         ensure_equal(
@@ -42252,6 +42407,19 @@ mod tests {
             .as_ref()
             .ok_or("key rotation lost transport identity")?;
         ensure_equal(&rotated_identity.key_generation, &2, "rotated generation")?;
+        ensure_equal(
+            &rotated.origin_node_id,
+            &durable_origin_node_id,
+            "same StableID key rotation preserves the ee-node principal",
+        )?;
+        let rotated_grant = connection
+            .get_mesh_lane_grant_state(&enrollment.workspace_id, &enrollment.peer_id)?
+            .ok_or("same-StableID rotation lost grant state")?;
+        ensure_equal(
+            &rotated_grant,
+            &migrated_grant,
+            "same-StableID rotation preserves grant and revoke state",
+        )?;
         ensure_equal(
             &rotated_identity.stable_node_id.as_str(),
             &"stable-peer-a",
@@ -42287,6 +42455,7 @@ mod tests {
         )?;
 
         let replaced = connection.upsert_mesh_peer(&super::UpsertMeshPeerInput {
+            origin_node_id: "node_fedcba9876543210fedcba9876543210".to_owned(),
             policy_summary_json: Some(r#"{"state":"active","key":"replacement"}"#.to_owned()),
             last_seen_at: Some("2026-08-09T00:03:00Z".to_owned()),
             ..enrollment
@@ -42295,6 +42464,85 @@ mod tests {
             &replaced.transport_identity,
             &None,
             "security enrollment replacement requires fresh LocalAPI binding",
+        )?;
+        ensure(
+            replaced.origin_node_id != durable_origin_node_id,
+            "replacement node receives a distinct random ee-node principal",
+        )?;
+        let replacement_grant = connection
+            .get_mesh_lane_grant_state(&replaced.workspace_id, &replaced.peer_id)?
+            .ok_or("replacement must retain a fail-closed grant fence")?;
+        ensure_equal(
+            &replacement_grant.metadata_override,
+            &None,
+            "replacement node inherits no prior grant",
+        )?;
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_peer_transport_identity_ambiguity_is_fail_closed() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        for (peer_id, node_id) in [
+            (
+                "peer_0123456789abcdef0123456789abcdef",
+                "node_0123456789abcdef0123456789abcdef",
+            ),
+            (
+                "peer_fedcba9876543210fedcba9876543210",
+                "node_fedcba9876543210fedcba9876543210",
+            ),
+        ] {
+            connection.upsert_mesh_peer(&super::UpsertMeshPeerInput {
+                workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                peer_id: peer_id.to_owned(),
+                origin_node_id: node_id.to_owned(),
+                display_name: None,
+                policy_summary_json: Some(format!(r#"{{"peer":"{peer_id}"}}"#)),
+                enabled: true,
+                last_seen_at: Some("2026-08-09T00:00:00Z".to_owned()),
+            })?;
+        }
+        let observation = |peer_id: &str| super::ObserveMeshPeerTransportIdentityInput {
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            peer_id: peer_id.to_owned(),
+            tailnet_id: "example.ts.net".to_owned(),
+            stable_node_id: "stable-ambiguous".to_owned(),
+            current_node_pubkey: "nodekey:ambiguous-current".to_owned(),
+            observed_at: Some("2026-08-09T00:01:00Z".to_owned()),
+        };
+        connection.observe_mesh_peer_transport_identity(&observation(
+            "peer_0123456789abcdef0123456789abcdef",
+        ))?;
+        let ambiguous = connection.observe_mesh_peer_transport_identity(&observation(
+            "peer_fedcba9876543210fedcba9876543210",
+        ));
+        ensure(
+            matches!(
+                ambiguous,
+                Err(super::MeshPeerTransportIdentityError::AmbiguousStableIdentity)
+            ),
+            "one StableID cannot bind two durable ee-node principals",
+        )?;
+        let second = connection
+            .get_mesh_peer(
+                "wsp_01234567890123456789012345",
+                "peer_fedcba9876543210fedcba9876543210",
+            )?
+            .ok_or("ambiguous peer disappeared")?;
+        ensure_equal(
+            &second.transport_identity,
+            &None,
+            "ambiguous observation commits no binding",
+        )?;
+        ensure(
+            connection
+                .get_mesh_lane_grant_state(&second.workspace_id, &second.peer_id)?
+                .is_none(),
+            "ambiguous replacement inherits no grant state",
         )?;
         connection.close()?;
         Ok(())

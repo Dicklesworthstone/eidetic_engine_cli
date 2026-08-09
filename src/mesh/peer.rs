@@ -1,10 +1,10 @@
 //! SRR6.24 peer enrollment, capability handshake, and key rotation contract.
 //!
-//! This module is deliberately pure: no network probes, no database writes, no
-//! secret-key material. Callers supply an already-granted hello/capability
-//! handshake and an explicit human consent bit; this module turns that into
-//! stable peer records and command-shaped reports for `ee mesh peer ...`
-//! surfaces. A reachable Tailscale node is never sufficient by itself.
+//! This module performs no network probes or database writes and handles no
+//! secret-key material. Enrollment consumes only operating-system randomness
+//! for opaque durable handles. Callers supply an already-granted
+//! hello/capability handshake and an explicit human consent bit; a reachable
+//! Tailscale node is never sufficient by itself.
 
 use std::collections::BTreeSet;
 
@@ -20,6 +20,7 @@ pub const PEER_ENROLLMENT_HANDSHAKE_DENIED_CODE: &str = "mesh_peer_handshake_den
 pub const PEER_ENROLLMENT_NETWORK_ONLY_DENIED_CODE: &str = "mesh_peer_network_only_denied";
 pub const PEER_ENROLLMENT_CAPABILITY_MISMATCH_CODE: &str =
     "mesh_peer_capability_handshake_mismatch";
+pub const PEER_ENROLLMENT_RANDOMNESS_UNAVAILABLE_CODE: &str = "mesh_peer_randomness_unavailable";
 pub const PEER_KEY_ROTATION_INVALID_KEY_CODE: &str = "mesh_peer_key_rotation_invalid_key";
 pub const PEER_KEY_ROTATION_UNCHANGED_CODE: &str = "mesh_peer_key_rotation_unchanged";
 pub const PEER_KEY_ROTATION_REVOKED_CODE: &str = "mesh_peer_key_rotation_revoked";
@@ -418,6 +419,8 @@ pub fn peer_command_test_event(
 }
 
 #[must_use]
+/// Compute the pre-randomization legacy handle for diagnostics and migration
+/// detection only. Production enrollment never calls this function.
 pub fn build_peer_id(workspace_id: &str, tailscale_node_key: &str) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"ee.mesh.peer.v1\n");
@@ -428,7 +431,36 @@ pub fn build_peer_id(workspace_id: &str, tailscale_node_key: &str) -> String {
     format!("peer_{}", &digest[..24])
 }
 
+/// Generate a new opaque peer handle with 128 bits from the operating-system
+/// CSPRNG. The handle is persisted and subsequently looked up; it is never
+/// recomputed from a Tailscale key or another network identity.
+pub fn generate_peer_id() -> Result<String, getrandom::Error> {
+    generate_opaque_mesh_identifier("peer_")
+}
+
+/// Generate the durable ee-node principal assigned to one enrollment.
+/// Tailscale StableID and current-key generations bind to this principal in
+/// storage, but neither value contributes bytes to the principal itself.
+pub fn generate_peer_origin_node_id() -> Result<String, getrandom::Error> {
+    generate_opaque_mesh_identifier("node_")
+}
+
+fn generate_opaque_mesh_identifier(prefix: &str) -> Result<String, getrandom::Error> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random)?;
+    let mut encoded = String::with_capacity(prefix.len() + random.len() * 2);
+    encoded.push_str(prefix);
+    for byte in random {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    Ok(encoded)
+}
+
 #[must_use]
+/// Compute the pre-randomization legacy node id for artifact compatibility.
+/// It is never an admissible responder principal.
 pub fn build_peer_origin_node_id(tailscale_node_key: &str) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"ee.mesh.peer.origin_node.v1\n");
@@ -472,7 +504,16 @@ pub fn enroll_peer(input: MeshPeerEnrollInput) -> MeshPeerCommandReport {
         );
     }
 
-    let peer_id = build_peer_id(&input.workspace_id, &input.endpoint.tailscale_node_key);
+    let peer_id = match generate_peer_id() {
+        Ok(peer_id) => peer_id,
+        Err(_) => {
+            return MeshPeerCommandReport::denied(
+                "mesh peer add",
+                PEER_ENROLLMENT_RANDOMNESS_UNAVAILABLE_CODE,
+                "peer enrollment requires operating-system cryptographic randomness",
+            );
+        }
+    };
     let record = MeshPeerRecord {
         schema: MESH_PEER_RECORD_SCHEMA_V1.to_owned(),
         peer_id: peer_id.clone(),
@@ -635,16 +676,17 @@ pub fn unknown_peer_attempt_report(
     workspace_id: &str,
     tailscale_node_key: &str,
 ) -> MeshPeerCommandReport {
-    let peer_id = build_peer_id(workspace_id, tailscale_node_key);
-    let known_active = known_peers
-        .iter()
-        .any(|peer| peer.peer_id == peer_id && peer.is_trusted());
-    if known_active {
+    let known_peer = known_peers.iter().find(|peer| {
+        peer.workspace_id == workspace_id
+            && peer.endpoint.tailscale_node_key == tailscale_node_key
+            && peer.is_trusted()
+    });
+    if let Some(peer) = known_peer {
         return MeshPeerCommandReport {
             schema: MESH_PEER_COMMAND_REPORT_SCHEMA_V1,
             command: "mesh peer unknown-attempt",
             success: true,
-            peer_id: Some(peer_id),
+            peer_id: Some(peer.peer_id.clone()),
             peer: None,
             peers: Vec::new(),
             denied_code: None,

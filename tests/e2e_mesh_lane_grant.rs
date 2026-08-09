@@ -17,7 +17,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ee::config::MeshLane;
 use ee::db::{
     CreateAuditInput, DbConnection, MeshLaneGrantAtomicError, MeshLaneGrantMutationError,
-    MeshLaneGrantMutationInput, MeshLaneGrantTargetAdapter,
+    MeshLaneGrantMutationInput, MeshLaneGrantTargetAdapter, ObserveMeshPeerTransportIdentityInput,
 };
 use ee::mesh::foreground_cli::{
     MESH_EXPORT_ARTIFACT_SCHEMA_V1, MeshCursorRow, MeshEventRow, MeshExportArtifact, MeshPeerRow,
@@ -381,6 +381,27 @@ fn set_up_fixture(label: &str) -> Result<LaneGrantFixture, String> {
     )?;
     let peer_json = success_json(&peer_add, "ee mesh peer add")?;
     let peer_id = json_string(&peer_json, "/data/peerId", "ee mesh peer add")?;
+
+    // This fixture exercises grant/revoke behavior after the production
+    // LocalAPI boundary. It plants only the durable positive observation; the
+    // real Tailscale status/WhoIs path is proven separately by the opt-in
+    // responder-broker test and is not claimed by this CLI fixture.
+    let database_path = tempdir.path().join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("open lane-grant fixture database: {error}"))?;
+    connection
+        .observe_mesh_peer_transport_identity(&ObserveMeshPeerTransportIdentityInput {
+            workspace_id: workspace_id.clone(),
+            peer_id: peer_id.clone(),
+            tailnet_id: "tn_lane_grant_e2e".to_owned(),
+            stable_node_id: format!("stable-lane-grant-{label}"),
+            current_node_pubkey: TEST_TAILSCALE_NODE_KEY.to_owned(),
+            observed_at: Some("2026-08-09T00:00:00Z".to_owned()),
+        })
+        .map_err(|error| format!("bind lane-grant fixture transport identity: {error}"))?;
+    connection
+        .close()
+        .map_err(|error| format!("close lane-grant fixture database: {error}"))?;
 
     write_mesh_policy_config(tempdir.path(), &workspace_id, &peer_id, true)?;
 
