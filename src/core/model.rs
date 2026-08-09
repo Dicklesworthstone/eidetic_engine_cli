@@ -4254,10 +4254,21 @@ mod tests {
             report.degradations[0].code == "model_registry_no_available_entry",
             "degradation code",
         )?;
+        let bundled_source = short_hashed_path(&format!(
+            "frankensearch://{provider}/{model}",
+            provider = ModelProvider::Model2Vec.as_str(),
+            model = BUNDLED_EMBEDDING_MODEL_ID,
+        ));
         ensure(
             report.model_lifecycle.models.iter().any(|entry| {
-                entry.model_id == BUNDLED_EMBEDDING_MODEL_ID
+                entry.provider == ModelProvider::Model2Vec.as_str()
+                    && entry.purpose == ModelPurpose::Embedding.as_str()
                     && entry.registry_status == "unavailable"
+                    && entry.asset_provenance.source_uri.as_deref() == Some(bundled_source.as_str())
+                    && entry.asset_provenance.model_revision.as_deref()
+                        == Some(BUNDLED_EMBEDDING_MODEL_REVISION)
+                    && entry.asset_provenance.registry_entry_id.as_deref()
+                        == Some(entry.model_id.as_str())
             }),
             "bundled embedding row is declared unavailable until downloaded",
         )
