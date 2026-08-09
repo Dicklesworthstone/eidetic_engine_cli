@@ -13647,7 +13647,7 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "memory",
-        description: "Manage stored memories (show, list, history, level, expire, link, tags)",
+        description: "Manage stored memories (show, list, history, level, expire, drift, link, tags, revise, reveal)",
         available: true,
         subcommands: &[
             SubcommandEntry {
@@ -13671,12 +13671,24 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
                 description: "Audited soft expiration without deleting rows",
             },
             SubcommandEntry {
+                name: "drift",
+                description: "Read-only provenance drift report for memories",
+            },
+            SubcommandEntry {
                 name: "link",
                 description: "List or create deterministic memory links",
             },
             SubcommandEntry {
                 name: "tags",
                 description: "Audited tag listing and mutation",
+            },
+            SubcommandEntry {
+                name: "revise",
+                description: "Preview or apply an immutable audited memory revision",
+            },
+            SubcommandEntry {
+                name: "reveal",
+                description: "Verify supplied bytes against a sealed memory's commitment and publish through the revise path; mismatches mutate nothing and are audited",
             },
         ],
         args: &[],
