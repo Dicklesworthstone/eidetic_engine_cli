@@ -44533,10 +44533,28 @@ where
         message: message.to_owned(),
         repair: Some("ee outcome --help".to_owned()),
     };
+    let mut pack_item_evidence: Option<String> = None;
     let resolved_pack_target = match (&args.pack, args.item) {
         (Some(pack_id), Some(item)) => {
             match resolve_outcome_pack_item_target(cli, args, pack_id, item) {
-                Ok(memory_id) => Some(memory_id),
+                Ok(memory_id) => {
+                    // Persist the pack linkage on the event: the resolution
+                    // otherwise collapses --pack/--item into a bare memory
+                    // target, leaving the ADR-0070 dense label source
+                    // (pack task = query) unreconstructable from stored
+                    // data (bd-2tehh.2). User-supplied evidence wins.
+                    if args.evidence_json.is_none() {
+                        pack_item_evidence = Some(
+                            serde_json::json!({
+                                "schema": "ee.outcome.pack_item_evidence.v1",
+                                "packId": pack_id,
+                                "itemRank": item,
+                            })
+                            .to_string(),
+                        );
+                    }
+                    Some(memory_id)
+                }
                 Err(error) => {
                     return write_domain_error(&error, cli.wants_json(), stdout, stderr);
                 }
@@ -44573,7 +44591,7 @@ where
         source_type: args.source_type.clone(),
         source_id: args.source_id.clone(),
         reason: args.reason.clone(),
-        evidence_json: args.evidence_json.clone(),
+        evidence_json: args.evidence_json.clone().or(pack_item_evidence),
         session_id: args.session_id.clone(),
         event_id: args.event_id.clone(),
         actor: args.actor.clone(),
