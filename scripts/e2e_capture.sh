@@ -347,16 +347,16 @@ assert_jq "$ready_index_out" ".schema == \"ee.response.v2\"
     and .data.indexDocumentCount == (2 + $spans_imported)" \
     "coalesced job drain publishes exact session/evidence counts at the DB generation"
 
-# bd-16imy owns direct EvidenceSpan hydration into packs. Until that typed pack
-# path lands, this undistilled span must be searchable with exact provenance and
-# must fail visibly at pack hydration instead of masquerading as a memory.
-step "bd-16imy: imported transcript phrase is searchable and pack-honest"
+# bd-16imy: the exact admitted transcript span must flow through search and
+# directly into a deterministic pack without a fabricated MemoryId.
+step "bd-16imy: imported transcript phrase is searchable and directly packable"
 evidence_search_out="$(ee_json --workspace "$WS" search \
     "ambient capture must dedupe accepted suggestions" --limit 20 --json)"
 assert_jq "$evidence_search_out" '.schema == "ee.response.v2" and .success == true' \
     "search for imported transcript phrase succeeds"
 exact_evidence_uri="cass-session://$first_session_id#L2-2"
 exact_evidence_content='{"role":"assistant","content":"Lesson: ambient capture must dedupe accepted suggestions and route storage through explicit curation accept."}'
+exact_evidence_content_json="$(printf '%s' "$exact_evidence_content" | jq -Rs '.')"
 exact_evidence_matches="$(printf '%s' "$evidence_search_out" | jq -c \
     --arg content "$exact_evidence_content" \
     --arg session "$first_session_id" \
@@ -386,11 +386,33 @@ assert_jq "$evidence_pack_out" '.schema == "ee.response.v2" and .success == true
     "pack for imported transcript phrase succeeds"
 assert_jq "$evidence_pack_out" ".data.pack.schema == \"ee.pack.v2\"
     and (.data.pack.items | type == \"array\")
-    and (.data.pack.items | length == 0)
-    and any((.degraded // [])[]?;
-        .code == \"context_evidence_hit_unhydrated\"
-        and (.message | contains(\"$evidence_doc_id\")))" \
-    "undistilled exact evidence hit is explicitly degraded and excluded from a typed empty pack"
+    and (.data.pack.items | length == 1)
+    and .data.pack.items[0].entityKind == \"evidence_span\"
+    and .data.pack.items[0].evidenceSpanId == \"$evidence_doc_id\"
+    and (.data.pack.items[0] | has(\"memoryId\") | not)
+    and .data.pack.items[0].content == $exact_evidence_content_json
+    and .data.pack.items[0].sessionId == \"$first_session_id\"
+    and .data.pack.items[0].startLine == 2
+    and .data.pack.items[0].endLine == 2
+    and (.data.pack.items[0].entityRevision | startswith(\"blake3:\"))
+    and .data.pack.items[0].trust.class == \"cass_evidence\"
+    and (.data.pack.items[0].why | contains(\"$evidence_doc_id\"))
+    and any(.data.pack.items[0].provenance[]?; .uri == \"$exact_evidence_uri\")
+    and .data.pack.items[0].sourceIndex == 1
+    and .data.pack.quality.itemCount == 1
+    and .data.pack.selectionAudit.selectedCount == 1
+    and .data.pack.provenanceFooter.evidenceCount == 1
+    and all((.degraded // [])[]?;
+        .code != \"context_evidence_hit_unhydrated\"
+        and .code != \"context_pack_persist_failed\")" \
+    "fresh imported evidence is the sole typed pack item with exact content, identity, why, and line provenance"
+repeat_evidence_pack_out="$(ee_json --workspace "$WS" pack \
+    "ambient capture must dedupe accepted suggestions" --max-tokens 2000 --json)"
+assert_jq "$repeat_evidence_pack_out" ".success == true
+    and .data.pack.hash == $(printf '%s' "$evidence_pack_out" | jq -c '.data.pack.hash')
+    and .data.pack.items == $(printf '%s' "$evidence_pack_out" | jq -c '.data.pack.items')
+    and .data.pack.budget.usedTokens == $(printf '%s' "$evidence_pack_out" | jq -c '.data.pack.budget.usedTokens')" \
+    "repeating the evidence pack preserves hash, typed item bytes, and truthful token accounting"
 
 ready_generation="$(printf '%s' "$ready_index_out" | jq -r '.data.indexGeneration // empty')"
 assert_nonempty "$ready_generation" "ready index exposes its published generation"

@@ -856,6 +856,7 @@ fn make_context_response_fixture() -> ContextResponse {
         budget: TokenBudget::new(500).expect("non-zero budget"),
         used_tokens: 21,
         items,
+        evidence_items: Vec::new(),
         omitted: vec![PackOmission {
             memory_id: fixed_memory_id(3),
             estimated_tokens: 900,

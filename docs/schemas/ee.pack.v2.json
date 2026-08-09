@@ -83,7 +83,6 @@
                 "type": "object",
                 "required": [
                   "rank",
-                  "memoryId",
                   "section",
                   "content",
                   "estimatedTokens",
@@ -92,10 +91,32 @@
                   "provenance",
                   "trust"
                 ],
+                "oneOf": [
+                  {"required": ["memoryId"]},
+                  {
+                    "required": [
+                      "entityKind",
+                      "evidenceSpanId",
+                      "entityRevision",
+                      "sessionId",
+                      "startLine",
+                      "endLine"
+                    ],
+                    "properties": {
+                      "entityKind": {"const": "evidence_span"}
+                    }
+                  }
+                ],
                 "additionalProperties": false,
                 "properties": {
                   "rank": {"type": "integer"},
                   "memoryId": {"type": "string"},
+                  "entityKind": {"type": "string", "const": "evidence_span"},
+                  "evidenceSpanId": {"type": "string", "pattern": "^ev_"},
+                  "entityRevision": {"type": "string", "pattern": "^blake3:[0-9a-f]{64}$"},
+                  "sessionId": {"type": "string"},
+                  "startLine": {"type": "integer", "minimum": 1},
+                  "endLine": {"type": "integer", "minimum": 1},
                   "section": {"type": "string"},
                   "content": {"type": "string"},
                   "contentRedacted": {"type": "boolean"},

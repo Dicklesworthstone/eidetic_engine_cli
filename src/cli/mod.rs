@@ -62958,7 +62958,14 @@ impl NormalizedInvocation {
                     mesh::MeshCommand::RevokeLane(_) => "mesh revoke-lane".to_string(),
                     mesh::MeshCommand::AutoEnroll(_) => "mesh auto-enroll".to_string(),
                     mesh::MeshCommand::DiscoveryPolicy(_) => "mesh discovery-policy".to_string(),
-                    mesh::MeshCommand::HelloResponder(_) => "mesh hello-responder".to_string(),
+                    mesh::MeshCommand::HelloResponder(responder) => match &responder.command {
+                        mesh::MeshHelloResponderCommand::Status(_) => {
+                            "mesh hello-responder status".to_string()
+                        }
+                        mesh::MeshHelloResponderCommand::Run(_) => {
+                            "mesh hello-responder run".to_string()
+                        }
+                    },
                 },
                 Command::Situation(sit) => match sit {
                     SituationCommand::Classify(_) => "situation classify".to_string(),

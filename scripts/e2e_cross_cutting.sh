@@ -124,10 +124,10 @@ assert_jq_file "$MIGRATION_MANIFEST" \
     'all(.transitionMatrix[]; .proofPosture == "rch_only_no_local_fallback")' \
     "migration transition matrix keeps RCH-only proof posture"
 assert_jq_file "$MIGRATION_MANIFEST" \
-    '.currentLastCompiledMigration == 98 and .nextPlannedMigration == 99 and (.policy.nonInitiativeCompiledMigrations.versions.V097 | startswith("V097_SESSION_INDEX_GENERATIONS")) and (.policy.nonInitiativeCompiledMigrations.versions.V098 | startswith("V098_MEMORY_SEALS"))' \
+    '.currentLastCompiledMigration == 100 and .nextPlannedMigration == 101 and (.policy.nonInitiativeCompiledMigrations.versions.V099 | startswith("V099_MESH_PEER_TRANSPORT_IDENTITY")) and (.policy.nonInitiativeCompiledMigrations.versions.V100 | startswith("V100_PACK_EVIDENCE_ITEMS"))' \
     "migration registry pins compiled tail and next planned migration"
 assert_jq_file "$MIGRATION_MANIFEST" \
-    '([.transitionMatrix[].version] | sort) == [66,67,68,69,69,70,71,72,99,100,101] and ([.transitionMatrix[].id] | unique | length) == (.transitionMatrix | length) and ([.transitionMatrix[] | select(.status == "planned") | .version] | unique | length) == ([.transitionMatrix[] | select(.status == "planned")] | length)' \
+    '([.transitionMatrix[].version] | sort) == [66,67,68,69,69,70,71,72,101,102,103] and ([.transitionMatrix[].id] | unique | length) == (.transitionMatrix | length) and ([.transitionMatrix[] | select(.status == "planned") | .version] | unique | length) == ([.transitionMatrix[] | select(.status == "planned")] | length)' \
     "migration transition versions match the implemented/planned layout with unique ids and planned slots"
 assert_jq_file "$MIGRATION_MANIFEST" \
     '([.transitionMatrix[] | {id, version, status}] | sort_by(.id)) == ([.allocations[] | {id, version, status}] | sort_by(.id))' \

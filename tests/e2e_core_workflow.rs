@@ -35,6 +35,16 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
+fn run_ee_as_agent(args: &[&str]) -> Result<Output, String> {
+    Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(args)
+        .env_remove("EE_WORKSPACE")
+        .env_remove("EE_WORKSPACE_REGISTRY")
+        .env("EE_AGENT_NAME", "GreenOsprey")
+        .output()
+        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
         Ok(())
@@ -802,15 +812,18 @@ fn search_family_is_queryless_complete_scoped_and_redaction_safe() -> TestResult
 fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
     let workspace = temp.path().to_string_lossy().to_string();
+    let family_id = "AKIAIOSFODNN7EXAMPLE";
     let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
     ensure_equal(&init.status.code(), &Some(EXIT_SUCCESS), "family init")?;
     assert_stderr_empty(&init, "family init")?;
 
+    let mut selected_memory_id = None;
+    let mut rejected_memory_id = None;
     for (attempt, disposition, content) in [
         ("1", "selected", "Selected partial family member"),
         ("2", "rejected", "Rejected partial family evidence"),
     ] {
-        let remember = run_ee(&[
+        let remember = run_ee_as_agent(&[
             "--workspace",
             &workspace,
             "remember",
@@ -820,7 +833,7 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
             "--kind",
             "fact",
             "--family",
-            "fam-partial-discount",
+            family_id,
             "--of-n",
             "3",
             "--attempt",
@@ -835,13 +848,33 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
             "partial family remember",
         )?;
         assert_stderr_empty(&remember, "partial family remember")?;
+        let remember_json = stdout_json(&remember)?;
+        ensure(
+            remember_json
+                .pointer("/data/attemptFamily/familyAlias")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|alias| alias.starts_with("afm_") && alias.len() == 36)
+                && remember_json
+                    .pointer("/data/attemptFamily/familyId")
+                    .is_none()
+                && !serde_json::to_string(&remember_json)
+                    .map_err(|error| error.to_string())?
+                    .contains(family_id),
+            "public remember output exposes only the family alias, never the raw secret-shaped id",
+        )?;
+        let memory_id = json_str(&remember_json, "/data/memory_id", "partial remember")?;
+        if disposition == "selected" {
+            selected_memory_id = Some(memory_id.to_owned());
+        } else {
+            rejected_memory_id = Some(memory_id.to_owned());
+        }
     }
     let partial = run_ee(&[
         "--workspace",
         &workspace,
         "search",
         "--family",
-        "fam-partial-discount",
+        family_id,
         "--json",
     ])?;
     ensure_equal(
@@ -887,6 +920,617 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
         &rejected_discount,
         &Some(1.0),
         "rejected evidence is never discounted",
+    )?;
+
+    let trust = run_ee(&["--workspace", &workspace, "trust", "report", "--json"])?;
+    ensure_equal(
+        &trust.status.code(),
+        &Some(EXIT_SUCCESS),
+        "multiplicity-aware trust report",
+    )?;
+    assert_stderr_empty(&trust, "multiplicity-aware trust report")?;
+    let trust_json = stdout_json(&trust)?;
+    let family_rows = json_array(
+        &trust_json,
+        "/data/attemptFamilies/families",
+        "multiplicity-aware trust report",
+    )?;
+    let family_row = family_rows
+        .iter()
+        .find(|row| row.get("declaredSize").and_then(serde_json::Value::as_u64) == Some(3))
+        .ok_or_else(|| "trust report omitted partial attempt family".to_owned())?;
+    ensure_equal(
+        &family_row
+            .get("recordedSlots")
+            .and_then(serde_json::Value::as_u64),
+        &Some(2),
+        "trust report recorded slots",
+    )?;
+    ensure_equal(
+        &family_row
+            .get("unrecordedCount")
+            .and_then(serde_json::Value::as_u64),
+        &Some(1),
+        "trust report unrecorded siblings",
+    )?;
+    ensure(
+        family_row
+            .get("selectedDiscountFactor")
+            .and_then(serde_json::Value::as_f64)
+            .is_some_and(|factor| (factor - 1.0 / 3.0).abs() < 1.0e-6),
+        "trust report exposes the exact selected 1/N discount",
+    )?;
+    ensure(
+        !serde_json::to_string(&trust_json)
+            .map_err(|error| error.to_string())?
+            .contains(family_id),
+        "trust report must not expose the raw family id",
+    )?;
+    let trust_human = run_ee(&["--workspace", &workspace, "trust", "report"])?;
+    ensure_equal(
+        &trust_human.status.code(),
+        &Some(EXIT_SUCCESS),
+        "multiplicity-aware human trust report",
+    )?;
+    let trust_human_stdout =
+        String::from_utf8(trust_human.stdout).map_err(|error| error.to_string())?;
+    ensure(
+        trust_human_stdout.contains("2 of 3 attempt slots recorded; 1 unrecorded")
+            && trust_human_stdout.contains("selected discount 0.333333")
+            && trust_human_stdout.contains("afm_")
+            && !trust_human_stdout.contains(family_id),
+        "public human trust report surfaces recorded-vs-declared posture and only the family alias",
+    )?;
+    let create_audit = run_ee(&[
+        "--workspace",
+        &workspace,
+        "audit",
+        "timeline",
+        "--action",
+        "memory.create",
+        "--json",
+    ])?;
+    let create_audit_json = stdout_json(&create_audit)?;
+    let serialized_create_audit =
+        serde_json::to_string(&create_audit_json).map_err(|error| error.to_string())?;
+    ensure(
+        serialized_create_audit.contains("familyAlias")
+            && !serialized_create_audit.contains("familyId")
+            && !serialized_create_audit.contains(family_id),
+        "memory.create audit stores only a domain-separated family alias",
+    )?;
+
+    let mut selected_memory_id =
+        selected_memory_id.ok_or_else(|| "selected partial-family memory id missing".to_owned())?;
+    let mut rejected_memory_id =
+        rejected_memory_id.ok_or_else(|| "rejected partial-family memory id missing".to_owned())?;
+
+    let revise = run_ee(&[
+        "--workspace",
+        &workspace,
+        "memory",
+        "revise",
+        &selected_memory_id,
+        "--content",
+        "Frozen multiplicity ledger selected member",
+        "--actor",
+        "literal-closure-auditor",
+        "--reason",
+        "Exercise attempt-family inheritance across revisions.",
+        "--json",
+    ])?;
+    ensure_equal(
+        &revise.status.code(),
+        &Some(EXIT_SUCCESS),
+        "revise selected family member",
+    )?;
+    assert_stderr_empty(&revise, "revise selected family member")?;
+    let revise_json = stdout_json(&revise)?;
+    let revised_memory_id = json_str(&revise_json, "/data/new_id", "family revision")?;
+    ensure(
+        revised_memory_id != selected_memory_id,
+        "family revision must create a distinct immutable row",
+    )?;
+    selected_memory_id = revised_memory_id.to_owned();
+
+    let revised_family = run_ee(&[
+        "--workspace",
+        &workspace,
+        "search",
+        "--family",
+        family_id,
+        "--json",
+    ])?;
+    let revised_family_json = stdout_json(&revised_family)?;
+    let revised_members = json_array(
+        &revised_family_json,
+        "/data/members",
+        "revised family search",
+    )?;
+    ensure(
+        revised_members.iter().any(|member| {
+            member.get("memoryId").and_then(serde_json::Value::as_str)
+                == Some(selected_memory_id.as_str())
+                && member
+                    .get("attemptIndex")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(1)
+        }),
+        "public family search must resolve the inherited slot through the current revision",
+    )?;
+
+    let rejected_revision_content = "Frozen multiplicity ledger rejected evidence carries a deliberately oversized body so the public pack selector records it in the omitted ledger while the short selected sibling still fits. This planted negative is intentionally repetitive: frozen multiplicity ledger rejected evidence must remain visible, preserve its unchanged rejection discount, and stay attached to the same attempt slot across revision, backup, restore, replay, and why inspection even after later siblings change the live family posture.";
+    let revise_rejected = run_ee(&[
+        "--workspace",
+        &workspace,
+        "memory",
+        "revise",
+        &rejected_memory_id,
+        "--content",
+        rejected_revision_content,
+        "--actor",
+        "literal-closure-auditor",
+        "--reason",
+        "Exercise omitted family evidence across revisions.",
+        "--json",
+    ])?;
+    ensure_equal(
+        &revise_rejected.status.code(),
+        &Some(EXIT_SUCCESS),
+        "revise rejected family member",
+    )?;
+    let revise_rejected_json = stdout_json(&revise_rejected)?;
+    rejected_memory_id = json_str(
+        &revise_rejected_json,
+        "/data/new_id",
+        "rejected family revision",
+    )?
+    .to_owned();
+
+    let backup = run_ee(&[
+        "--workspace",
+        &workspace,
+        "backup",
+        "create",
+        "--redaction",
+        "none",
+        "--label",
+        "multiplicity-revision-roundtrip",
+        "--json",
+    ])?;
+    ensure_equal(
+        &backup.status.code(),
+        &Some(EXIT_SUCCESS),
+        "backup revised family",
+    )?;
+    assert_stderr_empty(&backup, "backup revised family")?;
+    let backup_json = stdout_json(&backup)?;
+    let backup_id = json_str(&backup_json, "/data/backupId", "family backup")?;
+    let restore_root = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let restore_workspace = restore_root.path().join("restored-family");
+    let restore_workspace_arg = restore_workspace.to_string_lossy().into_owned();
+    let restore = run_ee(&[
+        "--workspace",
+        &workspace,
+        "backup",
+        "restore",
+        backup_id,
+        "--side-path",
+        &restore_workspace_arg,
+        "--json",
+    ])?;
+    ensure_equal(
+        &restore.status.code(),
+        &Some(EXIT_SUCCESS),
+        "restore revised family",
+    )?;
+    assert_stderr_empty(&restore, "restore revised family")?;
+    let restored_family = run_ee(&[
+        "--workspace",
+        &restore_workspace_arg,
+        "search",
+        "--family",
+        family_id,
+        "--json",
+    ])?;
+    ensure_equal(
+        &restored_family.status.code(),
+        &Some(EXIT_SUCCESS),
+        "search restored revised family",
+    )?;
+    let restored_family_json = stdout_json(&restored_family)?;
+    ensure_equal(
+        &restored_family_json
+            .pointer("/data/recordedSlots")
+            .and_then(serde_json::Value::as_u64),
+        &Some(2),
+        "backup restore retains each family slot exactly once",
+    )?;
+    let restored_members = json_array(
+        &restored_family_json,
+        "/data/members",
+        "restored revised family search",
+    )?;
+    ensure_equal(
+        &restored_members.len(),
+        &2_usize,
+        "backup restore does not duplicate a slot for historical revisions",
+    )?;
+    ensure(
+        restored_members.iter().any(|member| {
+            member.get("content").and_then(serde_json::Value::as_str)
+                == Some("Frozen multiplicity ledger selected member")
+                && member
+                    .get("attemptIndex")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(1)
+        }),
+        "restored family retains the revised selected head and its slot",
+    )?;
+
+    let rebuild = run_ee(&["--workspace", &workspace, "index", "rebuild", "--json"])?;
+    ensure_equal(
+        &rebuild.status.code(),
+        &Some(EXIT_SUCCESS),
+        "family pack index rebuild",
+    )?;
+    let pack_args = [
+        "--workspace",
+        workspace.as_str(),
+        "pack",
+        "frozen multiplicity ledger",
+        "--max-tokens",
+        "60",
+        "--candidate-pool",
+        "2",
+        "--profile",
+        "compact",
+        "--source-mode",
+        "lexical-only",
+        "--json",
+    ];
+    let frozen_pack = run_ee(&pack_args)?;
+    ensure_equal(
+        &frozen_pack.status.code(),
+        &Some(EXIT_SUCCESS),
+        "selected and omitted frozen family pack",
+    )?;
+    let frozen_pack_json = stdout_json(&frozen_pack)?;
+    let frozen_items = json_array(&frozen_pack_json, "/data/pack/items", "frozen pack items")?;
+    ensure(
+        frozen_items.iter().any(|item| {
+            item.get("memoryId").and_then(serde_json::Value::as_str)
+                == Some(selected_memory_id.as_str())
+        }),
+        "short selected sibling must be persisted as a selected pack item",
+    )?;
+    let frozen_skipped = json_array(
+        &frozen_pack_json,
+        "/data/pack/skipped",
+        "frozen pack skipped items",
+    )?;
+    ensure(
+        frozen_skipped.iter().any(|item| {
+            item.get("memoryId").and_then(serde_json::Value::as_str)
+                == Some(rejected_memory_id.as_str())
+        }),
+        "oversized rejected sibling must be persisted as an omitted pack item",
+    )?;
+
+    let mut performance_args = pack_args.to_vec();
+    performance_args.insert(performance_args.len() - 1, "--explain-performance");
+    let warm_performance = run_ee(&performance_args)?;
+    let warm_performance_json = stdout_json(&warm_performance)?;
+    ensure_equal(
+        &warm_performance_json
+            .pointer("/data/cache/status")
+            .and_then(serde_json::Value::as_str),
+        &Some("hit"),
+        "identical pack request warms the L2 cache",
+    )?;
+
+    for index in 0..10 {
+        let source_id = format!("public-family-promotion-{index}");
+        let outcome = run_ee(&[
+            "--workspace",
+            &workspace,
+            "outcome",
+            &selected_memory_id,
+            "--signal",
+            "helpful",
+            "--source-id",
+            &source_id,
+            "--json",
+        ])?;
+        ensure_equal(
+            &outcome.status.code(),
+            &Some(EXIT_SUCCESS),
+            "ordinary helpful family outcome",
+        )?;
+        assert_stderr_empty(&outcome, "ordinary helpful family outcome")?;
+    }
+    let blocked_show = run_ee(&[
+        "--workspace",
+        &workspace,
+        "memory",
+        "show",
+        &selected_memory_id,
+        "--json",
+    ])?;
+    let blocked_show_json = stdout_json(&blocked_show)?;
+    ensure_equal(
+        &blocked_show_json
+            .pointer("/data/memory/trust_class")
+            .and_then(serde_json::Value::as_str),
+        &Some("agent_assertion"),
+        "incomplete family refuses ordinary promotion",
+    )?;
+
+    let override_reason = "Operator reviewed the missing attempt and deliberately accepts risk.";
+    let override_outcome = run_ee(&[
+        "--workspace",
+        &workspace,
+        "outcome",
+        &selected_memory_id,
+        "--signal",
+        "helpful",
+        "--source-type",
+        "human_explicit",
+        "--source-id",
+        "operator-family-override",
+        "--actor",
+        "literal-closure-auditor",
+        "--reason",
+        override_reason,
+        "--json",
+    ])?;
+    ensure_equal(
+        &override_outcome.status.code(),
+        &Some(EXIT_SUCCESS),
+        "explicit family promotion override",
+    )?;
+    assert_stderr_empty(&override_outcome, "explicit family promotion override")?;
+    let promoted_show = run_ee(&[
+        "--workspace",
+        &workspace,
+        "memory",
+        "show",
+        &selected_memory_id,
+        "--json",
+    ])?;
+    let promoted_show_json = stdout_json(&promoted_show)?;
+    ensure_equal(
+        &promoted_show_json
+            .pointer("/data/memory/trust_class")
+            .and_then(serde_json::Value::as_str),
+        &Some("agent_validated"),
+        "deliberate human override promotes incomplete-family survivor",
+    )?;
+    let override_audit = run_ee(&[
+        "--workspace",
+        &workspace,
+        "audit",
+        "timeline",
+        "--action",
+        "trust_class.promotion_override",
+        "--target",
+        &selected_memory_id,
+        "--json",
+    ])?;
+    let override_audit_json = stdout_json(&override_audit)?;
+    let override_entries = json_array(
+        &override_audit_json,
+        "/data/entries",
+        "family promotion override audit",
+    )?;
+    ensure_equal(
+        &override_entries.len(),
+        &1_usize,
+        "one deliberate override audit row",
+    )?;
+    let serialized_override =
+        serde_json::to_string(&override_audit_json).map_err(|error| error.to_string())?;
+    ensure(
+        serialized_override.contains(override_reason) && !serialized_override.contains(family_id),
+        "override audit keeps the reason and aliases the family id",
+    )?;
+
+    let rewarm_after_outcomes = run_ee(&performance_args)?;
+    ensure_equal(
+        &rewarm_after_outcomes.status.code(),
+        &Some(EXIT_SUCCESS),
+        "rewarm pack after outcome generation changes",
+    )?;
+    let hot_immediately_before_family_write = run_ee(&performance_args)?;
+    let hot_before_family_json = stdout_json(&hot_immediately_before_family_write)?;
+    ensure_equal(
+        &hot_before_family_json
+            .pointer("/data/cache/status")
+            .and_then(serde_json::Value::as_str),
+        &Some("hit"),
+        "L2 entry is confirmed hot immediately before the family-sidecar write",
+    )?;
+
+    let third_sibling = run_ee_as_agent(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "Frozen multiplicity ledger final rejected sibling",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--family",
+        family_id,
+        "--of-n",
+        "3",
+        "--attempt",
+        "3",
+        "--attempt-outcome",
+        "rejected",
+        "--json",
+    ])?;
+    ensure_equal(
+        &third_sibling.status.code(),
+        &Some(EXIT_SUCCESS),
+        "record final canonical sibling",
+    )?;
+    let canonical_family = run_ee(&[
+        "--workspace",
+        &workspace,
+        "search",
+        "--family",
+        family_id,
+        "--json",
+    ])?;
+    let canonical_family_json = stdout_json(&canonical_family)?;
+    ensure_equal(
+        &canonical_family_json
+            .pointer("/data/promotionEligible")
+            .and_then(serde_json::Value::as_bool),
+        &Some(true),
+        "one selected plus N-1 rejected siblings is canonical",
+    )?;
+
+    let frozen_why = run_ee(&[
+        "--workspace",
+        &workspace,
+        "why",
+        &selected_memory_id,
+        "--json",
+    ])?;
+    let frozen_why_json = stdout_json(&frozen_why)?;
+    let frozen_selection = frozen_why_json
+        .pointer("/data/selection/latestPackSelection")
+        .ok_or_else(|| "why omitted latest frozen pack selection".to_owned())?;
+    ensure_equal(
+        &frozen_selection
+            .pointer("/attemptFamilyMultiplicity/memberships/0/recordedSlots")
+            .and_then(serde_json::Value::as_u64),
+        &Some(2),
+        "why uses selected-item multiplicity frozen before the sibling changed",
+    )?;
+    ensure_equal(
+        &frozen_selection
+            .pointer("/attemptFamilyMultiplicity/memberships/0/unrecordedCount")
+            .and_then(serde_json::Value::as_u64),
+        &Some(1),
+        "why retains the frozen missing-sibling count",
+    )?;
+    ensure(
+        frozen_selection
+            .pointer("/attemptFamilyMultiplicity/effectiveDiscountFactor")
+            .and_then(serde_json::Value::as_f64)
+            .is_some_and(|factor| (factor - 1.0 / 3.0).abs() < 1.0e-6),
+        "why retains the exact frozen selected 1/N discount",
+    )?;
+    ensure(
+        !serde_json::to_string(&frozen_why_json)
+            .map_err(|error| error.to_string())?
+            .contains(family_id),
+        "why must never expose the raw secret-shaped family id",
+    )?;
+    let pack_id = json_str(frozen_selection, "/packId", "frozen pack selection")?;
+    let replay = run_ee(&[
+        "--workspace",
+        &workspace,
+        "pack",
+        "replay",
+        pack_id,
+        "--json",
+    ])?;
+    let replay_json = stdout_json(&replay)?;
+    let replay_selected = json_array(
+        &replay_json,
+        "/data/replay/selectedItems",
+        "frozen replay selected items",
+    )?;
+    let replay_omitted = json_array(
+        &replay_json,
+        "/data/replay/omittedItems",
+        "frozen replay omitted items",
+    )?;
+    let selected_snapshot = replay_selected
+        .iter()
+        .find(|item| {
+            item.get("memoryId").and_then(serde_json::Value::as_str)
+                == Some(selected_memory_id.as_str())
+        })
+        .and_then(|item| item.get("attemptFamilyMultiplicity"))
+        .ok_or_else(|| "selected replay ledger omitted multiplicity snapshot".to_owned())?;
+    let omitted_snapshot = replay_omitted
+        .iter()
+        .find(|item| {
+            item.get("memoryId").and_then(serde_json::Value::as_str)
+                == Some(rejected_memory_id.as_str())
+        })
+        .and_then(|item| item.get("attemptFamilyMultiplicity"))
+        .ok_or_else(|| "omitted replay ledger omitted multiplicity snapshot".to_owned())?;
+    ensure_equal(
+        &selected_snapshot.pointer("/memberships/0/recordedSlots"),
+        &Some(&serde_json::json!(2)),
+        "selected replay snapshot stays frozen",
+    )?;
+    ensure_equal(
+        &omitted_snapshot.pointer("/memberships/0/memberDiscountFactor"),
+        &Some(&serde_json::json!(1.0)),
+        "rejected omitted snapshot keeps its undiscounted factor",
+    )?;
+    let public_replay = serde_json::to_string(&replay_json).map_err(|error| error.to_string())?;
+    ensure(
+        !public_replay.contains(family_id),
+        "pack replay must never expose the raw secret-shaped family id",
+    )?;
+
+    let invalidated_performance = run_ee(&performance_args)?;
+    let invalidated_performance_json = stdout_json(&invalidated_performance)?;
+    ensure_equal(
+        &invalidated_performance_json
+            .pointer("/data/cache/status")
+            .and_then(serde_json::Value::as_str),
+        &Some("fallback"),
+        "family-sidecar generation change invalidates the warm L2 entry",
+    )?;
+
+    let tombstone = run_ee(&[
+        "--workspace",
+        &workspace,
+        "curate",
+        "tombstone",
+        &rejected_memory_id,
+        "--actor",
+        "literal-closure-auditor",
+        "--reason",
+        "Planted negative: deleted sibling must not count as live evidence.",
+        "--json",
+    ])?;
+    ensure_equal(
+        &tombstone.status.code(),
+        &Some(EXIT_SUCCESS),
+        "tombstone rejected sibling",
+    )?;
+    let after_tombstone = run_ee(&[
+        "--workspace",
+        &workspace,
+        "search",
+        "--family",
+        family_id,
+        "--json",
+    ])?;
+    let after_tombstone_json = stdout_json(&after_tombstone)?;
+    ensure_equal(
+        &after_tombstone_json
+            .pointer("/data/recordedSlots")
+            .and_then(serde_json::Value::as_u64),
+        &Some(2),
+        "tombstoned rejected sibling no longer counts as live family evidence",
+    )?;
+    ensure_equal(
+        &after_tombstone_json
+            .pointer("/data/missingCurrentRevisionCount")
+            .and_then(serde_json::Value::as_u64),
+        &Some(1),
+        "tombstoned sibling remains visible as missing-current forensic evidence",
     )?;
 
     let unslotted = run_ee(&[

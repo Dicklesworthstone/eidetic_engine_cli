@@ -68,6 +68,7 @@ fn base_response() -> ContextResponse {
         budget: TokenBudget::new(400).expect("budget should be valid"),
         used_tokens: 8,
         items: vec![item],
+        evidence_items: Vec::new(),
         omitted: Vec::new(),
         selection_audit: PackSelectionAudit {
             profile: ee::pack::ContextPackProfile::Balanced,

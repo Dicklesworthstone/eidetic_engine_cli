@@ -1,9 +1,11 @@
-//! Production-path conformance for the bounded T2.2 accepted-side broker.
+//! Supplemental wire/session conformance for the bounded T2.2 broker.
 //!
 //! The responder binds and accepts through the real Asupersync TCP listener,
 //! calls a fake-but-wire-real Tailscale LocalAPI Unix socket for status and
 //! exact-source WhoIs, opens a preprovisioned hardened key store, and delegates
 //! the accepted stream to the public T2.1 authenticated-session path.
+//! Fake LocalAPI coverage is not evidence of real Tailscale authority; the
+//! opt-in test below exercises status and WhoIs against a real local daemon.
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -20,11 +22,21 @@ use std::thread;
 use std::time::Duration;
 
 use asupersync::{CancelKind, Cx};
+use ee::config::MeshLane;
+use ee::db::{
+    CreateWorkspaceInput, DbConnection, MeshLaneGrantMutationInput, MeshLaneGrantTargetAdapter,
+    UpsertMeshPeerInput,
+};
 use ee::mesh::key_store::{MeshKeyStore, PairKeyClass, SecretBytes};
+use ee::mesh::peer::{
+    MeshPeerCapabilityProfile, MeshPeerEndpoint, MeshPeerEnrollInput, MeshPeerHandshake,
+    build_peer_origin_node_id, enroll_peer,
+};
 use ee::mesh::responder_broker::{
-    MESH_KEY_STORE_UNAVAILABLE_CODE, PreAuthAdmissionLimits, RegisteredResponderRoute,
-    ResponderBroker, ResponderBrokerError, ResponderBrokerState, ResponderRouteRegistry,
-    TailscaleLocalApiClient,
+    DurableResponderRegistration, MESH_KEY_STORE_UNAVAILABLE_CODE, PreAuthAdmissionLimits,
+    RegisteredResponderRoute, ResponderBroker, ResponderBrokerError, ResponderBrokerOwner,
+    ResponderBrokerState, ResponderRouteRegistry, TailscaleLocalApi, TailscaleLocalApiClient,
+    resolve_durable_registration,
 };
 use ee::mesh::transport_session::{
     HandshakeObservations, InitiatorSessionConfig, ResponderExpectations, SessionBinding,
@@ -69,10 +81,13 @@ fn expectations() -> ResponderExpectations {
 fn route(workspace_path: PathBuf, port: u16) -> RegisteredResponderRoute {
     RegisteredResponderRoute {
         workspace_path,
+        database_path: None,
         peer_handle: PEER_HANDLE.to_owned(),
         committed_port: port,
         expectations: expectations(),
         responder_node_pubkey: "nodekey:responder-current".to_owned(),
+        peer_transport_key_generation: 1,
+        grant_generation: 1,
         capabilities: SessionCapabilities::base(),
         limits: session_limits(),
     }
@@ -161,6 +176,8 @@ impl FakeLocalApi {
                     .push(request.clone());
                 let body = if request.starts_with("GET /localapi/v0/status ") {
                     json!({
+                        "BackendState": "Running",
+                        "TailscaleIPs": ["127.0.0.1"],
                         "Self": {
                             "ID": "stable-responder",
                             "PublicKey": "nodekey:responder-current",
@@ -245,6 +262,211 @@ fn write_http_response(stream: &mut std::os::unix::net::UnixStream, body: &[u8])
         .write_all(header.as_bytes())
         .and_then(|()| stream.write_all(body))
         .map_err(|error| format!("write fake localapi response: {error}"))
+}
+
+#[test]
+fn real_tailscale_localapi_binds_status_and_whois_to_kernel_source() -> TestResult {
+    if std::env::var("EE_E2E_REAL_TAILSCALE").ok().as_deref() != Some("1") {
+        return Ok(());
+    }
+    run_runtime(|cx| async move {
+        let client = TailscaleLocalApiClient::discover(LOCAL_API_TIMEOUT)
+            .ok_or("real tailscaled LocalAPI socket was not found")?;
+        let status = client
+            .local_status(&cx)
+            .await
+            .map_err(|error| format!("real LocalAPI status failed: {error}"))?;
+        let bind_ip = status
+            .addresses
+            .first()
+            .copied()
+            .ok_or("real LocalAPI status returned no Tailscale address")?;
+        let listener = StdTcpListener::bind(SocketAddr::new(bind_ip, 0))
+            .map_err(|error| format!("bind real Tailscale self-test listener: {error}"))?;
+        let target = listener
+            .local_addr()
+            .map_err(|error| format!("read real Tailscale listener address: {error}"))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| format!("bound real Tailscale listener polling: {error}"))?;
+        let connector = thread::spawn(move || {
+            std::net::TcpStream::connect_timeout(&target, Duration::from_secs(2))
+                .map_err(|error| format!("connect real Tailscale self-test: {error}"))
+        });
+        let accept_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let (accepted, kernel_source) = loop {
+            match listener.accept() {
+                Ok(accepted) => break accepted,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= accept_deadline {
+                        return Err("real Tailscale self-test accept timed out".to_owned());
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    return Err(format!("accept real Tailscale self-test: {error}"));
+                }
+            }
+        };
+        drop(accepted);
+        drop(
+            connector
+                .join()
+                .map_err(|_| "real Tailscale connector panicked".to_owned())??,
+        );
+        if kernel_source.ip() != bind_ip {
+            return Err(format!(
+                "kernel source {} did not use LocalAPI Tailscale address {bind_ip}",
+                kernel_source.ip()
+            ));
+        }
+        let who_is = client
+            .who_is(&cx, kernel_source)
+            .await
+            .map_err(|error| format!("real LocalAPI WhoIs failed: {error}"))?;
+        if who_is.stable_id != status.identity.stable_id
+            || who_is.current_node_pubkey != status.identity.current_node_pubkey
+        {
+            return Err("real WhoIs identity did not match real LocalAPI self status".to_owned());
+        }
+        let workspace = tempfile::tempdir()
+            .map_err(|error| format!("create real responder workspace: {error}"))?;
+        let workspace_path = workspace
+            .path()
+            .canonicalize()
+            .map_err(|error| format!("canonicalize real responder workspace: {error}"))?;
+        let ee_dir = workspace_path.join(".ee");
+        std::fs::create_dir(&ee_dir)
+            .map_err(|error| format!("create real responder state dir: {error}"))?;
+        let database_path = ee_dir.join("ee.db");
+        let connection = DbConnection::open_file(&database_path)
+            .map_err(|error| format!("open real responder database: {error}"))?;
+        connection
+            .migrate()
+            .map_err(|error| format!("migrate real responder database: {error}"))?;
+        let workspace_id = "wsp_real_responder_0000000001";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("real responder proof".to_owned()),
+                },
+            )
+            .map_err(|error| format!("insert real responder workspace: {error}"))?;
+        let peer_report = enroll_peer(MeshPeerEnrollInput {
+            workspace_id: workspace_id.to_owned(),
+            alias: "real-tailscale-self".to_owned(),
+            endpoint: MeshPeerEndpoint {
+                tailscale_node_key: status.identity.current_node_pubkey.clone(),
+                tailnet_id: status.identity.tailnet_id.clone(),
+                tailnet_display_name: None,
+                endpoint: bind_ip.to_string(),
+                magic_dns_name: None,
+            },
+            capability_profile: MeshPeerCapabilityProfile::MetadataOnly,
+            handshake: MeshPeerHandshake::granted(
+                "real-responder-proof",
+                "1.0",
+                status.identity.current_node_pubkey.clone(),
+                vec!["mesh:metadata".to_owned()],
+            ),
+            public_key_fingerprint: "blake3:real-responder-proof".to_owned(),
+            now: CREATED_AT.to_owned(),
+            explicit_human_consent: true,
+        });
+        let peer = peer_report
+            .peer
+            .ok_or_else(|| format!("compose real responder peer: {}", peer_report.message))?;
+        let origin_node_id = build_peer_origin_node_id(&peer.endpoint.tailscale_node_key);
+        connection
+            .upsert_mesh_peer(&UpsertMeshPeerInput {
+                workspace_id: workspace_id.to_owned(),
+                peer_id: peer.peer_id.clone(),
+                origin_node_id: origin_node_id.clone(),
+                display_name: Some(peer.alias.clone()),
+                policy_summary_json: Some(
+                    serde_json::to_string(&peer)
+                        .map_err(|error| format!("encode real responder peer: {error}"))?,
+                ),
+                enabled: true,
+                last_seen_at: Some(CREATED_AT.to_owned()),
+            })
+            .map_err(|error| format!("persist real responder peer: {error}"))?;
+        let target_adapter = MeshLaneGrantTargetAdapter::new(&peer.peer_id, origin_node_id);
+        connection
+            .apply_mesh_lane_grant_with_effect(
+                &MeshLaneGrantMutationInput {
+                    workspace_id: workspace_id.to_owned(),
+                    peer_id: peer.peer_id.clone(),
+                    target_adapter,
+                    material_lane: MeshLane::Metadata,
+                    expected_generation: 0,
+                    approval_config_digest: Some(format!("blake3:{}", "a".repeat(64))),
+                    updated_at: Some(CREATED_AT.to_owned()),
+                },
+                |_| Ok::<(), String>(()),
+            )
+            .map_err(|error| format!("grant real responder lane: {error}"))?;
+        let store = MeshKeyStore::open_or_create(&workspace_path)
+            .map_err(|error| format!("create real responder key store: {error}"))?;
+        store
+            .store_pair_key(
+                &peer.peer_id,
+                PairKeyClass::Current,
+                NonZeroU64::new(1).expect("real proof generation is nonzero"),
+                &pair_key(),
+                CREATED_AT,
+                false,
+            )
+            .map_err(|error| format!("store real responder pair key: {error}"))?;
+
+        let port = available_nonprivileged_port()?;
+        let resolved = resolve_durable_registration(
+            &cx,
+            &client,
+            &connection,
+            &DurableResponderRegistration {
+                workspace_path,
+                database_path: database_path
+                    .canonicalize()
+                    .map_err(|error| format!("canonicalize real responder database: {error}"))?,
+                workspace_id: workspace_id.to_owned(),
+                team_id: "team-real-responder-proof".to_owned(),
+                responder_node_id: "node-real-responder-proof".to_owned(),
+                peer_handle: peer.peer_id,
+                committed_port: port,
+                capabilities: SessionCapabilities::base(),
+                limits: session_limits(),
+            },
+        )
+        .await
+        .map_err(|error| format!("resolve real durable responder route: {error}"))?;
+        let registry = ResponderRouteRegistry::new([resolved.route])
+            .map_err(|error| format!("register real responder route: {error}"))?;
+        let mut owner = ResponderBrokerOwner::start(
+            &cx,
+            client,
+            registry,
+            PreAuthAdmissionLimits::default(),
+            Duration::from_millis(250),
+        )
+        .await
+        .map_err(|error| format!("start real responder owner: {error}"))?;
+        let expected_addresses = status
+            .addresses
+            .iter()
+            .map(|ip| SocketAddr::new(*ip, port))
+            .collect::<Vec<_>>();
+        if owner.bound_addresses() != expected_addresses {
+            return Err(format!(
+                "real owner bound {:?}, expected full LocalAPI set {expected_addresses:?}",
+                owner.bound_addresses()
+            ));
+        }
+        owner.shutdown();
+        Ok(())
+    })
 }
 
 #[test]
