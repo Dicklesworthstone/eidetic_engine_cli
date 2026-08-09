@@ -145,6 +145,10 @@ pub mod audit_actions {
     /// unrecorded_count. The block is not a demotion: the stored trust class
     /// is left unchanged.
     pub const TRUST_CLASS_PROMOTION_BLOCKED: &str = "trust_class.promotion_blocked";
+    /// An explicit human outcome overrode an incomplete attempt-family
+    /// promotion gate. The accompanying audit row carries only public family
+    /// aliases plus the operator's recorded reason.
+    pub const TRUST_CLASS_PROMOTION_OVERRIDE: &str = "trust_class.promotion_override";
 
     pub const PROCEDURE_CREATE: &str = "procedure.create";
     pub const PROCEDURE_PROMOTE: &str = "procedure.promote";
@@ -1618,7 +1622,11 @@ impl DbConnection {
              FROM pack_records pr
              LEFT JOIN (
                 SELECT pack_id, COUNT(*) AS actual_count
-                FROM pack_items
+                FROM (
+                    SELECT pack_id FROM pack_items
+                    UNION ALL
+                    SELECT pack_id FROM pack_evidence_items
+                ) selected_items
                 GROUP BY pack_id
              ) pi ON pi.pack_id = pr.id
              WHERE pr.item_count <> COALESCE(pi.actual_count, 0)
@@ -1637,7 +1645,7 @@ impl DbConnection {
                 expected: Some(expected_item_count.to_string()),
                 actual: Some(actual_item_count.to_string()),
                 detail: format!(
-                    "pack record {pack_id} declares item_count={expected_item_count} but stores {actual_item_count} pack_items row(s)."
+                    "pack record {pack_id} declares item_count={expected_item_count} but stores {actual_item_count} selected entity row(s)."
                 ),
             });
         }
@@ -8807,6 +8815,105 @@ CREATE INDEX IF NOT EXISTS idx_memory_seals_unrevealed
     "blake3:v098_memory_seals_2026_08_08",
 );
 
+/// V099: Bind enrolled mesh peers to authoritative Tailscale observations.
+///
+/// Existing rows remain deliberately unverified (`transport_key_generation =
+/// 0`). A responder route cannot consume them until LocalAPI has supplied the
+/// tailnet, stable node id, and current node key as one atomic observation.
+/// Current-key rotation for the same stable node advances the observation
+/// generation without changing the opaque ee peer id or its lane grants.
+pub const V099_MESH_PEER_TRANSPORT_IDENTITY: Migration = Migration::new(
+    99,
+    "mesh_peer_transport_identity",
+    r#"
+ALTER TABLE mesh_peers ADD COLUMN transport_tailnet_id TEXT
+    CHECK (transport_tailnet_id IS NULL OR length(trim(transport_tailnet_id)) > 0);
+ALTER TABLE mesh_peers ADD COLUMN transport_stable_node_id TEXT
+    CHECK (transport_stable_node_id IS NULL OR length(trim(transport_stable_node_id)) > 0);
+ALTER TABLE mesh_peers ADD COLUMN transport_current_node_pubkey TEXT
+    CHECK (
+        transport_current_node_pubkey IS NULL
+        OR transport_current_node_pubkey GLOB 'nodekey:*'
+    );
+ALTER TABLE mesh_peers ADD COLUMN transport_key_generation INTEGER NOT NULL DEFAULT 0
+    CHECK (transport_key_generation >= 0);
+
+CREATE TRIGGER mesh_peers_transport_identity_insert_guard
+BEFORE INSERT ON mesh_peers
+WHEN NOT (
+    (NEW.transport_tailnet_id IS NULL
+        AND NEW.transport_stable_node_id IS NULL
+        AND NEW.transport_current_node_pubkey IS NULL
+        AND NEW.transport_key_generation = 0)
+    OR
+    (NEW.transport_tailnet_id IS NOT NULL
+        AND NEW.transport_stable_node_id IS NOT NULL
+        AND NEW.transport_current_node_pubkey IS NOT NULL
+        AND NEW.transport_key_generation > 0)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'mesh peer transport identity must be wholly unverified or wholly bound');
+END;
+
+CREATE TRIGGER mesh_peers_transport_identity_update_guard
+BEFORE UPDATE OF transport_tailnet_id, transport_stable_node_id,
+    transport_current_node_pubkey, transport_key_generation ON mesh_peers
+WHEN NOT (
+    (NEW.transport_tailnet_id IS NULL
+        AND NEW.transport_stable_node_id IS NULL
+        AND NEW.transport_current_node_pubkey IS NULL
+        AND NEW.transport_key_generation = 0)
+    OR
+    (NEW.transport_tailnet_id IS NOT NULL
+        AND NEW.transport_stable_node_id IS NOT NULL
+        AND NEW.transport_current_node_pubkey IS NOT NULL
+        AND NEW.transport_key_generation > 0)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'mesh peer transport identity must be wholly unverified or wholly bound');
+END;
+
+CREATE UNIQUE INDEX idx_mesh_peers_transport_stable_node
+    ON mesh_peers(workspace_id, transport_tailnet_id, transport_stable_node_id)
+    WHERE transport_stable_node_id IS NOT NULL;
+"#,
+    "blake3:v099_mesh_peer_transport_identity_2026_08_09",
+);
+
+/// Direct imported-evidence pack items retain their native identity instead of
+/// fabricating a `MemoryId` (bd-16imy). The source FK is deliberately RESTRICT:
+/// deleting evidence must not silently rewrite historical pack provenance.
+pub const V100_PACK_EVIDENCE_ITEMS: Migration = Migration::new(
+    100,
+    "pack_evidence_items",
+    r#"
+CREATE TABLE pack_evidence_items (
+    pack_id TEXT NOT NULL REFERENCES pack_records(id) ON DELETE CASCADE,
+    evidence_id TEXT NOT NULL REFERENCES evidence_spans(id) ON DELETE RESTRICT,
+    entity_revision TEXT NOT NULL CHECK (
+        length(entity_revision) = 71 AND substr(entity_revision, 1, 7) = 'blake3:'
+    ),
+    rank INTEGER NOT NULL CHECK (rank > 0),
+    section TEXT NOT NULL CHECK (length(trim(section)) > 0),
+    estimated_tokens INTEGER NOT NULL CHECK (estimated_tokens > 0),
+    relevance REAL NOT NULL CHECK (relevance >= 0.0 AND relevance <= 1.0),
+    utility REAL NOT NULL CHECK (utility >= 0.0 AND utility <= 1.0),
+    why TEXT NOT NULL CHECK (length(trim(why)) > 0),
+    provenance_json TEXT NOT NULL CHECK (length(trim(provenance_json)) > 0),
+    trust_class TEXT NOT NULL CHECK (trust_class = 'cass_evidence'),
+    trust_subclass TEXT,
+    PRIMARY KEY (pack_id, evidence_id),
+    UNIQUE (pack_id, rank)
+);
+
+CREATE INDEX idx_pack_evidence_items_evidence
+    ON pack_evidence_items(evidence_id);
+CREATE INDEX idx_pack_evidence_items_rank
+    ON pack_evidence_items(pack_id, rank);
+"#,
+    "blake3:v100_pack_evidence_items_2026_08_09",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -8907,6 +9014,8 @@ pub const MIGRATIONS: &[Migration] = &[
     V096_MEMORY_SENTINEL_POLARITY,
     V097_SESSION_INDEX_GENERATIONS,
     V098_MEMORY_SEALS,
+    V099_MESH_PEER_TRANSPORT_IDENTITY,
+    V100_PACK_EVIDENCE_ITEMS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -11284,8 +11393,20 @@ impl StoredEvidenceSpan {
             && self.search_eligibility == "admitted"
     }
 
-    /// Pack admission requires the same live security proof plus an attached
-    /// memory in the same workspace.
+    /// Direct pack admission revalidates the live source row and requires the
+    /// explicit pack-eligibility decision. No derived index metadata grants
+    /// this authority (bd-16imy).
+    #[must_use]
+    pub fn is_direct_pack_admitted_for_session(
+        &self,
+        expected_workspace_id: &str,
+        session: &StoredSession,
+    ) -> bool {
+        self.is_search_admitted_for_session(expected_workspace_id, session)
+            && self.pack_eligibility == "admitted"
+    }
+
+    /// Linked-memory pack admission additionally verifies the durable join.
     #[must_use]
     pub fn is_pack_admitted(
         &self,
@@ -11293,8 +11414,7 @@ impl StoredEvidenceSpan {
         session: &StoredSession,
         memory: &StoredMemory,
     ) -> bool {
-        self.is_search_admitted_for_session(expected_workspace_id, session)
-            && self.pack_eligibility == "admitted"
+        self.is_direct_pack_admitted_for_session(expected_workspace_id, session)
             && self.memory_id.as_deref() == Some(memory.id.as_str())
             && memory.workspace_id == self.workspace_id
     }
@@ -13038,6 +13158,65 @@ pub struct StoredMeshPeer {
     pub policy_summary_json: Option<String>,
     pub enabled: bool,
     pub last_seen_at: String,
+    /// Authoritative LocalAPI binding. `None` marks a legacy/unverified row
+    /// that must never be admitted to an inbound responder route.
+    pub transport_identity: Option<MeshPeerTransportIdentity>,
+}
+
+/// Durable LocalAPI observation bound to one opaque ee peer handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeshPeerTransportIdentity {
+    pub tailnet_id: String,
+    pub stable_node_id: String,
+    pub current_node_pubkey: String,
+    pub key_generation: u64,
+}
+
+/// One authoritative LocalAPI observation to bind or rotate a peer identity.
+#[derive(Debug, Clone)]
+pub struct ObserveMeshPeerTransportIdentityInput {
+    pub workspace_id: String,
+    pub peer_id: String,
+    pub tailnet_id: String,
+    pub stable_node_id: String,
+    pub current_node_pubkey: String,
+    pub observed_at: Option<String>,
+}
+
+/// Fail-closed identity observation errors kept distinct from storage faults.
+#[derive(Debug)]
+pub enum MeshPeerTransportIdentityError {
+    Storage(DbError),
+    PeerUnavailable,
+    InvalidObservation,
+    StableIdentityMismatch,
+    GenerationExhausted,
+}
+
+impl fmt::Display for MeshPeerTransportIdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Storage(error) => write!(formatter, "mesh peer identity storage failed: {error}"),
+            Self::PeerUnavailable => formatter.write_str("mesh peer is unavailable"),
+            Self::InvalidObservation => {
+                formatter.write_str("mesh peer identity observation is invalid")
+            }
+            Self::StableIdentityMismatch => {
+                formatter.write_str("mesh peer stable transport identity changed")
+            }
+            Self::GenerationExhausted => {
+                formatter.write_str("mesh peer transport key generation is exhausted")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MeshPeerTransportIdentityError {}
+
+impl From<DbError> for MeshPeerTransportIdentityError {
+    fn from(error: DbError) -> Self {
+        Self::Storage(error)
+    }
 }
 
 /// Canonical versioned binding used by lane-grant snapshots and durable state.
@@ -14037,13 +14216,104 @@ impl DbConnection {
         });
         let peer = self.upsert_mesh_peer_in_current_transaction(input)?;
         if security_identity_changed {
+            self.execute_for(
+                DbOperation::Execute,
+                "UPDATE mesh_peers
+                    SET transport_tailnet_id = NULL,
+                        transport_stable_node_id = NULL,
+                        transport_current_node_pubkey = NULL,
+                        transport_key_generation = 0
+                  WHERE workspace_id = ?1 AND peer_id = ?2",
+                &[
+                    Value::Text(input.workspace_id.clone()),
+                    Value::Text(input.peer_id.clone()),
+                ],
+            )?;
             self.invalidate_mesh_lane_grants_in_transaction(
                 &input.workspace_id,
                 &input.peer_id,
                 input.last_seen_at.as_deref(),
             )?;
         }
-        Ok(peer)
+        if security_identity_changed {
+            self.get_mesh_peer(&input.workspace_id, &input.peer_id)?
+                .ok_or_else(|| DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "mesh peer disappeared after identity invalidation".to_owned(),
+                })
+        } else {
+            Ok(peer)
+        }
+    }
+
+    /// Persist one authoritative Tailscale LocalAPI identity observation.
+    ///
+    /// Initial binding starts generation one. Re-observing the same current
+    /// key is idempotent. A current-key rotation for the same stable node
+    /// advances the generation while preserving the opaque peer handle and
+    /// grants. Tailnet or stable-node substitution fails without mutation.
+    pub fn observe_mesh_peer_transport_identity(
+        &self,
+        input: &ObserveMeshPeerTransportIdentityInput,
+    ) -> std::result::Result<StoredMeshPeer, MeshPeerTransportIdentityError> {
+        if !valid_mesh_transport_identity_component(&input.tailnet_id)
+            || !valid_mesh_transport_identity_component(&input.stable_node_id)
+            || !valid_mesh_transport_node_key(&input.current_node_pubkey)
+        {
+            return Err(MeshPeerTransportIdentityError::InvalidObservation);
+        }
+        self.with_transaction_error(|| {
+            let peer = self
+                .get_mesh_peer(&input.workspace_id, &input.peer_id)?
+                .filter(|peer| peer.enabled)
+                .ok_or(MeshPeerTransportIdentityError::PeerUnavailable)?;
+            let next_generation = match peer.transport_identity.as_ref() {
+                None => 1,
+                Some(identity)
+                    if identity.tailnet_id != input.tailnet_id
+                        || identity.stable_node_id != input.stable_node_id =>
+                {
+                    return Err(MeshPeerTransportIdentityError::StableIdentityMismatch);
+                }
+                Some(identity) if identity.current_node_pubkey == input.current_node_pubkey => {
+                    return Ok(peer);
+                }
+                Some(identity) => identity
+                    .key_generation
+                    .checked_add(1)
+                    .ok_or(MeshPeerTransportIdentityError::GenerationExhausted)?,
+            };
+            let next_generation = i64::try_from(next_generation)
+                .map_err(|_| MeshPeerTransportIdentityError::GenerationExhausted)?;
+            let observed_at = input
+                .observed_at
+                .clone()
+                .unwrap_or_else(|| Utc::now().to_rfc3339());
+            let affected = self.execute_for(
+                DbOperation::Execute,
+                "UPDATE mesh_peers
+                    SET transport_tailnet_id = ?3,
+                        transport_stable_node_id = ?4,
+                        transport_current_node_pubkey = ?5,
+                        transport_key_generation = ?6,
+                        last_seen_at = ?7
+                  WHERE workspace_id = ?1 AND peer_id = ?2 AND enabled = 1",
+                &[
+                    Value::Text(input.workspace_id.clone()),
+                    Value::Text(input.peer_id.clone()),
+                    Value::Text(input.tailnet_id.clone()),
+                    Value::Text(input.stable_node_id.clone()),
+                    Value::Text(input.current_node_pubkey.clone()),
+                    Value::BigInt(next_generation),
+                    Value::Text(observed_at),
+                ],
+            )?;
+            if affected != 1 {
+                return Err(MeshPeerTransportIdentityError::PeerUnavailable);
+            }
+            self.get_mesh_peer(&input.workspace_id, &input.peer_id)?
+                .ok_or(MeshPeerTransportIdentityError::PeerUnavailable)
+        })
     }
 
     /// Introduce a peer from a replay artifact only when no local enrollment
@@ -14239,7 +14509,9 @@ impl DbConnection {
         let rows = self.query_for(
             DbOperation::Query,
             "SELECT workspace_id, peer_id, origin_node_id, display_name,
-                    policy_summary_json, enabled, last_seen_at
+                    policy_summary_json, enabled, last_seen_at,
+                    transport_tailnet_id, transport_stable_node_id,
+                    transport_current_node_pubkey, transport_key_generation
              FROM mesh_peers
              WHERE workspace_id = ?1 AND peer_id = ?2",
             &[
@@ -14255,7 +14527,9 @@ impl DbConnection {
         let rows = self.query_for(
             DbOperation::Query,
             "SELECT workspace_id, peer_id, origin_node_id, display_name,
-                    policy_summary_json, enabled, last_seen_at
+                    policy_summary_json, enabled, last_seen_at,
+                    transport_tailnet_id, transport_stable_node_id,
+                    transport_current_node_pubkey, transport_key_generation
              FROM mesh_peers
              WHERE workspace_id = ?1
              ORDER BY peer_id ASC, origin_node_id ASC",
@@ -16656,6 +16930,35 @@ fn mesh_policy_json_error(message: String) -> DbError {
 }
 
 fn stored_mesh_peer_from_row(row: &Row) -> Result<StoredMeshPeer> {
+    let transport_tailnet_id = optional_text(row, 7)?.map(str::to_owned);
+    let transport_stable_node_id = optional_text(row, 8)?.map(str::to_owned);
+    let transport_current_node_pubkey = optional_text(row, 9)?.map(str::to_owned);
+    let transport_key_generation =
+        required_u64(row, 10, DbOperation::Query, "transport_key_generation")?;
+    let transport_identity = match (
+        transport_tailnet_id,
+        transport_stable_node_id,
+        transport_current_node_pubkey,
+        transport_key_generation,
+    ) {
+        (None, None, None, 0) => None,
+        (Some(tailnet_id), Some(stable_node_id), Some(current_node_pubkey), key_generation)
+            if key_generation > 0 =>
+        {
+            Some(MeshPeerTransportIdentity {
+                tailnet_id,
+                stable_node_id,
+                current_node_pubkey,
+                key_generation,
+            })
+        }
+        _ => {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "mesh peer transport identity is only partially bound".to_owned(),
+            });
+        }
+    };
     Ok(StoredMeshPeer {
         workspace_id: required_text(row, 0, DbOperation::Query, "workspace_id")?.to_string(),
         peer_id: required_text(row, 1, DbOperation::Query, "peer_id")?.to_string(),
@@ -16664,7 +16967,22 @@ fn stored_mesh_peer_from_row(row: &Row) -> Result<StoredMeshPeer> {
         policy_summary_json: optional_text(row, 4)?.map(str::to_string),
         enabled: required_sqlite_bool(row, 5, DbOperation::Query, "enabled")?,
         last_seen_at: required_text(row, 6, DbOperation::Query, "last_seen_at")?.to_string(),
+        transport_identity,
     })
+}
+
+fn valid_mesh_transport_identity_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
+fn valid_mesh_transport_node_key(value: &str) -> bool {
+    valid_mesh_transport_identity_component(value)
+        && value
+            .strip_prefix("nodekey:")
+            .is_some_and(|key| !key.is_empty() && !key.chars().any(char::is_whitespace))
 }
 
 fn stored_mesh_lane_grant_state_from_row(row: &Row) -> Result<StoredMeshLaneGrantState> {
@@ -19446,19 +19764,35 @@ impl DbConnection {
         if let (Some(index), Some(disposition)) =
             (family.attempt_index, family.disposition.as_deref())
         {
-            self.execute_for(
-                DbOperation::Execute,
-                "INSERT INTO attempt_family_members (workspace_id, family_id, attempt_index, \
-                 disposition, memory_logical_id, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            let existing_rows = self.query_for(
+                DbOperation::Query,
+                "SELECT disposition, memory_logical_id FROM attempt_family_members \
+                 WHERE workspace_id = ?1 AND family_id = ?2 AND attempt_index = ?3 LIMIT 1",
                 &[
                     Value::Text(workspace_id.clone()),
                     Value::Text(trimmed.to_string()),
                     Value::BigInt(i64::from(index)),
-                    Value::Text(disposition.to_string()),
-                    Value::Text(ledger_key),
-                    Value::Text(now.clone()),
                 ],
             )?;
+            let exact_existing = existing_rows.first().is_some_and(|existing| {
+                optional_text(existing, 0).ok().flatten() == Some(disposition)
+                    && optional_text(existing, 1).ok().flatten() == Some(ledger_key.as_str())
+            });
+            if !exact_existing {
+                self.execute_for(
+                    DbOperation::Execute,
+                    "INSERT INTO attempt_family_members (workspace_id, family_id, attempt_index, \
+                     disposition, memory_logical_id, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    &[
+                        Value::Text(workspace_id.clone()),
+                        Value::Text(trimmed.to_string()),
+                        Value::BigInt(i64::from(index)),
+                        Value::Text(disposition.to_string()),
+                        Value::Text(ledger_key),
+                        Value::Text(now.clone()),
+                    ],
+                )?;
+            }
         }
 
         let affected = self.execute_for(
@@ -19489,9 +19823,13 @@ impl DbConnection {
     ) -> Result<Vec<MemoryAttemptFamilyMember>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT memory_logical_id, attempt_index, disposition, recorded_at \
-             FROM attempt_family_members \
-             WHERE workspace_id = ?1 AND family_id = ?2 \
+            "SELECT member.memory_logical_id, member.attempt_index, member.disposition, member.recorded_at \
+             FROM attempt_family_members AS member \
+             WHERE member.workspace_id = ?1 AND member.family_id = ?2 \
+               AND EXISTS (SELECT 1 FROM memories AS live \
+                   WHERE live.workspace_id = member.workspace_id \
+                     AND COALESCE(live.logical_id, live.id) = member.memory_logical_id \
+                     AND live.tombstoned_at IS NULL AND live.valid_to IS NULL) \
              ORDER BY attempt_index ASC",
             &[
                 Value::Text(workspace_id.to_string()),
@@ -19628,6 +19966,47 @@ impl DbConnection {
             .transpose()
     }
 
+    /// Resolve unique current live heads for revision-stable ledger keys in
+    /// bounded chunks. Ambiguous chains are omitted so callers fail closed
+    /// instead of selecting an arbitrary head.
+    pub fn get_current_memory_ids_for_ledger_keys(
+        &self,
+        workspace_id: &str,
+        ledger_keys: &[String],
+    ) -> Result<BTreeMap<String, String>> {
+        let ledger_keys = ledger_keys
+            .iter()
+            .filter(|key| !key.trim().is_empty())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut current_ids = BTreeMap::new();
+        for chunk in ledger_keys.chunks(ATTEMPT_FAMILY_MEMBERSHIP_BATCH_SIZE) {
+            let placeholders = (2..=chunk.len() + 1)
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT COALESCE(logical_id, id), MIN(id) FROM memories \
+                 WHERE workspace_id = ?1 AND COALESCE(logical_id, id) IN ({placeholders}) \
+                   AND tombstoned_at IS NULL AND valid_to IS NULL \
+                 GROUP BY COALESCE(logical_id, id) HAVING COUNT(*) = 1 \
+                 ORDER BY COALESCE(logical_id, id) ASC"
+            );
+            let mut params = Vec::with_capacity(chunk.len() + 1);
+            params.push(Value::Text(workspace_id.to_string()));
+            params.extend(chunk.iter().cloned().map(Value::Text));
+            for row in self.query_for(DbOperation::Query, &sql, &params)? {
+                current_ids.insert(
+                    required_text(&row, 0, DbOperation::Query, "logical_id")?.to_string(),
+                    required_text(&row, 1, DbOperation::Query, "id")?.to_string(),
+                );
+            }
+        }
+        Ok(current_ids)
+    }
+
     /// Build the one authoritative workspace + logical-id membership snapshot
     /// used by promotion and queryless family retrieval. The candidate-family
     /// query unions every append-only V095 ledger membership with V094 pointer
@@ -19666,6 +20045,7 @@ impl DbConnection {
                 "SELECT DISTINCT COALESCE(memory.logical_id, memory.id) AS logical_id \
                  FROM memories AS memory \
                  WHERE memory.workspace_id = ?1 AND memory.attempt_family_id = ?2 \
+                   AND memory.tombstoned_at IS NULL AND memory.valid_to IS NULL \
                    AND NOT EXISTS (\
                        SELECT 1 FROM attempt_family_members AS member \
                        WHERE member.workspace_id = ?1 \
@@ -19754,6 +20134,10 @@ impl DbConnection {
                  LEFT JOIN attempt_family_members AS member \
                    ON member.workspace_id = family_key.workspace_id \
                   AND member.family_id = family_key.family_id \
+                  AND EXISTS (SELECT 1 FROM memories AS live \
+                       WHERE live.workspace_id = member.workspace_id \
+                         AND COALESCE(live.logical_id, live.id) = member.memory_logical_id \
+                         AND live.tombstoned_at IS NULL AND live.valid_to IS NULL) \
                  UNION ALL \
                  SELECT candidate.candidate_id, candidate.workspace_id, candidate.logical_id, \
                         family_key.family_id, family.declared_size, family.origin, \
@@ -19767,6 +20151,7 @@ impl DbConnection {
                  JOIN memories AS memory \
                    ON memory.workspace_id = family_key.workspace_id \
                   AND memory.attempt_family_id = family_key.family_id \
+                  AND memory.tombstoned_at IS NULL AND memory.valid_to IS NULL \
                  WHERE NOT EXISTS (\
                      SELECT 1 FROM attempt_family_members AS recorded \
                      WHERE recorded.workspace_id = family_key.workspace_id \
@@ -24520,6 +24905,40 @@ pub struct StoredPackItem {
     pub trust_subclass: Option<String>,
 }
 
+/// Input for one direct imported-evidence item in a durable pack record.
+#[derive(Debug, Clone)]
+pub struct CreatePackEvidenceItemInput {
+    pub pack_id: String,
+    pub evidence_id: String,
+    pub entity_revision: String,
+    pub rank: u32,
+    pub section: String,
+    pub estimated_tokens: u32,
+    pub relevance: f32,
+    pub utility: f32,
+    pub why: String,
+    pub provenance_json: String,
+    pub trust_class: String,
+    pub trust_subclass: Option<String>,
+}
+
+/// A stored `pack_evidence_items` row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredPackEvidenceItem {
+    pub pack_id: String,
+    pub evidence_id: String,
+    pub entity_revision: String,
+    pub rank: u32,
+    pub section: String,
+    pub estimated_tokens: u32,
+    pub relevance: f32,
+    pub utility: f32,
+    pub why: String,
+    pub provenance_json: String,
+    pub trust_class: String,
+    pub trust_subclass: Option<String>,
+}
+
 /// Input for creating a pack omission.
 #[derive(Debug, Clone)]
 pub struct CreatePackOmissionInput {
@@ -24822,7 +25241,16 @@ struct PackLedgerCandidateCounts {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackLedgerSelectedItem {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     memory_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    evidence_span_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    entity_kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    entity_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    entity_revision: String,
     rank: u32,
     section: String,
     estimated_tokens: u32,
@@ -24867,9 +25295,12 @@ struct PackLedgerOmittedItem {
 
 const PACK_INSERT_MAX_BIND_PARAMS: usize = 900;
 const PACK_ITEM_INSERT_VALUE_COUNT: usize = 12;
+const PACK_EVIDENCE_ITEM_INSERT_VALUE_COUNT: usize = 12;
 const PACK_OMISSION_INSERT_VALUE_COUNT: usize = 4;
 const PACK_ITEM_INSERT_BATCH_ROWS: usize =
     PACK_INSERT_MAX_BIND_PARAMS / PACK_ITEM_INSERT_VALUE_COUNT;
+const PACK_EVIDENCE_ITEM_INSERT_BATCH_ROWS: usize =
+    PACK_INSERT_MAX_BIND_PARAMS / PACK_EVIDENCE_ITEM_INSERT_VALUE_COUNT;
 const PACK_OMISSION_INSERT_BATCH_ROWS: usize =
     PACK_INSERT_MAX_BIND_PARAMS / PACK_OMISSION_INSERT_VALUE_COUNT;
 const IMPRESSION_INSERT_VALUE_COUNT: usize = 14;
@@ -24905,6 +25336,7 @@ fn validate_pack_record_input(
     id: &str,
     input: &CreatePackRecordInput,
     items: &[CreatePackItemInput],
+    evidence_items: &[CreatePackEvidenceItemInput],
     omissions: &[CreatePackOmissionInput],
     created_at: &str,
 ) -> Result<()> {
@@ -24938,10 +25370,12 @@ fn validate_pack_record_input(
             message: "pack created_at must be RFC 3339".to_owned(),
         });
     }
-    let item_count = u32::try_from(items.len()).map_err(|_| DbError::MalformedRow {
-        operation: DbOperation::Execute,
-        message: "pack item length does not fit u32".to_owned(),
-    })?;
+    let item_count = u32::try_from(items.len().saturating_add(evidence_items.len())).map_err(
+        |_| DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack item length does not fit u32".to_owned(),
+        },
+    )?;
     if item_count != input.item_count {
         return Err(DbError::MalformedRow {
             operation: DbOperation::Execute,
@@ -24961,6 +25395,11 @@ fn validate_pack_record_input(
     let selected_token_sum = items
         .iter()
         .map(|item| u64::from(item.estimated_tokens))
+        .chain(
+            evidence_items
+                .iter()
+                .map(|item| u64::from(item.estimated_tokens)),
+        )
         .try_fold(0_u64, u64::checked_add)
         .ok_or_else(|| DbError::MalformedRow {
             operation: DbOperation::Execute,
@@ -24984,6 +25423,12 @@ fn validate_pack_record_input(
             message: "selected item pack_id does not match containing pack".to_owned(),
         });
     }
+    if evidence_items.iter().any(|item| item.pack_id != id) {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "selected evidence item pack_id does not match containing pack".to_owned(),
+        });
+    }
     if omissions.iter().any(|omission| omission.pack_id != id) {
         return Err(DbError::MalformedRow {
             operation: DbOperation::Execute,
@@ -25000,16 +25445,42 @@ fn validate_pack_record_input(
             message: "pack selected memory ids must be unique".to_owned(),
         });
     }
+    let selected_evidence_ids = evidence_items
+        .iter()
+        .map(|item| item.evidence_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if selected_evidence_ids.len() != evidence_items.len()
+        || evidence_items.iter().any(|item| {
+            !is_canonical_evidence_id(&item.evidence_id)
+                || !is_canonical_blake3_hash(&item.entity_revision)
+                || item.trust_class != "cass_evidence"
+                || item.why.trim().is_empty()
+                || item.provenance_json.trim().is_empty()
+        })
+    {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack evidence items require unique canonical identities, revisions, provenance, and CASS trust".to_owned(),
+        });
+    }
     let mut previous_rank = None;
-    for item in items {
-        if item.rank == 0 || previous_rank.is_some_and(|rank| item.rank <= rank) {
+    let mut selected_ranks = items
+        .iter()
+        .map(|item| item.rank)
+        .chain(evidence_items.iter().map(|item| item.rank))
+        .collect::<Vec<_>>();
+    selected_ranks.sort_unstable();
+    for rank in selected_ranks {
+        if rank == 0 || previous_rank.is_some_and(|previous| rank <= previous) {
             return Err(DbError::MalformedRow {
                 operation: DbOperation::Execute,
                 message: "pack selected ranks must be positive, unique, and strictly increasing"
                     .to_owned(),
             });
         }
-        previous_rank = Some(item.rank);
+        previous_rank = Some(rank);
+    }
+    for item in items {
         if !item.relevance.is_finite()
             || !(0.0..=1.0).contains(&item.relevance)
             || !item.utility.is_finite()
@@ -25041,6 +25512,24 @@ fn validate_pack_record_input(
                 message: "pack selected item metadata is outside the storage domain".to_owned(),
             });
         }
+    }
+    if evidence_items.iter().any(|item| {
+        item.estimated_tokens == 0
+            || !item.relevance.is_finite()
+            || !(0.0..=1.0).contains(&item.relevance)
+            || !item.utility.is_finite()
+            || !(0.0..=1.0).contains(&item.utility)
+            || !is_pack_section(&item.section)
+            || item
+                .trust_subclass
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            || serde_json::from_str::<serde_json::Value>(&item.provenance_json).is_err()
+    }) {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack evidence item metadata is outside the storage domain".to_owned(),
+        });
     }
     let omitted_memory_ids = omissions
         .iter()
@@ -25079,6 +25568,12 @@ fn is_pack_section(value: &str) -> bool {
         value,
         "procedural_rules" | "decisions" | "failures" | "evidence" | "artifacts"
     )
+}
+
+fn is_canonical_evidence_id(value: &str) -> bool {
+    value.len() == 29
+        && value.starts_with("ev_")
+        && value[3..].bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 fn is_pack_trust_class(value: &str) -> bool {
@@ -25191,9 +25686,9 @@ impl DbConnection {
         let (ledger_json, ledger_hash) = if inject_reference_issue {
             (None, None)
         } else {
-            validate_pack_record_input(id, input, &[], &[], &created_at)?;
+            validate_pack_record_input(id, input, &[], &[], &[], &created_at)?;
             let (ledger_json, ledger_hash) =
-                build_pack_selection_ledger(id, input, &[], &[], &created_at, None)?;
+                build_pack_selection_ledger(id, input, &[], &[], &[], &created_at, None)?;
             (Some(ledger_json), Some(ledger_hash))
         };
         let audit_digest = blake3::hash(format!("{action}:{id}").as_bytes())
@@ -25270,7 +25765,15 @@ impl DbConnection {
             operation: DbOperation::Execute,
             message: format!("pack record created_at must be RFC 3339: {error}"),
         })?;
-        self.insert_pack_record_with_timings_at(id, input, items, omissions, created_at, None)
+        self.insert_pack_record_with_timings_at(
+            id,
+            input,
+            items,
+            &[],
+            omissions,
+            created_at,
+            None,
+        )
             .map(|_| ())
     }
 
@@ -25294,8 +25797,37 @@ impl DbConnection {
         omissions: &[CreatePackOmissionInput],
         task_lens: Option<&CreatePackTaskLensInput>,
     ) -> Result<PackRecordInsertTimings> {
+        self.insert_pack_record_with_timings_task_lens_and_evidence(
+            id,
+            input,
+            items,
+            &[],
+            omissions,
+            task_lens,
+        )
+    }
+
+    /// Insert a pack record whose selected entities include native evidence
+    /// spans. All children and the replay ledger commit atomically.
+    pub fn insert_pack_record_with_timings_task_lens_and_evidence(
+        &self,
+        id: &str,
+        input: &CreatePackRecordInput,
+        items: &[CreatePackItemInput],
+        evidence_items: &[CreatePackEvidenceItemInput],
+        omissions: &[CreatePackOmissionInput],
+        task_lens: Option<&CreatePackTaskLensInput>,
+    ) -> Result<PackRecordInsertTimings> {
         let now = Utc::now().to_rfc3339();
-        self.insert_pack_record_with_timings_at(id, input, items, omissions, &now, task_lens)
+        self.insert_pack_record_with_timings_at(
+            id,
+            input,
+            items,
+            evidence_items,
+            omissions,
+            &now,
+            task_lens,
+        )
     }
 
     fn insert_pack_record_with_timings_at(
@@ -25303,11 +25835,12 @@ impl DbConnection {
         id: &str,
         input: &CreatePackRecordInput,
         items: &[CreatePackItemInput],
+        evidence_items: &[CreatePackEvidenceItemInput],
         omissions: &[CreatePackOmissionInput],
         created_at: &str,
         task_lens: Option<&CreatePackTaskLensInput>,
     ) -> Result<PackRecordInsertTimings> {
-        validate_pack_record_input(id, input, items, omissions, created_at)?;
+        validate_pack_record_input(id, input, items, evidence_items, omissions, created_at)?;
         if task_lens.is_some_and(|lens| {
             lens.id.trim().is_empty()
                 || lens.version == 0
@@ -25322,23 +25855,37 @@ impl DbConnection {
         }
         let mut timings = PackRecordInsertTimings::default();
         let ledger_start = Instant::now();
-        let (ledger_json, ledger_hash) =
-            build_pack_selection_ledger(id, input, items, omissions, created_at, task_lens)?;
+        let (ledger_json, ledger_hash) = build_pack_selection_ledger(
+            id,
+            input,
+            items,
+            evidence_items,
+            omissions,
+            created_at,
+            task_lens,
+        )?;
         timings.ledger_serialization = ledger_start.elapsed();
         timings.item_write_batches =
-            pack_insert_batch_count(items.len(), PACK_ITEM_INSERT_BATCH_ROWS);
+            pack_insert_batch_count(items.len(), PACK_ITEM_INSERT_BATCH_ROWS).saturating_add(
+                pack_insert_batch_count(
+                    evidence_items.len(),
+                    PACK_EVIDENCE_ITEM_INSERT_BATCH_ROWS,
+                ),
+            );
         timings.omission_write_batches =
             pack_insert_batch_count(omissions.len(), PACK_OMISSION_INSERT_BATCH_ROWS);
 
         let transaction_start = Instant::now();
         self.with_transaction(|| {
             self.validate_pack_memory_workspace_membership(input, items, omissions)?;
+            self.validate_pack_evidence_workspace_membership(input, evidence_items)?;
             let record_start = Instant::now();
             self.insert_pack_record_row(id, input, created_at, &ledger_json, &ledger_hash)?;
             timings.record_write = record_start.elapsed();
 
             let item_start = Instant::now();
             self.insert_pack_items(items)?;
+            self.insert_pack_evidence_items(evidence_items)?;
             timings.item_writes = item_start.elapsed();
 
             let omission_start = Instant::now();
@@ -25396,6 +25943,53 @@ impl DbConnection {
                 operation: DbOperation::Execute,
                 message: "pack references a missing memory".to_owned(),
             });
+        }
+        Ok(())
+    }
+
+    fn validate_pack_evidence_workspace_membership(
+        &self,
+        input: &CreatePackRecordInput,
+        items: &[CreatePackEvidenceItemInput],
+    ) -> Result<()> {
+        for item in items {
+            let span = self.get_evidence_span(&item.evidence_id)?.ok_or_else(|| {
+                DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "pack references a missing evidence span".to_owned(),
+                }
+            })?;
+            if span.workspace_id != input.workspace_id {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "pack evidence belongs to a different workspace".to_owned(),
+                });
+            }
+            let session = self.get_session(&span.session_id)?.ok_or_else(|| {
+                DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "pack evidence has no live session provenance".to_owned(),
+                }
+            })?;
+            if !span.is_direct_pack_admitted_for_session(&input.workspace_id, &session) {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "pack evidence no longer has live pack admission".to_owned(),
+                });
+            }
+            let mut revision_hasher = blake3::Hasher::new();
+            revision_hasher.update(b"evidence_span");
+            revision_hasher.update(span.id.as_bytes());
+            revision_hasher.update(span.content_hash.as_bytes());
+            revision_hasher.update(&span.canonical_provenance_revision.to_le_bytes());
+            revision_hasher.update(&span.security_policy_epoch.to_le_bytes());
+            let expected_revision = format!("blake3:{}", revision_hasher.finalize().to_hex());
+            if item.entity_revision != expected_revision {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "pack evidence revision changed before persistence".to_owned(),
+                });
+            }
         }
         Ok(())
     }
@@ -25601,6 +26195,39 @@ impl DbConnection {
             self.execute_for(DbOperation::Execute, &sql, &params)?;
         }
 
+        Ok(())
+    }
+
+    fn insert_pack_evidence_items(&self, items: &[CreatePackEvidenceItemInput]) -> Result<()> {
+        for chunk in items.chunks(PACK_EVIDENCE_ITEM_INSERT_BATCH_ROWS) {
+            let mut sql = String::from(
+                "INSERT INTO pack_evidence_items (pack_id, evidence_id, entity_revision, rank, section, estimated_tokens, relevance, utility, why, provenance_json, trust_class, trust_subclass) VALUES ",
+            );
+            append_multi_row_placeholders(
+                &mut sql,
+                chunk.len(),
+                PACK_EVIDENCE_ITEM_INSERT_VALUE_COUNT,
+            );
+            let mut params =
+                Vec::with_capacity(chunk.len() * PACK_EVIDENCE_ITEM_INSERT_VALUE_COUNT);
+            for item in chunk {
+                params.push(Value::Text(item.pack_id.clone()));
+                params.push(Value::Text(item.evidence_id.clone()));
+                params.push(Value::Text(item.entity_revision.clone()));
+                params.push(Value::BigInt(i64::from(item.rank)));
+                params.push(Value::Text(item.section.clone()));
+                params.push(Value::BigInt(i64::from(item.estimated_tokens)));
+                params.push(Value::Float(item.relevance));
+                params.push(Value::Float(item.utility));
+                params.push(Value::Text(item.why.clone()));
+                params.push(Value::Text(item.provenance_json.clone()));
+                params.push(Value::Text(item.trust_class.clone()));
+                params.push(item.trust_subclass.as_ref().map_or(Value::Null, |subclass| {
+                    Value::Text(subclass.clone())
+                }));
+            }
+            self.execute_for(DbOperation::Execute, &sql, &params)?;
+        }
         Ok(())
     }
 
@@ -25864,6 +26491,16 @@ impl DbConnection {
         )?;
 
         rows.iter().map(stored_pack_item_from_row).collect()
+    }
+
+    /// Get direct imported-evidence items for a pack.
+    pub fn get_pack_evidence_items(&self, pack_id: &str) -> Result<Vec<StoredPackEvidenceItem>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT pack_id, evidence_id, entity_revision, rank, section, estimated_tokens, relevance, utility, why, provenance_json, trust_class, trust_subclass FROM pack_evidence_items WHERE pack_id = ?1 ORDER BY rank ASC",
+            &[Value::Text(pack_id.to_owned())],
+        )?;
+        rows.iter().map(stored_pack_evidence_item_from_row).collect()
     }
 
     /// List pack/item metadata that includes a specific memory.
@@ -26212,12 +26849,19 @@ fn build_pack_selection_ledger(
     id: &str,
     input: &CreatePackRecordInput,
     items: &[CreatePackItemInput],
+    evidence_items: &[CreatePackEvidenceItemInput],
     omissions: &[CreatePackOmissionInput],
     created_at: &str,
     task_lens: Option<&CreatePackTaskLensInput>,
 ) -> Result<(String, String)> {
     let (ledger_json, ledger_hash) = build_uncompressed_pack_selection_ledger(
-        id, input, items, omissions, created_at, task_lens,
+        id,
+        input,
+        items,
+        evidence_items,
+        omissions,
+        created_at,
+        task_lens,
     )?;
     let stored_ledger_json = store_pack_selection_ledger_json(&ledger_json, &ledger_hash)?;
 
@@ -26228,6 +26872,7 @@ fn build_uncompressed_pack_selection_ledger(
     id: &str,
     input: &CreatePackRecordInput,
     items: &[CreatePackItemInput],
+    evidence_items: &[CreatePackEvidenceItemInput],
     omissions: &[CreatePackOmissionInput],
     created_at: &str,
     task_lens: Option<&CreatePackTaskLensInput>,
@@ -26235,11 +26880,17 @@ fn build_uncompressed_pack_selection_ledger(
     let mut selected_items = items
         .iter()
         .map(pack_ledger_selected_item)
+        .chain(
+            evidence_items
+                .iter()
+                .map(pack_ledger_selected_evidence_item),
+        )
         .collect::<Vec<_>>();
     selected_items.sort_by(|left, right| {
         left.rank
             .cmp(&right.rank)
-            .then_with(|| left.memory_id.cmp(&right.memory_id))
+            .then_with(|| left.entity_kind.cmp(&right.entity_kind))
+            .then_with(|| left.entity_id.cmp(&right.entity_id))
             .then_with(|| left.section.cmp(&right.section))
             .then_with(|| left.scores.relevance.total_cmp(&right.scores.relevance))
             .then_with(|| left.scores.utility.total_cmp(&right.scores.utility))
@@ -26397,6 +27048,10 @@ fn pack_ledger_selected_item(item: &CreatePackItemInput) -> PackLedgerSelectedIt
 
     PackLedgerSelectedItem {
         memory_id: item.memory_id.clone(),
+        evidence_span_id: String::new(),
+        entity_kind: "memory".to_owned(),
+        entity_id: item.memory_id.clone(),
+        entity_revision: String::new(),
         rank: item.rank,
         section: item.section.clone(),
         estimated_tokens: item.estimated_tokens,
@@ -26408,6 +27063,40 @@ fn pack_ledger_selected_item(item: &CreatePackItemInput) -> PackLedgerSelectedIt
         attempt_family_multiplicity: item.attempt_family_multiplicity.clone(),
         why,
         diversity_key: item.diversity_key.clone(),
+        trust_class: item.trust_class.clone(),
+        trust_subclass: item.trust_subclass.clone(),
+        provenance,
+        redaction_classes: redaction_classes.into_iter().collect(),
+        freshness: "unavailable".to_owned(),
+    }
+}
+
+fn pack_ledger_selected_evidence_item(
+    item: &CreatePackEvidenceItemInput,
+) -> PackLedgerSelectedItem {
+    let why = pack_ledger_text_record(&item.why);
+    let provenance = pack_ledger_provenance_summary(&item.provenance_json);
+    let mut redaction_classes = BTreeSet::new();
+    redaction_classes.extend(why.redaction_reasons.iter().cloned());
+    redaction_classes.extend(provenance.redaction_reasons.iter().cloned());
+
+    PackLedgerSelectedItem {
+        memory_id: String::new(),
+        evidence_span_id: item.evidence_id.clone(),
+        entity_kind: "evidence_span".to_owned(),
+        entity_id: item.evidence_id.clone(),
+        entity_revision: item.entity_revision.clone(),
+        rank: item.rank,
+        section: item.section.clone(),
+        estimated_tokens: item.estimated_tokens,
+        scores: PackLedgerScoreComponents {
+            relevance: item.relevance,
+            utility: item.utility,
+            combined_score: None,
+        },
+        attempt_family_multiplicity: None,
+        why,
+        diversity_key: None,
         trust_class: item.trust_class.clone(),
         trust_subclass: item.trust_subclass.clone(),
         provenance,
@@ -26891,13 +27580,19 @@ fn pack_ledger_internal_invariant_mismatches(core: &PackSelectionLedgerCore) -> 
     {
         mismatches.push("selectedItems.why");
     }
-    let selected_memory_ids = core
+    let selected_entity_ids = core
         .selected_items
         .iter()
-        .map(|item| item.memory_id.as_str())
+        .map(|item| {
+            if item.entity_kind.is_empty() {
+                ("memory", item.memory_id.as_str())
+            } else {
+                (item.entity_kind.as_str(), item.entity_id.as_str())
+            }
+        })
         .collect::<BTreeSet<_>>();
-    if selected_memory_ids.len() != core.selected_items.len() {
-        mismatches.push("selectedItems.memoryId");
+    if selected_entity_ids.len() != core.selected_items.len() {
+        mismatches.push("selectedItems.entity");
     }
     if core.selected_items.iter().any(|item| item.rank == 0)
         || core
@@ -26927,8 +27622,24 @@ fn pack_ledger_internal_invariant_mismatches(core: &PackSelectionLedgerCore) -> 
         mismatches.push("selectedItems.attemptFamilyMultiplicity");
     }
     if core.selected_items.iter().any(|item| {
+        let identity_valid = match item.entity_kind.as_str() {
+            "" | "memory" => {
+                is_canonical_memory_id(&item.memory_id)
+                    && (item.entity_id.is_empty() || item.entity_id == item.memory_id)
+                    && item.evidence_span_id.is_empty()
+                    && item.entity_revision.is_empty()
+            }
+            "evidence_span" => {
+                item.memory_id.is_empty()
+                    && is_canonical_evidence_id(&item.evidence_span_id)
+                    && item.entity_id == item.evidence_span_id
+                    && is_canonical_blake3_hash(&item.entity_revision)
+                    && item.trust_class == "cass_evidence"
+            }
+            _ => false,
+        };
         item.estimated_tokens == 0
-            || !is_canonical_memory_id(&item.memory_id)
+            || !identity_valid
             || !is_pack_section(&item.section)
             || !is_pack_trust_class(&item.trust_class)
             || item
@@ -26996,7 +27707,7 @@ fn pack_ledger_internal_invariant_mismatches(core: &PackSelectionLedgerCore) -> 
         mismatches.push("omittedItems.attemptFamilyMultiplicity");
     }
     if core.omitted_items.iter().any(|item| {
-        selected_memory_ids.contains(item.memory_id.as_str())
+        selected_entity_ids.contains(&("memory", item.memory_id.as_str()))
             && item.reason != "redundant_candidate"
     }) {
         mismatches.push("selectedItems.omittedItemsOverlap");
@@ -27660,6 +28371,23 @@ fn stored_pack_item_from_joined_row(row: &Row, offset: usize) -> Result<StoredPa
         trust_class: required_text(row, offset + 10, DbOperation::Query, "trust_class")?
             .to_string(),
         trust_subclass: optional_text(row, offset + 11)?.map(str::to_string),
+    })
+}
+
+fn stored_pack_evidence_item_from_row(row: &Row) -> Result<StoredPackEvidenceItem> {
+    Ok(StoredPackEvidenceItem {
+        pack_id: required_text(row, 0, DbOperation::Query, "pack_id")?.to_owned(),
+        evidence_id: required_text(row, 1, DbOperation::Query, "evidence_id")?.to_owned(),
+        entity_revision: required_text(row, 2, DbOperation::Query, "entity_revision")?.to_owned(),
+        rank: required_u32(row, 3, DbOperation::Query, "rank")?,
+        section: required_text(row, 4, DbOperation::Query, "section")?.to_owned(),
+        estimated_tokens: required_u32(row, 5, DbOperation::Query, "estimated_tokens")?,
+        relevance: required_f64(row, 6, DbOperation::Query, "relevance")? as f32,
+        utility: required_f64(row, 7, DbOperation::Query, "utility")? as f32,
+        why: required_text(row, 8, DbOperation::Query, "why")?.to_owned(),
+        provenance_json: required_text(row, 9, DbOperation::Query, "provenance_json")?.to_owned(),
+        trust_class: required_text(row, 10, DbOperation::Query, "trust_class")?.to_owned(),
+        trust_subclass: optional_text(row, 11)?.map(str::to_owned),
     })
 }
 
@@ -31429,6 +32157,12 @@ mod tests {
 
     impl From<DbError> for TestFailure {
         fn from(error: DbError) -> Self {
+            Self(error.to_string())
+        }
+    }
+
+    impl From<super::MeshPeerTransportIdentityError> for TestFailure {
+        fn from(error: super::MeshPeerTransportIdentityError) -> Self {
             Self(error.to_string())
         }
     }
@@ -41037,6 +41771,117 @@ mod tests {
     }
 
     #[test]
+    fn mesh_peer_transport_identity_rotates_by_stable_node_and_blocks_substitution() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let enrollment = super::UpsertMeshPeerInput {
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            peer_id: "peer_transport_000001".to_owned(),
+            origin_node_id: "node_transport_000001".to_owned(),
+            display_name: Some("transport peer".to_owned()),
+            policy_summary_json: Some(r#"{"state":"active","key":"one"}"#.to_owned()),
+            enabled: true,
+            last_seen_at: Some("2026-08-09T00:00:00Z".to_owned()),
+        };
+        let legacy = connection.upsert_mesh_peer(&enrollment)?;
+        ensure_equal(
+            &legacy.transport_identity,
+            &None,
+            "legacy enrollment starts unverified",
+        )?;
+
+        let first_input = super::ObserveMeshPeerTransportIdentityInput {
+            workspace_id: enrollment.workspace_id.clone(),
+            peer_id: enrollment.peer_id.clone(),
+            tailnet_id: "example.ts.net".to_owned(),
+            stable_node_id: "stable-peer-a".to_owned(),
+            current_node_pubkey: "nodekey:peer-current-a".to_owned(),
+            observed_at: Some("2026-08-09T00:01:00Z".to_owned()),
+        };
+        let first = connection.observe_mesh_peer_transport_identity(&first_input)?;
+        let first_identity = first
+            .transport_identity
+            .as_ref()
+            .ok_or("first LocalAPI observation must bind transport identity")?;
+        ensure_equal(
+            &first_identity.key_generation,
+            &1,
+            "first observed generation",
+        )?;
+
+        let repeated = connection.observe_mesh_peer_transport_identity(&first_input)?;
+        ensure_equal(
+            &repeated
+                .transport_identity
+                .as_ref()
+                .ok_or("repeated observation lost identity")?
+                .key_generation,
+            &1,
+            "same current key is idempotent",
+        )?;
+
+        let rotated = connection.observe_mesh_peer_transport_identity(
+            &super::ObserveMeshPeerTransportIdentityInput {
+                current_node_pubkey: "nodekey:peer-current-b".to_owned(),
+                observed_at: Some("2026-08-09T00:02:00Z".to_owned()),
+                ..first_input.clone()
+            },
+        )?;
+        let rotated_identity = rotated
+            .transport_identity
+            .as_ref()
+            .ok_or("key rotation lost transport identity")?;
+        ensure_equal(&rotated_identity.key_generation, &2, "rotated generation")?;
+        ensure_equal(
+            &rotated_identity.stable_node_id.as_str(),
+            &"stable-peer-a",
+            "rotation preserves stable node",
+        )?;
+
+        let substituted = connection.observe_mesh_peer_transport_identity(
+            &super::ObserveMeshPeerTransportIdentityInput {
+                stable_node_id: "stable-peer-substitute".to_owned(),
+                current_node_pubkey: "nodekey:peer-substitute".to_owned(),
+                ..first_input.clone()
+            },
+        );
+        ensure(
+            matches!(
+                substituted,
+                Err(super::MeshPeerTransportIdentityError::StableIdentityMismatch)
+            ),
+            "a new stable node cannot inherit the opaque peer binding",
+        )?;
+        let unchanged = connection
+            .get_mesh_peer(&enrollment.workspace_id, &enrollment.peer_id)?
+            .ok_or("peer disappeared after rejected substitution")?;
+        ensure_equal(
+            &unchanged
+                .transport_identity
+                .as_ref()
+                .ok_or("rejected substitution cleared identity")?
+                .current_node_pubkey
+                .as_str(),
+            &"nodekey:peer-current-b",
+            "rejected substitution is non-mutating",
+        )?;
+
+        let replaced = connection.upsert_mesh_peer(&super::UpsertMeshPeerInput {
+            policy_summary_json: Some(r#"{"state":"active","key":"replacement"}"#.to_owned()),
+            last_seen_at: Some("2026-08-09T00:03:00Z".to_owned()),
+            ..enrollment
+        })?;
+        ensure_equal(
+            &replaced.transport_identity,
+            &None,
+            "security enrollment replacement requires fresh LocalAPI binding",
+        )?;
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn mesh_peer_lifecycle_creates_a_fence_before_the_first_lane_grant() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
@@ -47502,6 +48347,7 @@ mod tests {
             &input,
             &[item],
             &[],
+            &[],
             "2026-07-11T00:00:00Z",
             None,
         )?;
@@ -48181,6 +49027,7 @@ mod tests {
             &input,
             &items,
             &[],
+            &[],
             created_at,
             None,
         )?;
@@ -48340,6 +49187,7 @@ mod tests {
             &input,
             &items,
             &[],
+            &[],
             "2026-05-24T00:00:00Z",
             None,
         )?;
@@ -48472,6 +49320,7 @@ mod tests {
             pack_id,
             &input,
             &first_items,
+            &[],
             &omissions,
             created_at,
             None,
@@ -48480,6 +49329,7 @@ mod tests {
             pack_id,
             &input,
             &second_items,
+            &[],
             &omissions,
             created_at,
             None,
@@ -48549,6 +49399,7 @@ mod tests {
             pack_id,
             &input,
             &[selected],
+            &[],
             &[omitted],
             "2026-08-08T00:00:00Z",
             None,
