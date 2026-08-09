@@ -110,6 +110,10 @@ pub struct PrimerCandidate {
     /// True when another memory supersedes this one (decisions section
     /// excludes superseded chain links).
     pub superseded: bool,
+    /// True when the row came from the user-global store (bd-1bfwa.3).
+    /// Global rows compete in the same sections as workspace rows; the lane
+    /// is surfaced through the item's provenance `source_type`.
+    pub global_lane: bool,
 }
 
 /// One persisted centrality row (from the latest valid graph snapshot).
@@ -294,7 +298,11 @@ fn render_item(candidate: &PrimerCandidate, markdown: bool) -> PrimerItem {
             .map(|uri| {
                 vec![PrimerProvenanceRef {
                     uri: uri.clone(),
-                    source_type: "memory_provenance".to_owned(),
+                    source_type: if candidate.global_lane {
+                        "global_store".to_owned()
+                    } else {
+                        "memory_provenance".to_owned()
+                    },
                 }]
             })
             .unwrap_or_default(),
@@ -592,6 +600,31 @@ pub fn run_primer_with_persistence(
     refresh: bool,
     persist: bool,
 ) -> crate::db::Result<PrimerReport> {
+    // Opt-in-by-presence: a resolvable env root with an existing store
+    // database includes the global lane; anything else (no HOME, no store)
+    // is lane-off, matching the search seam's posture (bd-1bfwa.3).
+    let global_paths = crate::core::global_store::default_global_store_paths_from_env().ok();
+    run_primer_with_global_lane(
+        connection,
+        workspace_id,
+        settings,
+        refresh,
+        persist,
+        global_paths.as_ref(),
+    )
+}
+
+/// [`run_primer_with_persistence`] with explicit global-store paths so
+/// tests can point the lane at a temp root (bd-1bfwa.3). `None` disables
+/// the global lane outright.
+pub fn run_primer_with_global_lane(
+    connection: &DbConnection,
+    workspace_id: &str,
+    settings: &PrimerSettings,
+    refresh: bool,
+    persist: bool,
+    global_paths: Option<&crate::core::global_store::GlobalStorePaths>,
+) -> crate::db::Result<PrimerReport> {
     let db_generation = i64::try_from(
         connection
             .get_workspace_generation(workspace_id)?
@@ -599,11 +632,26 @@ pub fn run_primer_with_persistence(
     )
     .unwrap_or(i64::MAX);
 
+    // The global store changes without bumping the workspace generation, so
+    // the lane's content fingerprint must be part of the cache key or a
+    // cached primer would silently omit fresh global rows. When the lane is
+    // off the key is byte-identical to the pre-lane form.
+    let (global_rows, global_lane_degraded) = load_global_lane_rows(global_paths);
+    let cache_config_hash = if global_rows.is_empty() && global_lane_degraded.is_none() {
+        settings.config_hash.clone()
+    } else {
+        format!(
+            "{}+global:{}",
+            settings.config_hash,
+            global_store_lane_hash(&global_rows)
+        )
+    };
+
     if !refresh
         && let Some(cached) = connection.get_primer_cache(
             workspace_id,
             db_generation,
-            &settings.config_hash,
+            &cache_config_hash,
             settings.budget_tokens,
             settings.format.as_str(),
         )?
@@ -638,8 +686,10 @@ pub fn run_primer_with_persistence(
             updated_at: memory.updated_at.clone(),
             provenance_uri: memory.provenance_uri.clone(),
             superseded,
+            global_lane: false,
         });
     }
+    merge_global_candidates(&mut candidates, &global_rows);
 
     let centrality_rows = load_persisted_centrality(connection, workspace_id)?;
 
@@ -649,6 +699,9 @@ pub fn run_primer_with_persistence(
         settings,
         db_generation,
     );
+    if let Some(entry) = global_lane_degraded {
+        report.degraded.push(entry);
+    }
     report.degraded.push(PrimerDegradation {
         code: PRIMER_CACHE_COLD_CODE.to_owned(),
         severity: "info".to_owned(),
@@ -667,7 +720,7 @@ pub fn run_primer_with_persistence(
         connection.put_primer_cache(
             workspace_id,
             db_generation,
-            &settings.config_hash,
+            &cache_config_hash,
             settings.budget_tokens,
             settings.format.as_str(),
             &serialized,
@@ -681,6 +734,121 @@ pub fn run_primer_with_persistence(
 /// snapshot. Returns `None` (and the caller degrades) when the snapshot is
 /// missing or non-valid. Deliberately ignores time-based expiry on this
 /// path: assembly must be wall-clock-free so cache hits stay byte-identical.
+/// Read the global-store rows for the primer lane (bd-1bfwa.3).
+///
+/// `None` paths or an absent store database mean lane-off (opt-in by
+/// presence, mirroring the search seam). A present-but-unreadable store is
+/// surfaced as a low-severity degraded entry instead of a silent skip.
+fn load_global_lane_rows(
+    global_paths: Option<&crate::core::global_store::GlobalStorePaths>,
+) -> (Vec<crate::db::StoredMemory>, Option<PrimerDegradation>) {
+    let Some(paths) = global_paths else {
+        return (Vec::new(), None);
+    };
+    let inclusion = crate::core::global_store::resolve_global_inclusion(
+        &crate::core::global_store::GlobalInclusionInput {
+            store_present: paths.database_path.exists(),
+            // The separate-store implementation has not yet grown a
+            // repository participation row; default participation preserves
+            // the opt-in-by-presence behavior (same note as the search seam).
+            participating: true,
+            config_enabled: true,
+            no_global_flag: false,
+        },
+    );
+    if !inclusion.included {
+        return (Vec::new(), None);
+    }
+    match crate::core::global_store::read_global_store_memories(paths, false) {
+        Ok(rows) => (rows, None),
+        Err(error) => (
+            Vec::new(),
+            Some(PrimerDegradation {
+                code: "scope_metadata_unavailable".to_owned(),
+                severity: "low".to_owned(),
+                message: format!(
+                    "global store present but unreadable for the primer lane: {error}"
+                ),
+                repair: Some("ee doctor --json".to_owned()),
+            }),
+        ),
+    }
+}
+
+/// Deterministic fingerprint of the global lane's content for the primer
+/// cache key: the lane changes without bumping the workspace generation.
+fn global_store_lane_hash(rows: &[crate::db::StoredMemory]) -> String {
+    let mut keyed: Vec<(&str, &str, bool)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row.id.as_str(),
+                row.updated_at.as_str(),
+                row.tombstoned_at.is_some(),
+            )
+        })
+        .collect();
+    keyed.sort_unstable();
+    let mut hasher = blake3::Hasher::new();
+    for (id, updated_at, tombstoned) in keyed {
+        hasher.update(id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(updated_at.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(if tombstoned { b"t" } else { b"-" });
+        hasher.update(b"\0");
+    }
+    hasher
+        .finalize()
+        .to_hex()
+        .chars()
+        .take(16)
+        .collect::<String>()
+}
+
+/// Merge global-store rows into the candidate pool (bd-1bfwa.3).
+///
+/// Exact-content twins resolve workspace-wins (the same rule
+/// `promote_global` uses for duplicate detection), tombstoned rows are
+/// excluded, and rows without their own provenance get their canonical
+/// global-store address so the lane label always has a real URI. Global
+/// rows carry no local supersession links.
+fn merge_global_candidates(
+    candidates: &mut Vec<PrimerCandidate>,
+    global_rows: &[crate::db::StoredMemory],
+) {
+    if global_rows.is_empty() {
+        return;
+    }
+    let workspace_content: BTreeSet<String> = candidates
+        .iter()
+        .map(|candidate| candidate.content.clone())
+        .collect();
+    let mut merged: Vec<PrimerCandidate> = global_rows
+        .iter()
+        .filter(|row| row.tombstoned_at.is_none())
+        .filter(|row| !workspace_content.contains(&row.content))
+        .map(|row| PrimerCandidate {
+            memory_id: row.id.clone(),
+            level: row.level.clone(),
+            kind: row.kind.clone(),
+            content: row.content.clone(),
+            confidence: row.confidence,
+            utility: row.utility,
+            importance: row.importance,
+            updated_at: row.updated_at.clone(),
+            provenance_uri: row
+                .provenance_uri
+                .clone()
+                .or_else(|| Some(format!("ee-mem://{}/{}", row.workspace_id, row.id))),
+            superseded: false,
+            global_lane: true,
+        })
+        .collect();
+    merged.sort_by(|left, right| left.memory_id.cmp(&right.memory_id));
+    candidates.extend(merged);
+}
+
 fn load_persisted_centrality(
     connection: &DbConnection,
     workspace_id: &str,
@@ -742,6 +910,34 @@ mod tests {
             updated_at: format!("2026-06-{:02}T00:00:00Z", (id % 27) + 1),
             provenance_uri: Some(format!("test://prov/{id}")),
             superseded: false,
+            global_lane: false,
+        }
+    }
+
+    fn global_row(id: u32, content: &str, provenance: Option<&str>) -> crate::db::StoredMemory {
+        crate::db::StoredMemory {
+            id: format!("mem_g{id:025}"),
+            workspace_id: "ws_global".to_owned(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content: content.to_owned(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.8,
+            importance: 0.5,
+            provenance_uri: provenance.map(str::to_owned),
+            trust_class: "human_explicit".to_owned(),
+            trust_subclass: None,
+            provenance_chain_hash: None,
+            provenance_chain_hash_version: "v1".to_owned(),
+            provenance_verification_status: "unverified".to_owned(),
+            provenance_verified_at: None,
+            provenance_verification_note: None,
+            created_at: "2026-06-01T00:00:00Z".to_owned(),
+            updated_at: "2026-06-02T00:00:00Z".to_owned(),
+            tombstoned_at: None,
+            valid_from: None,
+            valid_to: None,
         }
     }
 
@@ -1000,7 +1196,9 @@ mod tests {
         insert_rule(&connection, &workspace_id, 1);
         let settings = settings(600);
 
-        let cold = run_primer(&connection, &workspace_id, &settings, false).expect("cold run");
+        let cold =
+            run_primer_with_global_lane(&connection, &workspace_id, &settings, false, true, None)
+                .expect("cold run");
         assert!(!cold.cache_hit);
         assert!(
             cold.degraded
@@ -1008,7 +1206,9 @@ mod tests {
                 .any(|entry| entry.code == PRIMER_CACHE_COLD_CODE)
         );
 
-        let warm = run_primer(&connection, &workspace_id, &settings, false).expect("warm run");
+        let warm =
+            run_primer_with_global_lane(&connection, &workspace_id, &settings, false, true, None)
+                .expect("warm run");
         assert!(warm.cache_hit);
         // Byte identity everywhere except the response-time cache flag.
         let mut warm_normalized = warm.clone();
@@ -1018,7 +1218,8 @@ mod tests {
 
         // --refresh forces re-assembly and still matches the cold bytes.
         let refreshed =
-            run_primer(&connection, &workspace_id, &settings, true).expect("refresh run");
+            run_primer_with_global_lane(&connection, &workspace_id, &settings, true, true, None)
+                .expect("refresh run");
         assert!(!refreshed.cache_hit);
         assert_eq!(refreshed.sections, cold.sections);
 
@@ -1026,7 +1227,8 @@ mod tests {
         // and sees the new memory.
         insert_rule(&connection, &workspace_id, 2);
         let after_write =
-            run_primer(&connection, &workspace_id, &settings, false).expect("post-write run");
+            run_primer_with_global_lane(&connection, &workspace_id, &settings, false, true, None)
+                .expect("post-write run");
         assert!(!after_write.cache_hit);
         assert!(after_write.db_generation > cold.db_generation);
         assert!(
@@ -1035,6 +1237,99 @@ mod tests {
                 .iter()
                 .any(|item| item.memory_id.ends_with("02")),
             "new memory appears after invalidation"
+        );
+    }
+
+    // ===== global-lane tests (bd-1bfwa.3 slice B) =====
+
+    #[test]
+    fn merge_global_candidates_dedupes_workspace_wins_and_labels_lane() {
+        let mut candidates = vec![candidate(1, "procedural", "rule", "shared rule content")];
+        let rows = vec![
+            global_row(1, "shared rule content", Some("ee-mem://ws_a/mem_1")),
+            global_row(2, "unique global rule", None),
+        ];
+        merge_global_candidates(&mut candidates, &rows);
+
+        assert_eq!(
+            candidates.len(),
+            2,
+            "exact-content twin resolves workspace-wins"
+        );
+        let merged = &candidates[1];
+        assert!(merged.global_lane);
+        assert!(!merged.superseded);
+        assert_eq!(merged.content, "unique global rule");
+        assert_eq!(
+            merged.provenance_uri.as_deref(),
+            Some(format!("ee-mem://ws_global/{}", merged.memory_id).as_str()),
+            "rows without provenance get their canonical global-store address"
+        );
+    }
+
+    #[test]
+    fn merge_global_candidates_skips_tombstoned_rows() {
+        let mut candidates = vec![candidate(1, "procedural", "rule", "workspace rule")];
+        let mut tombstoned = global_row(3, "dead global rule", None);
+        tombstoned.tombstoned_at = Some("2026-06-03T00:00:00Z".to_owned());
+        merge_global_candidates(&mut candidates, &[tombstoned]);
+        assert_eq!(
+            candidates.len(),
+            1,
+            "tombstoned global rows never enter the pool"
+        );
+    }
+
+    #[test]
+    fn global_lane_items_carry_global_store_provenance_source() {
+        let mut lane_candidate = candidate(7, "procedural", "rule", "global content");
+        lane_candidate.global_lane = true;
+        let item = render_item(&lane_candidate, false);
+        assert_eq!(item.provenance.len(), 1);
+        assert_eq!(item.provenance[0].source_type, "global_store");
+
+        let workspace_item = render_item(&candidate(8, "procedural", "rule", "local"), false);
+        assert_eq!(
+            workspace_item.provenance[0].source_type,
+            "memory_provenance"
+        );
+    }
+
+    #[test]
+    fn global_store_lane_hash_is_order_independent_and_content_bound() {
+        let row_a = global_row(1, "a", None);
+        let row_b = global_row(2, "b", None);
+        let forward = global_store_lane_hash(&[row_a.clone(), row_b.clone()]);
+        let reversed = global_store_lane_hash(&[row_b.clone(), row_a.clone()]);
+        assert_eq!(forward, reversed, "hash must not depend on row order");
+
+        let mut touched = row_b;
+        touched.updated_at = "2026-06-09T00:00:00Z".to_owned();
+        let shifted = global_store_lane_hash(&[row_a, touched]);
+        assert_ne!(forward, shifted, "updated_at changes must change the hash");
+    }
+
+    #[test]
+    fn global_rules_compete_in_the_rules_section() {
+        let mut candidates = vec![candidate(1, "procedural", "rule", "workspace rule text")];
+        merge_global_candidates(
+            &mut candidates,
+            &[global_row(
+                2,
+                "global rule text",
+                Some("ee-mem://ws_a/mem_2"),
+            )],
+        );
+        let report = assemble_primer(&candidates, None, &settings(600), 1);
+        let rules = &report.sections[0];
+        assert_eq!(rules.name, "rules");
+        assert_eq!(rules.items.len(), 2, "global rule competes inside rules");
+        assert!(
+            rules.items.iter().any(|item| item
+                .provenance
+                .first()
+                .is_some_and(|p| p.source_type == "global_store")),
+            "the lane label survives assembly"
         );
     }
 }
