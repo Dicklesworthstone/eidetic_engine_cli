@@ -148,6 +148,15 @@ fn parse_bare(chars: &mut Peekable<Chars<'_>>) -> String {
         if is_query_separator(next) || next == '"' {
             break;
         }
+        if next == '\\' {
+            let mut lookahead = chars.clone();
+            lookahead.next();
+            if matches!(lookahead.peek(), Some('"')) {
+                chars.next();
+                chars.next();
+                break;
+            }
+        }
         value.push(next);
         chars.next();
     }
