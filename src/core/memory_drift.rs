@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use super::workspace::stable_workspace_id;
 use crate::db::{
-    DbConnection, DbError, PackLedgerStatus, StoredMemory, StoredPackRecord,
+    DbConnection, DbError, PackLedgerStatus, ParsedPackLedger, StoredMemory, StoredPackRecord,
     parse_stored_pack_ledger,
 };
 use crate::models::memory_anchor::MemoryAnchorFreshnessTransition;
@@ -1824,6 +1824,11 @@ fn validated_recent_pack_record(
         PackLedgerStatus::Available => None,
         PackLedgerStatus::Missing => Some("pack_item_ledger_missing"),
         PackLedgerStatus::Malformed => Some("pack_item_ledger_malformed"),
+        PackLedgerStatus::HashMismatch
+            if recent_pack_record_binding_mismatches(&parsed).as_slice() == ["createdAt"] =>
+        {
+            Some("pack_item_ledger_timestamp_mismatch")
+        }
         PackLedgerStatus::HashMismatch => Some("pack_item_ledger_hash_mismatch"),
     };
     if let Some(reason) = reason {
@@ -1938,6 +1943,17 @@ fn validated_recent_pack_record(
             .map(|(_, memory_id)| memory_id)
             .collect(),
     })
+}
+
+fn recent_pack_record_binding_mismatches(parsed: &ParsedPackLedger) -> Vec<&str> {
+    parsed
+        .degraded
+        .iter()
+        .filter_map(|entry| entry.pointer("/details/recordBindingMismatches"))
+        .filter_map(serde_json::Value::as_array)
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect()
 }
 
 fn recent_pack_integrity_finding(
@@ -3361,7 +3377,7 @@ mod tests {
         )?;
         let malformed = report
             .iter()
-            .find(|item| item.memory_id == malformed_id)
+            .find(|item| item.memory_id == crate::models::public_memory_id(&malformed_id))
             .ok_or_else(|| {
                 "newest inserted malformed timestamp was hidden by bounded admission".to_owned()
             })?;
