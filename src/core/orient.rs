@@ -10,10 +10,20 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 
+use super::context::{
+    ContextPackOptions, ContextPackOutputOptions, ContextPackOutputProfile,
+    admit_recent_context_memories, run_context_pack,
+};
 use super::decide::{DecideItem, DecideRevisitOptions, decide_revisit};
-use crate::models::DomainError;
+use super::search::SearchSourceMode;
+use crate::db::DbConnection;
+use crate::models::{DomainError, MemoryScope, RedactionLevel};
+use crate::pack::{ContextPackProfile, PackResourceProfile, RenderedPackProvenance};
+use crate::search::SpeedMode;
 
 pub const ORIENT_DECISIONS_SCHEMA_V1: &str = "ee.orient.decisions.v1";
+pub const ORIENT_FAST_CONTENT_SCHEMA_V1: &str = "ee.orient.fast_content.v1";
+pub const ORIENT_FAST_CONTENT_LIMIT: usize = 5;
 
 #[derive(Clone, Debug)]
 pub struct OrientDecisionOptions<'a> {
@@ -42,6 +52,238 @@ impl OrientDecisionReport {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct OrientFastContentOptions<'a> {
+    pub workspace_path: &'a Path,
+    pub database_path: Option<&'a Path>,
+    pub index_dir: Option<&'a Path>,
+    pub task: &'a str,
+    pub max_tokens: u32,
+    pub candidate_pool: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrientFastContentStrategy {
+    pub recent: &'static str,
+    pub relevant: &'static str,
+    pub section_overlap: &'static str,
+    pub recent_limit: usize,
+    pub relevant_limit: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrientFastContentIssue {
+    pub component: &'static str,
+    pub status: &'static str,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrientFastContentItem {
+    pub id: String,
+    pub snippet: String,
+    pub created_at: String,
+    pub tags: Vec<String>,
+    pub provenance: Vec<RenderedPackProvenance>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrientFastContentReport {
+    pub schema: &'static str,
+    pub posture: &'static str,
+    pub strategy: OrientFastContentStrategy,
+    pub recent: Vec<OrientFastContentItem>,
+    pub relevant: Vec<OrientFastContentItem>,
+    pub issues: Vec<OrientFastContentIssue>,
+}
+
+impl OrientFastContentReport {
+    #[must_use]
+    pub fn data_json(&self) -> JsonValue {
+        serde_json::to_value(self).unwrap_or_else(|_| json!({}))
+    }
+}
+
+/// Assemble bounded fast-mode content without persisting a pack or bypassing
+/// context admission. Recent and relevant remain separate by contract, even
+/// when the same memory is useful in both sections.
+#[must_use]
+pub fn orient_fast_content(options: &OrientFastContentOptions<'_>) -> OrientFastContentReport {
+    let pack_options = orient_fast_pack_options(options);
+    let mut issues = Vec::new();
+
+    let recent = match admit_recent_context_memories(&pack_options, ORIENT_FAST_CONTENT_LIMIT) {
+        Ok(items) => items
+            .into_iter()
+            .map(|admitted| OrientFastContentItem {
+                id: admitted.item.memory_id.to_string(),
+                snippet: orient_fast_snippet(&admitted.item.content),
+                created_at: admitted.created_at,
+                tags: admitted.tags,
+                provenance: admitted.item.rendered_provenance(),
+            })
+            .collect(),
+        Err(error) => {
+            issues.push(OrientFastContentIssue {
+                component: "recent",
+                status: "unavailable",
+                message: format!("Recent context admission was unavailable: {error}"),
+            });
+            Vec::new()
+        }
+    };
+
+    let relevant = match run_context_pack(&pack_options) {
+        Ok(response) => match orient_fast_items_from_pack(&pack_options, response.data.pack.items) {
+            Ok(items) => items,
+            Err(message) => {
+                issues.push(OrientFastContentIssue {
+                    component: "relevant",
+                    status: "metadata_unavailable",
+                    message,
+                });
+                Vec::new()
+            }
+        },
+        Err(error) => {
+            issues.push(OrientFastContentIssue {
+                component: "relevant",
+                status: "unavailable",
+                message: format!("Lexical context retrieval was unavailable: {error}"),
+            });
+            Vec::new()
+        }
+    };
+
+    let posture = if issues.is_empty() {
+        if recent.is_empty() && relevant.is_empty() {
+            "empty"
+        } else {
+            "ready"
+        }
+    } else if recent.is_empty() && relevant.is_empty() {
+        "unavailable"
+    } else {
+        "partial"
+    };
+
+    OrientFastContentReport {
+        schema: ORIENT_FAST_CONTENT_SCHEMA_V1,
+        posture,
+        strategy: OrientFastContentStrategy {
+            recent: "context_admitted_recency_v1",
+            relevant: "context_pack_lexical_only_v1",
+            section_overlap: "preserved",
+            recent_limit: ORIENT_FAST_CONTENT_LIMIT,
+            relevant_limit: ORIENT_FAST_CONTENT_LIMIT,
+        },
+        recent,
+        relevant,
+        issues,
+    }
+}
+
+fn orient_fast_pack_options(options: &OrientFastContentOptions<'_>) -> ContextPackOptions {
+    ContextPackOptions {
+        workspace_path: options.workspace_path.to_path_buf(),
+        database_path: options.database_path.map(Path::to_path_buf),
+        index_dir: options.index_dir.map(Path::to_path_buf),
+        query: options.task.to_owned(),
+        speed: SpeedMode::Instant,
+        source_mode: SearchSourceMode::LexicalOnly,
+        strict_source_mode: false,
+        filters: crate::models::QueryFilters::default(),
+        profile: Some(ContextPackProfile::Orientation),
+        max_tokens: Some(options.max_tokens),
+        candidate_pool: Some(options.candidate_pool),
+        max_results: Some(ORIENT_FAST_CONTENT_LIMIT as u32),
+        include_tombstoned: false,
+        as_of: None,
+        include_expired: false,
+        include_future: false,
+        include_stale: false,
+        relevance_floor: Some(0.0),
+        redaction_level: RedactionLevel::Minimal,
+        memory_scope: MemoryScope::Workspace,
+        strict_scope: false,
+        ppr_weight: Some(0.0),
+        changed_symbols: Vec::new(),
+        changed_symbols_from_git: false,
+        pagination: None,
+        coordination_snapshot_path: None,
+        coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+        task_lens: None,
+        require_fresh_sentinels: false,
+        output_options: ContextPackOutputOptions::for_profile(ContextPackOutputProfile::Lean)
+            .with_resource_profile(PackResourceProfile::Lean),
+        persist_pack: false,
+        baseline_write: None,
+        no_lod: false,
+    }
+}
+
+fn orient_fast_items_from_pack(
+    options: &ContextPackOptions,
+    items: Vec<crate::pack::PackDraftItem>,
+) -> Result<Vec<OrientFastContentItem>, String> {
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+    let database_path = options
+        .database_path
+        .clone()
+        .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
+    let connection = DbConnection::open_file_read_only(&database_path)
+        .map_err(|error| format!("Relevant memory metadata could not be opened: {error}"))?;
+    let memory_ids = items
+        .iter()
+        .map(|item| item.memory_id.to_string())
+        .collect::<Vec<_>>();
+    let memory_refs = memory_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let memories = connection
+        .get_memories_batch(&memory_refs)
+        .map_err(|error| format!("Relevant memory metadata could not be loaded: {error}"))?;
+    let tags = connection
+        .get_memory_tags_batch(&memory_refs)
+        .map_err(|error| format!("Relevant memory tags could not be loaded: {error}"))?;
+
+    let mut rendered = Vec::with_capacity(items.len());
+    for item in items {
+        // Secret-shaped pack items are never useful orientation output. The
+        // pack path has already replaced their content, and dropping them here
+        // also prevents their identifiers from leaking into fast output.
+        if !item.redactions.is_empty() {
+            continue;
+        }
+        let id = item.memory_id.to_string();
+        let memory = memories.get(&id).ok_or_else(|| {
+            format!("Relevant memory metadata was missing for admitted item {id}")
+        })?;
+        rendered.push(OrientFastContentItem {
+            id: id.clone(),
+            snippet: orient_fast_snippet(&item.content),
+            created_at: memory.created_at.clone(),
+            tags: tags.get(&id).cloned().unwrap_or_else(Vec::new),
+            provenance: item.rendered_provenance(),
+        });
+    }
+    Ok(rendered)
+}
+
+fn orient_fast_snippet(content: &str) -> String {
+    const MAX_CHARS: usize = 480;
+    let mut chars = content.chars();
+    let mut snippet = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        snippet.push('…');
+    }
+    snippet
+}
+
 pub fn orient_decisions(
     options: &OrientDecisionOptions<'_>,
 ) -> Result<OrientDecisionReport, DomainError> {
@@ -66,6 +308,10 @@ pub fn orient_decisions(
 mod tests {
     use super::*;
     use crate::core::decide::{DecideRecordOptions, decide_record};
+    use crate::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
+    use crate::core::memory::{RememberMemoryOptions, remember_memory};
+    use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
+    use crate::models::{MemoryId, WorkspaceId};
 
     type TestResult = Result<(), String>;
 
@@ -78,6 +324,193 @@ mod tests {
         } else {
             Err(format!("{context}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn remember_fixture(
+        workspace: &Path,
+        content: &str,
+        tags: &str,
+        valid_from: Option<&str>,
+    ) -> Result<String, String> {
+        remember_memory(&RememberMemoryOptions {
+            workspace_path: workspace,
+            database_path: None,
+            content,
+            workflow_id: None,
+            level: "procedural",
+            kind: "rule",
+            tags: Some(tags),
+            confidence: 0.9,
+            source: Some("file://AGENTS.md#L1"),
+            valid_from,
+            valid_to: None,
+            dry_run: false,
+            auto_link: false,
+            propose_candidates: false,
+            allow_secret_mention: false,
+        })
+        .map(|report| report.memory_id.to_string())
+        .map_err(|error| format!("remember fixture failed: {error:?}"))
+    }
+
+    #[test]
+    fn orient_fast_content_returns_admitted_recent_and_lexical_items() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path();
+        let positive_id = remember_fixture(
+            workspace,
+            "Release checksum verification must run before publishing artifacts.",
+            "orient-positive,release",
+            None,
+        )?;
+        let tombstoned_id = remember_fixture(
+            workspace,
+            "Release checksum tombstoned negative must never surface.",
+            "orient-negative,tombstoned",
+            None,
+        )?;
+        let future_id = remember_fixture(
+            workspace,
+            "Release checksum future negative must never surface.",
+            "future,orient-negative",
+            Some("2099-01-01T00:00:00Z"),
+        )?;
+
+        let database_path = workspace.join(".ee").join("ee.db");
+        let connection = DbConnection::open_file(&database_path)
+            .map_err(|error| format!("open fixture database: {error}"))?;
+        connection
+            .tombstone_memory(&tombstoned_id)
+            .map_err(|error| format!("tombstone fixture memory: {error}"))?;
+        let active_workspace = connection
+            .get_memory(&positive_id)
+            .map_err(|error| format!("load positive fixture: {error}"))?
+            .ok_or_else(|| "positive fixture memory missing".to_owned())?
+            .workspace_id;
+
+        let secret_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x51)).to_string();
+        connection
+            .insert_memory(
+                &secret_id,
+                &CreateMemoryInput {
+                    workspace_id: active_workspace,
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "AWS_SECRET_ACCESS_KEY=orient_fast_must_not_emit".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.9,
+                    importance: 0.9,
+                    provenance_uri: Some("file://secret-fixture".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["orient-negative".to_owned(), "secret".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| format!("insert secret fixture: {error}"))?;
+
+        let other_workspace_id =
+            WorkspaceId::from_uuid(uuid::Uuid::from_u128(0x52)).to_string();
+        connection
+            .insert_workspace(
+                &other_workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.join("other-scope").display().to_string(),
+                    name: Some("other-scope".to_owned()),
+                },
+            )
+            .map_err(|error| format!("insert out-of-scope workspace: {error}"))?;
+        let out_of_scope_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x53)).to_string();
+        connection
+            .insert_memory(
+                &out_of_scope_id,
+                &CreateMemoryInput {
+                    workspace_id: other_workspace_id,
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Release checksum out-of-scope negative must never surface.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.9,
+                    importance: 0.9,
+                    provenance_uri: Some("file://other-scope".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["orient-negative".to_owned(), "scope".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| format!("insert out-of-scope fixture: {error}"))?;
+
+        let index_report = rebuild_index(&IndexRebuildOptions {
+            workspace_path: workspace.to_path_buf(),
+            database_path: Some(database_path),
+            index_dir: None,
+            dry_run: false,
+        })
+        .map_err(|error| format!("rebuild fixture index: {error:?}"))?;
+        ensure_equal(
+            &index_report.status,
+            &IndexRebuildStatus::Success,
+            "fixture index status",
+        )?;
+
+        let report = orient_fast_content(&OrientFastContentOptions {
+            workspace_path: workspace,
+            database_path: None,
+            index_dir: None,
+            task: "verify release checksums",
+            max_tokens: 4_000,
+            candidate_pool: 100,
+        });
+        ensure_equal(&report.posture, &"ready", "fast-content posture")?;
+        if report.recent.is_empty() || report.relevant.is_empty() {
+            return Err(format!(
+                "fast content must return both sections from a populated indexed store: {report:?}"
+            ));
+        }
+        for item in report.recent.iter().chain(&report.relevant) {
+            if item.created_at.is_empty() || item.provenance.is_empty() {
+                return Err(format!("item must bind created_at and provenance: {item:?}"));
+            }
+        }
+        let positive_recent = report.recent.iter().any(|item| item.id == positive_id);
+        let positive_relevant = report.relevant.iter().any(|item| item.id == positive_id);
+        if !positive_recent || !positive_relevant {
+            return Err(format!(
+                "the admissible positive must remain independently visible in recent and relevant: {report:?}"
+            ));
+        }
+        let positive = report
+            .relevant
+            .iter()
+            .find(|item| item.id == positive_id)
+            .ok_or_else(|| "positive relevant item missing".to_owned())?;
+        if !positive.snippet.contains("Release checksum verification")
+            || !positive.tags.iter().any(|tag| tag == "orient-positive")
+        {
+            return Err(format!("positive content/tags were not bound: {positive:?}"));
+        }
+
+        let forbidden = [secret_id, tombstoned_id, future_id, out_of_scope_id];
+        for forbidden_id in forbidden {
+            if report
+                .recent
+                .iter()
+                .chain(&report.relevant)
+                .any(|item| item.id == forbidden_id)
+            {
+                return Err(format!("ineligible memory surfaced: {forbidden_id}"));
+            }
+        }
+        let encoded = serde_json::to_string(&report).map_err(|error| error.to_string())?;
+        if encoded.contains("orient_fast_must_not_emit") {
+            return Err("secret-shaped content leaked through fast content".to_owned());
+        }
+        Ok(())
     }
 
     #[test]

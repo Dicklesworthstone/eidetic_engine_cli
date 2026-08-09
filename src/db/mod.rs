@@ -19851,6 +19851,31 @@ impl DbConnection {
         rows.iter().map(stored_memory_from_row).collect()
     }
 
+    /// Load a deterministic, SQL-bounded window of currently admissible
+    /// memory rows for recency-oriented retrieval.
+    ///
+    /// The source query itself excludes tombstoned, future, expired, and
+    /// post-`as_of` rows before ordering by newest creation time. Callers must
+    /// still run the returned rows through their normal scope, provenance, and
+    /// redaction admission path.
+    pub fn list_recent_current_memories_for_retrieval(
+        &self,
+        workspace_id: &str,
+        as_of: &str,
+        limit: u32,
+    ) -> Result<Vec<StoredMemory>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND created_at <= ?2 AND updated_at <= ?2 AND (valid_from IS NULL OR valid_from <= ?2) AND (valid_to IS NULL OR valid_to >= ?2) ORDER BY created_at DESC, id ASC LIMIT ?3",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(as_of.to_owned()),
+                Value::Integer(i64::from(limit)),
+            ],
+        )?;
+        rows.iter().map(stored_memory_from_row).collect()
+    }
+
     /// List active-workspace retrieval memories plus tag-backed global-scope memories.
     ///
     /// Global scope is deliberately represented by existing tags (`global` or

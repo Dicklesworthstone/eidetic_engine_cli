@@ -182,7 +182,9 @@ use crate::core::memory::{
     remember_memory_with_controls_and_typed_fields, revise_memory, update_memory_level,
     update_memory_link, update_memory_tags,
 };
-use crate::core::orient::{OrientDecisionOptions, orient_decisions};
+use crate::core::orient::{
+    OrientDecisionOptions, OrientFastContentOptions, orient_decisions, orient_fast_content,
+};
 use crate::core::outcome::{
     CliCancelReason, DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
     OutcomeQuarantineListOptions, OutcomeQuarantineListReport, OutcomeQuarantineReviewOptions,
@@ -3076,7 +3078,7 @@ pub struct OrientArgs {
     #[arg(long, default_value_t = 100)]
     pub candidate_pool: u32,
 
-    /// Fast session-start mode: skip full doctor and embedded pack work.
+    /// Fast session-start mode: skip full doctor and use bounded recent and lexical content.
     #[arg(long, alias = "quick", action = ArgAction::SetTrue)]
     pub fast: bool,
 
@@ -37270,22 +37272,20 @@ where
         }
     };
 
+    let fast_content = args.fast.then(|| {
+        orient_fast_content(&OrientFastContentOptions {
+            workspace_path: &workspace_path,
+            database_path: None,
+            index_dir: None,
+            task: &args.task,
+            max_tokens: args.max_tokens,
+            candidate_pool: args.candidate_pool,
+        })
+        .data_json()
+    });
+
     let pack = if args.fast {
-        degraded.push(orient_degradation_value(
-            "orient_pack_skipped",
-            "info",
-            "Embedded context pack was skipped because --fast was requested.".to_string(),
-            Some(orient_pack_command(
-                &workspace_path,
-                &args.task,
-                args.max_tokens,
-            )),
-        ));
-        orient_skipped_component(
-            "pack",
-            "fast_mode",
-            orient_pack_command(&workspace_path, &args.task, args.max_tokens),
-        )
+        serde_json::Value::Null
     } else {
         let filters = crate::models::QueryFilters::default();
         let output_options =
@@ -37425,6 +37425,7 @@ where
         "install": install,
         "workspaceHygiene": workspace_hygiene,
         "pack": pack,
+        "fastContent": fast_content,
         "primer": primer,
         "decisions": decisions,
         "learnGaps": learn_gaps,
@@ -37733,6 +37734,14 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
         .pointer("/pack/pack/items")
         .and_then(serde_json::Value::as_array)
         .map_or(0, Vec::len);
+    let fast_recent_items = data
+        .pointer("/fastContent/recent")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let fast_relevant_items = data
+        .pointer("/fastContent/relevant")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
     let decision_revisits = data
         .pointer("/decisions/dueCount")
         .and_then(serde_json::Value::as_u64)
@@ -37742,8 +37751,11 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let mut out = format!(
-        "Orientation: {task}\nWorkspace: {workspace}\nMode: {mode}\nembed_backend: {embed_backend}\nDoctor posture: {posture}\nDirty paths: {dirty_paths}\nPack items: {pack_items}\nDecision revisits: {decision_revisits}\nRevivable dead routes: {revivable_routes}\n"
+        "Orientation: {task}\nWorkspace: {workspace}\nMode: {mode}\nembed_backend: {embed_backend}\nDoctor posture: {posture}\nDirty paths: {dirty_paths}\nPack items: {pack_items}\nFast recent items: {fast_recent_items}\nFast relevant items: {fast_relevant_items}\nDecision revisits: {decision_revisits}\nRevivable dead routes: {revivable_routes}\n"
     );
+    if let Some(fast_content) = data.get("fastContent").filter(|value| value.is_object()) {
+        render_orient_fast_content_human(&mut out, fast_content);
+    }
     if let Some(revivals) = data.get("revivals").filter(|value| value.is_object()) {
         out.push_str(&render_revival_evaluation_human(revivals));
     }
@@ -37778,6 +37790,78 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
         }
     }
     out
+}
+
+fn render_orient_fast_content_human(out: &mut String, fast_content: &serde_json::Value) {
+    let posture = fast_content
+        .get("posture")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unavailable");
+    let recent_strategy = fast_content
+        .pointer("/strategy/recent")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let relevant_strategy = fast_content
+        .pointer("/strategy/relevant")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    out.push_str(&format!(
+        "\nFast content ({posture}; recent={recent_strategy}; relevant={relevant_strategy}):\n"
+    ));
+    for (heading, key) in [("Recent memories", "recent"), ("Task-relevant memories", "relevant")] {
+        out.push_str(&format!("\n{heading}:\n"));
+        let items = fast_content
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if items.is_empty() {
+            out.push_str("  (none)\n");
+            continue;
+        }
+        for item in items {
+            let id = item
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            let created_at = item
+                .get("createdAt")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            let tags = item
+                .get("tags")
+                .and_then(serde_json::Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            let snippet = item
+                .get("snippet")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let provenance = item
+                .get("provenance")
+                .and_then(serde_json::Value::as_array)
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter_map(|entry| entry.get("uri").and_then(serde_json::Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "  - {id} | created_at={created_at} | tags={tags} | provenance={provenance}\n    {snippet}\n"
+            ));
+        }
+    }
 }
 
 const CONTEXT_DEPRECATED_ALIAS_MESSAGE: &str = "`ee context` is a soft-deprecated compatibility alias for canonical `ee pack`; both run the same context-pack engine.";

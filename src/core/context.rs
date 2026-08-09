@@ -96,7 +96,7 @@ use crate::pack::{
     ContextResponsePagination, ContextResponseSeverity, PACK_ATTEMPT_FAMILY_MULTIPLICITY_SCHEMA_V1,
     PACK_COMMAND, PackAdmissionPosture, PackAssemblySlo, PackAssemblySloActuals,
     PackAttemptFamilyMembershipSnapshot, PackAttemptFamilyMultiplicitySnapshot, PackCandidate,
-    PackCandidateInput, PackCoordinationSnapshot, PackDraft, PackEvidenceItem,
+    PackCandidateInput, PackCoordinationSnapshot, PackDraft, PackDraftItem, PackEvidenceItem,
     PackFreshnessAnchorFacet, PackFreshnessFacet, PackItemLifecycle, PackOmission,
     PackOmissionReason, PackProvenance, PackRejectionStage, PackResourceProfile,
     PackScoreBreakdown, PackSection, PackTrustSignal, TokenBudget, WhyNotSelectedInput,
@@ -680,6 +680,15 @@ pub struct ContextPackOptions {
     pub no_lod: bool,
 }
 
+/// One stored memory admitted through the context-pack policy path for a
+/// bounded, recency-ordered caller such as `ee orient --fast`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AdmittedContextMemory {
+    pub item: PackDraftItem,
+    pub created_at: String,
+    pub tags: Vec<String>,
+}
+
 /// Per-agent baseline ledger write request (bd-7lvbg.6): rides the pack
 /// persistence chokepoint, so read-only / no-persist paths skip it for
 /// free.
@@ -1140,6 +1149,200 @@ fn context_pack_persist_error_is_contention(persist_error: &str) -> bool {
 
 pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse, ContextPackError> {
     run_context_pack_with_performance(options, PACK_COMMAND).map(|run| run.response)
+}
+
+/// Admit the newest live workspace memories through the same policy and pack
+/// machinery used by normal context assembly.
+///
+/// This deliberately returns pack items rather than stored memory bodies. The
+/// caller only receives content after temporal, workspace-scope, provenance,
+/// secret-screening, tier-admission, and output-redaction checks have run.
+pub(crate) fn admit_recent_context_memories(
+    options: &ContextPackOptions,
+    limit: usize,
+) -> Result<Vec<AdmittedContextMemory>, ContextPackError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let database_path = options
+        .database_path
+        .clone()
+        .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        return Err(ContextPackError::Storage(format!(
+            "Database not found at {}",
+            database_path.display()
+        )));
+    }
+    let connection = DbConnection::open_file_read_only(&database_path)
+        .map_err(|error| ContextPackError::Storage(error.to_string()))?;
+    let mut degraded = Vec::new();
+    let reference_time = options.as_of.unwrap_or_else(Utc::now);
+    let reference_time_text =
+        reference_time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    let candidate_cap = limit.saturating_mul(4).max(limit);
+    let mut memories = BTreeMap::new();
+    for workspace_id in context_workspace_ids(&connection, &options.workspace_path, &mut degraded) {
+        let remaining = candidate_cap.saturating_sub(memories.len());
+        if remaining == 0 {
+            break;
+        }
+        let workspace_memories = connection
+            .list_recent_current_memories_for_retrieval(
+                &workspace_id,
+                &reference_time_text,
+                u32::try_from(remaining).unwrap_or(u32::MAX),
+            )
+            .map_err(|error| ContextPackError::Storage(error.to_string()))?;
+        for memory in workspace_memories {
+            memories.insert(memory.id.clone(), memory);
+        }
+    }
+
+    let mut ordered = memories.into_values().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        parse_stored_memory_timestamp(&right.created_at)
+            .cmp(&parse_stored_memory_timestamp(&left.created_at))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let ordered_ids = ordered.iter().map(|memory| memory.id.as_str()).collect::<Vec<_>>();
+    let tags_by_memory = connection
+        .get_memory_tags_batch(&ordered_ids)
+        .map_err(|error| ContextPackError::Storage(error.to_string()))?;
+    let mut metadata = BTreeMap::new();
+    let mut candidates = Vec::with_capacity(candidate_cap);
+    for (recency_rank, memory) in ordered.into_iter().enumerate() {
+        if candidates.len() >= candidate_cap {
+            break;
+        }
+        if memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+            || !matches!(
+                fallback_memory_validity_visibility(&memory, reference_time, false, false, false),
+                FallbackMemoryVisibility::Visible
+            )
+            || !crate::policy::redact_secret_like_content(&memory.content)
+                .redacted_reasons
+                .is_empty()
+        {
+            continue;
+        }
+        let Ok(memory_id) = MemoryId::from_str(&memory.id) else {
+            continue;
+        };
+        let tags = tags_by_memory
+            .get(&memory.id)
+            .cloned()
+            .unwrap_or_else(Vec::new);
+        let Some(provenance) =
+            provenance_for_memory(&memory, memory_id, &options.workspace_path, &mut degraded)
+        else {
+            continue;
+        };
+        let relevance = unit_score(1.0 - (recency_rank.min(500) as f32 * 0.001))
+            .ok_or_else(|| ContextPackError::Pack("invalid recent relevance score".to_owned()))?;
+        let utility = unit_score(memory.utility)
+            .ok_or_else(|| ContextPackError::Pack("invalid recent utility score".to_owned()))?;
+        let content = orient_fast_snippet_source(&memory.content);
+        let candidate = PackCandidate::new(PackCandidateInput {
+            memory_id,
+            section: section_for_memory(&memory),
+            estimated_tokens: estimate_tokens_default(&content),
+            content,
+            relevance,
+            utility,
+            provenance: vec![provenance],
+            why: "Selected by the bounded orient-fast recency strategy after context admission."
+                .to_owned(),
+        })
+        .map_err(|error| ContextPackError::Pack(error.to_string()))?
+        .with_diversity_key(diversity_key_for_memory(&memory, &tags))
+        .with_trust_signal(trust_signal_for_memory(&memory, memory_id, &mut degraded))
+        .with_lifecycle(pack_lifecycle_for_memory(&memory, Some(reference_time)));
+        metadata.insert(memory.id, (memory.created_at, tags));
+        candidates.push(candidate);
+    }
+
+    let scope_context = MemoryScopeContext::for_workspace(
+        &options.workspace_path,
+        options.memory_scope,
+        options.strict_scope,
+    );
+    filter_candidates_by_memory_scope(
+        &connection,
+        &mut candidates,
+        &scope_context,
+        &mut degraded,
+        None,
+        &BTreeSet::new(),
+    );
+    if context_memory_tier_admission_enabled(&options.workspace_path).unwrap_or(false) {
+        apply_memory_tier_candidate_admission(&connection, &mut candidates, &mut degraded);
+    }
+    annotate_attempt_family_multiplicity(&connection, &mut candidates)?;
+    candidates.sort_by(|left, right| {
+        let left_created_at = metadata
+            .get(&left.memory_id.to_string())
+            .map(|(created_at, _)| created_at.as_str())
+            .and_then(parse_stored_memory_timestamp);
+        let right_created_at = metadata
+            .get(&right.memory_id.to_string())
+            .map(|(created_at, _)| created_at.as_str())
+            .and_then(parse_stored_memory_timestamp);
+        right_created_at
+            .cmp(&left_created_at)
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+    candidates.truncate(limit);
+
+    let budget = TokenBudget::new(options.max_tokens.unwrap_or(4_000))
+        .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    let output_redaction_enabled =
+        crate::config::workspace_output_redaction_enabled(&options.workspace_path);
+    let draft = assemble_draft_with_profile_and_options_seeded(
+        ContextPackProfile::Orientation,
+        "orient fast recent memories",
+        budget,
+        candidates,
+        crate::pack::PackAssemblyOptions {
+            redaction_level: options.redaction_level,
+            include_coverage_fill: options.output_options.include_coverage_fill,
+            include_anti_pattern_first: true,
+            output_redaction_enabled,
+            lod_budget_shares: if options.no_lod {
+                None
+            } else {
+                crate::pack::PackAssemblyOptions::default().lod_budget_shares
+            },
+            arena_mode: crate::pack::ArenaMode::Disabled,
+        },
+        &Deterministic::from_seed(0),
+    )
+    .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+
+    Ok(draft
+        .items
+        .into_iter()
+        .filter_map(|item| {
+            let (created_at, tags) = metadata.get(&item.memory_id.to_string())?.clone();
+            Some(AdmittedContextMemory {
+                item,
+                created_at,
+                tags,
+            })
+        })
+        .collect())
+}
+
+fn orient_fast_snippet_source(content: &str) -> String {
+    const MAX_CHARS: usize = 480;
+    let mut chars = content.chars();
+    let mut snippet = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        snippet.push('…');
+    }
+    snippet
 }
 
 pub fn run_context_pack_seeded(
