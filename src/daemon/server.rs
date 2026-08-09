@@ -4807,10 +4807,15 @@ mod tests {
         path: PathBuf,
         allow_missing: bool,
         stop: Arc<AtomicBool>,
-    ) -> JoinHandle<(u64, Vec<String>)> {
+    ) -> (
+        JoinHandle<(u64, Vec<String>)>,
+        Arc<std::sync::atomic::AtomicU64>,
+    ) {
         use std::os::unix::fs::FileTypeExt;
 
-        thread::spawn(move || {
+        let observed_samples = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let watcher_samples = Arc::clone(&observed_samples);
+        let watcher = thread::spawn(move || {
             let mut samples = 0_u64;
             let mut violations = Vec::new();
             while !stop.load(Ordering::Acquire) {
@@ -4839,10 +4844,30 @@ mod tests {
                 {
                     violations.push(violation);
                 }
+                watcher_samples.store(samples, Ordering::Release);
                 thread::yield_now();
             }
             (samples, violations)
-        })
+        });
+        (watcher, observed_samples)
+    }
+
+    fn wait_for_canonical_path_watcher_sample(
+        observed_samples: &std::sync::atomic::AtomicU64,
+        previous_samples: u64,
+    ) -> u64 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let samples = observed_samples.load(Ordering::Acquire);
+            if samples > previous_samples {
+                return samples;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "canonical-path watcher must make bounded observation progress",
+            );
+            thread::yield_now();
+        }
     }
 
     /// Accept the single pending connection on `listener` without
@@ -5085,14 +5110,17 @@ mod tests {
         }
 
         let stop = Arc::new(AtomicBool::new(false));
-        let watcher =
+        let (watcher, observed_samples) =
             spawn_canonical_path_invariant_watcher(socket_path.clone(), false, Arc::clone(&stop));
+        wait_for_canonical_path_watcher_sample(&observed_samples, 0);
 
         let broker = SocketBroker::new(socket_path.clone());
         let (listener, _publish_lock) = broker.publish_listener().expect(
             "publish over a dead stale socket must succeed via temp-bind + atomic rename \
              (ADR 0055 stale replacement)",
         );
+        let after_publish = observed_samples.load(Ordering::Acquire);
+        wait_for_canonical_path_watcher_sample(&observed_samples, after_publish);
 
         stop.store(true, Ordering::Release);
         let (samples, violations) = watcher.join().expect("watcher thread must not panic");
@@ -5158,13 +5186,16 @@ mod tests {
         let socket_path = temp.path().join("ee-daemon-fresh-chmod.sock");
 
         let stop = Arc::new(AtomicBool::new(false));
-        let watcher =
+        let (watcher, observed_samples) =
             spawn_canonical_path_invariant_watcher(socket_path.clone(), true, Arc::clone(&stop));
+        wait_for_canonical_path_watcher_sample(&observed_samples, 0);
 
         let broker = SocketBroker::new(socket_path.clone());
         let (listener, _publish_lock) = broker
             .publish_listener()
             .expect("fresh publish in a private parent must succeed");
+        let after_publish = observed_samples.load(Ordering::Acquire);
+        wait_for_canonical_path_watcher_sample(&observed_samples, after_publish);
 
         // The instant publish_listener returns, the canonical path is
         // connectable — so it must ALREADY be 0o600.
