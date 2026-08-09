@@ -272,6 +272,15 @@ use crate::db::{
 pub const GLOBAL_PROMOTION_REPORT_SCHEMA_V1: &str = "ee.global_promotion.report.v1";
 pub const GLOBAL_DEMOTION_REPORT_SCHEMA_V1: &str = "ee.global_demotion.report.v1";
 
+/// Search-index job ids must satisfy the schema CHECK
+/// (`sidx_` + 26-char payload, length 31); mirror the private generator in
+/// `core::memory` rather than widening its visibility.
+fn promotion_index_job_id() -> String {
+    let memory_id = crate::models::MemoryId::now().to_string();
+    let payload = memory_id.trim_start_matches("mem_");
+    format!("sidx_{payload}")
+}
+
 /// Provenance URI carried by every promoted global row, binding it to its
 /// origin workspace memory: `ee-mem://<workspace_id>/<memory_id>`.
 #[must_use]
@@ -410,7 +419,7 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
                 .map_err(|error| format!("insert global memory: {error}"))?;
             global_connection
                 .insert_search_index_job(
-                    &format!("job_{new_id}"),
+                    &promotion_index_job_id(),
                     &CreateSearchIndexJobInput {
                         workspace_id: global_workspace_id.clone(),
                         job_type: SearchIndexJobType::SingleDocument,
