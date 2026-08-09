@@ -18166,10 +18166,10 @@ pub fn run_family_retrieval(
         }
         let redaction = crate::policy::redact_secret_like_content(&memory.content);
         let (provenance_uri, provenance_redacted) =
-            memory.provenance_uri.map_or((None, false), |uri| {
+            memory.provenance_uri.as_ref().map_or((None, false), |uri| {
                 let mut redacted_patterns = BTreeSet::new();
-                let redacted_uri = redact_search_provenance_uri(&uri, true, &mut redacted_patterns);
-                let redacted = redacted_uri != uri;
+                let redacted_uri = redact_search_provenance_uri(uri, true, &mut redacted_patterns);
+                let redacted = redacted_uri.as_str() != uri;
                 (Some(redacted_uri), redacted)
             });
         let membership_posture = snapshot
