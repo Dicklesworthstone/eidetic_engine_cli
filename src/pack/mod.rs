@@ -4200,13 +4200,14 @@ impl ContextResponse {
         cached_json: String,
         command: &'static str,
     ) -> Self {
+        let embed_backend = cached_context_embed_backend(&cached_json);
         Self {
             schema: RESPONSE_SCHEMA_V2,
             success: true,
             cached_json: Some(cached_json),
             data: ContextResponseData {
                 command,
-                embed_backend: cached_context_embed_backend(&cached_json),
+                embed_backend,
                 request: request.clone(),
                 pack: PackDraft {
                     query: request.query.clone(),
