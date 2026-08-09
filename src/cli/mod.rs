@@ -67892,7 +67892,9 @@ mod tests {
                 workspace_arg.as_str(),
                 "--fast",
                 "--json",
-            ],
+            ]
+            .iter()
+            .map(OsString::from),
             &mut json_stdout,
             &mut json_stderr,
         );
@@ -68004,7 +68006,9 @@ mod tests {
                 "--workspace",
                 workspace_arg.as_str(),
                 "--fast",
-            ],
+            ]
+            .iter()
+            .map(OsString::from),
             &mut human_stdout,
             &mut human_stderr,
         );
