@@ -10980,9 +10980,9 @@ mod tests {
     };
     use crate::pack::{
         ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponseDegradation,
-        ContextResponseSeverity, PackCandidate, PackCandidateInput, PackProvenance,
-        PackResourceProfile, PackScoreBreakdown, PackSection, TokenBudget,
-        assemble_draft_with_profile,
+        ContextResponseSeverity, PackAssemblyOptions, PackCandidate, PackCandidateInput,
+        PackProvenance, PackResourceProfile, PackScoreBreakdown, PackSection, TokenBudget,
+        assemble_draft_with_profile, assemble_draft_with_profile_and_options,
     };
 
     fn workspace_at(root: &str) -> WorkspaceLocation {
@@ -12868,6 +12868,24 @@ pub fn unrelated_context() -> u64 {{
                 },
             )
             .map_err(|error| error.to_string())?;
+        fixture
+            .connection
+            .insert_graph_snapshot(
+                "gsnap_0000000000000000000000902",
+                &crate::db::CreateGraphSnapshotInput {
+                    workspace_id: WorkspaceId::from_uuid(uuid::Uuid::from_u128(900)).to_string(),
+                    snapshot_version: 1,
+                    schema_version: "ee.graph.snapshot.v1".to_string(),
+                    graph_type: crate::db::GraphSnapshotType::MemoryLinks,
+                    node_count: 3,
+                    edge_count: 2,
+                    metrics_json: "{}".to_string(),
+                    content_hash: "blake3:context-ppr-second-seed".to_string(),
+                    source_generation: 2,
+                    expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
         let mut first_candidates = vec![
             ppr_candidate(fixture.seed, 0.10)?,
             ppr_candidate(fixture.neighbor, 0.10)?,
@@ -14299,11 +14317,15 @@ pub fn unrelated_context() -> u64 {{
             sections: Vec::new(),
         })
         .map_err(|error| error.to_string())?;
-        let draft = assemble_draft_with_profile(
+        let draft = assemble_draft_with_profile_and_options(
             request.profile,
             request.query.clone(),
             TokenBudget::new(60).map_err(|error| error.to_string())?,
             [candidate_a, candidate_b],
+            PackAssemblyOptions {
+                lod_budget_shares: None,
+                ..PackAssemblyOptions::default()
+            },
         )
         .map_err(|error| error.to_string())?;
         let search_report = SearchReport {
