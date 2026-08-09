@@ -1110,6 +1110,27 @@ pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
             format!("Database not found at {}", options.database_path.display()),
         );
     }
+    let migration_connection = match DbConnection::open_file(options.database_path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            return WhyReport::error(
+                memory_id.to_string(),
+                format!("Failed to open database before why migration: {error}"),
+            );
+        }
+    };
+    if let Err(error) = migration_connection.migrate() {
+        return WhyReport::error(
+            memory_id.to_string(),
+            format!("Failed to migrate database before why query: {error}"),
+        );
+    }
+    if let Err(error) = migration_connection.close() {
+        return WhyReport::error(
+            memory_id.to_string(),
+            format!("Failed to close migration connection before why query: {error}"),
+        );
+    }
     let read_pool = registered_process_read_pool(
         DatabaseConfig::file(options.database_path.to_path_buf()),
         PoolConfig::default_single(),

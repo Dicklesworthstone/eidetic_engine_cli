@@ -48247,6 +48247,31 @@ where
         confidence_threshold: args.confidence_threshold,
     };
 
+    let migration_connection = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database before why migration: {error}"),
+                repair: Some("ee status --workspace . --json".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    if let Err(error) = migration_connection.migrate() {
+        let domain_error = DomainError::MigrationRequired {
+            message: format!("Failed to migrate database before why: {error}"),
+            repair: Some("ee migrate run --workspace . --json".to_owned()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    if let Err(error) = migration_connection.close() {
+        let domain_error = DomainError::Storage {
+            message: format!("Failed to close migration connection before why: {error}"),
+            repair: Some("ee status --workspace . --json".to_owned()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
     let read_pool = crate::db::read_pool::registered_process_read_pool(
         crate::db::DatabaseConfig::file(database_path.clone()),
         crate::db::read_pool::PoolConfig::default_single(),
