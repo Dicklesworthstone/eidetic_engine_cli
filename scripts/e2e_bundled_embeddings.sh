@@ -405,8 +405,9 @@ else
     remember_fact SNOW_ID "remember_snow_noise" "${SEMANTIC_WS}" "${SNOW_CONTENT}" "${SEMANTIC_ENV[@]}"
     remember_fact NKE_ID "remember_nke_noise" "${SEMANTIC_WS}" "${NKE_CONTENT}" "${SEMANTIC_ENV[@]}"
 
-    run_ee_json_env "semantic_index_rebuild" "${SEMANTIC_ENV[@]}" -- index rebuild --workspace "${SEMANTIC_WS}" --json
-    assert_jq_file "${LAST_STDOUT_FILE}" '.success == true' "semantic index rebuild succeeds"
+    run_ee_json_env "semantic_index_reembed" "${SEMANTIC_ENV[@]}" -- index reembed --workspace "${SEMANTIC_WS}" --json
+    assert_jq_file "${LAST_STDOUT_FILE}" '.success == true' "semantic index reembed succeeds"
+    assert_jq_file "${LAST_STDOUT_FILE}" '.data.status == "success" and .data.job_status == "completed" and .data.documents_total >= 3' "semantic reembed completes all fixture documents"
     assert_jq_file "${LAST_STDOUT_FILE}" '.data.embedding.semantic == true' "reembed summary reports semantic true"
     assert_jq_file "${LAST_STDOUT_FILE}" '.data.embedding.source == "registry_observed"' "reembed summary source registry_observed"
     assert_jq_file "${LAST_STDOUT_FILE}" '(.data.embedding.registered_model_count | tonumber) >= 1' "reembed registered model count"
@@ -465,8 +466,9 @@ run_ee_json_env "hash_init" "${HASH_ENV[@]}" -- init --workspace "${HASH_WS}" --
 assert_jq_file "${LAST_STDOUT_FILE}" '.success == true' "hash fallback init succeeds"
 remember_fact HASH_RUST_ID "hash_remember_rust" "${HASH_WS}" "Cargo workspace uses Rust nightly and lexical fallback stays useful." "${HASH_ENV[@]}"
 remember_fact HASH_NOISE_ID "hash_remember_noise" "${HASH_WS}" "Design screenshots discuss onboarding art direction." "${HASH_ENV[@]}"
-run_ee_json_env "hash_index_rebuild" "${HASH_ENV[@]}" -- index rebuild --workspace "${HASH_WS}" --json
-assert_jq_file "${LAST_STDOUT_FILE}" '.success == true' "hash index rebuild succeeds"
+run_ee_json_env "hash_index_reembed" "${HASH_ENV[@]}" -- index reembed --workspace "${HASH_WS}" --json
+assert_jq_file "${LAST_STDOUT_FILE}" '.success == true' "hash index reembed succeeds"
+assert_jq_file "${LAST_STDOUT_FILE}" '.data.status == "success" and .data.job_status == "completed" and .data.documents_total >= 2' "hash reembed completes all fixture documents"
 assert_jq_file "${LAST_STDOUT_FILE}" '.data.embedding.semantic == false' "hash reembed summary reports semantic false"
 run_ee_json_env "hash_search_lexical" "${HASH_ENV[@]}" -- \
     search "cargo workspace" --workspace "${HASH_WS}" --limit 3 --relevance-floor 0 --json

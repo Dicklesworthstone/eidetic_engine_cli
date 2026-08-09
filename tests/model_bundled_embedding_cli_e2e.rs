@@ -2,21 +2,15 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-#[cfg(unix)]
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-#[cfg(unix)]
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(unix)]
-use std::sync::atomic::{AtomicBool, AtomicUsize};
-#[cfg(unix)]
-use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ee::core::model::{BUNDLED_EMBEDDING_DIMENSION, BUNDLED_EMBEDDING_MODEL_ID};
 use ee::models::{MODEL_LIST_SCHEMA_V1, MODEL_STATUS_SCHEMA_V2, RESPONSE_SCHEMA_V2};
+#[cfg(unix)]
+use frankensearch::embed::{ModelManifest, verify_dir_cached};
 use serde_json::{Map, Value, json};
 
 type TestResult<T = ()> = Result<T, String>;
@@ -342,11 +336,14 @@ fn model_cli_auto_declares_bundled_embedding_without_claiming_download() -> Test
 #[cfg(unix)]
 #[test]
 #[ignore = "requires the real potion-multilingual-128M fixture"]
-fn registered_model2vec_fixture_is_neural_without_overrides_or_network() -> TestResult {
+fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -> TestResult {
     let fixture_root = std::env::var_os("EE_EMBED_MODEL_FIXTURE_DIR")
         .map(PathBuf::from)
         .ok_or_else(|| "EE_EMBED_MODEL_FIXTURE_DIR must name the real model fixture".to_string())?;
     let fixture_model_dir = resolve_fixture_model_dir(&fixture_root)?;
+    verify_dir_cached(&ModelManifest::potion_128m(), &fixture_model_dir).map_err(|error| {
+        format!("real model fixture failed frozen manifest verification: {error}")
+    })?;
     let workspace = E2eWorkspace::create("registered-model2vec-offline")?;
     let registered_parent = workspace
         .xdg_data
@@ -363,16 +360,18 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_network() -> Test
             registered_model_dir.display()
         )
     })?;
-
-    let network_trap = NetworkTrap::start()?;
-    let proxy = network_trap.proxy_url();
-    let proxy_env = network_proxy_env(&proxy);
+    let registered_entries_before = sorted_directory_entry_names(&registered_parent)?;
+    if registered_entries_before != ["potion-multilingual-128M"] {
+        return Err(format!(
+            "registry fixture parent contains unexpected entries: {registered_entries_before:?}"
+        ));
+    }
 
     let init = run_ee_with_env(
         &workspace,
         "registered_init",
         &["init", "--workspace", workspace.workspace_arg()?, "--json"],
-        &proxy_env,
+        &[],
     )?;
     ensure_success(&init, "registered ee init")?;
 
@@ -392,34 +391,88 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_network() -> Test
             "--no-propose-candidates",
             "--json",
         ],
-        &proxy_env,
+        &[],
     )?;
     ensure_success(&remember, "registered ee remember")?;
+    let remember_json = stdout_json(&remember, "registered ee remember")?;
+    let remember_data = response_data(&remember_json, "registered ee remember")?;
+    let memory_id = remember_data
+        .get("memoryId")
+        .or_else(|| remember_data.get("memory_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "registered remember response missing memory ID".to_string())?
+        .to_owned();
 
-    let rebuild = run_ee_with_env(
+    let reembed = run_ee_with_env(
         &workspace,
-        "registered_rebuild",
+        "registered_reembed",
         &[
             "index",
-            "rebuild",
+            "reembed",
             "--workspace",
             workspace.workspace_arg()?,
             "--json",
         ],
-        &proxy_env,
+        &[],
     )?;
-    ensure_success(&rebuild, "registered ee index rebuild")?;
-    let rebuild_json = stdout_json(&rebuild, "registered ee index rebuild")?;
-    let rebuild_data = response_data(&rebuild_json, "registered ee index rebuild")?;
+    ensure_success(&reembed, "registered ee index reembed")?;
+    let reembed_json = stdout_json(&reembed, "registered ee index reembed")?;
+    let reembed_data = response_data(&reembed_json, "registered ee index reembed")?;
+    ensure_eq_str(
+        string_member(reembed_data, "status")?,
+        "success",
+        "registered reembed status",
+    )?;
+    ensure_eq_str(
+        string_member(reembed_data, "job_status")?,
+        "completed",
+        "registered reembed job status",
+    )?;
+    ensure_u64_at_least(
+        u64_member(reembed_data, "documents_total")?,
+        1,
+        "registered reembed document count",
+    )?;
     ensure_eq_bool(
-        rebuild_data
+        reembed_data
             .get("embedding")
             .and_then(Value::as_object)
             .and_then(|embedding| embedding.get("semantic"))
             .and_then(Value::as_bool)
-            .ok_or_else(|| "missing rebuild embedding.semantic".to_string())?,
+            .ok_or_else(|| "missing reembed embedding.semantic".to_string())?,
         true,
-        "registered rebuild semantic",
+        "registered reembed semantic",
+    )?;
+    ensure_eq_str(
+        reembed_data
+            .get("embedding")
+            .and_then(Value::as_object)
+            .and_then(|embedding| embedding.get("source"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| "missing reembed embedding.source".to_string())?,
+        "registry_observed",
+        "registered reembed source",
+    )?;
+    let fast_model_id = reembed_data
+        .get("embedding")
+        .and_then(Value::as_object)
+        .and_then(|embedding| embedding.get("fast_model_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing reembed embedding.fast_model_id".to_string())?;
+    if !fast_model_id.contains("potion-multilingual-128M") {
+        return Err(format!(
+            "registered reembed selected unexpected fast model {fast_model_id}"
+        ));
+    }
+    ensure_u64_at_least(
+        reembed_data
+            .get("embedding")
+            .and_then(Value::as_object)
+            .and_then(|embedding| embedding.get("registered_model_count"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "missing reembed embedding.registered_model_count".to_string())?,
+        1,
+        "registered reembed model count",
     )?;
 
     let query = "local semantic model download policy";
@@ -435,10 +488,67 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_network() -> Test
             "0",
             "--json",
         ],
-        &proxy_env,
+        &[],
     )?;
     ensure_success(&search, "registered ee search")?;
     ensure_response_embed_backend(&search, "registered ee search", "neural_local")?;
+    let search_json = stdout_json(&search, "registered ee search")?;
+    let search_data = response_data(&search_json, "registered ee search")?;
+    ensure_eq_str(
+        string_member(search_data, "status")?,
+        "success",
+        "registered search status",
+    )?;
+    let search_results = search_data
+        .get("results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "registered search missing results array".to_string())?;
+    let remembered_search_result = search_results.iter().find(|result| {
+        result
+            .get("memoryId")
+            .or_else(|| result.get("memory_id"))
+            .and_then(Value::as_str)
+            == Some(memory_id.as_str())
+    });
+    let Some(remembered_search_result) = remembered_search_result else {
+        return Err(format!(
+            "registered neural search did not return remembered memory {memory_id}"
+        ));
+    };
+    ensure_eq_str(
+        remembered_search_result
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "registered search result missing content".to_string())?,
+        "Verified local semantic models must remain usable when downloads are disabled.",
+        "registered search content",
+    )?;
+    if remembered_search_result
+        .get("fastScore")
+        .and_then(Value::as_f64)
+        .is_none()
+    {
+        return Err("registered search result did not carry a semantic fastScore".to_string());
+    }
+    if !remembered_search_result
+        .get("provenance")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry.get("kind").and_then(Value::as_str) == Some("search_document")
+                    && entry.get("docId").and_then(Value::as_str) == Some(memory_id.as_str())
+            })
+        })
+    {
+        return Err(
+            "registered search provenance did not bind the remembered document".to_string(),
+        );
+    }
+    ensure_text_absent(
+        &search.stdout,
+        "embed_model_unavailable",
+        "registered neural search degradation",
+    )?;
 
     let pack = run_ee_with_env(
         &workspace,
@@ -452,10 +562,47 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_network() -> Test
             "800",
             "--json",
         ],
-        &proxy_env,
+        &[],
     )?;
     ensure_success(&pack, "registered ee pack")?;
     ensure_response_embed_backend(&pack, "registered ee pack", "neural_local")?;
+    let pack_json = stdout_json(&pack, "registered ee pack")?;
+    let packed_item = pack_json
+        .pointer("/data/pack/items")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item.get("memoryId").and_then(Value::as_str) == Some(memory_id.as_str())
+            })
+        })
+        .ok_or_else(|| format!("registered neural pack omitted memory {memory_id}"))?;
+    ensure_eq_str(
+        packed_item
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "registered packed item missing content".to_string())?,
+        "Verified local semantic models must remain usable when downloads are disabled.",
+        "registered packed content",
+    )?;
+    let expected_pack_provenance = format!("ee://memory/{memory_id}");
+    if !packed_item
+        .get("provenance")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry.get("uri").and_then(Value::as_str) == Some(expected_pack_provenance.as_str())
+            })
+        })
+    {
+        return Err(format!(
+            "registered packed item provenance did not bind {expected_pack_provenance}"
+        ));
+    }
+    ensure_text_absent(
+        &pack.stdout,
+        "embed_model_unavailable",
+        "registered neural pack degradation",
+    )?;
 
     let orient = run_ee_with_env(
         &workspace,
@@ -468,13 +615,29 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_network() -> Test
             "--fast",
             "--json",
         ],
-        &proxy_env,
+        &[],
     )?;
     ensure_success(&orient, "registered ee orient")?;
     ensure_response_embed_backend(&orient, "registered ee orient", "neural_local")?;
 
-    let mut download_off_env = proxy_env.clone();
-    download_off_env.push(("EE_EMBED_DOWNLOAD".to_string(), "off".to_string()));
+    // Hostile ambient remote-provider intent is deliberate: download-off must
+    // select the verified local registry artifact directly, without invoking
+    // general auto-detection, a remote provider, or the ee downloader.
+    let download_off_env = vec![
+        ("EE_EMBED_DOWNLOAD".to_string(), "off".to_string()),
+        (
+            "FRANKENSEARCH_API_PROVIDER".to_string(),
+            "openai".to_string(),
+        ),
+        (
+            "FRANKENSEARCH_API_MODEL".to_string(),
+            "ambient-remote-must-not-win".to_string(),
+        ),
+        (
+            "OPENAI_API_KEY".to_string(),
+            "network-tripwire-not-a-real-key".to_string(),
+        ),
+    ];
     let search_download_off = run_ee_with_env(
         &workspace,
         "registered_search_download_off",
@@ -498,11 +661,39 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_network() -> Test
         "registered ee search with downloads off",
         "neural_local",
     )?;
+    let download_off_json = stdout_json(
+        &search_download_off,
+        "registered ee search with downloads off",
+    )?;
+    let download_off_results = download_off_json
+        .pointer("/data/results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "download-off registered search missing results".to_string())?;
+    let download_off_result = download_off_results
+        .iter()
+        .find(|result| result.get("memoryId").and_then(Value::as_str) == Some(memory_id.as_str()));
+    let Some(download_off_result) = download_off_result else {
+        return Err(format!(
+            "download-off registered neural search did not return {memory_id}"
+        ));
+    };
+    if download_off_result
+        .get("fastScore")
+        .and_then(Value::as_f64)
+        .is_none()
+    {
+        return Err("download-off search did not carry a semantic fastScore".to_string());
+    }
+    ensure_text_absent(
+        &search_download_off.stdout,
+        "embed_model_unavailable",
+        "download-off registered neural degradation",
+    )?;
 
     for (name, output) in [
         ("init", &init),
         ("remember", &remember),
-        ("rebuild", &rebuild),
+        ("reembed", &reembed),
         ("search", &search),
         ("pack", &pack),
         ("orient", &orient),
@@ -515,11 +706,24 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_network() -> Test
         )?;
     }
 
-    ensure_eq_usize(
-        network_trap.finish()?,
-        0,
-        "registered fixture network connection attempts",
-    )
+    let legacy_download_destination = workspace
+        .xdg_data
+        .join("ee")
+        .join("models")
+        .join("potion-multilingual-128M");
+    if legacy_download_destination.exists() {
+        return Err(format!(
+            "download-off created the legacy download destination {}",
+            legacy_download_destination.display()
+        ));
+    }
+    let registered_entries_after = sorted_directory_entry_names(&registered_parent)?;
+    if registered_entries_after != registered_entries_before {
+        return Err(format!(
+            "registered local-model commands created downloader staging artifacts: before={registered_entries_before:?} after={registered_entries_after:?}"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -545,87 +749,17 @@ fn resolve_fixture_model_dir(root: &Path) -> TestResult<PathBuf> {
 }
 
 #[cfg(unix)]
-struct NetworkTrap {
-    address: std::net::SocketAddr,
-    attempts: Arc<AtomicUsize>,
-    stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
-}
-
-#[cfg(unix)]
-impl NetworkTrap {
-    fn start() -> TestResult<Self> {
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .map_err(|error| format!("bind network trap: {error}"))?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|error| format!("make network trap nonblocking: {error}"))?;
-        let address = listener
-            .local_addr()
-            .map_err(|error| format!("read network trap address: {error}"))?;
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread_attempts = Arc::clone(&attempts);
-        let thread_stop = Arc::clone(&stop);
-        let thread = thread::spawn(move || {
-            while !thread_stop.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((_stream, _peer)) => {
-                        thread_attempts.fetch_add(1, Ordering::AcqRel);
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(std::time::Duration::from_millis(5));
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        Ok(Self {
-            address,
-            attempts,
-            stop,
-            thread: Some(thread),
+fn sorted_directory_entry_names(path: &Path) -> TestResult<Vec<String>> {
+    let mut names = fs::read_dir(path)
+        .map_err(|error| format!("read {}: {error}", path.display()))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .map_err(|error| format!("read entry under {}: {error}", path.display()))
         })
-    }
-
-    fn proxy_url(&self) -> String {
-        format!("http://{}", self.address)
-    }
-
-    fn finish(mut self) -> TestResult<usize> {
-        self.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            thread
-                .join()
-                .map_err(|_| "network trap thread panicked".to_string())?;
-        }
-        Ok(self.attempts.load(Ordering::Acquire))
-    }
-}
-
-#[cfg(unix)]
-impl Drop for NetworkTrap {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
-#[cfg(unix)]
-fn network_proxy_env(proxy: &str) -> Vec<(String, String)> {
-    [
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-    ]
-    .into_iter()
-    .map(|name| (name.to_string(), proxy.to_string()))
-    .collect()
+        .collect::<TestResult<Vec<_>>>()?;
+    names.sort_unstable();
+    Ok(names)
 }
 
 fn run_ee(workspace: &E2eWorkspace, phase: &str, args: &[&str]) -> TestResult<Output> {
@@ -653,6 +787,7 @@ fn run_ee_with_env(
         .env("XDG_DATA_HOME", &workspace.xdg_data)
         .env("EE_NO_COLOR", "1")
         .env_remove("EE_EMBED_MODEL_DIR")
+        .env_remove("EE_EMBED_MODEL_FIXTURE_DIR")
         .env_remove("EE_EMBED_MODEL_PATH")
         .env_remove("EE_EMBED_DOWNLOAD")
         .env_remove("FRANKENSEARCH_MODEL_DIR")
@@ -663,7 +798,14 @@ fn run_ee_with_env(
         .env_remove("FRANKENSEARCH_API_DIMENSION")
         .env_remove("FRANKENSEARCH_API_IDENTITY_JSON")
         .env_remove("OPENAI_API_KEY")
-        .env_remove("GEMINI_API_KEY");
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("EE_MAX_OUTPUT_TOKENS")
+        .env_remove("HTTP_PROXY")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("ALL_PROXY")
+        .env_remove("http_proxy")
+        .env_remove("https_proxy")
+        .env_remove("all_proxy");
     for (name, value) in env {
         command.env(name, value);
     }
