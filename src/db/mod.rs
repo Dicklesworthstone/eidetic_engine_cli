@@ -14605,8 +14605,9 @@ impl DbConnection {
             if !conflicting.is_empty() {
                 return Err(MeshPeerTransportIdentityError::AmbiguousStableIdentity);
             }
-            let next_generation = match peer.transport_identity.as_ref() {
-                None => 1,
+            let (next_generation, transport_key_unchanged) = match peer.transport_identity.as_ref()
+            {
+                None => (1, false),
                 Some(identity)
                     if identity.tailnet_id != input.tailnet_id
                         || identity.stable_node_id != input.stable_node_id =>
@@ -14614,19 +14615,16 @@ impl DbConnection {
                     return Err(MeshPeerTransportIdentityError::StableIdentityMismatch);
                 }
                 Some(identity) if identity.current_node_pubkey == input.current_node_pubkey => {
-                    return Ok(peer);
+                    (identity.key_generation, true)
                 }
-                Some(identity) => identity
-                    .key_generation
-                    .checked_add(1)
-                    .ok_or(MeshPeerTransportIdentityError::GenerationExhausted)?,
+                Some(identity) => (
+                    identity
+                        .key_generation
+                        .checked_add(1)
+                        .ok_or(MeshPeerTransportIdentityError::GenerationExhausted)?,
+                    false,
+                ),
             };
-            let next_generation = i64::try_from(next_generation)
-                .map_err(|_| MeshPeerTransportIdentityError::GenerationExhausted)?;
-            let observed_at = input
-                .observed_at
-                .clone()
-                .unwrap_or_else(|| Utc::now().to_rfc3339());
             let prior_origin_node_id = peer.origin_node_id.clone();
             let durable_origin_node_id = if valid_durable_mesh_node_principal(&prior_origin_node_id)
             {
@@ -14647,6 +14645,15 @@ impl DbConnection {
             }) {
                 return Err(MeshPeerTransportIdentityError::AmbiguousGrantTarget);
             }
+            if transport_key_unchanged && durable_origin_node_id == prior_origin_node_id {
+                return Ok(peer);
+            }
+            let next_generation = i64::try_from(next_generation)
+                .map_err(|_| MeshPeerTransportIdentityError::GenerationExhausted)?;
+            let observed_at = input
+                .observed_at
+                .clone()
+                .unwrap_or_else(|| Utc::now().to_rfc3339());
             let affected = self.execute_for(
                 DbOperation::Execute,
                 "UPDATE mesh_peers
@@ -42766,8 +42773,10 @@ mod tests {
             "rejected substitution is non-mutating",
         )?;
 
+        let replacement_origin_node_id = super::random_mesh_node_principal()
+            .map_err(|error| TestFailure::new(error.to_string()))?;
         let replaced = connection.upsert_mesh_peer(&super::UpsertMeshPeerInput {
-            origin_node_id: "node_fedcba9876543210fedcba9876543210".to_owned(),
+            origin_node_id: replacement_origin_node_id,
             policy_summary_json: Some(r#"{"state":"active","key":"replacement"}"#.to_owned()),
             last_seen_at: Some("2026-08-09T00:03:00Z".to_owned()),
             ..enrollment
@@ -42789,6 +42798,157 @@ mod tests {
             &None,
             "replacement node inherits no prior grant",
         )?;
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_peer_transport_identity_heals_legacy_bound_allow_and_revoke_without_rotation()
+    -> TestResult {
+        use crate::config::{MeshLane, MeshLaneDecision};
+
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        for (peer_id, legacy_node_id, stable_id, node_key, revoke) in [
+            (
+                "peer_11111111111111111111111111111111",
+                "node_transport_allow_legacy",
+                "stable-legacy-allow",
+                "nodekey:legacy-allow-current",
+                false,
+            ),
+            (
+                "peer_22222222222222222222222222222222",
+                "node_transport_revoke_legacy",
+                "stable-legacy-revoke",
+                "nodekey:legacy-revoke-current",
+                true,
+            ),
+        ] {
+            let workspace_id = "wsp_01234567890123456789012345";
+            connection.upsert_mesh_peer(&super::UpsertMeshPeerInput {
+                workspace_id: workspace_id.to_owned(),
+                peer_id: peer_id.to_owned(),
+                origin_node_id: legacy_node_id.to_owned(),
+                display_name: Some("legacy bound peer".to_owned()),
+                policy_summary_json: Some(r#"{"state":"active"}"#.to_owned()),
+                enabled: true,
+                last_seen_at: Some("2026-08-09T00:00:00Z".to_owned()),
+            })?;
+            let allowed = connection
+                .apply_mesh_lane_grant(&super::MeshLaneGrantMutationInput {
+                    workspace_id: workspace_id.to_owned(),
+                    peer_id: peer_id.to_owned(),
+                    target_adapter: super::MeshLaneGrantTargetAdapter::new(peer_id, legacy_node_id),
+                    material_lane: MeshLane::Metadata,
+                    expected_generation: 0,
+                    approval_config_digest: Some(format!("blake3:{}", "b".repeat(64))),
+                    updated_at: Some("2026-08-09T00:00:10Z".to_owned()),
+                })
+                .map_err(|error| TestFailure::new(error.to_string()))?;
+            let before = if revoke {
+                connection
+                    .revoke_mesh_lane(&super::MeshLaneGrantMutationInput {
+                        workspace_id: workspace_id.to_owned(),
+                        peer_id: peer_id.to_owned(),
+                        target_adapter: super::MeshLaneGrantTargetAdapter::new(
+                            peer_id,
+                            legacy_node_id,
+                        ),
+                        material_lane: MeshLane::Metadata,
+                        expected_generation: allowed.grant_generation,
+                        approval_config_digest: None,
+                        updated_at: Some("2026-08-09T00:00:20Z".to_owned()),
+                    })
+                    .map_err(|error| TestFailure::new(error.to_string()))?
+            } else {
+                allowed
+            };
+            connection.execute_for(
+                DbOperation::Execute,
+                "UPDATE mesh_peers
+                    SET transport_tailnet_id = ?3,
+                        transport_stable_node_id = ?4,
+                        transport_current_node_pubkey = ?5,
+                        transport_key_generation = 7
+                  WHERE workspace_id = ?1 AND peer_id = ?2",
+                &[
+                    Value::Text(workspace_id.to_owned()),
+                    Value::Text(peer_id.to_owned()),
+                    Value::Text("example.ts.net".to_owned()),
+                    Value::Text(stable_id.to_owned()),
+                    Value::Text(node_key.to_owned()),
+                ],
+            )?;
+            let legacy_bound = connection
+                .get_mesh_peer(workspace_id, peer_id)?
+                .ok_or("legacy-bound peer disappeared")?;
+            ensure_equal(
+                &legacy_bound.origin_node_id.as_str(),
+                &legacy_node_id,
+                "fixture retains the pre-random principal",
+            )?;
+            ensure_equal(
+                &legacy_bound
+                    .transport_identity
+                    .as_ref()
+                    .ok_or("legacy fixture is not transport-bound")?
+                    .key_generation,
+                &7,
+                "legacy fixture has an existing transport generation",
+            )?;
+
+            let healed = connection.observe_mesh_peer_transport_identity(
+                &super::ObserveMeshPeerTransportIdentityInput {
+                    workspace_id: workspace_id.to_owned(),
+                    peer_id: peer_id.to_owned(),
+                    tailnet_id: "example.ts.net".to_owned(),
+                    stable_node_id: stable_id.to_owned(),
+                    current_node_pubkey: node_key.to_owned(),
+                    observed_at: Some("2026-08-09T00:01:00Z".to_owned()),
+                },
+            )?;
+            ensure(
+                super::valid_durable_mesh_node_principal(&healed.origin_node_id),
+                "same-key LocalAPI observation heals the legacy principal",
+            )?;
+            ensure(
+                healed.origin_node_id != legacy_node_id,
+                "same-key LocalAPI observation replaces the deterministic principal",
+            )?;
+            ensure_equal(
+                &healed
+                    .transport_identity
+                    .as_ref()
+                    .ok_or("healed peer lost transport identity")?
+                    .key_generation,
+                &7,
+                "principal migration does not invent a key rotation",
+            )?;
+            let migrated = connection
+                .get_mesh_lane_grant_state(workspace_id, peer_id)?
+                .ok_or("principal migration lost grant state")?;
+            ensure_equal(
+                &migrated.grant_generation,
+                &before.grant_generation,
+                "principal migration preserves the grant generation",
+            )?;
+            ensure_equal(
+                &migrated.metadata_override,
+                &Some(if revoke {
+                    MeshLaneDecision::Deny
+                } else {
+                    MeshLaneDecision::Allow
+                }),
+                "principal migration preserves Allow and revoked/Deny state",
+            )?;
+            ensure_equal(
+                &migrated.target_adapter.origin_node_id,
+                &healed.origin_node_id,
+                "principal migration retargets the exact grant adapter",
+            )?;
+        }
         connection.close()?;
         Ok(())
     }

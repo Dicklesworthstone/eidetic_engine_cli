@@ -38,7 +38,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{EnvVar, parse_env_bool_flag, read_env_var};
 use crate::db::{
-    DbConnection, MeshPeerTransportIdentityError, ObserveMeshPeerTransportIdentityInput,
+    DatabaseLocation, DbConnection, MeshPeerTransportIdentityError,
+    ObserveMeshPeerTransportIdentityInput,
 };
 use crate::mesh::bootstrap_envelope::BootstrapAdmission;
 pub use crate::mesh::key_store::MESH_KEY_STORE_UNAVAILABLE_CODE;
@@ -470,7 +471,7 @@ pub async fn resolve_durable_registration<A: TailscaleLocalApi>(
     connection: &DbConnection,
     registration: &DurableResponderRegistration,
 ) -> Result<ResolvedResponderRegistration, ResponderBrokerError> {
-    validate_durable_registration(registration)?;
+    validate_durable_registration(connection, registration)?;
     let local_status = local_api.local_status(cx).await.map_err(|error| {
         if matches!(
             error,
@@ -565,6 +566,7 @@ pub async fn resolve_durable_registration<A: TailscaleLocalApi>(
 }
 
 fn validate_durable_registration(
+    connection: &DbConnection,
     registration: &DurableResponderRegistration,
 ) -> Result<(), ResponderBrokerError> {
     if registration.committed_port < 1024
@@ -578,6 +580,23 @@ fn validate_durable_registration(
             != Some(&registration.workspace_path)
         || registration.database_path.canonicalize().ok().as_ref()
             != Some(&registration.database_path)
+    {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    let connection_path = match connection.location() {
+        DatabaseLocation::File(path) => path,
+        DatabaseLocation::Memory => return Err(ResponderBrokerError::InvalidConfiguration),
+    };
+    if connection_path.canonicalize().ok().as_ref() != Some(&registration.database_path) {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    let workspace = connection
+        .get_workspace(&registration.workspace_id)
+        .map_err(|_| ResponderBrokerError::RouteUnavailable)?
+        .ok_or(ResponderBrokerError::InvalidConfiguration)?;
+    let stored_workspace_path = PathBuf::from(workspace.path);
+    if !stored_workspace_path.is_absolute()
+        || stored_workspace_path.canonicalize().ok().as_ref() != Some(&registration.workspace_path)
     {
         return Err(ResponderBrokerError::InvalidConfiguration);
     }

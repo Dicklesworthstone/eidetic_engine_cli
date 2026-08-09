@@ -36,7 +36,6 @@ use ee::mesh::responder_broker::{
     DurableResponderRegistration, MESH_KEY_STORE_UNAVAILABLE_CODE, PreAuthAdmissionLimits,
     RegisteredResponderRoute, ResponderBroker, ResponderBrokerError, ResponderBrokerOwner,
     ResponderBrokerState, ResponderRouteRegistry, TailscaleLocalApi, TailscaleLocalApiClient,
-    resolve_durable_registration,
 };
 use ee::mesh::transport_session::{
     HandshakeObservations, InitiatorSessionConfig, ResponderExpectations, SessionBinding,
@@ -53,6 +52,19 @@ const CREATED_AT: &str = "2026-08-08T00:00:00Z";
 
 fn pair_key() -> SecretBytes {
     SecretBytes::new([0x5a; 32])
+}
+
+fn is_random_node_principal(value: &str) -> bool {
+    value.strip_prefix("node_").is_some_and(|suffix| {
+        suffix.len() == 32
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn sqlite_text_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn session_limits() -> SessionChannelLimits {
@@ -408,6 +420,21 @@ fn real_tailscale_localapi_binds_status_and_whois_to_kernel_source() -> TestResu
                 |_| Ok::<(), String>(()),
             )
             .map_err(|error| format!("grant real responder lane: {error}"))?;
+        connection
+            .execute_raw(&format!(
+                "UPDATE mesh_peers
+                    SET transport_tailnet_id = {},
+                        transport_stable_node_id = {},
+                        transport_current_node_pubkey = {},
+                        transport_key_generation = 1
+                  WHERE workspace_id = {} AND peer_id = {}",
+                sqlite_text_literal(&status.identity.tailnet_id),
+                sqlite_text_literal(&who_is.stable_id),
+                sqlite_text_literal(&who_is.current_node_pubkey),
+                sqlite_text_literal(workspace_id),
+                sqlite_text_literal(&peer.peer_id),
+            ))
+            .map_err(|error| format!("plant pre-random bound peer state: {error}"))?;
         let store = MeshKeyStore::open_or_create(&workspace_path)
             .map_err(|error| format!("create real responder key store: {error}"))?;
         store
@@ -436,14 +463,6 @@ fn real_tailscale_localapi_binds_status_and_whois_to_kernel_source() -> TestResu
             capabilities: SessionCapabilities::base(),
             limits: session_limits(),
         };
-        let resolved = resolve_durable_registration(&cx, &client, &connection, &registration)
-            .await
-            .map_err(|error| format!("resolve real durable responder route: {error}"))?;
-        if resolved.route.expectations.initiator_node_id == origin_node_id
-            || resolved.route.expectations.initiator_node_id.len() != 37
-        {
-            return Err("real LocalAPI observation did not migrate the legacy grant to a random ee-node principal".to_owned());
-        }
         let mut owner = ResponderBrokerOwner::start_durable(
             &cx,
             client,
@@ -453,6 +472,27 @@ fn real_tailscale_localapi_binds_status_and_whois_to_kernel_source() -> TestResu
         )
         .await
         .map_err(|error| format!("start real responder owner: {error}"))?;
+        let migrated_peer = connection
+            .get_mesh_peer(workspace_id, &peer_id)
+            .map_err(|error| format!("reload migrated real responder peer: {error}"))?
+            .ok_or_else(|| "migrated real responder peer disappeared".to_owned())?;
+        if migrated_peer.origin_node_id == origin_node_id
+            || !is_random_node_principal(&migrated_peer.origin_node_id)
+        {
+            return Err("durable owner did not heal the already-bound legacy principal through real LocalAPI".to_owned());
+        }
+        let migrated_grant = connection
+            .get_mesh_lane_grant_state(workspace_id, &peer_id)
+            .map_err(|error| format!("reload migrated real responder grant: {error}"))?
+            .ok_or_else(|| "migrated real responder grant disappeared".to_owned())?;
+        if migrated_grant.target_adapter.origin_node_id != migrated_peer.origin_node_id
+            || migrated_grant.grant_generation != 1
+        {
+            return Err(
+                "durable owner did not migrate the already-bound grant target exactly once"
+                    .to_owned(),
+            );
+        }
         let expected_addresses = status
             .addresses
             .iter()
@@ -511,6 +551,132 @@ fn real_tailscale_localapi_binds_status_and_whois_to_kernel_source() -> TestResu
         owner.shutdown();
         Ok(())
     })
+}
+
+#[test]
+fn durable_registration_rejects_cross_workspace_database_and_key_store_mixtures() -> TestResult {
+    let workspace_a_dir = tempfile::tempdir().map_err(|error| format!("workspace a: {error}"))?;
+    let workspace_b_dir = tempfile::tempdir().map_err(|error| format!("workspace b: {error}"))?;
+    let workspace_a = workspace_a_dir
+        .path()
+        .canonicalize()
+        .map_err(|error| format!("canonicalize workspace a: {error}"))?;
+    let workspace_b = workspace_b_dir
+        .path()
+        .canonicalize()
+        .map_err(|error| format!("canonicalize workspace b: {error}"))?;
+    std::fs::create_dir(workspace_a.join(".ee"))
+        .map_err(|error| format!("create workspace a state dir: {error}"))?;
+    std::fs::create_dir(workspace_b.join(".ee"))
+        .map_err(|error| format!("create workspace b state dir: {error}"))?;
+    let database_a = workspace_a.join(".ee/ee.db");
+    let database_b = workspace_b.join(".ee/ee.db");
+    let connection_a = DbConnection::open_file(&database_a)
+        .map_err(|error| format!("open workspace a database: {error}"))?;
+    connection_a
+        .migrate()
+        .map_err(|error| format!("migrate workspace a database: {error}"))?;
+    connection_a
+        .insert_workspace(
+            "wsp_cross_workspace_a",
+            &CreateWorkspaceInput {
+                path: workspace_a.display().to_string(),
+                name: Some("workspace a".to_owned()),
+            },
+        )
+        .map_err(|error| format!("insert workspace a row: {error}"))?;
+    let connection_b = DbConnection::open_file(&database_b)
+        .map_err(|error| format!("open workspace b database: {error}"))?;
+    connection_b
+        .migrate()
+        .map_err(|error| format!("migrate workspace b database: {error}"))?;
+    connection_b
+        .insert_workspace(
+            "wsp_cross_workspace_b",
+            &CreateWorkspaceInput {
+                path: workspace_b.display().to_string(),
+                name: Some("workspace b".to_owned()),
+            },
+        )
+        .map_err(|error| format!("insert workspace b row: {error}"))?;
+    MeshKeyStore::open_or_create(&workspace_b)
+        .map_err(|error| format!("open wrong-workspace key store: {error}"))?
+        .store_pair_key(
+            PEER_HANDLE,
+            PairKeyClass::Current,
+            NonZeroU64::new(1).expect("test generation is nonzero"),
+            &pair_key(),
+            CREATED_AT,
+            false,
+        )
+        .map_err(|error| format!("seed wrong-workspace pair key: {error}"))?;
+    let database_a = database_a
+        .canonicalize()
+        .map_err(|error| format!("canonicalize workspace a database: {error}"))?;
+    let database_b = database_b
+        .canonicalize()
+        .map_err(|error| format!("canonicalize workspace b database: {error}"))?;
+    let local_api_dir = tempfile::tempdir().map_err(|error| format!("localapi: {error}"))?;
+    let fake = FakeLocalApi::spawn(local_api_dir.path(), 0)?;
+    let client = TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT);
+    run_runtime(|cx| async move {
+        let base = DurableResponderRegistration {
+            workspace_path: workspace_a.clone(),
+            database_path: database_a.clone(),
+            workspace_id: "wsp_cross_workspace_a".to_owned(),
+            team_id: "team-cross-workspace".to_owned(),
+            responder_node_id: "node-cross-workspace".to_owned(),
+            peer_handle: PEER_HANDLE.to_owned(),
+            committed_port: 41888,
+            capabilities: SessionCapabilities::base(),
+            limits: session_limits(),
+        };
+        let wrong_workspace_path = DurableResponderRegistration {
+            workspace_path: workspace_b,
+            ..base.clone()
+        };
+        let wrong_path_error = ee::mesh::responder_broker::resolve_durable_registration(
+            &cx,
+            &client,
+            &connection_a,
+            &wrong_workspace_path,
+        )
+        .await
+        .expect_err("DB workspace row must reject another workspace's key-store root");
+        if !matches!(wrong_path_error, ResponderBrokerError::InvalidConfiguration) {
+            return Err(format!(
+                "cross-workspace key-store mixture returned {wrong_path_error:?}"
+            ));
+        }
+        let wrong_database_path = DurableResponderRegistration {
+            database_path: database_b,
+            ..base
+        };
+        let wrong_database_error = ee::mesh::responder_broker::resolve_durable_registration(
+            &cx,
+            &client,
+            &connection_a,
+            &wrong_database_path,
+        )
+        .await
+        .expect_err("live DB connection must match the registered database path");
+        if !matches!(
+            wrong_database_error,
+            ResponderBrokerError::InvalidConfiguration
+        ) {
+            return Err(format!(
+                "cross-workspace database mixture returned {wrong_database_error:?}"
+            ));
+        }
+        Ok(())
+    })?;
+    let requests = fake.finish()?;
+    if !requests.is_empty() {
+        return Err(format!(
+            "invalid local workspace mixtures reached LocalAPI: {requests:?}"
+        ));
+    }
+    Ok(())
 }
 
 #[test]
