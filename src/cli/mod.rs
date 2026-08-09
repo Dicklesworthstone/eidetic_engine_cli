@@ -36319,7 +36319,7 @@ where
     use crate::core::global_promotion::{PromoteGlobalOptions, promote_global};
 
     let MemoryStoreTarget {
-        workspace: _,
+        workspace,
         database_path,
     } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
         Ok(target) => target,
@@ -36333,15 +36333,17 @@ where
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
     };
+    // `[memory] include_global` / `participate` gate the lane; both default
+    // to true so unconfigured workspaces keep opt-in-by-presence behavior.
+    let memory_config = crate::config::workspace_config(&workspace)
+        .map(|config| config.memory)
+        .unwrap_or_default();
     let options = PromoteGlobalOptions {
         workspace_database_path: &database_path,
         memory_id: &args.memory_id,
         global_paths: &global_paths,
-        // Opt-in-by-presence era: the retrieval seam hardcodes an included
-        // lane (see the global-candidate merge in core/search.rs); promotion
-        // mirrors that posture until the [memory] include_global /
-        // participate config keys land (bd-1bfwa.3 slice C).
-        global_lane_available: true,
+        global_lane_available: memory_config.include_global.unwrap_or(true)
+            && memory_config.participate.unwrap_or(true),
         actor: args.actor.as_deref(),
         dry_run: args.dry_run,
     };

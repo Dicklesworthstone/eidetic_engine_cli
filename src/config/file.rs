@@ -4672,4 +4672,30 @@ requires_consent = true
             format!("unexpected error: {error:?}"),
         )
     }
+
+    #[test]
+    fn parses_memory_global_lane_keys() -> TestResult {
+        let config = ConfigFile::parse("[memory]\ninclude_global = false\nparticipate = true\n")
+            .map_err(|error| format!("parse failed: {error:?}"))?;
+        ensure(
+            config.memory.include_global == Some(false),
+            format!("include_global wrong: {:?}", config.memory),
+        )?;
+        ensure(
+            config.memory.participate == Some(true),
+            format!("participate wrong: {:?}", config.memory),
+        )
+    }
+
+    #[test]
+    fn rejects_unknown_memory_section_key() -> TestResult {
+        let error = match ConfigFile::parse("[memory]\ninclude_globall = true\n") {
+            Ok(config) => return Err(format!("expected unknown-key rejection, got {config:?}")),
+            Err(error) => error,
+        };
+        ensure(
+            format!("{error:?}").contains("include_globall"),
+            format!("unexpected error: {error:?}"),
+        )
+    }
 }
