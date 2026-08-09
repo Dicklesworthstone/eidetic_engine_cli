@@ -65,6 +65,12 @@ pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 /// Hard outer limit on one frame payload (unchanged from v1's scaffolding).
 pub const MAX_PAYLOAD_BYTES: usize = 32 * 1024;
 
+/// Maximum byte length of one frame request/response correlation identifier.
+pub const MAX_CORRELATION_ID_BYTES: usize = 128;
+
+/// Maximum byte length of one base or negotiated capability token.
+pub const MAX_CAPABILITY_TOKEN_BYTES: usize = 64;
+
 /// Version tag leading every session transcript (inside the hashed bytes).
 pub const SESSION_TRANSCRIPT_TAG: &str = "ee.mesh.session_transcript.v2";
 
@@ -618,6 +624,8 @@ pub fn sign_frame(
     keys: &DirectionalSessionKeys,
     draft: FrameDraft,
 ) -> Result<FrameV2, TransportSessionError> {
+    validate_frame_binding_shape(binding)?;
+    validate_correlation_id(&draft.correlation_id)?;
     if !valid_capability_token(draft.capability.token()) {
         return Err(TransportSessionError::MalformedFrame {
             message: "capability token must match [a-z0-9_]{1,64}".to_owned(),
@@ -696,9 +704,12 @@ pub fn decode_frame(bytes: &[u8]) -> Result<FrameV2, TransportSessionError> {
             observed: probe.schema,
         });
     }
-    serde_json::from_slice(bytes).map_err(|error| TransportSessionError::MalformedFrame {
-        message: format!("decode v2 frame: {error}"),
-    })
+    let frame =
+        serde_json::from_slice(bytes).map_err(|error| TransportSessionError::MalformedFrame {
+            message: format!("decode v2 frame: {error}"),
+        })?;
+    validate_frame_wire_shape(&frame)?;
+    Ok(frame)
 }
 
 /// Verify one inbound frame against the established session. Every check
@@ -712,6 +723,7 @@ pub fn verify_frame(
     keys: &DirectionalSessionKeys,
     negotiated: &NegotiatedExtensions,
 ) -> Result<VerifiedFrameV2, TransportSessionError> {
+    validate_frame_wire_shape(frame)?;
     if frame.schema == TRANSPORT_FRAME_SCHEMA_V1 {
         return Err(TransportSessionError::V1Rejected);
     }
@@ -720,12 +732,6 @@ pub fn verify_frame(
             observed: frame.schema.clone(),
         });
     }
-    if !valid_capability_token(frame.capability.token()) {
-        return Err(TransportSessionError::MalformedFrame {
-            message: "capability token must match [a-z0-9_]{1,64}".to_owned(),
-        });
-    }
-
     // Binding checks: identity, route, and direction confusion all fail
     // closed before any cryptographic work.
     if frame.team_id != binding.team_id {
@@ -815,6 +821,82 @@ pub fn verify_frame(
     Ok(VerifiedFrameV2 {
         frame: frame.clone(),
     })
+}
+
+fn validate_frame_binding_shape(binding: &SessionBinding) -> Result<(), TransportSessionError> {
+    for (field, value) in [
+        ("team_id", binding.team_id.as_str()),
+        ("initiator_node_id", binding.initiator_node_id.as_str()),
+        ("responder_node_id", binding.responder_node_id.as_str()),
+        (
+            "initiator_workspace_id",
+            binding.initiator_workspace_id.as_str(),
+        ),
+        (
+            "responder_workspace_id",
+            binding.responder_workspace_id.as_str(),
+        ),
+        ("session_id", binding.session_id.as_str()),
+    ] {
+        validate_frame_identity(field, value)?;
+    }
+    if binding.initiator_node_id == binding.responder_node_id
+        || binding.initiator_workspace_id == binding.responder_workspace_id
+    {
+        return Err(TransportSessionError::BindingMismatch {
+            field: "source_equals_target",
+        });
+    }
+    Ok(())
+}
+
+fn validate_frame_wire_shape(frame: &FrameV2) -> Result<(), TransportSessionError> {
+    for (field, value) in [
+        ("source_node_id", frame.source_node_id.as_str()),
+        ("target_node_id", frame.target_node_id.as_str()),
+        ("team_id", frame.team_id.as_str()),
+        ("source_workspace_id", frame.source_workspace_id.as_str()),
+        ("target_workspace_id", frame.target_workspace_id.as_str()),
+        ("session_id", frame.session_id.as_str()),
+    ] {
+        validate_frame_identity(field, value)?;
+    }
+    validate_correlation_id(&frame.correlation_id)?;
+    if !valid_capability_token(frame.capability.token()) {
+        return Err(TransportSessionError::MalformedFrame {
+            message: "capability token must match [a-z0-9_]{1,64}".to_owned(),
+        });
+    }
+    if decode_hex_32(&frame.payload_hash).is_none() {
+        return Err(TransportSessionError::MalformedFrame {
+            message: "payloadHash must contain exactly 64 lowercase hexadecimal characters"
+                .to_owned(),
+        });
+    }
+    if decode_hex_32(&frame.mac).is_none() {
+        return Err(TransportSessionError::MalformedFrame {
+            message: "mac must contain exactly 64 lowercase hexadecimal characters".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_frame_identity(field: &'static str, value: &str) -> Result<(), TransportSessionError> {
+    if value.is_empty() || value.len() > MAX_SESSION_BINDING_FIELD_BYTES {
+        return Err(TransportSessionError::MalformedFrame {
+            message: format!("{field} must contain 1..={MAX_SESSION_BINDING_FIELD_BYTES} bytes"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_correlation_id(value: &str) -> Result<(), TransportSessionError> {
+    if value.is_empty() || value.len() > MAX_CORRELATION_ID_BYTES {
+        return Err(TransportSessionError::MalformedFrame {
+            message: format!("correlationId must contain 1..={MAX_CORRELATION_ID_BYTES} bytes"),
+        });
+    }
+    Ok(())
 }
 
 impl FrameV2 {
@@ -1267,6 +1349,7 @@ impl InitiatorHandshake {
         pair_key: &SecretBytes,
         confirm: &SessionConfirmV1,
     ) -> Result<(SessionFinishV1, EstablishedSession), HandshakeError> {
+        validate_session_confirm_wire_shape(confirm)?;
         if confirm.schema != SESSION_CONFIRM_SCHEMA_V1 {
             return Err(HandshakeError::SchemaMismatch {
                 observed: confirm.schema.clone(),
@@ -1342,6 +1425,7 @@ pub fn responder_accept_open(
     observations: HandshakeObservations,
     pair_key: &SecretBytes,
 ) -> Result<(ResponderPendingSession, SessionConfirmV1), HandshakeError> {
+    validate_session_open_wire_shape(open)?;
     validate_observations(&observations)?;
     validate_nonce(&responder_nonce, "responder_nonce")?;
     if expectations.pair_key_generation == 0 {
@@ -1461,6 +1545,7 @@ impl ResponderPendingSession {
         pair_key: &SecretBytes,
         finish: &SessionFinishV1,
     ) -> Result<EstablishedSession, HandshakeError> {
+        validate_session_finish_wire_shape(finish)?;
         if finish.schema != SESSION_FINISH_SCHEMA_V1 {
             return Err(HandshakeError::SchemaMismatch {
                 observed: finish.schema.clone(),
@@ -1499,17 +1584,23 @@ impl ResponderPendingSession {
 
 /// Decode one encoded `session_open` message.
 pub fn decode_session_open(bytes: &[u8]) -> Result<SessionOpenV1, HandshakeError> {
-    decode_handshake_message(bytes, SESSION_OPEN_SCHEMA_V1)
+    let open = decode_handshake_message(bytes, SESSION_OPEN_SCHEMA_V1)?;
+    validate_session_open_wire_shape(&open)?;
+    Ok(open)
 }
 
 /// Decode one encoded `session_confirm` message.
 pub fn decode_session_confirm(bytes: &[u8]) -> Result<SessionConfirmV1, HandshakeError> {
-    decode_handshake_message(bytes, SESSION_CONFIRM_SCHEMA_V1)
+    let confirm = decode_handshake_message(bytes, SESSION_CONFIRM_SCHEMA_V1)?;
+    validate_session_confirm_wire_shape(&confirm)?;
+    Ok(confirm)
 }
 
 /// Decode one encoded `session_finish` message.
 pub fn decode_session_finish(bytes: &[u8]) -> Result<SessionFinishV1, HandshakeError> {
-    decode_handshake_message(bytes, SESSION_FINISH_SCHEMA_V1)
+    let finish = decode_handshake_message(bytes, SESSION_FINISH_SCHEMA_V1)?;
+    validate_session_finish_wire_shape(&finish)?;
+    Ok(finish)
 }
 
 fn decode_handshake_message<T: serde::de::DeserializeOwned>(
@@ -1537,6 +1628,58 @@ fn decode_handshake_message<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(bytes).map_err(|error| HandshakeError::MalformedMessage {
         message: format!("decode handshake message: {error}"),
     })
+}
+
+fn validate_session_open_wire_shape(open: &SessionOpenV1) -> Result<(), HandshakeError> {
+    let binding = SessionBinding {
+        team_id: open.team_id.clone(),
+        tailnet_id: open.tailnet_id.clone(),
+        initiator_node_id: open.initiator_node_id.clone(),
+        responder_node_id: open.responder_node_id.clone(),
+        initiator_workspace_id: open.initiator_workspace_id.clone(),
+        responder_workspace_id: open.responder_workspace_id.clone(),
+        initiator_stable_id: open.initiator_stable_id.clone(),
+        responder_stable_id: open.responder_stable_id.clone(),
+        session_id: open.session_id.clone(),
+    };
+    validate_binding_shape(&binding)?;
+    if open.pair_key_generation == 0 {
+        return Err(HandshakeError::GenerationMismatch {
+            expected: 1,
+            observed: 0,
+        });
+    }
+    let _ = decode_nonce(&open.initiator_nonce, "initiator_nonce")?;
+    Ok(())
+}
+
+fn validate_session_confirm_wire_shape(confirm: &SessionConfirmV1) -> Result<(), HandshakeError> {
+    validate_handshake_session_id(&confirm.session_id)?;
+    let _ = decode_nonce(&confirm.responder_nonce, "responder_nonce")?;
+    validate_handshake_mac(&confirm.confirm_mac, "confirm_mac")
+}
+
+fn validate_session_finish_wire_shape(finish: &SessionFinishV1) -> Result<(), HandshakeError> {
+    validate_handshake_session_id(&finish.session_id)?;
+    validate_handshake_mac(&finish.finish_mac, "finish_mac")
+}
+
+fn validate_handshake_session_id(session_id: &str) -> Result<(), HandshakeError> {
+    if session_id.is_empty() || session_id.len() > MAX_SESSION_BINDING_FIELD_BYTES {
+        return Err(HandshakeError::BindingMismatch {
+            field: "session_id",
+        });
+    }
+    Ok(())
+}
+
+fn validate_handshake_mac(value: &str, field: &'static str) -> Result<(), HandshakeError> {
+    if decode_hex_32(value).is_none() {
+        return Err(HandshakeError::MalformedMessage {
+            message: format!("{field} must contain exactly 64 lowercase hexadecimal characters"),
+        });
+    }
+    Ok(())
 }
 
 fn validate_binding_shape(binding: &SessionBinding) -> Result<(), HandshakeError> {
@@ -1835,7 +1978,7 @@ impl SessionCapabilities {
 
 fn valid_capability_token(token: &str) -> bool {
     !token.is_empty()
-        && token.len() <= 64
+        && token.len() <= MAX_CAPABILITY_TOKEN_BYTES
         && token
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
@@ -2585,9 +2728,13 @@ impl AuthenticatedTransportSession {
         if self.closed || self.write_closed {
             return Err(SessionChannelError::Closed);
         }
-        if message.correlation_id.is_empty() || message.correlation_id.len() > 128 {
+        if message.correlation_id.is_empty()
+            || message.correlation_id.len() > MAX_CORRELATION_ID_BYTES
+        {
             return Err(SessionChannelError::Authentication {
-                message: "correlation id must contain 1..=128 bytes".to_owned(),
+                message: format!(
+                    "correlation id must contain 1..={MAX_CORRELATION_ID_BYTES} bytes"
+                ),
             });
         }
         if !self.capabilities.allows(&message.capability) {
@@ -2720,13 +2867,6 @@ impl AuthenticatedTransportSession {
             return self.fail(SessionChannelError::Frame(
                 TransportSessionError::MalformedFrame {
                     message: "requested application budget exceeds the session limit".to_owned(),
-                },
-            ));
-        }
-        if verified.frame.correlation_id.is_empty() || verified.frame.correlation_id.len() > 128 {
-            return self.fail(SessionChannelError::Frame(
-                TransportSessionError::MalformedFrame {
-                    message: "correlation id must contain 1..=128 bytes".to_owned(),
                 },
             ));
         }

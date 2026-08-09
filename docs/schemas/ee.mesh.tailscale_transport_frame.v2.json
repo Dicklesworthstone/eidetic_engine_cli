@@ -18,7 +18,7 @@
     "correlationId": { "type": "string", "minLength": 1, "maxLength": 128 },
     "kind": { "enum": ["request", "response"] },
     "capability": { "type": "string", "pattern": "^[a-z0-9_]{1,64}$" },
-    "requestedBudgetMs": { "type": "integer", "minimum": 0 },
+    "requestedBudgetMs": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
     "payload": true,
     "payloadHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "mac": { "type": "string", "pattern": "^[0-9a-f]{64}$" }

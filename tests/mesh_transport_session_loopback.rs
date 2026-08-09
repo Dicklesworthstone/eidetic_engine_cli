@@ -2259,3 +2259,228 @@ fn transport_wire_schemas_validate_valid_and_near_identical_invalid_instances() 
     }
     Ok(())
 }
+
+#[test]
+fn wire_decoders_reject_schema_forbidden_near_misses_before_session_use() -> TestResult {
+    let session_binding = binding();
+    let keys = ee::mesh::transport_session::derive_session_keys(
+        &pair_key(),
+        &session_binding,
+        &[0x11; 32],
+        &[0x22; 32],
+    );
+    let frame = sign_frame(
+        &session_binding,
+        &keys,
+        FrameDraft {
+            direction: SessionDirection::InitiatorToResponder,
+            counter: 1,
+            correlation_id: "schema-boundary".to_owned(),
+            kind: FrameKind::Request,
+            capability: FrameCapability::Summary,
+            requested_budget_ms: 1,
+            payload: json!({"valid": true}),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let valid_frame = serde_json::to_value(frame).map_err(|error| error.to_string())?;
+    let mut invalid_frames = Vec::new();
+    for (label, pointer, replacement) in [
+        ("empty source node", "/sourceNodeId", json!("")),
+        (
+            "overlong source workspace",
+            "/sourceWorkspaceId",
+            json!("x".repeat(257)),
+        ),
+        ("empty correlation", "/correlationId", json!("")),
+        (
+            "overlong correlation",
+            "/correlationId",
+            json!("c".repeat(129)),
+        ),
+        (
+            "invalid capability token",
+            "/capability",
+            json!("Bad-Token"),
+        ),
+        (
+            "uppercase payload hash",
+            "/payloadHash",
+            json!("A".repeat(64)),
+        ),
+        ("short mac", "/mac", json!("00".repeat(31))),
+    ] {
+        let mut invalid = valid_frame.clone();
+        *invalid
+            .pointer_mut(pointer)
+            .ok_or_else(|| format!("missing planted frame pointer {pointer}"))? = replacement;
+        invalid_frames.push((label, invalid));
+    }
+    for (label, invalid) in invalid_frames {
+        let bytes = serde_json::to_vec(&invalid).map_err(|error| error.to_string())?;
+        if decode_frame(&bytes).is_ok() {
+            return Err(format!(
+                "schema-forbidden frame near-miss reached session use: {label}"
+            ));
+        }
+    }
+
+    let invalid_draft = FrameDraft {
+        direction: SessionDirection::InitiatorToResponder,
+        counter: 1,
+        correlation_id: String::new(),
+        kind: FrameKind::Request,
+        capability: FrameCapability::Summary,
+        requested_budget_ms: 1,
+        payload: json!({}),
+    };
+    if sign_frame(&session_binding, &keys, invalid_draft).is_ok() {
+        return Err("schema-forbidden outbound frame with empty correlation was signed".to_owned());
+    }
+
+    let (_, open) = InitiatorHandshake::open(binding(), [0x31; 32], 7, observations())
+        .map_err(|error| error.to_string())?;
+    let valid_open = serde_json::to_value(open).map_err(|error| error.to_string())?;
+    for (label, pointer, replacement) in [
+        ("zero generation", "/pairKeyGeneration", json!(0)),
+        ("empty team", "/teamId", json!("")),
+        ("overlong session", "/sessionId", json!("s".repeat(257))),
+        (
+            "uppercase initiator nonce",
+            "/initiatorNonce",
+            json!("A".repeat(64)),
+        ),
+    ] {
+        let mut invalid = valid_open.clone();
+        *invalid
+            .pointer_mut(pointer)
+            .ok_or_else(|| format!("missing planted open pointer {pointer}"))? = replacement;
+        let bytes = serde_json::to_vec(&invalid).map_err(|error| error.to_string())?;
+        if decode_session_open(&bytes).is_ok() {
+            return Err(format!(
+                "schema-forbidden session_open near-miss decoded: {label}"
+            ));
+        }
+    }
+
+    let accepted = accepted_config(limits());
+    let pair_key = pair_key();
+    let (initiator, open) = InitiatorHandshake::open(binding(), [0x31; 32], 7, observations())
+        .map_err(|error| error.to_string())?;
+    let (responder, confirm) = responder_accept_open(
+        &open,
+        &accepted.expectations,
+        [0x42; 32],
+        accepted.observations,
+        &pair_key,
+    )
+    .map_err(|error| error.to_string())?;
+    let (finish, _) = initiator
+        .finish(&pair_key, &confirm)
+        .map_err(|error| error.to_string())?;
+    responder
+        .complete(&pair_key, &finish)
+        .map_err(|error| error.to_string())?;
+    for (label, mut invalid, pointer, replacement) in [
+        (
+            "short confirm MAC",
+            serde_json::to_value(&confirm).map_err(|error| error.to_string())?,
+            "/confirmMac",
+            json!("00".repeat(31)),
+        ),
+        (
+            "empty confirm session",
+            serde_json::to_value(&confirm).map_err(|error| error.to_string())?,
+            "/sessionId",
+            json!(""),
+        ),
+    ] {
+        *invalid
+            .pointer_mut(pointer)
+            .ok_or_else(|| format!("missing planted confirm pointer {pointer}"))? = replacement;
+        let bytes = serde_json::to_vec(&invalid).map_err(|error| error.to_string())?;
+        if decode_session_confirm(&bytes).is_ok() {
+            return Err(format!(
+                "schema-forbidden session_confirm near-miss decoded: {label}"
+            ));
+        }
+    }
+    for (label, pointer, replacement) in [
+        ("uppercase finish MAC", "/finishMac", json!("A".repeat(64))),
+        (
+            "overlong finish session",
+            "/sessionId",
+            json!("s".repeat(257)),
+        ),
+    ] {
+        let mut invalid = serde_json::to_value(&finish).map_err(|error| error.to_string())?;
+        *invalid
+            .pointer_mut(pointer)
+            .ok_or_else(|| format!("missing planted finish pointer {pointer}"))? = replacement;
+        let bytes = serde_json::to_vec(&invalid).map_err(|error| error.to_string())?;
+        if decode_session_finish(&bytes).is_ok() {
+            return Err(format!(
+                "schema-forbidden session_finish near-miss decoded: {label}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn transport_schema_bounds_equal_runtime_wire_bounds() -> TestResult {
+    let schemas = ee::mesh::transport_session::TRANSPORT_WIRE_SCHEMAS;
+    let frame: serde_json::Value = serde_json::from_str(
+        schemas
+            .iter()
+            .find(|schema| schema.id == ee::mesh::transport_session::TRANSPORT_FRAME_SCHEMA_V2)
+            .ok_or("frame schema is not embedded".to_owned())?
+            .document,
+    )
+    .map_err(|error| error.to_string())?;
+    for pointer in [
+        "/properties/sourceNodeId/maxLength",
+        "/properties/targetNodeId/maxLength",
+        "/properties/teamId/maxLength",
+        "/properties/sourceWorkspaceId/maxLength",
+        "/properties/targetWorkspaceId/maxLength",
+        "/properties/sessionId/maxLength",
+    ] {
+        if frame.pointer(pointer).and_then(serde_json::Value::as_u64)
+            != Some(ee::mesh::transport_session::MAX_SESSION_BINDING_FIELD_BYTES as u64)
+        {
+            return Err(format!("frame schema/runtime bound drifted at {pointer}"));
+        }
+    }
+    if frame
+        .pointer("/properties/correlationId/maxLength")
+        .and_then(serde_json::Value::as_u64)
+        != Some(ee::mesh::transport_session::MAX_CORRELATION_ID_BYTES as u64)
+        || frame
+            .pointer("/properties/counter/maximum")
+            .and_then(serde_json::Value::as_u64)
+            != Some(u64::MAX)
+        || frame
+            .pointer("/properties/requestedBudgetMs/maximum")
+            .and_then(serde_json::Value::as_u64)
+            != Some(u64::MAX)
+    {
+        return Err("frame schema numeric bounds drifted from runtime types".to_owned());
+    }
+    let open: serde_json::Value = serde_json::from_str(
+        schemas
+            .iter()
+            .find(|schema| schema.id == ee::mesh::transport_session::SESSION_OPEN_SCHEMA_V1)
+            .ok_or("session_open schema is not embedded".to_owned())?
+            .document,
+    )
+    .map_err(|error| error.to_string())?;
+    if open
+        .pointer("/properties/pairKeyGeneration/maximum")
+        .and_then(serde_json::Value::as_u64)
+        != Some(u64::MAX)
+    {
+        return Err("session_open generation bound drifted from u64 runtime".to_owned());
+    }
+    Ok(())
+}

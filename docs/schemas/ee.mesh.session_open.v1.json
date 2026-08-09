@@ -16,7 +16,7 @@
     "initiatorStableId": { "type": "string", "minLength": 1, "maxLength": 256 },
     "responderStableId": { "type": "string", "minLength": 1, "maxLength": 256 },
     "sessionId": { "type": "string", "minLength": 1, "maxLength": 256 },
-    "pairKeyGeneration": { "type": "integer", "minimum": 1 },
+    "pairKeyGeneration": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 },
     "initiatorNonce": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
   }
 }
