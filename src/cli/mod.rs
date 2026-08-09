@@ -1129,7 +1129,7 @@ pub enum CacheCommand {
 /// instead of fabricated signals.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct CacheHotsetManifestArgs {
-    /// Hard per-probe watchdog in milliseconds for the git subprocess probe.
+    /// Hard watchdog in milliseconds for the Git probe and Beads stream.
     #[arg(long = "probe-timeout-ms", value_name = "MS", default_value_t = 4_000)]
     pub probe_timeout_ms: u64,
 
@@ -17978,8 +17978,14 @@ where
 
 /// Bound on captured probe stdout via the source-run tail capture.
 const HOTSET_PROBE_TAIL_BYTES_MAX: usize = 262_144;
-/// Bound on the Beads JSONL export read; larger exports abstain.
-const HOTSET_BEADS_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Bound on bytes streamed from one Beads JSONL export. The collector never
+/// retains the whole export, but still refuses unbounded or concurrently grown
+/// inputs. This comfortably covers the production tracker (about 20.6 MiB).
+const HOTSET_BEADS_STREAM_BYTES_MAX: u64 = 256 * 1024 * 1024;
+/// Bound on one Beads JSONL row retained for parsing.
+const HOTSET_BEADS_LINE_BYTES_MAX: usize = 1024 * 1024;
+/// Fixed scratch buffer used while streaming Beads JSONL.
+const HOTSET_BEADS_READ_CHUNK_BYTES: usize = 64 * 1024;
 /// Bound on parsed git status lines.
 const HOTSET_GIT_MAX_LINES: usize = 400;
 /// Bound on reservation paths retained for overlap detection.
@@ -18027,6 +18033,209 @@ fn hotset_bounded_regular_file_read(path: &Path, max_bytes: u64) -> Result<Vec<u
         return Err("exceeds the bounded-read cap");
     }
     Ok(bytes)
+}
+
+#[derive(Debug)]
+enum HotsetBeadsStreamError {
+    Unavailable(String),
+    Stale(String),
+}
+
+/// Stream the Beads JSONL export without retaining the file or all parsed
+/// rows. The read is bounded by total bytes, row bytes, retained signals, and
+/// elapsed time. Pre/open/post metadata checks reject a tracker replaced or
+/// resized during collection, so a mixed snapshot never becomes authority.
+fn hotset_stream_beads_signals(
+    path: &Path,
+    max_signals: usize,
+    timeout_ms: u64,
+) -> Result<
+    (Vec<crate::cache::hotset::PrewarmSignal>, String),
+    HotsetBeadsStreamError,
+> {
+    use crate::cache::hotset::{PrewarmSignal, PrewarmSignalSource};
+
+    let unavailable = |message: &str| HotsetBeadsStreamError::Unavailable(message.to_owned());
+    let stale = |message: &str| HotsetBeadsStreamError::Stale(message.to_owned());
+    let before = fs::symlink_metadata(path)
+        .map_err(|_| unavailable("Beads JSONL export is missing or unreadable"))?;
+    if !before.file_type().is_file() {
+        return Err(unavailable(
+            "Beads JSONL export is not a regular file (symlinks are refused)",
+        ));
+    }
+    if before.len() > HOTSET_BEADS_STREAM_BYTES_MAX {
+        return Err(unavailable(
+            "Beads JSONL export exceeds the bounded streaming cap",
+        ));
+    }
+
+    let mut file = fs::File::open(path)
+        .map_err(|_| unavailable("Beads JSONL export is missing or unreadable"))?;
+    let opened = file
+        .metadata()
+        .map_err(|_| unavailable("Beads JSONL export metadata is unreadable"))?;
+    if !opened.file_type().is_file() {
+        return Err(unavailable("Beads JSONL export is not a regular file"));
+    }
+    if before.len() != opened.len() {
+        return Err(stale("Beads JSONL export changed before streaming began"));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (before.dev(), before.ino()) != (opened.dev(), opened.ino()) {
+            return Err(stale("Beads JSONL export changed before streaming began"));
+        }
+    }
+
+    let started = Instant::now();
+    let deadline = Duration::from_millis(timeout_ms.max(1));
+    let mut hasher = blake3::Hasher::new();
+    let mut chunk = [0_u8; HOTSET_BEADS_READ_CHUNK_BYTES];
+    let mut line = Vec::with_capacity(4096);
+    let mut total_bytes = 0_u64;
+    let mut signals = Vec::with_capacity(max_signals.min(128));
+
+    let mut retain_line = |line: &[u8]| -> Result<(), HotsetBeadsStreamError> {
+        let Some(start) = line.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+            return Ok(());
+        };
+        let Some(end) = line
+            .iter()
+            .rposition(|byte| !byte.is_ascii_whitespace())
+        else {
+            return Ok(());
+        };
+        let row = serde_json::from_slice::<serde_json::Value>(&line[start..=end]).map_err(|_| {
+            stale(
+                "Beads JSONL export has an unparseable row (concurrent flush suspected)",
+            )
+        })?;
+        let Some(status) = row.get("status").and_then(serde_json::Value::as_str) else {
+            return Ok(());
+        };
+        if !matches!(status, "open" | "in_progress")
+            || row.get("issue_type").and_then(serde_json::Value::as_str) == Some("epic")
+        {
+            return Ok(());
+        }
+        let Some(id) = row.get("id").and_then(serde_json::Value::as_str) else {
+            return Ok(());
+        };
+        let Some(title) = row.get("title").and_then(serde_json::Value::as_str) else {
+            return Ok(());
+        };
+        let priority = row
+            .get("priority")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(2);
+        let labels: Vec<String> = row
+            .get("labels")
+            .and_then(serde_json::Value::as_array)
+            .map(|labels| {
+                labels
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .take(6)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let signal_priority = 9_u8.saturating_sub(u8::try_from(priority.min(4)).unwrap_or(4));
+        signals.push(
+            PrewarmSignal::new(PrewarmSignalSource::Beads, id, title)
+                .with_labels(labels)
+                .with_priority(signal_priority),
+        );
+        signals.sort_by(|left, right| left.stable_id().cmp(right.stable_id()));
+        signals.truncate(max_signals);
+        Ok(())
+    };
+
+    loop {
+        if started.elapsed() >= deadline {
+            return Err(unavailable(
+                "Beads JSONL export exceeded the bounded streaming deadline",
+            ));
+        }
+        let read = file
+            .read(&mut chunk)
+            .map_err(|_| unavailable("Beads JSONL export became unreadable while streaming"))?;
+        if read == 0 {
+            break;
+        }
+        total_bytes = total_bytes.saturating_add(read as u64);
+        if total_bytes > HOTSET_BEADS_STREAM_BYTES_MAX {
+            return Err(unavailable(
+                "Beads JSONL export exceeds the bounded streaming cap",
+            ));
+        }
+        hasher.update(&chunk[..read]);
+
+        let mut offset = 0;
+        while offset < read {
+            let remaining = &chunk[offset..read];
+            if let Some(newline) = remaining.iter().position(|byte| *byte == b'\n') {
+                if line.len().saturating_add(newline) > HOTSET_BEADS_LINE_BYTES_MAX {
+                    return Err(unavailable(
+                        "Beads JSONL export contains a row exceeding the bounded line cap",
+                    ));
+                }
+                line.extend_from_slice(&remaining[..newline]);
+                retain_line(&line)?;
+                line.clear();
+                offset = offset.saturating_add(newline).saturating_add(1);
+            } else {
+                if line.len().saturating_add(remaining.len()) > HOTSET_BEADS_LINE_BYTES_MAX {
+                    return Err(unavailable(
+                        "Beads JSONL export contains a row exceeding the bounded line cap",
+                    ));
+                }
+                line.extend_from_slice(remaining);
+                break;
+            }
+        }
+    }
+    if !line.is_empty() {
+        retain_line(&line)?;
+    }
+    if started.elapsed() >= deadline {
+        return Err(unavailable(
+            "Beads JSONL export exceeded the bounded streaming deadline",
+        ));
+    }
+
+    let after_open = file
+        .metadata()
+        .map_err(|_| stale("Beads JSONL export changed during streaming"))?;
+    let after_path = fs::symlink_metadata(path)
+        .map_err(|_| stale("Beads JSONL export changed during streaming"))?;
+    if !after_open.file_type().is_file()
+        || !after_path.file_type().is_file()
+        || total_bytes != opened.len()
+        || after_open.len() != opened.len()
+        || after_path.len() != opened.len()
+        || before.modified().ok() != after_path.modified().ok()
+    {
+        return Err(stale("Beads JSONL export changed during streaming"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let identity = (opened.dev(), opened.ino());
+        if (after_open.dev(), after_open.ino()) != identity
+            || (after_path.dev(), after_path.ino()) != identity
+        {
+            return Err(stale("Beads JSONL export changed during streaming"));
+        }
+    }
+
+    Ok((
+        signals,
+        format!("blake3:{}", hasher.finalize().to_hex()),
+    ))
 }
 
 /// Options for [`collect_hotset_signals`]. Program overrides exist so
@@ -18094,7 +18303,8 @@ fn collect_hotset_signals(
     let (mail_signals, mail_record, reserved_paths) = collect_hotset_agent_mail_source(options);
     sources.push(mail_record);
 
-    let (authority_signals, authority_record) = collect_hotset_source_authority(options);
+    let (authority_signals, authority_record, authority_fail_closed) =
+        collect_hotset_source_authority(options);
     signals.extend(authority_signals);
     sources.push(authority_record);
 
@@ -18110,6 +18320,13 @@ fn collect_hotset_signals(
     if overlap.is_empty() {
         signals.extend(git_signals);
         signals.extend(mail_signals);
+    }
+    // Source authority is the admission gate, not merely another source of
+    // ranking weight. Missing, malformed, incomplete, or explicitly
+    // fail-closed authority suppresses every collected signal while retaining
+    // per-source records and hashed diagnostics for repair.
+    if authority_fail_closed {
+        signals.clear();
     }
     HotsetCollection::from_parts(signals, sources, overlap, retrieval_provenance)
 }
@@ -18250,7 +18467,7 @@ fn collect_hotset_beads_source(
 ) {
     use crate::cache::hotset::{
         HOTSET_BEADS_STALE_CODE, HOTSET_BEADS_UNAVAILABLE_CODE, HotsetSourceRecord,
-        HotsetSourceStatus, PrewarmSignal, PrewarmSignalSource,
+        HotsetSourceStatus,
     };
 
     let path = options.workspace_path.join(".beads").join("issues.jsonl");
@@ -18263,82 +18480,29 @@ fn collect_hotset_beads_source(
             "Run `br sync --flush-only` to export tracker state, then re-collect.",
         )
     };
-    let bytes = match hotset_bounded_regular_file_read(&path, HOTSET_BEADS_MAX_BYTES) {
-        Ok(bytes) => bytes,
-        Err(reason) => {
+    let (beads_signals, source_hash) = match hotset_stream_beads_signals(
+        &path,
+        options.max_signals_per_source,
+        options.probe_timeout_ms,
+    ) {
+        Ok(collected) => collected,
+        Err(HotsetBeadsStreamError::Unavailable(message)) => {
+            return (Vec::new(), unavailable(message));
+        }
+        Err(HotsetBeadsStreamError::Stale(message)) => {
             return (
                 Vec::new(),
-                unavailable(format!("Beads JSONL export is {reason}")),
+                HotsetSourceRecord::degraded(
+                    "beads_tracker",
+                    HotsetSourceStatus::Stale,
+                    HOTSET_BEADS_STALE_CODE,
+                    format!("{message}; abstaining from tracker signals"),
+                    "Retry after the tracker flush settles, e.g. \
+                     `scripts/br_retry.sh list --status open --json`.",
+                ),
             );
         }
     };
-    let source_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
-    let text = String::from_utf8_lossy(&bytes);
-    let mut rows = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<serde_json::Value>(trimmed) {
-            Ok(row) => rows.push(row),
-            Err(_) => {
-                // A malformed row usually means a concurrent flush was caught
-                // mid-write. Abstain entirely: a half-parsed frontier must not
-                // look authoritative.
-                return (
-                    Vec::new(),
-                    HotsetSourceRecord::degraded(
-                        "beads_tracker",
-                        HotsetSourceStatus::Stale,
-                        HOTSET_BEADS_STALE_CODE,
-                        "Beads JSONL export has an unparseable row (concurrent flush \
-                         suspected); abstaining from tracker signals",
-                        "Retry after the tracker flush settles, e.g. \
-                         `scripts/br_retry.sh list --status open --json`.",
-                    ),
-                );
-            }
-        }
-    }
-    let mut beads_signals: Vec<PrewarmSignal> = rows
-        .iter()
-        .filter_map(|row| {
-            let status = row.get("status").and_then(serde_json::Value::as_str)?;
-            if !matches!(status, "open" | "in_progress") {
-                return None;
-            }
-            if row.get("issue_type").and_then(serde_json::Value::as_str) == Some("epic") {
-                return None;
-            }
-            let id = row.get("id").and_then(serde_json::Value::as_str)?;
-            let title = row.get("title").and_then(serde_json::Value::as_str)?;
-            let priority = row
-                .get("priority")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(2);
-            let labels: Vec<String> = row
-                .get("labels")
-                .and_then(serde_json::Value::as_array)
-                .map(|labels| {
-                    labels
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .take(6)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let signal_priority = 9_u8.saturating_sub(u8::try_from(priority.min(4)).unwrap_or(4));
-            Some(
-                PrewarmSignal::new(PrewarmSignalSource::Beads, id, title)
-                    .with_labels(labels)
-                    .with_priority(signal_priority),
-            )
-        })
-        .collect();
-    beads_signals.sort_by(|left, right| left.stable_id().cmp(right.stable_id()));
-    beads_signals.truncate(options.max_signals_per_source);
     let record = HotsetSourceRecord::fresh("beads_tracker", beads_signals.len(), Some(source_hash));
     (beads_signals, record)
 }
@@ -18649,6 +18813,7 @@ fn collect_hotset_source_authority(
 ) -> (
     Vec<crate::cache::hotset::PrewarmSignal>,
     crate::cache::hotset::HotsetSourceRecord,
+    bool,
 ) {
     use crate::cache::hotset::{
         HOTSET_SOURCE_AUTHORITY_DEGRADED_CODE, HOTSET_SOURCE_AUTHORITY_MISSING_CODE,
@@ -18665,49 +18830,40 @@ fn collect_hotset_source_authority(
                 .join("source-authority-snapshot.json")
         });
     let missing = |message: String| {
-        HotsetSourceRecord::degraded(
-            "source_authority",
-            HotsetSourceStatus::Unavailable,
-            HOTSET_SOURCE_AUTHORITY_MISSING_CODE,
-            message,
-            "Capture the sourceAuthority block from `ee swarm work-packet --workspace . \
-             --include-rch --json` and pass it via --source-authority-snapshot.",
+        (
+            Vec::new(),
+            HotsetSourceRecord::degraded(
+                "source_authority",
+                HotsetSourceStatus::Unavailable,
+                HOTSET_SOURCE_AUTHORITY_MISSING_CODE,
+                message,
+                "Capture the sourceAuthority block from `ee swarm work-packet --workspace . \
+                 --include-rch --json` and pass it via --source-authority-snapshot.",
+            ),
+            true,
         )
     };
     let text = match hotset_bounded_regular_file_read(&path, HOTSET_SNAPSHOT_MAX_BYTES) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(reason) => {
-            return (
-                Vec::new(),
-                missing(format!("source-authority snapshot is {reason}")),
-            );
+            return missing(format!("source-authority snapshot is {reason}"));
         }
     };
     let Ok(snapshot) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return (
-            Vec::new(),
-            missing("source-authority snapshot was not parseable JSON".to_owned()),
-        );
+        return missing("source-authority snapshot was not parseable JSON".to_owned());
     };
     if snapshot.get("schema").and_then(serde_json::Value::as_str)
         != Some(crate::core::swarm_next_action::SOURCE_AUTHORITY_SNAPSHOT_SCHEMA_V1)
     {
-        return (
-            Vec::new(),
-            missing(
-                "source-authority snapshot schema is not ee.source_authority.snapshot.v1"
-                    .to_owned(),
-            ),
+        return missing(
+            "source-authority snapshot schema is not ee.source_authority.snapshot.v1".to_owned(),
         );
     }
     let Some(source_rows) = snapshot
         .get("sources")
         .and_then(serde_json::Value::as_array)
     else {
-        return (
-            Vec::new(),
-            missing("source-authority snapshot has no source vector".to_owned()),
-        );
+        return missing("source-authority snapshot has no source vector".to_owned());
     };
     if snapshot
         .pointer("/overall/failClosed")
@@ -18723,6 +18879,7 @@ fn collect_hotset_source_authority(
                 "source-authority snapshot explicitly fails closed; abstaining from authority signals",
                 "Repair the degraded source-authority inputs and regenerate `ee.source_authority.snapshot.v1`.",
             ),
+            true,
         );
     }
 
@@ -18743,39 +18900,27 @@ fn collect_hotset_source_authority(
     let mut observed_source_kinds = BTreeSet::new();
     for source in source_rows {
         let Some(source_kind) = source.get("sourceKind").and_then(serde_json::Value::as_str) else {
-            return (
-                Vec::new(),
-                missing(
-                    "source-authority snapshot contains a source without sourceKind".to_owned(),
-                ),
+            return missing(
+                "source-authority snapshot contains a source without sourceKind".to_owned(),
             );
         };
         if !SOURCE_KINDS.contains(&source_kind) || !observed_source_kinds.insert(source_kind) {
-            return (
-                Vec::new(),
-                missing(
-                    "source-authority snapshot has unknown or duplicate source kinds".to_owned(),
-                ),
+            return missing(
+                "source-authority snapshot has unknown or duplicate source kinds".to_owned(),
             );
         }
     }
     if observed_source_kinds.len() != SOURCE_KINDS.len() {
-        return (
-            Vec::new(),
-            missing(
-                "source-authority snapshot does not contain the complete source vector".to_owned(),
-            ),
+        return missing(
+            "source-authority snapshot does not contain the complete source vector".to_owned(),
         );
     }
 
     let mut authority_signals = Vec::new();
     for source in source_rows.iter().take(options.max_signals_per_source) {
         let Some(source_kind) = source.get("sourceKind").and_then(serde_json::Value::as_str) else {
-            return (
-                Vec::new(),
-                missing(
-                    "source-authority snapshot contains a source without sourceKind".to_owned(),
-                ),
+            return missing(
+                "source-authority snapshot contains a source without sourceKind".to_owned(),
             );
         };
         if source.get("state").and_then(serde_json::Value::as_str) != Some("ready")
@@ -18800,7 +18945,7 @@ fn collect_hotset_source_authority(
         authority_signals.len(),
         Some(format!("blake3:{}", blake3::hash(text.as_bytes()).to_hex())),
     );
-    (authority_signals, record)
+    (authority_signals, record, false)
 }
 
 /// Bounded read-only collector for recent pack and search provenance in the
@@ -75133,6 +75278,77 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn write_over_8_mib_hotset_tracker(path: &Path) {
+        let mut file = fs::File::create(path).expect("create large Beads fixture");
+        let filler = format!(
+            "{{\"id\":\"bd-closed-padding\",\"title\":\"closed padding\",\"status\":\"closed\",\"issue_type\":\"task\",\"padding\":\"{}\"}}\n",
+            "x".repeat(896)
+        );
+        let target_bytes = 8 * 1024 * 1024 + 1;
+        let mut written = 0_usize;
+        while written <= target_bytes {
+            file.write_all(filler.as_bytes())
+                .expect("write large Beads filler row");
+            written = written.saturating_add(filler.len());
+        }
+        for index in 0..200 {
+            writeln!(
+                file,
+                "{{\"id\":\"bd-open-{index:03}\",\"title\":\"large tracker candidate {index:03}\",\"status\":\"open\",\"issue_type\":\"task\",\"priority\":1}}"
+            )
+            .expect("write large Beads candidate row");
+        }
+        file.flush().expect("flush large Beads fixture");
+    }
+
+    #[cfg(unix)]
+    fn invoke_hotset_manifest_public(
+        options: &HotsetCollectOptions,
+        source_authority_override: Option<&Path>,
+    ) -> (ProcessExitCode, String, String) {
+        let mut argv = vec![
+            OsString::from("ee"),
+            OsString::from("--json"),
+            OsString::from("--workspace"),
+            options.workspace_path.as_os_str().to_owned(),
+            OsString::from("cache"),
+            OsString::from("hotset-manifest"),
+            OsString::from("--probe-timeout-ms"),
+            OsString::from("60000"),
+            OsString::from("--bv-timeout-ms"),
+            OsString::from("60000"),
+            OsString::from("--max-signals-per-source"),
+            options.max_signals_per_source.to_string().into(),
+            OsString::from("--git-program"),
+            options
+                .git_program
+                .as_ref()
+                .expect("healthy fixture git stub")
+                .as_os_str()
+                .to_owned(),
+            OsString::from("--bv-program"),
+            options
+                .bv_program
+                .as_ref()
+                .expect("healthy fixture bv stub")
+                .as_os_str()
+                .to_owned(),
+        ];
+        if let Some(path) = source_authority_override {
+            argv.push(OsString::from("--source-authority-snapshot"));
+            argv.push(path.as_os_str().to_owned());
+        }
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run(argv, &mut stdout, &mut stderr);
+        (
+            exit,
+            String::from_utf8_lossy(&stdout).into_owned(),
+            String::from_utf8_lossy(&stderr).into_owned(),
+        )
+    }
+
+    #[cfg(unix)]
     #[test]
     fn hotset_bounded_reader_refuses_symlinks_and_caps_actual_bytes() {
         use std::os::unix::fs::symlink;
@@ -75151,6 +75367,134 @@ mod tests {
             hotset_bounded_regular_file_read(&linked, 32),
             Err("not a regular file (symlinks are refused)")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hotset_beads_stream_handles_over_8_mib_with_bounded_retention() {
+        use crate::cache::hotset::{HotsetSourceStatus, PrewarmSignalSource};
+
+        let dir = hotset_collect_workspace("large-beads-stream");
+        let mut options = healthy_hotset_collect_options(&dir);
+        options.probe_timeout_ms = 60_000;
+        options.max_signals_per_source = 32;
+        let tracker = dir.path().join(".beads").join("issues.jsonl");
+        write_over_8_mib_hotset_tracker(&tracker);
+        assert!(
+            fs::metadata(&tracker)
+                .expect("large tracker metadata")
+                .len()
+                > 8 * 1024 * 1024,
+            "fixture must prove the former whole-file ceiling"
+        );
+
+        let collection = collect_hotset_signals(&options);
+        let beads = collection
+            .sources()
+            .iter()
+            .find(|record| record.source() == "beads_tracker")
+            .expect("beads record");
+        assert_eq!(beads.status(), HotsetSourceStatus::Fresh);
+        assert_eq!(beads.signal_count(), options.max_signals_per_source);
+        let bead_ids: Vec<&str> = collection
+            .signals()
+            .iter()
+            .filter(|signal| signal.source() == PrewarmSignalSource::Beads)
+            .map(crate::cache::hotset::PrewarmSignal::stable_id)
+            .collect();
+        assert_eq!(bead_ids.len(), options.max_signals_per_source);
+        assert_eq!(bead_ids.first().copied(), Some("bd-open-000"));
+        assert_eq!(bead_ids.last().copied(), Some("bd-open-031"));
+        assert!(!bead_ids.contains(&"bd-open-199"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hotset_beads_stream_oversized_row_abstains_without_prefix_leak() {
+        use crate::cache::hotset::{HOTSET_BEADS_UNAVAILABLE_CODE, PrewarmSignalSource};
+
+        let dir = hotset_collect_workspace("oversized-beads-row");
+        let mut options = healthy_hotset_collect_options(&dir);
+        options.probe_timeout_ms = 60_000;
+        let tracker = dir.path().join(".beads").join("issues.jsonl");
+        let mut file = fs::File::create(&tracker).expect("create oversized-line fixture");
+        writeln!(
+            file,
+            "{{\"id\":\"bd-prefix\",\"title\":\"must not leak\",\"status\":\"open\",\"issue_type\":\"task\"}}"
+        )
+        .expect("write parseable prefix");
+        write!(
+            file,
+            "{{\"id\":\"bd-huge\",\"padding\":\"{}\"}}",
+            "x".repeat(super::HOTSET_BEADS_LINE_BYTES_MAX + 1)
+        )
+        .expect("write oversized row");
+        file.flush().expect("flush oversized-line fixture");
+
+        let collection = collect_hotset_signals(&options);
+        assert!(
+            hotset_degraded_codes(&collection).contains(&HOTSET_BEADS_UNAVAILABLE_CODE)
+        );
+        assert!(
+            !collection
+                .signals()
+                .iter()
+                .any(|signal| signal.source() == PrewarmSignalSource::Beads),
+            "an oversized later row must suppress the already parsed prefix"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hotset_public_cli_collects_over_8_mib_tracker() {
+        let dir = hotset_collect_workspace("public-large-beads");
+        let mut options = healthy_hotset_collect_options(&dir);
+        options.max_signals_per_source = 32;
+        write_over_8_mib_hotset_tracker(&dir.path().join(".beads").join("issues.jsonl"));
+
+        let (exit, stdout, stderr) = invoke_hotset_manifest_public(&options, None);
+        assert_eq!(exit, ProcessExitCode::Success, "stderr: {stderr}");
+        let envelope: serde_json::Value =
+            serde_json::from_str(&stdout).expect("public hotset CLI emits JSON");
+        assert_eq!(envelope["schema"], crate::models::RESPONSE_SCHEMA_V2);
+        assert_eq!(
+            envelope["data"]["schema"],
+            crate::models::CACHE_HOTSET_COLLECT_SCHEMA_V1
+        );
+        let beads = envelope["data"]["sources"]
+            .as_array()
+            .expect("source array")
+            .iter()
+            .find(|source| source["source"] == "beads_tracker")
+            .expect("beads source");
+        assert_eq!(beads["status"], "fresh");
+        assert_eq!(beads["signalCount"], 32);
+        assert!(envelope["data"]["plan"]["candidateCount"] != 0);
+        assert!(!stdout.contains("large tracker candidate"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hotset_public_cli_missing_authority_suppresses_all_candidates() {
+        use crate::cache::hotset::HOTSET_SOURCE_AUTHORITY_MISSING_CODE;
+
+        let dir = hotset_collect_workspace("public-missing-authority");
+        let options = healthy_hotset_collect_options(&dir);
+        let missing = dir.path().join("never-created-authority.json");
+
+        let (exit, stdout, stderr) = invoke_hotset_manifest_public(&options, Some(&missing));
+        assert_eq!(exit, ProcessExitCode::Success, "stderr: {stderr}");
+        let envelope: serde_json::Value =
+            serde_json::from_str(&stdout).expect("public hotset CLI emits JSON");
+        assert_eq!(envelope["data"]["plan"]["inputSignalCount"], 0);
+        assert_eq!(envelope["data"]["plan"]["candidateCount"], 0);
+        assert!(envelope["degraded"].as_array().is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry["code"] == HOTSET_SOURCE_AUTHORITY_MISSING_CODE)
+        }));
+        assert!(!stdout.contains("collector alpha work"));
+        assert!(!stdout.contains("docs/guide.md"));
     }
 
     #[test]
@@ -75337,6 +75681,17 @@ mod tests {
                 .any(|signal| signal.source() == PrewarmSignalSource::VerificationBroker),
             "fail-closed source authority must contribute zero authority signals"
         );
+        assert!(
+            collection.signals().is_empty(),
+            "fail-closed authority must suppress Beads, BV, Mail, Git, retrieval, and broker signals"
+        );
+        let manifest = collection.manifest_json(
+            0,
+            crate::cache::hotset::HotsetBudget::new(64, 262_144),
+            16,
+        );
+        assert_eq!(manifest["plan"]["inputSignalCount"], 0);
+        assert_eq!(manifest["plan"]["candidateCount"], 0);
     }
 
     #[cfg(unix)]
@@ -75371,6 +75726,10 @@ mod tests {
                 .iter()
                 .any(|signal| signal.source() == PrewarmSignalSource::VerificationBroker),
             "an incomplete authority vector must contribute zero authority signals"
+        );
+        assert!(
+            collection.signals().is_empty(),
+            "an unavailable authority vector must suppress all source signals"
         );
     }
 
@@ -75648,11 +76007,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn hotset_collector_missing_optional_sources_degrade_without_fabrication() {
+    fn hotset_collector_missing_authority_suppresses_other_source_signals() {
         use crate::cache::hotset::{
             HOTSET_AGENT_MAIL_UNAVAILABLE_CODE, HOTSET_GIT_UNAVAILABLE_CODE,
             HOTSET_RETRIEVAL_PROVENANCE_UNAVAILABLE_CODE, HOTSET_SOURCE_AUTHORITY_MISSING_CODE,
-            PrewarmSignalSource,
         };
 
         let dir = hotset_collect_workspace("missing");
@@ -75673,14 +76031,11 @@ mod tests {
         assert!(codes.contains(&HOTSET_AGENT_MAIL_UNAVAILABLE_CODE));
         assert!(codes.contains(&HOTSET_SOURCE_AUTHORITY_MISSING_CODE));
         assert!(codes.contains(&HOTSET_RETRIEVAL_PROVENANCE_UNAVAILABLE_CODE));
-        // Beads still collects: one signal from the single open row.
-        assert_eq!(
-            collection
-                .signals()
-                .iter()
-                .filter(|signal| signal.source() == PrewarmSignalSource::Beads)
-                .count(),
-            1
+        // Planted negative: even a locally parseable Beads row cannot bypass
+        // the missing source-authority admission gate.
+        assert!(
+            collection.signals().is_empty(),
+            "missing authority must suppress every otherwise usable source signal"
         );
     }
 

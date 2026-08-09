@@ -11,17 +11,17 @@
   "severity": "low",
   "repair_present": true,
   "trigger": {
-    "description": "Recent pack/search provenance has no bounded in-process reader in the current collector slice; the manifest discloses the abstention.",
+    "description": "The selected workspace database is missing or unreadable, so the bounded in-process collector abstains from recent pack/search provenance.",
     "setup_commands": [
-      "ee cache hotset-manifest --json"
+      "mkdir -p <uninitialized-workspace>"
     ],
-    "invocation": "ee cache hotset-manifest --workspace . --json"
+    "invocation": "ee cache hotset-manifest --workspace <uninitialized-workspace> --json"
   },
   "expected_emission": {
     "code": "hotset_retrieval_provenance_unavailable",
     "severity": "low",
     "message_contains": [
-      "no bounded in-process reader"
+      "workspace database is missing or unreadable"
     ]
   }
 }
