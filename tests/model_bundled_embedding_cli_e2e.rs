@@ -2,9 +2,17 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+#[cfg(unix)]
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+#[cfg(unix)]
+use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
+use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ee::core::model::{BUNDLED_EMBEDDING_DIMENSION, BUNDLED_EMBEDDING_MODEL_ID};
@@ -16,6 +24,105 @@ use serde_json::{Map, Value, json};
 type TestResult<T = ()> = Result<T, String>;
 
 static WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(unix)]
+struct NetworkTripwire {
+    proxy_url: String,
+    connection_count: Arc<AtomicUsize>,
+    accept_failed: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl NetworkTripwire {
+    fn start() -> TestResult<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .map_err(|error| format!("bind network tripwire: {error}"))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| format!("inspect network tripwire address: {error}"))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| format!("set network tripwire nonblocking: {error}"))?;
+
+        let connection_count = Arc::new(AtomicUsize::new(0));
+        let accept_failed = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_connections = Arc::clone(&connection_count);
+        let thread_failed = Arc::clone(&accept_failed);
+        let thread_stop = Arc::clone(&stop);
+        let thread = thread::Builder::new()
+            .name("ee-embedding-network-tripwire".to_string())
+            .spawn(move || {
+                while !thread_stop.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            thread_connections.fetch_add(1, Ordering::AcqRel);
+                            drop(stream);
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        Err(_) => {
+                            thread_failed.store(true, Ordering::Release);
+                            break;
+                        }
+                    }
+                }
+            })
+            .map_err(|error| format!("spawn network tripwire: {error}"))?;
+
+        Ok(Self {
+            proxy_url: format!("http://{address}"),
+            connection_count,
+            accept_failed,
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    fn proxy_env(&self) -> Vec<(String, String)> {
+        let mut env = [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ]
+        .into_iter()
+        .map(|name| (name.to_string(), self.proxy_url.clone()))
+        .collect::<Vec<_>>();
+        env.push(("NO_PROXY".to_string(), String::new()));
+        env.push(("no_proxy".to_string(), String::new()));
+        env
+    }
+
+    fn assert_unused(&self) -> TestResult {
+        thread::sleep(std::time::Duration::from_millis(20));
+        if self.accept_failed.load(Ordering::Acquire) {
+            return Err("network tripwire accept loop failed".to_string());
+        }
+        let connection_count = self.connection_count.load(Ordering::Acquire);
+        if connection_count == 0 {
+            return Ok(());
+        }
+        Err(format!(
+            "registered local-model commands attempted {connection_count} proxied network connection(s)"
+        ))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for NetworkTripwire {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 
 struct E2eWorkspace {
     path: PathBuf,
@@ -366,12 +473,14 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
             "registry fixture parent contains unexpected entries: {registered_entries_before:?}"
         ));
     }
+    let network_tripwire = NetworkTripwire::start()?;
+    let network_env = network_tripwire.proxy_env();
 
     let init = run_ee_with_env(
         &workspace,
         "registered_init",
         &["init", "--workspace", workspace.workspace_arg()?, "--json"],
-        &[],
+        &network_env,
     )?;
     ensure_success(&init, "registered ee init")?;
 
@@ -391,7 +500,7 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
             "--no-propose-candidates",
             "--json",
         ],
-        &[],
+        &network_env,
     )?;
     ensure_success(&remember, "registered ee remember")?;
     let remember_json = stdout_json(&remember, "registered ee remember")?;
@@ -413,7 +522,7 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
             workspace.workspace_arg()?,
             "--json",
         ],
-        &[],
+        &network_env,
     )?;
     ensure_success(&reembed, "registered ee index reembed")?;
     let reembed_json = stdout_json(&reembed, "registered ee index reembed")?;
@@ -488,7 +597,7 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
             "0",
             "--json",
         ],
-        &[],
+        &network_env,
     )?;
     ensure_success(&search, "registered ee search")?;
     ensure_response_embed_backend(&search, "registered ee search", "neural_local")?;
@@ -562,7 +671,7 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
             "800",
             "--json",
         ],
-        &[],
+        &network_env,
     )?;
     ensure_success(&pack, "registered ee pack")?;
     ensure_response_embed_backend(&pack, "registered ee pack", "neural_local")?;
@@ -615,7 +724,7 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
             "--fast",
             "--json",
         ],
-        &[],
+        &network_env,
     )?;
     ensure_success(&orient, "registered ee orient")?;
     ensure_response_embed_backend(&orient, "registered ee orient", "neural_local")?;
@@ -623,7 +732,8 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
     // Hostile ambient remote-provider intent is deliberate: download-off must
     // select the verified local registry artifact directly, without invoking
     // general auto-detection, a remote provider, or the ee downloader.
-    let download_off_env = vec![
+    let mut download_off_env = network_env.clone();
+    download_off_env.extend([
         ("EE_EMBED_DOWNLOAD".to_string(), "off".to_string()),
         (
             "FRANKENSEARCH_API_PROVIDER".to_string(),
@@ -637,7 +747,7 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
             "OPENAI_API_KEY".to_string(),
             "network-tripwire-not-a-real-key".to_string(),
         ),
-    ];
+    ]);
     let search_download_off = run_ee_with_env(
         &workspace,
         "registered_search_download_off",
@@ -723,6 +833,7 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
             "registered local-model commands created downloader staging artifacts: before={registered_entries_before:?} after={registered_entries_after:?}"
         ));
     }
+    network_tripwire.assert_unused()?;
     Ok(())
 }
 
@@ -805,7 +916,9 @@ fn run_ee_with_env(
         .env_remove("ALL_PROXY")
         .env_remove("http_proxy")
         .env_remove("https_proxy")
-        .env_remove("all_proxy");
+        .env_remove("all_proxy")
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy");
     for (name, value) in env {
         command.env(name, value);
     }
