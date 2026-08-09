@@ -361,8 +361,12 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
         .prefix("ee-lpb5-full-")
         .tempdir()
         .map_err(|error| format!("create temp dir: {error}"))?;
+    let staging_root = staging
+        .path()
+        .canonicalize()
+        .map_err(|error| format!("canonicalize fixture root: {error}"))?;
 
-    let workspace = staging.path().join("ws");
+    let workspace = staging_root.join("ws");
     std::fs::create_dir_all(&workspace).map_err(|error| format!("mkdir ws: {error}"))?;
     let workspace = workspace
         .canonicalize()
@@ -371,7 +375,7 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
 
     run_ee_json(&["--workspace", &ws_arg, "--json", "init"])?;
 
-    let fake_bin_dir = staging.path().join("bin");
+    let fake_bin_dir = staging_root.join("bin");
     fs::create_dir_all(&fake_bin_dir).map_err(|error| format!("mkdir fake bin: {error}"))?;
     set_executable_dir_permissions(&fake_bin_dir)?;
     let cass_binary = fake_bin_dir.join("cass");
@@ -382,7 +386,7 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
         r#"{"role":"assistant","content":"clippy warning release failed until the workspace ran cargo test before tagging"}"#,
     )
     .map_err(|error| format!("write fake CASS session: {error}"))?;
-    let view_path = staging.path().join("cass-view.json");
+    let view_path = staging_root.join("cass-view.json");
     fs::write(
         &view_path,
         serde_json::json!({
