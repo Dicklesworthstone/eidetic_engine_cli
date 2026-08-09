@@ -1179,8 +1179,9 @@ pub(crate) fn admit_recent_context_memories(
         .map_err(|error| ContextPackError::Storage(error.to_string()))?;
     let mut degraded = Vec::new();
     let reference_time = options.as_of.unwrap_or_else(Utc::now);
-    let reference_time_text =
-        reference_time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    // Match the RFC 3339 representation used when memory rows are inserted so
+    // SQLite's deterministic text ordering compares like-formatted instants.
+    let reference_time_text = reference_time.to_rfc3339();
     let candidate_cap = limit.saturating_mul(4).max(limit);
     let mut memories = BTreeMap::new();
     for workspace_id in context_workspace_ids(&connection, &options.workspace_path, &mut degraded) {
@@ -1207,7 +1208,10 @@ pub(crate) fn admit_recent_context_memories(
             .then_with(|| left.id.cmp(&right.id))
     });
 
-    let ordered_ids = ordered.iter().map(|memory| memory.id.as_str()).collect::<Vec<_>>();
+    let ordered_ids = ordered
+        .iter()
+        .map(|memory| memory.id.as_str())
+        .collect::<Vec<_>>();
     let tags_by_memory = connection
         .get_memory_tags_batch(&ordered_ids)
         .map_err(|error| ContextPackError::Storage(error.to_string()))?;

@@ -485,9 +485,26 @@ run_criterion_bench() {
             append_result "ee_$bench" "measured" "$p50_ms" null null null null
         fi
         echo "[+] $bench: p50=${p50_ms}ms" >&2
+        if [ "$bench" = "context" ]; then
+            orient_fast_p99_ms=$(printf '%s\n' "$output" \
+                | sed -n 's/^ee_orient_fast_10k_sampled_p99_ms=\([0-9][0-9.]*\)$/\1/p' \
+                | tail -n 1)
+            if [ -n "$orient_fast_p99_ms" ]; then
+                append_result "ee_orient_fast_content" "measured" null null \
+                    "$orient_fast_p99_ms" "$orient_fast_p99_ms" null "within_budget"
+                echo "[+] orient_fast_content: p99=${orient_fast_p99_ms}ms (<1000ms hard gate)" >&2
+            else
+                append_result "ee_orient_fast_content" "failed" null null null null null
+                echo "[-] context benchmark did not emit the orient fast 10k p99 gate" >&2
+                FAILED=true
+            fi
+        fi
     else
         printf '%s\n' "$output" >&2
         append_result "ee_$bench" "failed" null null null null null
+        if [ "$bench" = "context" ]; then
+            append_result "ee_orient_fast_content" "failed" null null null null null
+        fi
         echo "[-] $bench: FAILED" >&2
         FAILED=true
     fi
@@ -1243,11 +1260,10 @@ if [ "$CHECK_REGRESSION" = "true" ]; then
             check_regression_for_op "ee_${bench}"
         done
 
-        # Extra non-cargo-bench operations that emit under custom keys
-        # (l2_warm_bench, arena_mode_bench). Without this list, their results
-        # land in the perf JSON with regression_status="not_checked" and never
-        # gate the build — review-R5 / bd-3925e.
-        EXTRA_REGRESSION_OPERATIONS="ee_context_pack_l2_warm ee_context_arena_workspace_reuse"
+        # Extra operations emitted under custom keys. Without this list, their
+        # results land in the perf JSON with regression_status="not_checked"
+        # and never participate in baseline comparison.
+        EXTRA_REGRESSION_OPERATIONS="ee_context_pack_l2_warm ee_context_arena_workspace_reuse ee_orient_fast_content"
         for op in $EXTRA_REGRESSION_OPERATIONS; do
             check_regression_for_op "$op"
         done

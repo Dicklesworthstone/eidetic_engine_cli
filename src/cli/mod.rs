@@ -67759,9 +67759,115 @@ mod tests {
                 allow_secret_mention: false,
             })
             .map_err(|error| format!("remember orient CLI fixture: {error:?}"))?;
+        let tombstoned =
+            crate::core::memory::remember_memory(&crate::core::memory::RememberMemoryOptions {
+                workspace_path: workspace,
+                database_path: None,
+                content: "Verify release checksums tombstoned CLI negative.",
+                workflow_id: None,
+                level: "procedural",
+                kind: "rule",
+                tags: Some("orient-cli-negative,tombstoned"),
+                confidence: 0.9,
+                source: Some("file://tombstoned-orient-cli.md#L1"),
+                valid_from: None,
+                valid_to: None,
+                dry_run: false,
+                auto_link: false,
+                propose_candidates: false,
+                allow_secret_mention: false,
+            })
+            .map_err(|error| format!("remember tombstoned CLI fixture: {error:?}"))?;
+        let future =
+            crate::core::memory::remember_memory(&crate::core::memory::RememberMemoryOptions {
+                workspace_path: workspace,
+                database_path: None,
+                content: "Verify release checksums future CLI negative.",
+                workflow_id: None,
+                level: "procedural",
+                kind: "rule",
+                tags: Some("orient-cli-negative,future"),
+                confidence: 0.9,
+                source: Some("file://future-orient-cli.md#L1"),
+                valid_from: Some("2099-01-01T00:00:00Z"),
+                valid_to: None,
+                dry_run: false,
+                auto_link: false,
+                propose_candidates: false,
+                allow_secret_mention: false,
+            })
+            .map_err(|error| format!("remember future CLI fixture: {error:?}"))?;
+
+        let database_path = workspace.join(".ee").join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| format!("open orient CLI fixture database: {error}"))?;
+        connection
+            .tombstone_memory(&tombstoned.memory_id.to_string())
+            .map_err(|error| format!("tombstone orient CLI fixture: {error}"))?;
+        let active_workspace = connection
+            .get_memory(&remembered.memory_id.to_string())
+            .map_err(|error| format!("load orient CLI positive fixture: {error}"))?
+            .ok_or_else(|| "orient CLI positive fixture missing".to_owned())?
+            .workspace_id;
+        let secret_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x0e11)).to_string();
+        connection
+            .insert_memory(
+                &secret_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: active_workspace,
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Verify release checksums AWS_SECRET_ACCESS_KEY=orient_cli_never_emit"
+                        .to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.9,
+                    importance: 0.9,
+                    provenance_uri: Some("file://secret-orient-cli.md#L1".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["orient-cli-negative".to_owned(), "secret".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| format!("insert secret orient CLI fixture: {error}"))?;
+        let other_workspace_id =
+            crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_u128(0x0e12)).to_string();
+        connection
+            .insert_workspace(
+                &other_workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.join("other-orient-scope").display().to_string(),
+                    name: Some("other-orient-scope".to_owned()),
+                },
+            )
+            .map_err(|error| format!("insert out-of-scope orient CLI workspace: {error}"))?;
+        let out_of_scope_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x0e13)).to_string();
+        connection
+            .insert_memory(
+                &out_of_scope_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: other_workspace_id,
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Verify release checksums out-of-scope CLI negative.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.9,
+                    importance: 0.9,
+                    provenance_uri: Some("file://out-of-scope-orient-cli.md#L1".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["orient-cli-negative".to_owned(), "scope".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| format!("insert out-of-scope orient CLI fixture: {error}"))?;
         let rebuild = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
             workspace_path: workspace.to_path_buf(),
-            database_path: None,
+            database_path: Some(database_path),
             index_dir: None,
             dry_run: false,
         })
@@ -67797,13 +67903,23 @@ mod tests {
             &serde_json::json!("skipped"),
             "fast doctor component",
         )?;
-        ensure(
-            envelope["degraded"].as_array().is_some_and(|entries| {
+        let doctor_skip = envelope["degraded"]
+            .as_array()
+            .and_then(|entries| {
                 entries
                     .iter()
-                    .any(|entry| entry["code"] == serde_json::json!("orient_doctor_skipped"))
-            }),
-            "fast output retains orient_doctor_skipped",
+                    .find(|entry| entry["code"] == serde_json::json!("orient_doctor_skipped"))
+            })
+            .ok_or_else(|| "fast output must retain orient_doctor_skipped".to_owned())?;
+        ensure_equal(
+            &doctor_skip["severity"],
+            &serde_json::json!("info"),
+            "doctor-skip severity",
+        )?;
+        ensure_equal(
+            &doctor_skip["message"],
+            &serde_json::json!("Doctor triage was skipped because --fast was requested."),
+            "doctor-skip message",
         )?;
         ensure(
             !envelope["degraded"].as_array().is_some_and(|entries| {
@@ -67817,6 +67933,16 @@ mod tests {
             &envelope["data"]["fastContent"]["posture"],
             &serde_json::json!("ready"),
             "fast-content posture",
+        )?;
+        ensure_equal(
+            &envelope["data"]["fastContent"]["strategy"]["recent"],
+            &serde_json::json!("context_admitted_recency_v1"),
+            "fast recent strategy",
+        )?;
+        ensure_equal(
+            &envelope["data"]["fastContent"]["strategy"]["relevant"],
+            &serde_json::json!("context_pack_lexical_only_v1"),
+            "fast relevant strategy",
         )?;
         let memory_id = remembered.memory_id.to_string();
         for section in ["recent", "relevant"] {
@@ -67849,6 +67975,22 @@ mod tests {
                 &format!("fast {section} binds provenance"),
             )?;
         }
+        let forbidden_ids = [
+            tombstoned.memory_id.to_string(),
+            future.memory_id.to_string(),
+            secret_id,
+            out_of_scope_id,
+        ];
+        for forbidden_id in &forbidden_ids {
+            ensure(
+                !json_output.contains(forbidden_id),
+                &format!("JSON fast output leaked ineligible memory {forbidden_id}"),
+            )?;
+        }
+        ensure(
+            !json_output.contains("orient_cli_never_emit"),
+            "JSON fast output leaked secret-shaped memory content",
+        )?;
 
         let mut human_stdout = Vec::new();
         let mut human_stderr = Vec::new();
@@ -67871,11 +68013,34 @@ mod tests {
             "Task-relevant memories:",
             "Verify release checksums",
             "orient-cli",
+            "recent=context_admitted_recency_v1",
+            "relevant=context_pack_lexical_only_v1",
             "orient_doctor_skipped",
         ] {
             ensure(
                 human_output.contains(expected),
                 &format!("human fast output missing {expected:?}: {human_output}"),
+            )?;
+        }
+        ensure(
+            !human_output.contains("orient_pack_skipped"),
+            "human fast output must not claim content retrieval was skipped",
+        )?;
+        for forbidden_id in &forbidden_ids {
+            ensure(
+                !human_output.contains(forbidden_id),
+                &format!("human fast output leaked ineligible memory {forbidden_id}"),
+            )?;
+        }
+        for forbidden_content in [
+            "tombstoned CLI negative",
+            "future CLI negative",
+            "orient_cli_never_emit",
+            "out-of-scope CLI negative",
+        ] {
+            ensure(
+                !human_output.contains(forbidden_content),
+                &format!("human fast output leaked {forbidden_content:?}"),
             )?;
         }
         Ok(())

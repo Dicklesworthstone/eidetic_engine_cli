@@ -22,7 +22,7 @@
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ee::cache::pack_compression::{
@@ -48,7 +48,9 @@ use ee::db::{
     CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
     MemoryLinkRelation, MemoryLinkSource,
 };
-use ee::models::{MemoryId, MemoryScope, ProvenanceUri, RedactionLevel, UnitScore, WorkspaceId};
+use ee::models::{
+    MemoryId, MemoryScope, ProcessExitCode, ProvenanceUri, RedactionLevel, UnitScore, WorkspaceId,
+};
 use ee::pack::{
     ArenaMode, ContextPackProfile, PackArenaWorkspace, PackArenaWorkspaceKey, PackAssemblyOptions,
     PackCandidate, PackCandidateInput, PackProvenance, PackResourceProfile, PackSection,
@@ -103,6 +105,11 @@ const ARENA_MODE_EXPECTED_WORKSPACE_FRESH_ALLOCATIONS: u64 = 1;
 const PACK_DNA_ORCHESTRATION_SERIAL_TASK_COUNT: u64 = 1;
 const ZSTD_PACK_DICTIONARY_SAMPLE_COUNT: usize = 96;
 const TIERED_RECALL_EXPECTED_REQUIRED_COLD_MIN: u64 = 1;
+const ORIENT_FAST_BENCH_GROUP: &str = "ee_orient_fast_content";
+const ORIENT_FAST_BENCH_OPERATION: &str = "whole_command_10000_memories";
+const ORIENT_FAST_MEMORY_COUNT: usize = 10_000;
+const ORIENT_FAST_P99_SAMPLE_COUNT: usize = 30;
+const ORIENT_FAST_P99_BUDGET_MS: f64 = 1_000.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ResourceScale {
@@ -357,7 +364,10 @@ fn seed_resource_scale_database(temp_dir: &Path, memory_count: usize) -> PathBuf
             valid_from: None,
             valid_to: None,
         };
-        let memory_id = format!("mem_s4_resource_{index:06}");
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(
+            0x5_400_0000 + u128::try_from(index).expect("S4 memory index fits u128"),
+        ))
+        .to_string();
         connection
             .insert_memory(&memory_id, &input)
             .expect("insert S4 benchmark memory");
@@ -389,6 +399,102 @@ fn build_resource_scale_index(
         "S4 benchmark index should cover every seeded memory"
     );
     index_dir
+}
+
+fn invoke_orient_fast_whole_command(
+    workspace_path: &Path,
+) -> (Duration, ProcessExitCode, Vec<u8>, Vec<u8>) {
+    let workspace_arg = workspace_path.display().to_string();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let started = Instant::now();
+    let exit = ee::cli::run(
+        [
+            "ee",
+            "orient",
+            "S4 resource benchmark release testing performance",
+            "--workspace",
+            workspace_arg.as_str(),
+            "--fast",
+            "--json",
+            "--candidate-pool",
+            "100",
+            "--max-tokens",
+            "4000",
+        ],
+        &mut stdout,
+        &mut stderr,
+    );
+    (started.elapsed(), exit, stdout, stderr)
+}
+
+fn assert_orient_fast_whole_command_output(exit: ProcessExitCode, stdout: &[u8], stderr: &[u8]) {
+    assert_eq!(
+        exit,
+        ProcessExitCode::Success,
+        "whole ee orient --fast command failed: {}",
+        String::from_utf8_lossy(stderr)
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_slice(stdout).expect("whole ee orient --fast JSON output");
+    assert_eq!(
+        envelope.pointer("/data/fastContent/posture"),
+        Some(&serde_json::json!("ready")),
+        "10k fixture must produce useful fast content"
+    );
+    assert_eq!(
+        envelope.pointer("/data/fastContent/strategy/recent"),
+        Some(&serde_json::json!("context_admitted_recency_v1"))
+    );
+    assert_eq!(
+        envelope.pointer("/data/fastContent/strategy/relevant"),
+        Some(&serde_json::json!("context_pack_lexical_only_v1"))
+    );
+    for section in ["recent", "relevant"] {
+        let items = envelope
+            .pointer(&format!("/data/fastContent/{section}"))
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("10k fixture must populate fast {section}"));
+        assert!(
+            !items.is_empty(),
+            "10k fixture must populate fast {section}"
+        );
+        assert!(items.iter().all(|item| {
+            item["snippet"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+                && item["id"].as_str().is_some_and(|value| !value.is_empty())
+                && item["createdAt"]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty())
+                && item["tags"].as_array().is_some()
+                && item["provenance"]
+                    .as_array()
+                    .is_some_and(|value| !value.is_empty())
+        }));
+    }
+    let degraded = envelope["degraded"]
+        .as_array()
+        .expect("orient degraded array");
+    assert!(
+        degraded
+            .iter()
+            .any(|entry| entry["code"] == "orient_doctor_skipped"),
+        "fast benchmark must preserve the doctor-skip contract"
+    );
+    assert!(
+        degraded
+            .iter()
+            .all(|entry| entry["code"] != "orient_pack_skipped"),
+        "fast benchmark must exercise content retrieval, not claim it was skipped"
+    );
+}
+
+fn sampled_p99_ms(samples: &mut [Duration]) -> f64 {
+    assert!(!samples.is_empty(), "p99 requires at least one sample");
+    samples.sort_unstable();
+    let rank = samples.len().saturating_mul(99).div_ceil(100);
+    samples[rank.saturating_sub(1)].as_secs_f64() * 1_000.0
 }
 
 fn seed_pack_dna_orchestration_database(temp_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
@@ -1051,6 +1157,45 @@ fn bench_context_s4_resource_scales(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark the full public CLI dispatcher for `ee orient --fast` against an
+/// indexed 10k-memory store. The sampled p99 assertion is the release gate;
+/// Criterion remains useful for historical distribution/regression reporting.
+fn bench_orient_fast_whole_command(c: &mut Criterion) {
+    let temp_dir = TempDir::new().expect("orient fast 10k temp dir");
+    let workspace_path = seed_resource_scale_database(temp_dir.path(), ORIENT_FAST_MEMORY_COUNT);
+    let db_path = workspace_path.join(".ee").join("ee.db");
+    let _index_dir =
+        build_resource_scale_index(&workspace_path, &db_path, ORIENT_FAST_MEMORY_COUNT);
+
+    let (_, exit, stdout, stderr) = invoke_orient_fast_whole_command(&workspace_path);
+    assert_orient_fast_whole_command_output(exit, &stdout, &stderr);
+
+    let mut samples = Vec::with_capacity(ORIENT_FAST_P99_SAMPLE_COUNT);
+    for _ in 0..ORIENT_FAST_P99_SAMPLE_COUNT {
+        let (elapsed, exit, stdout, stderr) = invoke_orient_fast_whole_command(&workspace_path);
+        assert_orient_fast_whole_command_output(exit, &stdout, &stderr);
+        samples.push(elapsed);
+    }
+    let p99_ms = sampled_p99_ms(&mut samples);
+    eprintln!("ee_orient_fast_10k_sampled_p99_ms={p99_ms:.3}");
+    assert!(
+        p99_ms < ORIENT_FAST_P99_BUDGET_MS,
+        "whole-command ee orient --fast p99 {p99_ms:.3}ms must stay below \
+         {ORIENT_FAST_P99_BUDGET_MS:.3}ms over an indexed 10k-memory store"
+    );
+
+    let mut group = c.benchmark_group(ORIENT_FAST_BENCH_GROUP);
+    group.sample_size(10);
+    group.bench_function(ORIENT_FAST_BENCH_OPERATION, |b| {
+        b.iter(|| {
+            let (elapsed, exit, stdout, stderr) = invoke_orient_fast_whole_command(&workspace_path);
+            assert_eq!(exit, ProcessExitCode::Success);
+            black_box((elapsed, stdout, stderr))
+        });
+    });
+    group.finish();
+}
+
 /// Benchmark arena allocation modes on deterministic pack assembly fixtures.
 fn bench_context_arena_mode(c: &mut Criterion) {
     let mut group = c.benchmark_group(ARENA_MODE_BENCH_GROUP);
@@ -1392,6 +1537,7 @@ criterion_group!(
     bench_context,
     bench_context_memory_scales,
     bench_context_s4_resource_scales,
+    bench_orient_fast_whole_command,
     bench_context_arena_mode,
     bench_context_l2_warm_cache,
     bench_context_pack_dna_orchestration,
@@ -1411,20 +1557,22 @@ mod tests {
         BENCH_GROUP_NAME, BUDGET_P50_MS, BUDGET_P99_MS, L2_CONCURRENT_IDENTICAL_REQUESTS,
         L2_EXPECTED_FRESH_ASSEMBLIES, L2_EXPECTED_WARM_HITS, L2_WARM_BENCH_GROUP,
         L2_WARM_BENCH_OPERATION, L2_WARM_BUDGET_P50_MS, L2_WARM_BUDGET_P99_MS,
-        MEMORY_SCALES_BENCH_GROUP, PACK_DNA_ORCHESTRATION_BENCH_GROUP,
-        PACK_DNA_ORCHESTRATION_BUDGET_P50_MS, PACK_DNA_ORCHESTRATION_BUDGET_P99_MS,
-        PACK_DNA_ORCHESTRATION_OPERATION, PACK_DNA_ORCHESTRATION_SERIAL_TASK_COUNT,
-        REGRESSION_THRESHOLD, S4_NIGHTLY_SCALE, S4_RELEASE_CANDIDATE_SCALE, S4_RESOURCE_SCALES,
-        S4_RESOURCE_SCALES_BENCH_GROUP, S4_STRESS_SCALE, TIERED_RECALL_BENCH_GROUP,
-        TIERED_RECALL_BUDGET_P50_MS, TIERED_RECALL_BUDGET_P99_MS, TIERED_RECALL_CANDIDATE_POOL,
+        MEMORY_SCALES_BENCH_GROUP, ORIENT_FAST_BENCH_GROUP, ORIENT_FAST_BENCH_OPERATION,
+        ORIENT_FAST_MEMORY_COUNT, ORIENT_FAST_P99_BUDGET_MS, ORIENT_FAST_P99_SAMPLE_COUNT,
+        PACK_DNA_ORCHESTRATION_BENCH_GROUP, PACK_DNA_ORCHESTRATION_BUDGET_P50_MS,
+        PACK_DNA_ORCHESTRATION_BUDGET_P99_MS, PACK_DNA_ORCHESTRATION_OPERATION,
+        PACK_DNA_ORCHESTRATION_SERIAL_TASK_COUNT, REGRESSION_THRESHOLD, S4_NIGHTLY_SCALE,
+        S4_RELEASE_CANDIDATE_SCALE, S4_RESOURCE_SCALES, S4_RESOURCE_SCALES_BENCH_GROUP,
+        S4_STRESS_SCALE, TIERED_RECALL_BENCH_GROUP, TIERED_RECALL_BUDGET_P50_MS,
+        TIERED_RECALL_BUDGET_P99_MS, TIERED_RECALL_CANDIDATE_POOL,
         TIERED_RECALL_EXPECTED_REQUIRED_COLD_MIN, TIERED_RECALL_MEMORY_COUNT,
         TIERED_RECALL_OPERATION, TIERED_RECALL_QUERY, ZSTD_PACK_DICTIONARY_BENCH_GROUP,
         ZSTD_PACK_DICTIONARY_BUDGET_P50_MS, ZSTD_PACK_DICTIONARY_BUDGET_P99_MS,
         ZSTD_PACK_DICTIONARY_OPERATION, ZSTD_PACK_DICTIONARY_SAMPLE_COUNT,
         arena_fixture_coverage_fill, arena_fixture_provenance_heavy, l2_warm_pack_json,
-        pack_dna_orchestration_options, s4_resource_scales_for_profile, seed_database,
-        seed_l2_warm_cache, seed_pack_dna_orchestration_database, seed_zstd_pack_dictionary_cache,
-        zstd_pack_dictionary_pack_json,
+        pack_dna_orchestration_options, s4_resource_scales_for_profile, sampled_p99_ms,
+        seed_database, seed_l2_warm_cache, seed_pack_dna_orchestration_database,
+        seed_zstd_pack_dictionary_cache, zstd_pack_dictionary_pack_json,
     };
 
     #[test]
@@ -1450,6 +1598,22 @@ mod tests {
             (BUDGET_P99_MS - 240.0).abs() < f64::EPSILON,
             "p99 budget matches plan §28"
         );
+    }
+
+    #[test]
+    fn orient_fast_whole_command_benchmark_contract_is_release_gated() {
+        assert_eq!(ORIENT_FAST_BENCH_GROUP, "ee_orient_fast_content");
+        assert_eq!(ORIENT_FAST_BENCH_OPERATION, "whole_command_10000_memories");
+        assert_eq!(ORIENT_FAST_MEMORY_COUNT, 10_000);
+        assert_eq!(ORIENT_FAST_P99_SAMPLE_COUNT, 30);
+        assert!((ORIENT_FAST_P99_BUDGET_MS - 1_000.0).abs() < f64::EPSILON);
+
+        let mut samples = [
+            std::time::Duration::from_millis(999),
+            std::time::Duration::from_millis(20),
+            std::time::Duration::from_millis(100),
+        ];
+        assert!((sampled_p99_ms(&mut samples) - 999.0).abs() < f64::EPSILON);
     }
 
     #[test]
