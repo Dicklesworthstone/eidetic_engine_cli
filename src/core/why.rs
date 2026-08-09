@@ -4716,14 +4716,19 @@ mod tests {
         original_path: Option<&str>,
         external_ref: Option<&str>,
     ) -> TestResult {
+        let source_kind = if external_ref.is_some() {
+            "external"
+        } else {
+            "file"
+        };
         conn.upsert_artifact(
             artifact_id,
             &CreateArtifactInput {
                 workspace_id: "wsp_00000000000000000000000001".to_owned(),
-                source_kind: "external".to_owned(),
+                source_kind: source_kind.to_owned(),
                 artifact_type: "log".to_owned(),
                 original_path: original_path.map(ToOwned::to_owned),
-                canonical_path: None,
+                canonical_path: original_path.map(ToOwned::to_owned),
                 external_ref: external_ref.map(ToOwned::to_owned),
                 content_hash:
                     "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -4871,8 +4876,8 @@ mod tests {
         insert_why_artifact(
             &conn,
             "art_00000000000000000000000001",
-            Some("file:///Users/alice/private/repo/build.log"),
             None,
+            Some("/Users/alice/private/repo/build.log"),
             None,
         )?;
         insert_why_artifact(
