@@ -2665,13 +2665,10 @@ async fn run_context_pack_with_performance_inner(
         Ok(Some(focus_state)) => {
             trace.focus_state_hits = trace.focus_state_hits.saturating_add(1);
             let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-            let focus_workspace_ids = context_workspace_ids(
-                read_connection,
-                &options.workspace_path,
-                &mut degraded,
-            )
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+            let focus_workspace_ids =
+                context_workspace_ids(read_connection, &options.workspace_path, &mut degraded)
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
             let focus_candidates = focus_candidates_from_state(
                 read_connection,
                 &options.workspace_path,
