@@ -521,7 +521,16 @@ fn ensure_hook_dir_is_not_symlink(hook_dir: &Path) -> Result<(), DomainError> {
     }
 
     match std::fs::symlink_metadata(hook_dir) {
-        Ok(_) => Ok(()),
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to create hook directory '{}': an existing filesystem entry is not a directory",
+                hook_dir.display()
+            ),
+            repair: Some(
+                "Choose a directory path or move the conflicting filesystem entry.".to_owned(),
+            ),
+        }),
         Err(error)
             if matches!(
                 error.kind(),
@@ -5008,11 +5017,7 @@ mod tests {
         let temp = TempDir::new().map_err(|e| e.to_string())?;
         let hook_dir = temp.path().join(".git").join("hooks");
         fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
-        fs::write(
-            hook_dir.join("pre-commit"),
-            "#!/bin/sh\n/usr/local/bin/ee preflight check --cmd \"$*\" --json\n",
-        )
-        .map_err(|e| e.to_string())?;
+        fs::write(hook_dir.join("pre-commit"), "#!/bin/sh\nexit 0\n").map_err(|e| e.to_string())?;
         fs::write(
             hook_dir.join("pre-push"),
             r#"#!/usr/bin/env python3
