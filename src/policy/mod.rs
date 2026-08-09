@@ -2166,11 +2166,25 @@ fn redact_secret_key_values(input: &str, reasons: &mut Vec<&'static str>) -> (St
 }
 
 fn key_value_redaction_code(default_code: &'static str, value: &str) -> &'static str {
-    if default_code == "token" && looks_like_gitlab_personal_access_token(value) {
+    if default_code == "bearer_token" && looks_like_mesh_approval_token(value) {
+        "mesh_approval_token"
+    } else if default_code == "token" && looks_like_gitlab_personal_access_token(value) {
         "personal_access_token"
     } else {
         default_code
     }
+}
+
+fn looks_like_mesh_approval_token(value: &str) -> bool {
+    let value = value.trim_matches(|ch| matches!(ch, '"' | '\''));
+    let Some(suffix) = value.strip_prefix("eeap1_") else {
+        return false;
+    };
+    suffix
+        .chars()
+        .take_while(|ch| is_raw_token_char(*ch))
+        .count()
+        >= 16
 }
 
 fn looks_like_gitlab_personal_access_token(value: &str) -> bool {
