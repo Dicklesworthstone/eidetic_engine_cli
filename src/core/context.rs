@@ -2665,11 +2665,23 @@ async fn run_context_pack_with_performance_inner(
         Ok(Some(focus_state)) => {
             trace.focus_state_hits = trace.focus_state_hits.saturating_add(1);
             let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+            let focus_workspace_ids = context_workspace_ids(
+                read_connection,
+                &options.workspace_path,
+                &mut degraded,
+            )
+            .into_iter()
+            .collect::<BTreeSet<_>>();
             let focus_candidates = focus_candidates_from_state(
                 read_connection,
                 &options.workspace_path,
                 &focus_state,
                 options.include_tombstoned,
+                context_include_expired(options, &effective_filters),
+                context_include_future(options, &effective_filters),
+                context_validity_reference_time(options, &effective_filters)
+                    .unwrap_or_else(Utc::now),
+                &focus_workspace_ids,
                 &mut degraded,
             );
             trace.focus_candidate_count = focus_candidates.len();
@@ -10178,9 +10190,13 @@ struct FocusCandidateSource<'a> {
     connection: &'a DbConnection,
     focus_state: &'a crate::models::FocusState,
     workspace_path: &'a Path,
+    workspace_ids: &'a BTreeSet<String>,
     focus_hash: &'a str,
     storage_path: &'a str,
     include_tombstoned: bool,
+    include_expired: bool,
+    include_future: bool,
+    validity_reference_time: DateTime<Utc>,
 }
 
 fn candidate_from_hit_preloaded(
@@ -10262,6 +10278,10 @@ fn focus_candidates_from_state(
     workspace_path: &Path,
     focus_state: &crate::models::FocusState,
     include_tombstoned: bool,
+    include_expired: bool,
+    include_future: bool,
+    validity_reference_time: DateTime<Utc>,
+    workspace_ids: &BTreeSet<String>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Vec<PackCandidate> {
     let mut candidates = Vec::new();
@@ -10271,9 +10291,13 @@ fn focus_candidates_from_state(
         connection,
         focus_state,
         workspace_path,
+        workspace_ids,
         focus_hash: &focus_hash,
         storage_path: &storage_path,
         include_tombstoned,
+        include_expired,
+        include_future,
+        validity_reference_time,
     };
     for item in &focus_state.items {
         match focus_candidate_from_item(&source, item, degraded) {
@@ -10341,6 +10365,73 @@ fn focus_candidate_from_item(
             return None;
         }
     };
+    if !source.workspace_ids.contains(&memory.workspace_id) {
+        push_degradation(
+            degraded,
+            "context_focus_workspace_filtered",
+            ContextResponseSeverity::Low,
+            format!(
+                "Focused memory {} belongs to a different workspace and was excluded from context.",
+                item.memory_id
+            ),
+            Some(format!("ee focus remove {} --json", item.memory_id)),
+        );
+        return None;
+    }
+    if !matches!(
+        fallback_memory_validity_visibility(
+            &memory,
+            source.validity_reference_time,
+            source.include_expired,
+            source.include_future,
+            false,
+        ),
+        FallbackMemoryVisibility::Visible
+    ) {
+        push_degradation(
+            degraded,
+            "context_focus_temporal_filtered",
+            ContextResponseSeverity::Low,
+            format!(
+                "Focused memory {} is outside the requested validity window and was excluded from context.",
+                item.memory_id
+            ),
+            Some(format!("ee focus remove {} --json", item.memory_id)),
+        );
+        return None;
+    }
+    if memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
+        push_degradation(
+            degraded,
+            "context_focus_sealed_memory",
+            ContextResponseSeverity::Info,
+            format!(
+                "Focused memory {} is sealed and was excluded from context until reveal.",
+                item.memory_id
+            ),
+            Some(format!(
+                "ee memory reveal {} --content-file <path> --json",
+                item.memory_id
+            )),
+        );
+        return None;
+    }
+    if !crate::policy::redact_secret_like_content(&memory.content)
+        .redacted_reasons
+        .is_empty()
+    {
+        push_degradation(
+            degraded,
+            "context_focus_secret_filtered",
+            ContextResponseSeverity::Low,
+            format!(
+                "Focused memory {} contains secret-like content and was excluded from context.",
+                item.memory_id
+            ),
+            Some(format!("ee focus remove {} --json", item.memory_id)),
+        );
+        return None;
+    }
     let tags = source
         .connection
         .get_memory_tags(&memory.id)
