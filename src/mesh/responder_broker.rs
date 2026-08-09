@@ -1869,6 +1869,36 @@ fn refuse_if_transport_disabled() -> Result<(), ResponderBrokerError> {
 mod tests {
     use super::*;
 
+    #[derive(Clone)]
+    struct StaticLocalApi {
+        status: LocalTailscaleStatus,
+    }
+
+    impl TailscaleLocalApi for StaticLocalApi {
+        fn local_status<'a>(
+            &'a self,
+            _cx: &'a Cx,
+        ) -> TailscaleLocalApiFuture<'a, LocalTailscaleStatus> {
+            Box::pin(async move { Ok(self.status.clone()) })
+        }
+
+        fn verify_local_address<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _address: SocketAddr,
+        ) -> TailscaleLocalApiFuture<'a, LocalTailscaleIdentity> {
+            Box::pin(async { Err(ResponderBrokerError::WhoIsUnverified) })
+        }
+
+        fn who_is<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _source: SocketAddr,
+        ) -> TailscaleLocalApiFuture<'a, WhoIsIdentity> {
+            Box::pin(async { Err(ResponderBrokerError::WhoIsUnverified) })
+        }
+    }
+
     fn route(path: PathBuf, port: u16) -> RegisteredResponderRoute {
         RegisteredResponderRoute {
             workspace_path: path,
@@ -1923,6 +1953,41 @@ mod tests {
         assert!(matches!(
             ResponderRouteRegistry::new([guessable_handle]),
             Err(ResponderBrokerError::InvalidConfiguration)
+        ));
+    }
+
+    #[test]
+    fn production_owner_rejects_loopback_status_before_any_listener_bind() {
+        let runtime = crate::core::build_cli_runtime().expect("build owner test runtime");
+        let cx = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+        let registry = ResponderRouteRegistry::new([route(
+            PathBuf::from("/tmp/ee-responder-owner-loopback-negative"),
+            41888,
+        )])
+        .expect("valid local route registry");
+        let result = runtime.block_on(async {
+            let _ambient = Cx::set_current(Some(cx.clone()));
+            ResponderBrokerOwner::start(
+                &cx,
+                StaticLocalApi {
+                    status: LocalTailscaleStatus {
+                        identity: LocalTailscaleIdentity {
+                            stable_id: "stable-responder".to_owned(),
+                            current_node_pubkey: "nodekey:responder-current".to_owned(),
+                            tailnet_id: "tailnet-a".to_owned(),
+                        },
+                        addresses: vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)],
+                    },
+                },
+                registry,
+                PreAuthAdmissionLimits::default(),
+                Duration::from_secs(1),
+            )
+            .await
+        });
+        assert!(matches!(
+            result,
+            Err(ResponderBrokerError::TransportUnavailable)
         ));
     }
 
