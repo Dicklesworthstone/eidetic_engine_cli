@@ -1159,6 +1159,7 @@ mod tests {
                     .unwrap_or_else(|_| PathBuf::from("."))
                     .join("target")
             });
+        let root = fs::canonicalize(&root).unwrap_or(root);
         let unique = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
