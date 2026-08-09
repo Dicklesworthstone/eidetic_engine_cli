@@ -1938,6 +1938,51 @@ fn remember_level_kind_cross_wire_guard_public_cli_contract() -> TestResult {
         &Some("episodic"),
         "kind-as-level provided token",
     )?;
+    ensure_equal(
+        &error_json.pointer("/error/severity").and_then(serde_json::Value::as_str),
+        &Some("low"),
+        "kind-as-level severity",
+    )?;
+    ensure_equal(
+        &error_json.pointer("/error/repairKind").and_then(serde_json::Value::as_str),
+        &Some("template"),
+        "kind-as-level repairKind",
+    )?;
+    ensure(
+        error_json
+            .pointer("/error/repair")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|repair| repair.contains("--level episodic")),
+        "kind-as-level repair must template the corrected flag",
+    )?;
+    ensure_equal(
+        &error_json.pointer("/error/details/recovery"),
+        &Some(&serde_json::json!([])),
+        "kind-as-level recovery is a present, empty array",
+    )?;
+
+    // The same guard is reachable through the real `ee note` CLI surface.
+    let note_cross_wire = run_ee(&[
+        "--workspace",
+        &workspace,
+        "note",
+        "cross-wired note attempt",
+        "--kind",
+        "episodic",
+        "--json",
+    ])?;
+    ensure_equal(
+        &note_cross_wire.status.code(),
+        &Some(1),
+        "level token as note --kind must exit with the usage code",
+    )?;
+    let note_json = stdout_json(&note_cross_wire)?;
+    assert_schema(&note_json, "ee.error.v2", "note kind-as-level error envelope")?;
+    ensure_equal(
+        &note_json.pointer("/error/code").and_then(serde_json::Value::as_str),
+        &Some("remember_kind_is_level"),
+        "note kind-as-level error code",
+    )?;
 
     // Cross-wire direction 2: a canonical kind token passed as --level.
     let level_as_kind = run_ee(&[
@@ -2001,6 +2046,28 @@ fn remember_level_kind_cross_wire_guard_public_cli_contract() -> TestResult {
             .and_then(serde_json::Value::as_str),
         &Some("episodic-note"),
         "custom kind must persist byte-for-byte",
+    )?;
+    let custom_memory_id = custom_json
+        .pointer("/data/memory_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "custom kind remember must return a memory_id".to_owned())?
+        .to_owned();
+
+    // Read back the persisted row: the stored kind must be the exact bytes
+    // provided, not a normalized or prefix-corrected token.
+    let show = run_ee(&["--workspace", &workspace, "show", &custom_memory_id, "--json"])?;
+    ensure_equal(
+        &show.status.code(),
+        &Some(EXIT_SUCCESS),
+        "custom kind show exit code",
+    )?;
+    let show_json = stdout_json(&show)?;
+    ensure_equal(
+        &show_json
+            .pointer("/data/memory/kind")
+            .and_then(serde_json::Value::as_str),
+        &Some("episodic-note"),
+        "persisted custom kind read-back must stay byte-for-byte",
     )?;
 
     // Canonical control: valid level plus canonical kind still succeeds.

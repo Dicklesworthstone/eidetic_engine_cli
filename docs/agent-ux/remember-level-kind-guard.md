@@ -24,9 +24,13 @@ byte-for-byte.
 | `--kind Episodic`, `--level " decision "` | normalized before matching, then rejected |
 | both flags cross-wired | `remember_kind_is_level` wins deterministically |
 
-The guard runs in the shared remember core, so the single write path, `ee
-note`, `--batch` lines, and the serve surface (HTTP 400) all behave
-identically.
+The guard is implemented in the shared remember core
+(`remember_level_kind_cross_wire_error` in `src/core/memory.rs`, invoked
+before level/kind parsing). The real-binary E2E contract test
+(`remember_level_kind_cross_wire_guard_public_cli_contract`) proves the
+`ee remember` and `ee note` CLI surfaces. Other callers of the same core
+path (batch lines, serve) route through the identical guard but are not
+independently pinned by executable coverage here.
 
 ## Machine-facing error shape (`ee.error.v2`)
 
