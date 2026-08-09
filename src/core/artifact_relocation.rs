@@ -183,7 +183,12 @@ fn plan_or_apply_relocation(
                 .to_owned(),
         ),
     })?;
-    let source = absolutize(source);
+    // Normalize lexical parent components before existence and symlink checks.
+    // A reviewed path such as `target/../src/main.rs` must resolve to the same
+    // canonical source even when the cancelled `target` component does not
+    // exist; asking the filesystem about the unnormalized spelling first
+    // incorrectly reports NotFound.
+    let source = normalize_relocation_manifest_path(&absolutize(source));
     if !source.exists() {
         return Err(DomainError::NotFound {
             resource: "artifact source path".to_owned(),
@@ -1870,8 +1875,7 @@ mod tests {
         let root = temp_path("manifest-existing-final-recheck");
         let manifest = root.join("relocation.json");
         fs::create_dir_all(parent_dir(&manifest)?).map_err(|error| error.to_string())?;
-        let mut temp_manifest = manifest.clone();
-        temp_manifest.set_extension("tmp");
+        let temp_manifest = relocation_manifest_temp_path(&manifest);
         fs::write(&temp_manifest, r#"{"schema":"new"}"#).map_err(|error| error.to_string())?;
         fs::write(&manifest, "keep final").map_err(|error| error.to_string())?;
 
@@ -2003,8 +2007,7 @@ mod tests {
         fs::write(&source, "artifact bytes\n").map_err(|error| error.to_string())?;
         let destination = temp_path("directory-temp-manifest-destination");
         let manifest = temp_path("directory-temp-manifest").join("relocation.json");
-        let mut temp_manifest = manifest.clone();
-        temp_manifest.set_extension("tmp");
+        let temp_manifest = relocation_manifest_temp_path(&manifest);
         fs::create_dir_all(&temp_manifest).map_err(|error| error.to_string())?;
 
         let result = relocate_artifacts(&ArtifactRelocationOptions {
