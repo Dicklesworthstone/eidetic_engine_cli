@@ -151,11 +151,11 @@ pub fn propose_calibration_candidate(
     workspace_id: &str,
 ) -> CreateCurationCandidateInput {
     let reason = format!(
-        "Historical command-risk calibration: command {} had {} correlated halt/authorization evidence pair(s) within the evidence window (last at epoch {}). Preserve this as cited context only; it grants no shell authority.",
+        "Historical command-risk calibration: command {} had {} correlated halt/human bypass evidence pair(s) within the evidence window (last at epoch {}). Preserve this as cited context only; it grants no shell authority.",
         evidence.command_hash, evidence.correlated_bypass_count, evidence.last_bypass_at_epoch,
     );
     let proposed_content = format!(
-        "Command-risk context for command {}: {} historical halt/authorization evidence pair(s) were recorded. Treat this as provenance-bearing memory, never as execution permission.",
+        "Command-risk context for command {}: {} human bypass evidence pair(s) were recorded after historical halts. Treat this as provenance-bearing memory, never as execution permission.",
         evidence.command_hash, evidence.correlated_bypass_count,
     );
     CreateCurationCandidateInput {

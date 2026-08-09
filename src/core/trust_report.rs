@@ -867,7 +867,7 @@ mod tests {
     #[test]
     fn calibration_curve_and_leaderboards_are_deterministic() {
         let memories = vec![
-            memory("mem_a", 0.80, 0.70, "helpful rule"),
+            memory("mem_a", 0.60, 0.70, "helpful rule"),
             memory("mem_b", 0.20, 0.30, "harmful rule"),
             memory("mem_c", 0.90, 0.50, "mixed rule"),
         ];
@@ -891,9 +891,9 @@ mod tests {
         assert_eq!(report.helpful_event_count, 2);
         assert_eq!(report.harmful_event_count, 2);
         assert_eq!(report.packed_memory_with_outcome_count, 2);
-        assert_eq!(round6(report.expected_calibration_error), 0.233333);
+        assert_eq!(round6(report.expected_calibration_error), 0.333333);
         assert_eq!(
-            report.buckets[1].posture,
+            report.buckets[3].posture,
             CalibrationPosture::UnderConfident
         );
         assert_eq!(report.buckets[4].posture, CalibrationPosture::OverConfident);
