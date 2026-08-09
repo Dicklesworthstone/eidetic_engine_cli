@@ -217,8 +217,9 @@ static SEARCH_SCORE_CALIBRATION_CACHE: OnceLock<
     RwLock<HashMap<SearchScoreCalibrationCacheKey, SearchScoreCalibration>>,
 > = OnceLock::new();
 #[cfg(test)]
-static SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_FULL_LOADS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_FULL_LOADS: OnceLock<
+    Mutex<HashMap<PathBuf, usize>>,
+> = OnceLock::new();
 static LEXICAL_RAM_TIER_SEARCH_CONFIG_CACHE: OnceLock<
     Mutex<HashMap<PathBuf, CachedLexicalRamTierSearchConfig>>,
 > = OnceLock::new();
@@ -3022,8 +3023,13 @@ fn search_score_calibration_for_workspace_cached(
     }
 
     #[cfg(test)]
-    SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_FULL_LOADS
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut full_loads) = SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_FULL_LOADS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        let count = full_loads.entry(workspace_root.clone()).or_default();
+        *count = count.saturating_add(1);
+    }
 
     let feedback_events = match feedback_fingerprint {
         SearchScoreCalibrationFeedbackFingerprint::NoDatabase => {
@@ -11956,18 +11962,13 @@ mod tests {
         Ok(())
     }
 
-    fn reset_search_score_calibration_cache_for_test() {
-        if let Some(cache) = SEARCH_SCORE_CALIBRATION_CACHE.get()
-            && let Ok(mut guard) = cache.write()
-        {
-            guard.clear();
-        }
+    fn feedback_event_full_loads_for_test(workspace_path: &Path) -> usize {
+        let workspace_root = default_workspace_root(workspace_path);
         SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_FULL_LOADS
-            .store(0, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn feedback_event_full_loads_for_test() -> usize {
-        SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_FULL_LOADS.load(std::sync::atomic::Ordering::SeqCst)
+            .get()
+            .and_then(|full_loads| full_loads.lock().ok())
+            .and_then(|full_loads| full_loads.get(&workspace_root).copied())
+            .unwrap_or(0)
     }
 
     fn insert_calibration_feedback_event(
@@ -12015,7 +12016,6 @@ mod tests {
 
     #[test]
     fn search_score_calibration_cache_reuses_feedback_until_fingerprint_changes() -> TestResult {
-        reset_search_score_calibration_cache_for_test();
         let workspace = unique_test_dir("score-calibration-feedback-cache");
         let database_path = workspace.join(".ee").join("ee.db");
         std::fs::create_dir_all(
@@ -12059,7 +12059,7 @@ mod tests {
             &mut first_degraded,
         );
         assert!(first_degraded.is_empty());
-        assert_eq!(feedback_event_full_loads_for_test(), 1);
+        assert_eq!(feedback_event_full_loads_for_test(&workspace), 1);
         assert_eq!(
             hit_score_calibration_sample_count(&first_hits[0])?,
             MIN_SEARCH_SCORE_CALIBRATION_SAMPLES as u64
@@ -12076,7 +12076,7 @@ mod tests {
         );
         assert!(second_degraded.is_empty());
         assert_eq!(
-            feedback_event_full_loads_for_test(),
+            feedback_event_full_loads_for_test(&workspace),
             1,
             "unchanged feedback fingerprint must reuse derived calibration"
         );
@@ -12103,7 +12103,7 @@ mod tests {
         );
         assert!(third_degraded.is_empty());
         assert_eq!(
-            feedback_event_full_loads_for_test(),
+            feedback_event_full_loads_for_test(&workspace),
             2,
             "new feedback row must invalidate the derived calibration cache"
         );
