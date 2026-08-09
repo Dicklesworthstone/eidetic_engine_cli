@@ -12,7 +12,7 @@ use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::core::search::{
     RetrievalMetrics, ScoreSource, SearchHit, SearchReport, SearchSourceMode, SearchStatus,
 };
-use ee::models::{MemoryScope, MemoryScopeStats};
+use ee::models::{EmbedBackend, MemoryScope, MemoryScopeStats};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
@@ -65,6 +65,7 @@ fn contains_snake_case_key(value: &Value, path: &str) -> Option<String> {
 fn search_report_data_json_uses_camel_case_fields() -> TestResult {
     let report = SearchReport {
         status: SearchStatus::Success,
+        embed_backend: EmbedBackend::HashFallback,
         query: "test query".to_string(),
         requested_limit: 10,
         results: vec![SearchHit {
@@ -209,6 +210,7 @@ fn retrieval_metrics_data_json_uses_camel_case_fields() -> TestResult {
 fn search_hit_fields_are_camel_case_when_populated() -> TestResult {
     let report = SearchReport {
         status: SearchStatus::Success,
+        embed_backend: EmbedBackend::HashFallback,
         query: "test".to_string(),
         requested_limit: 5,
         results: vec![SearchHit {
@@ -273,6 +275,7 @@ fn search_hit_fields_are_camel_case_when_populated() -> TestResult {
 fn search_report_data_json_exposes_rerank_posture_contract() -> TestResult {
     let report = SearchReport {
         status: SearchStatus::Success,
+        embed_backend: EmbedBackend::HashFallback,
         query: "rerank contract".to_string(),
         requested_limit: 5,
         results: vec![SearchHit {
@@ -469,6 +472,7 @@ fn field_naming_contract_is_stable() -> TestResult {
     // Build a report that exercises all fields
     let report = SearchReport {
         status: SearchStatus::Success,
+        embed_backend: EmbedBackend::HashFallback,
         query: "naming contract".to_string(),
         requested_limit: 5,
         results: vec![SearchHit {
@@ -602,6 +606,7 @@ fn optional_hit_fields_absent_when_none() -> TestResult {
     // This confirms the contract: optional fields omitted unless populated.
     let report = SearchReport {
         status: SearchStatus::Success,
+        embed_backend: EmbedBackend::HashFallback,
         query: "minimal hit".to_string(),
         requested_limit: 5,
         results: vec![SearchHit {

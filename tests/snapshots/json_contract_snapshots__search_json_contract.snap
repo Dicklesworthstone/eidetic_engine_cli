@@ -71,6 +71,7 @@ expression: search
         ]
       }
     ],
+    "embed_backend": "hash_fallback",
     "elapsedMs": 0,
     "errors": [],
     "metrics": {

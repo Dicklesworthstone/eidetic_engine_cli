@@ -1630,10 +1630,11 @@ fn command_name_from_schema(schema: &str) -> String {
 fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&'static str] {
     match command {
         "search" => match preset {
-            FieldProfile::Minimal => &["memoryId", "docId", "score", "source"],
+            FieldProfile::Minimal => &["embed_backend", "memoryId", "docId", "score", "source"],
             FieldProfile::Summary => &[
                 "query",
                 "status",
+                "embed_backend",
                 "resultCount",
                 "memoryId",
                 "docId",
@@ -1643,6 +1644,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
             FieldProfile::Standard => &[
                 "query",
                 "status",
+                "embed_backend",
                 "resultCount",
                 "results",
                 "memoryId",
@@ -1659,9 +1661,10 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
             FieldProfile::Full => &["*"],
         },
         "context" | "pack" => match preset {
-            FieldProfile::Minimal => &["command", "query", "hash"],
+            FieldProfile::Minimal => &["command", "embed_backend", "query", "hash"],
             FieldProfile::Summary => &[
                 "command",
+                "embed_backend",
                 "request",
                 "pack",
                 "budget",
@@ -1671,6 +1674,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
             ],
             FieldProfile::Standard => &[
                 "command",
+                "embed_backend",
                 "request",
                 "pack",
                 "items",
@@ -1954,9 +1958,10 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
             FieldProfile::Full => &["*"],
         },
         "orient" => match preset {
-            FieldProfile::Minimal => &["command", "task", "workspace"],
+            FieldProfile::Minimal => &["command", "embed_backend", "task", "workspace"],
             FieldProfile::Summary => &[
                 "command",
+                "embed_backend",
                 "task",
                 "workspace",
                 "doctor",
@@ -1966,6 +1971,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
             ],
             FieldProfile::Standard => &[
                 "command",
+                "embed_backend",
                 "task",
                 "workspace",
                 "swarmBrief",

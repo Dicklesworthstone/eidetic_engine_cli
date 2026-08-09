@@ -3048,7 +3048,7 @@ async fn run_context_pack_with_performance_inner(
     let mut response = ContextResponse::new(request, draft, response_degraded)
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     response.data.command = command;
-    response.data.embed_backend = crate::core::index::active_embed_backend();
+    response.data.embed_backend = search_report.embed_backend;
     response.data.adaptive_budget = adaptive_budget_decision;
     response.data.agent_profile = agent_profile;
     response.data.slo = Some(slo);
@@ -3570,6 +3570,7 @@ fn missing_index_search_report(
 ) -> SearchReport {
     SearchReport {
         status: SearchStatus::IndexNotFound,
+        embed_backend: crate::core::index::active_embed_backend(),
         query: query.to_owned(),
         requested_limit: limit,
         results: Vec::new(),
@@ -5346,6 +5347,7 @@ fn push_coordination_snapshot_degradations(
 struct ContextPackL2Context {
     cache: PackL2Cache,
     key: String,
+    key_input: PackL2CacheKeyInput,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5435,7 +5437,7 @@ fn context_pack_l2_prepare(
             return None;
         }
     };
-    let key = compute_pack_l2_cache_key(&PackL2CacheKeyInput {
+    let key_input = PackL2CacheKeyInput {
         workspace_id,
         database_generation,
         index_generation: context_pack_l2_index_generation(options),
@@ -5455,9 +5457,14 @@ fn context_pack_l2_prepare(
             output_redaction_enabled,
         ),
         personalization_generation,
-    });
+    };
+    let key = compute_pack_l2_cache_key(&key_input);
 
-    Some(ContextPackL2Context { cache, key })
+    Some(ContextPackL2Context {
+        cache,
+        key,
+        key_input,
+    })
 }
 
 fn context_pack_l2_try_hit(
@@ -5472,7 +5479,11 @@ fn context_pack_l2_try_hit(
     let lookup_start = Instant::now();
     match l2_context.cache.get(&l2_context.key) {
         Ok(PackL2CacheLookup::Hit(hit)) => {
-            match context_pack_l2_cached_response_json(&hit.pack_json, command) {
+            match context_pack_l2_cached_response_json(
+                &hit.pack_json,
+                command,
+                l2_context.key_input.embed_backend,
+            ) {
                 Ok(cached_json) => {
                     let source_mode_metadata =
                         context_pack_l2_cached_source_mode_metadata(&hit.pack_json, options);
@@ -5570,11 +5581,14 @@ fn context_pack_l2_store(
     response: &mut ContextResponse,
 ) {
     let source_mode_metadata = ContextPackL2SourceModeMetadata::from_search_report(search_report);
+    let mut store_key_input = l2_context.key_input.clone();
+    store_key_input.embed_backend = response.data.embed_backend;
+    let store_key = compute_pack_l2_cache_key(&store_key_input);
     if source_mode_metadata.fallback {
         tracing::debug!(
             target: "ee::pack_l2",
             event = "pack_l2_cache_write_skipped",
-            key = %l2_context.key,
+            key = %store_key,
             reason = "source_mode_fallback",
         );
         return;
@@ -5594,12 +5608,12 @@ fn context_pack_l2_store(
         },
     });
 
-    match l2_context.cache.put_compressed(&l2_context.key, &payload) {
+    match l2_context.cache.put_compressed(&store_key, &payload) {
         Ok(report) => {
             tracing::info!(
                 target: "ee::pack_l2",
                 event = "pack_l2_cache_write",
-                key = %l2_context.key,
+                key = %store_key,
                 path = %report.path.display(),
                 byte_len = report.byte_len,
                 compressed_bytes = report.compression.as_ref().map(|compression| compression.compressed_bytes).unwrap_or(0),
@@ -5911,6 +5925,7 @@ fn context_pack_l2_feature_flags_hash(
 fn context_pack_l2_cached_response_json(
     payload: &serde_json::Value,
     command: &'static str,
+    expected_embed_backend: EmbedBackend,
 ) -> Result<String, String> {
     let schema = payload
         .get("schema")
@@ -5935,13 +5950,19 @@ fn context_pack_l2_cached_response_json(
         .pointer("/data/pack/schema")
         .and_then(serde_json::Value::as_str)
         == Some(PACK_SCHEMA_V2);
-    let embed_backend_is_valid = parsed
+    let cached_embed_backend = parsed
         .pointer("/data/embed_backend")
         .and_then(serde_json::Value::as_str)
-        .and_then(|value| value.parse::<EmbedBackend>().ok())
-        .is_some();
-    if !embed_backend_is_valid {
+        .and_then(|value| value.parse::<EmbedBackend>().ok());
+    let Some(cached_embed_backend) = cached_embed_backend else {
         return Err("L2 pack cache responseJson is missing a valid data.embed_backend".to_string());
+    };
+    if cached_embed_backend != expected_embed_backend {
+        return Err(format!(
+            "L2 pack cache responseJson embed backend {} does not match cache key backend {}",
+            cached_embed_backend.as_str(),
+            expected_embed_backend.as_str()
+        ));
     }
     if command_matches && pack_schema_matches {
         return Ok(response_json.to_owned());
@@ -12746,6 +12767,7 @@ pub fn unrelated_context() -> u64 {{
     fn ppr_search_report(hits: Vec<SearchHit>) -> SearchReport {
         SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "release graph".to_string(),
             requested_limit: hits.len() as u32,
             results: hits,
@@ -13944,6 +13966,7 @@ pub fn unrelated_context() -> u64 {{
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(70));
         let search_report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "prepare release".to_string(),
             requested_limit: 1,
             results: vec![SearchHit {
@@ -14079,6 +14102,7 @@ pub fn unrelated_context() -> u64 {{
 
         let search_report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "release mesh context guard".to_string(),
             requested_limit: 2,
             results: vec![
@@ -14214,6 +14238,7 @@ pub fn unrelated_context() -> u64 {{
 
         let search_report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "mesh human explicit guard".to_string(),
             requested_limit: 2,
             results: vec![
@@ -14376,6 +14401,7 @@ pub fn unrelated_context() -> u64 {{
 
         let search_report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "freshness ordering".to_string(),
             requested_limit: 3,
             results: vec![
@@ -14534,6 +14560,7 @@ pub fn unrelated_context() -> u64 {{
         .map_err(|error| error.to_string())?;
         let search_report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: request.query.clone(),
             requested_limit: 2,
             results: vec![
@@ -14856,7 +14883,11 @@ pub fn unrelated_context() -> u64 {{
             "responseJson": response_json,
         });
 
-        let replayed = super::context_pack_l2_cached_response_json(&payload, "pack")?;
+        let replayed = super::context_pack_l2_cached_response_json(
+            &payload,
+            "pack",
+            crate::models::EmbedBackend::HashFallback,
+        )?;
 
         assert_eq!(
             replayed,
@@ -14888,10 +14919,46 @@ pub fn unrelated_context() -> u64 {{
             .to_string(),
         });
 
-        let error = super::context_pack_l2_cached_response_json(&payload, "pack")
-            .expect_err("cache payloads without an embedding backend must be invalidated");
+        let error = super::context_pack_l2_cached_response_json(
+            &payload,
+            "pack",
+            crate::models::EmbedBackend::HashFallback,
+        )
+        .expect_err("cache payloads without an embedding backend must be invalidated");
         assert!(
             error.contains("missing a valid data.embed_backend"),
+            "unexpected cache rejection: {error}"
+        );
+    }
+
+    #[test]
+    fn l2_cached_response_json_rejects_backend_mismatch_with_cache_key() {
+        let payload = serde_json::json!({
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2,
+            "responseJson": serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": {
+                    "command": "pack",
+                    "embed_backend": "neural_local",
+                    "pack": {
+                        "schema": crate::models::PACK_SCHEMA_V2,
+                        "query": "prepare release"
+                    }
+                },
+                "degraded": []
+            })
+            .to_string(),
+        });
+
+        let error = super::context_pack_l2_cached_response_json(
+            &payload,
+            "pack",
+            crate::models::EmbedBackend::HashFallback,
+        )
+        .expect_err("a neural response stored under a hash key must be rejected");
+        assert!(
+            error.contains("neural_local does not match cache key backend hash_fallback"),
             "unexpected cache rejection: {error}"
         );
     }
@@ -14929,8 +14996,12 @@ pub fn unrelated_context() -> u64 {{
             .to_string(),
         });
 
-        let error = super::context_pack_l2_cached_response_json(&payload, "pack")
-            .expect_err("v1 cached response semantics must be invalidated");
+        let error = super::context_pack_l2_cached_response_json(
+            &payload,
+            "pack",
+            crate::models::EmbedBackend::HashFallback,
+        )
+        .expect_err("v1 cached response semantics must be invalidated");
         assert!(
             error.contains("unexpected schema ee.pack.l2_context_response.v1"),
             "unexpected cache rejection: {error}"
@@ -14958,7 +15029,11 @@ pub fn unrelated_context() -> u64 {{
             "responseJson": response_json,
         });
 
-        let replayed = super::context_pack_l2_cached_response_json(&payload, "pack")?;
+        let replayed = super::context_pack_l2_cached_response_json(
+            &payload,
+            "pack",
+            crate::models::EmbedBackend::HashFallback,
+        )?;
         let replayed_json = serde_json::from_str::<serde_json::Value>(&replayed)
             .map_err(|error| error.to_string())?;
 
@@ -15363,10 +15438,6 @@ pub fn unrelated_context() -> u64 {{
             cache_root,
             crate::cache::pack_l2::PackL2CacheOptions::default(),
         );
-        let l2_context = super::ContextPackL2Context {
-            cache: cache.clone(),
-            key: "blake3:l2-source-mode-fallback".to_owned(),
-        };
         let options = super::ContextPackOptions {
             workspace_path: tempdir.path().join("workspace"),
             database_path: None,
@@ -15403,6 +15474,29 @@ pub fn unrelated_context() -> u64 {{
             baseline_write: None,
             no_lod: false,
         };
+        let key_input = super::PackL2CacheKeyInput {
+            workspace_id: "wsp_l2_source_mode_fallback".to_owned(),
+            database_generation: 1,
+            index_generation: 1,
+            graph_generation: None,
+            embed_backend: crate::models::EmbedBackend::HashFallback,
+            redaction_level: options.redaction_level,
+            request: ContextRequest::from_query("lexical fallback")
+                .map_err(|error| error.to_string())?,
+            output_options: options.output_options,
+            include_legacy_selection_certificate: false,
+            memory_scope: options.memory_scope,
+            strict_scope: options.strict_scope,
+            source_mode: options.source_mode,
+            strict_source_mode: options.strict_source_mode,
+            context_feature_flags_hash: "blake3:test-features".to_owned(),
+            personalization_generation: None,
+        };
+        let l2_context = super::ContextPackL2Context {
+            cache: cache.clone(),
+            key: "blake3:l2-source-mode-fallback".to_owned(),
+            key_input,
+        };
         let mut search_report =
             super::missing_index_search_report("lexical fallback", 10, test_runtime_profile());
         search_report.source_mode_requested = crate::core::search::SearchSourceMode::SemanticOnly;
@@ -15422,6 +15516,96 @@ pub fn unrelated_context() -> u64 {{
             ),
             "source-mode fallback payload should not be written to L2"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn context_pack_l2_rekeys_storage_to_backend_that_produced_response() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let cache = crate::cache::pack_l2::PackL2Cache::new(
+            tempdir.path().join("pack-l2").join("workspace"),
+            crate::cache::pack_l2::PackL2CacheOptions::default(),
+        );
+        let options = super::ContextPackOptions {
+            workspace_path: tempdir.path().join("workspace"),
+            database_path: None,
+            index_dir: None,
+            query: "backend transition".to_owned(),
+            speed: crate::search::SpeedMode::Default,
+            source_mode: crate::core::search::SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            filters: crate::models::QueryFilters::default(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(400),
+            candidate_pool: Some(10),
+            max_results: None,
+            include_tombstoned: false,
+            as_of: None,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            redaction_level: crate::models::RedactionLevel::Minimal,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
+            pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
+            require_fresh_sentinels: false,
+            output_options: super::ContextPackOutputOptions::default()
+                .with_cache_json_response(true),
+            persist_pack: true,
+            baseline_write: None,
+            no_lod: false,
+        };
+        let key_input = super::PackL2CacheKeyInput {
+            workspace_id: "wsp_l2_backend_transition".to_owned(),
+            database_generation: 1,
+            index_generation: 1,
+            graph_generation: None,
+            embed_backend: EmbedBackend::HashFallback,
+            redaction_level: options.redaction_level,
+            request: ContextRequest::from_query("backend transition")
+                .map_err(|error| error.to_string())?,
+            output_options: options.output_options,
+            include_legacy_selection_certificate: false,
+            memory_scope: options.memory_scope,
+            strict_scope: options.strict_scope,
+            source_mode: options.source_mode,
+            strict_source_mode: options.strict_source_mode,
+            context_feature_flags_hash: "blake3:test-features".to_owned(),
+            personalization_generation: None,
+        };
+        let lookup_key = super::compute_pack_l2_cache_key(&key_input);
+        let l2_context = super::ContextPackL2Context {
+            cache: cache.clone(),
+            key: lookup_key.clone(),
+            key_input: key_input.clone(),
+        };
+        let search_report =
+            super::missing_index_search_report("backend transition", 10, test_runtime_profile());
+        let mut response =
+            context_response_with_pack_item(MemoryId::from_uuid(uuid::Uuid::from_u128(45)))?;
+        response.data.embed_backend = EmbedBackend::NeuralLocal;
+
+        super::context_pack_l2_store(&l2_context, &options, &search_report, &mut response);
+
+        let mut neural_key_input = key_input;
+        neural_key_input.embed_backend = EmbedBackend::NeuralLocal;
+        let neural_key = super::compute_pack_l2_cache_key(&neural_key_input);
+        assert_ne!(lookup_key, neural_key);
+        assert!(matches!(
+            cache.get(&lookup_key).map_err(|error| error.to_string())?,
+            crate::cache::pack_l2::PackL2CacheLookup::Miss(_)
+        ));
+        assert!(matches!(
+            cache.get(&neural_key).map_err(|error| error.to_string())?,
+            crate::cache::pack_l2::PackL2CacheLookup::Hit(_)
+        ));
         Ok(())
     }
 
@@ -16208,6 +16392,7 @@ pub fn unrelated_context() -> u64 {{
 
         let search_report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "snapshot provenance release original".to_owned(),
             requested_limit: 10,
             results: hits,

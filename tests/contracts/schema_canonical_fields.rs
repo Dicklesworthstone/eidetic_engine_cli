@@ -46,7 +46,7 @@ use ee::core::memory::{MemoryListFilter, MemoryListReport, MemorySummary};
 use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::core::rule::{RuleEvidence, RuleLifecycle, RuleListFilter, RuleListReport, RuleSummary};
 use ee::core::search::{ScoreSource, SearchHit, SearchReport, SearchSourceMode, SearchStatus};
-use ee::models::{MemoryScope, MemoryScopeStats};
+use ee::models::{EmbedBackend, MemoryScope, MemoryScopeStats};
 use ee::output::{
     render_introspect_json, render_learn_uncertainty_json, render_memory_list_json,
     render_rule_list_json,
@@ -493,6 +493,7 @@ fn learn_uncertainty_surface_has_no_field_name_drift() -> TestResult {
 fn search_surface_normalizes_legacy_content_preview_metadata() -> TestResult {
     let report = SearchReport {
         status: SearchStatus::Success,
+        embed_backend: EmbedBackend::HashFallback,
         query: "format before release".to_owned(),
         requested_limit: 1,
         results: vec![SearchHit {

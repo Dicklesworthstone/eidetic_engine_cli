@@ -18049,10 +18049,7 @@ fn hotset_stream_beads_signals(
     path: &Path,
     max_signals: usize,
     timeout_ms: u64,
-) -> Result<
-    (Vec<crate::cache::hotset::PrewarmSignal>, String),
-    HotsetBeadsStreamError,
-> {
+) -> Result<(Vec<crate::cache::hotset::PrewarmSignal>, String), HotsetBeadsStreamError> {
     use crate::cache::hotset::{PrewarmSignal, PrewarmSignalSource};
 
     let unavailable = |message: &str| HotsetBeadsStreamError::Unavailable(message.to_owned());
@@ -18102,17 +18099,13 @@ fn hotset_stream_beads_signals(
         let Some(start) = line.iter().position(|byte| !byte.is_ascii_whitespace()) else {
             return Ok(());
         };
-        let Some(end) = line
-            .iter()
-            .rposition(|byte| !byte.is_ascii_whitespace())
-        else {
+        let Some(end) = line.iter().rposition(|byte| !byte.is_ascii_whitespace()) else {
             return Ok(());
         };
-        let row = serde_json::from_slice::<serde_json::Value>(&line[start..=end]).map_err(|_| {
-            stale(
-                "Beads JSONL export has an unparseable row (concurrent flush suspected)",
-            )
-        })?;
+        let row =
+            serde_json::from_slice::<serde_json::Value>(&line[start..=end]).map_err(|_| {
+                stale("Beads JSONL export has an unparseable row (concurrent flush suspected)")
+            })?;
         let Some(status) = row.get("status").and_then(serde_json::Value::as_str) else {
             return Ok(());
         };
@@ -18232,10 +18225,7 @@ fn hotset_stream_beads_signals(
         }
     }
 
-    Ok((
-        signals,
-        format!("blake3:{}", hasher.finalize().to_hex()),
-    ))
+    Ok((signals, format!("blake3:{}", hasher.finalize().to_hex())))
 }
 
 /// Options for [`collect_hotset_signals`]. Program overrides exist so
@@ -37181,6 +37171,7 @@ where
     };
 
     let workspace_path = cli.resolve_workspace();
+    let orient_start_backend = crate::core::index::active_embed_backend();
     let mut degraded = Vec::new();
 
     let mut swarm_sources = if args.fast {
@@ -37413,11 +37404,17 @@ where
         }
     };
 
+    let embed_backend = pack
+        .get("embed_backend")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| orient_start_backend.as_str().to_owned());
+
     let data = serde_json::json!({
         "schema": "ee.orient.v1",
         "command": "orient",
         "mode": if args.fast { "fast" } else { "full" },
-        "embed_backend": crate::core::index::active_embed_backend_token(),
+        "embed_backend": embed_backend,
         "version": env!("CARGO_PKG_VERSION"),
         "workspace": workspace_path.display().to_string(),
         "task": &args.task,
@@ -67482,6 +67479,7 @@ mod tests {
     fn search_report_fixture() -> SearchReport {
         SearchReport {
             status: SearchStatus::Success,
+            embed_backend: crate::models::EmbedBackend::HashFallback,
             query: "release format".to_string(),
             requested_limit: 5,
             results: vec![SearchHit {
@@ -75441,9 +75439,7 @@ mod tests {
         file.flush().expect("flush oversized-line fixture");
 
         let collection = collect_hotset_signals(&options);
-        assert!(
-            hotset_degraded_codes(&collection).contains(&HOTSET_BEADS_UNAVAILABLE_CODE)
-        );
+        assert!(hotset_degraded_codes(&collection).contains(&HOTSET_BEADS_UNAVAILABLE_CODE));
         assert!(
             !collection
                 .signals()
@@ -75694,11 +75690,8 @@ mod tests {
             collection.signals().is_empty(),
             "fail-closed authority must suppress Beads, BV, Mail, Git, retrieval, and broker signals"
         );
-        let manifest = collection.manifest_json(
-            0,
-            crate::cache::hotset::HotsetBudget::new(64, 262_144),
-            16,
-        );
+        let manifest =
+            collection.manifest_json(0, crate::cache::hotset::HotsetBudget::new(64, 262_144), 16);
         assert_eq!(manifest["plan"]["inputSignalCount"], 0);
         assert_eq!(manifest["plan"]["candidateCount"], 0);
     }

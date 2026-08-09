@@ -13,7 +13,7 @@ use ee::core::search::{
     ScoreExplanation, ScoreFactor, ScoreSource, SearchHit, SearchReport, SearchSourceMode,
     SearchStatus,
 };
-use ee::models::{MemoryScope, MemoryScopeStats};
+use ee::models::{EmbedBackend, MemoryScope, MemoryScopeStats};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
@@ -35,6 +35,7 @@ fn test_runtime_profile() -> RuntimeProfileReport {
 fn report_with_results(results: Vec<SearchHit>) -> SearchReport {
     SearchReport {
         status: SearchStatus::Success,
+        embed_backend: EmbedBackend::HashFallback,
         query: "schema contract".to_string(),
         requested_limit: results.len() as u32,
         results,

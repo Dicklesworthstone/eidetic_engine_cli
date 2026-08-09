@@ -79,7 +79,7 @@
     }
   },
   "field_presets": {
-    "minimal": ["memoryId", "docId", "score", "source"],
+    "minimal": ["embed_backend", "memoryId", "docId", "score", "source"],
     "summary": ["query", "status", "embed_backend", "resultCount", "memoryId", "docId", "score", "source"],
     "standard": ["query", "status", "embed_backend", "resultCount", "results", "memoryId", "docId", "score", "source", "why", "provenance", "degraded", "errors", "metrics", "elapsedMs"],
     "full": ["*"]

@@ -29,14 +29,16 @@ bypasses L2.
 ## Canonical Key
 
 The L2 key is a BLAKE3 hash of every input that can affect emitted pack JSON.
-The canonical key schema is `ee.pack.l2_cache_key.v3`. V3 invalidates cached
-packs assembled before multiplicity-aware ranking and frozen family snapshots.
+The canonical key schema is `ee.pack.l2_cache_key.v4`. V4 invalidates cached
+packs assembled before multiplicity-aware ranking, frozen family snapshots,
+and explicit embedding-backend attribution.
 At minimum, the canonical input set includes:
 
 - workspace ID
 - database generation
 - index generation
 - graph generation when graph-derived fields can affect output
+- active embedding backend (`neural_local` or `hash_fallback`)
 - redaction level
 - context profile
 - resource profile
@@ -51,6 +53,12 @@ At minimum, the canonical input set includes:
 Same canonical input set means same key. Any changed input that can change JSON
 must change the key. Do not serve stale data and rely on downstream consumers
 to notice.
+
+Because model readiness may change while a pending request initializes the
+local model, lookup and storage keys are intentionally distinct: lookup uses
+the backend observed before assembly, while storage recomputes the key from
+the backend that actually produced the response. Cached response payloads are
+rejected unless their `data.embed_backend` exactly matches the key input.
 
 ## Cached Value
 

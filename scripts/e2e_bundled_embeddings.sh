@@ -174,7 +174,9 @@ run_ee_json_env() {
 
     local start_ms end_ms elapsed_ms exit_code
     start_ms="$(python3 -c 'import time; print(int(time.time() * 1000))')"
-    env HOME="${HOME_DIR}" NO_COLOR=1 "${env_overrides[@]}" "${REAL_EE}" "$@" >"${stdout_file}" 2>"${stderr_file}"
+    env -u EE_EMBED_MODEL_DIR -u EE_EMBED_MODEL_PATH \
+        HOME="${HOME_DIR}" NO_COLOR=1 "${env_overrides[@]}" \
+        "${REAL_EE}" "$@" >"${stdout_file}" 2>"${stderr_file}"
     exit_code=$?
     end_ms="$(python3 -c 'import time; print(int(time.time() * 1000))')"
     elapsed_ms=$((end_ms - start_ms))
@@ -361,10 +363,33 @@ HASH_ENV=(
 if [[ "${MODEL_FIXTURE_PRESENT}" != "true" ]]; then
     record_failure "preprovisioned bundled model fixture available" "Set EE_EMBED_MODEL_FIXTURE_DIR or EE_EMBED_MODEL_DIR to a pre-populated potion-multilingual-128M cache root; default e2e does not download 531MB"
 else
+    MODEL_FIXTURE_DIR="$(cd "${MODEL_FIXTURE_DIR}" && pwd -P)"
+    MODEL_FIXTURE_MODEL_DIR=""
+    for candidate in \
+        "${MODEL_FIXTURE_DIR}" \
+        "${MODEL_FIXTURE_DIR}/potion-multilingual-128M" \
+        "${MODEL_FIXTURE_DIR}/model2vec/potion-multilingual-128M" \
+        "${MODEL_FIXTURE_DIR}/models/model2vec/potion-multilingual-128M"; do
+        if [[ -f "${candidate}/model.safetensors" && -f "${candidate}/tokenizer.json" ]]; then
+            MODEL_FIXTURE_MODEL_DIR="${candidate}"
+            break
+        fi
+    done
+    if [[ -z "${MODEL_FIXTURE_MODEL_DIR}" ]]; then
+        record_failure "preprovisioned bundled model artifact resolved" "fixture does not contain potion-multilingual-128M model.safetensors and tokenizer.json"
+    else
+        record_pass "preprovisioned bundled model artifact resolved"
+    fi
+
+    REGISTERED_XDG_DATA_HOME="${ROOT}/registered-xdg-data"
+    REGISTERED_MODEL_PARENT="${REGISTERED_XDG_DATA_HOME}/ee/models/model2vec"
+    mkdir -p "${REGISTERED_MODEL_PARENT}"
+    if [[ -n "${MODEL_FIXTURE_MODEL_DIR}" ]]; then
+        ln -s "${MODEL_FIXTURE_MODEL_DIR}" "${REGISTERED_MODEL_PARENT}/potion-multilingual-128M"
+    fi
     SEMANTIC_ENV=(
-        "EE_EMBED_DOWNLOAD=auto"
-        "EE_EMBED_MODEL_DIR=${MODEL_FIXTURE_DIR}"
-        "FRANKENSEARCH_MODEL_DIR=${MODEL_FIXTURE_DIR}"
+        "EE_EMBED_DOWNLOAD=off"
+        "XDG_DATA_HOME=${REGISTERED_XDG_DATA_HOME}"
         "FRANKENSEARCH_OFFLINE=1"
         "FRANKENSEARCH_ALLOW_DOWNLOAD=0"
     )
@@ -406,6 +431,7 @@ else
         search "${ANALYST_QUERY}" --workspace "${SEMANTIC_WS}" --limit 5 --relevance-floor 0 --json
     analyst_search_file="${LAST_STDOUT_FILE}"
     assert_jq_file "${analyst_search_file}" '.success == true' "analyst search succeeds"
+    assert_jq_file "${analyst_search_file}" '.data.embed_backend == "neural_local"' "registered offline search reports neural_local"
     assert_jq_file_arg "${analyst_search_file}" rblx "${RBLX_ID}" '(.data.results[0].memoryId // .data.results[0].memory_id // .data.results[0].docId) == $rblx' "analyst paraphrase ranks RBLX first"
     assert_jq_file_arg "${analyst_search_file}" snow "${SNOW_ID}" '(.data.results[0].memoryId // .data.results[0].memory_id // .data.results[0].docId) != $snow' "analyst paraphrase does not rank SNOW first"
     assert_jq_file_arg "${analyst_search_file}" nke "${NKE_ID}" '(.data.results[0].memoryId // .data.results[0].memory_id // .data.results[0].docId) != $nke' "analyst paraphrase does not rank NKE first"
@@ -415,6 +441,7 @@ else
         pack "${ANALYST_QUERY}" --workspace "${SEMANTIC_WS}" --max-tokens 2000 --json
     pack_first_file="${LAST_STDOUT_FILE}"
     assert_jq_file "${pack_first_file}" '.success == true' "first pack succeeds"
+    assert_jq_file "${pack_first_file}" '.data.embed_backend == "neural_local"' "registered offline pack reports neural_local"
     PACK_HASH_FIRST="$(json_scalar_file "${pack_first_file}" '.data.pack.hash' "first pack hash")"
     run_ee_json_env "pack_hash_second" "${SEMANTIC_ENV[@]}" -- \
         pack "${ANALYST_QUERY}" --workspace "${SEMANTIC_WS}" --max-tokens 2000 --json

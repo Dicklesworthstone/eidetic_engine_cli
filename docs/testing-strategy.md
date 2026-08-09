@@ -552,6 +552,12 @@ Set `EE_EMBED_MODEL_FIXTURE_DIR` or `EE_EMBED_MODEL_DIR` to a pre-provisioned
 `potion-multilingual-128M` cache for the semantic path, or leave the cache
 absent to assert the documented hash/lexical fallback.
 
+The semantic branch mounts that real artifact into the canonical machine
+registry layout (`models/model2vec/potion-multilingual-128M`), clears explicit
+model-path overrides, and runs with `EE_EMBED_DOWNLOAD=off`. It therefore proves
+that the verified registered artifact remains neural-local while network model
+downloads and remote embedding providers are forbidden.
+
 The harness pins the analyst paraphrase regression by storing an RBLX
 bookings/FCF memory, querying a zero-ticker paraphrase, and requiring that the
 RBLX memory rank ahead of unrelated analyst memories when semantic retrieval is

@@ -2,7 +2,7 @@ use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::core::search::{
     ScoreSource, SearchDegradation, SearchHit, SearchReport, SearchSourceMode, SearchStatus,
 };
-use ee::models::{MemoryScope, MemoryScopeStats};
+use ee::models::{EmbedBackend, MemoryScope, MemoryScopeStats};
 
 fn runtime_profile() -> RuntimeProfileReport {
     RuntimeProfileReport::for_profile(OperatingProfile::Swarm, "rerank-posture-contract")
@@ -15,6 +15,7 @@ fn scope_stats() -> MemoryScopeStats {
 fn empty_search_report(degraded: Vec<SearchDegradation>) -> SearchReport {
     SearchReport {
         status: SearchStatus::NoResults,
+        embed_backend: EmbedBackend::HashFallback,
         query: "release formatting policy".to_string(),
         requested_limit: 10,
         results: Vec::<SearchHit>::new(),

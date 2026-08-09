@@ -41,8 +41,8 @@ use crate::search::{
 use crate::search::{LexicalRead, LexicalWrite, TantivyIndex};
 use asupersync::sync::OnceCell as AsyncOnceCell;
 use frankensearch::embed::{
-    ConsentSource, DownloadConsent, DownloadProgress, ModelDownloader, ModelLifecycle,
-    ModelManifest, verify_dir_cached,
+    ConsentSource, DetectOptions, DownloadConsent, DownloadProgress, ModelDownloader,
+    ModelLifecycle, ModelManifest, verify_dir_cached,
 };
 use frankensearch::{Model2VecEmbedder, ModelCategory, ModelTier, SearchError, VectorIndex};
 use sqlmodel_core::Value as SqlValue;
@@ -4935,7 +4935,6 @@ fn detect_default_search_embedder_stack() -> EmbedderStack {
 fn search_embedder_stack_for_settings(settings: &EeEmbedderSettings) -> EmbedderStack {
     tracing::info!(
         target: "ee::index::embedder",
-        model_root = %settings.model_root.display(),
         download_mode = ?settings.download_mode,
         "ee embedding model policy resolved"
     );
@@ -4946,17 +4945,19 @@ fn search_embedder_stack_for_settings(settings: &EeEmbedderSettings) -> Embedder
         // or already ran an ee-managed download must still get semantic search.
         // Consult the on-disk model first and only fall back to the
         // deterministic hash embedder when no local semantic model is present.
-        // `auto_detect_with` performs local detection only; the network download
-        // is driven separately by `EeLazyModel2VecEmbedder`, which we never
-        // construct here, so this stays offline. (GH#18: the previous
+        // Frankensearch's explicit offline policy prevents both model downloads
+        // and remote-provider construction, even when ambient credentials or
+        // provider settings are present. (GH#18: the previous
         // unconditional hash fallback made search report
         // `semantic:false / frankensearch_hash_fallback` even with a valid model
         // on disk, contradicting `ee index reembed`.)
-        match EmbedderStack::auto_detect_with(Some(&settings.model_root)) {
+        let offline = DetectOptions {
+            offline: Some(true),
+        };
+        match EmbedderStack::auto_detect_with_options(Some(&settings.model_root), &offline) {
             Ok(stack) if stack.fast().is_semantic() => {
                 tracing::info!(
                     target: "ee::index::embedder",
-                    model_root = %settings.model_root.display(),
                     detected_fast = stack.fast().id(),
                     "EE_EMBED_DOWNLOAD=off; using on-disk semantic model without downloading"
                 );
@@ -4965,7 +4966,6 @@ fn search_embedder_stack_for_settings(settings: &EeEmbedderSettings) -> Embedder
             _ => {
                 tracing::info!(
                     target: "ee::index::embedder",
-                    model_root = %settings.model_root.display(),
                     "EE_EMBED_DOWNLOAD=off and no on-disk semantic model; using deterministic hash fallback"
                 );
                 return hash_fallback_embedder_stack();
@@ -4979,16 +4979,14 @@ fn search_embedder_stack_for_settings(settings: &EeEmbedderSettings) -> Embedder
             tracing::info!(
                 target: "ee::index::embedder",
                 detected_fast = stack.fast().id(),
-                model_root = %settings.model_root.display(),
                 "semantic model not present locally; enabling ee-managed first-use download"
             );
             ee_auto_download_embedder_stack(settings.model_root.clone())
         }
-        Err(error) => {
+        Err(_) => {
             tracing::warn!(
                 target: "ee::index::embedder",
-                error = %error,
-                model_root = %settings.model_root.display(),
+                reason = "auto_detect_failed",
                 "Frankensearch default embedder auto-detect failed; enabling ee-managed first-use download"
             );
             ee_auto_download_embedder_stack(settings.model_root.clone())
@@ -5203,7 +5201,7 @@ impl EeLazyModel2VecEmbedder {
         model_initialization_checkpoint(cx, "before model download")?;
 
         let manifest = ModelManifest::potion_128m();
-        emit_embedding_download_notice(&destination, manifest.total_size_bytes());
+        emit_embedding_download_notice(manifest.total_size_bytes());
         let reporter = EeModelDownloadReporter::new(POTION_MODEL_NAME);
         let downloader = ModelDownloader::with_defaults();
         let consent = DownloadConsent::granted(ConsentSource::Programmatic);
@@ -5381,11 +5379,10 @@ pub(crate) fn potion_model_destination_dir(model_root: &Path) -> PathBuf {
     model_root.join(POTION_MODEL_NAME)
 }
 
-fn emit_embedding_download_notice(destination: &Path, bytes: u64) {
+fn emit_embedding_download_notice(bytes: u64) {
     eprintln!(
-        "ee is downloading the local embedding model {POTION_MODEL_NAME} ({}) once; it will be cached at {}. Set EE_EMBED_DOWNLOAD=off for lexical-only.",
-        format_bytes(bytes),
-        destination.display()
+        "ee is downloading the local embedding model {POTION_MODEL_NAME} ({}) once into the private ee model registry. Set EE_EMBED_DOWNLOAD=off to prohibit network downloads; verified registered models remain usable.",
+        format_bytes(bytes)
     );
 }
 

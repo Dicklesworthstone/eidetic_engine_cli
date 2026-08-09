@@ -166,7 +166,7 @@
     "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}}
   },
   "field_presets": {
-    "minimal": ["command", "query", "hash"],
+    "minimal": ["command", "embed_backend", "query", "hash"],
     "summary": ["command", "embed_backend", "request", "pack", "budget", "quality", "pagination", "degraded"],
     "standard": ["command", "embed_backend", "request", "pack", "items", "pagination", "degraded"],
     "full": ["*"]

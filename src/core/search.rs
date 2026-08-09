@@ -23,7 +23,7 @@ use crate::models::degradation::{
     CONFORMAL_CALIBRATION_INSUFFICIENT_CODE, SEARCH_SCORE_CALIBRATION_FILE_TOO_LARGE_CODE,
     SEARCH_SCORE_CALIBRATION_ROWS_CORRUPT_CODE, SEARCH_SCORE_CALIBRATION_UNREADABLE_CODE,
 };
-use crate::models::model_registry::{ModelPurpose, ModelRegistryStatus};
+use crate::models::model_registry::{EmbedBackend, ModelPurpose, ModelRegistryStatus};
 use crate::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
 use crate::models::{
     DomainError, EvidenceId, GLOBAL_MEMORY_SCOPE_TAG, MemoryId, MemoryScope, MemoryScopeStats,
@@ -773,6 +773,7 @@ impl QueryAssistReformulation {
 #[derive(Clone, Debug)]
 pub struct SearchReport {
     pub status: SearchStatus,
+    pub embed_backend: EmbedBackend,
     pub query: String,
     pub requested_limit: u32,
     pub results: Vec<SearchHit>,
@@ -2160,10 +2161,7 @@ impl SearchReport {
             }
         }
 
-        output.push_str(&format!(
-            "embed_backend: {}\n\n",
-            crate::core::index::active_embed_backend_token()
-        ));
+        output.push_str(&format!("embed_backend: {}\n\n", self.embed_backend));
 
         for (i, hit) in visible_results.iter().enumerate() {
             output.push_str(&format!(
@@ -2395,7 +2393,7 @@ impl SearchReport {
         let mut data = serde_json::json!({
             "command": "search",
             "status": self.status.as_str(),
-            "embed_backend": crate::core::index::active_embed_backend_token(),
+            "embed_backend": self.embed_backend.as_str(),
             "query": &self.query,
             "request": {
                 "sourceMode": self.source_mode_requested.as_str(),
@@ -6950,6 +6948,7 @@ async fn run_search_inner_with_performance(
         return Ok(SearchPerformanceRun {
             report: SearchReport {
                 status: SearchStatus::NoResults,
+                embed_backend: crate::core::index::active_embed_backend(),
                 query: options.query.clone(),
                 requested_limit: options.limit,
                 results: Vec::new(),
@@ -7322,6 +7321,7 @@ async fn run_search_inner_with_performance(
             Ok(SearchPerformanceRun {
                 report: SearchReport {
                     status,
+                    embed_backend: crate::core::index::active_embed_backend(),
                     query: options.query.clone(),
                     requested_limit: options.limit,
                     results: above_floor,
@@ -7360,6 +7360,7 @@ async fn run_search_inner_with_performance(
             Ok(SearchPerformanceRun {
                 report: SearchReport {
                     status: SearchStatus::IndexError,
+                    embed_backend: crate::core::index::active_embed_backend(),
                     query: options.query.clone(),
                     requested_limit: options.limit,
                     results: Vec::new(),
@@ -7529,6 +7530,7 @@ pub async fn run_diag_search_with_cx(
         resolve_search_rerank_config(&options.workspace_path);
     let final_report = SearchReport {
         status,
+        embed_backend: crate::core::index::active_embed_backend(),
         query: options.query.clone(),
         requested_limit: options.limit,
         results: above_floor,
@@ -11058,6 +11060,7 @@ mod tests {
     fn similar_report_data_json_reuses_search_result_shape() {
         let mut report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "mem_00000000000000000000000001".to_string(),
             requested_limit: 1,
             results: vec![SearchHit {
@@ -11104,13 +11107,12 @@ mod tests {
         assert_eq!(json["command"], "similar");
         assert_eq!(
             json["embed_backend"],
-            serde_json::json!(crate::core::index::active_embed_backend_token())
+            serde_json::json!(EmbedBackend::HashFallback.as_str())
         );
         assert!(
-            similar.human_summary().contains(&format!(
-                "embed_backend: {}",
-                crate::core::index::active_embed_backend_token()
-            )),
+            similar
+                .human_summary()
+                .contains("embed_backend: hash_fallback"),
             "human retrieval output must expose the same backend token"
         );
         assert_eq!(
@@ -11132,6 +11134,7 @@ mod tests {
     fn similar_removes_seed_memory_and_truncates_neighbors() {
         let mut report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "release checks".to_string(),
             requested_limit: 2,
             results: vec![
@@ -11386,6 +11389,7 @@ mod tests {
     fn search_revision_metadata_is_absent_by_default_and_stable_when_revisable() {
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "format before release".to_string(),
             requested_limit: 10,
             results: vec![SearchHit {
@@ -11444,6 +11448,7 @@ mod tests {
     fn search_report_data_json_has_required_fields() {
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "test query".to_string(),
             requested_limit: 10,
             results: vec![SearchHit {
@@ -12413,6 +12418,7 @@ mod tests {
     fn search_report_data_json_exposes_allowed_mesh_provenance() {
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "mesh query".to_string(),
             requested_limit: 10,
             results: vec![SearchHit {
@@ -12701,6 +12707,7 @@ mod tests {
 
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "mesh query".to_string(),
             requested_limit: 10,
             results: visible,
@@ -12742,6 +12749,7 @@ mod tests {
     fn search_report_data_json_blocks_non_allowed_mesh_hits_defensively() {
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "mesh query".to_string(),
             requested_limit: 10,
             results: vec![
@@ -13268,6 +13276,7 @@ mod tests {
 
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "cargo fmt".to_string(),
             requested_limit: 10,
             results: visible,
@@ -13382,6 +13391,7 @@ mod tests {
 
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "stale provenance".to_string(),
             requested_limit: 10,
             results: visible,
@@ -13546,6 +13556,7 @@ mod tests {
 
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "provenance drift".to_string(),
             requested_limit: 10,
             results: visible,
@@ -13714,6 +13725,7 @@ mod tests {
         assert_eq!(visible.len(), 1);
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "stale validity".to_string(),
             requested_limit: 10,
             results: visible,
@@ -13828,6 +13840,7 @@ mod tests {
         assert_eq!(visible.len(), 1);
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "stale validity window".to_string(),
             requested_limit: 10,
             results: visible,
@@ -13859,6 +13872,7 @@ mod tests {
     fn search_performance_explain_report_is_redaction_safe_and_pins_fallbacks() {
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "rotate secret sk_live_do_not_emit".to_string(),
             requested_limit: 10,
             results: vec![SearchHit {
@@ -13910,6 +13924,7 @@ mod tests {
     fn search_report_degraded_entries_are_aggregated() {
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "format before release".to_string(),
             requested_limit: 10,
             results: Vec::new(),
@@ -13964,6 +13979,7 @@ mod tests {
         let raw_value = concat!("sk", "_", "search", "_", "secret", "_", "123");
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "rotate output secrets".to_string(),
             requested_limit: 10,
             results: vec![SearchHit {
@@ -14023,6 +14039,7 @@ mod tests {
         let raw_value = concat!("sk", "_", "search", "_", "disabled", "_", "123");
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "rotate output secrets".to_string(),
             requested_limit: 10,
             results: vec![SearchHit {
@@ -14082,6 +14099,7 @@ mod tests {
         let raw_value = concat!("sk", "_", "search", "_", "raw", "_", "123");
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "inspect raw output policy".to_string(),
             requested_limit: 10,
             results: vec![SearchHit {
@@ -14140,6 +14158,7 @@ mod tests {
         let raw_value = concat!("sk", "_", "search", "_", "hidden", "_", "123");
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "rotate hidden output secrets".to_string(),
             requested_limit: 10,
             results: vec![SearchHit {
@@ -15007,6 +15026,7 @@ mod tests {
     fn search_json_includes_score_breakdown() {
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "hybrid query".to_string(),
             requested_limit: 5,
             results: vec![SearchHit {
@@ -15072,6 +15092,7 @@ mod tests {
 
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "provenance".to_string(),
             requested_limit: 1,
             results: vec![hit],
@@ -15135,6 +15156,7 @@ mod tests {
 
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "provenance".to_string(),
             requested_limit: 1,
             results: vec![hit],
@@ -15199,6 +15221,7 @@ mod tests {
     fn search_json_omits_null_scores() {
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "minimal".to_string(),
             requested_limit: 3,
             results: vec![SearchHit {
@@ -15258,6 +15281,7 @@ mod tests {
 
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "metrics".to_string(),
             requested_limit: 4,
             results: vec![
@@ -15326,6 +15350,7 @@ mod tests {
     fn retrieval_metrics_are_stable_for_empty_results() {
         let report = SearchReport {
             status: SearchStatus::NoResults,
+            embed_backend: EmbedBackend::HashFallback,
             query: "empty".to_string(),
             requested_limit: 7,
             results: Vec::new(),
@@ -15458,6 +15483,7 @@ mod tests {
 
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "explained".to_string(),
             requested_limit: 1,
             results: vec![hit],
@@ -15524,6 +15550,7 @@ mod tests {
 
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "human test".to_string(),
             requested_limit: 1,
             results: vec![hit],
@@ -15548,6 +15575,34 @@ mod tests {
         let summary = report.human_summary();
         assert!(summary.contains("lexical: 0.70"));
         assert!(summary.contains("BM25"));
+    }
+
+    #[test]
+    fn search_report_delayed_render_uses_captured_embed_backend() {
+        let active_backend = crate::core::index::active_embed_backend();
+        let captured_backend = match active_backend {
+            EmbedBackend::NeuralLocal => EmbedBackend::HashFallback,
+            EmbedBackend::HashFallback => EmbedBackend::NeuralLocal,
+        };
+        let mut report = rerank_test_report(Vec::new(), Vec::new());
+        report.embed_backend = captured_backend;
+
+        std::thread::yield_now();
+
+        assert_ne!(
+            captured_backend,
+            crate::core::index::active_embed_backend(),
+            "fixture must distinguish the captured backend from ambient render-time state"
+        );
+        assert_eq!(
+            report.data_json()["embed_backend"],
+            serde_json::json!(captured_backend.as_str())
+        );
+        assert!(
+            report
+                .human_summary()
+                .contains(&format!("embed_backend: {captured_backend}"))
+        );
     }
 
     #[test]
@@ -15891,6 +15946,7 @@ mod tests {
 
         let mut report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "prefetch regression".to_owned(),
             requested_limit: 10,
             results: vec![
@@ -15929,6 +15985,7 @@ mod tests {
 
         let mut contains_report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "contains operator".to_owned(),
             requested_limit: 10,
             results: vec![
@@ -15968,6 +16025,7 @@ mod tests {
 
         let mut prefix_report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "prefix operator".to_owned(),
             requested_limit: 10,
             results: vec![
@@ -16007,6 +16065,7 @@ mod tests {
 
         let mut empty_report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "missing family".to_owned(),
             requested_limit: 10,
             results: vec![synthetic_hit("mem_11000000000000000000000001", 0.9)],
@@ -16040,6 +16099,7 @@ mod tests {
 
         let mut list_value_report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "decision options".to_owned(),
             requested_limit: 10,
             results: vec![
@@ -16523,6 +16583,7 @@ mod tests {
     ) -> SearchReport {
         SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "release formatting policy".to_string(),
             requested_limit: 10,
             results,
@@ -17596,6 +17657,7 @@ mod tests {
 
         let report = SearchReport {
             status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
             query: "cargo fmt release".to_string(),
             requested_limit: 10,
             results: deduped,

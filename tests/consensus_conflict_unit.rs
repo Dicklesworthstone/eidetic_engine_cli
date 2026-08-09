@@ -2,7 +2,9 @@
 
 use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::core::search::{ScoreSource, SearchHit, SearchReport, SearchSourceMode, SearchStatus};
-use ee::models::{MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri, TrustClass, UnitScore};
+use ee::models::{
+    EmbedBackend, MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri, TrustClass, UnitScore,
+};
 use ee::output::{render_context_response_json, render_context_response_markdown};
 use ee::pack::{
     ConflictKind, ConflictRecommendedAction, ContextPackProfile, ContextRequest, ContextResponse,
@@ -162,6 +164,7 @@ fn search_hit(
 fn search_report(results: Vec<SearchHit>) -> SearchReport {
     SearchReport {
         status: SearchStatus::Success,
+        embed_backend: EmbedBackend::HashFallback,
         query: "release prep".to_string(),
         requested_limit: 10,
         results,

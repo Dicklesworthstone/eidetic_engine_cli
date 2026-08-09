@@ -2,9 +2,17 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+#[cfg(unix)]
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+#[cfg(unix)]
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+#[cfg(unix)]
+use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ee::core::model::{BUNDLED_EMBEDDING_DIMENSION, BUNDLED_EMBEDDING_MODEL_ID};
@@ -331,7 +339,305 @@ fn model_cli_auto_declares_bundled_embedding_without_claiming_download() -> Test
     )
 }
 
+#[cfg(unix)]
+#[test]
+#[ignore = "requires the real potion-multilingual-128M fixture"]
+fn registered_model2vec_fixture_is_neural_without_overrides_or_network() -> TestResult {
+    let fixture_root = std::env::var_os("EE_EMBED_MODEL_FIXTURE_DIR")
+        .map(PathBuf::from)
+        .ok_or_else(|| "EE_EMBED_MODEL_FIXTURE_DIR must name the real model fixture".to_string())?;
+    let fixture_model_dir = resolve_fixture_model_dir(&fixture_root)?;
+    let workspace = E2eWorkspace::create("registered-model2vec-offline")?;
+    let registered_parent = workspace
+        .xdg_data
+        .join("ee")
+        .join("models")
+        .join("model2vec");
+    fs::create_dir_all(&registered_parent)
+        .map_err(|error| format!("create {}: {error}", registered_parent.display()))?;
+    let registered_model_dir = registered_parent.join("potion-multilingual-128M");
+    std::os::unix::fs::symlink(&fixture_model_dir, &registered_model_dir).map_err(|error| {
+        format!(
+            "link real model fixture {} at {}: {error}",
+            fixture_model_dir.display(),
+            registered_model_dir.display()
+        )
+    })?;
+
+    let network_trap = NetworkTrap::start()?;
+    let proxy = network_trap.proxy_url();
+    let proxy_env = network_proxy_env(&proxy);
+
+    let init = run_ee_with_env(
+        &workspace,
+        "registered_init",
+        &["init", "--workspace", workspace.workspace_arg()?, "--json"],
+        &proxy_env,
+    )?;
+    ensure_success(&init, "registered ee init")?;
+
+    let remember = run_ee_with_env(
+        &workspace,
+        "registered_remember",
+        &[
+            "remember",
+            "Verified local semantic models must remain usable when downloads are disabled.",
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--no-auto-link",
+            "--no-propose-candidates",
+            "--json",
+        ],
+        &proxy_env,
+    )?;
+    ensure_success(&remember, "registered ee remember")?;
+
+    let rebuild = run_ee_with_env(
+        &workspace,
+        "registered_rebuild",
+        &[
+            "index",
+            "rebuild",
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--json",
+        ],
+        &proxy_env,
+    )?;
+    ensure_success(&rebuild, "registered ee index rebuild")?;
+    let rebuild_json = stdout_json(&rebuild, "registered ee index rebuild")?;
+    let rebuild_data = response_data(&rebuild_json, "registered ee index rebuild")?;
+    ensure_eq_bool(
+        rebuild_data
+            .get("embedding")
+            .and_then(Value::as_object)
+            .and_then(|embedding| embedding.get("semantic"))
+            .and_then(Value::as_bool)
+            .ok_or_else(|| "missing rebuild embedding.semantic".to_string())?,
+        true,
+        "registered rebuild semantic",
+    )?;
+
+    let query = "local semantic model download policy";
+    let search = run_ee_with_env(
+        &workspace,
+        "registered_search",
+        &[
+            "search",
+            query,
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--relevance-floor",
+            "0",
+            "--json",
+        ],
+        &proxy_env,
+    )?;
+    ensure_success(&search, "registered ee search")?;
+    ensure_response_embed_backend(&search, "registered ee search", "neural_local")?;
+
+    let pack = run_ee_with_env(
+        &workspace,
+        "registered_pack",
+        &[
+            "pack",
+            query,
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--max-tokens",
+            "800",
+            "--json",
+        ],
+        &proxy_env,
+    )?;
+    ensure_success(&pack, "registered ee pack")?;
+    ensure_response_embed_backend(&pack, "registered ee pack", "neural_local")?;
+
+    let orient = run_ee_with_env(
+        &workspace,
+        "registered_orient",
+        &[
+            "orient",
+            query,
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--fast",
+            "--json",
+        ],
+        &proxy_env,
+    )?;
+    ensure_success(&orient, "registered ee orient")?;
+    ensure_response_embed_backend(&orient, "registered ee orient", "neural_local")?;
+
+    let mut download_off_env = proxy_env.clone();
+    download_off_env.push(("EE_EMBED_DOWNLOAD".to_string(), "off".to_string()));
+    let search_download_off = run_ee_with_env(
+        &workspace,
+        "registered_search_download_off",
+        &[
+            "search",
+            query,
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--relevance-floor",
+            "0",
+            "--json",
+        ],
+        &download_off_env,
+    )?;
+    ensure_success(
+        &search_download_off,
+        "registered ee search with downloads off",
+    )?;
+    ensure_response_embed_backend(
+        &search_download_off,
+        "registered ee search with downloads off",
+        "neural_local",
+    )?;
+
+    for (name, output) in [
+        ("init", &init),
+        ("remember", &remember),
+        ("rebuild", &rebuild),
+        ("search", &search),
+        ("pack", &pack),
+        ("orient", &orient),
+        ("search_download_off", &search_download_off),
+    ] {
+        ensure_text_absent(
+            &output.stderr,
+            "downloading the local embedding model",
+            &format!("{name} download notice"),
+        )?;
+    }
+
+    ensure_eq_usize(
+        network_trap.finish()?,
+        0,
+        "registered fixture network connection attempts",
+    )
+}
+
+#[cfg(unix)]
+fn resolve_fixture_model_dir(root: &Path) -> TestResult<PathBuf> {
+    for candidate in [
+        root.to_path_buf(),
+        root.join("potion-multilingual-128M"),
+        root.join("model2vec").join("potion-multilingual-128M"),
+        root.join("models")
+            .join("model2vec")
+            .join("potion-multilingual-128M"),
+    ] {
+        if candidate.join("model.safetensors").is_file()
+            && candidate.join("tokenizer.json").is_file()
+        {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "{} does not contain a potion-multilingual-128M fixture",
+        root.display()
+    ))
+}
+
+#[cfg(unix)]
+struct NetworkTrap {
+    address: std::net::SocketAddr,
+    attempts: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl NetworkTrap {
+    fn start() -> TestResult<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .map_err(|error| format!("bind network trap: {error}"))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| format!("make network trap nonblocking: {error}"))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| format!("read network trap address: {error}"))?;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_attempts = Arc::clone(&attempts);
+        let thread_stop = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            while !thread_stop.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((_stream, _peer)) => {
+                        thread_attempts.fetch_add(1, Ordering::AcqRel);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok(Self {
+            address,
+            attempts,
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    fn proxy_url(&self) -> String {
+        format!("http://{}", self.address)
+    }
+
+    fn finish(mut self) -> TestResult<usize> {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            thread
+                .join()
+                .map_err(|_| "network trap thread panicked".to_string())?;
+        }
+        Ok(self.attempts.load(Ordering::Acquire))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for NetworkTrap {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn network_proxy_env(proxy: &str) -> Vec<(String, String)> {
+    [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ]
+    .into_iter()
+    .map(|name| (name.to_string(), proxy.to_string()))
+    .collect()
+}
+
 fn run_ee(workspace: &E2eWorkspace, phase: &str, args: &[&str]) -> TestResult<Output> {
+    run_ee_with_env(workspace, phase, args, &[])
+}
+
+fn run_ee_with_env(
+    workspace: &E2eWorkspace,
+    phase: &str,
+    args: &[&str],
+    env: &[(String, String)],
+) -> TestResult<Output> {
     workspace.log(
         phase,
         json!({
@@ -340,11 +646,28 @@ fn run_ee(workspace: &E2eWorkspace, phase: &str, args: &[&str]) -> TestResult<Ou
         }),
     )?;
     let started = Instant::now();
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    command
         .args(args)
         .env("HOME", &workspace.home)
         .env("XDG_DATA_HOME", &workspace.xdg_data)
         .env("EE_NO_COLOR", "1")
+        .env_remove("EE_EMBED_MODEL_DIR")
+        .env_remove("EE_EMBED_MODEL_PATH")
+        .env_remove("EE_EMBED_DOWNLOAD")
+        .env_remove("FRANKENSEARCH_MODEL_DIR")
+        .env_remove("FRANKENSEARCH_OFFLINE")
+        .env_remove("FRANKENSEARCH_ALLOW_DOWNLOAD")
+        .env_remove("FRANKENSEARCH_API_PROVIDER")
+        .env_remove("FRANKENSEARCH_API_MODEL")
+        .env_remove("FRANKENSEARCH_API_DIMENSION")
+        .env_remove("FRANKENSEARCH_API_IDENTITY_JSON")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("GEMINI_API_KEY");
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let output = command
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))?;
     workspace.log(
@@ -360,6 +683,22 @@ fn run_ee(workspace: &E2eWorkspace, phase: &str, args: &[&str]) -> TestResult<Ou
         }),
     )?;
     Ok(output)
+}
+
+#[cfg(unix)]
+fn ensure_response_embed_backend(output: &Output, context: &str, expected: &str) -> TestResult {
+    let value = stdout_json(output, context)?;
+    let data = response_data(&value, context)?;
+    ensure_eq_str(string_member(data, "embed_backend")?, expected, context)
+}
+
+#[cfg(unix)]
+fn ensure_text_absent(bytes: &[u8], needle: &str, context: &str) -> TestResult {
+    let text = String::from_utf8_lossy(bytes);
+    if !text.contains(needle) {
+        return Ok(());
+    }
+    Err(format!("{context} unexpectedly contained {needle}"))
 }
 
 fn response_data<'a>(value: &'a Value, context: &str) -> TestResult<&'a Map<String, Value>> {

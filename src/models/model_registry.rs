@@ -1508,9 +1508,10 @@ mod tests {
     use serde::Serialize;
 
     use super::{
-        EMBEDDING_METADATA_SCHEMA_V1, EmbeddingMetadataRecord, EmbeddingMetadataValidationError,
-        EmbeddingPooling, EmbeddingVectorDtype, ModelDistanceMetric, ModelProvider, ModelPurpose,
-        ModelRegistryStatus, ParseModelRegistryValueError, SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1,
+        EMBEDDING_METADATA_SCHEMA_V1, EmbedBackend, EmbeddingMetadataRecord,
+        EmbeddingMetadataValidationError, EmbeddingPooling, EmbeddingVectorDtype,
+        ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
+        ParseModelRegistryValueError, SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1,
         SemanticModelAdmissibilityBudget, SemanticModelAdmissibilityReport,
         SemanticModelAdmissionMode, SemanticModelCandidate, embedding_metadata_schema_catalog_json,
         embedding_metadata_schemas,
@@ -1525,6 +1526,24 @@ mod tests {
 
     fn test_failure(message: impl Into<String>) -> Box<dyn Error> {
         Box::new(io::Error::other(message.into()))
+    }
+
+    #[test]
+    fn embed_backend_round_trips_as_the_stable_public_vocabulary() -> TestResult {
+        for backend in [EmbedBackend::NeuralLocal, EmbedBackend::HashFallback] {
+            assert_eq!(EmbedBackend::from_str(backend.as_str())?, backend);
+            assert_eq!(backend.to_string(), backend.as_str());
+            assert_eq!(
+                serde_json::from_str::<EmbedBackend>(&serde_json::to_string(&backend)?)?,
+                backend
+            );
+        }
+        assert_eq!(
+            EmbedBackend::from_str(" Neural-Local ")?,
+            EmbedBackend::NeuralLocal
+        );
+        assert!(EmbedBackend::from_str("remote_api").is_err());
+        Ok(())
     }
 
     #[test]

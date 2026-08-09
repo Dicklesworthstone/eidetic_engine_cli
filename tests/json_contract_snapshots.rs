@@ -303,6 +303,12 @@ fn build_search_index(workspace: &Path, database: &Path, index_dir: &Path) -> Te
 fn run_ee(fixture: &JsonContractFixture, args: &[String]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env(
+            "EE_EMBED_MODEL_DIR",
+            fixture.canonical_workspace.join(".ee/empty-model-cache"),
+        )
+        .env_remove("EE_EMBED_MODEL_PATH")
         .env_remove("EE_PROFILE")
         .env_remove("EE_WORKSPACE")
         .env("PATH", "/usr/bin:/bin")

@@ -141,6 +141,25 @@ fn deprecated_context_alias_shares_canonical_pack_presets() -> TestResult {
 }
 
 #[test]
+fn retrieval_presets_never_strip_embedding_backend_attribution() -> TestResult {
+    for command in ["search", "pack", "context", "orient"] {
+        for profile in [
+            FieldProfile::Minimal,
+            FieldProfile::Summary,
+            FieldProfile::Standard,
+        ] {
+            let fields = field_preset_names_for_command(command, profile);
+            if !fields.contains(&"embed_backend") {
+                return Err(format!(
+                    "{command} {profile:?} must preserve embed_backend attribution: {fields:?}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn field_selector_presets_apply_to_every_matrix_row() -> TestResult {
     for surface in matrix_surfaces()? {
         let schema = read_json(schema_path(&surface.schema_file))?;
