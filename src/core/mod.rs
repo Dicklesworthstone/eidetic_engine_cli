@@ -65,6 +65,7 @@ pub mod feedback;
 pub mod focus;
 pub mod focus_suggest;
 pub mod git_ahead;
+pub mod global_promotion;
 pub mod global_store;
 pub mod graph_audit;
 pub mod graph_memory_budget;

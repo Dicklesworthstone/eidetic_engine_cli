@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "global_promotion_redaction_refused",
+  "introduced_by": { "bead": "bd-1bfwa.2" },
+  "surfaces": ["memory"],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A workspace memory containing secret-like content (allowed workspace-locally via --allow-secret-mention) is promoted toward the user-global lane; promotion re-screens at the workspace boundary and refuses rather than silently redacting.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Deploy uses key AKIAIOSFODNN7EXAMPLE for the staging bucket.' --workspace . --allow-secret-mention --level procedural --kind rule"
+    ],
+    "invocation": "ee memory promote-global <memory-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "global_promotion_redaction_refused",
+    "severity": "medium",
+    "message_contains": [
+      "Secret-like content blocks promotion",
+      "refuses rather than silently"
+    ],
+    "repair_contains": "re-remember"
+  }
+}
