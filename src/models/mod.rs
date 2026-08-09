@@ -176,10 +176,10 @@ pub use learn::{
     learning_schema_catalog_json, learning_schemas,
 };
 pub use memory::{
-    Confidence, Importance, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES,
-    MAX_TYPED_MEMORY_FIELD_LIST_ITEMS, MAX_TYPED_MEMORY_FIELD_VALUE_BYTES, MAX_TYPED_MEMORY_FIELDS,
-    MAX_TYPED_MEMORY_FIELDS_JSON_BYTES, MemoryContent, MemoryKind, MemoryLevel,
-    MemoryValidationError, TYPED_MEMORY_FIELDS_SCHEMA_V1, Tag, UnitScore, Utility,
+    Confidence, Importance, KNOWN_MEMORY_KINDS, KNOWN_MEMORY_LEVELS, MAX_CONTENT_BYTES,
+    MAX_TAG_BYTES, MAX_TYPED_MEMORY_FIELD_LIST_ITEMS, MAX_TYPED_MEMORY_FIELD_VALUE_BYTES,
+    MAX_TYPED_MEMORY_FIELDS, MAX_TYPED_MEMORY_FIELDS_JSON_BYTES, MemoryContent, MemoryKind,
+    MemoryLevel, MemoryValidationError, TYPED_MEMORY_FIELDS_SCHEMA_V1, Tag, UnitScore, Utility,
     canonicalize_typed_memory_fields_json, canonicalize_typed_memory_fields_json_with_redactor,
 };
 pub use memory_anchor::{

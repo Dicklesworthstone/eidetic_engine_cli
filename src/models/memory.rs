@@ -175,6 +175,10 @@ pub const KNOWN_MEMORY_KINDS: &[&str] = &[
     "playbook-step",
 ];
 
+/// Names of the four memory levels, in stable order. Useful for help text,
+/// cross-wiring guidance, and golden tests.
+pub const KNOWN_MEMORY_LEVELS: &[&str] = &["working", "episodic", "semantic", "procedural"];
+
 pub const TYPED_MEMORY_FIELDS_SCHEMA_V1: &str = "ee.memory.typed_fields.v1";
 pub const TYPED_MEMORY_FIELDS_SCHEMA_V2: &str = "ee.memory.typed_fields.v2";
 pub const TYPED_MEMORY_FIELD_METADATA_PREFIX: &str = "typed_field.";

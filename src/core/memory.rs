@@ -41,9 +41,9 @@ use crate::db::{
     StoredMemoryLink, audit_actions, generate_audit_id, generate_audit_id_seeded,
 };
 use crate::models::{
-    DomainError, GLOBAL_MEMORY_SCOPE_TAG, MAX_TAG_BYTES, MemoryContent, MemoryId, MemoryKind,
-    MemoryLevel, MemoryValidationError, ProducerMetadata, ProducerSourceSystem, ProvenanceUri, Tag,
-    TrustClass, UnitScore, WorkspaceId,
+    DomainError, GLOBAL_MEMORY_SCOPE_TAG, KNOWN_MEMORY_KINDS, KNOWN_MEMORY_LEVELS, MAX_TAG_BYTES,
+    MemoryContent, MemoryId, MemoryKind, MemoryLevel, MemoryValidationError, ProducerMetadata,
+    ProducerSourceSystem, ProvenanceUri, Tag, TrustClass, UnitScore, WorkspaceId,
 };
 use crate::obs::{AuditEvent, AuditOutcome, now_rfc3339_nanos};
 use crate::runtime::determinism::{Deterministic, Seed};
@@ -2368,6 +2368,9 @@ fn prepare_remember_memory_with_store(
         .as_str()
         .to_owned();
     let workflow_id = parse_workflow_id(options.workflow_id)?;
+    if let Some(error) = remember_level_kind_cross_wire_error(options.level, options.kind) {
+        return Err(error);
+    }
     let level = MemoryLevel::from_str(options.level)
         .map_err(|error| remember_usage_error(error.to_string()))?;
     let kind = MemoryKind::from_str(options.kind)
@@ -5958,6 +5961,74 @@ pub const TYPED_FIELD_UNKNOWN_CODE: &str = "typed_field_unknown";
 
 /// A declared typed-field assignment has an invalid name, value, or shape.
 pub const TYPED_FIELD_INVALID_CODE: &str = "typed_field_invalid";
+
+/// A known memory LEVEL token was passed as the memory kind.
+pub const REMEMBER_KIND_IS_LEVEL_CODE: &str = "remember_kind_is_level";
+
+/// A canonical memory KIND token was passed as the memory level.
+pub const REMEMBER_LEVEL_IS_KIND_CODE: &str = "remember_level_is_kind";
+
+/// Detect level/kind cross-wiring on the raw `--level` / `--kind` tokens
+/// (bd-remember-level-kind-validation-zau2l).
+///
+/// Matching is exact on the normalized token: the four level names are
+/// reserved as kinds and the nine canonical kind names are rejected as
+/// levels, each with did-you-mean guidance toward the sibling flag. Custom
+/// kinds that merely share a prefix with a level name (for example
+/// `episodic-note`) stay accepted byte-for-byte.
+#[must_use]
+pub fn remember_level_kind_cross_wire_error(level: &str, kind: &str) -> Option<DomainError> {
+    if let Ok(level_token) = MemoryLevel::from_str(kind) {
+        let level_value = level_token.as_str();
+        return Some(DomainError::UsageCodeWithDetails {
+            code: REMEMBER_KIND_IS_LEVEL_CODE,
+            message: format!(
+                "`{kind}` is a memory level, not a kind — did you mean `--level {level_value}`? \
+                 Canonical kinds: {}. Free-form kinds stay accepted; only the four level names \
+                 (working, episodic, semantic, procedural) are reserved.",
+                KNOWN_MEMORY_KINDS.join(", ")
+            ),
+            repair: Some(format!(
+                "ee remember \"<content>\" --level {level_value} --kind <kind> --json"
+            )),
+            details_json: serde_json::json!({
+                "failureModeCode": REMEMBER_KIND_IS_LEVEL_CODE,
+                "argument": "--kind",
+                "provided": kind,
+                "didYouMean": {"argument": "--level", "value": level_value},
+                "memoryLevels": KNOWN_MEMORY_LEVELS,
+                "canonicalKinds": KNOWN_MEMORY_KINDS,
+            })
+            .to_string(),
+        });
+    }
+    if MemoryLevel::from_str(level).is_err()
+        && let Ok(kind_token) = MemoryKind::from_str(level)
+        && !matches!(kind_token, MemoryKind::Custom(_))
+    {
+        let kind_value = kind_token.as_str().to_owned();
+        return Some(DomainError::UsageCodeWithDetails {
+            code: REMEMBER_LEVEL_IS_KIND_CODE,
+            message: format!(
+                "`{level}` is a memory kind, not a level — did you mean `--kind {kind_value}`? \
+                 Levels are: working, episodic, semantic, procedural."
+            ),
+            repair: Some(format!(
+                "ee remember \"<content>\" --level <level> --kind {kind_value} --json"
+            )),
+            details_json: serde_json::json!({
+                "failureModeCode": REMEMBER_LEVEL_IS_KIND_CODE,
+                "argument": "--level",
+                "provided": level,
+                "didYouMean": {"argument": "--kind", "value": kind_value},
+                "memoryLevels": KNOWN_MEMORY_LEVELS,
+                "canonicalKinds": KNOWN_MEMORY_KINDS,
+            })
+            .to_string(),
+        });
+    }
+    None
+}
 
 /// Metadata schema for evidence spans attached by `ee remember --reinforce`.
 const REMEMBER_REINFORCE_EVIDENCE_SCHEMA_V1: &str = "ee.remember.reinforce_evidence.v1";
@@ -11295,6 +11366,132 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn cross_wire_details(error: &DomainError) -> Result<serde_json::Value, String> {
+        match error {
+            DomainError::UsageCodeWithDetails { details_json, .. } => {
+                serde_json::from_str(details_json)
+                    .map_err(|parse| format!("details_json must parse: {parse}"))
+            }
+            other => Err(format!("expected UsageCodeWithDetails, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn remember_cross_wire_guard_flags_levels_passed_as_kind() -> TestResult {
+        for (provided, canonical) in [
+            ("working", "working"),
+            ("episodic", "episodic"),
+            ("semantic", "semantic"),
+            ("procedural", "procedural"),
+            ("Episodic", "episodic"),
+            (" semantic ", "semantic"),
+        ] {
+            let error = remember_level_kind_cross_wire_error("episodic", provided)
+                .ok_or_else(|| format!("level token `{provided}` as kind must error"))?;
+            ensure(error.code(), REMEMBER_KIND_IS_LEVEL_CODE, "kind-as-level code")?;
+            ensure(
+                error.exit_code(),
+                crate::models::ProcessExitCode::Usage,
+                "kind-as-level exit code",
+            )?;
+            let message = error.message();
+            ensure(
+                message.contains(&format!("did you mean `--level {canonical}`")),
+                true,
+                "kind-as-level did-you-mean message",
+            )?;
+            let details = cross_wire_details(&error)?;
+            ensure(
+                details["failureModeCode"].as_str(),
+                Some(REMEMBER_KIND_IS_LEVEL_CODE),
+                "kind-as-level failureModeCode",
+            )?;
+            ensure(details["argument"].as_str(), Some("--kind"), "kind-as-level argument")?;
+            ensure(details["provided"].as_str(), Some(provided), "kind-as-level provided")?;
+            ensure(
+                details["didYouMean"]["argument"].as_str(),
+                Some("--level"),
+                "kind-as-level didYouMean argument",
+            )?;
+            ensure(
+                details["didYouMean"]["value"].as_str(),
+                Some(canonical),
+                "kind-as-level didYouMean value",
+            )?;
+            ensure(
+                details["canonicalKinds"]
+                    .as_array()
+                    .map(std::vec::Vec::len),
+                Some(KNOWN_MEMORY_KINDS.len()),
+                "kind-as-level canonicalKinds",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn remember_cross_wire_guard_flags_kinds_passed_as_level() -> TestResult {
+        for (provided, canonical) in [
+            ("rule", "rule"),
+            ("anti-pattern", "anti-pattern"),
+            ("Anti_Pattern", "anti-pattern"),
+            ("playbook-step", "playbook-step"),
+            (" decision ", "decision"),
+        ] {
+            let error = remember_level_kind_cross_wire_error(provided, "fact")
+                .ok_or_else(|| format!("kind token `{provided}` as level must error"))?;
+            ensure(error.code(), REMEMBER_LEVEL_IS_KIND_CODE, "level-as-kind code")?;
+            let details = cross_wire_details(&error)?;
+            ensure(details["argument"].as_str(), Some("--level"), "level-as-kind argument")?;
+            ensure(details["provided"].as_str(), Some(provided), "level-as-kind provided")?;
+            ensure(
+                details["didYouMean"]["argument"].as_str(),
+                Some("--kind"),
+                "level-as-kind didYouMean argument",
+            )?;
+            ensure(
+                details["didYouMean"]["value"].as_str(),
+                Some(canonical),
+                "level-as-kind didYouMean value",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn remember_cross_wire_guard_accepts_custom_kinds_and_valid_pairs() -> TestResult {
+        // Planted negative: a lookalike custom kind sharing a level prefix must
+        // pass untouched — exact-match only, never prefix rejection.
+        for (level, kind) in [
+            ("episodic", "fact"),
+            ("semantic", "decision"),
+            ("working", "anti-pattern"),
+            ("episodic", "episodic-note"),
+            ("semantic", "episodic-note"),
+            ("procedural", "workingset"),
+            ("episodic", "working-set"),
+            ("episodic", "proceduralish"),
+            ("episodic", "rules"),
+            ("episodic", "episodic_"),
+        ] {
+            ensure(
+                remember_level_kind_cross_wire_error(level, kind).is_none(),
+                true,
+                &format!("({level}, {kind}) must stay accepted"),
+            )?;
+        }
+        // Both flags cross-wired: the kind-direction guidance wins
+        // deterministically.
+        let error = remember_level_kind_cross_wire_error("rule", "episodic")
+            .ok_or_else(|| "double cross-wire must error".to_owned())?;
+        ensure(
+            error.code(),
+            REMEMBER_KIND_IS_LEVEL_CODE,
+            "double cross-wire precedence",
+        )?;
+        Ok(())
     }
 
     fn remember_test_memory_input(workspace_id: &str, content: &str) -> CreateMemoryInput {

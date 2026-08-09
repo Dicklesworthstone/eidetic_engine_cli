@@ -1875,3 +1875,151 @@ fn context_pack_includes_relevant_memories() -> TestResult {
 
     Ok(())
 }
+
+#[test]
+fn remember_level_kind_cross_wire_guard_public_cli_contract() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(
+        &init.status.code(),
+        &Some(EXIT_SUCCESS),
+        "cross-wire guard init exit code",
+    )?;
+
+    // Cross-wire direction 1: a known level token passed as --kind.
+    let kind_as_level = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "cross-wired kind attempt",
+        "--kind",
+        "episodic",
+        "--json",
+    ])?;
+    ensure_equal(
+        &kind_as_level.status.code(),
+        &Some(1),
+        "level token as --kind must exit with the usage code",
+    )?;
+    let error_json = stdout_json(&kind_as_level)?;
+    assert_schema(&error_json, "ee.error.v2", "kind-as-level error envelope")?;
+    ensure_equal(
+        &error_json.pointer("/error/code").and_then(serde_json::Value::as_str),
+        &Some("remember_kind_is_level"),
+        "kind-as-level error code",
+    )?;
+    ensure(
+        error_json
+            .pointer("/error/message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|message| message.contains("did you mean `--level episodic`")),
+        "kind-as-level message must carry the did-you-mean guidance",
+    )?;
+    ensure_equal(
+        &error_json
+            .pointer("/error/details/didYouMean/argument")
+            .and_then(serde_json::Value::as_str),
+        &Some("--level"),
+        "kind-as-level didYouMean argument",
+    )?;
+    ensure_equal(
+        &error_json
+            .pointer("/error/details/didYouMean/value")
+            .and_then(serde_json::Value::as_str),
+        &Some("episodic"),
+        "kind-as-level didYouMean value",
+    )?;
+    ensure_equal(
+        &error_json
+            .pointer("/error/details/provided")
+            .and_then(serde_json::Value::as_str),
+        &Some("episodic"),
+        "kind-as-level provided token",
+    )?;
+
+    // Cross-wire direction 2: a canonical kind token passed as --level.
+    let level_as_kind = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "cross-wired level attempt",
+        "--level",
+        "rule",
+        "--json",
+    ])?;
+    ensure_equal(
+        &level_as_kind.status.code(),
+        &Some(1),
+        "kind token as --level must exit with the usage code",
+    )?;
+    let inverse_json = stdout_json(&level_as_kind)?;
+    assert_schema(&inverse_json, "ee.error.v2", "level-as-kind error envelope")?;
+    ensure_equal(
+        &inverse_json.pointer("/error/code").and_then(serde_json::Value::as_str),
+        &Some("remember_level_is_kind"),
+        "level-as-kind error code",
+    )?;
+    ensure_equal(
+        &inverse_json
+            .pointer("/error/details/didYouMean/argument")
+            .and_then(serde_json::Value::as_str),
+        &Some("--kind"),
+        "level-as-kind didYouMean argument",
+    )?;
+    ensure_equal(
+        &inverse_json
+            .pointer("/error/details/didYouMean/value")
+            .and_then(serde_json::Value::as_str),
+        &Some("rule"),
+        "level-as-kind didYouMean value",
+    )?;
+
+    // Planted negative: a lookalike custom kind sharing a level prefix must be
+    // accepted byte-for-byte, never prefix-rejected.
+    let custom_kind = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "custom kind lookalike stays accepted",
+        "--kind",
+        "episodic-note",
+        "--json",
+    ])?;
+    ensure_equal(
+        &custom_kind.status.code(),
+        &Some(EXIT_SUCCESS),
+        "custom kind lookalike exit code",
+    )?;
+    assert_stderr_empty(&custom_kind, "custom kind lookalike")?;
+    let custom_json = stdout_json(&custom_kind)?;
+    assert_schema(&custom_json, "ee.response.v2", "custom kind lookalike")?;
+    ensure_equal(
+        &custom_json
+            .pointer("/data/kind")
+            .and_then(serde_json::Value::as_str),
+        &Some("episodic-note"),
+        "custom kind must persist byte-for-byte",
+    )?;
+
+    // Canonical control: valid level plus canonical kind still succeeds.
+    let canonical = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "canonical pair control",
+        "--level",
+        "semantic",
+        "--kind",
+        "decision",
+        "--json",
+    ])?;
+    ensure_equal(
+        &canonical.status.code(),
+        &Some(EXIT_SUCCESS),
+        "canonical pair exit code",
+    )?;
+
+    Ok(())
+}
