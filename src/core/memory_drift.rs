@@ -3360,11 +3360,16 @@ mod tests {
             )?;
         }
         let malformed_id = crate::testing::mem("driftlowsortmalformed");
+        let malformed_pack_seed = "pack_drift_low_sort_malformed";
+        let malformed_pack_seed_hash = blake3::hash(malformed_pack_seed.as_bytes())
+            .to_hex()
+            .to_string();
+        let malformed_pack_id = format!("pack_{}", &malformed_pack_seed_hash[..26]);
         insert_recent_pack_test_memory(&connection, &workspace_id, &malformed_id, true)?;
         insert_recent_pack_test_record(
             &connection,
             &workspace_id,
-            "pack_drift_low_sort_malformed",
+            malformed_pack_seed,
             &malformed_id,
             "!",
         )?;
@@ -3377,10 +3382,15 @@ mod tests {
         )?;
         let malformed = report
             .iter()
-            .find(|item| item.memory_id == crate::models::public_memory_id(&malformed_id))
+            .find(|item| item.top_reason == "pack_item_ledger_timestamp_mismatch")
             .ok_or_else(|| {
                 "newest inserted malformed timestamp was hidden by bounded admission".to_owned()
             })?;
+        assert_eq!(
+            malformed.memory_id,
+            crate::models::public_memory_id(&malformed_pack_id),
+            "a record-binding failure must identify the trusted pack record, not untrusted ledger content"
+        );
         assert_eq!(malformed.top_reason, "pack_item_ledger_timestamp_mismatch");
         assert_eq!(
             malformed.degraded_code.as_deref(),
