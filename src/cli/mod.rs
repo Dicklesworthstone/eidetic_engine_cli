@@ -50800,7 +50800,8 @@ impl RememberMemoryReport {
             output.push_str(&format!("  Typed fields: {typed_fields}\n"));
         }
         if let Some(family) = &self.attempt_family {
-            let mut line = format!("  Attempt family: {}", family.family_id);
+            let family_alias = crate::models::public_attempt_family_alias(&family.family_id);
+            let mut line = format!("  Attempt family: {family_alias}");
             match (family.attempt_index, family.declared_size) {
                 (Some(index), Some(declared)) => {
                     line.push_str(&format!(" (slot {index} of {declared}"));
@@ -50887,6 +50888,7 @@ impl RememberMemoryReport {
             .attempt_family
             .as_ref()
             .map_or_else(String::new, |family| {
+                let family_alias = crate::models::public_attempt_family_alias(&family.family_id);
                 let declared_size = family
                     .declared_size
                     .map_or_else(|| "null".to_string(), |size| size.to_string());
@@ -50898,9 +50900,9 @@ impl RememberMemoryReport {
                     |disposition| format!("\"{}\"", escape_json_string(disposition)),
                 );
                 format!(
-                    ",\"attemptFamily\":{{\"familyId\":\"{}\",\"declaredSize\":{declared_size},\
+                    ",\"attemptFamily\":{{\"familyAlias\":\"{}\",\"declaredSize\":{declared_size},\
                  \"attemptIndex\":{attempt_index},\"disposition\":{disposition}}}",
-                    escape_json_string(&family.family_id)
+                    escape_json_string(&family_alias)
                 )
             });
         let typed_fields_json = format!("{typed_fields_json}{attempt_family_json}");

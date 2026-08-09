@@ -8914,6 +8914,23 @@ CREATE INDEX idx_pack_evidence_items_rank
     "blake3:v100_pack_evidence_items_2026_08_09",
 );
 
+/// Forward-only repair for the V095 attempt-family ledger: the shipped
+/// append-only trigger rejected UPDATE but accidentally permitted DELETE.
+/// Keep V095 byte-stable and close that history-erasure path at the next
+/// contiguous migration instead of changing an applied checksum.
+pub const V101_ATTEMPT_FAMILY_IMMUTABILITY_REPAIR: Migration = Migration::new(
+    101,
+    "attempt_family_immutability_repair",
+    r#"
+CREATE TRIGGER trg_attempt_family_members_delete_append_only
+BEFORE DELETE ON attempt_family_members
+BEGIN
+    SELECT RAISE(ABORT, 'attempt family members are append-only');
+END;
+"#,
+    "blake3:v101_attempt_family_immutability_repair_2026_08_09",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -9016,6 +9033,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V098_MEMORY_SEALS,
     V099_MESH_PEER_TRANSPORT_IDENTITY,
     V100_PACK_EVIDENCE_ITEMS,
+    V101_ATTEMPT_FAMILY_IMMUTABILITY_REPAIR,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -18145,11 +18163,29 @@ pub struct AttemptFamilyMembershipSnapshot {
 pub const ATTEMPT_FAMILY_MEMBERSHIP_BATCH_SIZE: usize = 128;
 
 /// Deterministic result of the bounded candidate-ID membership batch loader.
-/// `query_count` is surfaced for SLO/conformance tests: it is exactly one SQL
-/// statement per non-empty chunk and never scales with families per candidate.
+/// `query_count` is surfaced for SLO/conformance tests: candidate mappings and
+/// distinct family ledgers are each loaded in bounded chunks, never per row.
+/// `materialized_row_count` proves each distinct shared family is read once,
+/// rather than once per candidate or candidate chunk.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct AttemptFamilyMembershipSnapshotBatch {
     pub by_memory_id: BTreeMap<String, AttemptFamilyMembershipSnapshot>,
+    pub query_count: usize,
+    pub materialized_row_count: usize,
+}
+
+/// The pointer-selected attempt-family record for one concrete memory row,
+/// including the declaration origin needed by lossless backup/restore.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MemoryAttemptFamilyDetails {
+    pub family: MemoryAttemptFamily,
+    pub origin: Option<String>,
+}
+
+/// Bounded bulk form of [`DbConnection::get_memory_attempt_family`].
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MemoryAttemptFamilyDetailsBatch {
+    pub by_memory_id: BTreeMap<String, MemoryAttemptFamilyDetails>,
     pub query_count: usize,
 }
 
@@ -20022,6 +20058,121 @@ impl DbConnection {
         }))
     }
 
+    /// Batch-load each concrete memory row's pointer-selected attempt family
+    /// and declaration origin in bounded chunks. This preserves the scalar
+    /// reader's deterministic first-slot behavior for malformed duplicate
+    /// logical memberships while avoiding backup-time per-memory queries.
+    pub fn get_memory_attempt_family_details_batch(
+        &self,
+        memory_ids: &[String],
+    ) -> Result<MemoryAttemptFamilyDetailsBatch> {
+        self.begin_read_snapshot()?;
+        let result = self.get_memory_attempt_family_details_batch_in_current_snapshot(memory_ids);
+        match result {
+            Ok(batch) => {
+                self.commit_read_snapshot()?;
+                Ok(batch)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = self.rollback_read_snapshot() {
+                    tracing::error!(
+                        error = %error,
+                        rollback_error = %rollback_error,
+                        "failed to roll back attempt-family detail snapshot"
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn get_memory_attempt_family_details_batch_in_current_snapshot(
+        &self,
+        memory_ids: &[String],
+    ) -> Result<MemoryAttemptFamilyDetailsBatch> {
+        let memory_ids = memory_ids
+            .iter()
+            .filter(|memory_id| !memory_id.trim().is_empty())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut by_memory_id = BTreeMap::new();
+        let mut query_count = 0_usize;
+
+        for chunk in memory_ids.chunks(ATTEMPT_FAMILY_MEMBERSHIP_BATCH_SIZE) {
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "WITH candidates AS (\
+                     SELECT id AS candidate_id, workspace_id, \
+                            COALESCE(logical_id, id) AS logical_id, \
+                            attempt_family_id, attempt_family_size \
+                     FROM memories WHERE id IN ({placeholders})\
+                 ) \
+                 SELECT candidate.candidate_id, candidate.attempt_family_id, \
+                        COALESCE(family.declared_size, candidate.attempt_family_size), \
+                        family.origin, member.attempt_index, member.disposition \
+                 FROM candidates AS candidate \
+                 LEFT JOIN attempt_families AS family \
+                   ON family.workspace_id = candidate.workspace_id \
+                  AND family.family_id = candidate.attempt_family_id \
+                 LEFT JOIN attempt_family_members AS member \
+                   ON member.workspace_id = candidate.workspace_id \
+                  AND member.family_id = candidate.attempt_family_id \
+                  AND member.memory_logical_id = candidate.logical_id \
+                 ORDER BY candidate.candidate_id ASC, member.attempt_index ASC"
+            );
+            let params = chunk
+                .iter()
+                .map(|memory_id| Value::Text(memory_id.clone()))
+                .collect::<Vec<_>>();
+            let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+            query_count = query_count.saturating_add(1);
+            for row in &rows {
+                let memory_id =
+                    required_text(row, 0, DbOperation::Query, "candidate_id")?.to_owned();
+                if by_memory_id.contains_key(&memory_id) {
+                    continue;
+                }
+                let Some(family_id) = optional_text(row, 1)?.map(str::to_owned) else {
+                    continue;
+                };
+                by_memory_id.insert(
+                    memory_id,
+                    MemoryAttemptFamilyDetails {
+                        family: MemoryAttemptFamily {
+                            family_id,
+                            declared_size: optional_i64(
+                                row,
+                                2,
+                                DbOperation::Query,
+                                "declared_size",
+                            )?
+                            .and_then(|value| u32::try_from(value).ok()),
+                            attempt_index: optional_i64(
+                                row,
+                                4,
+                                DbOperation::Query,
+                                "attempt_index",
+                            )?
+                            .and_then(|value| u32::try_from(value).ok()),
+                            disposition: optional_text(row, 5)?.map(str::to_owned),
+                        },
+                        origin: optional_text(row, 3)?.map(str::to_owned),
+                    },
+                );
+            }
+        }
+
+        Ok(MemoryAttemptFamilyDetailsBatch {
+            by_memory_id,
+            query_count,
+        })
+    }
+
     /// Persist a memory's attempt-family membership
     /// (bd-multiplicity-aware-trust-p0u7g): the V094 legacy pointer columns
     /// on the memory row carry the family identity, while the authoritative
@@ -20481,10 +20632,35 @@ impl DbConnection {
     }
 
     /// Load authoritative attempt-family membership for candidate memory IDs in
-    /// bounded chunks. Each chunk is one SQL statement that derives the owning
-    /// workspace and revision-stable logical ID, unions every V095 ledger family
-    /// with every V094 pointer family, and materializes the full family members.
+    /// two bounded phases. The first maps candidates to every V095 ledger and
+    /// V094 pointer family; the second materializes each distinct family once,
+    /// preventing candidates that share a family from multiplying its rows.
     pub fn get_attempt_family_membership_snapshots_for_memory_ids(
+        &self,
+        memory_ids: &[String],
+    ) -> Result<AttemptFamilyMembershipSnapshotBatch> {
+        self.begin_read_snapshot()?;
+        let result = self
+            .get_attempt_family_membership_snapshots_for_memory_ids_in_current_snapshot(memory_ids);
+        match result {
+            Ok(batch) => {
+                self.commit_read_snapshot()?;
+                Ok(batch)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = self.rollback_read_snapshot() {
+                    tracing::error!(
+                        error = %error,
+                        rollback_error = %rollback_error,
+                        "failed to roll back attempt-family membership snapshot"
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn get_attempt_family_membership_snapshots_for_memory_ids_in_current_snapshot(
         &self,
         memory_ids: &[String],
     ) -> Result<AttemptFamilyMembershipSnapshotBatch> {
@@ -20497,13 +20673,17 @@ impl DbConnection {
             .collect::<Vec<_>>();
         let mut by_memory_id = BTreeMap::new();
         let mut query_count = 0_usize;
+        let mut materialized_row_count = 0_usize;
+        let mut candidate_family_ids =
+            BTreeMap::<String, (String, String, BTreeSet<String>)>::new();
+        let mut family_keys = BTreeSet::<(String, String)>::new();
 
         for chunk in memory_ids.chunks(ATTEMPT_FAMILY_MEMBERSHIP_BATCH_SIZE) {
             let placeholders = (1..=chunk.len())
                 .map(|index| format!("?{index}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let sql = format!(
+            let candidate_sql = format!(
                 "WITH candidates AS (\
                      SELECT id AS candidate_id, workspace_id, COALESCE(logical_id, id) AS logical_id \
                      FROM memories WHERE id IN ({placeholders})\
@@ -20522,12 +20702,52 @@ impl DbConnection {
                      WHERE memory.attempt_family_id IS NOT NULL\
                  ) \
                  SELECT candidate.candidate_id, candidate.workspace_id, candidate.logical_id, \
-                        family_key.family_id, family.declared_size, family.origin, \
-                        member.memory_logical_id, member.attempt_index, member.disposition, \
-                        member.recorded_at, 0 AS pointer_only \
+                        family_key.family_id \
                  FROM candidates AS candidate \
                  LEFT JOIN candidate_families AS family_key \
                    ON family_key.candidate_id = candidate.candidate_id \
+                 ORDER BY candidate.candidate_id ASC, family_key.family_id ASC"
+            );
+            let params = chunk
+                .iter()
+                .map(|memory_id| Value::Text(memory_id.clone()))
+                .collect::<Vec<_>>();
+            let rows = self.query_for(DbOperation::Query, &candidate_sql, &params)?;
+            query_count = query_count.saturating_add(1);
+            materialized_row_count = materialized_row_count.saturating_add(rows.len());
+            for row in &rows {
+                let candidate_id =
+                    required_text(row, 0, DbOperation::Query, "candidate_id")?.to_owned();
+                let workspace_id =
+                    required_text(row, 1, DbOperation::Query, "workspace_id")?.to_owned();
+                let logical_id =
+                    required_text(row, 2, DbOperation::Query, "logical_id")?.to_owned();
+                let family_id = optional_text(row, 3)?.map(str::to_owned);
+                let candidate = candidate_family_ids
+                    .entry(candidate_id)
+                    .or_insert_with(|| (workspace_id.clone(), logical_id, BTreeSet::new()));
+                if let Some(family_id) = family_id {
+                    candidate.2.insert(family_id.clone());
+                    family_keys.insert((workspace_id, family_id));
+                }
+            }
+        }
+
+        let family_keys = family_keys.into_iter().collect::<Vec<_>>();
+        let family_batch_size = (ATTEMPT_FAMILY_MEMBERSHIP_BATCH_SIZE / 2).max(1);
+        let mut family_snapshots = BTreeMap::<(String, String), AttemptFamilySnapshot>::new();
+        for chunk in family_keys.chunks(family_batch_size) {
+            let values = (0..chunk.len())
+                .map(|index| format!("(?{}, ?{})", index * 2 + 1, index * 2 + 2))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let family_sql = format!(
+                "WITH family_keys(workspace_id, family_id) AS (VALUES {values}) \
+                 SELECT family_key.workspace_id, family_key.family_id, \
+                        family.declared_size, family.origin, member.memory_logical_id, \
+                        member.attempt_index, member.disposition, member.recorded_at, \
+                        0 AS pointer_only \
+                 FROM family_keys AS family_key \
                  LEFT JOIN attempt_families AS family \
                    ON family.workspace_id = family_key.workspace_id \
                   AND family.family_id = family_key.family_id \
@@ -20539,12 +20759,11 @@ impl DbConnection {
                          AND COALESCE(live.logical_id, live.id) = member.memory_logical_id \
                          AND live.tombstoned_at IS NULL AND live.valid_to IS NULL) \
                  UNION ALL \
-                 SELECT candidate.candidate_id, candidate.workspace_id, candidate.logical_id, \
-                        family_key.family_id, family.declared_size, family.origin, \
-                        COALESCE(memory.logical_id, memory.id), NULL, NULL, NULL, 1 AS pointer_only \
-                 FROM candidates AS candidate \
-                 JOIN candidate_families AS family_key \
-                   ON family_key.candidate_id = candidate.candidate_id \
+                 SELECT family_key.workspace_id, family_key.family_id, \
+                        family.declared_size, family.origin, \
+                        COALESCE(memory.logical_id, memory.id), NULL, NULL, NULL, \
+                        1 AS pointer_only \
+                 FROM family_keys AS family_key \
                  LEFT JOIN attempt_families AS family \
                    ON family.workspace_id = family_key.workspace_id \
                   AND family.family_id = family_key.family_id \
@@ -20558,101 +20777,95 @@ impl DbConnection {
                        AND recorded.family_id = family_key.family_id \
                        AND recorded.memory_logical_id = COALESCE(memory.logical_id, memory.id)\
                  ) \
-                 GROUP BY candidate.candidate_id, candidate.workspace_id, candidate.logical_id, \
-                          family_key.family_id, family.declared_size, family.origin, \
+                 GROUP BY family_key.workspace_id, family_key.family_id, \
+                          family.declared_size, family.origin, \
                           COALESCE(memory.logical_id, memory.id) \
-                 ORDER BY 1 ASC, 4 ASC, 11 ASC, 8 ASC, 7 ASC"
+                 ORDER BY 1 ASC, 2 ASC, 9 ASC, 6 ASC, 5 ASC"
             );
             let params = chunk
                 .iter()
-                .map(|memory_id| Value::Text(memory_id.clone()))
+                .flat_map(|(workspace_id, family_id)| {
+                    [
+                        Value::Text(workspace_id.clone()),
+                        Value::Text(family_id.clone()),
+                    ]
+                })
                 .collect::<Vec<_>>();
-            let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+            let rows = self.query_for(DbOperation::Query, &family_sql, &params)?;
             query_count = query_count.saturating_add(1);
-
+            materialized_row_count = materialized_row_count.saturating_add(rows.len());
             for row in &rows {
-                let candidate_id =
-                    required_text(row, 0, DbOperation::Query, "candidate_id")?.to_owned();
                 let workspace_id =
-                    required_text(row, 1, DbOperation::Query, "workspace_id")?.to_owned();
-                let logical_id =
-                    required_text(row, 2, DbOperation::Query, "logical_id")?.to_owned();
-                let snapshot = by_memory_id.entry(candidate_id).or_insert_with(|| {
-                    AttemptFamilyMembershipSnapshot {
-                        workspace_id,
-                        memory_logical_id: logical_id,
-                        families: Vec::new(),
-                    }
-                });
-                let Some(family_id) = optional_text(row, 3)?.map(str::to_owned) else {
+                    required_text(row, 0, DbOperation::Query, "workspace_id")?.to_owned();
+                let family_id = required_text(row, 1, DbOperation::Query, "family_id")?.to_owned();
+                let declared_size = optional_i64(row, 2, DbOperation::Query, "declared_size")?
+                    .and_then(|value| u32::try_from(value).ok());
+                let origin = optional_text(row, 3)?.map(str::to_owned);
+                let family = family_snapshots
+                    .entry((workspace_id, family_id.clone()))
+                    .or_insert(AttemptFamilySnapshot {
+                        family_id,
+                        declared_size,
+                        origin,
+                        ledger_members: Vec::new(),
+                        pointer_only_logical_ids: Vec::new(),
+                    });
+                let Some(member_logical_id) = optional_text(row, 4)?.map(str::to_owned) else {
                     continue;
                 };
-                let family_index = match snapshot
-                    .families
-                    .iter()
-                    .position(|family| family.family_id == family_id)
-                {
-                    Some(index) => index,
-                    None => {
-                        let declared_size =
-                            optional_i64(row, 4, DbOperation::Query, "declared_size")?
-                                .and_then(|value| u32::try_from(value).ok());
-                        let origin = optional_text(row, 5)?.map(str::to_owned);
-                        snapshot.families.push(AttemptFamilySnapshot {
-                            family_id: family_id.clone(),
-                            declared_size,
-                            origin,
-                            ledger_members: Vec::new(),
-                            pointer_only_logical_ids: Vec::new(),
-                        });
-                        snapshot.families.len() - 1
-                    }
-                };
-                let family = &mut snapshot.families[family_index];
-                let Some(member_logical_id) = optional_text(row, 6)?.map(str::to_owned) else {
-                    continue;
-                };
-                let pointer_only = required_i64(row, 10, DbOperation::Query, "pointer_only")? != 0;
+                let pointer_only = required_i64(row, 8, DbOperation::Query, "pointer_only")? != 0;
                 if pointer_only {
-                    if !family.pointer_only_logical_ids.contains(&member_logical_id) {
-                        family.pointer_only_logical_ids.push(member_logical_id);
-                    }
+                    family.pointer_only_logical_ids.push(member_logical_id);
                 } else {
                     family.ledger_members.push(MemoryAttemptFamilyMember {
                         memory_logical_id: member_logical_id,
                         attempt_index: u32::try_from(required_i64(
                             row,
-                            7,
+                            5,
                             DbOperation::Query,
                             "attempt_index",
                         )?)
                         .unwrap_or(u32::MAX),
-                        disposition: required_text(row, 8, DbOperation::Query, "disposition")?
+                        disposition: required_text(row, 6, DbOperation::Query, "disposition")?
                             .to_owned(),
-                        recorded_at: required_text(row, 9, DbOperation::Query, "recorded_at")?
+                        recorded_at: required_text(row, 7, DbOperation::Query, "recorded_at")?
                             .to_owned(),
                     });
                 }
             }
         }
 
-        for snapshot in by_memory_id.values_mut() {
-            snapshot
-                .families
-                .sort_by(|left, right| left.family_id.cmp(&right.family_id));
-            for family in &mut snapshot.families {
-                family.ledger_members.sort_by(|left, right| {
-                    left.attempt_index
-                        .cmp(&right.attempt_index)
-                        .then_with(|| left.memory_logical_id.cmp(&right.memory_logical_id))
-                });
-                family.pointer_only_logical_ids.sort();
-            }
+        for family in family_snapshots.values_mut() {
+            family.ledger_members.sort_by(|left, right| {
+                left.attempt_index
+                    .cmp(&right.attempt_index)
+                    .then_with(|| left.memory_logical_id.cmp(&right.memory_logical_id))
+            });
+            family.pointer_only_logical_ids.sort();
+        }
+        for (candidate_id, (workspace_id, logical_id, family_ids)) in candidate_family_ids {
+            let families = family_ids
+                .into_iter()
+                .filter_map(|family_id| {
+                    family_snapshots
+                        .get(&(workspace_id.clone(), family_id))
+                        .cloned()
+                })
+                .collect();
+            by_memory_id.insert(
+                candidate_id,
+                AttemptFamilyMembershipSnapshot {
+                    workspace_id,
+                    memory_logical_id: logical_id,
+                    families,
+                },
+            );
         }
 
         Ok(AttemptFamilyMembershipSnapshotBatch {
             by_memory_id,
             query_count,
+            materialized_row_count,
         })
     }
 
@@ -36316,12 +36529,13 @@ mod tests {
     }
 
     #[test]
-    fn attempt_family_candidate_batch_uses_one_query_per_bounded_chunk() -> TestResult {
+    fn attempt_family_candidate_batch_bounds_shared_family_materialization() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
         let workspace_id = "wsp_00000000000000000000001104";
         insert_attempt_family_test_workspace(&connection, workspace_id, "/tmp/afbatch")?;
         let candidate_count = super::ATTEMPT_FAMILY_MEMBERSHIP_BATCH_SIZE + 1;
+        let declared_size = u32::try_from(candidate_count).expect("bounded fixture size fits u32");
         let mut memory_ids = Vec::with_capacity(candidate_count);
         for index in 0..candidate_count {
             let memory_id = format!("mem_{:026}", 12_000_u64 + index as u64);
@@ -36329,29 +36543,44 @@ mod tests {
                 &memory_id,
                 &test_memory_input(workspace_id, &format!("batch candidate {index}")),
             )?;
+            connection.set_memory_attempt_family(
+                &memory_id,
+                &super::MemoryAttemptFamily {
+                    family_id: "AKIAIOSFODNN7EXAMPLE".to_owned(),
+                    declared_size: Some(declared_size),
+                    attempt_index: Some(
+                        u32::try_from(index + 1).expect("bounded fixture slot fits u32"),
+                    ),
+                    disposition: Some(if index == 0 { "selected" } else { "rejected" }.to_owned()),
+                },
+            )?;
             memory_ids.push(memory_id);
         }
-        connection.set_memory_attempt_family(
-            &memory_ids[0],
-            &super::MemoryAttemptFamily {
-                family_id: "AKIAIOSFODNN7EXAMPLE".to_owned(),
-                declared_size: Some(3),
-                attempt_index: Some(1),
-                disposition: Some("selected".to_owned()),
-            },
+        let non_family_id = "mem_00000000000000000000129999".to_owned();
+        connection.insert_memory(
+            &non_family_id,
+            &test_memory_input(workspace_id, "batch candidate without a family"),
         )?;
+        memory_ids.push(non_family_id.clone());
 
         let batch =
             connection.get_attempt_family_membership_snapshots_for_memory_ids(&memory_ids)?;
         ensure_equal(
             &batch.query_count,
-            &2_usize,
-            "batch loader executes one query per bounded chunk",
+            &3_usize,
+            "batch loader uses two candidate chunks and one distinct-family chunk",
         )?;
         ensure_equal(
             &batch.by_memory_id.len(),
-            &candidate_count,
-            "batch loader returns every candidate, including non-family candidates",
+            &memory_ids.len(),
+            "batch loader returns family and non-family candidates",
+        )?;
+        ensure(
+            batch.materialized_row_count <= memory_ids.len().saturating_mul(2),
+            format!(
+                "shared family materialized {} rows for {candidate_count} candidates",
+                batch.materialized_row_count
+            ),
         )?;
         let selected = batch
             .by_memory_id
@@ -36360,8 +36589,91 @@ mod tests {
             .ok_or_else(|| "selected batch family missing".to_owned())?;
         ensure_equal(
             &selected.multiplicity().promotion_posture(),
-            &AttemptFamilyPromotionPosture::BlockedIncomplete,
-            "batch snapshot preserves full family posture",
+            &AttemptFamilyPromotionPosture::Eligible,
+            "batch snapshot preserves the complete canonical family",
+        )?;
+        ensure_equal(
+            &selected.ledger_members.len(),
+            &candidate_count,
+            "shared family is complete in every candidate snapshot",
+        )?;
+        ensure_equal(
+            &batch
+                .by_memory_id
+                .get(&non_family_id)
+                .map(|snapshot| snapshot.families.is_empty()),
+            &Some(true),
+            "non-family candidate retains an empty membership snapshot",
+        )?;
+
+        let backup_batch = connection.get_memory_attempt_family_details_batch(&memory_ids)?;
+        ensure_equal(
+            &backup_batch.query_count,
+            &2_usize,
+            "backup family loader executes one query per bounded chunk",
+        )?;
+        ensure_equal(
+            &backup_batch.by_memory_id.len(),
+            &candidate_count,
+            "backup family loader returns every family pointer without N+1 reads",
+        )?;
+        ensure_equal(
+            &backup_batch
+                .by_memory_id
+                .get(&memory_ids[1])
+                .and_then(|details| details.family.disposition.as_deref()),
+            &Some("rejected"),
+            "backup batch preserves rejected sibling disposition",
+        )
+    }
+
+    #[test]
+    fn v101_attempt_family_member_delete_is_rejected_after_forward_repair() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 100)?;
+        let workspace_id = "wsp_00000000000000000000001105";
+        let family_id = "fam-v101-delete-guard";
+        let memory_id = "mem_00000000000000000000120105";
+        insert_attempt_family_test_workspace(&connection, workspace_id, "/tmp/afv101")?;
+        connection.insert_memory(
+            memory_id,
+            &test_memory_input(workspace_id, "V101 delete guard fixture"),
+        )?;
+        let family = super::MemoryAttemptFamily {
+            family_id: family_id.to_owned(),
+            declared_size: Some(1),
+            attempt_index: Some(1),
+            disposition: Some("selected".to_owned()),
+        };
+        connection.set_memory_attempt_family(memory_id, &family)?;
+
+        connection.execute_raw(&format!(
+            "DELETE FROM attempt_family_members WHERE workspace_id = '{workspace_id}' \
+             AND family_id = '{family_id}'"
+        ))?;
+        connection.set_memory_attempt_family(memory_id, &family)?;
+        connection.migrate()?;
+
+        let error = connection
+            .execute_raw(&format!(
+                "DELETE FROM attempt_family_members WHERE workspace_id = '{workspace_id}' \
+                 AND family_id = '{family_id}'"
+            ))
+            .expect_err("V101 must reject deletion of immutable ledger history");
+        ensure(
+            error
+                .to_string()
+                .contains("attempt family members are append-only"),
+            format!("unexpected V101 delete failure: {error}"),
+        )?;
+        let snapshot =
+            connection.get_attempt_family_membership_snapshot(workspace_id, memory_id)?;
+        ensure_equal(
+            &snapshot
+                .family(family_id)
+                .map(|family| family.ledger_members.len()),
+            &Some(1_usize),
+            "failed delete preserves the authoritative ledger member",
         )
     }
 

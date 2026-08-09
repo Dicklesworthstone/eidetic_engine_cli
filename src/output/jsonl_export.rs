@@ -508,6 +508,11 @@ pub fn redact_memory_record(
     record.redacted = level != RedactionLevel::None;
     record.redaction_reason = Some(format!("redaction_level:{}", level.as_str()));
 
+    if let Some(attempt_family) = record.attempt_family.as_mut() {
+        attempt_family.family_id =
+            crate::models::public_attempt_family_alias(&attempt_family.family_id);
+    }
+
     if level.redacts_identifiers() {
         record.memory_id = redact_identifier(&record.memory_id, level);
         record.workspace_id = redact_identifier(&record.workspace_id, level);
@@ -1145,8 +1150,8 @@ pub struct ExportStats {
 mod tests {
     use super::*;
     use crate::models::{
-        EXPORT_ARTIFACT_SCHEMA_V1, EXPORT_MEMORY_SCHEMA_V1, ExportHeader, ExportLinkRecord,
-        ExportMemoryRecord,
+        EXPORT_ARTIFACT_SCHEMA_V1, EXPORT_MEMORY_SCHEMA_V1, ExportAttemptFamilyRecord,
+        ExportHeader, ExportLinkRecord, ExportMemoryRecord,
     };
 
     type TestResult = Result<(), String>;
@@ -1511,6 +1516,48 @@ mod tests {
         assert!(redacted.redacted);
         assert!(redacted.redaction_reason.is_some());
         assert_eq!(redacted.memory_id, "mem-001");
+    }
+
+    #[test]
+    fn redact_memory_record_never_exports_raw_attempt_family_id() {
+        let raw_family_id = secret_fixture(&["AKIA", "EXAMPLEFAMILYSECRET"]);
+        let record = ExportMemoryRecord::builder()
+            .memory_id("mem-family-redaction")
+            .workspace_id("ws-family-redaction")
+            .level("semantic")
+            .kind("fact")
+            .content("selected attempt")
+            .created_at("2026-08-09T12:00:00Z")
+            .attempt_family(ExportAttemptFamilyRecord {
+                family_id: raw_family_id.clone(),
+                declared_size: Some(3),
+                attempt_index: Some(1),
+                disposition: Some("selected".to_owned()),
+                origin: Some("manual".to_owned()),
+            })
+            .build()
+            .expect("memory has required fields");
+
+        let redacted = redact_memory_record(record.clone(), RedactionLevel::Minimal);
+        let redacted_family = redacted
+            .attempt_family
+            .expect("attempt family remains represented after redaction");
+        assert!(redacted_family.family_id.starts_with("afm_"));
+        assert_ne!(redacted_family.family_id, raw_family_id);
+        assert!(
+            !serde_json::to_string(&redacted_family)
+                .expect("redacted family serializes")
+                .contains(&raw_family_id)
+        );
+
+        let unredacted = redact_memory_record(record, RedactionLevel::None);
+        assert_eq!(
+            unredacted
+                .attempt_family
+                .expect("unredacted attempt family remains available")
+                .family_id,
+            raw_family_id
+        );
     }
 
     #[test]

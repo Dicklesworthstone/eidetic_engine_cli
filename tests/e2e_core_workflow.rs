@@ -817,6 +817,38 @@ fn search_family_exposes_incomplete_discounts_and_unslotted_legacy_posture() -> 
     ensure_equal(&init.status.code(), &Some(EXIT_SUCCESS), "family init")?;
     assert_stderr_empty(&init, "family init")?;
 
+    let human_remember = run_ee_as_agent(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "Dry-run selected family member",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--family",
+        family_id,
+        "--of-n",
+        "3",
+        "--attempt",
+        "1",
+        "--attempt-outcome",
+        "selected",
+        "--dry-run",
+    ])?;
+    ensure_equal(
+        &human_remember.status.code(),
+        &Some(EXIT_SUCCESS),
+        "human dry-run family remember",
+    )?;
+    assert_stderr_empty(&human_remember, "human dry-run family remember")?;
+    let human_stdout =
+        String::from_utf8(human_remember.stdout).map_err(|error| error.to_string())?;
+    ensure(
+        human_stdout.contains("afm_") && !human_stdout.contains(family_id),
+        "human remember output exposes only an opaque family alias",
+    )?;
+
     let mut selected_memory_id = None;
     let mut rejected_memory_id = None;
     for (attempt, disposition, content) in [

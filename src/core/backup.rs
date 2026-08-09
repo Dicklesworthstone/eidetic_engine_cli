@@ -2608,6 +2608,40 @@ fn load_export_data(
     connection: &DbConnection,
     workspace: crate::db::StoredWorkspace,
 ) -> Result<BackupExportData, DomainError> {
+    connection
+        .begin_read_snapshot()
+        .map_err(|error| DomainError::Storage {
+            message: error.to_string(),
+            repair: Some("ee db check --workspace .".to_owned()),
+        })?;
+    let result = load_export_data_in_current_snapshot(connection, workspace);
+    match result {
+        Ok(data) => {
+            connection
+                .commit_read_snapshot()
+                .map_err(|error| DomainError::Storage {
+                    message: error.to_string(),
+                    repair: Some("ee db check --workspace .".to_owned()),
+                })?;
+            Ok(data)
+        }
+        Err(error) => {
+            if let Err(rollback_error) = connection.rollback_read_snapshot() {
+                tracing::error!(
+                    error = %error.message(),
+                    rollback_error = %rollback_error,
+                    "failed to roll back backup export read snapshot"
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
+fn load_export_data_in_current_snapshot(
+    connection: &DbConnection,
+    workspace: crate::db::StoredWorkspace,
+) -> Result<BackupExportData, DomainError> {
     let memories = connection
         .list_memories(&workspace.id, None, true)
         .map_err(|error| DomainError::Storage {
@@ -2618,53 +2652,55 @@ fn load_export_data(
         .iter()
         .map(|memory| memory.id.clone())
         .collect::<BTreeSet<_>>();
-    let mut tags_by_memory = BTreeMap::new();
-    for memory in &memories {
+    let mut tags_by_memory = memories
+        .iter()
+        .map(|memory| (memory.id.clone(), Vec::new()))
+        .collect::<BTreeMap<_, _>>();
+    for memory_chunk in memories.chunks(128) {
+        let ids = memory_chunk
+            .iter()
+            .map(|memory| memory.id.as_str())
+            .collect::<Vec<_>>();
         let tags =
             connection
-                .get_memory_tags(&memory.id)
+                .get_memory_tags_batch(&ids)
                 .map_err(|error| DomainError::Storage {
                     message: error.to_string(),
                     repair: Some("ee db check --workspace .".to_owned()),
                 })?;
-        tags_by_memory.insert(memory.id.clone(), tags);
+        tags_by_memory.extend(tags);
     }
-    let mut attempt_families_by_memory = BTreeMap::new();
-    for memory in &memories {
-        // The ledger is keyed by revision-stable logical identity. Export its
-        // slot exactly once, on the current head; attaching the same slot to
-        // every historical revision makes restore attempt duplicate primary
-        // keys and misrepresents revisions as sibling attempts.
-        if memory.valid_to.is_some() {
-            continue;
-        }
-        let family = connection
-            .get_memory_attempt_family(&memory.id)
-            .map_err(|error| DomainError::Storage {
-                message: error.to_string(),
-                repair: Some("ee db check --workspace .".to_owned()),
-            })?;
-        let Some(family) = family else {
-            continue;
-        };
-        let origin = connection
-            .get_attempt_family_declaration(&workspace.id, &family.family_id)
-            .map_err(|error| DomainError::Storage {
-                message: error.to_string(),
-                repair: Some("ee db check --workspace .".to_owned()),
-            })?
-            .map(|(_declared, origin)| origin);
-        attempt_families_by_memory.insert(
-            memory.id.clone(),
-            crate::models::ExportAttemptFamilyRecord {
-                family_id: family.family_id,
-                declared_size: family.declared_size,
-                attempt_index: family.attempt_index,
-                disposition: family.disposition,
-                origin,
-            },
-        );
-    }
+    // The ledger is keyed by revision-stable logical identity. Export its
+    // slot exactly once, on the current head; attaching the same slot to every
+    // historical revision makes restore attempt duplicate primary keys and
+    // misrepresents revisions as sibling attempts.
+    let current_memory_ids = memories
+        .iter()
+        .filter(|memory| memory.valid_to.is_none())
+        .map(|memory| memory.id.clone())
+        .collect::<Vec<_>>();
+    let attempt_family_batch = connection
+        .get_memory_attempt_family_details_batch_in_current_snapshot(&current_memory_ids)
+        .map_err(|error| DomainError::Storage {
+            message: error.to_string(),
+            repair: Some("ee db check --workspace .".to_owned()),
+        })?;
+    let attempt_families_by_memory = attempt_family_batch
+        .by_memory_id
+        .into_iter()
+        .map(|(memory_id, details)| {
+            (
+                memory_id,
+                crate::models::ExportAttemptFamilyRecord {
+                    family_id: details.family.family_id,
+                    declared_size: details.family.declared_size,
+                    attempt_index: details.family.attempt_index,
+                    disposition: details.family.disposition,
+                    origin: details.origin,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let links = connection
         .list_all_memory_links(None)
         .map_err(|error| DomainError::Storage {
