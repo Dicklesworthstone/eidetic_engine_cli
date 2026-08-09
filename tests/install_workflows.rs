@@ -977,7 +977,7 @@ fn franken_stack_lock_pins_complete_full_sha_closure() -> TestResult {
             "7faf0a1b5d0ff808202194c6b68ef738678a9077",
         ),
         ("frankensearch", "83ef0195e4f364bb6b150d788c4e236db8a3b767"),
-        ("frankensqlite", "ce412d4196fe48f9c61d4cb001530b8680bb74a9"),
+        ("frankensqlite", "6a86c07176830dcab0fd845a71a3dd070694ea28"),
         ("sqlmodel_rust", "f034a97be341e9a5daee550975f9aa96cff724eb"),
         ("toon_rust", "e46b71957fad5397d4bae9eef9d428c8ac8b52aa"),
     ];

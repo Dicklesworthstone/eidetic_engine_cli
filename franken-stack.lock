@@ -1,15 +1,14 @@
 # ee.franken-stack.lock.v1
 #
 # Full commit IDs are mandatory. This set pins the newest sibling revisions
-# that stay coherent with ee's Cargo.lock closure: the 0.3.10-line asupersync
-# tip (ee pins asupersync =0.3.10), the 0.1.19-line FrankenSQLite tip
-# (sqlmodel_rust at f034a97b still requires fsqlite ^0.1.19, so the 0.2.0
-# line — and with it a998b05a — stays blocked until sqlmodel gains 0.2
-# support; see bd-022z1), and current heads for the remaining stack.
+# proven coherent with ee's Cargo.lock closure. FrankenSQLite stays at the
+# synchronous 0.1.19 API revision consumed by Frankensearch and SQLModel;
+# later commits on main kept the 0.1.19 package version while changing the
+# connection API to async, so version matching alone is not sufficient.
 asupersync	7ecb98499715b18f24ce48f5022ec187fe03afb6
 franken_agent_detection	5b0d64988b48ec4a8f20cac9413ab8588176dd7d
 franken_networkx	7faf0a1b5d0ff808202194c6b68ef738678a9077
 frankensearch	83ef0195e4f364bb6b150d788c4e236db8a3b767
-frankensqlite	ce412d4196fe48f9c61d4cb001530b8680bb74a9
+frankensqlite	6a86c07176830dcab0fd845a71a3dd070694ea28
 sqlmodel_rust	f034a97be341e9a5daee550975f9aa96cff724eb
 toon_rust	e46b71957fad5397d4bae9eef9d428c8ac8b52aa
