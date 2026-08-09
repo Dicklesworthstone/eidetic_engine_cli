@@ -1133,9 +1133,20 @@ pub fn runtime_profile_for_workspace(workspace_root: &Path) -> RuntimeProfileRep
     if let Some(profile) = selected_profile_from_config(workspace_root) {
         RuntimeProfileReport::for_profile(profile, "workspace_config")
     } else {
-        let probe = HostResourceProbeReport::gather_for_workspace(workspace_root);
-        let selection = recommend_operating_profile(&probe);
-        RuntimeProfileReport::for_profile(selection.effective, "host_probe")
+        // Ordinary search/index/pack calls need only the CPU and memory
+        // signals that actually select an operating profile.  The full host
+        // probe also walks PATH and calls statvfs for workspace, state,
+        // database, index, cache, temp, and Cargo-target paths.  Those
+        // diagnostics can block on a slow or disconnected mount and used to
+        // put that unrelated latency on every one-shot query.  Keep the full
+        // probe on explicit diag/status surfaces; the runtime hot path stays
+        // side-effect-free and resource-equivalent without touching mounts.
+        let cpu = CpuProbe::gather();
+        let memory = MemoryProbe::gather();
+        RuntimeProfileReport::for_profile(
+            operating_profile_for_resources(&cpu, &memory),
+            "host_probe",
+        )
     }
 }
 
@@ -1599,16 +1610,7 @@ pub fn recommend_operating_profile(probe: &HostResourceProbeReport) -> ProfileSe
         .available_bytes
         .or(probe.memory.total_bytes)
         .unwrap_or(0);
-
-    let recommended = if logical_cores >= 12 && available_memory >= 32 * GIB {
-        OperatingProfile::Swarm
-    } else if logical_cores >= 6 && available_memory >= 16 * GIB {
-        OperatingProfile::Workstation
-    } else if logical_cores >= 2 && available_memory >= 8 * GIB {
-        OperatingProfile::Portable
-    } else {
-        OperatingProfile::Constrained
-    };
+    let recommended = operating_profile_for_resources(&probe.cpu, &probe.memory);
 
     let confidence = if probe.cpu.logical_cores.is_some() && available_memory > 0 {
         "high"
@@ -1629,6 +1631,21 @@ pub fn recommend_operating_profile(probe: &HostResourceProbeReport) -> ProfileSe
         effective: recommended,
         confidence,
         reasons,
+    }
+}
+
+fn operating_profile_for_resources(cpu: &CpuProbe, memory: &MemoryProbe) -> OperatingProfile {
+    let logical_cores = cpu.logical_cores.unwrap_or(1);
+    let available_memory = memory.available_bytes.or(memory.total_bytes).unwrap_or(0);
+
+    if logical_cores >= 12 && available_memory >= 32 * GIB {
+        OperatingProfile::Swarm
+    } else if logical_cores >= 6 && available_memory >= 16 * GIB {
+        OperatingProfile::Workstation
+    } else if logical_cores >= 2 && available_memory >= 8 * GIB {
+        OperatingProfile::Portable
+    } else {
+        OperatingProfile::Constrained
     }
 }
 
@@ -4134,6 +4151,93 @@ Pages wired down:                             253184.
             result.confidence,
             "medium",
             "medium confidence without probe data",
+        )
+    }
+
+    #[test]
+    fn lightweight_runtime_profile_selector_pins_every_resource_boundary() -> TestResult {
+        let cases = [
+            (12, 32, OperatingProfile::Swarm, "swarm exact boundary"),
+            (
+                11,
+                32,
+                OperatingProfile::Workstation,
+                "swarm CPU below boundary",
+            ),
+            (
+                12,
+                31,
+                OperatingProfile::Workstation,
+                "swarm memory below boundary",
+            ),
+            (
+                6,
+                16,
+                OperatingProfile::Workstation,
+                "workstation exact boundary",
+            ),
+            (
+                5,
+                16,
+                OperatingProfile::Portable,
+                "workstation CPU below boundary",
+            ),
+            (
+                6,
+                15,
+                OperatingProfile::Portable,
+                "workstation memory below boundary",
+            ),
+            (2, 8, OperatingProfile::Portable, "portable exact boundary"),
+            (
+                1,
+                8,
+                OperatingProfile::Constrained,
+                "portable CPU below boundary",
+            ),
+            (
+                2,
+                7,
+                OperatingProfile::Constrained,
+                "portable memory below boundary",
+            ),
+        ];
+
+        for (logical_cores, memory_gib, expected, context) in cases {
+            let probe = probe_with_resources(Some(logical_cores), memory_gib);
+            ensure(
+                operating_profile_for_resources(&probe.cpu, &probe.memory),
+                expected,
+                context,
+            )?;
+            ensure(
+                recommend_operating_profile(&probe).recommended,
+                expected,
+                &format!("full-probe parity: {context}"),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn lightweight_runtime_profile_selector_prefers_available_memory() -> TestResult {
+        let cpu = CpuProbe {
+            logical_cores: Some(16),
+            physical_cores: Some(8),
+            source: "test_synthetic",
+        };
+        let memory = MemoryProbe {
+            total_bytes: Some(64 * GIB),
+            available_bytes: Some(7 * GIB),
+            cgroup_limit_bytes: None,
+            source: "test_synthetic",
+        };
+
+        ensure(
+            operating_profile_for_resources(&cpu, &memory),
+            OperatingProfile::Constrained,
+            "available memory controls the runtime profile",
         )
     }
 
