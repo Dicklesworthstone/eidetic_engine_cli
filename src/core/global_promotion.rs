@@ -591,6 +591,192 @@ pub fn demote_global(options: &DemoteGlobalOptions<'_>) -> Result<DemotionReport
     })
 }
 
+// ── Feedback backflow (slice 3) ────────────────────────────────────────────
+
+pub const GLOBAL_BACKFLOW_REPORT_SCHEMA_V1: &str = "ee.global_promotion.backflow.v1";
+
+/// Hard cap on how much one global-lane outcome may move the origin row's
+/// confidence. Backflow is corroboration, not authority: a run of global
+/// outcomes adjusts the origin gradually and each step is audited.
+pub const MAX_BACKFLOW_STEP: f32 = 0.05;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackflowSignal {
+    Helpful,
+    Harmful,
+}
+
+impl BackflowSignal {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Helpful => "helpful",
+            Self::Harmful => "harmful",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BackflowOptions<'a> {
+    pub workspace_database_path: &'a Path,
+    pub global_memory_id: &'a str,
+    pub global_paths: &'a super::global_store::GlobalStorePaths,
+    pub signal: BackflowSignal,
+    /// Requested magnitude; clamped to [`MAX_BACKFLOW_STEP`].
+    pub weight: f32,
+    pub actor: Option<&'a str>,
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct BackflowReport {
+    pub global_memory_id: String,
+    /// `None` when the global row carries no promotion provenance (it was
+    /// written directly with `remember --global`) — feedback is recorded on
+    /// the global row but there is no origin to adjust.
+    pub origin: Option<(String, String)>,
+    pub applied_delta: f32,
+    pub origin_confidence_before: Option<f32>,
+    pub origin_confidence_after: Option<f32>,
+    pub executed: bool,
+}
+
+impl BackflowReport {
+    #[must_use]
+    pub fn data_json(&self) -> Value {
+        json!({
+            "schema": GLOBAL_BACKFLOW_REPORT_SCHEMA_V1,
+            "globalMemoryId": self.global_memory_id,
+            "originWorkspaceId": self.origin.as_ref().map(|(workspace, _)| workspace.clone()),
+            "originMemoryId": self.origin.as_ref().map(|(_, memory)| memory.clone()),
+            "appliedDelta": self.applied_delta,
+            "originConfidenceBefore": self.origin_confidence_before,
+            "originConfidenceAfter": self.origin_confidence_after,
+            "executed": self.executed,
+        })
+    }
+}
+
+/// Record outcome feedback against a global row and flow a bounded, audited
+/// confidence adjustment back to the origin workspace row.
+///
+/// # Errors
+///
+/// Returns a human-readable error string when storage access fails or the
+/// global row does not exist.
+pub fn backflow_global_feedback(options: &BackflowOptions<'_>) -> Result<BackflowReport, String> {
+    let (global_connection, global_workspace_id) =
+        super::global_store::open_or_create_global_store(options.global_paths)
+            .map_err(|error| format!("open global store: {error}"))?;
+    let row = global_connection
+        .get_memory(options.global_memory_id)
+        .map_err(|error| format!("load global memory: {error}"))?
+        .ok_or_else(|| format!("global memory {} not found", options.global_memory_id))?;
+    let origin = row
+        .provenance_uri
+        .as_deref()
+        .and_then(parse_promotion_provenance);
+
+    let step = options.weight.clamp(0.0, MAX_BACKFLOW_STEP);
+    let signed_delta = match options.signal {
+        BackflowSignal::Helpful => step,
+        BackflowSignal::Harmful => -step,
+    };
+
+    if options.dry_run {
+        let _ = global_connection.close();
+        return Ok(BackflowReport {
+            global_memory_id: row.id,
+            origin,
+            applied_delta: signed_delta,
+            origin_confidence_before: None,
+            origin_confidence_after: None,
+            executed: false,
+        });
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    // 1) Feedback event on the global row itself.
+    global_connection
+        .insert_feedback_event(
+            &generate_audit_id(),
+            &crate::db::CreateFeedbackEventInput {
+                workspace_id: global_workspace_id.clone(),
+                target_type: "memory".to_owned(),
+                target_id: row.id.clone(),
+                signal: options.signal.as_str().to_owned(),
+                weight: step,
+                source_type: "global_lane_backflow".to_owned(),
+                source_id: options.actor.map(str::to_owned),
+                reason: Some("global-lane outcome evidence".to_owned()),
+                evidence_json: None,
+                session_id: None,
+            },
+        )
+        .map_err(|error| format!("record global feedback: {error}"))?;
+
+    // 2) Bounded origin adjustment, when this row was promoted.
+    let (before, after) = if let Some((origin_workspace, origin_memory)) = &origin {
+        let workspace_connection = DbConnection::open_file(options.workspace_database_path)
+            .map_err(|error| format!("open workspace database: {error}"))?;
+        let origin_row = workspace_connection
+            .get_memory(origin_memory)
+            .map_err(|error| format!("load origin memory: {error}"))?;
+        let outcome = match origin_row {
+            Some(origin_row) if origin_row.tombstoned_at.is_none() => {
+                let before = origin_row.confidence;
+                let target = (before + signed_delta).clamp(0.0, 1.0);
+                let applied = workspace_connection
+                    .apply_memory_reinforcement(origin_memory, origin_workspace, target, &now)
+                    .map_err(|error| format!("adjust origin confidence: {error}"))?;
+                let details = json!({
+                    "schema": GLOBAL_BACKFLOW_REPORT_SCHEMA_V1,
+                    "globalMemoryId": row.id,
+                    "signal": options.signal.as_str(),
+                    "appliedDelta": signed_delta,
+                    "confidenceBefore": before,
+                    "confidenceAfter": target,
+                })
+                .to_string();
+                workspace_connection
+                    .insert_audit(
+                        &generate_audit_id(),
+                        &CreateAuditInput {
+                            workspace_id: Some(origin_workspace.clone()),
+                            actor: options.actor.map(str::to_owned),
+                            action: "memory.global_feedback_backflow".to_owned(),
+                            target_type: Some("memory".to_owned()),
+                            target_id: Some(origin_memory.clone()),
+                            details: Some(details),
+                        },
+                    )
+                    .map_err(|error| format!("origin audit: {error}"))?;
+                applied.then_some((before, target))
+            }
+            // Origin tombstoned or vanished: feedback stays on the global
+            // row only; never resurrect or adjust dead rows.
+            _ => None,
+        };
+        let _ = workspace_connection.close();
+        match outcome {
+            Some((before, after)) => (Some(before), Some(after)),
+            None => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+    let _ = global_connection.close();
+
+    Ok(BackflowReport {
+        global_memory_id: row.id,
+        origin,
+        applied_delta: signed_delta,
+        origin_confidence_before: before,
+        origin_confidence_after: after,
+        executed: true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -862,6 +1048,85 @@ mod tests {
             );
         }
         let _ = global_connection.close();
+    }
+
+    #[test]
+    fn backflow_adjusts_origin_bounded_and_audited() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (workspace_db, memory_id) = seeded_workspace(
+            temp.path(),
+            "agent_validated",
+            "Backflow target rule with known confidence.",
+        );
+        let paths =
+            super::super::global_store::GlobalStorePaths::from_root(&temp.path().join("global"));
+        let promoted = promote_global(&PromoteGlobalOptions {
+            workspace_database_path: &workspace_db,
+            memory_id: &memory_id,
+            global_paths: &paths,
+            global_lane_available: true,
+            actor: None,
+            dry_run: false,
+        })
+        .expect("promotion");
+        let global_id = promoted.global_memory_id.expect("global id");
+
+        // Helpful outcome with an oversized weight: clamped to the step cap.
+        let report = backflow_global_feedback(&BackflowOptions {
+            workspace_database_path: &workspace_db,
+            global_memory_id: &global_id,
+            global_paths: &paths,
+            signal: BackflowSignal::Helpful,
+            weight: 0.5,
+            actor: Some("test-actor"),
+            dry_run: false,
+        })
+        .expect("backflow");
+        assert!(report.executed);
+        assert!((report.applied_delta - MAX_BACKFLOW_STEP).abs() < f32::EPSILON);
+        let before = report.origin_confidence_before.expect("before");
+        let after = report.origin_confidence_after.expect("after");
+        assert!((after - (before + MAX_BACKFLOW_STEP)).abs() < 1e-6);
+
+        // The origin row actually moved.
+        let workspace_connection = DbConnection::open_file(&workspace_db).expect("open ws");
+        let origin_row = workspace_connection
+            .get_memory(&memory_id)
+            .expect("load")
+            .expect("row");
+        assert!((origin_row.confidence - after).abs() < 1e-6);
+        let _ = workspace_connection.close();
+
+        // Harmful outcome moves it back down.
+        let harmful = backflow_global_feedback(&BackflowOptions {
+            workspace_database_path: &workspace_db,
+            global_memory_id: &global_id,
+            global_paths: &paths,
+            signal: BackflowSignal::Harmful,
+            weight: 0.02,
+            actor: None,
+            dry_run: false,
+        })
+        .expect("harmful backflow");
+        assert!(harmful.applied_delta < 0.0);
+        assert!(
+            harmful.origin_confidence_after.expect("after") < after,
+            "harmful signal must lower origin confidence"
+        );
+
+        // Dry run reports the would-be delta without touching anything.
+        let dry = backflow_global_feedback(&BackflowOptions {
+            workspace_database_path: &workspace_db,
+            global_memory_id: &global_id,
+            global_paths: &paths,
+            signal: BackflowSignal::Helpful,
+            weight: 0.01,
+            actor: None,
+            dry_run: true,
+        })
+        .expect("dry backflow");
+        assert!(!dry.executed);
+        assert!(dry.origin_confidence_after.is_none());
     }
 
     #[test]
