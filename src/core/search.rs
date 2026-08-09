@@ -455,11 +455,14 @@ impl SearchSourceMode {
     }
 }
 
+/// Live fusion arm weights. Crate-visible so the shadow-tuning evaluator
+/// (bd-2tehh.2 S2) can re-fuse a replayed hit pool with candidate weight
+/// vectors using exactly the production adjustment math.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct SearchFusionWeights {
-    lexical: f32,
-    semantic: f32,
-    graph: f32,
+pub(crate) struct SearchFusionWeights {
+    pub(crate) lexical: f32,
+    pub(crate) semantic: f32,
+    pub(crate) graph: f32,
 }
 
 impl Default for SearchFusionWeights {
@@ -484,8 +487,8 @@ impl SearchFusionWeights {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct SearchFusionAdjustment {
-    multiplier: f32,
+pub(crate) struct SearchFusionAdjustment {
+    pub(crate) multiplier: f32,
     lexical_component: f32,
     semantic_component: f32,
     graph_component: f32,
@@ -586,7 +589,10 @@ pub const fn default_floor_for_source(source: ScoreSource) -> f32 {
     }
 }
 
-fn search_hit_meets_relevance_floor(hit: &SearchHit, user_floor_override: Option<f32>) -> bool {
+pub(crate) fn search_hit_meets_relevance_floor(
+    hit: &SearchHit,
+    user_floor_override: Option<f32>,
+) -> bool {
     let floor = user_floor_override.unwrap_or_else(|| default_floor_for_source(hit.source));
     hit.score.is_finite() && hit.score >= floor
 }
@@ -8441,7 +8447,7 @@ fn unit_weight_or(value: Option<f64>, default: f32) -> f32 {
         .map_or(default, |weight| weight as f32)
 }
 
-fn resolved_search_fusion_weights(workspace_path: &Path) -> SearchFusionWeights {
+pub(crate) fn resolved_search_fusion_weights(workspace_path: &Path) -> SearchFusionWeights {
     crate::core::config_surface::merged_workspace_config(workspace_path)
         .map(|config| SearchFusionWeights::from_config(&config.values.search))
         .unwrap_or_default()
@@ -8501,7 +8507,7 @@ fn weighted_available_component_mix(
     (weights.lexical * scale * lexical_component) + (weights.semantic * scale * semantic_component)
 }
 
-fn configured_fusion_adjustment(
+pub(crate) fn configured_fusion_adjustment(
     hit: &SearchHit,
     source_mode: SearchSourceMode,
     weights: SearchFusionWeights,
@@ -8616,7 +8622,7 @@ fn search_hit_from_scored_result(
     hit
 }
 
-fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
+pub(crate) fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
     // bd-2vq2z.30: when a reranker ran, its order must survive to the output.
     // Frankensearch returns reranked candidates carrying `rerank_score`;
     // `search_hit_from_scored_result` promotes that value into the public

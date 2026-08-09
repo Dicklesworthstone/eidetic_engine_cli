@@ -1,4 +1,5 @@
-//! Shadow-tuning label extraction (ADR 0070, bd-2tehh.2 S1).
+//! Shadow-tuning label extraction and replay evaluator (ADR 0070,
+//! bd-2tehh.2 S1+S2).
 //!
 //! Joins outcome-labeled retrieval triples `(query, memory, signal, weight,
 //! age)` from persisted state only:
@@ -33,12 +34,22 @@
 //! with a length-prefixed BLAKE3 hash so evaluation reports are reproducible.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use asupersync::Cx;
 use chrono::{DateTime, Duration, Utc};
 
+use crate::core::search::{
+    SearchDedupMode, SearchFusionWeights, SearchHit, SearchOptions, SearchSourceMode,
+    configured_fusion_adjustment, resolved_search_fusion_weights,
+    run_search_with_read_connection_seeded, search_hit_meets_relevance_floor,
+    sort_search_hits_by_score_order,
+};
 use crate::db::{DbConnection, StoredAuditEntry, StoredFeedbackEvent, audit_actions};
+use crate::models::MemoryScope;
 use crate::obs::audit_events::query_hash as audit_query_hash;
+use crate::runtime::determinism::Deterministic;
+use crate::search::SpeedMode;
 
 /// Evidence schema stamped on pack-item outcome events by the CLI outcome
 /// path; the dense label source keys on it.
@@ -529,6 +540,491 @@ fn label_set_hash(triples: &[LabeledTriple]) -> String {
         input.extend_from_slice(&triple.age_days.to_bits().to_be_bytes());
     }
     format!("blake3:{}", blake3::hash(&input).to_hex())
+}
+
+// ===================== S2: replay evaluator (ADR 0070 §2–3) =====================
+//
+// Fact-check correction folded in (banked on bd-2tehh.2): the ADR names
+// `SearchScoringConfig` as the tunable, but that struct has no production
+// consumer — live ranking moves through `SearchFusionWeights`
+// (`search.lexical_weight` / `search.semantic_weight` / `search.graph_weight`),
+// applied per hit by `configured_fusion_adjustment`. The evaluator therefore
+// tunes fusion weights, and the ADR's recency-tau axis is dropped: live search
+// has no recency knob, and sweeping a parameter ranking ignores would report
+// fake capability. The graph axis is kept but its sensitivity is degenerate
+// today (`graph_component` is hardcoded 0.0 in the live adjustment; the weight
+// only moves scores through renormalization) — consumers of the evaluation
+// must read `graph_axis_degenerate` honestly.
+//
+// Mechanism: single-replay offline re-fusion. Each distinct labeled query is
+// replayed ONCE against the current index (read-only, seeded, floor disabled,
+// pool capped); per-hit arm components ride on the returned `SearchHit`s, so
+// every candidate vector re-scores the same pool with the production
+// adjustment function, re-applies the production relevance floor, and re-sorts
+// with the production ordering. No candidate can reach live ranking: the
+// injection exists only inside this evaluator, and the CLI search surface has
+// no weight argument (frozen by the golden help contracts).
+
+/// ADR §3 clamps — deliberately in code next to the policy, not user config.
+const FUSION_LEXICAL_CLAMP: (f32, f32) = (0.2, 0.7);
+const FUSION_SEMANTIC_CLAMP: (f32, f32) = (0.2, 0.7);
+const FUSION_GRAPH_CLAMP: (f32, f32) = (0.0, 0.3);
+/// Fixed per-axis offset grid around the incumbent (ADR §3).
+const FUSION_GRID_OFFSETS: [f32; 4] = [-0.10, -0.05, 0.05, 0.10];
+const DESCENT_MAX_ROUNDS: u32 = 2;
+const DESCENT_INITIAL_STEP: f32 = 0.025;
+/// Replayed hit-pool cap per query. Labeled memories outside the pool count
+/// as unranked (contribute 0), exactly like results beyond a live limit.
+pub const REPLAY_POOL_LIMIT: u32 = 200;
+const EVALUATION_HASH_DOMAIN: &str = "ee.shadow.retrieval_tuning_evaluation.v1";
+
+/// One candidate fusion-weight vector.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TuningWeights {
+    pub lexical: f32,
+    pub semantic: f32,
+    pub graph: f32,
+}
+
+impl TuningWeights {
+    /// The compiled-in fusion defaults (used when no workspace overlay is set).
+    #[must_use]
+    pub fn compiled_defaults() -> Self {
+        Self::from_fusion(SearchFusionWeights::default())
+    }
+
+    /// The incumbent vector actually in effect for a workspace.
+    #[must_use]
+    pub fn incumbent_for_workspace(workspace_path: &Path) -> Self {
+        Self::from_fusion(resolved_search_fusion_weights(workspace_path))
+    }
+
+    fn from_fusion(weights: SearchFusionWeights) -> Self {
+        Self {
+            lexical: weights.lexical,
+            semantic: weights.semantic,
+            graph: weights.graph,
+        }
+    }
+
+    fn to_fusion(self) -> SearchFusionWeights {
+        SearchFusionWeights {
+            lexical: self.lexical,
+            semantic: self.semantic,
+            graph: self.graph,
+        }
+    }
+
+    fn clamped(self) -> Self {
+        Self {
+            lexical: self
+                .lexical
+                .clamp(FUSION_LEXICAL_CLAMP.0, FUSION_LEXICAL_CLAMP.1),
+            semantic: self
+                .semantic
+                .clamp(FUSION_SEMANTIC_CLAMP.0, FUSION_SEMANTIC_CLAMP.1),
+            graph: self.graph.clamp(FUSION_GRAPH_CLAMP.0, FUSION_GRAPH_CLAMP.1),
+        }
+    }
+
+    /// Exact-bit identity key for deduplication and deterministic ordering.
+    fn key(self) -> (u32, u32, u32) {
+        (
+            self.lexical.to_bits(),
+            self.semantic.to_bits(),
+            self.graph.to_bits(),
+        )
+    }
+}
+
+/// One replayed query with its raw-score (pre-adjustment) hit pool.
+#[derive(Debug, Clone)]
+pub struct QueryReplay {
+    pub query: String,
+    /// Hits with `score` restored to the raw fusion score (the workspace's
+    /// own fusion adjustment divided back out), so candidate re-fusion starts
+    /// from the same basis the live pipeline does.
+    pub hits: Vec<SearchHit>,
+}
+
+/// Replay collection result with honest denominators.
+#[derive(Debug, Clone)]
+pub struct ReplayCollection {
+    pub replays: Vec<QueryReplay>,
+    /// Hits dropped because the workspace fusion multiplier was zero and the
+    /// raw score could not be recovered (requires a degenerate zero-weight
+    /// workspace config; counted, never guessed).
+    pub unrecoverable_hits: usize,
+}
+
+/// Replay every distinct labeled query once against the current index.
+///
+/// Read-only by construction: the underlying search entry point passes no
+/// audit connection, so no audit rows can be written. The relevance floor is
+/// disabled at replay and re-applied per candidate offline, because floor
+/// membership depends on the adjusted score each candidate produces.
+pub fn collect_query_replays(
+    cx: &Cx,
+    read_connection: &crate::db::DbConnection,
+    workspace_path: &Path,
+    database_path: &Path,
+    queries: &BTreeSet<String>,
+    as_of: DateTime<Utc>,
+) -> Result<ReplayCollection, ShadowTuningError> {
+    let workspace_weights = resolved_search_fusion_weights(workspace_path);
+    let determinism = Deterministic::from_seed(0);
+    let mut replays = Vec::with_capacity(queries.len());
+    let mut unrecoverable_hits = 0_usize;
+
+    for query in queries {
+        shadow_checkpoint(cx)?;
+        let options = SearchOptions {
+            workspace_path: workspace_path.to_path_buf(),
+            database_path: Some(database_path.to_path_buf()),
+            index_dir: None,
+            query: query.clone(),
+            limit: REPLAY_POOL_LIMIT,
+            speed: SpeedMode::Default,
+            explain: false,
+            as_of: Some(as_of),
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::default(),
+            strict_scope: false,
+        };
+        let report =
+            run_search_with_read_connection_seeded(&options, read_connection, &determinism)
+                .map_err(|error| storage_error("replay search failed", &error))?;
+        let mut hits = Vec::with_capacity(report.results.len());
+        for mut hit in report.results {
+            // The live pipeline multiplied the raw fusion score by the
+            // workspace adjustment; divide it back out so candidate
+            // re-fusion starts from the raw basis. The multiplier depends
+            // only on the hit's arm components, which are unchanged.
+            if let Some(adjustment) =
+                configured_fusion_adjustment(&hit, SearchSourceMode::Hybrid, workspace_weights)
+            {
+                if adjustment.multiplier > f32::EPSILON {
+                    hit.score /= adjustment.multiplier;
+                } else {
+                    unrecoverable_hits += 1;
+                    continue;
+                }
+            }
+            hits.push(hit);
+        }
+        replays.push(QueryReplay {
+            query: query.clone(),
+            hits,
+        });
+    }
+
+    Ok(ReplayCollection {
+        replays,
+        unrecoverable_hits,
+    })
+}
+
+/// Outcome gain per ADR §2. Signals outside the ADR's mapping are excluded
+/// from the metric and counted, never guessed.
+fn signal_gain(signal: &str) -> Option<f64> {
+    match signal {
+        "helpful" | "confirmation" => Some(1.0),
+        "harmful" | "contradiction" => Some(-2.0),
+        _ => None,
+    }
+}
+
+struct QueryLabelGains {
+    /// `1 / Σ|w·gain|` — candidate-independent per-query normalizer.
+    norm: f64,
+    /// `(memory_id, w·gain)` pairs.
+    gains: Vec<(String, f64)>,
+}
+
+struct GroupedLabels {
+    by_query: BTreeMap<String, QueryLabelGains>,
+    labels_unmapped_signal: usize,
+    queries_without_gain: usize,
+}
+
+fn group_label_gains(labels: &[LabeledTriple]) -> GroupedLabels {
+    let mut raw: BTreeMap<String, Vec<(String, f64)>> = BTreeMap::new();
+    let mut labels_unmapped_signal = 0_usize;
+    for label in labels {
+        let Some(gain) = signal_gain(&label.signal) else {
+            labels_unmapped_signal += 1;
+            continue;
+        };
+        raw.entry(label.query.clone())
+            .or_default()
+            .push((label.memory_id.clone(), label.weight * gain));
+    }
+    let mut by_query = BTreeMap::new();
+    let mut queries_without_gain = 0_usize;
+    for (query, gains) in raw {
+        let denom: f64 = gains.iter().map(|(_, value)| value.abs()).sum();
+        if denom <= f64::EPSILON {
+            queries_without_gain += 1;
+            continue;
+        }
+        by_query.insert(
+            query,
+            QueryLabelGains {
+                norm: 1.0 / denom,
+                gains,
+            },
+        );
+    }
+    GroupedLabels {
+        by_query,
+        labels_unmapped_signal,
+        queries_without_gain,
+    }
+}
+
+/// Re-fuse one replayed pool with a candidate vector using the production
+/// adjustment, floor, and ordering, and return 1-based ranks by memory id.
+fn ranked_pool(hits: &[SearchHit], weights: SearchFusionWeights) -> BTreeMap<String, usize> {
+    let mut pool: Vec<SearchHit> = hits.to_vec();
+    for hit in &mut pool {
+        if let Some(adjustment) =
+            configured_fusion_adjustment(hit, SearchSourceMode::Hybrid, weights)
+        {
+            hit.score = (hit.score * adjustment.multiplier).max(0.0);
+        }
+    }
+    pool.retain(|hit| search_hit_meets_relevance_floor(hit, None));
+    sort_search_hits_by_score_order(&mut pool);
+    pool.into_iter()
+        .enumerate()
+        .map(|(index, hit)| (hit.doc_id, index + 1))
+        .collect()
+}
+
+fn score_candidate(
+    replays: &BTreeMap<&str, &QueryReplay>,
+    grouped: &GroupedLabels,
+    weights: SearchFusionWeights,
+) -> f64 {
+    let mut total = 0.0_f64;
+    for (query, label_gains) in &grouped.by_query {
+        let Some(replay) = replays.get(query.as_str()) else {
+            // No replay pool for this query: every label is unranked and
+            // contributes 0 (ADR §2).
+            continue;
+        };
+        let ranks = ranked_pool(&replay.hits, weights);
+        let mut query_score = 0.0_f64;
+        for (memory_id, weighted_gain) in &label_gains.gains {
+            if let Some(rank) = ranks.get(memory_id) {
+                #[allow(clippy::cast_precision_loss)]
+                let discount = (1.0 + *rank as f64).log2();
+                query_score += weighted_gain / discount;
+            }
+        }
+        total += label_gains.norm * query_score;
+    }
+    total
+}
+
+/// One evaluated candidate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CandidateScore {
+    pub weights: TuningWeights,
+    pub score: f64,
+    /// `incumbent`, `grid`, or `descent` — deterministic provenance.
+    pub origin: &'static str,
+}
+
+/// Deterministic sweep result (ADR §2–3). The §4 evidence gate and the
+/// `ee.shadow.retrieval_tuning_report.v1` envelope land with S3.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TuningEvaluation {
+    pub incumbent: CandidateScore,
+    /// Every non-incumbent candidate in evaluation order.
+    pub candidates: Vec<CandidateScore>,
+    /// Best strictly-improving candidate, if any.
+    pub winner: Option<CandidateScore>,
+    /// `(winner - incumbent) / |incumbent|`; `None` when the incumbent score
+    /// is too close to zero for a relative margin to be meaningful.
+    pub relative_margin: Option<f64>,
+    pub queries_scored: usize,
+    pub queries_without_gain: usize,
+    pub labels_unmapped_signal: usize,
+    pub labels_total: usize,
+    /// The graph fusion axis currently only moves scores through
+    /// renormalization (`graph_component` is 0.0 in the live adjustment), so
+    /// its deltas must not be read as real graph-signal tuning.
+    pub graph_axis_degenerate: bool,
+    /// `blake3:<hex>` over the full evaluation (candidates + scores).
+    pub evaluation_hash: String,
+}
+
+fn enumerate_grid(incumbent: TuningWeights) -> Vec<TuningWeights> {
+    let mut seen = BTreeSet::new();
+    let mut vectors = Vec::new();
+    let mut push = |candidate: TuningWeights, vectors: &mut Vec<TuningWeights>| {
+        if seen.insert(candidate.key()) {
+            vectors.push(candidate);
+        }
+    };
+    push(incumbent.clamped(), &mut vectors);
+    for axis in 0..3_usize {
+        for offset in FUSION_GRID_OFFSETS {
+            let mut candidate = incumbent;
+            match axis {
+                0 => candidate.lexical += offset,
+                1 => candidate.semantic += offset,
+                _ => candidate.graph += offset,
+            }
+            push(candidate.clamped(), &mut vectors);
+        }
+    }
+    vectors
+}
+
+fn descent_neighbors(center: TuningWeights, step: f32) -> Vec<TuningWeights> {
+    let mut neighbors = Vec::with_capacity(6);
+    for axis in 0..3_usize {
+        for direction in [-1.0_f32, 1.0] {
+            let mut candidate = center;
+            let delta = step * direction;
+            match axis {
+                0 => candidate.lexical += delta,
+                1 => candidate.semantic += delta,
+                _ => candidate.graph += delta,
+            }
+            neighbors.push(candidate.clamped());
+        }
+    }
+    neighbors
+}
+
+fn evaluation_hash(
+    incumbent: &CandidateScore,
+    candidates: &[CandidateScore],
+    labels_total: usize,
+) -> String {
+    let mut input = Vec::new();
+    append_len_prefixed(&mut input, EVALUATION_HASH_DOMAIN.as_bytes());
+    input.extend_from_slice(
+        &u32::try_from(labels_total)
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
+    let push_candidate = |candidate: &CandidateScore, input: &mut Vec<u8>| {
+        append_len_prefixed(input, candidate.origin.as_bytes());
+        input.extend_from_slice(&candidate.weights.lexical.to_bits().to_be_bytes());
+        input.extend_from_slice(&candidate.weights.semantic.to_bits().to_be_bytes());
+        input.extend_from_slice(&candidate.weights.graph.to_bits().to_be_bytes());
+        input.extend_from_slice(&candidate.score.to_bits().to_be_bytes());
+    };
+    push_candidate(incumbent, &mut input);
+    for candidate in candidates {
+        push_candidate(candidate, &mut input);
+    }
+    format!("blake3:{}", blake3::hash(&input).to_hex())
+}
+
+/// Evaluate the incumbent plus the deterministic candidate set against the
+/// replayed pools (ADR §2–3): fixed offset grid, then ≤2 rounds of bounded
+/// coordinate descent with step halving around the best vector so far.
+/// Cancellable between candidate evaluations; pure — no partial state.
+pub fn evaluate_fusion_candidates(
+    cx: &Cx,
+    replays: &[QueryReplay],
+    labels: &[LabeledTriple],
+    incumbent: TuningWeights,
+) -> Result<TuningEvaluation, ShadowTuningError> {
+    shadow_checkpoint(cx)?;
+    let replays_by_query: BTreeMap<&str, &QueryReplay> = replays
+        .iter()
+        .map(|replay| (replay.query.as_str(), replay))
+        .collect();
+    let grouped = group_label_gains(labels);
+
+    let incumbent = incumbent.clamped();
+    let incumbent_score = CandidateScore {
+        weights: incumbent,
+        score: score_candidate(&replays_by_query, &grouped, incumbent.to_fusion()),
+        origin: "incumbent",
+    };
+
+    let mut evaluated: BTreeSet<(u32, u32, u32)> = BTreeSet::new();
+    evaluated.insert(incumbent.key());
+    let mut candidates: Vec<CandidateScore> = Vec::new();
+    for weights in enumerate_grid(incumbent) {
+        if !evaluated.insert(weights.key()) {
+            continue;
+        }
+        shadow_checkpoint(cx)?;
+        candidates.push(CandidateScore {
+            weights,
+            score: score_candidate(&replays_by_query, &grouped, weights.to_fusion()),
+            origin: "grid",
+        });
+    }
+
+    let mut best = candidates
+        .iter()
+        .copied()
+        .fold(incumbent_score, |best, candidate| {
+            if candidate.score > best.score {
+                candidate
+            } else {
+                best
+            }
+        });
+    for round in 0..DESCENT_MAX_ROUNDS {
+        let step = DESCENT_INITIAL_STEP / 2.0_f32.powi(i32::try_from(round).unwrap_or(0));
+        let mut improved = false;
+        for weights in descent_neighbors(best.weights, step) {
+            if !evaluated.insert(weights.key()) {
+                continue;
+            }
+            shadow_checkpoint(cx)?;
+            let candidate = CandidateScore {
+                weights,
+                score: score_candidate(&replays_by_query, &grouped, weights.to_fusion()),
+                origin: "descent",
+            };
+            candidates.push(candidate);
+            if candidate.score > best.score {
+                best = candidate;
+                improved = true;
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+
+    let winner = (best.origin != "incumbent" && best.score > incumbent_score.score).then_some(best);
+    let relative_margin = winner.and_then(|winner| {
+        (incumbent_score.score.abs() > f64::EPSILON)
+            .then(|| (winner.score - incumbent_score.score) / incumbent_score.score.abs())
+    });
+    let hash = evaluation_hash(&incumbent_score, &candidates, labels.len());
+
+    Ok(TuningEvaluation {
+        incumbent: incumbent_score,
+        candidates,
+        winner,
+        relative_margin,
+        queries_scored: grouped.by_query.len(),
+        queries_without_gain: grouped.queries_without_gain,
+        labels_unmapped_signal: grouped.labels_unmapped_signal,
+        labels_total: labels.len(),
+        graph_axis_degenerate: true,
+        evaluation_hash: hash,
+    })
 }
 
 #[cfg(test)]
@@ -1152,5 +1648,250 @@ mod tests {
             return Err(format!("weak denominators must be clean: {report:?}"));
         }
         Ok(())
+    }
+
+    // ===== S2: replay evaluator tests =====
+
+    use crate::core::search::ScoreSource;
+
+    fn hybrid_hit(
+        doc_id: &str,
+        raw_score: f32,
+        lexical: Option<f32>,
+        semantic: Option<f32>,
+    ) -> SearchHit {
+        SearchHit {
+            doc_id: doc_id.to_owned(),
+            score: raw_score,
+            source: ScoreSource::Hybrid,
+            fast_score: None,
+            quality_score: semantic,
+            lexical_score: lexical,
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        }
+    }
+
+    fn triple(query: &str, memory_id: &str, signal: &str, weight: f64) -> LabeledTriple {
+        LabeledTriple {
+            query: query.to_owned(),
+            memory_id: memory_id.to_owned(),
+            signal: signal.to_owned(),
+            base_weight: weight,
+            weight,
+            age_days: 0.0,
+            source: LabelSource::PackItemOutcome,
+            feedback_event_id: format!("fev-{memory_id}"),
+            pack_record_id: Some("pack-1".to_owned()),
+            audit_row_id: None,
+        }
+    }
+
+    fn incumbent() -> TuningWeights {
+        TuningWeights::compiled_defaults()
+    }
+
+    #[test]
+    fn evaluator_hand_computed_metric_and_rank_flip_winner() -> TestResult {
+        // mem-a is lexical-only (raw 0.0255), mem-b semantic-only (raw
+        // 0.020). Flipping their order needs mult(b)/mult(a) > 0.0255/0.020
+        // = 1.275. Hand-derived ratios per single-axis grid candidate:
+        // lexical -0.10 → 1.0125/0.7875 ≈ 1.2857 (flips); semantic +0.10 →
+        // 1.21/0.99 ≈ 1.2222 (does not); all smaller offsets are weaker, and
+        // the graph axis rescales both arms identically (degenerate — never
+        // flips). The single helpful label on mem-b therefore makes
+        // lexical -0.10 the unique strict winner: incumbent = 1/log2(3),
+        // winner = 1/log2(2) = 1.0, and descent cannot beat a perfect score
+        // so the sweep stops after one non-improving round.
+        let replays = [QueryReplay {
+            query: "q1".to_owned(),
+            hits: vec![
+                hybrid_hit("mem-a", 0.0255, Some(1.0), None),
+                hybrid_hit("mem-b", 0.020, None, Some(1.0)),
+            ],
+        }];
+        let labels = [triple("q1", "mem-b", "helpful", 1.0)];
+        let cx = Cx::for_testing();
+        let evaluation = evaluate_fusion_candidates(&cx, &replays, &labels, incumbent())
+            .map_err(|error| error.to_string())?;
+
+        let expected_incumbent = 1.0 / 3.0_f64.log2();
+        if !approx_eq(evaluation.incumbent.score, expected_incumbent) {
+            return Err(format!(
+                "incumbent metric must be 1/log2(3): {evaluation:?}"
+            ));
+        }
+        let Some(winner) = evaluation.winner else {
+            return Err(format!("lexical -0.10 vector must win: {evaluation:?}"));
+        };
+        if !approx_eq(winner.score, 1.0)
+            || (f64::from(winner.weights.lexical) - 0.35).abs() > 1e-6
+            || (f64::from(winner.weights.semantic) - 0.45).abs() > 1e-6
+        {
+            return Err(format!(
+                "winner must be lexical -0.10 at score 1.0: {winner:?}"
+            ));
+        }
+        let Some(margin) = evaluation.relative_margin else {
+            return Err("winner must carry a relative margin".to_owned());
+        };
+        if margin <= 0.0 {
+            return Err(format!("margin must be positive: {margin}"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn evaluator_is_deterministic_across_runs() -> TestResult {
+        let replays = [QueryReplay {
+            query: "q1".to_owned(),
+            hits: vec![
+                hybrid_hit("mem-a", 0.021, Some(1.0), None),
+                hybrid_hit("mem-b", 0.020, None, Some(1.0)),
+                hybrid_hit("mem-c", 0.015, Some(0.4), Some(0.4)),
+            ],
+        }];
+        let labels = [
+            triple("q1", "mem-a", "helpful", 0.8),
+            triple("q1", "mem-b", "harmful", 0.5),
+            triple("q1", "mem-c", "confirmation", 1.0),
+        ];
+        let cx = Cx::for_testing();
+        let first = evaluate_fusion_candidates(&cx, &replays, &labels, incumbent())
+            .map_err(|error| error.to_string())?;
+        let second = evaluate_fusion_candidates(&cx, &replays, &labels, incumbent())
+            .map_err(|error| error.to_string())?;
+        if first != second {
+            return Err("evaluation must be byte-identical across runs".to_owned());
+        }
+        if !first.evaluation_hash.starts_with("blake3:") {
+            return Err(format!("hash must be prefixed: {}", first.evaluation_hash));
+        }
+        // A different label set must fingerprint differently.
+        let third = evaluate_fusion_candidates(&cx, &replays, &labels[..1], incumbent())
+            .map_err(|error| error.to_string())?;
+        if third.evaluation_hash == first.evaluation_hash {
+            return Err("different label sets must not share an evaluation hash".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_grid_respects_clamps_and_dedups() -> TestResult {
+        // Near-boundary incumbent: +0.05 and +0.10 on lexical both clamp to
+        // 0.7 and must collapse to one candidate; graph +0.10 clamps to 0.3;
+        // semantic -0.10 clamps to 0.2.
+        let near_edge = TuningWeights {
+            lexical: 0.65,
+            semantic: 0.25,
+            graph: 0.25,
+        };
+        let vectors = enumerate_grid(near_edge);
+        for vector in &vectors {
+            if vector.lexical < FUSION_LEXICAL_CLAMP.0
+                || vector.lexical > FUSION_LEXICAL_CLAMP.1
+                || vector.semantic < FUSION_SEMANTIC_CLAMP.0
+                || vector.semantic > FUSION_SEMANTIC_CLAMP.1
+                || vector.graph < FUSION_GRAPH_CLAMP.0
+                || vector.graph > FUSION_GRAPH_CLAMP.1
+            {
+                return Err(format!("clamp violated: {vector:?}"));
+            }
+        }
+        let mut keys = BTreeSet::new();
+        for vector in &vectors {
+            if !keys.insert(vector.key()) {
+                return Err(format!("duplicate candidate survived dedup: {vector:?}"));
+            }
+        }
+        if vectors != enumerate_grid(near_edge) {
+            return Err("grid enumeration must be deterministic".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unmapped_signals_and_zero_gain_queries_are_counted_not_guessed() -> TestResult {
+        let replays = [QueryReplay {
+            query: "q1".to_owned(),
+            hits: vec![hybrid_hit("mem-a", 0.02, Some(1.0), None)],
+        }];
+        // "stale" is outside the ADR gain mapping; the zero-weight helpful
+        // label makes q2's normalizer denominator zero.
+        let labels = [
+            triple("q1", "mem-a", "stale", 1.0),
+            triple("q2", "mem-a", "helpful", 0.0),
+        ];
+        let cx = Cx::for_testing();
+        let evaluation = evaluate_fusion_candidates(&cx, &replays, &labels, incumbent())
+            .map_err(|error| error.to_string())?;
+        if evaluation.labels_unmapped_signal != 1
+            || evaluation.queries_without_gain != 1
+            || evaluation.queries_scored != 0
+        {
+            return Err(format!("honest counters wrong: {evaluation:?}"));
+        }
+        if !approx_eq(evaluation.incumbent.score, 0.0) || evaluation.winner.is_some() {
+            return Err(format!(
+                "no usable labels must mean zero scores and no winner: {evaluation:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reranked_hits_outrank_fusion_hits_under_every_candidate() -> TestResult {
+        let reranked = SearchHit {
+            doc_id: "mem-reranked".to_owned(),
+            score: 0.9,
+            source: ScoreSource::Reranked,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: None,
+            rerank_score: Some(0.9),
+            metadata: None,
+            explanation: None,
+        };
+        let hits = vec![
+            hybrid_hit("mem-a", 0.021, Some(1.0), None),
+            reranked,
+            hybrid_hit("mem-b", 0.020, None, Some(1.0)),
+        ];
+        for weights in [
+            TuningWeights {
+                lexical: 0.7,
+                semantic: 0.2,
+                graph: 0.0,
+            },
+            TuningWeights {
+                lexical: 0.2,
+                semantic: 0.7,
+                graph: 0.3,
+            },
+        ] {
+            let ranks = ranked_pool(&hits, weights.to_fusion());
+            if ranks.get("mem-reranked") != Some(&1) {
+                return Err(format!(
+                    "reranked hit must stay rank 1 under {weights:?}: {ranks:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_cx_aborts_evaluation_sweep() -> TestResult {
+        let cx = Cx::for_testing();
+        cx.set_cancel_reason(CancelReason::user("shadow tuning sweep cancellation test"));
+        let replays = [QueryReplay {
+            query: "q1".to_owned(),
+            hits: vec![hybrid_hit("mem-a", 0.02, Some(1.0), None)],
+        }];
+        let labels = [triple("q1", "mem-a", "helpful", 1.0)];
+        match evaluate_fusion_candidates(&cx, &replays, &labels, incumbent()) {
+            Err(ShadowTuningError::Cancelled(_)) => Ok(()),
+            other => Err(format!("cancelled Cx must abort the sweep: {other:?}")),
+        }
     }
 }
