@@ -5998,6 +5998,7 @@ pub fn remember_level_kind_cross_wire_error(level: &str, kind: &str) -> Option<D
                 "didYouMean": {"argument": "--level", "value": level_value},
                 "memoryLevels": KNOWN_MEMORY_LEVELS,
                 "canonicalKinds": KNOWN_MEMORY_KINDS,
+                "recovery": [],
             })
             .to_string(),
         });
@@ -6023,6 +6024,7 @@ pub fn remember_level_kind_cross_wire_error(level: &str, kind: &str) -> Option<D
                 "didYouMean": {"argument": "--kind", "value": kind_value},
                 "memoryLevels": KNOWN_MEMORY_LEVELS,
                 "canonicalKinds": KNOWN_MEMORY_KINDS,
+                "recovery": [],
             })
             .to_string(),
         });
@@ -11390,7 +11392,11 @@ mod tests {
         ] {
             let error = remember_level_kind_cross_wire_error("episodic", provided)
                 .ok_or_else(|| format!("level token `{provided}` as kind must error"))?;
-            ensure(error.code(), REMEMBER_KIND_IS_LEVEL_CODE, "kind-as-level code")?;
+            ensure(
+                error.code(),
+                REMEMBER_KIND_IS_LEVEL_CODE,
+                "kind-as-level code",
+            )?;
             ensure(
                 error.exit_code(),
                 crate::models::ProcessExitCode::Usage,
@@ -11408,8 +11414,16 @@ mod tests {
                 Some(REMEMBER_KIND_IS_LEVEL_CODE),
                 "kind-as-level failureModeCode",
             )?;
-            ensure(details["argument"].as_str(), Some("--kind"), "kind-as-level argument")?;
-            ensure(details["provided"].as_str(), Some(provided), "kind-as-level provided")?;
+            ensure(
+                details["argument"].as_str(),
+                Some("--kind"),
+                "kind-as-level argument",
+            )?;
+            ensure(
+                details["provided"].as_str(),
+                Some(provided),
+                "kind-as-level provided",
+            )?;
             ensure(
                 details["didYouMean"]["argument"].as_str(),
                 Some("--level"),
@@ -11421,11 +11435,14 @@ mod tests {
                 "kind-as-level didYouMean value",
             )?;
             ensure(
-                details["canonicalKinds"]
-                    .as_array()
-                    .map(std::vec::Vec::len),
+                details["canonicalKinds"].as_array().map(std::vec::Vec::len),
                 Some(KNOWN_MEMORY_KINDS.len()),
                 "kind-as-level canonicalKinds",
+            )?;
+            ensure(
+                details["recovery"].as_array().map(std::vec::Vec::len),
+                Some(0),
+                "kind-as-level recovery",
             )?;
         }
         Ok(())
@@ -11442,10 +11459,22 @@ mod tests {
         ] {
             let error = remember_level_kind_cross_wire_error(provided, "fact")
                 .ok_or_else(|| format!("kind token `{provided}` as level must error"))?;
-            ensure(error.code(), REMEMBER_LEVEL_IS_KIND_CODE, "level-as-kind code")?;
+            ensure(
+                error.code(),
+                REMEMBER_LEVEL_IS_KIND_CODE,
+                "level-as-kind code",
+            )?;
             let details = cross_wire_details(&error)?;
-            ensure(details["argument"].as_str(), Some("--level"), "level-as-kind argument")?;
-            ensure(details["provided"].as_str(), Some(provided), "level-as-kind provided")?;
+            ensure(
+                details["argument"].as_str(),
+                Some("--level"),
+                "level-as-kind argument",
+            )?;
+            ensure(
+                details["provided"].as_str(),
+                Some(provided),
+                "level-as-kind provided",
+            )?;
             ensure(
                 details["didYouMean"]["argument"].as_str(),
                 Some("--kind"),
@@ -11455,6 +11484,11 @@ mod tests {
                 details["didYouMean"]["value"].as_str(),
                 Some(canonical),
                 "level-as-kind didYouMean value",
+            )?;
+            ensure(
+                details["recovery"].as_array().map(std::vec::Vec::len),
+                Some(0),
+                "level-as-kind recovery",
             )?;
         }
         Ok(())
