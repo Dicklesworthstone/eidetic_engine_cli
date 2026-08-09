@@ -138,17 +138,19 @@ pub fn orient_fast_content(options: &OrientFastContentOptions<'_>) -> OrientFast
     };
 
     let relevant = match run_context_pack(&pack_options) {
-        Ok(response) => match orient_fast_items_from_pack(&pack_options, response.data.pack.items) {
-            Ok(items) => items,
-            Err(message) => {
-                issues.push(OrientFastContentIssue {
-                    component: "relevant",
-                    status: "metadata_unavailable",
-                    message,
-                });
-                Vec::new()
+        Ok(response) => {
+            match orient_fast_items_from_pack(&pack_options, response.data.pack.items) {
+                Ok(items) => items,
+                Err(message) => {
+                    issues.push(OrientFastContentIssue {
+                        component: "relevant",
+                        status: "metadata_unavailable",
+                        message,
+                    });
+                    Vec::new()
+                }
             }
-        },
+        }
         Err(error) => {
             issues.push(OrientFastContentIssue {
                 component: "relevant",
@@ -308,6 +310,7 @@ pub fn orient_decisions(
 mod tests {
     use super::*;
     use crate::core::decide::{DecideRecordOptions, decide_record};
+    use crate::core::focus::{FocusScope, FocusSetOptions, set_focus};
     use crate::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
     use crate::core::memory::{RememberMemoryOptions, remember_memory};
     use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
@@ -411,8 +414,7 @@ mod tests {
             )
             .map_err(|error| format!("insert secret fixture: {error}"))?;
 
-        let other_workspace_id =
-            WorkspaceId::from_uuid(uuid::Uuid::from_u128(0x52)).to_string();
+        let other_workspace_id = WorkspaceId::from_uuid(uuid::Uuid::from_u128(0x52)).to_string();
         connection
             .insert_workspace(
                 &other_workspace_id,
@@ -430,7 +432,8 @@ mod tests {
                     workspace_id: other_workspace_id,
                     level: "procedural".to_owned(),
                     kind: "rule".to_owned(),
-                    content: "Release checksum out-of-scope negative must never surface.".to_owned(),
+                    content: "Release checksum out-of-scope negative must never surface."
+                        .to_owned(),
                     workflow_id: None,
                     confidence: 0.9,
                     utility: 0.9,
@@ -444,6 +447,22 @@ mod tests {
                 },
             )
             .map_err(|error| format!("insert out-of-scope fixture: {error}"))?;
+
+        set_focus(&FocusSetOptions {
+            workspace_path: workspace.to_path_buf(),
+            memory_ids: vec![
+                secret_id.clone(),
+                future_id.clone(),
+                out_of_scope_id.clone(),
+            ],
+            focal_memory_id: Some(out_of_scope_id.clone()),
+            pinned_memory_ids: vec![secret_id.clone(), future_id.clone()],
+            capacity: 7,
+            reason: "Plant ineligible passive-focus candidates.".to_owned(),
+            provenance: vec!["orient fast admission regression".to_owned()],
+            scope: FocusScope::default(),
+        })
+        .map_err(|error| format!("set focus fixture: {error:?}"))?;
 
         let index_report = rebuild_index(&IndexRebuildOptions {
             workspace_path: workspace.to_path_buf(),
@@ -474,7 +493,9 @@ mod tests {
         }
         for item in report.recent.iter().chain(&report.relevant) {
             if item.created_at.is_empty() || item.provenance.is_empty() {
-                return Err(format!("item must bind created_at and provenance: {item:?}"));
+                return Err(format!(
+                    "item must bind created_at and provenance: {item:?}"
+                ));
             }
         }
         let positive_recent = report.recent.iter().any(|item| item.id == positive_id);
@@ -492,7 +513,9 @@ mod tests {
         if !positive.snippet.contains("Release checksum verification")
             || !positive.tags.iter().any(|tag| tag == "orient-positive")
         {
-            return Err(format!("positive content/tags were not bound: {positive:?}"));
+            return Err(format!(
+                "positive content/tags were not bound: {positive:?}"
+            ));
         }
 
         let forbidden = [secret_id, tombstoned_id, future_id, out_of_scope_id];
