@@ -15,6 +15,7 @@
       "type": "object",
       "required": [
         "command",
+        "embed_backend",
         "query",
         "status",
         "resultCount",
@@ -27,6 +28,7 @@
       "additionalProperties": false,
       "properties": {
         "command": {"type": "string", "const": "search"},
+        "embed_backend": {"type": "string", "enum": ["neural_local", "hash_fallback"]},
         "query": {"type": "string"},
         "status": {"type": "string"},
         "resultCount": {"type": "integer"},
@@ -78,8 +80,8 @@
   },
   "field_presets": {
     "minimal": ["memoryId", "docId", "score", "source"],
-    "summary": ["query", "status", "resultCount", "memoryId", "docId", "score", "source"],
-    "standard": ["query", "status", "resultCount", "results", "memoryId", "docId", "score", "source", "why", "provenance", "degraded", "errors", "metrics", "elapsedMs"],
+    "summary": ["query", "status", "embed_backend", "resultCount", "memoryId", "docId", "score", "source"],
+    "standard": ["query", "status", "embed_backend", "resultCount", "results", "memoryId", "docId", "score", "source", "why", "provenance", "degraded", "errors", "metrics", "elapsedMs"],
     "full": ["*"]
   },
   "$defs": {

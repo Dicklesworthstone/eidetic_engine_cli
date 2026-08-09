@@ -42,7 +42,7 @@ use crate::search::{LexicalRead, LexicalWrite, TantivyIndex};
 use asupersync::sync::OnceCell as AsyncOnceCell;
 use frankensearch::embed::{
     ConsentSource, DownloadConsent, DownloadProgress, ModelDownloader, ModelLifecycle,
-    ModelManifest,
+    ModelManifest, verify_dir_cached,
 };
 use frankensearch::{Model2VecEmbedder, ModelCategory, ModelTier, SearchError, VectorIndex};
 use sqlmodel_core::Value as SqlValue;
@@ -4897,8 +4897,11 @@ fn verify_published_tier_counts(
 }
 
 const EE_MODEL_CACHE_SUBDIR: &str = "models";
+const EE_MODEL2VEC_REGISTRY_SUBDIR: &str = "model2vec";
 const EMBEDDING_REGISTRY_FINGERPRINT_SCHEMA: &str = "ee.embedding_registry_fingerprint.v1";
 pub(crate) const POTION_MODEL_NAME: &str = "potion-multilingual-128M";
+pub(crate) const EMBED_BACKEND_NEURAL_LOCAL: &str = "neural_local";
+pub(crate) const EMBED_BACKEND_HASH_FALLBACK: &str = "hash_fallback";
 const EE_EMBED_DOWNLOAD_AUTO: &str = "auto";
 const EE_EMBED_DOWNLOAD_OFF: &str = "off";
 const EE_DOWNLOAD_STATE_PENDING: u8 = 0;
@@ -5031,9 +5034,52 @@ pub(crate) fn default_embedder_model_root() -> PathBuf {
     if let Some(model_dir) = configured_embedder_model_root() {
         return model_dir;
     }
-    process_ee_data_dir()
+    let model_cache_root = process_ee_data_dir()
         .unwrap_or_else(stable_ee_data_dir_fallback)
-        .join(EE_MODEL_CACHE_SUBDIR)
+        .join(EE_MODEL_CACHE_SUBDIR);
+    resolve_default_embedder_model_root(&model_cache_root)
+}
+
+fn resolve_default_embedder_model_root(model_cache_root: &Path) -> PathBuf {
+    resolve_default_embedder_model_root_with(model_cache_root, verified_potion_model_dir)
+}
+
+fn resolve_default_embedder_model_root_with(
+    model_cache_root: &Path,
+    mut is_verified_model_dir: impl FnMut(&Path) -> bool,
+) -> PathBuf {
+    let registry_root = model_cache_root.join(EE_MODEL2VEC_REGISTRY_SUBDIR);
+    let registry_model_dir = potion_model_destination_dir(&registry_root);
+    if is_verified_model_dir(&registry_model_dir) {
+        return registry_root;
+    }
+    model_cache_root.to_path_buf()
+}
+
+fn verified_potion_model_dir(model_dir: &Path) -> bool {
+    verify_dir_cached(&ModelManifest::potion_128m(), model_dir).is_ok()
+}
+
+/// Stable, deliberately small backend vocabulary shared by search, pack, and
+/// orient. This reports the backend that is ready for the current process; if
+/// the stack has not been initialized yet, it performs only manifest-cached
+/// local availability checks and never starts a download.
+#[must_use]
+pub(crate) fn active_embed_backend_token() -> &'static str {
+    if let Some(stack) = DEFAULT_SEARCH_EMBEDDER_STACK.get() {
+        return if stack.fast().is_semantic() {
+            EMBED_BACKEND_NEURAL_LOCAL
+        } else {
+            EMBED_BACKEND_HASH_FALLBACK
+        };
+    }
+
+    let settings = default_embedder_settings();
+    if verified_potion_model_dir(&potion_model_destination_dir(&settings.model_root)) {
+        EMBED_BACKEND_NEURAL_LOCAL
+    } else {
+        EMBED_BACKEND_HASH_FALLBACK
+    }
 }
 
 fn configured_embedder_model_root() -> Option<PathBuf> {
@@ -7400,6 +7446,39 @@ mod tests {
         ensure(
             potion_model_destination_dir(&direct_model_dir) == direct_model_dir,
             "pre-populated model directories should be honored directly",
+        )
+    }
+
+    #[test]
+    fn default_embedder_root_prefers_verified_model2vec_registry_layout() -> TestResult {
+        let model_cache_root = unique_test_dir("embed-model-registry-root");
+        let expected_registry_root = model_cache_root.join(EE_MODEL2VEC_REGISTRY_SUBDIR);
+        let expected_model_dir = expected_registry_root.join(POTION_MODEL_NAME);
+        let mut inspected = Vec::new();
+
+        let resolved = resolve_default_embedder_model_root_with(&model_cache_root, |candidate| {
+            inspected.push(candidate.to_path_buf());
+            candidate == expected_model_dir
+        });
+
+        ensure(
+            inspected == vec![expected_model_dir],
+            "resolver should inspect the canonical model2vec registry entry exactly once",
+        )?;
+        ensure(
+            resolved == expected_registry_root,
+            "a verified model2vec/<name> registry entry must outrank the legacy cache root",
+        )
+    }
+
+    #[test]
+    fn default_embedder_root_falls_back_when_registry_entry_is_unverified() -> TestResult {
+        let model_cache_root = unique_test_dir("embed-model-registry-fallback");
+        let resolved = resolve_default_embedder_model_root_with(&model_cache_root, |_| false);
+
+        ensure(
+            resolved == model_cache_root,
+            "an absent or unverified registry entry must preserve the default cache root",
         )
     }
 

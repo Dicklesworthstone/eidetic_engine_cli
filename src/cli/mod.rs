@@ -37417,6 +37417,7 @@ where
         "schema": "ee.orient.v1",
         "command": "orient",
         "mode": if args.fast { "fast" } else { "full" },
+        "embed_backend": crate::core::index::active_embed_backend_token(),
         "version": env!("CARGO_PKG_VERSION"),
         "workspace": workspace_path.display().to_string(),
         "task": &args.task,
@@ -37723,6 +37724,10 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
         .get("mode")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("full");
+    let embed_backend = data
+        .get("embed_backend")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(crate::core::index::EMBED_BACKEND_HASH_FALLBACK);
     let dirty_paths = data
         .pointer("/workspaceHygiene/dirtyPathCount")
         .and_then(serde_json::Value::as_u64)
@@ -37740,7 +37745,7 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     let mut out = format!(
-        "Orientation: {task}\nWorkspace: {workspace}\nMode: {mode}\nDoctor posture: {posture}\nDirty paths: {dirty_paths}\nPack items: {pack_items}\nDecision revisits: {decision_revisits}\nRevivable dead routes: {revivable_routes}\n"
+        "Orientation: {task}\nWorkspace: {workspace}\nMode: {mode}\nembed_backend: {embed_backend}\nDoctor posture: {posture}\nDirty paths: {dirty_paths}\nPack items: {pack_items}\nDecision revisits: {decision_revisits}\nRevivable dead routes: {revivable_routes}\n"
     );
     if let Some(revivals) = data.get("revivals").filter(|value| value.is_object()) {
         out.push_str(&render_revival_evaluation_human(revivals));
@@ -64470,11 +64475,13 @@ mod tests {
                 "task": "resume",
                 "workspace": "/fixture",
                 "mode": "fast",
+                "embed_backend": "neural_local",
                 "revivals": implicit
             }),
             &[],
         );
         for expected in [
+            "embed_backend: neural_local",
             "mode=implicit",
             "evaluationPosture=local_read_only_predicates_no_process_execution",
             "commandHelpProcessExecution=false",

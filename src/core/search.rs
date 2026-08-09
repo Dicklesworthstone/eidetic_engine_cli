@@ -2160,6 +2160,11 @@ impl SearchReport {
             }
         }
 
+        output.push_str(&format!(
+            "embed_backend: {}\n\n",
+            crate::core::index::active_embed_backend_token()
+        ));
+
         for (i, hit) in visible_results.iter().enumerate() {
             output.push_str(&format!(
                 "  {}. {} (score: {:.4}, source: {})\n",
@@ -2390,6 +2395,7 @@ impl SearchReport {
         let mut data = serde_json::json!({
             "command": "search",
             "status": self.status.as_str(),
+            "embed_backend": crate::core::index::active_embed_backend_token(),
             "query": &self.query,
             "request": {
                 "sourceMode": self.source_mode_requested.as_str(),
@@ -11096,6 +11102,17 @@ mod tests {
         let json = similar.data_json();
 
         assert_eq!(json["command"], "similar");
+        assert_eq!(
+            json["embed_backend"],
+            serde_json::json!(crate::core::index::active_embed_backend_token())
+        );
+        assert!(
+            similar.human_summary().contains(&format!(
+                "embed_backend: {}",
+                crate::core::index::active_embed_backend_token()
+            )),
+            "human retrieval output must expose the same backend token"
+        );
         assert_eq!(
             json["targetMemoryId"],
             serde_json::json!("mem_00000000000000000000000001")

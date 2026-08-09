@@ -12,10 +12,11 @@
     "fields": {"type": "string"},
     "data": {
       "type": "object",
-      "required": ["command", "request", "pack", "degraded"],
+      "required": ["command", "embed_backend", "request", "pack", "degraded"],
       "additionalProperties": false,
       "properties": {
         "command": {"type": "string", "const": "pack"},
+        "embed_backend": {"type": "string", "enum": ["neural_local", "hash_fallback"]},
         "request": {
           "type": "object",
           "required": [
@@ -166,8 +167,8 @@
   },
   "field_presets": {
     "minimal": ["command", "query", "hash"],
-    "summary": ["command", "request", "pack", "budget", "quality", "pagination", "degraded"],
-    "standard": ["command", "request", "pack", "items", "pagination", "degraded"],
+    "summary": ["command", "embed_backend", "request", "pack", "budget", "quality", "pagination", "degraded"],
+    "standard": ["command", "embed_backend", "request", "pack", "items", "pagination", "degraded"],
     "full": ["*"]
   },
   "$defs": {

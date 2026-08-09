@@ -2825,6 +2825,10 @@ pub fn render_context_response_json_with_options(
     b.field_bool("success", response.success);
     b.field_object("data", |d| {
         d.field_str("command", response.data.command);
+        d.field_str(
+            "embed_backend",
+            crate::core::index::active_embed_backend_token(),
+        );
         d.field_object("request", |request| {
             request.field_str("query", &response.data.request.query);
             request.field_str("profile", response.data.request.profile.as_str());
@@ -3211,14 +3215,20 @@ fn context_response_cached_json_with_top_level_degraded(cached_json: &str) -> St
     let Some(object) = value.as_object_mut() else {
         return cached_json.to_owned();
     };
-    if object.contains_key("degraded") {
-        return cached_json.to_owned();
+    if let Some(data) = object
+        .get_mut("data")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        data.entry("embed_backend".to_string())
+            .or_insert_with(|| serde_json::json!(crate::core::index::active_embed_backend_token()));
     }
-    let degraded = object
-        .get("data")
-        .map(response_degraded_from_data)
-        .unwrap_or_else(|| serde_json::json!([]));
-    object.insert("degraded".to_string(), degraded);
+    if !object.contains_key("degraded") {
+        let degraded = object
+            .get("data")
+            .map(response_degraded_from_data)
+            .unwrap_or_else(|| serde_json::json!([]));
+        object.insert("degraded".to_string(), degraded);
+    }
     serde_json::to_string(&value).unwrap_or_else(|_| cached_json.to_owned())
 }
 
@@ -3292,11 +3302,12 @@ pub fn render_context_response_human(response: &ContextResponse) -> String {
     let mut output = String::new();
     output.push_str(&format!("ee pack \"{}\"\n\n", response.data.request.query));
     output.push_str(&format!(
-        "Profile: {} | Budget: {}/{} tokens | Pack hash: {}\n\n",
+        "Profile: {} | Budget: {}/{} tokens | Pack hash: {}\nembed_backend: {}\n\n",
         response.data.request.profile.as_str(),
         response.data.pack.used_tokens,
         response.data.pack.budget.max_tokens(),
-        context_pack_hash(response)
+        context_pack_hash(response),
+        crate::core::index::active_embed_backend_token()
     ));
 
     let advisory_banner =
@@ -3524,6 +3535,15 @@ pub fn render_context_response_markdown_with_options(
     let degraded = aggregate_context_degraded_as_response(filtered);
     let mut markdown =
         crate::pack::render_context_response_markdown_with_degraded(response, &degraded);
+    if let Some(heading_end) = markdown.find("\n\n") {
+        markdown.insert_str(
+            heading_end + 2,
+            &format!(
+                "**embed_backend:** `{}`\n\n",
+                crate::core::index::active_embed_backend_token()
+            ),
+        );
+    }
     if let Some(pack_dna) = &response.data.pack_dna {
         insert_context_pack_dna_markdown(&mut markdown, pack_dna);
     }
@@ -21732,6 +21752,30 @@ mod tests {
 
         ensure_starts_with(&json, "{\"schema\":\"ee.response.v2\"", "schema")?;
         ensure_contains(&json, "\"command\":\"pack\"", "command")?;
+        ensure_contains(
+            &json,
+            &format!(
+                "\"embed_backend\":\"{}\"",
+                crate::core::index::active_embed_backend_token()
+            ),
+            "pack embedding backend",
+        )?;
+        ensure_contains(
+            &render_context_response_human(&response),
+            &format!(
+                "embed_backend: {}",
+                crate::core::index::active_embed_backend_token()
+            ),
+            "human pack embedding backend",
+        )?;
+        ensure_contains(
+            &render_context_response_markdown(&response),
+            &format!(
+                "**embed_backend:** `{}`",
+                crate::core::index::active_embed_backend_token()
+            ),
+            "markdown pack embedding backend",
+        )?;
         ensure_contains(
             &json,
             "\"provenance\":[{\"uri\":\"file://AGENTS.md#L42\",\"scheme\":\"file\",\"label\":\"AGENTS.md:L42\",\"locator\":\"L42\",\"note\":\"source evidence\"}]",
