@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.global_promotion.report.v1.json",
+  "title": "ee.global_promotion.report.v1",
+  "description": "Execution report for ee memory promote-global: the policy plan plus what actually happened (dry-run plans set executed=false; an exact-content global twin reports alreadyPromoted=true and merges instead of inserting a sibling).",
+  "type": "object",
+  "required": [
+    "schema",
+    "plan",
+    "executed",
+    "globalMemoryId",
+    "alreadyPromoted"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.global_promotion.report.v1"
+    },
+    "plan": {
+      "$ref": "ee.global_promotion.plan.v1.json"
+    },
+    "executed": {
+      "type": "boolean"
+    },
+    "globalMemoryId": {
+      "type": ["string", "null"],
+      "description": "The global row this promotion created or matched; null when refused or dry-run."
+    },
+    "alreadyPromoted": {
+      "type": "boolean",
+      "description": "True when an exact-content global twin already existed (idempotent re-promotion)."
+    }
+  }
+}

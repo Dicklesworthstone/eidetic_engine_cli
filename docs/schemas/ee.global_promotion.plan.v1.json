@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.global_promotion.plan.v1.json",
+  "title": "ee.global_promotion.plan.v1",
+  "description": "Deterministic workspace-to-global promotion decision from the bd-1bfwa.2 policy core: allow (insert or merge into an existing global twin) or a typed refusal (evidence gate, secret re-screen, tombstone, sealed placeholder, lane unavailable). Pure decision output — execution state lives in ee.global_promotion.report.v1.",
+  "type": "object",
+  "required": [
+    "schema",
+    "memoryId",
+    "originWorkspaceId",
+    "verdict",
+    "detail",
+    "auditAction"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.global_promotion.plan.v1"
+    },
+    "memoryId": {
+      "type": "string",
+      "description": "The workspace memory the decision is about."
+    },
+    "originWorkspaceId": {
+      "type": "string",
+      "description": "Workspace the candidate row belongs to."
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["allow", "refuse"]
+    },
+    "detail": {
+      "type": "object",
+      "description": "Allow: { action: insert | merge_into, globalMemoryId? }. Refuse: { code, message, repair } with the typed refusal vocabulary."
+    },
+    "auditAction": {
+      "type": "string",
+      "description": "Audit action the execution slice records for this decision."
+    }
+  }
+}

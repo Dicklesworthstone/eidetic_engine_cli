@@ -11541,7 +11541,51 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             category: "claims",
             definition: manifest_artifact_schema_definition,
         },
+        SchemaEntry {
+            id: "ee.global_promotion.plan.v1",
+            version: "1",
+            description: "Workspace-to-global promotion decision (allow insert/merge or typed refusal) from ee memory promote-global and its dry-run plan.",
+            category: "memory",
+            definition: global_promotion_plan_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.global_promotion.report.v1",
+            version: "1",
+            description: "Execution report for ee memory promote-global: plan plus executed/globalMemoryId/alreadyPromoted state.",
+            category: "memory",
+            definition: global_promotion_report_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.global_demotion.report.v1",
+            version: "1",
+            description: "Execution report for ee memory demote-global: tombstone of a promoted global row with origin parsed from promotion provenance.",
+            category: "memory",
+            definition: global_demotion_report_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.shadow.retrieval_tuning_report.v1",
+            version: "1",
+            description: "ADR 0070 offline retrieval-weight tuning report: labeled-evidence counts with honest denominators, deterministic candidate sweep, winner margin, evidence-gate abstention, and reportHash.",
+            category: "shadow",
+            definition: shadow_retrieval_tuning_report_schema_definition,
+        },
     ]
+}
+
+fn global_promotion_plan_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.global_promotion.plan.v1.json").to_string()
+}
+
+fn global_promotion_report_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.global_promotion.report.v1.json").to_string()
+}
+
+fn global_demotion_report_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.global_demotion.report.v1.json").to_string()
+}
+
+fn shadow_retrieval_tuning_report_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.shadow.retrieval_tuning_report.v1.json").to_string()
 }
 
 fn agentsmd_export_schema_definition() -> String {

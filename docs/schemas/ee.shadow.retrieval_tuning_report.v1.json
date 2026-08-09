@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.shadow.retrieval_tuning_report.v1.json",
+  "title": "ee.shadow.retrieval_tuning_report.v1",
+  "description": "ADR 0070 offline retrieval-weight tuning report: outcome-labeled evidence counts with honest denominators (unresolvable dense linkage, unreplayable and unmatched weak candidates), the deterministic candidate sweep over live fusion weights, the strict winner with its relative margin, the evidence-gate abstention posture, and a BLAKE3 reportHash over the canonical hashless JSON. Live ranking changes only through the explicit promote step, never from this report.",
+  "type": "object",
+  "required": [
+    "schema",
+    "policyId",
+    "dbGeneration",
+    "labelSet",
+    "abstained",
+    "abstentionReason",
+    "incumbent",
+    "candidates",
+    "winner",
+    "promotable",
+    "diagnostics",
+    "reportHash"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.shadow.retrieval_tuning_report.v1"
+    },
+    "policyId": {
+      "type": "string",
+      "const": "candidate.retrieval.outcome_tuned_weights"
+    },
+    "dbGeneration": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "labelSet": {
+      "type": "object",
+      "required": [
+        "triples",
+        "distinctQueries",
+        "hash",
+        "denseShare",
+        "denseUnresolvable",
+        "weakUnreplayable",
+        "weakUnmatched"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "triples": { "type": "integer", "minimum": 0 },
+        "distinctQueries": { "type": "integer", "minimum": 0 },
+        "hash": { "type": "string" },
+        "denseShare": { "type": "number", "minimum": 0, "maximum": 1 },
+        "denseUnresolvable": { "type": "integer", "minimum": 0 },
+        "weakUnreplayable": { "type": "integer", "minimum": 0 },
+        "weakUnmatched": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "abstained": {
+      "type": "boolean"
+    },
+    "abstentionReason": {
+      "type": ["string", "null"],
+      "description": "insufficient_outcome_evidence when the ADR §4 gate held the run back; null otherwise."
+    },
+    "incumbent": {
+      "$ref": "#/$defs/candidateScore",
+      "description": "Null exactly when the run abstained before sweeping."
+    },
+    "candidates": {
+      "type": ["array", "null"],
+      "items": { "$ref": "#/$defs/candidateScore" }
+    },
+    "winner": {
+      "type": ["object", "null"],
+      "description": "The strictly-improving best candidate with relativeMargin; null when the incumbent stands."
+    },
+    "promotable": {
+      "type": "boolean"
+    },
+    "diagnostics": {
+      "type": ["object", "null"],
+      "description": "Evaluation hash, graph-axis degeneracy flag, and per-query honesty counters."
+    },
+    "reportHash": {
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "candidateScore": {
+      "type": ["object", "null"],
+      "properties": {
+        "weights": {
+          "type": "object",
+          "required": ["lexical", "semantic", "graph"],
+          "additionalProperties": false,
+          "properties": {
+            "lexical": { "type": "number" },
+            "semantic": { "type": "number" },
+            "graph": { "type": "number" }
+          }
+        },
+        "score": { "type": "number" },
+        "origin": { "type": "string", "enum": ["incumbent", "grid", "descent"] }
+      }
+    }
+  }
+}

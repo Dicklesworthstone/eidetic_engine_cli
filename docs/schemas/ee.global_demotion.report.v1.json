@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.global_demotion.report.v1.json",
+  "title": "ee.global_demotion.report.v1",
+  "description": "Execution report for ee memory demote-global: withdrawing (tombstoning) a promoted user-global memory without touching the origin workspace row. Origin fields parse back from the ee-mem:// promotion provenance when present.",
+  "type": "object",
+  "required": [
+    "schema",
+    "globalMemoryId",
+    "executed",
+    "tombstoned",
+    "originWorkspaceId",
+    "originMemoryId"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.global_demotion.report.v1"
+    },
+    "globalMemoryId": {
+      "type": "string"
+    },
+    "executed": {
+      "type": "boolean",
+      "description": "False for dry-run plans."
+    },
+    "tombstoned": {
+      "type": "boolean"
+    },
+    "originWorkspaceId": {
+      "type": ["string", "null"]
+    },
+    "originMemoryId": {
+      "type": ["string", "null"]
+    }
+  }
+}
