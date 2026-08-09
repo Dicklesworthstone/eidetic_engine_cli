@@ -11222,7 +11222,7 @@ mod tests {
         let connection =
             DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
-        let workspace_id = "wsp_similar_hash";
+        let workspace_id = "wsp_00000000000000000000001013";
         connection
             .insert_workspace(
                 workspace_id,

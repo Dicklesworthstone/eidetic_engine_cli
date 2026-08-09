@@ -4330,7 +4330,7 @@ mod tests {
                     target_memory_id: Some(memory_id.to_string()),
                     proposed_content: Some(format!("Close query gap for {query_hash}.")),
                     proposed_confidence: Some(0.7),
-                    proposed_trust_class: Some("derived".to_string()),
+                    proposed_trust_class: Some(TrustClass::AgentAssertion.as_str().to_string()),
                     source_type: "learn_gaps".to_string(),
                     source_id: Some(query_hash.to_string()),
                     reason: format!("Repeated query miss for {query_hash}."),
@@ -4907,7 +4907,7 @@ mod tests {
                     target_memory_id: Some(memory_id.to_string()),
                     proposed_content: Some(format!("Learned summary candidate {id}.")),
                     proposed_confidence: Some(0.7),
-                    proposed_trust_class: Some("derived".to_string()),
+                    proposed_trust_class: Some(TrustClass::AgentAssertion.as_str().to_string()),
                     source_type: "learn_summary_test".to_string(),
                     source_id: Some(id.to_string()),
                     reason: format!("Summary period regression candidate {id}."),
@@ -5146,14 +5146,14 @@ mod tests {
             &connection,
             &workspace_id,
             memory_id,
-            "cand_summary_old_000000000000001",
+            "curate_00000000000000000000000101",
             "2000-01-01T00:00:00Z",
         )?;
         seed_summary_candidate(
             &connection,
             &workspace_id,
             memory_id,
-            "cand_summary_current_0000000001",
+            "curate_00000000000000000000000102",
             "9999-01-01T00:00:00Z",
         )?;
         connection.close().map_err(|error| error.to_string())?;
@@ -5222,14 +5222,14 @@ mod tests {
             &connection,
             &workspace_id,
             memory_id,
-            "cand_summary_same_second_old",
+            "curate_00000000000000000000000103",
             "2026-01-01T00:00:00Z",
         )?;
         seed_summary_candidate(
             &connection,
             &workspace_id,
             memory_id,
-            "cand_summary_after_boundary",
+            "curate_00000000000000000000000104",
             "2026-01-01T00:00:01+00:00",
         )?;
         connection.close().map_err(|error| error.to_string())?;

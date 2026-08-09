@@ -17032,10 +17032,10 @@ pub fn unrelated_context() -> u64 {{
 
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
-        let workspace_id = "wsp_afpack000000000000000000001";
+        let workspace_id = WorkspaceId::from_uuid(uuid::Uuid::from_u128(8_100)).to_string();
         connection
             .insert_workspace(
-                workspace_id,
+                &workspace_id,
                 &CreateWorkspaceInput {
                     path: "/tmp/ee-attempt-family-pack".to_owned(),
                     name: Some("attempt family pack".to_owned()),
@@ -17053,7 +17053,7 @@ pub fn unrelated_context() -> u64 {{
                 .insert_memory(
                     &memory_id.to_string(),
                     &CreateMemoryInput {
-                        workspace_id: workspace_id.to_owned(),
+                        workspace_id: workspace_id.clone(),
                         level: "working".to_owned(),
                         kind: "fact".to_owned(),
                         content: content.to_owned(),
@@ -17184,7 +17184,7 @@ pub fn unrelated_context() -> u64 {{
                 utility: UnitScore::parse(0.6).map_err(|error| error.to_string())?,
                 provenance: vec![
                     PackProvenance::new(
-                        ProvenanceUri::from_str("test://attempt-family-ranking")
+                        ProvenanceUri::from_str("manual://attempt-family-ranking")
                             .map_err(|error| error.to_string())?,
                         "ranking fixture",
                     )

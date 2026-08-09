@@ -5410,7 +5410,7 @@ mod tests {
                 utility: 0.5,
                 importance: 0.5,
                 provenance_uri: None,
-                trust_class: "agent_inference".to_string(),
+                trust_class: "agent_assertion".to_string(),
                 trust_subclass: None,
                 tags: Vec::new(),
                 valid_from: None,

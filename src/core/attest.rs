@@ -1122,7 +1122,7 @@ mod tests {
         const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
-        let source_workspace_id = "wsp_attest_source000000000000001";
+        let source_workspace_id = "wsp_00000000000000000000001011";
         connection.insert_workspace(
             source_workspace_id,
             &db::CreateWorkspaceInput {
@@ -1154,7 +1154,7 @@ mod tests {
         let attestation = build_memory_attestation_for_workspace(
             &connection,
             &memory_id,
-            "wsp_attest_expected0000000000001",
+            "wsp_00000000000000000000001012",
         )?;
         assert_eq!(
             attestation, None,

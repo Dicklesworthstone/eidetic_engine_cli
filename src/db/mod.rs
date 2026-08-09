@@ -34965,13 +34965,13 @@ mod tests {
     {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
-        let workspace_a = "wsp_afsnap000000000000000000001";
-        let workspace_b = "wsp_afsnap000000000000000000002";
+        let workspace_a = "wsp_00000000000000000000001101";
+        let workspace_b = "wsp_00000000000000000000001102";
         insert_attempt_family_test_workspace(&connection, workspace_a, "/tmp/afsnap-a")?;
         insert_attempt_family_test_workspace(&connection, workspace_b, "/tmp/afsnap-b")?;
 
-        let original_id = "mem_afsnap000000000000000000001";
-        let revision_id = "mem_afsnap000000000000000000002";
+        let original_id = "mem_00000000000000000000001101";
+        let revision_id = "mem_00000000000000000000001102";
         connection.insert_memory(
             original_id,
             &test_memory_input(workspace_a, "V094 pointer-only attempt"),
@@ -35031,7 +35031,7 @@ mod tests {
             "pointer-only legacy family fails closed",
         )?;
 
-        let other_workspace_row = "mem_afsnap000000000000000000003";
+        let other_workspace_row = "mem_00000000000000000000001103";
         connection.insert_memory_revision(
             other_workspace_row,
             original_id,
@@ -35069,10 +35069,10 @@ mod tests {
     {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
-        let workspace_id = "wsp_afsnap000000000000000000003";
+        let workspace_id = "wsp_00000000000000000000001103";
         insert_attempt_family_test_workspace(&connection, workspace_id, "/tmp/afsnap-corrupt")?;
 
-        let undeclared_id = "mem_afsnap000000000000000000004";
+        let undeclared_id = "mem_00000000000000000000001104";
         connection.insert_memory(
             undeclared_id,
             &test_memory_input(workspace_id, "Undeclared family member"),
@@ -35102,7 +35102,7 @@ mod tests {
             "undeclared family is never complete",
         )?;
 
-        let duplicate_id = "mem_afsnap000000000000000000005";
+        let duplicate_id = "mem_00000000000000000000001105";
         connection.insert_memory(
             duplicate_id,
             &test_memory_input(workspace_id, "Repeated logical member"),
@@ -35165,12 +35165,12 @@ mod tests {
     fn attempt_family_candidate_batch_uses_one_query_per_bounded_chunk() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
-        let workspace_id = "wsp_afbatch00000000000000000001";
+        let workspace_id = "wsp_00000000000000000000001104";
         insert_attempt_family_test_workspace(&connection, workspace_id, "/tmp/afbatch")?;
         let candidate_count = super::ATTEMPT_FAMILY_MEMBERSHIP_BATCH_SIZE + 1;
         let mut memory_ids = Vec::with_capacity(candidate_count);
         for index in 0..candidate_count {
-            let memory_id = format!("mem_afbatch{index:020}");
+            let memory_id = format!("mem_{:026}", 12_000_u64 + index as u64);
             connection.insert_memory(
                 &memory_id,
                 &test_memory_input(workspace_id, &format!("batch candidate {index}")),
