@@ -21,6 +21,7 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -48,9 +49,7 @@ use ee::db::{
     CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
     MemoryLinkRelation, MemoryLinkSource,
 };
-use ee::models::{
-    MemoryId, MemoryScope, ProcessExitCode, ProvenanceUri, RedactionLevel, UnitScore, WorkspaceId,
-};
+use ee::models::{MemoryId, MemoryScope, ProvenanceUri, RedactionLevel, UnitScore, WorkspaceId};
 use ee::pack::{
     ArenaMode, ContextPackProfile, PackArenaWorkspace, PackArenaWorkspaceKey, PackAssemblyOptions,
     PackCandidate, PackCandidateInput, PackProvenance, PackResourceProfile, PackSection,
@@ -402,15 +401,13 @@ fn build_resource_scale_index(
 }
 
 fn invoke_orient_fast_whole_command(
+    ee_binary: &Path,
     workspace_path: &Path,
-) -> (Duration, ProcessExitCode, Vec<u8>, Vec<u8>) {
+) -> (Duration, bool, Vec<u8>, Vec<u8>) {
     let workspace_arg = workspace_path.display().to_string();
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
     let started = Instant::now();
-    let exit = ee::cli::run(
-        [
-            "ee",
+    let output = Command::new(ee_binary)
+        .args([
             "orient",
             "S4 resource benchmark release testing performance",
             "--workspace",
@@ -421,17 +418,20 @@ fn invoke_orient_fast_whole_command(
             "100",
             "--max-tokens",
             "4000",
-        ],
-        &mut stdout,
-        &mut stderr,
-    );
-    (started.elapsed(), exit, stdout, stderr)
+        ])
+        .output()
+        .expect("spawn release ee binary for orient-fast benchmark");
+    (
+        started.elapsed(),
+        output.status.success(),
+        output.stdout,
+        output.stderr,
+    )
 }
 
-fn assert_orient_fast_whole_command_output(exit: ProcessExitCode, stdout: &[u8], stderr: &[u8]) {
-    assert_eq!(
-        exit,
-        ProcessExitCode::Success,
+fn assert_orient_fast_whole_command_output(success: bool, stdout: &[u8], stderr: &[u8]) {
+    assert!(
+        success,
         "whole ee orient --fast command failed: {}",
         String::from_utf8_lossy(stderr)
     );
@@ -1161,19 +1161,29 @@ fn bench_context_s4_resource_scales(c: &mut Criterion) {
 /// indexed 10k-memory store. The sampled p99 assertion is the release gate;
 /// Criterion remains useful for historical distribution/regression reporting.
 fn bench_orient_fast_whole_command(c: &mut Criterion) {
+    let ee_binary = std::env::var_os("EE_BENCH_EE_BIN")
+        .map(PathBuf::from)
+        .expect("EE_BENCH_EE_BIN must name the release ee binary");
+    assert!(
+        ee_binary.is_file(),
+        "EE_BENCH_EE_BIN does not name a file: {}",
+        ee_binary.display()
+    );
     let temp_dir = TempDir::new().expect("orient fast 10k temp dir");
     let workspace_path = seed_resource_scale_database(temp_dir.path(), ORIENT_FAST_MEMORY_COUNT);
     let db_path = workspace_path.join(".ee").join("ee.db");
     let _index_dir =
         build_resource_scale_index(&workspace_path, &db_path, ORIENT_FAST_MEMORY_COUNT);
 
-    let (_, exit, stdout, stderr) = invoke_orient_fast_whole_command(&workspace_path);
-    assert_orient_fast_whole_command_output(exit, &stdout, &stderr);
+    let (_, success, stdout, stderr) =
+        invoke_orient_fast_whole_command(&ee_binary, &workspace_path);
+    assert_orient_fast_whole_command_output(success, &stdout, &stderr);
 
     let mut samples = Vec::with_capacity(ORIENT_FAST_P99_SAMPLE_COUNT);
     for _ in 0..ORIENT_FAST_P99_SAMPLE_COUNT {
-        let (elapsed, exit, stdout, stderr) = invoke_orient_fast_whole_command(&workspace_path);
-        assert_orient_fast_whole_command_output(exit, &stdout, &stderr);
+        let (elapsed, success, stdout, stderr) =
+            invoke_orient_fast_whole_command(&ee_binary, &workspace_path);
+        assert_orient_fast_whole_command_output(success, &stdout, &stderr);
         samples.push(elapsed);
     }
     let p99_ms = sampled_p99_ms(&mut samples);
@@ -1188,8 +1198,9 @@ fn bench_orient_fast_whole_command(c: &mut Criterion) {
     group.sample_size(10);
     group.bench_function(ORIENT_FAST_BENCH_OPERATION, |b| {
         b.iter(|| {
-            let (elapsed, exit, stdout, stderr) = invoke_orient_fast_whole_command(&workspace_path);
-            assert_eq!(exit, ProcessExitCode::Success);
+            let (elapsed, success, stdout, stderr) =
+                invoke_orient_fast_whole_command(&ee_binary, &workspace_path);
+            assert!(success);
             black_box((elapsed, stdout, stderr))
         });
     });

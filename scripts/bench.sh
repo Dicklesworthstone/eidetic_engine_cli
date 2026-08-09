@@ -81,6 +81,7 @@ OUTPUT_FILE="${EE_BENCH_OUTPUT:-$ARTIFACT_DIR/ee-perf.v1.json}"
 EE_BIN="$TARGET_ROOT/release/ee"
 export CARGO_TARGET_DIR="$TARGET_ROOT"
 export EE_BENCH_PROFILE="$PROFILE"
+export EE_BENCH_EE_BIN="$EE_BIN"
 
 if [ ! -f "$BUDGETS_FILE" ]; then
     echo "Error: budgets.toml not found at $BUDGETS_FILE" >&2
@@ -158,6 +159,7 @@ else
         cargo build --release --bench status >&2
     else
         cargo build --release --benches >&2
+        cargo build --release --bin ee >&2
     fi
 
     if [ "$PROFILE" = "ci-smoke" ]; then
