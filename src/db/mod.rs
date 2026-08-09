@@ -18937,6 +18937,26 @@ impl DbConnection {
             .transpose()
     }
 
+    /// Find an active (non-tombstoned) memory whose content exactly matches,
+    /// scoped to one workspace. Used by the global-promotion engine's
+    /// deterministic exact-duplicate scan (bd-1bfwa.2); embedding-based
+    /// similarity can layer on top later without changing this contract.
+    pub fn find_active_memory_by_content(
+        &self,
+        workspace_id: &str,
+        content: &str,
+    ) -> Result<Option<StoredMemory>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND content = ?2 AND tombstoned_at IS NULL ORDER BY created_at ASC, id ASC LIMIT 1",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(content.to_string()),
+            ],
+        )?;
+        rows.first().map(stored_memory_from_row).transpose()
+    }
+
     /// Get a memory by ID.
     pub fn get_memory(&self, id: &str) -> Result<Option<StoredMemory>> {
         // ORDER BY/LIMIT keeps the result deterministic while avoiding a stale

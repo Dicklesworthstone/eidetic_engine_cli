@@ -255,6 +255,342 @@ pub fn plan_promotion(input: &PromotionInput) -> PromotionPlan {
     }
 }
 
+// ── Execution (slice 2) ────────────────────────────────────────────────────
+//
+// The engine turns an allowed plan into durable state: a copy (never a move)
+// of the workspace memory into the separate global store with origin
+// provenance, audits in BOTH stores, idempotent re-promotion, and a
+// tombstone-based demotion. The decision core above stays pure.
+
+use std::path::Path;
+
+use crate::db::{
+    CreateAuditInput, CreateMemoryInput, CreateSearchIndexJobInput, DbConnection,
+    SearchIndexJobType, generate_audit_id,
+};
+
+pub const GLOBAL_PROMOTION_REPORT_SCHEMA_V1: &str = "ee.global_promotion.report.v1";
+pub const GLOBAL_DEMOTION_REPORT_SCHEMA_V1: &str = "ee.global_demotion.report.v1";
+
+/// Provenance URI carried by every promoted global row, binding it to its
+/// origin workspace memory: `ee-mem://<workspace_id>/<memory_id>`.
+#[must_use]
+pub fn promotion_provenance_uri(workspace_id: &str, memory_id: &str) -> String {
+    format!("ee-mem://{workspace_id}/{memory_id}")
+}
+
+#[derive(Clone, Debug)]
+pub struct PromoteGlobalOptions<'a> {
+    /// Workspace database holding the memory to promote.
+    pub workspace_database_path: &'a Path,
+    pub memory_id: &'a str,
+    /// Resolved global store paths (callers use
+    /// [`super::global_store::default_global_store_paths_from_env`] in
+    /// production; tests pass a temp root).
+    pub global_paths: &'a super::global_store::GlobalStorePaths,
+    /// Whether config enables the lane for this workspace (the CLI slice
+    /// resolves this; the engine only enforces it through the plan).
+    pub global_lane_available: bool,
+    pub actor: Option<&'a str>,
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct PromotionReport {
+    pub plan: PromotionPlan,
+    pub executed: bool,
+    /// The global row this promotion created or matched.
+    pub global_memory_id: Option<String>,
+    /// True when an exact-content global twin already existed: the
+    /// promotion is a no-op re-promotion (idempotence == merge for the
+    /// exact-match case).
+    pub already_promoted: bool,
+}
+
+impl PromotionReport {
+    #[must_use]
+    pub fn data_json(&self) -> Value {
+        json!({
+            "schema": GLOBAL_PROMOTION_REPORT_SCHEMA_V1,
+            "plan": self.plan.data_json(),
+            "executed": self.executed,
+            "globalMemoryId": self.global_memory_id,
+            "alreadyPromoted": self.already_promoted,
+        })
+    }
+}
+
+/// Promote one workspace memory into the user-global store.
+///
+/// # Errors
+///
+/// Returns a human-readable error string when storage access fails or the
+/// memory does not exist; policy refusals are NOT errors — they come back
+/// as a report whose plan carries the refusal (typed code/message/repair)
+/// so callers render them honestly without string-matching.
+pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionReport, String> {
+    let workspace_connection = DbConnection::open_file(options.workspace_database_path)
+        .map_err(|error| format!("open workspace database: {error}"))?;
+    let memory = workspace_connection
+        .get_memory(options.memory_id)
+        .map_err(|error| format!("load memory: {error}"))?
+        .ok_or_else(|| format!("memory {} not found", options.memory_id))?;
+
+    // Exact-content twin scan against the global store (deterministic v1
+    // duplicate signal; similarity 1.0 by construction).
+    let (global_connection, global_workspace_id) =
+        super::global_store::open_or_create_global_store(options.global_paths)
+            .map_err(|error| format!("open global store: {error}"))?;
+    let existing_twin = global_connection
+        .find_active_memory_by_content(&global_workspace_id, &memory.content)
+        .map_err(|error| format!("scan global duplicates: {error}"))?;
+
+    let plan = plan_promotion(&PromotionInput {
+        candidate: PromotionCandidate {
+            memory_id: memory.id.clone(),
+            workspace_id: memory.workspace_id.clone(),
+            content: memory.content.clone(),
+            level: memory.level.clone(),
+            kind: memory.kind.clone(),
+            trust_class: memory.trust_class.clone(),
+            confidence: memory.confidence,
+            tombstoned: memory.tombstoned_at.is_some(),
+        },
+        nearest_global_duplicate: existing_twin.as_ref().map(|twin| GlobalNearDuplicate {
+            global_memory_id: twin.id.clone(),
+            similarity: 1.0,
+        }),
+        merge_similarity: None,
+        global_lane_available: options.global_lane_available,
+    });
+
+    if !plan.allowed() || options.dry_run {
+        let _ = global_connection.close();
+        return Ok(PromotionReport {
+            executed: false,
+            global_memory_id: existing_twin.map(|twin| twin.id),
+            already_promoted: false,
+            plan,
+        });
+    }
+
+    let (global_memory_id, already_promoted) = match &plan.verdict {
+        PromotionVerdict::Allow {
+            action: PromotionAction::MergeInto { global_memory_id },
+        } => (global_memory_id.clone(), true),
+        PromotionVerdict::Allow {
+            action: PromotionAction::Insert,
+        } => {
+            let new_id = crate::models::MemoryId::now().to_string();
+            let mut tags = vec!["scope:global".to_owned()];
+            tags.push(format!("origin:{}", memory.workspace_id));
+            global_connection
+                .insert_memory(
+                    &new_id,
+                    &CreateMemoryInput {
+                        workspace_id: global_workspace_id.clone(),
+                        level: memory.level.clone(),
+                        kind: memory.kind.clone(),
+                        content: memory.content.clone(),
+                        workflow_id: None,
+                        confidence: memory.confidence,
+                        utility: memory.utility,
+                        importance: memory.importance,
+                        provenance_uri: Some(promotion_provenance_uri(
+                            &memory.workspace_id,
+                            &memory.id,
+                        )),
+                        trust_class: memory.trust_class.clone(),
+                        trust_subclass: memory.trust_subclass.clone(),
+                        tags,
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| format!("insert global memory: {error}"))?;
+            global_connection
+                .insert_search_index_job(
+                    &format!("job_{new_id}"),
+                    &CreateSearchIndexJobInput {
+                        workspace_id: global_workspace_id.clone(),
+                        job_type: SearchIndexJobType::SingleDocument,
+                        document_source: Some("memories".to_owned()),
+                        document_id: Some(new_id.clone()),
+                        documents_total: 1,
+                    },
+                )
+                .map_err(|error| format!("queue global index job: {error}"))?;
+            (new_id, false)
+        }
+        PromotionVerdict::Refuse { .. } => unreachable!("allowed() checked above"),
+    };
+
+    // Audit in BOTH stores: the origin workspace records what left, the
+    // global store records what arrived (no silent memory mutation).
+    let details = json!({
+        "schema": GLOBAL_PROMOTION_REPORT_SCHEMA_V1,
+        "originWorkspaceId": memory.workspace_id,
+        "originMemoryId": memory.id,
+        "globalMemoryId": global_memory_id,
+        "alreadyPromoted": already_promoted,
+    })
+    .to_string();
+    let workspace_audit = CreateAuditInput {
+        workspace_id: Some(memory.workspace_id.clone()),
+        actor: options.actor.map(str::to_owned),
+        action: plan.audit_action.to_owned(),
+        target_type: Some("memory".to_owned()),
+        target_id: Some(memory.id.clone()),
+        details: Some(details.clone()),
+    };
+    workspace_connection
+        .insert_audit(&generate_audit_id(), &workspace_audit)
+        .map_err(|error| format!("workspace audit: {error}"))?;
+    let global_audit = CreateAuditInput {
+        workspace_id: Some(global_workspace_id),
+        actor: options.actor.map(str::to_owned),
+        action: plan.audit_action.to_owned(),
+        target_type: Some("memory".to_owned()),
+        target_id: Some(global_memory_id.clone()),
+        details: Some(details),
+    };
+    global_connection
+        .insert_audit(&generate_audit_id(), &global_audit)
+        .map_err(|error| format!("global audit: {error}"))?;
+    let _ = global_connection.close();
+    let _ = workspace_connection.close();
+
+    Ok(PromotionReport {
+        plan,
+        executed: true,
+        global_memory_id: Some(global_memory_id),
+        already_promoted,
+    })
+}
+
+#[derive(Clone, Debug)]
+pub struct DemoteGlobalOptions<'a> {
+    /// Workspace database used for the origin-side audit trail.
+    pub workspace_database_path: &'a Path,
+    /// The GLOBAL memory id to demote.
+    pub global_memory_id: &'a str,
+    pub global_paths: &'a super::global_store::GlobalStorePaths,
+    pub actor: Option<&'a str>,
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct DemotionReport {
+    pub global_memory_id: String,
+    pub executed: bool,
+    pub tombstoned: bool,
+    /// Origin parsed back from the global row's promotion provenance, when
+    /// the row was created by `promote_global`.
+    pub origin: Option<(String, String)>,
+}
+
+impl DemotionReport {
+    #[must_use]
+    pub fn data_json(&self) -> Value {
+        json!({
+            "schema": GLOBAL_DEMOTION_REPORT_SCHEMA_V1,
+            "globalMemoryId": self.global_memory_id,
+            "executed": self.executed,
+            "tombstoned": self.tombstoned,
+            "originWorkspaceId": self.origin.as_ref().map(|(workspace, _)| workspace.clone()),
+            "originMemoryId": self.origin.as_ref().map(|(_, memory)| memory.clone()),
+        })
+    }
+}
+
+/// Parse a promotion provenance URI back into `(workspace_id, memory_id)`.
+#[must_use]
+pub fn parse_promotion_provenance(uri: &str) -> Option<(String, String)> {
+    let rest = uri.strip_prefix("ee-mem://")?;
+    let (workspace, memory) = rest.split_once('/')?;
+    (!workspace.is_empty() && !memory.is_empty()).then(|| (workspace.to_owned(), memory.to_owned()))
+}
+
+/// Demote (tombstone) a global row. The origin workspace row is never
+/// touched — demotion withdraws the global copy, it does not delete
+/// knowledge.
+///
+/// # Errors
+///
+/// Returns a human-readable error string when storage access fails or the
+/// global row does not exist.
+pub fn demote_global(options: &DemoteGlobalOptions<'_>) -> Result<DemotionReport, String> {
+    let (global_connection, global_workspace_id) =
+        super::global_store::open_or_create_global_store(options.global_paths)
+            .map_err(|error| format!("open global store: {error}"))?;
+    let row = global_connection
+        .get_memory(options.global_memory_id)
+        .map_err(|error| format!("load global memory: {error}"))?
+        .ok_or_else(|| format!("global memory {} not found", options.global_memory_id))?;
+    let origin = row
+        .provenance_uri
+        .as_deref()
+        .and_then(parse_promotion_provenance);
+
+    if options.dry_run {
+        let _ = global_connection.close();
+        return Ok(DemotionReport {
+            global_memory_id: row.id,
+            executed: false,
+            tombstoned: false,
+            origin,
+        });
+    }
+
+    let tombstoned = global_connection
+        .tombstone_memory(&row.id)
+        .map_err(|error| format!("tombstone global memory: {error}"))?;
+    let details = json!({
+        "schema": GLOBAL_DEMOTION_REPORT_SCHEMA_V1,
+        "globalMemoryId": row.id,
+        "originWorkspaceId": origin.as_ref().map(|(workspace, _)| workspace.clone()),
+        "originMemoryId": origin.as_ref().map(|(_, memory)| memory.clone()),
+    })
+    .to_string();
+    global_connection
+        .insert_audit(
+            &generate_audit_id(),
+            &CreateAuditInput {
+                workspace_id: Some(global_workspace_id),
+                actor: options.actor.map(str::to_owned),
+                action: "memory.demote_global".to_owned(),
+                target_type: Some("memory".to_owned()),
+                target_id: Some(row.id.clone()),
+                details: Some(details.clone()),
+            },
+        )
+        .map_err(|error| format!("global audit: {error}"))?;
+    if let Some((origin_workspace, origin_memory)) = &origin {
+        if let Ok(workspace_connection) = DbConnection::open_file(options.workspace_database_path) {
+            let _ = workspace_connection.insert_audit(
+                &generate_audit_id(),
+                &CreateAuditInput {
+                    workspace_id: Some(origin_workspace.clone()),
+                    actor: options.actor.map(str::to_owned),
+                    action: "memory.demote_global".to_owned(),
+                    target_type: Some("memory".to_owned()),
+                    target_id: Some(origin_memory.clone()),
+                    details: Some(details),
+                },
+            );
+            let _ = workspace_connection.close();
+        }
+    }
+    let _ = global_connection.close();
+
+    Ok(DemotionReport {
+        global_memory_id: row.id,
+        executed: true,
+        tombstoned,
+        origin,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,6 +709,170 @@ mod tests {
                 action: PromotionAction::Insert
             }
         ));
+    }
+
+    fn seeded_workspace(
+        temp: &Path,
+        trust_class: &str,
+        content: &str,
+    ) -> (std::path::PathBuf, String) {
+        let database_path = temp.join("workspace.db");
+        let connection = DbConnection::open_file(&database_path).expect("open workspace db");
+        connection.migrate().expect("migrate workspace db");
+        connection
+            .execute_raw(
+                "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_01234567890123456789012345', '/tmp/promo-ws', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            )
+            .expect("seed workspace");
+        let memory_id = crate::models::MemoryId::now().to_string();
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: content.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: trust_class.to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("seed memory");
+        connection.close().expect("close workspace db");
+        (database_path, memory_id)
+    }
+
+    #[test]
+    fn promote_inserts_audits_both_stores_and_repromotes_idempotently() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (workspace_db, memory_id) = seeded_workspace(
+            temp.path(),
+            "agent_validated",
+            "Always pin franken-stack revisions before remote verification.",
+        );
+        let paths =
+            super::super::global_store::GlobalStorePaths::from_root(&temp.path().join("global"));
+
+        let options = PromoteGlobalOptions {
+            workspace_database_path: &workspace_db,
+            memory_id: &memory_id,
+            global_paths: &paths,
+            global_lane_available: true,
+            actor: Some("test-actor"),
+            dry_run: false,
+        };
+        let report = promote_global(&options).expect("promotion");
+        assert!(report.executed);
+        assert!(!report.already_promoted);
+        let global_id = report.global_memory_id.clone().expect("global id");
+
+        // The global row exists, carries origin provenance and trust.
+        let (global_connection, global_ws) =
+            super::super::global_store::open_or_create_global_store(&paths).expect("open global");
+        let row = global_connection
+            .get_memory(&global_id)
+            .expect("load")
+            .expect("global row");
+        assert_eq!(row.trust_class, "agent_validated");
+        assert_eq!(
+            row.provenance_uri.as_deref(),
+            Some(promotion_provenance_uri("wsp_01234567890123456789012345", &memory_id).as_str())
+        );
+        assert_eq!(row.workspace_id, global_ws);
+        let _ = global_connection.close();
+
+        // Re-promotion is an idempotent merge, not a twin insert.
+        let again = promote_global(&options).expect("re-promotion");
+        assert!(again.already_promoted);
+        assert_eq!(again.global_memory_id.as_deref(), Some(global_id.as_str()));
+
+        // Demotion tombstones the global row and parses origin back.
+        let demotion = demote_global(&DemoteGlobalOptions {
+            workspace_database_path: &workspace_db,
+            global_memory_id: &global_id,
+            global_paths: &paths,
+            actor: Some("test-actor"),
+            dry_run: false,
+        })
+        .expect("demotion");
+        assert!(demotion.executed && demotion.tombstoned);
+        assert_eq!(
+            demotion.origin,
+            Some((
+                "wsp_01234567890123456789012345".to_owned(),
+                memory_id.clone()
+            ))
+        );
+    }
+
+    #[test]
+    fn refused_and_dry_run_promotions_write_nothing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (workspace_db, memory_id) =
+            seeded_workspace(temp.path(), "agent_assertion", "Unvalidated hunch.");
+        let paths =
+            super::super::global_store::GlobalStorePaths::from_root(&temp.path().join("global"));
+
+        let refused = promote_global(&PromoteGlobalOptions {
+            workspace_database_path: &workspace_db,
+            memory_id: &memory_id,
+            global_paths: &paths,
+            global_lane_available: true,
+            actor: None,
+            dry_run: false,
+        })
+        .expect("refusal is a report, not an error");
+        assert!(!refused.executed);
+        assert!(!refused.plan.allowed());
+
+        // Dry-run of an allowed promotion also writes nothing.
+        let (workspace_db2, memory_id2) = seeded_workspace(
+            &temp.path().join("second"),
+            "human_explicit",
+            "Validated rule for dry-run.",
+        );
+        let dry = promote_global(&PromoteGlobalOptions {
+            workspace_database_path: &workspace_db2,
+            memory_id: &memory_id2,
+            global_paths: &paths,
+            global_lane_available: true,
+            actor: None,
+            dry_run: true,
+        })
+        .expect("dry-run");
+        assert!(!dry.executed && dry.plan.allowed());
+
+        let (global_connection, global_ws) =
+            super::super::global_store::open_or_create_global_store(&paths).expect("open global");
+        for content in ["Unvalidated hunch.", "Validated rule for dry-run."] {
+            assert!(
+                global_connection
+                    .find_active_memory_by_content(&global_ws, content)
+                    .expect("scan")
+                    .is_none(),
+                "nothing may be written for refused/dry-run promotions"
+            );
+        }
+        let _ = global_connection.close();
+    }
+
+    #[test]
+    fn promotion_provenance_round_trips() {
+        let uri = promotion_provenance_uri("wsp_a", "mem_b");
+        assert_eq!(
+            parse_promotion_provenance(&uri),
+            Some(("wsp_a".to_owned(), "mem_b".to_owned()))
+        );
+        assert_eq!(parse_promotion_provenance("https://x/y"), None);
+        assert_eq!(parse_promotion_provenance("ee-mem://only"), None);
     }
 
     #[test]
