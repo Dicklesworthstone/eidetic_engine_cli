@@ -423,7 +423,7 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
                     &CreateSearchIndexJobInput {
                         workspace_id: global_workspace_id.clone(),
                         job_type: SearchIndexJobType::SingleDocument,
-                        document_source: Some("memories".to_owned()),
+                        document_source: Some("memory".to_owned()),
                         document_id: Some(new_id.clone()),
                         documents_total: 1,
                     },
@@ -911,6 +911,7 @@ mod tests {
         trust_class: &str,
         content: &str,
     ) -> (std::path::PathBuf, String) {
+        std::fs::create_dir_all(temp).expect("create workspace dir");
         let database_path = temp.join("workspace.db");
         let connection = DbConnection::open_file(&database_path).expect("open workspace db");
         connection.migrate().expect("migrate workspace db");
