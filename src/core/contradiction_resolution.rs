@@ -215,18 +215,21 @@ mod tests {
             ContradictionResolutionKind::from_signal(ExplicitConflictSignal::ValidityWindowOverlap),
             ContradictionResolutionKind::ScopeSplit
         );
-        // Kinds bridge to the curate CandidateType that performs the audited apply.
+        // The analytical kind stays distinct, while every confirmed proposal
+        // bridges to the one content-free curate mutation that can preserve the
+        // winner as source_id and tombstone the loser without fabricated body
+        // content.
         assert_eq!(
             ContradictionResolutionKind::Supersede.candidate_type(),
-            CandidateType::Supersede
+            CandidateType::Tombstone
         );
         assert_eq!(
             ContradictionResolutionKind::ScopeSplit.candidate_type(),
-            CandidateType::Split
+            CandidateType::Tombstone
         );
         assert_eq!(
             ContradictionResolutionKind::Merge.candidate_type(),
-            CandidateType::Merge
+            CandidateType::Tombstone
         );
     }
 
