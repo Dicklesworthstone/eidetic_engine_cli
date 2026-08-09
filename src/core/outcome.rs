@@ -1048,6 +1048,15 @@ fn record_outcome_inner(
         evidence_json: evidence_json.clone(),
         session_id: session_id.clone(),
     };
+    let explicit_human_promotion = source_type == "human_explicit"
+        && options
+            .actor
+            .as_deref()
+            .is_some_and(|actor| !actor.trim().is_empty())
+        && feedback_input
+            .reason
+            .as_deref()
+            .is_some_and(|reason| !reason.trim().is_empty());
 
     if options.dry_run {
         let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
@@ -1380,64 +1389,62 @@ fn record_outcome_inner(
     let mut confidence_before: Option<f32> = None;
     let mut confidence_after: Option<f32> = None;
     if target_type == "memory" {
-        let stored = connection
-            .get_memory_bayes_posterior(&target_id)
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to read Bayesian posterior: {error}"),
-                repair: Some("ee doctor".to_string()),
-            })?;
-        if let Some((current_alpha, current_beta)) = stored {
-            let prior = BetaPosterior::new(current_alpha, current_beta)
-                .unwrap_or_else(BetaPosterior::jeffreys);
-            let (posterior, applied_weight) = match FeedbackSignal::from_signal_str(&signal) {
-                FeedbackSignal::Helpful => (prior.update_helpful(), 1.0_f64),
-                FeedbackSignal::Harmful => {
-                    let w = DEFAULT_HARMFUL_WEIGHT;
-                    (prior.update_harmful(w), w)
-                }
-                // Neutral and unknown-safe signals are stored as feedback but
-                // do not represent Bernoulli evidence for this posterior.
-                FeedbackSignal::Neutral => (prior, 0.0),
-            };
-            confidence_before = Some(prior.mean() as f32);
-            confidence_after = Some(posterior.mean() as f32);
-            if posterior != prior {
-                tracing::debug!(
-                    target: "ee::trust::bayes",
-                    memory_id = %target_id,
-                    signal = %signal,
-                    prior_alpha = prior.alpha(),
-                    prior_beta = prior.beta(),
-                    posterior_alpha = posterior.alpha(),
-                    posterior_beta = posterior.beta(),
-                    harmful_weight = DEFAULT_HARMFUL_WEIGHT,
-                    applied_weight,
-                    "applying Bayesian posterior outcome update"
-                );
+        let confidence = connection
+            .with_transaction(|| {
+                let Some((current_alpha, current_beta)) =
+                    connection.get_memory_bayes_posterior(&target_id)?
+                else {
+                    return Ok(None);
+                };
+                let prior = BetaPosterior::new(current_alpha, current_beta)
+                    .unwrap_or_else(BetaPosterior::jeffreys);
+                let (posterior, applied_weight) = match FeedbackSignal::from_signal_str(&signal) {
+                    FeedbackSignal::Helpful => (prior.update_helpful(), 1.0_f64),
+                    FeedbackSignal::Harmful => {
+                        let weight = DEFAULT_HARMFUL_WEIGHT;
+                        (prior.update_harmful(weight), weight)
+                    }
+                    // Neutral and unknown-safe signals are stored as feedback but
+                    // do not represent Bernoulli evidence for this posterior.
+                    FeedbackSignal::Neutral => (prior, 0.0),
+                };
+                if posterior != prior {
+                    tracing::debug!(
+                        target: "ee::trust::bayes",
+                        memory_id = %target_id,
+                        signal = %signal,
+                        prior_alpha = prior.alpha(),
+                        prior_beta = prior.beta(),
+                        posterior_alpha = posterior.alpha(),
+                        posterior_beta = posterior.beta(),
+                        harmful_weight = DEFAULT_HARMFUL_WEIGHT,
+                        applied_weight,
+                        "applying Bayesian posterior outcome update"
+                    );
 
-                connection
-                    .update_memory_bayes_posterior(&target_id, posterior.alpha(), posterior.beta())
-                    .map_err(|error| DomainError::Storage {
-                        message: format!("Failed to update Bayesian posterior: {error}"),
-                        repair: Some("ee doctor".to_string()),
-                    })?;
+                    if !connection.update_memory_bayes_posterior(
+                        &target_id,
+                        posterior.alpha(),
+                        posterior.beta(),
+                    )? {
+                        return Ok(None);
+                    }
 
-                let posterior_audit_id = id_source.next_audit_id();
-                let details = serde_json::json!({
-                    "schema": "ee.audit.bayes_posterior_updated.v1",
-                    "feedbackEventId": &event_id,
-                    "signal": &signal,
-                    "appliedWeight": applied_weight,
-                    "priorAlpha": prior.alpha(),
-                    "priorBeta": prior.beta(),
-                    "posteriorAlpha": posterior.alpha(),
-                    "posteriorBeta": posterior.beta(),
-                    "priorMean": prior.mean(),
-                    "posteriorMean": posterior.mean(),
-                })
-                .to_string();
-                connection
-                    .insert_audit(
+                    let posterior_audit_id = id_source.next_audit_id();
+                    let details = serde_json::json!({
+                        "schema": "ee.audit.bayes_posterior_updated.v1",
+                        "feedbackEventId": &event_id,
+                        "signal": &signal,
+                        "appliedWeight": applied_weight,
+                        "priorAlpha": prior.alpha(),
+                        "priorBeta": prior.beta(),
+                        "posteriorAlpha": posterior.alpha(),
+                        "posteriorBeta": posterior.beta(),
+                        "priorMean": prior.mean(),
+                        "posteriorMean": posterior.mean(),
+                    })
+                    .to_string();
+                    connection.insert_audit(
                         &posterior_audit_id,
                         &CreateAuditInput {
                             workspace_id: Some(target.workspace_id.clone()),
@@ -1447,26 +1454,35 @@ fn record_outcome_inner(
                             target_id: Some(target_id.clone()),
                             details: Some(details),
                         },
-                    )
-                    .map_err(|error| DomainError::Storage {
-                        message: format!("Failed to audit Bayesian posterior update: {error}"),
-                        repair: Some("ee doctor".to_string()),
-                    })?;
+                    )?;
 
-                let validation_events =
-                    current_feedback_summary(&connection, "memory", &target_id)?.positive_count;
-                apply_memory_trust_class_transition(
-                    &connection,
-                    &target.workspace_id,
-                    &target_id,
-                    &event_id,
-                    &posterior,
-                    u64::from(validation_events),
-                    false,
-                    options.actor.as_deref(),
-                    id_source,
-                )?;
-            }
+                    let validation_events = connection
+                        .count_feedback_by_signal("memory", &target_id)?
+                        .positive_count;
+                    apply_memory_trust_class_transition_in_transaction(
+                        &connection,
+                        &target.workspace_id,
+                        &target_id,
+                        &event_id,
+                        &posterior,
+                        u64::from(validation_events),
+                        explicit_human_promotion,
+                        feedback_input.reason.as_deref(),
+                        options.actor.as_deref(),
+                        id_source,
+                    )?;
+                }
+                Ok(Some((prior.mean() as f32, posterior.mean() as f32)))
+            })
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to atomically update Bayesian posterior and trust class: {error}"
+                ),
+                repair: Some("ee doctor".to_string()),
+            })?;
+        if let Some((before, after)) = confidence {
+            confidence_before = Some(before);
+            confidence_after = Some(after);
         }
         // Posterior is None ⇒ memory row doesn't exist; the
         // target-resolution step above already validated existence, so
@@ -1528,7 +1544,7 @@ fn outcome_quarantine_with_cause(
         .or_else(|| sprt_quarantine.map(|summary| (OutcomeQuarantineCause::Sprt, summary)))
 }
 
-fn apply_memory_trust_class_transition(
+fn apply_memory_trust_class_transition_in_transaction(
     connection: &DbConnection,
     workspace_id: &str,
     memory_id: &str,
@@ -1536,25 +1552,20 @@ fn apply_memory_trust_class_transition(
     posterior: &BetaPosterior,
     validation_events: u64,
     explicit_human_promotion: bool,
+    override_reason: Option<&str>,
     actor: Option<&str>,
     id_source: &mut OutcomeIdSource<'_>,
-) -> Result<(), DomainError> {
-    let Some(stored_trust_class) =
-        connection
-            .get_memory_trust_class(memory_id)
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to read memory trust class: {error}"),
-                repair: Some("ee doctor".to_string()),
-            })?
-    else {
+) -> crate::db::Result<()> {
+    let Some(stored_trust_class) = connection.get_memory_trust_class(memory_id)? else {
         return Ok(());
     };
 
-    let current_class =
-        TrustClass::from_str(&stored_trust_class).map_err(|error| DomainError::Storage {
-            message: format!("Stored memory trust class is invalid: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
+    let current_class = TrustClass::from_str(&stored_trust_class).map_err(|error| {
+        crate::db::DbError::MalformedRow {
+            operation: crate::db::DbOperation::Query,
+            message: format!("stored memory trust class is invalid: {error}"),
+        }
+    })?;
     let transition = trust_class_transition(
         current_class,
         posterior,
@@ -1565,13 +1576,11 @@ fn apply_memory_trust_class_transition(
         return Ok(());
     }
 
-    // bd-multiplicity-aware-trust-p0u7g: the family-completeness gate, the
-    // trust-class CAS, and the audit row commit or roll back together. The
-    // eligibility read happens INSIDE the same transaction as the update, so
-    // a concurrent sibling write or tombstone can no longer invalidate a
-    // completeness decision after it was checked (TOCTOU), and the SQL CAS
-    // (`trust_class = expected`) makes a transition computed from a stale
-    // read a silent no-op instead of an over-promotion. Demotions are never
+    // bd-multiplicity-aware-trust-p0u7g: the caller owns the transaction that
+    // fences the Bayesian posterior update, this family-completeness read,
+    // the trust-class CAS, and both audit rows. A concurrent outcome, sibling
+    // write, or tombstone therefore cannot invalidate either the posterior or
+    // completeness decision between read and commit. Demotions are never
     // gated but share the same atomicity.
     let gate_relevant = matches!(transition.direction, TrustClassTransitionDirection::Promote)
         && matches!(
@@ -1579,66 +1588,88 @@ fn apply_memory_trust_class_transition(
             TrustClass::AgentValidated | TrustClass::PeerHumanAttested | TrustClass::HumanExplicit
         );
     let audit_id = id_source.next_audit_id();
+    let override_audit_id = explicit_human_promotion.then(|| id_source.next_audit_id());
     let mut cas_lost = false;
-    connection
-        .with_transaction(|| {
-            if gate_relevant
-                && let Some(snapshot) = promotion_ineligible_attempt_family_snapshot(
-                    connection,
-                    workspace_id,
-                    memory_id,
-                )?
-            {
-                return connection.insert_audit(
-                    &audit_id,
-                    &CreateAuditInput {
-                        workspace_id: Some(workspace_id.to_string()),
-                        actor: actor.map(ToOwned::to_owned),
-                        action: audit_actions::TRUST_CLASS_PROMOTION_BLOCKED.to_string(),
-                        target_type: Some("memory".to_string()),
-                        target_id: Some(memory_id.to_string()),
-                        details: Some(memory_trust_class_promotion_blocked_audit_details(
-                            feedback_event_id,
-                            &transition,
-                            &snapshot,
-                        )),
-                    },
-                );
-            }
-
-            let updated = connection.update_memory_trust_class_if(
-                memory_id,
-                transition.previous_class.as_str(),
-                transition.next_class.as_str(),
-            )?;
-            if !updated {
-                // The stored class moved (or the row tombstoned) since the
-                // posterior was read; applying this transition would encode a
-                // stale decision. Concede the race conservatively.
-                cas_lost = true;
-                return Ok(());
-            }
-
+    let mut promotion_override_snapshot = None;
+    if gate_relevant
+        && let Some(snapshot) =
+            promotion_ineligible_attempt_family_snapshot(connection, workspace_id, memory_id)?
+    {
+        if explicit_human_promotion {
+            promotion_override_snapshot = Some(snapshot);
+        } else {
             connection.insert_audit(
                 &audit_id,
                 &CreateAuditInput {
                     workspace_id: Some(workspace_id.to_string()),
                     actor: actor.map(ToOwned::to_owned),
-                    action: audit_actions::TRUST_CLASS_TRANSITION.to_string(),
+                    action: audit_actions::TRUST_CLASS_PROMOTION_BLOCKED.to_string(),
                     target_type: Some("memory".to_string()),
                     target_id: Some(memory_id.to_string()),
-                    details: Some(memory_trust_class_transition_audit_details(
+                    details: Some(memory_trust_class_promotion_blocked_audit_details(
                         feedback_event_id,
                         &transition,
-                        posterior,
+                        &snapshot,
                     )),
                 },
-            )
-        })
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to apply memory trust-class transition atomically: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
+            )?;
+            return Ok(());
+        }
+    }
+
+    let updated = connection.update_memory_trust_class_if(
+        memory_id,
+        transition.previous_class.as_str(),
+        transition.next_class.as_str(),
+    )?;
+    if !updated {
+        // The stored class moved (or the row tombstoned) since the
+        // posterior was read; applying this transition would encode a
+        // stale decision. Concede the race conservatively.
+        cas_lost = true;
+    } else {
+        if let Some(snapshot) = promotion_override_snapshot.as_ref() {
+            let override_audit_id =
+                override_audit_id
+                    .as_deref()
+                    .ok_or_else(|| crate::db::DbError::MalformedRow {
+                        operation: crate::db::DbOperation::Execute,
+                        message: "explicit family promotion override omitted audit id".to_owned(),
+                    })?;
+            connection.insert_audit(
+                override_audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(workspace_id.to_string()),
+                    actor: actor.map(ToOwned::to_owned),
+                    action: audit_actions::TRUST_CLASS_PROMOTION_OVERRIDE.to_string(),
+                    target_type: Some("memory".to_string()),
+                    target_id: Some(memory_id.to_string()),
+                    details: Some(memory_trust_class_promotion_override_audit_details(
+                        feedback_event_id,
+                        &transition,
+                        snapshot,
+                        override_reason.unwrap_or("explicit human override"),
+                    )),
+                },
+            )?;
+        }
+
+        connection.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.to_string()),
+                actor: actor.map(ToOwned::to_owned),
+                action: audit_actions::TRUST_CLASS_TRANSITION.to_string(),
+                target_type: Some("memory".to_string()),
+                target_id: Some(memory_id.to_string()),
+                details: Some(memory_trust_class_transition_audit_details(
+                    feedback_event_id,
+                    &transition,
+                    posterior,
+                )),
+            },
+        )?;
+    }
     if cas_lost {
         tracing::debug!(
             memory_id,
@@ -1648,6 +1679,33 @@ fn apply_memory_trust_class_transition(
         );
     }
     Ok(())
+}
+
+fn memory_trust_class_promotion_override_audit_details(
+    feedback_event_id: &str,
+    transition: &TrustClassTransition,
+    snapshot: &AttemptFamilyMembershipSnapshot,
+    reason: &str,
+) -> String {
+    let posture = snapshot
+        .promotion_posture()
+        .unwrap_or(crate::models::AttemptFamilyPromotionPosture::BlockedUndeclared);
+    let family_aliases = snapshot
+        .family_ids()
+        .iter()
+        .map(|family_id| crate::models::public_attempt_family_alias(family_id))
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema": "ee.audit.trust_class_promotion_override.v1",
+        "feedbackEventId": feedback_event_id,
+        "fromClass": transition.previous_class.as_str(),
+        "toClass": transition.next_class.as_str(),
+        "promotionPosture": posture.as_str(),
+        "familyAliases": family_aliases,
+        "membershipFamilyCount": snapshot.families.len(),
+        "operatorReason": reason,
+    })
+    .to_string()
 }
 
 /// Load the authoritative workspace/logical-id membership snapshot and return
@@ -6333,6 +6391,70 @@ mod tests {
             &profile.is_none(),
             &true,
             "audit actor alone must not create an agent profile",
+        )
+    }
+
+    #[test]
+    fn concurrent_public_outcomes_preserve_every_bayesian_increment() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-concurrent-posterior")?;
+        const OUTCOME_COUNT: usize = 24;
+        let mut handles = Vec::with_capacity(OUTCOME_COUNT);
+        for index in 0..OUTCOME_COUNT {
+            let database = database.clone();
+            handles.push(std::thread::spawn(move || {
+                record_outcome(&OutcomeRecordOptions {
+                    database_path: &database,
+                    target_type: "memory".to_owned(),
+                    target_id: OUTCOME_TEST_MEMORY_ID.to_owned(),
+                    workspace_id: None,
+                    signal: "helpful".to_owned(),
+                    weight: None,
+                    source_type: "outcome_observed".to_owned(),
+                    source_id: Some(format!("concurrent-run-{index}")),
+                    reason: Some("Concurrent planted-negative outcome.".to_owned()),
+                    evidence_json: None,
+                    session_id: None,
+                    event_id: Some(format!("fb_{:026}", 90_000 + index)),
+                    actor: Some("concurrency-test".to_owned()),
+                    agent_name: None,
+                    dry_run: false,
+                    harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+                    harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+                    prompt_injection_guard: true,
+                })
+                .map(|_| ())
+                .map_err(|error| error.message())
+            }));
+        }
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| "concurrent outcome thread panicked".to_owned())??;
+        }
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let (alpha, beta) = connection
+            .get_memory_bayes_posterior(OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory posterior missing after concurrent outcomes".to_owned())?;
+        ensure(
+            (alpha - (0.5 + OUTCOME_COUNT as f64)).abs() < f64::EPSILON,
+            &format!(
+                "all concurrent helpful increments must survive: expected {}, got {alpha}",
+                0.5 + OUTCOME_COUNT as f64
+            ),
+        )?;
+        ensure(
+            (beta - 0.5).abs() < f64::EPSILON,
+            &format!("helpful outcomes must leave beta unchanged at 0.5, got {beta}"),
+        )?;
+        let events = connection
+            .list_feedback_events_for_target("memory", OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &events.len(),
+            &OUTCOME_COUNT,
+            "every concurrent public outcome remains durably recorded",
         )
     }
 

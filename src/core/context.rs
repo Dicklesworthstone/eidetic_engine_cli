@@ -76,8 +76,9 @@ use crate::db::read_pool::{
     SnapshotPin, SnapshotPinMetadata, registered_process_read_pool,
 };
 use crate::db::{
-    CreatePackBaselineInput, CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput,
-    CreatePackTaskLensInput, DatabaseConfig, DbConnection, PackRecordInsertTimings,
+    CreatePackBaselineInput, CreatePackEvidenceItemInput, CreatePackItemInput,
+    CreatePackOmissionInput, CreatePackRecordInput, CreatePackTaskLensInput, DatabaseConfig,
+    DbConnection, PackRecordInsertTimings,
     StoredAgentContextProfileForPack, StoredMemory,
 };
 use crate::models::degradation::{
@@ -95,10 +96,11 @@ use crate::pack::{
     ContextResponsePagination, ContextResponseSeverity, PACK_ATTEMPT_FAMILY_MULTIPLICITY_SCHEMA_V1,
     PACK_COMMAND, PackAdmissionPosture, PackAssemblySlo, PackAssemblySloActuals,
     PackAttemptFamilyMembershipSnapshot, PackAttemptFamilyMultiplicitySnapshot, PackCandidate,
-    PackCandidateInput, PackCoordinationSnapshot, PackDraft, PackFreshnessAnchorFacet,
-    PackFreshnessFacet, PackItemLifecycle, PackOmission, PackOmissionReason, PackProvenance,
-    PackRejectionStage, PackResourceProfile, PackScoreBreakdown, PackSection, PackTrustSignal,
-    TokenBudget, WhyNotSelectedInput, WhyNotSelectedReport,
+    PackCandidateInput, PackCoordinationSnapshot, PackDraft, PackEvidenceItem,
+    PackFreshnessAnchorFacet, PackFreshnessFacet, PackItemLifecycle, PackOmission,
+    PackOmissionReason, PackProvenance, PackRejectionStage, PackResourceProfile,
+    PackScoreBreakdown, PackSection, PackTrustSignal, TokenBudget, WhyNotSelectedInput,
+    WhyNotSelectedReport,
     assemble_draft_with_profile_and_options_seeded,
     budget_classifier::{AdaptiveBudgetDecision, AdaptiveBudgetInput, classify_adaptive_budget},
     estimate_tokens_default, explain_why_not_selected, pack_item_provenance_json,
@@ -2772,6 +2774,14 @@ async fn run_context_pack_with_performance_inner(
     )
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     apply_context_pack_contradiction_guard(read_connection, &mut draft);
+    append_direct_evidence_pack_items(
+        read_connection,
+        &options.workspace_path,
+        &search_report,
+        &request,
+        &mut draft,
+        &mut degraded,
+    );
     if !sentinel_omissions.is_empty() {
         let omitted_count = sentinel_omissions.len();
         draft.omitted.extend(sentinel_omissions);
@@ -2797,7 +2807,7 @@ async fn run_context_pack_with_performance_inner(
     push_pack_budget_too_small_degradation(
         &mut degraded,
         draft.selection_audit.candidate_count,
-        draft.items.len(),
+        draft.items.len().saturating_add(draft.evidence_items.len()),
         draft.used_tokens,
         draft.budget.max_tokens(),
         candidate_token_costs_min,
@@ -5016,7 +5026,7 @@ fn persist_pack_record_with_pack_id(
     subspans: &mut PackPersistenceSubspans,
 ) -> Result<String, String> {
     subspans.attempted = true;
-    subspans.item_count = draft.items.len();
+    subspans.item_count = draft.items.len().saturating_add(draft.evidence_items.len());
     subspans.omission_count = draft.omitted.len();
 
     // Bead bd-17c65.1.9 (A9). Pre-overhaul this surface emitted
@@ -5087,7 +5097,8 @@ fn persist_pack_record_with_pack_id(
         profile: request.profile.as_str().to_string(),
         max_tokens: request.budget.max_tokens(),
         used_tokens: draft.used_tokens,
-        item_count: draft.items.len() as u32,
+        item_count: u32::try_from(draft.items.len().saturating_add(draft.evidence_items.len()))
+            .unwrap_or(u32::MAX),
         omitted_count: draft.omitted.len() as u32,
         pack_hash,
         degraded_json,
@@ -5118,6 +5129,24 @@ fn persist_pack_record_with_pack_id(
             trust_subclass: item.trust.subclass.clone(),
         })
         .collect();
+    let evidence_items: Vec<CreatePackEvidenceItemInput> = draft
+        .evidence_items
+        .iter()
+        .map(|item| CreatePackEvidenceItemInput {
+            pack_id: pack_id.to_string(),
+            evidence_id: item.evidence_id.clone(),
+            entity_revision: item.entity_revision.clone(),
+            rank: item.rank,
+            section: item.section.as_str().to_owned(),
+            estimated_tokens: item.estimated_tokens,
+            relevance: item.relevance.into_inner(),
+            utility: item.utility.into_inner(),
+            why: item.why.clone(),
+            provenance_json: pack_item_provenance_json(&item.provenance),
+            trust_class: item.trust.class.as_str().to_owned(),
+            trust_subclass: item.trust.subclass.clone(),
+        })
+        .collect();
     subspans.item_input_build = item_input_start.elapsed();
 
     let omission_input_start = Instant::now();
@@ -5144,10 +5173,11 @@ fn persist_pack_record_with_pack_id(
     });
 
     connection
-        .insert_pack_record_with_timings_and_task_lens(
+        .insert_pack_record_with_timings_task_lens_and_evidence(
             &pack_id.to_string(),
             &input,
             &items,
+            &evidence_items,
             &omissions,
             db_task_lens.as_ref(),
         )
@@ -6618,6 +6648,31 @@ fn compute_pack_hash_components(
                     hasher.update(&anchor.generation.to_le_bytes());
                     hasher.update(&[u8::from(anchor.stale_anchor)]);
                 }
+            }
+        }
+    }
+    for item in &draft.evidence_items {
+        for hasher in [&mut draft_hasher, &mut composite_hasher] {
+            hasher.update(b"evidence_span");
+            hasher.update(item.evidence_id.as_bytes());
+            hasher.update(item.entity_revision.as_bytes());
+            hasher.update(item.session_id.as_bytes());
+            hasher.update(&item.start_line.to_le_bytes());
+            hasher.update(&item.end_line.to_le_bytes());
+            hasher.update(&item.rank.to_le_bytes());
+            hasher.update(item.section.as_str().as_bytes());
+            hasher.update(item.content.as_bytes());
+            hasher.update(&item.estimated_tokens.to_le_bytes());
+            hasher.update(&item.relevance.into_inner().to_le_bytes());
+            hasher.update(&item.utility.into_inner().to_le_bytes());
+            hasher.update(item.why.as_bytes());
+            hasher.update(item.trust.class.as_str().as_bytes());
+            if let Some(subclass) = &item.trust.subclass {
+                hasher.update(subclass.as_bytes());
+            }
+            for provenance in &item.provenance {
+                hasher.update(provenance.uri.to_string().as_bytes());
+                hasher.update(provenance.note.as_bytes());
             }
         }
     }
@@ -10451,6 +10506,152 @@ fn rule_linked_memory_id(
     None
 }
 
+fn append_direct_evidence_pack_items(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    search_report: &crate::core::search::SearchReport,
+    request: &ContextRequest,
+    draft: &mut PackDraft,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) {
+    if !request.sections.is_empty() && !request.sections.contains(&PackSection::Evidence) {
+        return;
+    }
+
+    let workspace_ids = context_workspace_ids(connection, workspace_path, degraded);
+    let selected_memory_ids = draft
+        .items
+        .iter()
+        .map(|item| item.memory_id.to_string())
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    let mut rejected_live_admission = 0_usize;
+
+    for hit in &search_report.results {
+        if !hit.doc_id.starts_with("ev_") || !seen.insert(hit.doc_id.clone()) {
+            continue;
+        }
+        let Ok(evidence_id) = EvidenceId::from_str(&hit.doc_id) else {
+            rejected_live_admission = rejected_live_admission.saturating_add(1);
+            continue;
+        };
+        let Ok(Some(span)) = connection.get_evidence_span(&evidence_id.to_string()) else {
+            rejected_live_admission = rejected_live_admission.saturating_add(1);
+            continue;
+        };
+        if !workspace_ids.iter().any(|id| id == &span.workspace_id) {
+            rejected_live_admission = rejected_live_admission.saturating_add(1);
+            continue;
+        }
+        let Ok(Some(session)) = connection.get_session(&span.session_id) else {
+            rejected_live_admission = rejected_live_admission.saturating_add(1);
+            continue;
+        };
+        if !span.is_direct_pack_admitted_for_session(&span.workspace_id, &session) {
+            rejected_live_admission = rejected_live_admission.saturating_add(1);
+            continue;
+        }
+        if span
+            .memory_id
+            .as_ref()
+            .is_some_and(|memory_id| selected_memory_ids.contains(memory_id))
+        {
+            continue;
+        }
+
+        let estimated_tokens = estimate_tokens_default(&span.excerpt).max(1);
+        let Some(next_used_tokens) = draft.used_tokens.checked_add(estimated_tokens) else {
+            continue;
+        };
+        if next_used_tokens > draft.budget.max_tokens() {
+            continue;
+        }
+        let Ok(provenance_uri) = ProvenanceUri::from_str(&span.canonical_provenance_uri()) else {
+            rejected_live_admission = rejected_live_admission.saturating_add(1);
+            continue;
+        };
+        let Ok(provenance) = PackProvenance::new(
+            provenance_uri,
+            format!(
+                "Imported CASS transcript span {} lines {}-{}",
+                span.id, span.start_line, span.end_line
+            ),
+        ) else {
+            rejected_live_admission = rejected_live_admission.saturating_add(1);
+            continue;
+        };
+        let relevance =
+            UnitScore::parse(hit.relevance_score()).unwrap_or_else(|_| UnitScore::zero());
+        let utility = UnitScore::neutral();
+        let rank = u32::try_from(
+            draft
+                .items
+                .len()
+                .saturating_add(draft.evidence_items.len())
+                .saturating_add(1),
+        )
+        .unwrap_or(u32::MAX);
+        let mut revision_hasher = blake3::Hasher::new();
+        revision_hasher.update(b"evidence_span");
+        revision_hasher.update(span.id.as_bytes());
+        revision_hasher.update(span.content_hash.as_bytes());
+        revision_hasher.update(&span.canonical_provenance_revision.to_le_bytes());
+        revision_hasher.update(&span.security_policy_epoch.to_le_bytes());
+        let entity_revision = format!("blake3:{}", revision_hasher.finalize().to_hex());
+        let why = format!(
+            "matched '{}' via {} (relevance {:.4}, utility 0.5000); selected live-admitted imported evidence {}",
+            request.query,
+            hit.source.as_str(),
+            hit.relevance_score(),
+            span.id
+        );
+        draft.evidence_items.push(PackEvidenceItem {
+            rank,
+            evidence_id: span.id,
+            entity_revision,
+            session_id: span.session_id,
+            start_line: span.start_line,
+            end_line: span.end_line,
+            section: PackSection::Evidence,
+            content: span.excerpt,
+            estimated_tokens,
+            relevance,
+            utility,
+            provenance: vec![provenance],
+            why,
+            trust: PackTrustSignal::new(
+                TrustClass::CassEvidence,
+                Some("imported_transcript_excerpt".to_owned()),
+            ),
+        });
+        draft.used_tokens = next_used_tokens;
+    }
+
+    if !draft.evidence_items.is_empty() {
+        draft.selection_audit.candidate_count = draft
+            .selection_audit
+            .candidate_count
+            .saturating_add(draft.evidence_items.len());
+        draft.selection_audit.selected_count = draft
+            .items
+            .len()
+            .saturating_add(draft.evidence_items.len());
+        draft.selection_audit.budget_used = draft.used_tokens;
+        draft.hash = None;
+    }
+    if rejected_live_admission > 0 {
+        push_degradation(
+            degraded,
+            "context_evidence_hit_unhydrated",
+            ContextResponseSeverity::Low,
+            format!(
+                "Excluded {rejected_live_admission} imported-evidence search hit(s) because live pack admission could not be proved."
+            ),
+            Some("ee index rebuild --json".to_owned()),
+        );
+    }
+}
+
 /// Resolve an imported-evidence search hit to the memory its span was
 /// distilled into so the hit can hydrate into the pack (bd-16imy).
 ///
@@ -10564,19 +10765,9 @@ fn evidence_linked_memory_id(
         return None;
     }
     let Some(linked_memory_id) = span.memory_id.as_deref() else {
-        push_degradation(
-            degraded,
-            "context_evidence_hit_unhydrated",
-            ContextResponseSeverity::Low,
-            format!(
-                "Imported evidence {} matched search but has not been distilled into a memory, so it cannot hydrate into the pack.",
-                evidence_id
-            ),
-            Some(format!(
-                "ee review session {} --propose --dry-run --json",
-                session.id
-            )),
-        );
+        // Fresh imported evidence is hydrated by the typed direct-evidence
+        // boundary after memory-only selection. It is not a degradation and
+        // must never receive a synthetic MemoryId (bd-16imy).
         return None;
     };
     let memory_id = match MemoryId::from_str(linked_memory_id) {
@@ -16974,6 +17165,7 @@ pub fn unrelated_context() -> u64 {{
                     "Missing provenance should outrank changed provenance.",
                 )?,
             ],
+            evidence_items: Vec::new(),
             omitted: Vec::new(),
             selection_audit: PackSelectionAudit {
                 profile: ContextPackProfile::Balanced,
@@ -17353,6 +17545,7 @@ pub fn unrelated_context() -> u64 {{
             budget,
             used_tokens: 10,
             items: vec![base_item.clone()],
+            evidence_items: Vec::new(),
             omitted: vec![],
             selection_audit: PackSelectionAudit {
                 profile: request.profile,

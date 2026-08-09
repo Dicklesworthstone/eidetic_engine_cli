@@ -2631,6 +2631,13 @@ fn load_export_data(
     }
     let mut attempt_families_by_memory = BTreeMap::new();
     for memory in &memories {
+        // The ledger is keyed by revision-stable logical identity. Export its
+        // slot exactly once, on the current head; attaching the same slot to
+        // every historical revision makes restore attempt duplicate primary
+        // keys and misrepresents revisions as sibling attempts.
+        if memory.valid_to.is_some() {
+            continue;
+        }
         let family = connection
             .get_memory_attempt_family(&memory.id)
             .map_err(|error| DomainError::Storage {
@@ -5120,6 +5127,75 @@ mod tests {
         ensure(
             !plain_line.contains("attempt_family"),
             "family-less memories serialize without the attempt_family key",
+        )
+    }
+
+    #[test]
+    fn revised_family_memory_exports_one_ledger_slot_on_current_head() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let workspace_record =
+            load_workspace(&connection, &workspace).map_err(|error| error.message())?;
+        let original_id = MemoryId::from_uuid(Uuid::from_u128(2)).to_string();
+        connection
+            .set_memory_attempt_family(
+                &original_id,
+                &crate::db::MemoryAttemptFamily {
+                    family_id: "fam-backup-revision".to_owned(),
+                    declared_size: Some(3),
+                    attempt_index: Some(1),
+                    disposition: Some("selected".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let revised_id = MemoryId::from_uuid(Uuid::from_u128(0xfeed)).to_string();
+        connection
+            .with_transaction(|| {
+                connection.expire_memory_valid_to(&original_id, "2026-08-09T00:00:00Z")?;
+                connection.insert_memory_revision(
+                    &revised_id,
+                    &original_id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_record.id.clone(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: "Revised selected attempt survives backup restore.".to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.7,
+                        importance: 0.8,
+                        provenance_uri: Some("ee-test://backup-revision".to_owned()),
+                        trust_class: "agent_assertion".to_owned(),
+                        trust_subclass: Some("fixture".to_owned()),
+                        tags: Vec::new(),
+                        valid_from: Some("2026-08-09T00:00:00Z".to_owned()),
+                        valid_to: None,
+                    },
+                )?;
+                connection.carry_memory_attempt_family_pointer(&original_id, &revised_id)?;
+                Ok(())
+            })
+            .map_err(|error| error.to_string())?;
+
+        let export =
+            load_export_data(&connection, workspace_record).map_err(|error| error.message())?;
+        ensure(
+            !export.attempt_families_by_memory.contains_key(&original_id),
+            "superseded revision must not duplicate the logical family's ledger slot",
+        )?;
+        let current = export
+            .attempt_families_by_memory
+            .get(&revised_id)
+            .ok_or_else(|| "current revision omitted family export block".to_owned())?;
+        ensure_equal(
+            current.attempt_index,
+            Some(1),
+            "current revision preserves the logical family slot",
+        )?;
+        ensure_equal(
+            current.disposition.as_deref(),
+            Some("selected"),
+            "current revision preserves selected disposition",
         )
     }
 

@@ -58,9 +58,9 @@ use crate::pack::{
     ConflictEntry, ConsensusEntry, ConsensusProducer, ContextResponse, ContextResponseDegradation,
     ContextResponsePagination, ContextResponseSeverity, PACK_BUDGET_TOO_SMALL_CODE,
     PACK_CONCURRENT_LIMIT_REACHED_CODE, PackAdmissionPosture, PackAdvisoryBanner, PackAdvisoryNote,
-    PackAssemblySlo, PackFreshnessAnchorFacet, PackFreshnessFacet, PackItemProvenance,
-    PackOmission, PackOmissionMetrics, PackQualityMetrics, PackSectionMetric, PackSelectedItem,
-    PackSelectionAudit, PackSelectionStep, RenderedPackProvenance,
+    PackAssemblySlo, PackEvidenceItem, PackFreshnessAnchorFacet, PackFreshnessFacet,
+    PackItemProvenance, PackOmission, PackOmissionMetrics, PackQualityMetrics, PackSectionMetric,
+    PackSelectedItem, PackSelectionAudit, PackSelectionStep, RenderedPackProvenance,
 };
 use crate::policy::{redact_secret_like_content, redaction_placeholder};
 use crate::steward::{
@@ -1298,6 +1298,45 @@ impl JsonBuilder {
             let mut nested = JsonBuilder::new();
             build(&mut nested, item);
             self.buffer.push_str(&nested.finish());
+        }
+        self.buffer.push(']');
+        self
+    }
+
+    pub fn field_array_of_objects_chained<A, B, F, G>(
+        &mut self,
+        key: &str,
+        first_items: &[A],
+        second_items: &[B],
+        build_first: F,
+        build_second: G,
+    ) -> &mut Self
+    where
+        F: Fn(&mut JsonBuilder, &A),
+        G: Fn(&mut JsonBuilder, &B),
+    {
+        self.separator();
+        self.buffer.push('"');
+        self.buffer.push_str(key);
+        self.buffer.push_str("\":[");
+        let mut wrote_item = false;
+        for item in first_items {
+            if wrote_item {
+                self.buffer.push(',');
+            }
+            let mut nested = JsonBuilder::new();
+            build_first(&mut nested, item);
+            self.buffer.push_str(&nested.finish());
+            wrote_item = true;
+        }
+        for item in second_items {
+            if wrote_item {
+                self.buffer.push(',');
+            }
+            let mut nested = JsonBuilder::new();
+            build_second(&mut nested, item);
+            self.buffer.push_str(&nested.finish());
+            wrote_item = true;
         }
         self.buffer.push(']');
         self
@@ -2956,7 +2995,11 @@ pub fn render_context_response_json_with_options(
             let footer = response.data.pack.provenance_footer();
             let footer_by_rank: std::collections::BTreeMap<u32, &PackItemProvenance> =
                 footer.entries.iter().map(|e| (e.rank, e)).collect();
-            pack.field_array_of_objects("items", &response.data.pack.items, |obj, item| {
+            pack.field_array_of_objects_chained(
+                "items",
+                &response.data.pack.items,
+                &response.data.pack.evidence_items,
+                |obj, item| {
                 obj.field_u32("rank", item.rank);
                 obj.field_str("memoryId", &item.memory_id.to_string());
                 obj.field_str("section", item.section.as_str());
@@ -3081,7 +3124,9 @@ pub fn render_context_response_json_with_options(
                 if let Some(footer_entry) = footer_by_rank.get(&item.rank) {
                     obj.field_u32("sourceIndex", footer_entry.source_index);
                 }
-            });
+                },
+                build_pack_evidence_item,
+            );
             pack.field_raw(
                 "skippedTotal",
                 &response.data.pack.skipped_total().to_string(),
@@ -3099,6 +3144,9 @@ pub fn render_context_response_json_with_options(
             // per-item home.
             pack.field_object("provenanceFooter", |obj| {
                 obj.field_raw("memoryCount", &footer.memory_count.to_string());
+                if footer.evidence_count > 0 {
+                    obj.field_raw("evidenceCount", &footer.evidence_count.to_string());
+                }
                 obj.field_raw("sourceCount", &footer.source_count.to_string());
                 obj.field_raw(
                     "schemes",
@@ -3119,6 +3167,38 @@ pub fn render_context_response_json_with_options(
         build_aggregated_degradation,
     );
     b.finish()
+}
+
+fn build_pack_evidence_item(obj: &mut JsonBuilder, item: &PackEvidenceItem) {
+    obj.field_u32("rank", item.rank);
+    obj.field_str("entityKind", "evidence_span");
+    obj.field_str("evidenceSpanId", &item.evidence_id);
+    obj.field_str("entityRevision", &item.entity_revision);
+    obj.field_str("sessionId", &item.session_id);
+    obj.field_u32("startLine", item.start_line);
+    obj.field_u32("endLine", item.end_line);
+    obj.field_str("section", item.section.as_str());
+    obj.field_str("content", &item.content);
+    obj.field_u32("estimatedTokens", item.estimated_tokens);
+    obj.field_object("scores", |scores| {
+        scores.field_raw("relevance", &score_json(item.relevance.into_inner()));
+        scores.field_raw("utility", &score_json(item.utility.into_inner()));
+    });
+    obj.field_object("trust", |trust| {
+        trust.field_str("class", item.trust.class.as_str());
+        match item.trust.subclass.as_deref() {
+            Some(subclass) => trust.field_str("subclass", subclass),
+            None => trust.field_raw("subclass", "null"),
+        };
+        trust.field_str("posture", item.trust.posture().as_str());
+    });
+    let provenance = item.rendered_provenance();
+    obj.field_array_of_objects("provenance", &provenance, build_rendered_provenance);
+    obj.field_u32("sourceIndex", 1);
+    obj.field_str("why", &item.why);
+    obj.field_str("selectedIn", "direct_evidence");
+    obj.field_u32("tokenCost", item.estimated_tokens);
+    obj.field_bool("feasible", true);
 }
 
 fn context_response_cached_json_with_top_level_degraded(cached_json: &str) -> String {

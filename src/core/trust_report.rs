@@ -8,8 +8,9 @@ use serde_json::{Value as JsonValue, json};
 
 use crate::core::bayes::FeedbackSignal;
 use crate::db::{
-    DbConnection, DbError, DbOperation, StoredFeedbackEvent, StoredMemory, pack_ledger_core_array,
-    parse_stored_pack_ledger,
+    DatabaseConfig, DbConnection, DbError, DbOperation, StoredFeedbackEvent, StoredMemory,
+    pack_ledger_core_array, parse_stored_pack_ledger,
+    read_pool::{PoolConfig, registered_process_read_pool},
 };
 use crate::models::TRUST_REPORT_SCHEMA_V1;
 
@@ -80,6 +81,7 @@ pub struct TrustReport {
     pub buckets: Vec<CalibrationBucket>,
     pub most_helpful: Vec<ReliabilityLeader>,
     pub most_harmful: Vec<ReliabilityLeader>,
+    pub attempt_families: Vec<AttemptFamilyTrustRow>,
     pub recommendations: Vec<TrustRecommendation>,
 }
 
@@ -127,6 +129,21 @@ impl TrustReport {
                     .map(ReliabilityLeader::data_json)
                     .collect::<Vec<_>>()
             },
+            "attemptFamilies": {
+                "familyCount": self.attempt_families.len(),
+                "discountedFamilyCount": self.attempt_families
+                    .iter()
+                    .filter(|family| family.discount_factor < 1.0)
+                    .count(),
+                "promotionBlockedFamilyCount": self.attempt_families
+                    .iter()
+                    .filter(|family| !family.promotion_eligible)
+                    .count(),
+                "families": self.attempt_families
+                    .iter()
+                    .map(AttemptFamilyTrustRow::data_json)
+                    .collect::<Vec<_>>()
+            },
             "recommendations": self
                 .recommendations
                 .iter()
@@ -142,8 +159,8 @@ impl TrustReport {
             self.packed_memory_with_outcome_count,
             self.packed_memory_count,
         ) * 100.0;
-        format!(
-            "Trust report: ECE {:.3}; memory outcome coverage {:.1}% ({}/{}); packed-memory outcome coverage {:.1}% ({}/{}); {} recommendation(s).",
+        let mut output = format!(
+            "Trust report: ECE {:.3}; memory outcome coverage {:.1}% ({}/{}); packed-memory outcome coverage {:.1}% ({}/{}); {} attempt family/families; {} recommendation(s).",
             self.expected_calibration_error,
             coverage,
             self.memory_with_outcome_count,
@@ -151,8 +168,58 @@ impl TrustReport {
             packed_coverage,
             self.packed_memory_with_outcome_count,
             self.packed_memory_count,
+            self.attempt_families.len(),
             self.recommendations.len()
-        )
+        );
+        for family in &self.attempt_families {
+            output.push_str(&format!(
+                "\n  {}: {}; selected discount {:.6}; promotion {} ({}).",
+                family.family_alias,
+                family.summary,
+                family.discount_factor,
+                family.promotion_posture,
+                family.promotion_reason,
+            ));
+        }
+        output
+    }
+}
+
+/// Redaction-safe recorded-vs-declared attempt-family posture exposed by
+/// `ee trust report`. Only the public family alias leaves the process.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttemptFamilyTrustRow {
+    pub family_alias: String,
+    pub declared_size: Option<u32>,
+    pub recorded_slots: u32,
+    pub selected_count: u32,
+    pub rejected_count: u32,
+    pub unslotted_count: u32,
+    pub unrecorded_count: u32,
+    pub discount_factor: f32,
+    pub promotion_eligible: bool,
+    pub promotion_posture: String,
+    pub promotion_reason: String,
+    pub summary: String,
+}
+
+impl AttemptFamilyTrustRow {
+    #[must_use]
+    fn data_json(&self) -> serde_json::Value {
+        json!({
+            "familyAlias": self.family_alias,
+            "declaredSize": self.declared_size,
+            "recordedSlots": self.recorded_slots,
+            "selectedCount": self.selected_count,
+            "rejectedCount": self.rejected_count,
+            "unslottedCount": self.unslotted_count,
+            "unrecordedCount": self.unrecorded_count,
+            "selectedDiscountFactor": round6(f64::from(self.discount_factor)),
+            "promotionEligible": self.promotion_eligible,
+            "promotionPosture": self.promotion_posture,
+            "promotionReason": self.promotion_reason,
+            "summary": self.summary,
+        })
     }
 }
 
@@ -293,31 +360,82 @@ pub fn generate_trust_report(options: TrustReportOptions) -> Result<TrustReport,
     let database_path = options
         .database_path
         .unwrap_or_else(|| default_workspace_database_path(&workspace_root));
-    let connection = DbConnection::open_file(&database_path)?;
-    let workspace_id = resolve_workspace_id(&connection, &workspace_root)?;
-    let memories = connection.list_memories(&workspace_id, None, false)?;
-    let feedback_events = connection.list_feedback_events(&workspace_id)?;
-    let packed_memory_ids = verified_packed_memory_ids(
-        &connection,
-        &workspace_id,
-        options.pack_item_limit,
-        Utc::now(),
-    )?;
+    let read_pool = registered_process_read_pool(
+        DatabaseConfig::file(database_path),
+        PoolConfig::default_single(),
+    );
+    let read_snapshot = read_pool.pin_snapshot()?;
+    let result = {
+        let connection = read_snapshot.checked_connection()?;
+        let workspace_id = resolve_workspace_id(connection, &workspace_root)?;
+        let memories = connection.list_memories(&workspace_id, None, false)?;
+        let feedback_events = connection.list_feedback_events(&workspace_id)?;
+        let packed_memory_ids = verified_packed_memory_ids(
+            connection,
+            &workspace_id,
+            options.pack_item_limit,
+            Utc::now(),
+        )?;
+        let attempt_families = attempt_family_trust_rows(connection, &memories)?;
 
-    Ok(build_trust_report(
-        workspace_id,
-        memories
-            .iter()
-            .map(MemoryTrustInput::from)
-            .collect::<Vec<_>>(),
-        feedback_events
-            .iter()
-            .map(FeedbackTrustInput::from)
-            .collect::<Vec<_>>(),
-        packed_memory_ids,
-        options.bucket_count,
-        options.leaderboard_limit,
-    ))
+        Ok(build_trust_report(
+            workspace_id,
+            memories
+                .iter()
+                .map(MemoryTrustInput::from)
+                .collect::<Vec<_>>(),
+            feedback_events
+                .iter()
+                .map(FeedbackTrustInput::from)
+                .collect::<Vec<_>>(),
+            packed_memory_ids,
+            attempt_families,
+            options.bucket_count,
+            options.leaderboard_limit,
+        ))
+    };
+    read_snapshot.commit()?;
+    result
+}
+
+fn attempt_family_trust_rows(
+    connection: &DbConnection,
+    memories: &[StoredMemory],
+) -> Result<Vec<AttemptFamilyTrustRow>, TrustReportError> {
+    let memory_ids = memories
+        .iter()
+        .map(|memory| memory.id.clone())
+        .collect::<Vec<_>>();
+    let snapshots =
+        connection.get_attempt_family_membership_snapshots_for_memory_ids(&memory_ids)?;
+    let mut families = BTreeMap::new();
+    for snapshot in snapshots.by_memory_id.values() {
+        for family in &snapshot.families {
+            families
+                .entry(family.family_id.clone())
+                .or_insert_with(|| family.multiplicity());
+        }
+    }
+    Ok(families
+        .into_values()
+        .map(|family| {
+            let posture = family.promotion_posture();
+            AttemptFamilyTrustRow {
+                family_alias: crate::models::public_attempt_family_alias(&family.family_id),
+                declared_size: family.declared_size,
+                recorded_slots: family.recorded_slots,
+                selected_count: family.selected_count,
+                rejected_count: family.rejected_count,
+                unslotted_count: family.unslotted_count,
+                unrecorded_count: family.unrecorded_count(),
+                discount_factor: family.discount_factor(),
+                promotion_eligible: family.is_promotion_eligible(),
+                promotion_posture: posture.as_str().to_owned(),
+                promotion_reason: posture.reason().to_owned(),
+                summary: family.summary(),
+            }
+        })
+        .collect())
 }
 
 fn verified_packed_memory_ids(
@@ -416,6 +534,7 @@ fn build_trust_report(
     memories: Vec<MemoryTrustInput>,
     feedback_events: Vec<FeedbackTrustInput>,
     packed_memory_ids: BTreeSet<String>,
+    attempt_families: Vec<AttemptFamilyTrustRow>,
     bucket_count: usize,
     leaderboard_limit: usize,
 ) -> TrustReport {
@@ -530,6 +649,7 @@ fn build_trust_report(
         buckets,
         most_helpful,
         most_harmful,
+        attempt_families,
         recommendations,
     }
 }
@@ -865,6 +985,40 @@ mod tests {
     }
 
     #[test]
+    fn human_summary_exposes_multiplicity_without_raw_family_id() {
+        let raw_family_id = "AKIA-DO-NOT-LEAK-ATTEMPT-FAMILY";
+        let family_alias = crate::models::public_attempt_family_alias(raw_family_id);
+        let report = build_trust_report(
+            "wsp_test".to_string(),
+            Vec::new(),
+            Vec::new(),
+            BTreeSet::new(),
+            vec![AttemptFamilyTrustRow {
+                family_alias: family_alias.clone(),
+                declared_size: Some(18),
+                recorded_slots: 1,
+                selected_count: 1,
+                rejected_count: 0,
+                unslotted_count: 0,
+                unrecorded_count: 17,
+                discount_factor: 1.0 / 18.0,
+                promotion_eligible: false,
+                promotion_posture: "blocked_incomplete".to_string(),
+                promotion_reason: "17 declared attempt slots are unrecorded".to_string(),
+                summary: "1 of 18 attempt slots recorded; 17 unrecorded".to_string(),
+            }],
+            5,
+            10,
+        );
+
+        let human = report.human_summary();
+        assert!(human.contains("1 of 18 attempt slots recorded; 17 unrecorded"));
+        assert!(human.contains("selected discount 0.055556"));
+        assert!(human.contains(&family_alias));
+        assert!(!human.contains(raw_family_id));
+    }
+
+    #[test]
     fn calibration_curve_and_leaderboards_are_deterministic() {
         let memories = vec![
             memory("mem_a", 0.60, 0.70, "helpful rule"),
@@ -882,6 +1036,7 @@ mod tests {
             memories,
             feedback_events,
             BTreeSet::from(["mem_a".to_string(), "mem_c".to_string()]),
+            Vec::new(),
             5,
             10,
         );
@@ -932,6 +1087,7 @@ mod tests {
                 "mem_b".to_string(),
                 "mem_c".to_string(),
             ]),
+            Vec::new(),
             5,
             10,
         );
@@ -965,6 +1121,7 @@ mod tests {
                 feedback("mem_outdated", "outdated", 1.0),
             ],
             BTreeSet::from(["mem_stale".to_string()]),
+            Vec::new(),
             5,
             10,
         );
@@ -1004,6 +1161,7 @@ mod tests {
                 feedback("mem_helpful_b", "positive", 1.0),
             ],
             BTreeSet::new(),
+            Vec::new(),
             5,
             10,
         );
@@ -1043,6 +1201,7 @@ mod tests {
                 "mem_infinite".to_string(),
                 "mem_real".to_string(),
             ]),
+            Vec::new(),
             5,
             10,
         );
@@ -1064,6 +1223,7 @@ mod tests {
             Vec::new(),
             vec![feedback("missing_memory", "helpful", 1.0)],
             BTreeSet::new(),
+            Vec::new(),
             0,
             0,
         );

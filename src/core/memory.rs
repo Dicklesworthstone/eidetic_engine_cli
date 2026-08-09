@@ -4565,7 +4565,7 @@ fn remember_audit_details(
         "workflowId": input.workflow_id,
         "tagCount": input.tags.len(),
         "attemptFamily": attempt_family.map(|family| serde_json::json!({
-            "familyId": family.family_id,
+            "familyAlias": crate::models::public_attempt_family_alias(&family.family_id),
             "declaredSize": family.declared_size,
             "attemptIndex": family.attempt_index,
             "disposition": family.disposition,
@@ -6023,8 +6023,9 @@ fn validate_remember_attempt_family(
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
     {
+        let family_alias = crate::models::public_attempt_family_alias(trimmed);
         return Err(remember_usage_error(format!(
-            "--family `{trimmed}` may only contain ASCII letters, digits, `.`, `_`, `:`, and `-`"
+            "--family `{family_alias}` may only contain ASCII letters, digits, `.`, `_`, `:`, and `-`"
         )));
     }
     if let Some(size) = family.declared_size
@@ -11327,6 +11328,29 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
         Ok(workspace_id)
+    }
+
+    #[test]
+    fn invalid_attempt_family_error_never_echoes_secret_shaped_identifier() -> TestResult {
+        let raw_family = "AKIAIOSFODNN7EXAMPLE/invalid";
+        let error = validate_remember_attempt_family(&RememberAttemptFamily {
+            family_id: raw_family,
+            declared_size: Some(3),
+            attempt_index: Some(1),
+            disposition: Some("selected"),
+        })
+        .expect_err("invalid family alphabet must be rejected");
+        let message = error.message();
+        ensure(
+            message.contains(&crate::models::public_attempt_family_alias(raw_family)),
+            true,
+            "invalid family error exposes the safe alias",
+        )?;
+        ensure(
+            message.contains(raw_family),
+            false,
+            "invalid family error omits the raw caller-controlled identifier",
+        )
     }
 
     #[test]

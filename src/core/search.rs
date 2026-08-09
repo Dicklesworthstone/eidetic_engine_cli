@@ -4269,6 +4269,7 @@ fn search_consensus_conflict_report(query: &str, hits: &[SearchHit]) -> Consensu
         budget: TokenBudget::default_context(),
         used_tokens,
         items,
+        evidence_items: Vec::new(),
         omitted: Vec::new(),
         selection_audit: PackSelectionAudit {
             profile: ContextPackProfile::Balanced,
@@ -18020,6 +18021,7 @@ pub fn run_family_retrieval(
             repair: Some("ee search --family <id> --json".to_owned()),
         });
     }
+    let family_alias = crate::models::public_attempt_family_alias(family_id);
     let workspace_root = default_workspace_root(options.workspace_path);
     let workspace_id = crate::core::curate::stable_workspace_id(&workspace_root);
     let default_database_path = default_workspace_database_path(options.workspace_path);
@@ -18028,11 +18030,27 @@ pub fn run_family_retrieval(
         message,
         repair: Some("ee doctor --workspace . --json".to_owned()),
     };
-    let connection = DbConnection::open_file(database_path)
+    let migration_connection = DbConnection::open_file(database_path)
         .map_err(|error| storage_error(format!("Failed to open database: {error}")))?;
-    connection
+    migration_connection
         .migrate()
         .map_err(|error| storage_error(format!("Failed to migrate database: {error}")))?;
+    drop(migration_connection);
+
+    let read_pool = registered_process_read_pool(
+        DatabaseConfig::file(database_path.to_path_buf()),
+        PoolConfig::default_single(),
+    );
+    let read_snapshot = read_pool.pin_snapshot().map_err(|error| {
+        storage_error(format!(
+            "Failed to acquire attempt-family read snapshot: {error}"
+        ))
+    })?;
+    let connection = read_snapshot.checked_connection().map_err(|error| {
+        storage_error(format!(
+            "Attempt-family read snapshot became unavailable: {error}"
+        ))
+    })?;
 
     let logical_ids = connection
         .list_attempt_family_membership_logical_ids(&workspace_id, family_id)
@@ -18049,27 +18067,38 @@ pub fn run_family_retrieval(
         None => (None, None),
     };
 
-    let mut snapshots = Vec::with_capacity(logical_ids.len());
+    let current_ids_by_logical = connection
+        .get_current_memory_ids_for_ledger_keys(&workspace_id, &logical_ids)
+        .map_err(|error| {
+            storage_error(format!("Failed to resolve live family revisions: {error}"))
+        })?;
+    let current_ids = current_ids_by_logical.values().cloned().collect::<Vec<_>>();
+    let snapshot_batch = connection
+        .get_attempt_family_membership_snapshots_for_memory_ids(&current_ids)
+        .map_err(|error| {
+            storage_error(format!(
+                "Failed to load batched attempt-family membership snapshots: {error}"
+            ))
+        })?;
+    let mut snapshots = Vec::with_capacity(current_ids.len());
     let mut target_family_snapshot = None;
     let mut multi_family_membership = false;
-    for logical_id in logical_ids {
-        let snapshot = connection
-            .get_attempt_family_membership_snapshot(&workspace_id, &logical_id)
-            .map_err(|error| {
-                storage_error(format!(
-                    "Failed to load attempt-family membership snapshot: {error}"
-                ))
-            })?;
+    for (logical_id, current_id) in &current_ids_by_logical {
+        let snapshot = snapshot_batch.by_memory_id.get(current_id).ok_or_else(|| {
+            storage_error(format!(
+                "Batched attempt-family snapshot omitted live memory `{current_id}`"
+            ))
+        })?;
         let Some(target_family) = snapshot.family(family_id) else {
             return Err(storage_error(format!(
-                "Attempt-family membership snapshot omitted requested family `{family_id}` for logical memory `{logical_id}`"
+                "Attempt-family membership snapshot omitted requested family `{family_alias}` for logical memory `{logical_id}`"
             )));
         };
         if target_family_snapshot.is_none() {
             target_family_snapshot = Some(target_family.clone());
         }
         multi_family_membership |= snapshot.families.len() > 1;
-        snapshots.push((logical_id, snapshot));
+        snapshots.push((logical_id.clone(), current_id.clone(), snapshot.clone()));
     }
 
     let multiplicity = target_family_snapshot.as_ref().map_or_else(
@@ -18094,32 +18123,37 @@ pub fn run_family_retrieval(
     );
     let mut admitted = Vec::new();
     let mut scope_filtered_count = 0_u32;
-    let mut missing_current_revision_count = 0_u32;
-    for (logical_id, snapshot) in &snapshots {
+    let missing_current_revision_count = u32::try_from(
+        logical_ids
+            .len()
+            .saturating_sub(current_ids_by_logical.len()),
+    )
+    .unwrap_or(u32::MAX);
+    let mut memories_by_id = BTreeMap::new();
+    let mut tags_by_id = BTreeMap::new();
+    for chunk in current_ids.chunks(crate::db::ATTEMPT_FAMILY_MEMBERSHIP_BATCH_SIZE) {
+        let refs = chunk.iter().map(String::as_str).collect::<Vec<_>>();
+        memories_by_id.extend(connection.get_memories_batch(&refs).map_err(|error| {
+            storage_error(format!("Failed to load batched family members: {error}"))
+        })?);
+        tags_by_id.extend(connection.get_memory_tags_batch(&refs).map_err(|error| {
+            storage_error(format!(
+                "Failed to load batched family member tags: {error}"
+            ))
+        })?);
+    }
+    for (logical_id, current_id, snapshot) in &snapshots {
         let target_family = snapshot.family(family_id).ok_or_else(|| {
             storage_error(format!(
-                "Attempt-family membership snapshot omitted requested family `{family_id}` for logical memory `{logical_id}`"
+                "Attempt-family membership snapshot omitted requested family `{family_alias}` for logical memory `{logical_id}`"
             ))
         })?;
-        let current_id = connection
-            .get_current_memory_id_for_ledger_key(&workspace_id, logical_id)
-            .map_err(|error| {
-                storage_error(format!("Failed to resolve live family revision: {error}"))
-            })?;
-        let Some(current_id) = current_id else {
-            missing_current_revision_count = missing_current_revision_count.saturating_add(1);
-            continue;
-        };
-        let Some(memory) = connection
-            .get_memory(&current_id)
-            .map_err(|error| storage_error(format!("Failed to load family member: {error}")))?
-        else {
-            missing_current_revision_count = missing_current_revision_count.saturating_add(1);
-            continue;
-        };
-        let tags = connection
-            .get_memory_tags(&memory.id)
-            .map_err(|error| storage_error(format!("Failed to load member tags: {error}")))?;
+        let memory = memories_by_id.get(current_id).ok_or_else(|| {
+            storage_error(format!(
+                "Batched family member load omitted live memory `{current_id}`"
+            ))
+        })?;
+        let tags = tags_by_id.get(current_id).map_or(&[][..], Vec::as_slice);
         if !scope_context.memory_in_scope_with_tags(&memory, &tags) {
             scope_filtered_count = scope_filtered_count.saturating_add(1);
             continue;
@@ -18195,9 +18229,9 @@ pub fn run_family_retrieval(
         multiplicity.promotion_posture()
     };
 
-    Ok(SearchFamilyReport {
+    let report = SearchFamilyReport {
         workspace_id,
-        family_alias: crate::models::public_attempt_family_alias(family_id),
+        family_alias,
         declared_size: multiplicity.declared_size,
         origin,
         recorded_slots: multiplicity.recorded_slots,
@@ -18220,5 +18254,11 @@ pub fn run_family_retrieval(
         missing_current_revision_count,
         memory_scope: options.memory_scope,
         strict_scope: options.strict_scope,
-    })
+    };
+    read_snapshot.commit().map_err(|error| {
+        storage_error(format!(
+            "Failed to release attempt-family read snapshot: {error}"
+        ))
+    })?;
+    Ok(report)
 }

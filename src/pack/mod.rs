@@ -1688,6 +1688,7 @@ pub struct PackItemProvenance {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackProvenanceFooter {
     pub memory_count: usize,
+    pub evidence_count: usize,
     pub source_count: usize,
     pub schemes: Vec<String>,
     pub entries: Vec<PackItemProvenance>,
@@ -2015,6 +2016,12 @@ pub struct PackDraft {
     pub budget: TokenBudget,
     pub used_tokens: u32,
     pub items: Vec<PackDraftItem>,
+    /// Direct imported evidence selected without fabricating a memory identity.
+    ///
+    /// Memory-only ranking and graph algorithms intentionally operate on
+    /// `items`; live-admitted evidence joins at the pack boundary under its
+    /// canonical `EvidenceId` (bd-16imy).
+    pub evidence_items: Vec<PackEvidenceItem>,
     pub omitted: Vec<PackOmission>,
     pub selection_audit: PackSelectionAudit,
     pub hash: Option<String>,
@@ -2023,7 +2030,7 @@ pub struct PackDraft {
 impl PackDraft {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
+        self.items.is_empty() && self.evidence_items.is_empty()
     }
 
     /// bd-1n0np.7.5 — pack-time contradiction guard. Drops the lower-standing
@@ -2110,17 +2117,27 @@ impl PackDraft {
 
     #[must_use]
     pub fn quality_metrics(&self) -> PackQualityMetrics {
-        let item_count = self.items.len();
+        let item_count = self.items.len().saturating_add(self.evidence_items.len());
         let omitted_count = self.omitted.len();
         let provenance_source_count = self
             .items
             .iter()
             .map(|item| item.provenance.len())
-            .sum::<usize>();
+            .sum::<usize>()
+            .saturating_add(
+                self.evidence_items
+                    .iter()
+                    .map(|item| item.provenance.len())
+                    .sum::<usize>(),
+            );
 
         let mut relevance_sum = 0.0_f32;
         let mut utility_sum = 0.0_f32;
         for item in &self.items {
+            relevance_sum += item.relevance.into_inner();
+            utility_sum += item.utility.into_inner();
+        }
+        for item in &self.evidence_items {
             relevance_sum += item.relevance.into_inner();
             utility_sum += item.utility.into_inner();
         }
@@ -2155,7 +2172,11 @@ impl PackDraft {
             average_utility: average_metric(utility_sum, item_count),
             provenance_source_count,
             provenance_sources_per_item: count_ratio(provenance_source_count, item_count),
-            provenance_complete: self.items.iter().all(|item| !item.provenance.is_empty()),
+            provenance_complete: self.items.iter().all(|item| !item.provenance.is_empty())
+                && self
+                    .evidence_items
+                    .iter()
+                    .all(|item| !item.provenance.is_empty()),
             coverage_fill_count: self.coverage_fill_count(),
             sections: PackSection::all()
                 .into_iter()
@@ -2188,10 +2209,18 @@ impl PackDraft {
                 });
             }
         }
+        let mut evidence_source_count = 0_usize;
+        for item in &self.evidence_items {
+            for provenance in &item.provenance {
+                schemes.insert(provenance.rendered().scheme);
+                evidence_source_count = evidence_source_count.saturating_add(1);
+            }
+        }
 
         PackProvenanceFooter {
             memory_count: memory_ids.len(),
-            source_count: entries.len(),
+            evidence_count: self.evidence_items.len(),
+            source_count: entries.len().saturating_add(evidence_source_count),
             schemes: schemes.into_iter().collect(),
             entries,
         }
@@ -2224,6 +2253,9 @@ impl PackDraft {
         for item in &self.items {
             counts.add(item.trust.class);
         }
+        for item in &self.evidence_items {
+            counts.add(item.trust.class);
+        }
         counts
     }
 
@@ -2231,6 +2263,12 @@ impl PackDraft {
         let mut item_count = 0_usize;
         let mut used_tokens = 0_u32;
         for item in &self.items {
+            if item.section == section {
+                item_count = item_count.saturating_add(1);
+                used_tokens = used_tokens.saturating_add(item.estimated_tokens);
+            }
+        }
+        for item in &self.evidence_items {
             if item.section == section {
                 item_count = item_count.saturating_add(1);
                 used_tokens = used_tokens.saturating_add(item.estimated_tokens);
@@ -4173,6 +4211,7 @@ impl ContextResponse {
                     budget: request.budget,
                     used_tokens: 0,
                     items: Vec::new(),
+                    evidence_items: Vec::new(),
                     omitted: Vec::new(),
                     selection_audit: PackSelectionAudit {
                         profile: request.profile,
@@ -4395,7 +4434,7 @@ pub fn render_context_markdown_with_analysis(
         .filter(|item| is_link_only_pack_item(item))
         .collect();
 
-    if pack.items.is_empty() {
+    if pack.items.is_empty() && pack.evidence_items.is_empty() {
         output.push_str("*No items in pack.*\n\n");
     } else {
         let mut by_section: std::collections::HashMap<&str, Vec<&PackDraftItem>> =
@@ -4451,6 +4490,42 @@ pub fn render_context_markdown_with_analysis(
                             "- {} ({})\n",
                             markdown_inline_code(&prov.uri),
                             escape_markdown_text(&prov.scheme)
+                        ));
+                    }
+                    output.push('\n');
+                }
+            }
+        }
+
+        if !pack.evidence_items.is_empty() {
+            output.push_str("## Evidence\n\n");
+            for item in &pack.evidence_items {
+                display_index = display_index.saturating_add(1);
+                output.push_str(&format!(
+                    "### {}. {} ({} tokens)\n\n",
+                    display_index,
+                    escape_markdown_text(&item.evidence_id),
+                    item.estimated_tokens
+                ));
+                if !item.content.is_empty() {
+                    output.push_str(&markdown_fenced_code_block(&item.content));
+                    output.push('\n');
+                }
+                if !item.why.is_empty() {
+                    output.push_str(&format!("**Why:** {}\n\n", escape_markdown_text(&item.why)));
+                }
+                output.push_str(&format!(
+                    "**Trust:** `{}` / `{}`\n\n",
+                    item.trust.class.as_str(),
+                    item.trust.posture().as_str()
+                ));
+                if !item.provenance.is_empty() {
+                    output.push_str("**Provenance:**\n");
+                    for provenance in item.rendered_provenance() {
+                        output.push_str(&format!(
+                            "- {} ({})\n",
+                            markdown_inline_code(&provenance.uri),
+                            escape_markdown_text(&provenance.scheme)
                         ));
                     }
                     output.push('\n');
@@ -5146,6 +5221,39 @@ pub struct PackDraftItem {
     pub lifecycle: Option<PackItemLifecycle>,
     pub freshness_facets: Vec<PackFreshnessFacet>,
     pub selected_in: PackSelectionPhase,
+}
+
+/// A live-admitted imported transcript excerpt selected directly into a pack.
+///
+/// This is deliberately not a `PackDraftItem`: the latter is a memory-shaped
+/// type and carries a mandatory `MemoryId`. Keeping the entity typed prevents
+/// fresh CASS evidence from being assigned a synthetic memory identity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackEvidenceItem {
+    pub rank: u32,
+    pub evidence_id: String,
+    pub entity_revision: String,
+    pub session_id: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub section: PackSection,
+    pub content: String,
+    pub estimated_tokens: u32,
+    pub relevance: UnitScore,
+    pub utility: UnitScore,
+    pub provenance: Vec<PackProvenance>,
+    pub why: String,
+    pub trust: PackTrustSignal,
+}
+
+impl PackEvidenceItem {
+    #[must_use]
+    pub fn rendered_provenance(&self) -> Vec<RenderedPackProvenance> {
+        self.provenance
+            .iter()
+            .map(PackProvenance::rendered)
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -6247,6 +6355,7 @@ fn assemble_mmr_draft(
         query,
         budget,
         used_tokens,
+        evidence_items: Vec::new(),
         selection_audit: PackSelectionAudit {
             profile,
             objective: PackSelectionObjective::MmrRedundancy,
@@ -6641,6 +6750,7 @@ fn assemble_mmr_draft_reusing_workspace(
         query,
         budget,
         used_tokens,
+        evidence_items: Vec::new(),
         selection_audit: PackSelectionAudit {
             profile,
             objective: PackSelectionObjective::MmrRedundancy,
@@ -6937,6 +7047,7 @@ fn assemble_facility_location_draft(
         query,
         budget,
         used_tokens,
+        evidence_items: Vec::new(),
         selection_audit: PackSelectionAudit {
             profile,
             objective: PackSelectionObjective::FacilityLocation,
@@ -7224,6 +7335,7 @@ fn assemble_facility_location_draft_reusing_workspace(
         query,
         budget,
         used_tokens,
+        evidence_items: Vec::new(),
         selection_audit: PackSelectionAudit {
             profile,
             objective: PackSelectionObjective::FacilityLocation,
@@ -10288,6 +10400,7 @@ mod tests {
             budget,
             used_tokens,
             items,
+            evidence_items: Vec::new(),
             omitted: Vec::new(),
             selection_audit: PackSelectionAudit {
                 profile: ContextPackProfile::Balanced,
