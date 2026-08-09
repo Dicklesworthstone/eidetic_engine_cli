@@ -21921,14 +21921,15 @@ mod cass_timeout_tests {
     #[test]
     fn project_config_key_overrides_built_in_default() -> TestResult {
         let workspace = tempfile::tempdir().map_err(|e| e.to_string())?;
-        std::fs::create_dir_all(workspace.path().join(".ee")).map_err(|e| e.to_string())?;
+        let workspace_path = workspace.path().canonicalize().map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(workspace_path.join(".ee")).map_err(|e| e.to_string())?;
         std::fs::write(
-            workspace.path().join(".ee").join("config.toml"),
+            workspace_path.join(".ee").join("config.toml"),
             "[cass]\nsubprocess_timeout_secs = 120\n",
         )
         .map_err(|e| e.to_string())?;
 
-        let resolved = resolve_cass_subprocess_timeout(None, workspace.path());
+        let resolved = resolve_cass_subprocess_timeout(None, &workspace_path);
         ensure(
             resolved == Some(Duration::from_secs(120)),
             "project [cass] subprocess_timeout_secs must override the built-in default",
@@ -21944,7 +21945,8 @@ mod cass_timeout_tests {
             return Ok(());
         }
         let workspace = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let resolved = resolve_cass_subprocess_timeout(None, workspace.path());
+        let workspace_path = workspace.path().canonicalize().map_err(|e| e.to_string())?;
+        let resolved = resolve_cass_subprocess_timeout(None, &workspace_path);
         ensure(
             resolved == Some(crate::cass::client::DEFAULT_SUBPROCESS_TIMEOUT),
             "layered default must equal DEFAULT_SUBPROCESS_TIMEOUT (30s)",

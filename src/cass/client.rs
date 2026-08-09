@@ -817,6 +817,9 @@ mod tests {
         let target_dir = std::env::var_os("CARGO_TARGET_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+        let target_dir = target_dir
+            .canonicalize()
+            .map_err(|error| format!("canonicalize CASS client test root: {error}"))?;
         Ok(target_dir
             .join("ee-cass-client-tests")
             .join(format!("{prefix}-{}-{now}", std::process::id())))
