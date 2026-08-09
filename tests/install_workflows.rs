@@ -1413,7 +1413,7 @@ fn ci_proves_five_target_native_reranker_release_gate() -> TestResult {
         "cargo tree --locked --target \"$TARGET\" -e features --prefix none",
         "timestamps.tsv",
         "if: ${{ always() && matrix.release_target }}",
-        "b559c92e03242336614b995c562a13dfd1269eed",
+        "Frankensearch lock/checkout mismatch",
     ] {
         ensure(
             cross.contains(contract),
@@ -1476,6 +1476,50 @@ fn ci_proves_five_target_native_reranker_release_gate() -> TestResult {
         !strict.contains("--no-run"),
         "strict full-suite execution must run tests rather than compile only",
     )?;
+    ensure(
+        !cross.contains("FRANKENSEARCH_EXPECTED_REV"),
+        "the release proof must derive the exact Frankensearch revision from franken-stack.lock",
+    )?;
+    for contract in [
+        "locked_revision\" =~ ^[0-9a-f]{40}$",
+        "checked_out_revision\" != \"$locked_revision",
+        "$lockedRevision -notmatch '^[0-9a-f]{40}$'",
+        "$checkedOutRevision -ne $lockedRevision",
+    ] {
+        ensure(
+            cross.contains(contract),
+            &format!("release proof is missing lock-derived revision contract {contract:?}"),
+        )?;
+    }
+
+    let (_, full_suite_and_rest) = strict
+        .split_once("run_logged full-ee-suite env \\\n")
+        .ok_or_else(|| "strict proof is missing the isolated full ee suite".to_owned())?;
+    let (full_suite, frankensearch_and_rest) = full_suite_and_rest
+        .split_once("run_logged frankensearch-rerank-suite env \\\n")
+        .ok_or_else(|| "strict proof is missing the isolated Frankensearch suite".to_owned())?;
+    let (frankensearch_suite, _) = frankensearch_and_rest
+        .split_once("          if grep -F '[native_reranker] SKIP'")
+        .ok_or_else(|| "strict Frankensearch suite has no stable boundary".to_owned())?;
+    for (label, suite) in [
+        ("full ee", full_suite),
+        ("Frankensearch reranker", frankensearch_suite),
+    ] {
+        for binding in [
+            "HOME=\"$native_home\"",
+            "USERPROFILE=\"$native_home\"",
+            "APPDATA=\"$native_appdata\"",
+            "LOCALAPPDATA=\"$native_localappdata\"",
+            "TMPDIR=\"$native_tmp\"",
+            "TMP=\"$native_tmp\"",
+            "TEMP=\"$native_tmp\"",
+        ] {
+            ensure(
+                suite.contains(binding),
+                &format!("strict {label} suite is missing isolated environment binding {binding}"),
+            )?;
+        }
+    }
 
     for target in [
         "aarch64-apple-darwin",
@@ -1500,6 +1544,9 @@ fn ci_proves_five_target_native_reranker_release_gate() -> TestResult {
         "needs.cross-platform-determinism.result",
         "strict-completed-at.txt",
         "MATRIX_RESULT",
+        "expected_revision = None",
+        "re.fullmatch(r\"[0-9a-f]{40}\", revision)",
+        "revision != expected_revision",
     ] {
         ensure(
             aggregate.contains(contract),

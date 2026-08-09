@@ -398,7 +398,6 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           BINARY_NAME: ${{ matrix.binary }}
-          FRANKENSEARCH_EXPECTED_REV: b559c92e03242336614b995c562a13dfd1269eed
         run: |
           set -euo pipefail
           runner_temp="$RUNNER_TEMP"
@@ -427,10 +426,10 @@ jobs:
 
           locked_revision="$(awk -F '\t' '$1 == "frankensearch" { print $2 }' franken-stack.lock)"
           checked_out_revision="$(git -C .ci/franken-stack/projects/frankensearch rev-parse HEAD)"
-          if [[ "$locked_revision" != "$FRANKENSEARCH_EXPECTED_REV" \
-            || "$checked_out_revision" != "$FRANKENSEARCH_EXPECTED_REV" ]]; then
-            printf 'expected latest Frankensearch %s, lock=%s checkout=%s\n' \
-              "$FRANKENSEARCH_EXPECTED_REV" "$locked_revision" "$checked_out_revision" >&2
+          if [[ ! "$locked_revision" =~ ^[0-9a-f]{40}$ \
+            || "$checked_out_revision" != "$locked_revision" ]]; then
+            printf 'Frankensearch lock/checkout mismatch: lock=%s checkout=%s\n' \
+              "$locked_revision" "$checked_out_revision" >&2
             exit 1
           fi
           printf '{"target":"%s","frankensearchRevision":"%s"}\n' \
@@ -488,7 +487,6 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           BINARY_NAME: ${{ matrix.binary }}
-          FRANKENSEARCH_EXPECTED_REV: b559c92e03242336614b995c562a13dfd1269eed
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $false
@@ -516,9 +514,9 @@ jobs:
             Where-Object Project -eq "frankensearch").Revision
           $checkedOutRevision = (& git -C .ci/franken-stack/projects/frankensearch rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0 -or
-              $lockedRevision -ne $env:FRANKENSEARCH_EXPECTED_REV -or
-              $checkedOutRevision -ne $env:FRANKENSEARCH_EXPECTED_REV) {
-            throw "expected latest Frankensearch $env:FRANKENSEARCH_EXPECTED_REV, lock=$lockedRevision checkout=$checkedOutRevision"
+              $lockedRevision -notmatch '^[0-9a-f]{40}$' -or
+              $checkedOutRevision -ne $lockedRevision) {
+            throw "Frankensearch lock/checkout mismatch: lock=$lockedRevision checkout=$checkedOutRevision"
           }
 
           $linker = (Get-Command link.exe -CommandType Application | Select-Object -First 1).Source
@@ -717,13 +715,19 @@ jobs:
 
           native_model_dir="$(native_path "$unpacked_dir")"
           run_logged full-ee-suite env \
+            HOME="$native_home" USERPROFILE="$native_home" \
+            APPDATA="$native_appdata" LOCALAPPDATA="$native_localappdata" \
+            TMPDIR="$native_tmp" TMP="$native_tmp" TEMP="$native_tmp" \
             EE_E2E_RERANK_MODEL_DIR="$native_model_dir" \
             EE_E2E_RERANK_REQUIRE_MODEL=1 \
             EE_E2E_NATIVE_RERANK_REQUIRE_MODEL=1 \
             cargo test --locked --workspace --lib --bins --tests --examples \
               --target "$TARGET" -- --test-threads=1 --nocapture
 
-          run_logged frankensearch-rerank-suite \
+          run_logged frankensearch-rerank-suite env \
+            HOME="$native_home" USERPROFILE="$native_home" \
+            APPDATA="$native_appdata" LOCALAPPDATA="$native_localappdata" \
+            TMPDIR="$native_tmp" TMP="$native_tmp" TEMP="$native_tmp" \
             cargo test --locked \
               --manifest-path "$workspace_root/.ci/franken-stack/projects/frankensearch/Cargo.toml" \
               -p frankensearch-rerank --no-default-features --features native \
@@ -1051,6 +1055,7 @@ jobs:
           import json
           import math
           import pathlib
+          import re
           import sys
 
           expected_targets = {
@@ -1060,7 +1065,7 @@ jobs:
               "x86_64-unknown-linux-gnu",
               "x86_64-pc-windows-msvc",
           }
-          expected_revision = "b559c92e03242336614b995c562a13dfd1269eed"
+          expected_revision = None
           tolerance = 0.01
           root = pathlib.Path(sys.argv[1])
           records = {}
@@ -1070,9 +1075,18 @@ jobs:
               target = target_data.get("target")
               if target in records:
                   raise SystemExit(f"duplicate target evidence: {target}")
-              if target_data.get("frankensearchRevision") != expected_revision:
+              revision = target_data.get("frankensearchRevision")
+              if not isinstance(revision, str) \
+                  or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
                   raise SystemExit(
-                      f"{target}: Frankensearch revision is not {expected_revision}"
+                      f"{target}: invalid Frankensearch revision evidence: {revision!r}"
+                  )
+              if expected_revision is None:
+                  expected_revision = revision
+              elif revision != expected_revision:
+                  raise SystemExit(
+                      f"{target}: Frankensearch revision {revision} differs from "
+                      f"the five-target revision {expected_revision}"
                   )
               if target == "x86_64-pc-windows-msvc":
                   toolchain_path = sidecar.with_name("windows-toolchain.json")
