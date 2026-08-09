@@ -2070,6 +2070,17 @@ impl DomainError {
             // recovery actions so the JSON envelope's details.recovery[]
             // tells the agent exactly what to do, not just the prose
             // repair hint.
+            // Audit-report serialization failures (bd-1eeyw full-suite
+            // inventory): the ee.error.v2 contract makes details.recovery[]
+            // mandatory, and these storage errors previously rendered a
+            // prose-only repair with empty details.
+            Self::Storage { .. } if message.contains("audit report serialization") => {
+                vec![recovery_command(
+                    0,
+                    "ee doctor --workspace . --json",
+                    "Diagnose the audit store; a row that cannot re-serialize indicates local corruption or a schema mismatch.",
+                )]
+            }
             Self::Storage { .. } if message.contains("database not found") => vec![
                 RecoveryAction {
                     priority: 1,
