@@ -3,7 +3,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 #[cfg(unix)]
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 #[cfg(unix)]
@@ -27,6 +27,7 @@ static WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(unix)]
 struct NetworkTripwire {
+    address: SocketAddr,
     proxy_url: String,
     connection_count: Arc<AtomicUsize>,
     accept_failed: Arc<AtomicBool>,
@@ -74,6 +75,7 @@ impl NetworkTripwire {
             .map_err(|error| format!("spawn network tripwire: {error}"))?;
 
         Ok(Self {
+            address,
             proxy_url: format!("http://{address}"),
             connection_count,
             accept_failed,
@@ -122,6 +124,29 @@ impl Drop for NetworkTripwire {
             let _ = thread.join();
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn network_tripwire_detects_a_proxied_connection() -> TestResult {
+    let network_tripwire = NetworkTripwire::start()?;
+    let stream = TcpStream::connect(network_tripwire.address)
+        .map_err(|error| format!("connect to network tripwire: {error}"))?;
+    drop(stream);
+    for _ in 0..100 {
+        if network_tripwire.connection_count.load(Ordering::Acquire) != 0 {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let error = match network_tripwire.assert_unused() {
+        Ok(()) => return Err("planted network connection was not detected".to_string()),
+        Err(error) => error,
+    };
+    if error.contains("attempted 1 proxied network connection") {
+        return Ok(());
+    }
+    Err(format!("unexpected network tripwire error: {error}"))
 }
 
 struct E2eWorkspace {
