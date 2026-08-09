@@ -11499,6 +11499,50 @@ pub enum MemoryCommand {
     Reveal(MemoryRevealArgs),
     /// List or mutate tags on a memory.
     Tags(MemoryTagsArgs),
+    /// Promote a workspace memory into the user-global store (ADR 0081).
+    PromoteGlobal(MemoryPromoteGlobalArgs),
+    /// Demote (tombstone) a promoted user-global memory.
+    DemoteGlobal(MemoryDemoteGlobalArgs),
+}
+
+/// Arguments for `ee memory promote-global` (bd-1bfwa.3).
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MemoryPromoteGlobalArgs {
+    /// Workspace memory ID to promote.
+    #[arg(value_name = "MEMORY_ID")]
+    pub memory_id: String,
+
+    /// Workspace database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Actor recorded in the audit trail.
+    #[arg(long, value_name = "NAME")]
+    pub actor: Option<String>,
+
+    /// Plan only: report the promotion verdict without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee memory demote-global` (bd-1bfwa.3).
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MemoryDemoteGlobalArgs {
+    /// GLOBAL memory ID to demote (tombstone) in the user-global store.
+    #[arg(value_name = "GLOBAL_MEMORY_ID")]
+    pub global_memory_id: String,
+
+    /// Workspace database path (origin-side audit trail).
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Actor recorded in the audit trail.
+    #[arg(long, value_name = "NAME")]
+    pub actor: Option<String>,
+
+    /// Plan only: report what would be demoted without writing.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `ee memory reveal`
@@ -13647,6 +13691,12 @@ where
         }
         Some(Command::Memory(MemoryCommand::Tags(ref args))) => {
             handle_memory_tags(&cli, args, stdout, stderr)
+        }
+        Some(Command::Memory(MemoryCommand::PromoteGlobal(ref args))) => {
+            handle_memory_promote_global(&cli, args, stdout, stderr)
+        }
+        Some(Command::Memory(MemoryCommand::DemoteGlobal(ref args))) => {
+            handle_memory_demote_global(&cli, args, stdout, stderr)
         }
         // Bead bd-17c65.6.2 (F2) — top-level aliases route by ID prefix.
         Some(Command::Show(ref args)) => handle_show_alias(&cli, args, stdout, stderr),
@@ -36212,6 +36262,193 @@ where
     }
 }
 
+fn global_store_paths_for_memory_lane()
+-> Result<crate::core::global_store::GlobalStorePaths, DomainError> {
+    crate::core::global_store::default_global_store_paths_from_env().map_err(|message| {
+        DomainError::Configuration {
+            message,
+            repair: Some(
+                "Set HOME or XDG_DATA_HOME so the user-global store can be located.".to_owned(),
+            ),
+        }
+    })
+}
+
+fn render_global_lane_report<W>(
+    cli: &Cli,
+    command: &str,
+    human: &str,
+    data: serde_json::Value,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let envelope = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": {
+            "command": command,
+            "report": data,
+        },
+        "degraded": [],
+    });
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, human),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&envelope.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(envelope.to_string() + "\n")),
+    }
+}
+
+fn handle_memory_promote_global<W, E>(
+    cli: &Cli,
+    args: &MemoryPromoteGlobalArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::global_promotion::{PromoteGlobalOptions, promote_global};
+
+    let MemoryStoreTarget {
+        workspace: _,
+        database_path,
+    } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let global_paths = match global_store_paths_for_memory_lane() {
+        Ok(paths) => paths,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let options = PromoteGlobalOptions {
+        workspace_database_path: &database_path,
+        memory_id: &args.memory_id,
+        global_paths: &global_paths,
+        // Opt-in-by-presence era: the retrieval seam hardcodes an included
+        // lane (see the global-candidate merge in core/search.rs); promotion
+        // mirrors that posture until the [memory] include_global /
+        // participate config keys land (bd-1bfwa.3 slice C).
+        global_lane_available: true,
+        actor: args.actor.as_deref(),
+        dry_run: args.dry_run,
+    };
+    let report = match promote_global(&options) {
+        Ok(report) => report,
+        Err(message) => {
+            let domain_error = DomainError::Storage {
+                message,
+                repair: Some("ee doctor".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    if !report.plan.allowed() {
+        let domain_error = DomainError::PolicyDeniedWithDetails {
+            message: format!("global promotion of {} refused by policy", args.memory_id),
+            repair: Some(format!(
+                "ee memory show {} --json  # inspect trust class and content",
+                args.memory_id
+            )),
+            details_json: report.data_json().to_string(),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    let human = format!(
+        "Global promotion\n  Memory: {}\n  Executed: {}\n  Global memory: {}\n  Already promoted: {}\n",
+        args.memory_id,
+        report.executed,
+        report.global_memory_id.as_deref().unwrap_or("-"),
+        report.already_promoted,
+    );
+    render_global_lane_report(
+        cli,
+        "memory promote-global",
+        &human,
+        report.data_json(),
+        stdout,
+    )
+}
+
+fn handle_memory_demote_global<W, E>(
+    cli: &Cli,
+    args: &MemoryDemoteGlobalArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::global_promotion::{DemoteGlobalOptions, demote_global};
+
+    let MemoryStoreTarget {
+        workspace: _,
+        database_path,
+    } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let global_paths = match global_store_paths_for_memory_lane() {
+        Ok(paths) => paths,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let options = DemoteGlobalOptions {
+        workspace_database_path: &database_path,
+        global_memory_id: &args.global_memory_id,
+        global_paths: &global_paths,
+        actor: args.actor.as_deref(),
+        dry_run: args.dry_run,
+    };
+    let report = match demote_global(&options) {
+        Ok(report) => report,
+        Err(message) => {
+            let domain_error = DomainError::Storage {
+                message,
+                repair: Some("ee doctor".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let (origin_workspace, origin_memory) = report
+        .origin
+        .as_ref()
+        .map_or(("-", "-"), |(workspace, memory)| {
+            (workspace.as_str(), memory.as_str())
+        });
+    let human = format!(
+        "Global demotion\n  Global memory: {}\n  Executed: {}\n  Tombstoned: {}\n  Origin workspace: {}\n  Origin memory: {}\n",
+        report.global_memory_id,
+        report.executed,
+        report.tombstoned,
+        origin_workspace,
+        origin_memory,
+    );
+    render_global_lane_report(
+        cli,
+        "memory demote-global",
+        &human,
+        report.data_json(),
+        stdout,
+    )
+}
+
 fn handle_memory_tags<W, E>(
     cli: &Cli,
     args: &MemoryTagsArgs,
@@ -37808,7 +38045,10 @@ fn render_orient_fast_content_human(out: &mut String, fast_content: &serde_json:
     out.push_str(&format!(
         "\nFast content ({posture}; recent={recent_strategy}; relevant={relevant_strategy}):\n"
     ));
-    for (heading, key) in [("Recent memories", "recent"), ("Task-relevant memories", "relevant")] {
+    for (heading, key) in [
+        ("Recent memories", "recent"),
+        ("Task-relevant memories", "relevant"),
+    ] {
         out.push_str(&format!("\n{heading}:\n"));
         let items = fast_content
             .get(key)
@@ -62975,6 +63215,8 @@ impl NormalizedInvocation {
                     MemoryCommand::History(_) => "memory history".to_string(),
                     MemoryCommand::Revise(_) => "memory revise".to_string(),
                     MemoryCommand::Reveal(_) => "memory reveal".to_string(),
+                    MemoryCommand::PromoteGlobal(_) => "memory promote-global".to_string(),
+                    MemoryCommand::DemoteGlobal(_) => "memory demote-global".to_string(),
                     MemoryCommand::Tags(_) => "memory tags".to_string(),
                 },
                 // Bead bd-17c65.6.2 (F2) — top-level aliases.
@@ -67492,6 +67734,151 @@ mod tests {
             Some(Command::Orient(args)) => ensure_equal(&args.fast, &true, "orient fast alias"),
             other => Err(format!("expected orient command, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn orient_fast_renders_live_content_in_json_and_human_output() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path();
+        let remembered =
+            crate::core::memory::remember_memory(&crate::core::memory::RememberMemoryOptions {
+                workspace_path: workspace,
+                database_path: None,
+                content: "Verify release checksums before publishing the signed artifact.",
+                workflow_id: None,
+                level: "procedural",
+                kind: "rule",
+                tags: Some("orient-cli,release"),
+                confidence: 0.9,
+                source: Some("file://AGENTS.md#L1"),
+                valid_from: None,
+                valid_to: None,
+                dry_run: false,
+                auto_link: false,
+                propose_candidates: false,
+                allow_secret_mention: false,
+            })
+            .map_err(|error| format!("remember orient CLI fixture: {error:?}"))?;
+        let rebuild = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+            workspace_path: workspace.to_path_buf(),
+            database_path: None,
+            index_dir: None,
+            dry_run: false,
+        })
+        .map_err(|error| format!("rebuild orient CLI fixture index: {error:?}"))?;
+        ensure_equal(
+            &rebuild.status,
+            &crate::core::index::IndexRebuildStatus::Success,
+            "orient CLI fixture index status",
+        )?;
+
+        let workspace_arg = workspace.display().to_string();
+        let mut json_stdout = Vec::new();
+        let mut json_stderr = Vec::new();
+        let json_exit = run(
+            [
+                "ee",
+                "orient",
+                "verify release checksums",
+                "--workspace",
+                workspace_arg.as_str(),
+                "--fast",
+                "--json",
+            ],
+            &mut json_stdout,
+            &mut json_stderr,
+        );
+        ensure_equal(&json_exit, &ProcessExitCode::Success, "orient JSON exit")?;
+        let json_output = String::from_utf8(json_stdout).map_err(|error| error.to_string())?;
+        let envelope: serde_json::Value =
+            serde_json::from_str(&json_output).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &envelope["data"]["doctor"]["status"],
+            &serde_json::json!("skipped"),
+            "fast doctor component",
+        )?;
+        ensure(
+            envelope["degraded"].as_array().is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| entry["code"] == serde_json::json!("orient_doctor_skipped"))
+            }),
+            "fast output retains orient_doctor_skipped",
+        )?;
+        ensure(
+            !envelope["degraded"].as_array().is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| entry["code"] == serde_json::json!("orient_pack_skipped"))
+            }),
+            "fast output removes the false orient_pack_skipped claim",
+        )?;
+        ensure_equal(
+            &envelope["data"]["fastContent"]["posture"],
+            &serde_json::json!("ready"),
+            "fast-content posture",
+        )?;
+        let memory_id = remembered.memory_id.to_string();
+        for section in ["recent", "relevant"] {
+            let item = envelope["data"]["fastContent"][section]
+                .as_array()
+                .and_then(|items| items.iter().find(|item| item["id"] == memory_id))
+                .ok_or_else(|| format!("live memory missing from fast {section}: {json_output}"))?;
+            ensure(
+                item["snippet"]
+                    .as_str()
+                    .is_some_and(|snippet| snippet.contains("Verify release checksums")),
+                &format!("fast {section} binds admitted content"),
+            )?;
+            ensure(
+                item["createdAt"]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty()),
+                &format!("fast {section} binds created_at"),
+            )?;
+            ensure(
+                item["tags"]
+                    .as_array()
+                    .is_some_and(|tags| tags.iter().any(|tag| tag == "orient-cli")),
+                &format!("fast {section} binds tags"),
+            )?;
+            ensure(
+                item["provenance"]
+                    .as_array()
+                    .is_some_and(|provenance| !provenance.is_empty()),
+                &format!("fast {section} binds provenance"),
+            )?;
+        }
+
+        let mut human_stdout = Vec::new();
+        let mut human_stderr = Vec::new();
+        let human_exit = run(
+            [
+                "ee",
+                "orient",
+                "verify release checksums",
+                "--workspace",
+                workspace_arg.as_str(),
+                "--fast",
+            ],
+            &mut human_stdout,
+            &mut human_stderr,
+        );
+        ensure_equal(&human_exit, &ProcessExitCode::Success, "orient human exit")?;
+        let human_output = String::from_utf8(human_stdout).map_err(|error| error.to_string())?;
+        for expected in [
+            "Recent memories:",
+            "Task-relevant memories:",
+            "Verify release checksums",
+            "orient-cli",
+            "orient_doctor_skipped",
+        ] {
+            ensure(
+                human_output.contains(expected),
+                &format!("human fast output missing {expected:?}: {human_output}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

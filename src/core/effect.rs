@@ -2369,6 +2369,16 @@ impl EffectManifest {
                 "Verify supplied bytes against a sealed memory's commitment; on match publish the content through the revise path, mark the seal revealed, and audit memory.reveal — a mismatch mutates nothing and audits memory.reveal_failed (bd-sealed-preregistration-memory-b67be)",
             ),
             CommandEffect::durable_write(
+                "memory promote-global",
+                vec!["memories", "audit_log"],
+                "Promote a workspace memory into the user-global store through the bd-1bfwa.2 policy core (evidence gate, secret re-screen, duplicate merge); refusals are typed exit-7 policy denials and dry-run writes nothing",
+            ),
+            CommandEffect::durable_write(
+                "memory demote-global",
+                vec!["memories", "audit_log"],
+                "Tombstone a promoted user-global memory (withdraw the global copy without touching the origin workspace row), origin parsed from promotion provenance",
+            ),
+            CommandEffect::durable_write(
                 "memory level",
                 vec!["memories", "search_index_jobs", "audit_log"],
                 "Apply a canonical manual memory-level transition with audit provenance",
