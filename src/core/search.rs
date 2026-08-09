@@ -8678,14 +8678,17 @@ fn global_store_lexical_hits(
             return Vec::new();
         }
     };
+    // `[memory] include_global` / `participate` from the workspace config
+    // gate the lane (bd-1bfwa.3 slice C); both default to true so the
+    // opt-in-by-presence behavior is unchanged for unconfigured workspaces.
+    let memory_config = crate::config::workspace_config(&options.workspace_path)
+        .map(|config| config.memory)
+        .unwrap_or_default();
     let inclusion =
         super::global_store::resolve_global_inclusion(&super::global_store::GlobalInclusionInput {
             store_present: paths.database_path.exists(),
-            // The separate-store implementation has not yet grown a repository
-            // participation row; default participation preserves the existing
-            // opt-in-by-presence behavior while routing through the policy core.
-            participating: true,
-            config_enabled: true,
+            participating: memory_config.participate.unwrap_or(true),
+            config_enabled: memory_config.include_global.unwrap_or(true),
             no_global_flag: false,
         });
     if !inclusion.included {

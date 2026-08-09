@@ -91,6 +91,9 @@ pub struct PrimerSettings {
     /// Skip memories whose bodies trip the secret detector (workspace
     /// `[privacy]` posture). Skips are counted, never silent.
     pub redact_secrets: bool,
+    /// `[memory] include_global && participate` (bd-1bfwa.3 slice C); when
+    /// false the primer never consults the user-global store.
+    pub global_lane_enabled: bool,
 }
 
 /// One candidate memory row (joined fields the selectors need).
@@ -234,11 +237,19 @@ pub fn primer_settings_from_workspace(
         .as_ref()
         .and_then(|config| config.privacy.redact_secrets)
         .unwrap_or(true);
+    let global_lane_enabled = config
+        .as_ref()
+        .map(|config| {
+            config.memory.include_global.unwrap_or(true)
+                && config.memory.participate.unwrap_or(true)
+        })
+        .unwrap_or(true);
     PrimerSettings {
         budget_tokens: budget_override.unwrap_or(default_tokens),
         format,
         config_hash: primer_config_hash(default_tokens, redact_secrets),
         redact_secrets,
+        global_lane_enabled,
     }
 }
 
@@ -600,10 +611,16 @@ pub fn run_primer_with_persistence(
     refresh: bool,
     persist: bool,
 ) -> crate::db::Result<PrimerReport> {
-    // Opt-in-by-presence: a resolvable env root with an existing store
-    // database includes the global lane; anything else (no HOME, no store)
-    // is lane-off, matching the search seam's posture (bd-1bfwa.3).
-    let global_paths = crate::core::global_store::default_global_store_paths_from_env().ok();
+    // Opt-in-by-presence plus the `[memory]` config gate (bd-1bfwa.3
+    // slice C): a resolvable env root with an existing store database
+    // includes the global lane unless include_global/participate turned it
+    // off; anything else (no HOME, no store) is lane-off, matching the
+    // search seam's posture.
+    let global_paths = if settings.global_lane_enabled {
+        crate::core::global_store::default_global_store_paths_from_env().ok()
+    } else {
+        None
+    };
     run_primer_with_global_lane(
         connection,
         workspace_id,
@@ -943,6 +960,7 @@ mod tests {
 
     fn settings(budget: u32) -> PrimerSettings {
         PrimerSettings {
+            global_lane_enabled: true,
             budget_tokens: budget,
             format: PrimerFormat::Markdown,
             config_hash: primer_config_hash(budget, true),
