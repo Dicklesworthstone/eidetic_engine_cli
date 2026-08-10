@@ -4914,7 +4914,7 @@ fn proof_broker_local_cargo_bypass_is_unusable_without_bypass() -> TestResult {
     let fake_ee_log_arg = fake_ee_log
         .to_str()
         .ok_or_else(|| "fake ee invocation log is not utf-8".to_owned())?;
-    let bypass_tripwire = r#"{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"bypass_detected","count":1,"processes":[{"pid":"123","packageCacheLockHeld":true}],"detectedLocalBuilds":[]}"#;
+    let bypass_tripwire = r#"{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"bypass_detected","count":1,"processes":[{"pid":"123","packageCacheLockHeld":true,"policyStatus":"local_cargo_disallowed"}],"detectedLocalBuilds":[]}"#;
 
     let (status, stdout, _stderr) = run_script_with_env(
         &[
