@@ -94,6 +94,28 @@ fn storage_error_cases(workspace: &str) -> Vec<ConformanceCase> {
                 "--json".to_owned(),
             ],
         },
+        ConformanceCase {
+            id: "ERR-RECOVERY-STORAGE-003",
+            surface: "remember",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace.to_owned(),
+                "remember".to_owned(),
+                "storeless workspace conformance fact".to_owned(),
+                "--json".to_owned(),
+            ],
+        },
+        ConformanceCase {
+            id: "ERR-RECOVERY-STORAGE-004",
+            surface: "search",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace.to_owned(),
+                "search".to_owned(),
+                "storeless workspace conformance".to_owned(),
+                "--json".to_owned(),
+            ],
+        },
     ]
 }
 
@@ -178,6 +200,25 @@ fn assert_storage_recovery_contract(case: &ConformanceCase, output: &Output) -> 
         ),
     )?;
 
+    let repair = string_at(&json, "/error/repair", case.id)?;
+    ensure(
+        repair.contains("Re-check --workspace addressing (looked for"),
+        format!(
+            "{}: freetext repair must lead with addressing and the looked-for path, got: {repair}",
+            case.id
+        ),
+    )?;
+    let recheck_at = repair.find("Re-check --workspace addressing");
+    let init_at = repair.find("ee init --workspace .");
+    ensure(
+        matches!((recheck_at, init_at), (Some(recheck), Some(init)) if recheck < init)
+            && repair.contains("Only if you intended to create a NEW store here"),
+        format!(
+            "{}: ee init must appear last and conditionally framed in the repair, got: {repair}",
+            case.id
+        ),
+    )?;
+
     log_event(
         case,
         "pass",
@@ -198,8 +239,8 @@ fn storage_database_not_found_recovery_contract() -> TestResult {
     let cases = storage_error_cases(&workspace);
 
     ensure(
-        cases.len() == 2,
-        "coverage matrix should exercise two independent storage-backed surfaces",
+        cases.len() == 4,
+        "coverage matrix should exercise four independent storage-backed surfaces",
     )?;
 
     for case in &cases {
@@ -215,5 +256,118 @@ fn storage_database_not_found_recovery_contract() -> TestResult {
         assert_storage_recovery_contract(case, &output)?;
     }
 
+    Ok(())
+}
+
+/// bd-sfjvq: a storeless miss next to a populated store must point the
+/// caller at that store (remember/search via the freetext repair, orient
+/// via the storeDiscovery block) instead of leading with `ee init`.
+#[test]
+fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let store_root = tempdir.path().join("nearby_store_root_sfjvq");
+    let leaf = store_root.join("sub").join("storeless_leaf_sfjvq");
+    std::fs::create_dir_all(&leaf).map_err(|error| error.to_string())?;
+    // Pin the parent walk: discovery stops at the first .git it sees.
+    std::fs::create_dir_all(store_root.join(".git")).map_err(|error| error.to_string())?;
+    let store_root_str = store_root.to_string_lossy().to_string();
+    let leaf_str = leaf.to_string_lossy().to_string();
+
+    let init = run_ee(&[
+        "init".to_owned(),
+        "--workspace".to_owned(),
+        store_root_str.clone(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        init.status.success(),
+        format!(
+            "init of the nearby store failed: {}",
+            String::from_utf8_lossy(&init.stdout)
+        ),
+    )?;
+    let seeded = run_ee(&[
+        "--workspace".to_owned(),
+        store_root_str.clone(),
+        "remember".to_owned(),
+        "nearby store seed fact".to_owned(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        seeded.status.success(),
+        format!(
+            "seeding the nearby store failed: {}",
+            String::from_utf8_lossy(&seeded.stdout)
+        ),
+    )?;
+
+    for verb in [
+        vec![
+            "--workspace".to_owned(),
+            leaf_str.clone(),
+            "remember".to_owned(),
+            "storeless leaf fact".to_owned(),
+            "--json".to_owned(),
+        ],
+        vec![
+            "--workspace".to_owned(),
+            leaf_str.clone(),
+            "search".to_owned(),
+            "storeless leaf".to_owned(),
+            "--json".to_owned(),
+        ],
+    ] {
+        let output = run_ee(&verb)?;
+        ensure(
+            !output.status.success(),
+            format!("{}: storeless miss must fail", verb.join(" ")),
+        )?;
+        let json = stdout_json(&output, &verb.join(" "))?;
+        let repair = string_at(&json, "/error/repair", &verb.join(" "))?;
+        ensure(
+            repair.contains("a populated store exists at")
+                && repair.contains("nearby_store_root_sfjvq")
+                && repair.contains("retarget with --workspace"),
+            format!(
+                "{}: repair must surface the nearby populated store, got: {repair}",
+                verb.join(" ")
+            ),
+        )?;
+        ensure(
+            repair.contains("storeless_leaf_sfjvq") && repair.contains("looked for"),
+            format!(
+                "{}: repair must print the exact looked-for path, got: {repair}",
+                verb.join(" ")
+            ),
+        )?;
+    }
+
+    let orient = run_ee(&[
+        "--workspace".to_owned(),
+        leaf_str.clone(),
+        "orient".to_owned(),
+        "--fast".to_owned(),
+        "--json".to_owned(),
+    ])?;
+    let orient_json = stdout_json(&orient, "orient storeless leaf")?;
+    let discovery = orient_json
+        .pointer("/storeDiscovery")
+        .ok_or("orient storeless leaf: missing storeDiscovery block")?;
+    ensure(
+        discovery["storeEmpty"] == serde_json::json!(true)
+            && discovery["scanned"] == serde_json::json!(true),
+        format!("orient must scan on a storeless workspace, got: {discovery}"),
+    )?;
+    let nearby = discovery["nearbyStores"]
+        .as_array()
+        .ok_or("orient storeless leaf: nearbyStores missing")?;
+    ensure(
+        nearby.iter().any(|store| {
+            store["workspaceRoot"]
+                .as_str()
+                .is_some_and(|root| root.contains("nearby_store_root_sfjvq"))
+        }),
+        format!("orient nearbyStores must include the populated store, got: {nearby:?}"),
+    )?;
     Ok(())
 }

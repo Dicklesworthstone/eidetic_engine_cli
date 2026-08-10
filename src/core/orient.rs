@@ -343,6 +343,7 @@ pub fn orient_decisions(
 
 /// One discovered populated store near the addressed workspace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NearbyStore {
     /// Workspace root that owns the store (the directory containing `.ee`
     /// or `.ee-campaign`).

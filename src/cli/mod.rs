@@ -38517,7 +38517,7 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
                 out.push_str("\nThis store is empty, but populated stores exist nearby:\n");
                 for store in stores {
                     let path = store
-                        .get("workspace_root")
+                        .get("workspaceRoot")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("-");
                     let documents = store
@@ -38525,7 +38525,7 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
                         .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     let last_write = store
-                        .get("last_write")
+                        .get("lastWrite")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("-");
                     out.push_str(&format!(
