@@ -2010,6 +2010,7 @@ fn remember_index_status(report: &IndexProcessingJobReport) -> String {
 
 const REMEMBER_CONTENTION_MAX_ATTEMPTS: usize = 64;
 const REMEMBER_WORKSPACE_LOCK_TTL_SECS: u64 = 300;
+const REMEMBER_WORKSPACE_LOCK_MAX_WAIT: Duration = Duration::from_secs(300);
 const REMEMBER_ADVISORY_LOCK_REPAIR_COMMAND: &str =
     "ee diag advisory-lock --workspace . --resource-type workspace --release --json";
 
@@ -2047,6 +2048,7 @@ fn acquire_remember_workspace_lock<'a>(
         workspace_id,
         memory_id,
         REMEMBER_CONTENTION_MAX_ATTEMPTS,
+        REMEMBER_WORKSPACE_LOCK_MAX_WAIT,
         remember_write_retry_delay,
     )
 }
@@ -2056,7 +2058,29 @@ fn acquire_remember_workspace_lock_with_retry<'a>(
     workspace_id: &str,
     memory_id: &str,
     attempts: usize,
+    max_wait: Duration,
     retry_delay: impl Fn(usize) -> Duration,
+) -> Result<RememberWorkspaceWriteLock<'a>, DomainError> {
+    let started = Instant::now();
+    acquire_remember_workspace_lock_with_retry_and_elapsed(
+        connection,
+        workspace_id,
+        memory_id,
+        attempts,
+        max_wait,
+        retry_delay,
+        || started.elapsed(),
+    )
+}
+
+fn acquire_remember_workspace_lock_with_retry_and_elapsed<'a>(
+    connection: &'a DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+    attempts: usize,
+    max_wait: Duration,
+    retry_delay: impl Fn(usize) -> Duration,
+    mut elapsed: impl FnMut() -> Duration,
 ) -> Result<RememberWorkspaceWriteLock<'a>, DomainError> {
     let lock_id = AdvisoryLockId::workspace(workspace_id);
     let holder_id = format!("remember:{}:{memory_id}", std::process::id());
@@ -2070,10 +2094,21 @@ fn acquire_remember_workspace_lock_with_retry<'a>(
     // continues rather than dropping the write with a hard storage error
     // (the old fixed cliff starved N-writer queues whose total service time
     // exceeded ~38s). The ambient Cx remains the overall cancellation/deadline
-    // bound; the local counter detects only lack of queue progress.
+    // bound when present; the elapsed ceiling is the fail-safe for synchronous
+    // callers that do not install one. Unlike the removed total-poll ceiling,
+    // elapsed time does not punish a rapidly progressing deep queue.
     let mut no_progress_polls = 0usize;
 
     loop {
+        if elapsed() >= max_wait {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "advisory lock timeout after {}ms while waiting for workspace write lock",
+                    max_wait.as_millis()
+                ),
+                repair: Some(REMEMBER_ADVISORY_LOCK_REPAIR_COMMAND.to_owned()),
+            });
+        }
         remember_retry_sleep(Duration::ZERO, "acquire advisory lock")?;
         match connection.acquire_advisory_lock(
             &lock_id,
@@ -16434,6 +16469,7 @@ mod tests {
             "wsp_remember_timeout",
             "mem_01234567890123456789012345",
             1,
+            Duration::from_secs(1),
             |_| Duration::ZERO,
         ) {
             Ok(_) => return Err("remember should not acquire a held workspace lock".to_owned()),
@@ -16490,6 +16526,7 @@ mod tests {
             "wsp_remember_progress",
             "mem_01234567890123456789012346",
             2,
+            Duration::from_secs(30),
             |delay_attempt| {
                 let call = sleep_calls.get();
                 sleep_calls.set(call + 1);
@@ -16531,6 +16568,79 @@ mod tests {
     }
 
     #[test]
+    fn remember_workspace_lock_holder_churn_obeys_elapsed_ceiling_without_ambient_cx() -> TestResult
+    {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection
+            .ensure_advisory_locks_table()
+            .map_err(|error| error.to_string())?;
+        let lock_id = AdvisoryLockId::workspace("wsp_remember_churn_ceiling");
+        let acquired = connection
+            .acquire_advisory_lock(&lock_id, "holder-0", Some(300), Some("unit test"))
+            .map_err(|error| error.to_string())?;
+        ensure(acquired.is_acquired(), true, "fixture lock acquired")?;
+
+        let sleep_calls = std::cell::Cell::new(0usize);
+        let elapsed_checks = std::cell::Cell::new(0usize);
+        let error = match acquire_remember_workspace_lock_with_retry_and_elapsed(
+            &connection,
+            "wsp_remember_churn_ceiling",
+            "mem_01234567890123456789012347",
+            2,
+            Duration::from_millis(1),
+            |_| {
+                let call = sleep_calls.get();
+                sleep_calls.set(call + 1);
+                let current_holder = format!("holder-{call}");
+                connection
+                    .release_advisory_lock(&lock_id, &current_holder)
+                    .expect("release current holder");
+                let next_holder = format!("holder-{}", call + 1);
+                assert!(
+                    connection
+                        .acquire_advisory_lock(
+                            &lock_id,
+                            &next_holder,
+                            Some(300),
+                            Some("unit test"),
+                        )
+                        .expect("acquire next holder")
+                        .is_acquired()
+                );
+                Duration::ZERO
+            },
+            || {
+                let check = elapsed_checks.get();
+                elapsed_checks.set(check + 1);
+                if check == 0 {
+                    Duration::ZERO
+                } else {
+                    Duration::from_millis(1)
+                }
+            },
+        ) {
+            Ok(_) => return Err("holder churn must not bypass the elapsed ceiling".to_owned()),
+            Err(error) => error,
+        };
+        ensure(
+            error.message().contains("advisory lock timeout"),
+            true,
+            "elapsed ceiling preserves advisory-lock timeout classification",
+        )?;
+        ensure(
+            sleep_calls.get() >= 1,
+            true,
+            "fixture changed the holder before the elapsed ceiling fired",
+        )?;
+
+        let final_holder = format!("holder-{}", sleep_calls.get());
+        connection
+            .release_advisory_lock(&lock_id, &final_holder)
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
     fn remember_workspace_lock_releases_when_guard_drops() -> TestResult {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection
@@ -16544,6 +16654,7 @@ mod tests {
                 "wsp_remember_release",
                 "mem_01234567890123456789012346",
                 1,
+                Duration::from_secs(1),
                 |_| Duration::ZERO,
             )
             .map_err(|error| error.to_string())?;

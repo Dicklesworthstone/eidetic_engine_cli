@@ -115,6 +115,8 @@ CI_SMOKE=false
 SWARM_HEAVY=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=scripts/lib/ee_binary_resolution.sh
+source "${REPO_ROOT}/scripts/lib/ee_binary_resolution.sh"
 DEFAULT_AGENT_BUILD_ROOT="/Volumes/USBNVME16TB/temp_agent_space"
 BEADS_LOCK_WAIT_SECONDS="${EE_BEADS_LOCK_WAIT_SECONDS:-30}"
 BEADS_LOCK_SKIP_CODE=75
@@ -188,12 +190,14 @@ TRACE_LOG_DIRS=""
 STAGE_RESULTS=""
 TOTAL_START=$(date +%s)
 
+CURRENT_SOURCE_TARGET_DIR="$(ee_cargo_target_directory || true)"
+if [ -n "${CURRENT_SOURCE_TARGET_DIR}" ]; then
+    CURRENT_SOURCE_EE_BINARY="${CURRENT_SOURCE_TARGET_DIR%/}/debug/ee"
+else
+    CURRENT_SOURCE_EE_BINARY="${REPO_ROOT}/target/debug/ee"
+fi
 if [ -z "${EE_BINARY:-}" ]; then
-    if [ -n "${CARGO_TARGET_DIR:-}" ]; then
-        export EE_BINARY="${CARGO_TARGET_DIR%/}/debug/ee"
-    else
-        export EE_BINARY="${REPO_ROOT}/target/debug/ee"
-    fi
+    export EE_BINARY="${CURRENT_SOURCE_EE_BINARY}"
 fi
 
 # shellcheck disable=SC2329
@@ -1156,7 +1160,7 @@ run_stage "Journal Capture E2E (bd-1pi9m.6)" "./scripts/e2e_journal_capture.sh"
 # against one workspace DB. Journal appends must never drop (the bd-d67os.26
 # flock-classification fix class, proven end-to-end), and progress-aware
 # advisory-lock waiting must keep every remember write lossless (bd-rs4cm).
-run_stage "Write Contention E2E (bd-d67os.27)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_single_shot_write_contention.sh"
+run_stage "Write Contention E2E (bd-d67os.27)" "cargo build --locked --bin ee && EE_BIN=\"${CURRENT_SOURCE_EE_BINARY}\" EE_BINARY=\"${CURRENT_SOURCE_EE_BINARY}\" EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_single_shot_write_contention.sh"
 
 # Gate 6.1265: Capture-track real-binary E2E (bd-2vq2z.20). No-Cargo:
 # proves ambient capture suggestions are read-only and workspace-stable,
