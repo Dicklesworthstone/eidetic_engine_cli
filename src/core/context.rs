@@ -11494,8 +11494,8 @@ mod tests {
         StoredAgentContextProfileForPack, StoredMemory, UpsertAgentContextProfileInput,
     };
     use crate::models::{
-        AgentContextProfileCounts, FocusItem, FocusState, LineSpan, MemoryId, MemoryScope,
-        MemoryScopeStats, ProvenanceUri, QueryTemporalFilters, QueryTemporalValidity,
+        AgentContextProfileCounts, EmbedBackend, FocusItem, FocusState, LineSpan, MemoryId,
+        MemoryScope, MemoryScopeStats, ProvenanceUri, QueryTemporalFilters, QueryTemporalValidity,
         QueryTemporalValidityPosture, TrustClass, UnitScore, WorkspaceId,
     };
     use crate::pack::{

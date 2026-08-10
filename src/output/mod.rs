@@ -19231,7 +19231,7 @@ mod tests {
         escape_json_string, help_json, help_text, human_status, redact_mesh_approval_bearer_spans,
         redact_mesh_approval_bearers, render_agent_docs_json, render_agent_docs_toon,
         render_capabilities_json, render_capabilities_json_filtered, render_check_json,
-        render_check_json_filtered, render_context_response_json,
+        render_check_json_filtered, render_context_response_human, render_context_response_json,
         render_context_response_json_with_options, render_context_response_markdown,
         render_context_response_toon, render_dependency_diagnostics_json,
         render_doctor_concise_json, render_doctor_concise_toon, render_doctor_json,
