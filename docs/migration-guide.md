@@ -851,6 +851,30 @@ walkthrough.
 
 ---
 
+## User-Global Memory Lane (bd-1bfwa)
+
+The global knowledge lane (`ee remember --global`, `ee memory
+promote-global` / `demote-global`, `[memory] include_global` /
+`participate`) adds **no workspace schema migration**. The design is
+copy-with-link into a **separate** store:
+
+- The user-global store is its own database under the user data root
+  (`$XDG_DATA_HOME/ee/global`, `$HOME` fallback), created on demand the
+  first time the lane is written. The standard migration gate applies to
+  that store independently: an older binary meeting a newer global store
+  refuses with the normal exit-8 protection, exactly as it would for a
+  workspace store.
+- Workspace databases are untouched. Existing rows keep their meaning
+  (everything is implicitly workspace-lane); no column defaults to
+  backfill, no downgrade hazard is introduced in workspace stores.
+- Promotion records origin linkage in the global row's provenance
+  (`ee-mem://<workspace_id>/<memory_id>`) plus audit rows on both sides —
+  linkage lives in data, not in schema.
+- Older binaries simply do not consult the global store: retrieval
+  behaves as before the feature existed. Newer binaries in a
+  non-participating workspace report `global_lane_disabled` rather than
+  silently narrowing.
+
 ## No Features Dropped
 
 This migration **splits responsibilities**, it does not remove functionality:

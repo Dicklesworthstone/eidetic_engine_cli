@@ -47,6 +47,44 @@ path. Generic peer policy, JSONL/playbook import, curation, and local rule
 commands cannot mint it. `human_explicit` itself remains local and never crosses
 the mesh boundary.
 
+## Global Knowledge Lane
+
+The user-global lane (`ee remember --global`, `ee memory promote-global`,
+`ee memory demote-global`) shares procedural knowledge across every workspace
+of one user. It is a separate store under the user data root, never the mesh:
+global rows stay on this machine and cross no trust boundary that
+`human_explicit` content could not already cross.
+
+Placement in the trust taxonomy:
+
+- **Promotion evidence gate.** Only `human_explicit` and `agent_validated`
+  workspace memories can be promoted. `agent_assertion`, `cass_evidence`, and
+  `legacy_import` rows are refused with a typed exit-7 plan
+  (`ee.global_promotion.plan.v1`) naming the trust class; nothing is silently
+  upgraded on the way into the lane. `--dry-run` previews the same verdict
+  without writing.
+- **Copy-with-link, not move.** Promotion copies the row into the global store
+  with `derived_from` provenance back to the origin workspace; the origin
+  keeps its row and its local audit history. The global row has its own
+  feedback life: outcomes recorded against it adjust its confidence without
+  rewriting the origin's evidence.
+- **Retrieval posture.** Global rows compete in the same sections as
+  workspace rows at pack/recall/primer/search time. They are always labeled
+  (`storeLane=global` in search metadata, provenance `source_type` of
+  `global_store` on primer items) so a reader can tell lane advice from
+  workspace advice. An exact-content twin resolves workspace-wins; a
+  contradiction between lanes defers to the operator with
+  `global_lane_conflict_deferred` — both sides stay visible, neither is
+  silently dropped.
+- **Isolation.** `[memory] include_global = false` stops the lane from being
+  read in a workspace; `[memory] participate = false` isolates the workspace
+  in both directions (nothing read, nothing promotable out). Privileged
+  workspaces — legal, medical, client-confidential — should set
+  `participate = false`; retrieval then reports `global_lane_disabled`
+  honestly instead of silently returning workspace-only results.
+- **Demotion.** `ee memory demote-global` tombstones the global row with an
+  audit record; tombstoned rows never re-enter candidate pools.
+
 ## Advisory Priority
 
 Context packs should separate "what to do" from "why this is safe to trust".

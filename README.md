@@ -489,6 +489,7 @@ Current top-level groups:
 | `ee lens list --json` / `ee lens explain <id> --json` | Inspect named task lenses such as `bugfix`, `code-review`, and `release-readiness` before applying them |
 | `ee search "<query>" [--limit N] [--explain] [--json]` | Hybrid retrieval over memories, sessions, rules, evidence |
 | `ee search --family <family-id> [--memory-scope <scope>] [--strict-scope] [--json]` | Queryless, workspace-scoped retrieval of every recorded attempt-family member, including rejected attempts |
+| `ee search "<query>" --all-workspaces [--json]` | Inspection-only fan-out over registered workspaces plus the user-global lane (bounded, per-row `workspaceId` and lane labels); never mutates any store |
 | `ee similar <memory-id> [--limit N] [--min-score T] [--explain] [--json]` | Find embedding-native nearest-neighbor memories for a seed memory; degrades to lexical similarity with an explicit degraded note when semantic vectors are unavailable |
 | `ee ask "<question>" [--require-confidence T] [--json]` | Direct extractive answer from stored memories, with citations, conflict sides, calibrated abstention, and exit 6 fail-closed mode |
 | `ee recall --path <glob>` / `--symbol <name>` / `--diff <ref>` | Fetch memories anchored to a code surface before editing; returns `ee.recall.v1` under the standard response envelope |
@@ -1219,6 +1220,8 @@ ee outcome <candidate-id> --target-type candidate --signal negative --reason "To
 | `ee memory expire <id> [--dry-run]` | Audited soft expiration without deleting memory rows |
 | `ee memory link <id> [target-id] --relation <type> [--dry-run]` | Deterministic memory link listing and audited explicit link creation |
 | `ee memory tags <id> [--add <tags>] [--remove <tags>] [--set <tags>] [--clear]` | Deterministic audited tag listing and mutation |
+| `ee memory promote-global <id> [--dry-run]` | Evidence-gated copy-with-link promotion of a workspace memory into the user-global lane; refusals are typed exit-7 plans (`ee.global_promotion.plan.v1`) |
+| `ee memory demote-global <global-id>` | Audited tombstone of a promoted global row (`ee.global_demotion.report.v1`); tombstoned rows never re-enter candidate pools |
 
 ### Graph
 
@@ -1661,6 +1664,37 @@ Decision memories have a dedicated micro-ADR workflow through `ee decide`.
 heads, and `revisit` surfaces due or near-due decisions. See
 [`docs/agent-ux/decide.md`](docs/agent-ux/decide.md).
 
+### Memory lanes: workspace and user-global
+
+Memories live in one of two lanes. The **workspace lane** is the default:
+every row belongs to the workspace whose `.ee` store holds it. The
+**user-global lane** is a separate store under the user data root
+(`$XDG_DATA_HOME/ee/global`, falling back under `$HOME`) that shares
+procedural knowledge across all of one user's workspaces — house rules,
+hard-won anti-patterns, cross-project playbooks. It never crosses the mesh.
+
+Rows enter the global lane two ways: authored directly
+(`ee remember --global`), or promoted from a workspace
+(`ee memory promote-global <id>`). Promotion is **copy-with-link** — the
+origin workspace keeps its row and audit history; the global copy carries
+`derived_from` provenance and its own feedback life — and it is
+**evidence-gated**: only `human_explicit` or `agent_validated` memories
+qualify, everything else gets a typed exit-7 refusal plan
+(`--dry-run` previews the verdict without writing).
+
+Precedence at retrieval is fixed: global rows compete in the same
+pack/recall/primer/search sections as workspace rows, always labeled
+(`storeLane=global`, provenance `source_type=global_store`); an
+exact-content twin resolves workspace-wins; a genuine contradiction defers
+to the operator via `global_lane_conflict_deferred` with both sides kept
+visible. Two `[memory]` config keys control participation:
+`include_global = false` stops reading the lane in a workspace, and
+`participate = false` isolates a workspace in both directions. When the
+lane is off or empty, retrieval says so with `global_lane_disabled`
+instead of silently narrowing. See the
+[trust model](docs/trust-model.md#global-knowledge-lane) for how the lane
+sits in the trust taxonomy.
+
 ---
 
 ## Context Profiles
@@ -1760,13 +1794,20 @@ recurring decisions, and cited sources.
 | Medicine or clinical operations | Guideline facts, near misses, differential-diagnosis procedures | `pubmed://...`, `guideline://...`, `emr://...` |
 | Sales and account work | Call notes, objection patterns, account maps, qualification playbooks | `crm://...`, `salesforce://...`, `gong://...` |
 
-For privileged domains, isolate by workspace:
+For privileged domains, isolate by workspace, and take the workspace out of
+the user-global lane entirely — a matter-confidential or patient-adjacent
+workspace should neither read shared memories nor leak its own into them:
 
 ```bash
 ee init --workspace ./matters/smith-v-jones --json
+ee config set memory.participate false --workspace ./matters/smith-v-jones --json
 ee init --workspace ./deals/2026-q3-acme --json
 ee init --workspace ./positions/AAPL-long --json
 ```
+
+With `memory.participate = false`, retrieval in that workspace reports
+`global_lane_disabled` honestly instead of silently narrowing, and
+`ee memory promote-global` refuses to move anything out.
 
 `cass` is specific to coding sessions. For other domains, use direct `ee remember` calls or
 structured imports through `ee import jsonl --source <file>`.
