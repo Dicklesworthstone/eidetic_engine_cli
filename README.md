@@ -110,6 +110,7 @@ ee outcome trace <memory-id> --workspace . --json
 
 | Situation | First `ee` command |
 |---|---|
+| Resuming work — "where was I?" | `ee resume --workspace . --json` |
 | Starting from a cold agent session | `ee orient "<task>" --workspace . --include-primer --fast --json` |
 | You want the standing workspace charter | `ee primer --workspace . --format markdown` |
 | AGENTS.md might be lying about the rules | `ee diag agentsmd-drift --workspace . --json` |
@@ -480,6 +481,7 @@ Current top-level groups:
 | `ee status [--json]` | DB generation, index generation, degraded capabilities, recent jobs |
 | `ee doctor [--json]` | Health checks with repair commands for every failure |
 | `ee capabilities [--json]` | Feature, schema, renderer, env-var, and capability posture |
+| `ee resume [--sessions N] [--json]` | The "where was I" bundle: last N episodic sessions newest-first, revisit-conditioned decisions, next/queue/blocking-tagged items, staleness flags on superseded notes, nearby populated stores when the addressed store is empty (`ee.resume.v1`) |
 | `ee orient "<task>" --fast --json` | Fast read-only session-start bundle: bounded swarm brief, install/path posture, workspace hygiene, and explicit follow-up commands for full doctor/pack surfaces |
 | `ee primer [--tokens N] [--refresh] [--json]` | Deterministic, cached workspace charter (~600 tokens): top rules, unresolved warnings, key decisions, load-bearing memories, every line provenance-backed (`ee orient --include-primer` folds it into orientation) |
 | `ee export agentsmd [--file AGENTS.md] [--create] [--dry-run]` | Render the primer rules+warnings into a marker-delimited managed block; never edits outside its markers, backs up before mutating, refuses hand-edited blocks without `--force-managed-block` |

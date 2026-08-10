@@ -1051,6 +1051,8 @@ pub enum Command {
     Rehearse(RehearseCommand),
     /// Store a new memory.
     Remember(RememberArgs),
+    /// Where was I — recent sessions, open decisions, queued work, staleness flags.
+    Resume(ResumeArgs),
     /// Review sessions and propose curation candidates.
     #[command(subcommand)]
     Review(ReviewCommand),
@@ -14248,6 +14250,7 @@ where
         },
         Some(Command::Note(ref args)) => handle_note(&cli, args, stdout, stderr),
         Some(Command::Remember(ref args)) => handle_remember_command(&cli, args, stdout, stderr),
+        Some(Command::Resume(ref args)) => handle_resume(&cli, args, stdout, stderr),
         Some(Command::Curate(CurateCommand::Candidates(ref args))) => {
             handle_curate_candidates(&cli, args, stdout, stderr)
         }
@@ -17177,6 +17180,126 @@ where
             write_stdout(stdout, &conflict::render_conflict_human(&surface, command))
         }
         _ => write_stdout(stdout, &(conflict::render_conflict_json(&surface) + "\n")),
+    }
+}
+
+/// Arguments for `ee resume` (bd-resume-verb-v0f57).
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct ResumeArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// How many recent sessions to include.
+    #[arg(long, default_value_t = 3, value_name = "COUNT")]
+    pub sessions: usize,
+}
+
+/// `ee resume` (bd-resume-verb-v0f57): the session-resume bundle — recent
+/// end-state, open decisions, queued work, staleness flags. Read-only.
+fn handle_resume<W, E>(
+    cli: &Cli,
+    args: &ResumeArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::resume::{ResumeOptions, build_resume_report};
+
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let report = match build_resume_report(&ResumeOptions {
+        workspace_path: &workspace,
+        database_path: &database_path,
+        sessions: args.sessions,
+    }) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    let mut degraded: Vec<serde_json::Value> = Vec::new();
+    if report.episodic_total == 0 {
+        degraded.push(serde_json::json!({
+            "code": "resume_no_session_evidence",
+            "severity": "info",
+            "message": "No episodic memories to resume from in this store.",
+            "repair": "ee remember \"<session note>\" --level episodic --workspace . --json  # or check nearbyStores for the populated one",
+        }));
+    }
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mut text = format!(
+                "resume: {} episodic memories, {} sessions shown, {} open decisions, {} queued items, {} stale flags\n",
+                report.episodic_total,
+                report.sessions.len(),
+                report.open_loops.revisit_decisions.len(),
+                report.open_loops.tagged_items.len(),
+                report.stale_count,
+            );
+            for session in &report.sessions {
+                text.push_str(&format!(
+                    "\n[{}] {} memories ({} .. {})\n",
+                    session.label, session.member_count, session.oldest_at, session.newest_at
+                ));
+                for session_item in &session.items {
+                    let marker = if session_item.stale.is_some() {
+                        " [STALE]"
+                    } else {
+                        ""
+                    };
+                    let head: String = session_item.content.chars().take(96).collect();
+                    text.push_str(&format!("  - {}{marker}: {head}\n", session_item.memory_id));
+                }
+            }
+            for decision in &report.open_loops.revisit_decisions {
+                text.push_str(&format!(
+                    "open decision {}: {} (revisit {})\n",
+                    decision.memory_id,
+                    decision.topic,
+                    decision.revisit_by.as_deref().unwrap_or("unconditioned")
+                ));
+            }
+            if let Some(scan) = &report.nearby_stores
+                && !scan.stores.is_empty()
+            {
+                text.push_str("\nNearby populated stores:\n");
+                for store in &scan.stores {
+                    text.push_str(&format!(
+                        "  - {} ({} documents)\n",
+                        store.store_dir, store.documents
+                    ));
+                }
+            }
+            for command in &report.next_commands {
+                text.push_str(&format!("next: {command}\n"));
+            }
+            write_stdout(stdout, &text)
+        }
+        _ => {
+            let envelope = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": { "report": report },
+                "degraded": degraded,
+            });
+            write_stdout(stdout, &(envelope.to_string() + "\n"))
+        }
     }
 }
 
@@ -65423,6 +65546,7 @@ impl NormalizedInvocation {
                     },
                 },
                 Command::Remember(_) => "remember".to_string(),
+                Command::Resume(_) => "resume".to_string(),
                 Command::Rehearse(rehearse) => match rehearse {
                     RehearseCommand::Plan(_) => "rehearse plan".to_string(),
                     RehearseCommand::Run(_) => "rehearse run".to_string(),

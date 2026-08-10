@@ -2370,6 +2370,10 @@ impl EffectManifest {
                 vec!["memories", "memory_tags", "audit_log"],
                 "Store a new memory with direct or audit-lane-backed audit_log provenance",
             ),
+            CommandEffect::read_only_db(
+                "resume",
+                "Assemble the session-resume bundle: recent episodic sessions, revisit-conditioned decisions, queued-tag items, staleness flags, nearby stores (reads only)",
+            ),
             CommandEffect::durable_write(
                 "decide record",
                 vec![

@@ -115,6 +115,7 @@ pub mod recall;
 pub mod recorder;
 pub mod rehearse;
 pub mod repro;
+pub mod resume;
 pub mod retrieval_affinity;
 pub mod rule;
 pub mod sandbox;

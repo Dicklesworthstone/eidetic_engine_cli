@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.resume.v1.json",
+  "title": "ee.resume.v1",
+  "description": "Session-resume bundle for ee resume (bd-resume-verb-v0f57): the 'where was I' report a resuming agent needs in one read-only call. Recent episodic sessions newest-first (session-* tags name sessions; untagged runs cluster by write-time gap), open loops (revisit-conditioned decisions from the decide surface plus memories tagged next/queue/blocking/pending/todo), staleness flags (a surfaced item superseded by a newer same-kind write sharing >=2 tags is flagged rather than silently ranked down), nearby populated stores when the addressed store has nothing episodic, and resume-flavored next commands.",
+  "type": "object",
+  "required": [
+    "schema",
+    "workspaceId",
+    "episodicTotal",
+    "sessions",
+    "openLoops",
+    "staleCount",
+    "nearbyStores",
+    "nextCommands"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.resume.v1"
+    },
+    "workspaceId": {
+      "type": "string"
+    },
+    "episodicTotal": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sessions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["label", "memberCount", "newestAt", "oldestAt", "items"],
+        "additionalProperties": false,
+        "properties": {
+          "label": { "type": "string" },
+          "memberCount": { "type": "integer", "minimum": 1 },
+          "newestAt": { "type": "string" },
+          "oldestAt": { "type": "string" },
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/item" }
+          }
+        }
+      }
+    },
+    "openLoops": {
+      "type": "object",
+      "required": ["revisitDecisions", "taggedItems"],
+      "additionalProperties": false,
+      "properties": {
+        "revisitDecisions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "memoryId",
+              "topic",
+              "chosen",
+              "revisitBy",
+              "revisitStatus",
+              "createdAt"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "memoryId": { "type": "string" },
+              "topic": { "type": "string" },
+              "chosen": { "type": "string" },
+              "revisitBy": { "type": ["string", "null"] },
+              "revisitStatus": { "type": "string" },
+              "createdAt": { "type": "string" }
+            }
+          }
+        },
+        "taggedItems": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/item" }
+        }
+      }
+    },
+    "staleCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "nearbyStores": {
+      "type": ["object", "null"],
+      "description": "Populated only when the store has nothing episodic; reuses the orient nearby-store scan shape.",
+      "required": ["stores", "truncated"],
+      "properties": {
+        "stores": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["workspaceRoot", "storeDir", "documents", "lastWrite"],
+            "properties": {
+              "workspaceRoot": { "type": "string" },
+              "storeDir": { "type": "string" },
+              "documents": { "type": "integer", "minimum": 0 },
+              "lastWrite": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "nextCommands": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "item": {
+      "type": "object",
+      "required": [
+        "memoryId",
+        "level",
+        "kind",
+        "content",
+        "tags",
+        "createdAt",
+        "stale"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": { "type": "string" },
+        "level": { "type": "string" },
+        "kind": { "type": "string" },
+        "content": { "type": "string" },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "createdAt": { "type": "string" },
+        "stale": {
+          "type": ["object", "null"],
+          "required": ["supersededBy", "supersededByCreatedAt", "sharedTags"],
+          "properties": {
+            "supersededBy": { "type": "string" },
+            "supersededByCreatedAt": { "type": "string" },
+            "sharedTags": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -11331,6 +11331,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: repair_action_graph_schema_definition,
         },
         SchemaEntry {
+            id: "ee.resume.v1",
+            version: "1",
+            description: "Session-resume bundle for ee resume: recent episodic sessions, revisit-conditioned decisions, queued-tag items, staleness flags, nearby stores.",
+            category: "memory",
+            definition: resume_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.search.revision_token.v1",
             version: "1",
             description: "Explicit revisable-search token metadata emitted only when mesh revisable mode is requested.",
@@ -12129,6 +12136,10 @@ fn conflict_resolve_schema_definition() -> String {
 
 fn graph_diff_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.graph.diff.v1.json").to_string()
+}
+
+fn resume_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.resume.v1.json").to_string()
 }
 
 fn graph_snapshot_prune_schema_definition() -> String {
