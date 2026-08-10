@@ -21,8 +21,8 @@ use super::audit_lane::{
 use super::bayes::BetaPosterior;
 use super::config_surface::{ConfigSurfaceOptions, get_config};
 use super::index::{
-    DEFAULT_INDEX_SUBDIR, IndexProcessingJobReport, process_index_job_for_connection,
-    process_pending_index_jobs_coalesced,
+    DEFAULT_INDEX_SUBDIR, IndexProcessingJobReport, IndexRebuildError,
+    process_index_job_for_connection, process_pending_index_jobs_coalesced,
 };
 use super::memory_lifecycle::{
     LEVEL_TRANSITION_CONCURRENT_CONFLICT_CODE, LEVEL_TRANSITION_REQUIRES_EVIDENCE_CODE,
@@ -2243,11 +2243,24 @@ fn process_remember_index_job_with_retry(
                 if attempt + 1 < REMEMBER_CONTENTION_MAX_ATTEMPTS {
                     remember_retry_sleep(remember_write_retry_delay(attempt), "publish index job")?;
                 } else {
-                    return Ok(remember_index_job_queued_after_contention(
+                    return Ok(remember_index_job_queued_after_transient_failure(
                         index_job_id,
                         error,
                     ));
                 }
+            }
+            // The memory, audit row, and index job are already committed before
+            // this best-effort inline publish begins. Under a deep writer queue,
+            // a process can exhaust the index runtime deadline while waiting for
+            // or rebuilding the derived index. Reporting the whole remember as
+            // failed would lie about that durable mutation and invites duplicate
+            // retries. Leave the cancelled job for the normal public requeue /
+            // coalesced-reconcile path and report the truthful queued posture.
+            Err(error) if remember_index_failure_is_deferable(&error) => {
+                return Ok(remember_index_job_queued_after_transient_failure(
+                    index_job_id,
+                    error,
+                ));
             }
             Err(error) => return Err(remember_search_index_error(error)),
         }
@@ -2260,7 +2273,18 @@ fn process_remember_index_job_with_retry(
     })
 }
 
-fn remember_index_job_queued_after_contention(
+fn remember_index_failure_is_deferable(error: &IndexRebuildError) -> bool {
+    matches!(
+        error,
+        IndexRebuildError::Cancelled(reason)
+            if matches!(
+                reason.kind,
+                asupersync::CancelKind::Deadline | asupersync::CancelKind::Timeout
+            )
+    )
+}
+
+fn remember_index_job_queued_after_transient_failure(
     index_job_id: &str,
     error: impl ToString,
 ) -> IndexProcessingJobReport {
@@ -2274,7 +2298,7 @@ fn remember_index_job_queued_after_contention(
         documents_total: 1,
         documents_indexed: 0,
         error: Some(format!(
-            "search index publish deferred after contention retries: {}",
+            "search index publish deferred after a transient failure: {}",
             error.to_string()
         )),
         fallback_to_full: None,
@@ -16449,6 +16473,46 @@ mod tests {
                 Err(other) => panic!("wrong error variant for `{content}`: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn remember_index_deadline_after_commit_is_reported_as_queued() -> TestResult {
+        for reason in [
+            asupersync::CancelReason::deadline(),
+            asupersync::CancelReason::timeout(),
+        ] {
+            let error = IndexRebuildError::Cancelled(reason);
+            ensure(
+                remember_index_failure_is_deferable(&error),
+                true,
+                "deadline-like index cancellation is deferable after commit",
+            )?;
+            let report = remember_index_job_queued_after_transient_failure("sidx_fixture", &error);
+            ensure(report.job_id, "sidx_fixture".to_owned(), "queued job id")?;
+            ensure(report.outcome, "skipped".to_owned(), "queued outcome")?;
+            ensure(
+                remember_index_status(&report),
+                "queued".to_owned(),
+                "public index status",
+            )?;
+            ensure(report.documents_indexed, 0, "queued document count")?;
+            ensure(
+                report
+                    .error
+                    .as_deref()
+                    .is_some_and(|message| message.contains("transient failure")),
+                true,
+                "queued report retains a bounded transient diagnosis",
+            )?;
+        }
+
+        ensure(
+            remember_index_failure_is_deferable(&IndexRebuildError::Cancelled(
+                asupersync::CancelReason::user("operator cancelled remember"),
+            )),
+            false,
+            "explicit user cancellation remains terminal",
+        )
     }
 
     #[test]
