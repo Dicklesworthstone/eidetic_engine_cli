@@ -85,6 +85,15 @@ pub const QUERY_ASSIST_SCHEMA_V1: &str = "ee.query_assist.v1";
 /// Other transactional writers may leave queued jobs, so reads use this
 /// boundary to decide whether a bounded automatic reconciliation is eligible.
 pub const SEARCH_INDEX_LARGE_GAP_THRESHOLD: u64 = 50;
+/// Maximum source-of-truth corpus size eligible for synchronous read repair.
+///
+/// Coalesced index publication rebuilds a complete, writer-fenced corpus even
+/// for a one-generation gap. Bounding only the number of queued jobs would
+/// therefore be misleading: a single job in a very large workspace can still
+/// be expensive. Larger stores remain truthfully stale and use the explicit
+/// rebuild repair instead of blocking an interactive read.
+const SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS: u64 = 64;
+const SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT: Duration = Duration::from_millis(500);
 const SEARCH_QUERY_MISS_AUDIT_SCHEMA_V1: &str = "ee.search.query_miss.v1";
 const INDEX_STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
 const SEARCH_SCORE_COVERAGE_GUARANTEE: f32 = 0.95;
@@ -869,7 +878,7 @@ impl SearchAdvisorySession {
         }
     }
 
-    fn emit_response_code_once(&mut self, code: &str) -> bool {
+    pub(crate) fn emit_response_code_once(&mut self, code: &str) -> bool {
         let occurrence_count = self
             .response_once_occurrences
             .entry(code.to_owned())
@@ -1563,6 +1572,17 @@ impl SearchDegradation {
                 "Search index generation gap is {generation_gap}, above the automatic reconciliation limit of {SEARCH_INDEX_LARGE_GAP_THRESHOLD}; automatic read repair was skipped."
             ),
             repair: Some("ee index rebuild --workspace .".to_owned()),
+        }
+    }
+
+    #[must_use]
+    fn index_status_probe_failed() -> Self {
+        Self {
+            code: "search_index_degraded".to_owned(),
+            severity: "medium".to_owned(),
+            message: "Search is compiled, but the index is missing from the freshness status because its status probe failed; retrieval continued without claiming that the index is current."
+                .to_owned(),
+            repair: Some("Run `ee index status --workspace . --json`.".to_owned()),
         }
     }
 
@@ -7852,7 +7872,7 @@ fn search_degradations_with_connection(
     connection: Option<&DbConnection>,
 ) -> Vec<SearchDegradation> {
     let Ok(index_status) = cached_index_status_for_search(options, index_dir, connection) else {
-        return Vec::new();
+        return vec![SearchDegradation::index_status_probe_failed()];
     };
 
     match index_status.health {
@@ -8345,6 +8365,20 @@ fn cached_index_status_for_search(
     index_dir: &Path,
     connection: Option<&DbConnection>,
 ) -> Result<IndexStatusReport, IndexStatusError> {
+    let status_options = IndexStatusOptions {
+        workspace_path: options.workspace_path.clone(),
+        database_path: options.database_path.clone(),
+        index_dir: Some(index_dir.to_path_buf()),
+    };
+
+    // A caller-held snapshot is authoritative for this response. Never let a
+    // process-local Ready observation mask a writer that committed after the
+    // cache entry was populated, and never let this request repopulate the
+    // cache with an observation older than a concurrent writer's invalidation.
+    if let Some(connection) = connection {
+        return get_index_status_with_connection(&status_options, Some(connection));
+    }
+
     let cache_key = IndexStatusCacheKey::from_search_options(options, index_dir);
     let now = Instant::now();
     let cache = SEARCH_INDEX_STATUS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -8360,13 +8394,7 @@ fn cached_index_status_for_search(
         }
     }
 
-    let status_options = IndexStatusOptions {
-        workspace_path: options.workspace_path.clone(),
-        database_path: options.database_path.clone(),
-        index_dir: Some(index_dir.to_path_buf()),
-    };
-
-    let index_status = get_index_status_with_connection(&status_options, connection)?;
+    let index_status = get_index_status_with_connection(&status_options, None)?;
 
     if let Ok(mut guard) = cache.lock() {
         guard.retain(|_, cached| {
@@ -8397,15 +8425,26 @@ pub(crate) async fn reconcile_search_index_before_read_with_cx(
     options: &SearchOptions,
 ) {
     let index_dir = options.resolve_index_dir();
+    invalidate_cached_index_status_for_search(options, &index_dir);
     let status_options = IndexStatusOptions {
         workspace_path: options.workspace_path.clone(),
         database_path: options.database_path.clone(),
         index_dir: Some(index_dir.clone()),
     };
-    let Ok(status) = get_index_status_with_connection(&status_options, None) else {
+    let database_path = options.resolve_database_path();
+    let read_pool = registered_process_read_pool(
+        DatabaseConfig::file(database_path),
+        PoolConfig::default_single(),
+    );
+    let Ok(read_snapshot) = read_pool.acquire_snapshot(false) else {
         return;
     };
-    invalidate_cached_index_status_for_search(options, &index_dir);
+    let Ok(connection) = read_snapshot.checked_connection() else {
+        return;
+    };
+    let Ok(status) = get_index_status_with_connection(&status_options, Some(connection)) else {
+        return;
+    };
     let Some((db_generation, index_generation)) = status.db_generation.zip(status.index_generation)
     else {
         return;
@@ -8416,16 +8455,52 @@ pub(crate) async fn reconcile_search_index_before_read_with_cx(
     {
         return;
     }
+    let corpus_documents = u64::from(status.db_memory_count)
+        .saturating_add(u64::from(status.db_session_count))
+        .saturating_add(u64::from(status.db_artifact_count))
+        .saturating_add(u64::from(status.db_rule_count))
+        .saturating_add(u64::from(status.db_evidence_admitted_count));
+    if corpus_documents > SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS {
+        tracing::info!(
+            target: "ee::search::index_freshness",
+            generation_gap,
+            corpus_documents,
+            corpus_document_limit = SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS,
+            "skipped synchronous search-index repair because the complete corpus exceeds the interactive read bound"
+        );
+        return;
+    }
+    drop(read_snapshot);
 
     let processing_options = IndexProcessingOptions {
         workspace_path: options.workspace_path.clone(),
         database_path: options.database_path.clone(),
         index_dir: Some(index_dir.clone()),
         dry_run: false,
-        job_limit: None,
+        job_limit: Some(
+            u32::try_from(generation_gap)
+                .unwrap_or(u32::MAX)
+                .min(u32::try_from(SEARCH_INDEX_LARGE_GAP_THRESHOLD).unwrap_or(u32::MAX)),
+        ),
     };
-    match process_index_jobs_coalesced_with_cx(cx, &processing_options).await {
-        Ok(report)
+    let child_scope =
+        cx.scope_with_budget(cx.budget_for_timeout(SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT));
+    let mut task = match cx.spawn_in(&child_scope, move |child_cx| async move {
+        process_index_jobs_coalesced_with_cx(&child_cx, &processing_options).await
+    }) {
+        Ok(task) => task,
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::search::index_freshness",
+                generation_gap,
+                error = %error,
+                "could not start bounded pre-retrieval index repair; continuing with truthful stale-index reporting"
+            );
+            return;
+        }
+    };
+    match task.join(cx).await {
+        Ok(Ok(report))
             if matches!(
                 report.status,
                 IndexProcessingStatus::Success | IndexProcessingStatus::NoPendingJobs
@@ -8438,7 +8513,7 @@ pub(crate) async fn reconcile_search_index_before_read_with_cx(
                 "reconciled queued search-index work before retrieval"
             );
         }
-        Ok(report) => {
+        Ok(Ok(report)) => {
             tracing::warn!(
                 target: "ee::search::index_freshness",
                 generation_gap,
@@ -8447,12 +8522,20 @@ pub(crate) async fn reconcile_search_index_before_read_with_cx(
                 "pre-retrieval search-index reconciliation did not converge"
             );
         }
-        Err(error) => {
+        Ok(Err(error)) => {
             tracing::warn!(
                 target: "ee::search::index_freshness",
                 generation_gap,
                 error = %error,
                 "pre-retrieval search-index reconciliation failed; continuing with truthful stale-index reporting"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::search::index_freshness",
+                generation_gap,
+                error = %error,
+                "bounded pre-retrieval search-index reconciliation ended before convergence; continuing with truthful stale-index reporting"
             );
         }
     }
