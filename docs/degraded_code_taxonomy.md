@@ -850,14 +850,17 @@ process-local heap warmload rather than OS-level pinning; see
 | `lexical_ram_tier_disabled` | info | bd-1hvzh (bd-21xbi scaffold) |
 | `lexical_ram_unavailable_on_macos` | info | bd-21xbi.2 |
 
-#### Daemon UDS RPC (9 — response_time)
+#### Daemon UDS RPC (10 — response_time)
 
 The `ee daemon` hot-mode UDS RPC skeleton (bd-oja31 / SRR1) emits most of
 these codes from the per-connection dispatcher (`src/daemon/server.rs`) and
 the `ee daemon stop` CLI handler (`src/cli/mod.rs`). The wire envelope
 (`ee.daemon.response.v1`) carries no `repair` field; the CLI client maps
 the daemon-side codes onto the canonical `degraded[]` array on fallback.
-`daemon_socket_unavailable` is emitted CLI-side with a repair hint. The
+`daemon_socket_unavailable` and `daemon_search_fallback` are emitted CLI-side
+with repair hints. The latter records that an explicitly requested warm search
+path could not negotiate or complete and canonical in-process search was used.
+The
 bounded-pool `daemon_overloaded` and peer-credential
 `daemon_peer_unauthorized` codes are catalogued under their own concurrency
 and security rows respectively. `daemon_ann_warmload_not_yet_implemented`
@@ -874,6 +877,7 @@ the closed daemon hot-mode surface.
 | `daemon_method_unauthorized` | high | bd-3mbao |
 | `daemon_request_decode_failed` | medium | bd-oja31 |
 | `daemon_request_schema_mismatch` | medium | bd-oja31 |
+| `daemon_search_fallback` | warning | bd-search-warm-latency-0bh05 |
 | `daemon_setsockopt_failed` | high | bd-3pnno (SRR1) |
 | `daemon_shutting_down` | medium | bd-36dp2 (SRR1) |
 | `daemon_socket_unavailable` | info | bd-oja31 (bd-1feff emission wiring) |

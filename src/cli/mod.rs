@@ -8711,6 +8711,15 @@ pub struct SearchArgs {
     )]
     pub family: Option<String>,
 
+    /// Opt in to the long-lived daemon search path. Capability or schema
+    /// negotiation failures safely fall back to canonical in-process search.
+    #[arg(long = "use-daemon", action = ArgAction::SetTrue, conflicts_with = "family")]
+    pub use_daemon: bool,
+
+    /// Explicit daemon socket path. Defaults to the platform per-UID socket.
+    #[arg(long = "daemon-socket", value_name = "PATH", requires = "use_daemon")]
+    pub daemon_socket: Option<PathBuf>,
+
     /// Maximum number of results to return.
     #[arg(long, short = 'n', default_value_t = 10)]
     pub limit: u32,
@@ -44337,6 +44346,232 @@ where
     }
 }
 
+const DAEMON_SEARCH_FALLBACK_CODE: &str = "daemon_search_fallback";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DaemonSearchFallbackReason {
+    UnsupportedCliOption(&'static str),
+    CapabilityRoundTripFailed,
+    CapabilityMethodError,
+    CapabilityProtocolDrift,
+    CapabilityEnvelopeSchemaDrift,
+    CapabilityMethodMissing,
+    CapabilityAuthorizationDrift,
+    CapabilityMethodSchemaDrift,
+    RequestEncodingFailed,
+    SearchRoundTripFailed,
+    SearchMethodError,
+    SearchResultMissing,
+    SearchResponseDrift,
+    PlatformUnsupported,
+}
+
+impl DaemonSearchFallbackReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnsupportedCliOption(option) => option,
+            Self::CapabilityRoundTripFailed => "capability round-trip failed",
+            Self::CapabilityMethodError => "capability method returned an error",
+            Self::CapabilityProtocolDrift => "capability protocol drift",
+            Self::CapabilityEnvelopeSchemaDrift => "capability envelope schema drift",
+            Self::CapabilityMethodMissing => "search method not advertised",
+            Self::CapabilityAuthorizationDrift => "search authorization drift",
+            Self::CapabilityMethodSchemaDrift => "search method schema drift",
+            Self::RequestEncodingFailed => "search request encoding failed",
+            Self::SearchRoundTripFailed => "search round-trip failed",
+            Self::SearchMethodError => "search method returned an error",
+            Self::SearchResultMissing => "search result missing",
+            Self::SearchResponseDrift => "search response drift",
+            Self::PlatformUnsupported => "daemon search is unsupported on this platform",
+        }
+    }
+}
+
+fn daemon_search_fallback_degradation(reason: DaemonSearchFallbackReason) -> SearchDegradation {
+    SearchDegradation {
+        code: DAEMON_SEARCH_FALLBACK_CODE.to_owned(),
+        severity: "warning".to_owned(),
+        message: format!(
+            "Warm daemon search unavailable ({}); used canonical in-process search.",
+            reason.as_str()
+        ),
+        repair: Some("ee daemon status --json".to_owned()),
+    }
+}
+
+fn daemon_search_unsupported_reason(args: &SearchArgs) -> Option<DaemonSearchFallbackReason> {
+    [
+        (
+            args.recalibrate_now,
+            DaemonSearchFallbackReason::UnsupportedCliOption(
+                "--recalibrate-now remains in-process",
+            ),
+        ),
+        (
+            args.explain_performance,
+            DaemonSearchFallbackReason::UnsupportedCliOption(
+                "--explain-performance remains in-process",
+            ),
+        ),
+        (
+            args.mesh_mode != MeshCommandMode::Off,
+            DaemonSearchFallbackReason::UnsupportedCliOption("--mesh remains in-process"),
+        ),
+        (
+            args.cursor.is_some(),
+            DaemonSearchFallbackReason::UnsupportedCliOption("--cursor remains in-process"),
+        ),
+    ]
+    .into_iter()
+    .find_map(|(present, reason)| present.then_some(reason))
+}
+
+fn validate_daemon_search_capabilities(
+    capabilities: &serde_json::Value,
+) -> Result<(), DaemonSearchFallbackReason> {
+    use crate::daemon::server::{
+        DAEMON_SEARCH_REQUEST_SCHEMA_V1, DAEMON_SEARCH_RESPONSE_SCHEMA_V1, METHOD_SEARCH,
+    };
+    use crate::daemon::{DAEMON_REQUEST_SCHEMA_V1, DAEMON_RESPONSE_SCHEMA_V1};
+
+    if capabilities
+        .get("protocol")
+        .and_then(serde_json::Value::as_str)
+        != Some("ee.daemon")
+    {
+        return Err(DaemonSearchFallbackReason::CapabilityProtocolDrift);
+    }
+    let advertises = |field: &str, expected: &str| {
+        capabilities
+            .get(field)
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(expected)))
+    };
+    if !advertises("request_schemas", DAEMON_REQUEST_SCHEMA_V1)
+        || !advertises("response_schemas", DAEMON_RESPONSE_SCHEMA_V1)
+    {
+        return Err(DaemonSearchFallbackReason::CapabilityEnvelopeSchemaDrift);
+    }
+    if !advertises("methods", METHOD_SEARCH) {
+        return Err(DaemonSearchFallbackReason::CapabilityMethodMissing);
+    }
+    if capabilities
+        .pointer("/authorization/ee.daemon.search")
+        .and_then(serde_json::Value::as_str)
+        != Some("same_uid_workspace")
+    {
+        return Err(DaemonSearchFallbackReason::CapabilityAuthorizationDrift);
+    }
+    if capabilities
+        .pointer("/method_schemas/ee.daemon.search/request")
+        .and_then(serde_json::Value::as_str)
+        != Some(DAEMON_SEARCH_REQUEST_SCHEMA_V1)
+        || capabilities
+            .pointer("/method_schemas/ee.daemon.search/response")
+            .and_then(serde_json::Value::as_str)
+            != Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V1)
+    {
+        return Err(DaemonSearchFallbackReason::CapabilityMethodSchemaDrift);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn search_via_daemon(
+    args: &SearchArgs,
+    options: &SearchOptions,
+    kind_filter: Option<&str>,
+) -> Result<(serde_json::Value, String), DaemonSearchFallbackReason> {
+    use crate::daemon::protocol::DaemonRequest;
+    use crate::daemon::server::{
+        DaemonSearchParams, DaemonSearchResult, METHOD_CAPABILITIES, METHOD_SEARCH,
+        client_round_trip,
+    };
+
+    if let Some(reason) = daemon_search_unsupported_reason(args) {
+        return Err(reason);
+    }
+    let socket_path = args
+        .daemon_socket
+        .clone()
+        .unwrap_or_else(crate::daemon::default_daemon_socket_path);
+    let agent_id = crate::core::memory_scope::current_agent_name()
+        .unwrap_or_else(|| "ee-cli-search".to_owned());
+    let capabilities_request = DaemonRequest::new(
+        format!("search-capabilities-{}", std::process::id()),
+        agent_id.clone(),
+        METHOD_CAPABILITIES,
+        serde_json::json!({}),
+    );
+    let capabilities_response = client_round_trip(&socket_path, &capabilities_request)
+        .map_err(|_| DaemonSearchFallbackReason::CapabilityRoundTripFailed)?;
+    if capabilities_response.error.is_some() {
+        return Err(DaemonSearchFallbackReason::CapabilityMethodError);
+    }
+    let capabilities = capabilities_response
+        .result
+        .as_ref()
+        .ok_or(DaemonSearchFallbackReason::CapabilityMethodError)?;
+    validate_daemon_search_capabilities(capabilities)?;
+
+    let params = DaemonSearchParams::from_search_options(options, kind_filter, &args.field_filters);
+    let params = serde_json::to_value(params)
+        .map_err(|_| DaemonSearchFallbackReason::RequestEncodingFailed)?;
+    let workspace_id = options.workspace_path.display().to_string();
+    let mut request = DaemonRequest::new(
+        format!("search-{}", std::process::id()),
+        agent_id,
+        METHOD_SEARCH,
+        params,
+    );
+    request.workspace_id = Some(workspace_id);
+    let response = client_round_trip(&socket_path, &request)
+        .map_err(|_| DaemonSearchFallbackReason::SearchRoundTripFailed)?;
+    if response.error.is_some() {
+        return Err(DaemonSearchFallbackReason::SearchMethodError);
+    }
+    let result = response
+        .result
+        .ok_or(DaemonSearchFallbackReason::SearchResultMissing)?;
+    DaemonSearchResult::from_value(result)
+        .map(DaemonSearchResult::into_renderings)
+        .map_err(|_| DaemonSearchFallbackReason::SearchResponseDrift)
+}
+
+#[cfg(not(unix))]
+fn search_via_daemon(
+    args: &SearchArgs,
+    _options: &SearchOptions,
+    _kind_filter: Option<&str>,
+) -> Result<(serde_json::Value, String), DaemonSearchFallbackReason> {
+    if let Some(reason) = daemon_search_unsupported_reason(args) {
+        return Err(reason);
+    }
+    Err(DaemonSearchFallbackReason::PlatformUnsupported)
+}
+
+fn write_daemon_search_renderings<W>(
+    cli: &Cli,
+    response: &serde_json::Value,
+    human: &str,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, human),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
 fn handle_search<W, E>(
     cli: &Cli,
     args: &SearchArgs,
@@ -44470,6 +44705,17 @@ where
         filter_parse_start.elapsed(),
     ));
 
+    let daemon_fallback = if args.use_daemon {
+        match search_via_daemon(args, &options, kind_filter.as_deref()) {
+            Ok((response, human)) => {
+                return write_daemon_search_renderings(cli, &response, &human, stdout);
+            }
+            Err(reason) => Some(daemon_search_fallback_degradation(reason)),
+        }
+    } else {
+        None
+    };
+
     if args.explain_performance {
         let core_search_start = Instant::now();
         return match run_search_with_performance_and_filters(
@@ -44477,7 +44723,10 @@ where
             kind_filter.as_deref(),
             &typed_field_filters,
         ) {
-            Ok(run) => {
+            Ok(mut run) => {
+                if let Some(degradation) = daemon_fallback {
+                    run.report.degraded.push(degradation);
+                }
                 command_timings.push(cli_performance_timing_json(
                     "command::coreSearch",
                     core_search_start.elapsed(),
@@ -44516,27 +44765,32 @@ where
     }
 
     match run_search_with_filters(&options, kind_filter.as_deref(), &typed_field_filters) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &report.human_summary())
+        Ok(mut report) => {
+            if let Some(degradation) = daemon_fallback {
+                report.degraded.push(degradation);
             }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(format_search_toon_with_mesh(&report, args.mesh_mode) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_stdout(
-                stdout,
-                &(format_search_json_with_mesh_and_recalibration(
-                    &report,
-                    args.mesh_mode,
-                    recalibration.as_ref(),
-                    args.explain.then_some("data.results"),
-                ) + "\n"),
-            ),
-        },
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &report.human_summary())
+                }
+                output::Renderer::Toon => write_stdout(
+                    stdout,
+                    &(format_search_toon_with_mesh(&report, args.mesh_mode) + "\n"),
+                ),
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => write_stdout(
+                    stdout,
+                    &(format_search_json_with_mesh_and_recalibration(
+                        &report,
+                        args.mesh_mode,
+                        recalibration.as_ref(),
+                        args.explain.then_some("data.results"),
+                    ) + "\n"),
+                ),
+            }
+        }
         Err(error) => write_search_error(
             &error,
             cli.wants_json() || args.explain_performance,
@@ -80897,6 +81151,143 @@ mod tests {
             }
             _ => Err("expected Search command".to_string()),
         }
+    }
+
+    #[test]
+    fn search_command_parses_opt_in_daemon_flags() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "search",
+            "release",
+            "--use-daemon",
+            "--daemon-socket",
+            "/tmp/ee-search.sock",
+        ])
+        .map_err(|error| format!("failed to parse daemon search: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Search(args)) => {
+                ensure_equal(&args.use_daemon, &true, "daemon search opt-in")?;
+                ensure_equal(
+                    &args.daemon_socket,
+                    &Some(PathBuf::from("/tmp/ee-search.sock")),
+                    "daemon search socket",
+                )
+            }
+            other => Err(format!("expected Search command, got {other:?}")),
+        }
+    }
+
+    fn daemon_search_capabilities_fixture() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": "ee.daemon",
+            "request_schemas": [crate::daemon::DAEMON_REQUEST_SCHEMA_V1],
+            "response_schemas": [crate::daemon::DAEMON_RESPONSE_SCHEMA_V1],
+            "methods": [crate::daemon::server::METHOD_SEARCH],
+            "authorization": {
+                "ee.daemon.search": "same_uid_workspace"
+            },
+            "method_schemas": {
+                "ee.daemon.search": {
+                    "request": crate::daemon::server::DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+                    "response": crate::daemon::server::DAEMON_SEARCH_RESPONSE_SCHEMA_V1
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn daemon_search_capability_negotiation_rejects_method_and_schema_drift() {
+        let capabilities = daemon_search_capabilities_fixture();
+        assert_eq!(validate_daemon_search_capabilities(&capabilities), Ok(()));
+
+        let mut missing_method = capabilities.clone();
+        missing_method["methods"] = serde_json::json!([]);
+        assert_eq!(
+            validate_daemon_search_capabilities(&missing_method),
+            Err(DaemonSearchFallbackReason::CapabilityMethodMissing)
+        );
+
+        let mut schema_drift = capabilities;
+        schema_drift["method_schemas"]["ee.daemon.search"]["response"] =
+            serde_json::json!("ee.daemon.search.response.v2");
+        assert_eq!(
+            validate_daemon_search_capabilities(&schema_drift),
+            Err(DaemonSearchFallbackReason::CapabilityMethodSchemaDrift)
+        );
+    }
+
+    #[test]
+    fn daemon_search_fallback_degradation_is_stable() {
+        let degradation = daemon_search_fallback_degradation(
+            DaemonSearchFallbackReason::CapabilityMethodSchemaDrift,
+        );
+        ensure_equal(
+            &degradation.code,
+            &DAEMON_SEARCH_FALLBACK_CODE.to_owned(),
+            "daemon fallback code",
+        )?;
+        ensure_equal(
+            &degradation.severity,
+            &"warning".to_owned(),
+            "daemon fallback severity",
+        )?;
+        ensure_contains(
+            &degradation.message,
+            "search method schema drift",
+            "daemon fallback reason",
+        )?;
+        ensure_equal(
+            &degradation.repair,
+            &Some("ee daemon status --json".to_owned()),
+            "daemon fallback repair",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_search_unavailable_socket_returns_local_fallback_reason() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let missing_socket = temp.path().join("missing-daemon.sock");
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "search",
+            "release",
+            "--use-daemon",
+            "--daemon-socket",
+            missing_socket
+                .to_str()
+                .ok_or_else(|| "temp socket path must be UTF-8".to_owned())?,
+        ])
+        .map_err(|error| error.to_string())?;
+        let Some(Command::Search(args)) = parsed.command else {
+            return Err("expected Search command".to_owned());
+        };
+        let options = SearchOptions {
+            workspace_path: temp.path().to_path_buf(),
+            database_path: None,
+            index_dir: None,
+            query: "release".to_owned(),
+            limit: 10,
+            speed: crate::search::SpeedMode::Default,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        };
+        ensure_equal(
+            &search_via_daemon(&args, &options, None),
+            &Err(DaemonSearchFallbackReason::CapabilityRoundTripFailed),
+            "missing daemon socket fallback reason",
+        )
     }
 
     #[test]

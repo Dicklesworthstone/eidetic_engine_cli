@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "daemon_search_fallback",
+  "honesty_only": true,
+  "introduced_by": {
+    "bead": "bd-search-warm-latency-0bh05",
+    "epic_letter": "search-warm-latency"
+  },
+  "surfaces": [
+    "search --use-daemon"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "An opt-in warm daemon search cannot negotiate the exact envelope, method, authorization, and method-specific request/response schemas, or its round-trip fails. The CLI executes canonical in-process search and records why the requested acceleration path was not used.",
+    "setup_commands": [
+      "(no compatible daemon currently running)"
+    ],
+    "invocation": "ee search release --use-daemon --json"
+  },
+  "expected_emission": {
+    "code": "daemon_search_fallback",
+    "severity": "warning",
+    "message_contains": [
+      "Warm daemon search unavailable",
+      "used canonical in-process search"
+    ],
+    "repair_contains": "ee daemon status --json"
+  }
+}
