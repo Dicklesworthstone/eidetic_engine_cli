@@ -2654,7 +2654,7 @@ fn download_embedding_manifest(
             Ok(result) => result.map_err(|error| DomainError::Configuration {
                 message: format!("Failed to download bundled embedding model: {error}"),
                 repair: Some(
-                    "Check network access, or set EE_EMBED_DOWNLOAD=off for lexical-only operation."
+                    "Check network access, or set EE_EMBED_DOWNLOAD=off to prohibit network downloads; verified local models remain usable, with deterministic hash/lexical fallback only when none exists."
                         .to_string(),
                 ),
             }),
@@ -2664,7 +2664,7 @@ fn download_embedding_manifest(
                     EMBEDDING_DOWNLOAD_TIMEOUT.as_secs()
                 ),
                 repair: Some(format!(
-                    "Retry `ee model fetch {DEFAULT_EMBEDDING_MODEL_ALIAS}`, or set EE_EMBED_DOWNLOAD=off for lexical-only operation."
+                    "Retry `ee model fetch {DEFAULT_EMBEDDING_MODEL_ALIAS}`, or set EE_EMBED_DOWNLOAD=off to prohibit network downloads; verified local models remain usable, with deterministic hash/lexical fallback only when none exists."
                 )),
             }),
         }

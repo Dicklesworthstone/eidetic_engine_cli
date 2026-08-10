@@ -2884,7 +2884,7 @@ fn embedding_posture_check_result(
             message,
             error_code: None,
             repair: Some(
-                "Run an embedding operation or pre-download the bundled model with `ee model fetch`; use EE_EMBED_DOWNLOAD=off only for intentional offline hash fallback.",
+                "Run an embedding operation or pre-download the bundled model with `ee model fetch`; EE_EMBED_DOWNLOAD=off prohibits network downloads while retaining verified local models, with deterministic hash/lexical fallback only when none exists.",
             ),
             tier: CheckTier::Advisory,
         }

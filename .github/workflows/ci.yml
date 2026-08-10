@@ -79,6 +79,48 @@ jobs:
           lscpu
           df -T "$RUNNER_TEMP"
 
+      - name: Prove registered Model2Vec fixture without egress
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/ee-daemon-search-target
+        run: |
+          set -euo pipefail
+          if [[ -z "${EE_EMBED_MODEL_FIXTURE_DIR:-}" ]]; then
+            echo "::error::EE_EMBED_MODEL_FIXTURE_DIR is required on the ee-perf runner" >&2
+            exit 1
+          fi
+          if [[ ! -d "$EE_EMBED_MODEL_FIXTURE_DIR" ]]; then
+            echo "::error::EE_EMBED_MODEL_FIXTURE_DIR is not an accessible directory" >&2
+            exit 1
+          fi
+          if ! command -v unshare >/dev/null; then
+            echo "::error::unshare is required for the egress-denied model fixture gate" >&2
+            exit 1
+          fi
+          if ! command -v ip >/dev/null; then
+            echo "::error::ip is required to verify the egress-denied network namespace" >&2
+            exit 1
+          fi
+          unshare --user --map-root-user --net -- bash -euo pipefail <<'EE_UNSHARE'
+            ip link set lo up
+            interfaces=()
+            for interface_path in /sys/class/net/*; do
+              interfaces+=("${interface_path##*/}")
+            done
+            if [[ "${interfaces[*]}" != "lo" ]]; then
+              echo "unexpected interfaces in egress-denied namespace: ${interfaces[*]}" >&2
+              exit 1
+            fi
+            if [[ -n "$(ip route show)" ]]; then
+              echo "unexpected route in egress-denied namespace" >&2
+              ip route show >&2
+              exit 1
+            fi
+            cargo test --locked --test model_bundled_embedding_cli_e2e \
+              registered_model2vec_fixture_is_neural_without_overrides_or_download_path -- \
+              --ignored --exact --nocapture
+          EE_UNSHARE
+
       - name: Enforce cold and warm search p50 budgets
         shell: bash
         env:
