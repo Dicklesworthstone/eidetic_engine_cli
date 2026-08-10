@@ -5039,7 +5039,6 @@ fn search_rerank_posture_json(
         "scoreKind": if rerank_score_count > 0 { "reranked" } else { "rrf_fused" },
         "available": rerank_score_count > 0,
         "degradedCode": unavailable.map(|degradation| degradation.code.as_str()),
-        "permanent": unavailable_is_permanent,
         "advisory": unavailable.map(|degradation| serde_json::json!({
             "code": degradation.code,
             "severity": degradation.severity,
@@ -16763,7 +16762,6 @@ mod tests {
         assert_eq!(posture["scoreKind"], "reranked");
         assert_eq!(posture["available"], true);
         assert!(posture["degradedCode"].is_null());
-        assert_eq!(posture["permanent"], false);
         assert!(posture["advisory"].is_null());
     }
 
@@ -16842,7 +16840,6 @@ mod tests {
         assert_eq!(posture["scoreKind"], "rrf_fused");
         assert_eq!(posture["available"], false);
         assert_eq!(posture["degradedCode"], "rerank_model_unavailable");
-        assert_eq!(posture["permanent"], true);
         assert_eq!(posture["advisory"]["code"], "rerank_model_unavailable");
         assert_eq!(posture["advisory"]["permanent"], true);
         assert!(posture["advisory"]["repair"].is_null());
@@ -16864,7 +16861,6 @@ mod tests {
         assert_eq!(json["rerank"]["scoreKind"], "rrf_fused");
         assert_eq!(json["rerank"]["available"], false);
         assert_eq!(json["rerank"]["degradedCode"], "rerank_model_unavailable");
-        assert_eq!(json["rerank"]["permanent"], true);
         assert_eq!(json["rerank"]["advisory"]["permanent"], true);
         assert_eq!(json["degraded"], serde_json::json!([]));
     }
@@ -16875,11 +16871,10 @@ mod tests {
 
         assert_eq!(degraded.code, "rerank_model_unavailable");
         assert_eq!(degraded.severity, "low");
-        assert!(degraded.message.contains("Search rerank is in auto mode"));
-        assert!(degraded.message.contains("fusion-only ranking"));
+        assert_eq!(degraded.message, RERANK_MODEL_UNAVAILABLE_ADVISORY);
         assert!(degraded.repair.is_none());
         assert!(degraded.is_permanent());
-        assert_eq!(degraded.data_json()["permanent"], true);
+        assert!(degraded.data_json().get("permanent").is_none());
     }
 
     #[test]
@@ -16895,7 +16890,6 @@ mod tests {
 
         assert_eq!(json["degraded"].as_array().map(Vec::len), Some(1));
         assert_eq!(json["degraded"][0]["code"], "rerank_model_unavailable");
-        assert_eq!(json["rerank"]["permanent"], false);
         assert_eq!(json["rerank"]["advisory"]["permanent"], false);
         assert_eq!(
             json["rerank"]["advisory"]["resolution"],

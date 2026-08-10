@@ -60,15 +60,6 @@ expression: search
         "sources": [
           "search"
         ]
-      },
-      {
-        "code": "rerank_model_unavailable",
-        "message": "Search rerank is in auto mode, but the local reranker is unavailable; returning fusion-only ranking. No reranker model is registered. Read-only search never auto-registers cached artifacts; run the explicit model fetch command first.",
-        "repair": "ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst",
-        "severity": "low",
-        "sources": [
-          "search"
-        ]
       }
     ],
     "embed_backend": "hash_fallback",
@@ -162,6 +153,14 @@ expression: search
       "strictSourceMode": false
     },
     "rerank": {
+      "advisory": {
+        "code": "rerank_model_unavailable",
+        "message": "No usable local reranker is registered; this build cannot fetch or bundle one automatically. Search is using fusion-only ranking.",
+        "permanent": true,
+        "repair": null,
+        "resolution": "operator_supplied_artifact_required",
+        "severity": "low"
+      },
       "available": false,
       "configured": "auto",
       "degradedCode": "rerank_model_unavailable",
@@ -311,15 +310,6 @@ expression: search
       "message": "Embedding model unavailable (active embedder source frankensearch_hash_fallback reports semantic=false); semantic similarity is disabled and lexical search remains available.",
       "repair": "ee index reembed --workspace .",
       "severity": "warning",
-      "sources": [
-        "search"
-      ]
-    },
-    {
-      "code": "rerank_model_unavailable",
-      "message": "Search rerank is in auto mode, but the local reranker is unavailable; returning fusion-only ranking. No reranker model is registered. Read-only search never auto-registers cached artifacts; run the explicit model fetch command first.",
-      "repair": "ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst",
-      "severity": "low",
       "sources": [
         "search"
       ]

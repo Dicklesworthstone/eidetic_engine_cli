@@ -123,7 +123,7 @@ assert_jq "$search_one" '.data.rerank.mode == "fusion_only_degraded"' "missing r
 assert_jq "$search_one" '.data.rerank.available == false' "missing reranker is not reported available"
 assert_jq "$search_one" '.data.rerank.scoreKind == "rrf_fused"' "fusion-only scoreKind is explicit"
 assert_jq "$search_one" '.data.rerank.degradedCode == "rerank_model_unavailable"' "rerank degraded code is explicit"
-assert_jq "$search_one" '.data.rerank.permanent == true' "rerank capability gap is permanent"
+assert_jq "$search_one" '.data.rerank | has("permanent") | not' "rerank permanence is scoped to the advisory"
 assert_jq "$search_one" '.data.rerank.advisory.code == "rerank_model_unavailable"' \
     "rerank posture carries one structured advisory"
 assert_jq "$search_one" '.data.rerank.advisory.permanent == true' \
@@ -161,7 +161,6 @@ assert_jq "$search_two" '.data.rerank == {
     "scoreKind": "rrf_fused",
     "available": false,
     "degradedCode": "rerank_model_unavailable",
-    "permanent": true,
     "advisory": {
         "code": "rerank_model_unavailable",
         "severity": "low",

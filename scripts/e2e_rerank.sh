@@ -315,7 +315,9 @@ case "${rerank_mode}" in
         fi
         assert_jq_file "${hybrid_file}" '.data.rerank.available' "false" "degraded mode reports unavailable"
         assert_jq_file "${hybrid_file}" '.data.rerank.degradedCode' "rerank_model_unavailable" "degraded mode names rerank_model_unavailable"
-        assert_jq_file "${hybrid_file}" '((.data.degraded // .degraded // []) | map(.code) | contains(["rerank_model_unavailable"]))' "true" "degraded array includes rerank_model_unavailable"
+        assert_jq_file "${hybrid_file}" '.data.rerank.advisory.code' "rerank_model_unavailable" "rerank posture carries the unavailable advisory"
+        assert_jq_file "${hybrid_file}" '.data.rerank.advisory.permanent' "true" "unregistered reranker is a permanent capability gap"
+        assert_jq_file "${hybrid_file}" '((.data.degraded // .degraded // []) | map(.code) | contains(["rerank_model_unavailable"]))' "false" "permanent reranker gap stays out of query degradation prose"
         assert_jq_file "${hybrid_file}" '((.data.results // []) | map(select(.scoreKind == "reranked" or has("rerankScore"))) | length)' "0" "fusion-only degraded results omit rerankScore"
 
         run_ee_json "search_hybrid_degraded_replay" search "${QUERY}" --limit 3 --relevance-floor 0 --json

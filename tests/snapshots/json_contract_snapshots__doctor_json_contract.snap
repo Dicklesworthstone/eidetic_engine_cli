@@ -24,6 +24,12 @@ expression: doctor
         "tier": "advisory"
       },
       {
+        "message": "Permanent capability gap: no usable local reranker is registered. Search uses fusion-only ranking. This build cannot fetch or bundle a reranker automatically; no automatic repair command exists. An operator-supplied artifact is required to enable reranking.",
+        "name": "reranker_posture",
+        "severity": "warning",
+        "tier": "advisory"
+      },
+      {
         "message": "Workspace inspected at [WORKSPACE].",
         "name": "workspace",
         "severity": "ok",

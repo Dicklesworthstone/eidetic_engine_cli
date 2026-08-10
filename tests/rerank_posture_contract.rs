@@ -70,7 +70,7 @@ fn repeated_permanent_rerank_rows_collapse_into_one_structured_posture_advisory(
         ScoreSource::Hybrid.score_kind()
     );
     assert_eq!(json["rerank"]["degradedCode"], "rerank_model_unavailable");
-    assert_eq!(json["rerank"]["permanent"], true);
+    assert!(json["rerank"].get("permanent").is_none());
     assert_eq!(
         json["rerank"]["advisory"]["code"],
         "rerank_model_unavailable"
@@ -96,7 +96,7 @@ fn transient_reranker_load_failure_remains_a_query_degradation() {
 
     let json = report.data_json();
 
-    assert_eq!(json["rerank"]["permanent"], false);
+    assert!(json["rerank"].get("permanent").is_none());
     assert_eq!(json["rerank"]["advisory"]["permanent"], false);
     assert_eq!(
         json["rerank"]["advisory"]["resolution"],
