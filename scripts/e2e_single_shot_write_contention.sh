@@ -146,12 +146,15 @@ for ((w = 1; w <= WRITERS; w++)); do
 done
 expected_memories=$((expected_total - expected_journal))
 
-journal_json="$("${REAL_EE}" --workspace "${WS}" journal list --limit 500 --json 2>/dev/null)"
+journal_stderr="${LOG_DIR}/journal-list.stderr"
+journal_json="$("${REAL_EE}" --workspace "${WS}" journal list --limit 500 --json 2>"${journal_stderr}")"
+journal_rc=$?
 journal_count="$(jq -r '[.data.entries // .data.journalEntries // [] | length] | first' <<<"${journal_json}" 2>/dev/null || echo -1)"
-if [[ "${journal_count}" == "${expected_journal}" ]]; then
+if [[ "${journal_rc}" -eq 0 && "${journal_count}" == "${expected_journal}" ]]; then
     event journal_rows_persisted pass
 else
-    event journal_rows_persisted fail "expected ${expected_journal} journal entries, listed ${journal_count}"
+    event journal_rows_persisted fail \
+        "expected ${expected_journal} journal entries, rc=${journal_rc}, listed=${journal_count}; stderr=$(head -c 240 "${journal_stderr}"); stdout=$(head -c 240 <<<"${journal_json}")"
 fi
 
 memory_rows="${LOG_DIR}/remembered.rows"
@@ -168,9 +171,11 @@ show_failures=0
 show_diagnosis=""
 while read -r _ label memory_id; do
     [[ -n "${memory_id:-}" ]] || continue
-    show_json="$("${REAL_EE}" --workspace "${WS}" memory show "${memory_id}" --json 2>/dev/null)"
+    show_stderr="${LOG_DIR}/memory-show-${label}.stderr"
+    show_json="$("${REAL_EE}" --workspace "${WS}" memory show "${memory_id}" --json 2>"${show_stderr}")"
+    show_rc=$?
     expected_content="contention fact ${label}"
-    if ! jq -e --arg memory_id "${memory_id}" --arg content "${expected_content}" '
+    if [[ "${show_rc}" -ne 0 ]] || ! jq -e --arg memory_id "${memory_id}" --arg content "${expected_content}" '
         .schema == "ee.response.v2"
         and .success == true
         and .data.found == true
@@ -179,7 +184,7 @@ while read -r _ label memory_id; do
     ' <<<"${show_json}" >/dev/null; then
         show_failures=$((show_failures + 1))
         if [[ -z "${show_diagnosis}" ]]; then
-            show_diagnosis="${label}/${memory_id}: $(head -c 240 <<<"${show_json}")"
+            show_diagnosis="${label}/${memory_id}: rc=${show_rc}; stderr=$(head -c 240 "${show_stderr}"); stdout=$(head -c 240 <<<"${show_json}")"
         fi
     fi
 done <"${memory_rows}"
@@ -189,12 +194,16 @@ else
     event every_remember_response_is_durably_readable fail "showFailures=${show_failures}; first=${show_diagnosis:-missing response IDs}"
 fi
 
-memory_json="$("${REAL_EE}" --workspace "${WS}" search "contention fact" --limit 100 --json 2>/dev/null)"
+search_stderr="${LOG_DIR}/search.stderr"
+memory_json="$("${REAL_EE}" --workspace "${WS}" search "contention fact" --limit 100 \
+    --source-mode lexical_only --strict-source-mode --json 2>"${search_stderr}")"
+search_rc=$?
 memory_count="$(jq -r '.data.resultCount // (.data.results | length) // -1' <<<"${memory_json}" 2>/dev/null || echo -1)"
-if [[ "${memory_count}" == "${expected_memories}" ]]; then
+if [[ "${search_rc}" -eq 0 && "${memory_count}" == "${expected_memories}" ]]; then
     event remembered_facts_searchable pass
 else
-    event remembered_facts_searchable fail "expected ${expected_memories} searchable facts, resultCount=${memory_count}"
+    event remembered_facts_searchable fail \
+        "expected ${expected_memories} searchable facts, rc=${search_rc}, resultCount=${memory_count}; stderr=$(head -c 240 "${search_stderr}"); stdout=$(head -c 240 <<<"${memory_json}")"
 fi
 
 echo
