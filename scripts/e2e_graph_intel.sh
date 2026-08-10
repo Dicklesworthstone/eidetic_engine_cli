@@ -74,6 +74,16 @@ else
     event empty_graph_reports_insufficient fail "exit ${LAST_EXIT}; $(head -c 250 "${LAST_STDOUT}")"
 fi
 
+# --- graph diff with no snapshots reports the honest missing code --------
+run_ee graph diff --workspace "${WS}" --json
+if [[ "${LAST_EXIT}" -eq 0 ]] \
+    && jq -e '[.degraded[]? | select(.code == "graph_diff_snapshot_missing")] | length >= 1' \
+        "${LAST_STDOUT}" >/dev/null 2>&1; then
+    event diff_without_snapshots_reports_missing pass
+else
+    event diff_without_snapshots_reports_missing fail "exit ${LAST_EXIT}; $(head -c 250 "${LAST_STDOUT}")"
+fi
+
 # --- corpus: a hub pattern (a-c, b-c linked; a,b share tags) -------------
 run_ee remember "Always run the schema drift gate before altering public JSON contracts." \
     --workspace "${WS}" --level procedural --kind rule --tags "contracts,gates" --json
@@ -199,6 +209,36 @@ if [[ "${LAST_EXIT}" -ne 0 ]] && grep -q 'conflict_resolve_stale_surface' "${LAS
     event resolved_pair_rerun_refused_stale pass
 else
     event resolved_pair_rerun_refused_stale fail "exit ${LAST_EXIT}; $(head -c 250 "${LAST_STDOUT}")"
+fi
+
+# --- graph diff between two real snapshots (bd-3a1op.5) ------------------
+# Snapshot the pre-resolve-era graph, grow it, snapshot again, then diff.
+run_ee graph snapshot refresh --graph memory_links --workspace "${WS}" --json
+SNAP1_EXIT=$LAST_EXIT
+run_ee remember "Diff-era memory: the snapshot family gained a node." \
+    --workspace "${WS}" --level semantic --kind fact --tags "diff" --json
+MEM_D="$(remember_id)"
+run_ee memory link "${MEM_C}" "${MEM_D}" --relation related --workspace "${WS}" --json
+LINK_CD=$LAST_EXIT
+run_ee graph snapshot refresh --graph memory_links --workspace "${WS}" --json
+SNAP2_EXIT=$LAST_EXIT
+if [[ "${SNAP1_EXIT}" -eq 0 && "${LINK_CD}" -eq 0 && "${SNAP2_EXIT}" -eq 0 && -n "${MEM_D}" ]]; then
+    event diff_snapshots_prepared pass
+else
+    event diff_snapshots_prepared fail "snap1=${SNAP1_EXIT} link=${LINK_CD} snap2=${SNAP2_EXIT} d=${MEM_D}"
+fi
+
+run_ee graph diff --graph memory_links --workspace "${WS}" --json
+if [[ "${LAST_EXIT}" -eq 0 ]] \
+    && jq -e --arg d "${MEM_D}" \
+        '.data.report.schema == "ee.graph.diff.v1"
+         and (.data.report.summary.edgesAdded >= 1)
+         and ([.data.report.nodesAdded[]? | select(. == $d)] | length == 1)
+         and (.data.report.detailCap >= 1)' \
+        "${LAST_STDOUT}" >/dev/null 2>&1; then
+    event diff_reports_planted_growth pass
+else
+    event diff_reports_planted_growth fail "exit ${LAST_EXIT}; $(head -c 300 "${LAST_STDOUT}")"
 fi
 
 echo
