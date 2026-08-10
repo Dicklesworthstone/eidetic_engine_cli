@@ -5077,6 +5077,72 @@ fn proof_broker_unknown_local_cargo_policy_fails_closed() -> TestResult {
 }
 
 #[test]
+fn proof_broker_informational_local_cargo_policies_remain_nonblocking() -> TestResult {
+    let ledger = unique_tmp_path("proof-broker-local-informational-ledger").join("ledger.json");
+    fs::create_dir_all(
+        ledger
+            .parent()
+            .ok_or_else(|| "ledger path missing parent".to_owned())?,
+    )
+    .map_err(|error| format!("create proof-broker ledger dir: {error}"))?;
+    fs::write(&ledger, "[]").map_err(|error| format!("write proof-broker ledger: {error}"))?;
+    let ledger_arg = ledger
+        .to_str()
+        .ok_or_else(|| "ledger path is not utf-8".to_owned())?;
+    let informational_tripwire = r#"{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"ok","count":0,"processes":[{"policyStatus":"editor_tooling_informational"}],"detectedLocalBuilds":[{"policyStatus":"unkillable_stale_informational"}]}"#;
+
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--skip-build-admission",
+            "--proof-broker-ledger",
+            ledger_arg,
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "proof_broker_local_informational",
+        ],
+        &[
+            ("RCH_VERIFY_PROOF_BROKER_NATIVE", "1"),
+            (
+                "RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON",
+                informational_tripwire,
+            ),
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "Selected worker: css\n[RCH] remote css (0.1s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "css"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "css"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "informational local tooling should remain nonblocking\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse informational proof report: {error}"))?;
+    if report["status"] != "remote_pass"
+        || report["proof_broker"]["verdict"] != "dispatch_allowed"
+        || report["proof_broker"]["fingerprint"]["localCargoTripwireClass"]
+            != "class:tripwire_clean"
+        || report["proof_broker"]["remoteCargoLaunched"] != true
+        || degraded_contains(&report, "rch_verify_local_cargo_process_policy_unknown")?
+        || degraded_contains(
+            &report,
+            "rch_verify_proof_broker_unknown_insufficient_evidence",
+        )?
+    {
+        return Err(format!(
+            "informational local tooling did not remain clean and remote: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn proof_broker_explicit_bypass_runs_remote_and_records_reason() -> TestResult {
     let ledger = unique_tmp_path("proof-broker-explicit-bypass-ledger").join("ledger.json");
     fs::create_dir_all(
