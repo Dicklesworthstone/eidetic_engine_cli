@@ -13121,9 +13121,11 @@ permanent advisory. Message contains: `No usable local reranker is registered
 ... fusion-only ranking`. The code is omitted from the per-query `degraded[]`
 and human degradation prose.
 
-**Repair hint.** None. This build cannot fetch or bundle a reranker
-automatically; `ee doctor` reports that an operator-supplied artifact is
-required rather than inventing a placeholder path.
+**Repair hint.** Network fetch and bundled installation remain unavailable.
+Import a verified operator-supplied artifact with
+`ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst`.
+The same exact command is carried by the structured rerank advisory and
+`ee doctor`.
 
 Registered-artifact registry or load failures are transient uses of the same
 code. They remain in the affected query's `degraded[]`; the structured rerank

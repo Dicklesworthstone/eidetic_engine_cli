@@ -1,7 +1,7 @@
 use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::core::search::{
-    RERANK_MODEL_UNAVAILABLE_ADVISORY, ScoreSource, SearchDegradation, SearchHit, SearchReport,
-    SearchSourceMode, SearchStatus,
+    RERANK_MODEL_OFFLINE_IMPORT_COMMAND, RERANK_MODEL_UNAVAILABLE_ADVISORY, ScoreSource,
+    SearchDegradation, SearchHit, SearchReport, SearchSourceMode, SearchStatus,
 };
 use ee::models::{EmbedBackend, MemoryScope, MemoryScopeStats};
 
@@ -40,23 +40,25 @@ fn empty_search_report(degraded: Vec<SearchDegradation>) -> SearchReport {
 }
 
 #[test]
-fn repeated_permanent_rerank_rows_collapse_into_one_structured_posture_advisory() {
+fn duplicate_permanent_rerank_rows_collapse_within_each_structured_response() {
     let report = empty_search_report(vec![
         SearchDegradation {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
             message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-            repair: None,
+            repair: Some(RERANK_MODEL_OFFLINE_IMPORT_COMMAND.to_string()),
         },
         SearchDegradation {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
             message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-            repair: None,
+            repair: Some(RERANK_MODEL_OFFLINE_IMPORT_COMMAND.to_string()),
         },
     ]);
 
+    let human = report.human_summary();
     let json = report.data_json();
+    let repeated_json = report.data_json();
 
     assert_eq!(json["resultCount"], 0);
     assert_eq!(json["rerank"]["schema"], "ee.rerank_posture.v1");
@@ -76,12 +78,18 @@ fn repeated_permanent_rerank_rows_collapse_into_one_structured_posture_advisory(
         "rerank_model_unavailable"
     );
     assert_eq!(json["rerank"]["advisory"]["permanent"], true);
-    assert!(json["rerank"]["advisory"]["repair"].is_null());
+    assert_eq!(
+        json["rerank"]["advisory"]["repair"],
+        RERANK_MODEL_OFFLINE_IMPORT_COMMAND
+    );
+    assert_eq!(repeated_json["rerank"], json["rerank"]);
     assert_eq!(
         json["degraded"].as_array().map_or(0, |rows| rows.len()),
         0,
         "permanent capability posture must not repeat in per-query degraded output"
     );
+    assert!(!human.contains(RERANK_MODEL_UNAVAILABLE_ADVISORY));
+    assert!(!human.contains(RERANK_MODEL_OFFLINE_IMPORT_COMMAND));
 }
 
 #[test]

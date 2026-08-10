@@ -97,6 +97,8 @@ const SEARCH_ANALYSIS_CREATED_AT_KEY: &str = "_ee_analysis_created_at";
 const EMBED_MODEL_UNAVAILABLE_MODEL_ID: &str = "EE_EMBED_MODEL_PATH";
 const DEFAULT_SEARCH_RERANK_TOP_K: usize = 50;
 pub const RERANK_MODEL_UNAVAILABLE_ADVISORY: &str = "No usable local reranker is registered; this build cannot fetch or bundle one automatically. Search is using fusion-only ranking.";
+pub const RERANK_MODEL_OFFLINE_IMPORT_COMMAND: &str =
+    "ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst";
 const RERANK_MODEL_TOKENIZER: &str = "tokenizer.json";
 const RERANK_MODEL_SAFETENSORS_PRIMARY: &str = "model_f32.safetensors";
 const RERANK_MODEL_SAFETENSORS_FALLBACK: &str = "model.safetensors";
@@ -1437,7 +1439,7 @@ impl SearchDegradation {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
             message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-            repair: None,
+            repair: Some(RERANK_MODEL_OFFLINE_IMPORT_COMMAND.to_string()),
         }
     }
 
@@ -5053,7 +5055,11 @@ fn search_rerank_posture_json(
             } else {
                 degradation.message.as_str()
             },
-            "repair": degradation.repair.as_deref(),
+            "repair": if unavailable_is_permanent {
+                Some(RERANK_MODEL_OFFLINE_IMPORT_COMMAND)
+            } else {
+                degradation.repair.as_deref()
+            },
             "resolution": if unavailable_is_permanent {
                 "operator_supplied_artifact_required"
             } else {
@@ -16884,7 +16890,10 @@ mod tests {
         assert_eq!(posture["degradedCode"], "rerank_model_unavailable");
         assert_eq!(posture["advisory"]["code"], "rerank_model_unavailable");
         assert_eq!(posture["advisory"]["permanent"], true);
-        assert!(posture["advisory"]["repair"].is_null());
+        assert_eq!(
+            posture["advisory"]["repair"],
+            RERANK_MODEL_OFFLINE_IMPORT_COMMAND
+        );
         assert_eq!(
             posture["advisory"]["resolution"],
             "operator_supplied_artifact_required"
@@ -16914,7 +16923,10 @@ mod tests {
         assert_eq!(degraded.code, "rerank_model_unavailable");
         assert_eq!(degraded.severity, "low");
         assert_eq!(degraded.message, RERANK_MODEL_UNAVAILABLE_ADVISORY);
-        assert!(degraded.repair.is_none());
+        assert_eq!(
+            degraded.repair.as_deref(),
+            Some(RERANK_MODEL_OFFLINE_IMPORT_COMMAND)
+        );
         assert!(degraded.is_permanent());
         assert!(degraded.data_json().get("permanent").is_none());
     }
@@ -16951,6 +16963,8 @@ mod tests {
         let json = report.data_json();
 
         assert!(!human.contains("rerank_model_unavailable"));
+        assert!(!human.contains(RERANK_MODEL_UNAVAILABLE_ADVISORY));
+        assert!(!human.contains(RERANK_MODEL_OFFLINE_IMPORT_COMMAND));
         assert!(human.contains("search_index_stale"));
         assert_eq!(json["degraded"].as_array().map(Vec::len), Some(1));
         assert_eq!(json["degraded"][0]["code"], "search_index_stale");

@@ -24,8 +24,9 @@ expression: doctor
         "tier": "advisory"
       },
       {
-        "message": "Permanent capability gap: no usable local reranker is registered. Search uses fusion-only ranking. This build cannot fetch or bundle a reranker automatically; no automatic repair command exists. An operator-supplied artifact is required to enable reranking.",
+        "message": "Permanent capability gap: no usable local reranker is registered. Search uses fusion-only ranking. Network fetch and bundled reranker installation are unavailable; import a verified operator-supplied artifact with `ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst`.",
         "name": "reranker_posture",
+        "repair": "ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst",
         "severity": "warning",
         "tier": "advisory"
       },
