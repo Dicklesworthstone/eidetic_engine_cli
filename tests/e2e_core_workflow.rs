@@ -260,6 +260,123 @@ fn init_publishes_ready_empty_search_index() -> TestResult {
 }
 
 #[test]
+fn remember_three_memories_keeps_search_index_fresh_without_manual_rebuild() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(&init.status.code(), &Some(EXIT_SUCCESS), "init exit code")?;
+    assert_stderr_empty(&init, "init")?;
+
+    let mut memory_ids = BTreeSet::new();
+    for content in [
+        "Freshness cohort marker alpha release evidence.",
+        "Freshness cohort marker beta release evidence.",
+        "Freshness cohort marker gamma release evidence.",
+    ] {
+        let remember = run_ee(&[
+            "--workspace",
+            &workspace,
+            "remember",
+            content,
+            "--level",
+            "semantic",
+            "--kind",
+            "fact",
+            "--no-auto-link",
+            "--json",
+        ])?;
+        ensure_equal(
+            &remember.status.code(),
+            &Some(EXIT_SUCCESS),
+            "remember exit code",
+        )?;
+        assert_stderr_empty(&remember, "remember")?;
+        let remember_json = stdout_json(&remember)?;
+        assert_schema(&remember_json, "ee.response.v2", "remember")?;
+        ensure_equal(
+            &remember_json.pointer("/data/index_status"),
+            &Some(&serde_json::json!("indexed")),
+            "remember synchronously indexes the stored memory",
+        )?;
+        memory_ids
+            .insert(json_str(&remember_json, "/data/memory_id", "remember memory id")?.to_owned());
+    }
+    ensure_equal(&memory_ids.len(), &3usize, "three distinct memories")?;
+
+    let status = run_ee(&["--workspace", &workspace, "index", "status", "--json"])?;
+    ensure_equal(
+        &status.status.code(),
+        &Some(EXIT_SUCCESS),
+        "index status exit code",
+    )?;
+    assert_stderr_empty(&status, "index status")?;
+    let status_json = stdout_json(&status)?;
+    assert_schema(&status_json, "ee.response.v2", "index status")?;
+    ensure_equal(
+        &status_json.pointer("/data/health"),
+        &Some(&serde_json::json!("ready")),
+        "index health after remembers",
+    )?;
+    ensure_equal(
+        &status_json.pointer("/data/indexDocumentCount"),
+        &Some(&serde_json::Value::from(3)),
+        "index contains all remembered documents",
+    )?;
+    ensure_equal(
+        &status_json.pointer("/data/indexDocumentCounts/memories"),
+        &Some(&serde_json::Value::from(3)),
+        "memory index count after remembers",
+    )?;
+    ensure_equal(
+        &status_json.pointer("/data/indexGeneration"),
+        &status_json.pointer("/data/dbGeneration"),
+        "remember keeps index generation equal to database generation",
+    )?;
+    ensure_equal(
+        &status_json.pointer("/data/actualCorpusRevision"),
+        &status_json.pointer("/data/expectedCorpusRevision"),
+        "remember keeps the indexed corpus revision current",
+    )?;
+
+    let search = run_ee(&[
+        "--workspace",
+        &workspace,
+        "search",
+        "freshness cohort marker",
+        "--source-mode",
+        "lexical_only",
+        "--limit",
+        "10",
+        "--json",
+    ])?;
+    ensure_equal(
+        &search.status.code(),
+        &Some(EXIT_SUCCESS),
+        "search exit code",
+    )?;
+    assert_stderr_empty(&search, "search")?;
+    let search_json = stdout_json(&search)?;
+    assert_schema(&search_json, "ee.response.v2", "search")?;
+    let result_ids = json_array(&search_json, "/data/results", "search results")?
+        .iter()
+        .filter_map(|result| result.get("docId").and_then(serde_json::Value::as_str))
+        .collect::<BTreeSet<_>>();
+    ensure(
+        memory_ids
+            .iter()
+            .all(|memory_id| result_ids.contains(memory_id.as_str())),
+        format!("search must return all three newly indexed memories: {search_json}"),
+    )?;
+    ensure(
+        !degraded_codes(&search_json)
+            .iter()
+            .any(|code| *code == "search_index_stale" || *code == "index_stale"),
+        format!("fresh common path must not report a stale index: {search_json}"),
+    )
+}
+
+#[test]
 fn core_workflow_init_remember_search_context_why() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let workspace = tempdir.path().to_string_lossy().to_string();
