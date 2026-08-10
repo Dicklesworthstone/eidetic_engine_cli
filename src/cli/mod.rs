@@ -39693,17 +39693,17 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
                 }
                 out.push_str("The first Next command below is retargeted at the best candidate.\n");
             }
-            _ => {
-                if data
-                    .pointer("/storeDiscovery/truncated")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-                {
-                    out.push_str(
-                        "\nThis store is empty; the nearby-store scan hit its time budget before finishing.\n",
-                    );
-                }
-            }
+            _ => {}
+        }
+        if data
+            .pointer("/storeDiscovery/truncated")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            out.push_str(&format!(
+                "Nearby-store scan hit its {} ms time budget; the candidate list may be incomplete.\n",
+                crate::core::orient::NEARBY_STORE_SCAN_BUDGET_MS
+            ));
         }
     }
     if let Some(revivals) = data.get("revivals").filter(|value| value.is_object()) {
@@ -67034,6 +67034,71 @@ mod tests {
             "limitRepair=ee tripwire check --revivals --limit 3 --workspace . --json",
         ] {
             ensure_contains(&orient, expected, "orient revival human posture")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn orient_human_reports_truncated_nearby_store_scan_with_or_without_candidates() -> TestResult {
+        let nearby_store = serde_json::json!({
+            "workspaceRoot": "/fixture/best-campaign",
+            "storeDir": "/fixture/best-campaign/.ee-campaign",
+            "documents": 17,
+            "lastWrite": "2026-08-10T14:15:16Z"
+        });
+        for nearby_stores in [vec![nearby_store], Vec::new()] {
+            let orient = super::render_orient_human(
+                &serde_json::json!({
+                    "task": "resume campaign",
+                    "workspace": "/fixture/empty-root",
+                    "mode": "fast",
+                    "embed_backend": "hash_fallback",
+                    "storeDiscovery": {
+                        "storeEmpty": true,
+                        "scanned": true,
+                        "truncated": true,
+                        "nearbyStores": nearby_stores
+                    }
+                }),
+                &[],
+            );
+            ensure_contains(
+                &orient,
+                "Nearby-store scan hit its 200 ms time budget; the candidate list may be incomplete.",
+                "orient truncated nearby-store scan",
+            )?;
+        }
+
+        let orient = super::render_orient_human(
+            &serde_json::json!({
+                "task": "resume campaign",
+                "workspace": "/fixture/empty-root",
+                "mode": "fast",
+                "embed_backend": "hash_fallback",
+                "storeDiscovery": {
+                    "storeEmpty": true,
+                    "scanned": true,
+                    "truncated": true,
+                    "nearbyStores": [{
+                        "workspaceRoot": "/fixture/best-campaign",
+                        "storeDir": "/fixture/best-campaign/.ee-campaign",
+                        "documents": 17,
+                        "lastWrite": "2026-08-10T14:15:16Z"
+                    }]
+                }
+            }),
+            &[],
+        );
+        for expected in [
+            "/fixture/best-campaign",
+            "17 docs",
+            "last write 2026-08-10T14:15:16Z",
+        ] {
+            ensure_contains(
+                &orient,
+                expected,
+                "orient populated truncated nearby-store scan",
+            )?;
         }
         Ok(())
     }
