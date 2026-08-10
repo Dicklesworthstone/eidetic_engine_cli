@@ -9138,6 +9138,128 @@ CREATE TABLE retrieval_affinity_cursor (
     "blake3:v102_retrieval_affinity_projection_2026_08_10",
 );
 
+/// V103: Link-proposal and contradiction-review curation candidates
+/// (ADR 0066 / bd-3a1op.3 `--propose`).
+///
+/// Rebuilds `curation_candidates` with the two suggest-links candidate
+/// types admitted to the `candidate_type` CHECK (same FK-relaxed
+/// create/copy/drop/rename shape as V091; the consumed_candidate_id child
+/// keeps referencing the table by name). Both new types carry the
+/// suggestion payload in `proposed_content` (ids, relation, and signal
+/// values — no raw memory bodies) and target `memory_a`.
+pub const V103_SUGGEST_LINK_CANDIDATE_TYPES: Migration = Migration::new(
+    103,
+    "suggest_link_candidate_types",
+    r#"
+CREATE TABLE curation_candidates_v103_new (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'curate_*' AND length(id) = 33),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    candidate_type TEXT NOT NULL CHECK (candidate_type IN (
+        'consolidate', 'promote', 'deprecate', 'supersede', 'tombstone',
+        'merge', 'paraphrase_dedup_proposal', 'split', 'retract', 'rule',
+        'anti_pattern_proposal', 'procedure', 'create_derived_memory',
+        'link_proposal', 'contradiction_review'
+    )),
+    target_memory_id TEXT REFERENCES memories(id) ON DELETE CASCADE,
+    proposed_content TEXT CHECK (proposed_content IS NULL OR length(trim(proposed_content)) > 0),
+    proposed_confidence REAL CHECK (
+        proposed_confidence IS NULL
+        OR (proposed_confidence >= 0.0 AND proposed_confidence <= 1.0)
+    ),
+    proposed_trust_class TEXT CHECK (
+        proposed_trust_class IS NULL OR proposed_trust_class IN (
+            'human_explicit', 'peer_human_attested', 'agent_validated',
+            'agent_assertion', 'cass_evidence', 'legacy_import'
+        )
+    ),
+    source_type TEXT NOT NULL CHECK (source_type IN (
+        'agent_inference', 'rule_engine', 'human_request', 'feedback_event',
+        'contradiction_detected', 'decay_trigger', 'counterfactual_replay'
+    )),
+    source_id TEXT CHECK (source_id IS NULL OR length(trim(source_id)) > 0),
+    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'applied')),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    reviewed_at TEXT CHECK (reviewed_at IS NULL OR length(trim(reviewed_at)) > 0),
+    reviewed_by TEXT CHECK (reviewed_by IS NULL OR length(trim(reviewed_by)) > 0),
+    applied_at TEXT CHECK (applied_at IS NULL OR length(trim(applied_at)) > 0),
+    ttl_expires_at TEXT CHECK (ttl_expires_at IS NULL OR length(trim(ttl_expires_at)) > 0),
+    review_state TEXT NOT NULL DEFAULT 'new' CHECK (review_state IN (
+        'new', 'needs_evidence', 'needs_scope', 'duplicate', 'snoozed',
+        'accepted', 'rejected', 'merged', 'superseded', 'expired', 'applied'
+    )),
+    snoozed_until TEXT CHECK (snoozed_until IS NULL OR length(trim(snoozed_until)) > 0),
+    merged_into_candidate_id TEXT CHECK (merged_into_candidate_id IS NULL OR (
+        merged_into_candidate_id GLOB 'curate_*' AND length(merged_into_candidate_id) = 33
+    )),
+    state_entered_at TEXT CHECK (state_entered_at IS NULL OR length(trim(state_entered_at)) > 0),
+    last_action_at TEXT CHECK (last_action_at IS NULL OR length(trim(last_action_at)) > 0),
+    ttl_policy_id TEXT CHECK (ttl_policy_id IS NULL OR length(trim(ttl_policy_id)) > 0),
+    derivation_source_refs_json TEXT CHECK (
+        derivation_source_refs_json IS NULL
+        OR (length(trim(derivation_source_refs_json)) > 0 AND json_valid(derivation_source_refs_json))
+    ),
+    derivation_metadata_json TEXT CHECK (
+        derivation_metadata_json IS NULL
+        OR (length(trim(derivation_metadata_json)) > 0 AND json_valid(derivation_metadata_json))
+    ),
+    CHECK (
+        (candidate_type = 'create_derived_memory'
+            AND target_memory_id IS NULL
+            AND derivation_source_refs_json IS NOT NULL
+            AND derivation_metadata_json IS NOT NULL)
+        OR
+        (candidate_type != 'create_derived_memory'
+            AND target_memory_id IS NOT NULL
+            AND derivation_source_refs_json IS NULL
+            AND derivation_metadata_json IS NULL)
+    )
+);
+
+INSERT INTO curation_candidates_v103_new (
+    id, workspace_id, candidate_type, target_memory_id, proposed_content,
+    proposed_confidence, proposed_trust_class, source_type, source_id, reason,
+    confidence, status, created_at, reviewed_at, reviewed_by, applied_at,
+    ttl_expires_at, review_state, snoozed_until, merged_into_candidate_id,
+    state_entered_at, last_action_at, ttl_policy_id,
+    derivation_source_refs_json, derivation_metadata_json
+)
+SELECT
+    id, workspace_id, candidate_type, target_memory_id, proposed_content,
+    proposed_confidence, proposed_trust_class, source_type, source_id, reason,
+    confidence, status, created_at, reviewed_at, reviewed_by, applied_at,
+    ttl_expires_at, review_state, snoozed_until, merged_into_candidate_id,
+    state_entered_at, last_action_at, ttl_policy_id,
+    derivation_source_refs_json, derivation_metadata_json
+FROM curation_candidates
+ORDER BY rowid;
+
+DROP TABLE curation_candidates;
+ALTER TABLE curation_candidates_v103_new RENAME TO curation_candidates;
+
+CREATE INDEX idx_curation_candidates_v103_workspace ON curation_candidates(workspace_id);
+CREATE INDEX idx_curation_candidates_v103_target
+    ON curation_candidates(target_memory_id)
+    WHERE target_memory_id IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v103_status ON curation_candidates(status);
+CREATE INDEX idx_curation_candidates_v103_type ON curation_candidates(candidate_type);
+CREATE INDEX idx_curation_candidates_v103_created ON curation_candidates(created_at);
+CREATE INDEX idx_curation_candidates_v103_ttl
+    ON curation_candidates(ttl_expires_at)
+    WHERE ttl_expires_at IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v103_review_state ON curation_candidates(review_state);
+CREATE INDEX idx_curation_candidates_v103_snoozed_until
+    ON curation_candidates(snoozed_until)
+    WHERE snoozed_until IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v103_merged_into
+    ON curation_candidates(merged_into_candidate_id)
+    WHERE merged_into_candidate_id IS NOT NULL;
+"#,
+    "blake3:v103_suggest_link_candidate_types_2026_08_10",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -9242,6 +9364,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V100_PACK_EVIDENCE_ITEMS,
     V101_ATTEMPT_FAMILY_IMMUTABILITY_REPAIR,
     V102_RETRIEVAL_AFFINITY_PROJECTION,
+    V103_SUGGEST_LINK_CANDIDATE_TYPES,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -9295,6 +9418,7 @@ fn migration_requires_foreign_key_relaxation(migration: &Migration) -> bool {
         V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST.version(),
         V096_MEMORY_SENTINEL_POLARITY.version(),
         V102_RETRIEVAL_AFFINITY_PROJECTION.version(),
+        V103_SUGGEST_LINK_CANDIDATE_TYPES.version(),
     ]
     .contains(&migration.version())
 }

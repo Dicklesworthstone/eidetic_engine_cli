@@ -1438,9 +1438,10 @@ impl EffectManifest {
             CommandEffect::read_only_db("graph neighborhood", "Inspect graph neighborhood"),
             CommandEffect::read_only_db("graph pagerank", "Compute graph PageRank scores"),
             CommandEffect::read_only_db("graph path", "Find graph shortest path"),
-            CommandEffect::read_only_db(
+            CommandEffect::durable_write(
                 "graph suggest-links",
-                "Predict missing memory links with bounded, typed, explained blended scoring (ADR 0066); read-only report",
+                vec!["curation_candidates"],
+                "Predict missing memory links with bounded, typed, explained blended scoring (ADR 0066); default is a read-only report, --propose writes link/contradiction-review curation candidates (dedup on re-propose), never links directly",
             ),
             CommandEffect::read_only(
                 "handoff completion-audit",

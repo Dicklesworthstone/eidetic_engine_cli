@@ -443,6 +443,12 @@ pub enum CandidateType {
     Procedure,
     /// Create a new memory derived from typed memory or evidence-span sources.
     CreateDerivedMemory,
+    /// Propose creating a typed memory link from blended link-prediction
+    /// evidence (ADR 0066 `ee graph suggest-links --propose`).
+    LinkProposal,
+    /// Propose reviewing a predicted contradiction between two memories;
+    /// applying records a `contradicts` link that feeds the conflict queue.
+    ContradictionReview,
 }
 
 impl CandidateType {
@@ -462,6 +468,8 @@ impl CandidateType {
             Self::AntiPatternProposal => "anti_pattern_proposal",
             Self::Procedure => "procedure",
             Self::CreateDerivedMemory => "create_derived_memory",
+            Self::LinkProposal => "link_proposal",
+            Self::ContradictionReview => "contradiction_review",
         }
     }
 
@@ -546,6 +554,8 @@ impl FromStr for CandidateType {
             | "create-derived"
             | "derived_memory"
             | "derived-memory" => Ok(Self::CreateDerivedMemory),
+            "link_proposal" | "link-proposal" => Ok(Self::LinkProposal),
+            "contradiction_review" | "contradiction-review" => Ok(Self::ContradictionReview),
             _ => Err(ParseCandidateTypeError {
                 input: input.to_owned(),
             }),
@@ -6043,6 +6053,8 @@ impl CandidateType {
                 | Self::AntiPatternProposal
                 | Self::Procedure
                 | Self::CreateDerivedMemory
+                | Self::LinkProposal
+                | Self::ContradictionReview
         )
     }
 

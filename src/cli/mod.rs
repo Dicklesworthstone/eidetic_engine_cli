@@ -5055,6 +5055,13 @@ pub struct GraphSuggestLinksArgs {
     /// Minimum blended score to include.
     #[arg(long = "min-score", default_value_t = 0.0)]
     pub min_score: f64,
+
+    /// Write each suggestion as a curation candidate (link-creation
+    /// proposals; contradicts-typed suggestions become contradiction-review
+    /// candidates). Never creates links directly; re-proposing a pair
+    /// dedups to the existing candidate.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub propose: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
@@ -33870,10 +33877,101 @@ where
                 "repair": "ee memory link <id> <target-id> --relation related --json  # or add tags; suggestions need some graph evidence",
             }));
         }
+        let workspace_id_for_propose = workspace_id.clone();
+        let mut proposed_ids: Vec<Option<String>> = vec![None; report.suggestions.len()];
+        if args.propose {
+            let Some(workspace_id) = workspace_id_for_propose.as_deref() else {
+                let domain_error = DomainError::Storage {
+                    message: "Cannot propose candidates: workspace is not registered.".to_owned(),
+                    repair: Some("ee init --workspace .".to_owned()),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            };
+            let now = chrono::Utc::now().to_rfc3339();
+            for (index, suggestion) in report.suggestions.iter().enumerate() {
+                use crate::core::suggest_links::SuggestedRelation;
+                let candidate_type =
+                    if suggestion.suggested_relation == SuggestedRelation::Contradicts {
+                        "contradiction_review"
+                    } else {
+                        "link_proposal"
+                    };
+                let digest = blake3::hash(
+                    format!(
+                        "{}|{}|{}",
+                        suggestion.memory_a,
+                        suggestion.suggested_relation.as_str(),
+                        suggestion.memory_b
+                    )
+                    .as_bytes(),
+                )
+                .to_hex()
+                .to_string();
+                let candidate_id = format!("curate_{}", &digest[..26]);
+                // Re-proposing the same pair dedups to the existing candidate.
+                if let Ok(Some(_)) = conn.get_curation_candidate(&candidate_id) {
+                    proposed_ids[index] = Some(candidate_id);
+                    continue;
+                }
+                let payload = serde_json::json!({
+                    "schema": "ee.graph.suggest_links.proposal.v1",
+                    "memoryA": suggestion.memory_a,
+                    "memoryB": suggestion.memory_b,
+                    "relation": suggestion.suggested_relation.as_str(),
+                    "score": suggestion.score,
+                    "signals": {
+                        "adamicAdar": suggestion.signals.adamic_adar,
+                        "jaccardTags": suggestion.signals.jaccard_tags,
+                        "ppr": suggestion.signals.ppr,
+                        "affinity": suggestion.signals.affinity,
+                        "preferentialAttachment": suggestion.signals.preferential_attachment,
+                    },
+                })
+                .to_string();
+                let insert = conn.insert_curation_candidate(
+                    &candidate_id,
+                    &crate::db::CreateCurationCandidateInput {
+                        workspace_id: workspace_id.to_owned(),
+                        candidate_type: candidate_type.to_owned(),
+                        target_memory_id: Some(suggestion.memory_a.clone()),
+                        proposed_content: Some(payload),
+                        proposed_confidence: None,
+                        proposed_trust_class: None,
+                        source_type: if candidate_type == "contradiction_review" {
+                            "contradiction_detected".to_owned()
+                        } else {
+                            "agent_inference".to_owned()
+                        },
+                        source_id: Some(format!(
+                            "suggest:{}:{}",
+                            suggestion.memory_a, suggestion.memory_b
+                        )),
+                        reason: suggestion.reason.clone(),
+                        confidence: suggestion.score.clamp(0.0, 1.0) as f32,
+                        status: None,
+                        created_at: Some(now.clone()),
+                        ttl_expires_at: None,
+                        derivation_source_refs_json: None,
+                        derivation_metadata_json: None,
+                    },
+                );
+                match insert {
+                    Ok(()) => proposed_ids[index] = Some(candidate_id),
+                    Err(error) => {
+                        let domain_error = DomainError::Storage {
+                            message: format!("Failed to write suggestion candidate: {error}"),
+                            repair: Some("ee doctor --json".to_owned()),
+                        };
+                        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                    }
+                }
+            }
+        }
         let suggestions_json: Vec<serde_json::Value> = report
             .suggestions
             .iter()
-            .map(|suggestion| {
+            .enumerate()
+            .map(|(index, suggestion)| {
                 serde_json::json!({
                     "memoryA": suggestion.memory_a,
                     "memoryB": suggestion.memory_b,
@@ -33887,7 +33985,11 @@ where
                         "preferentialAttachment": suggestion.signals.preferential_attachment,
                     },
                     "reason": suggestion.reason,
-                    "proposedCandidateId": serde_json::Value::Null,
+                    "proposedCandidateId": proposed_ids[index]
+                        .as_ref()
+                        .map_or(serde_json::Value::Null, |id| {
+                            serde_json::Value::String(id.clone())
+                        }),
                 })
             })
             .collect();
@@ -33898,7 +34000,7 @@ where
                 "suggestions": suggestions_json,
                 "candidateCount": report.candidate_count,
                 "affinityCold": report.affinity_cold,
-                "proposed": false,
+                "proposed": args.propose,
             },
         });
         let response = serde_json::json!({

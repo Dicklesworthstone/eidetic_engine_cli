@@ -5406,6 +5406,10 @@ pub fn show_curation_candidate(
         })?;
 
     let planned_application = match CandidateType::from_str(&stored.candidate_type) {
+        Ok(CandidateType::LinkProposal | CandidateType::ContradictionReview) => {
+            let decision = evaluate_link_candidate_for_apply(&connection, &stored);
+            Some(planned_application_from_decision(&stored, &decision))
+        }
         Ok(CandidateType::CreateDerivedMemory) => {
             let now = Utc::now().to_rfc3339();
             let prompt_injection_guard = crate::core::config_surface::get_config(
@@ -5565,6 +5569,9 @@ pub fn apply_curation_candidate(
     let now = Utc::now().to_rfc3339();
     let parsed_candidate_type = CandidateType::from_str(&stored.candidate_type);
     let decision = match parsed_candidate_type {
+        Ok(CandidateType::LinkProposal | CandidateType::ContradictionReview) => {
+            evaluate_link_candidate_for_apply(&connection, &stored)
+        }
         Ok(CandidateType::CreateDerivedMemory) => {
             let prompt_injection_guard = crate::core::config_surface::get_config(
                 &crate::core::config_surface::ConfigSurfaceOptions {
@@ -11031,6 +11038,16 @@ fn evaluate_candidate_for_apply(
                 "Keep the candidate pending until derived-memory apply support lands.",
             ));
         }
+        CandidateType::LinkProposal | CandidateType::ContradictionReview => {
+            // Defensive: link candidates are special-cased upstream through
+            // evaluate_link_candidate_for_apply and must never reach the
+            // generic memory-mutation evaluator.
+            errors.push(validation_issue(
+                "link_candidate_generic_apply_refused",
+                "Link candidates apply through the dedicated link path, not generic memory mutation.",
+                "Re-run `ee curate apply <candidate-id>`; report this if it recurs.",
+            ));
+        }
     }
 
     if candidate_type != CandidateType::Rule
@@ -12898,6 +12915,299 @@ fn generate_derived_memory_link_id(memory_id: &str, source_memory_id: &str) -> S
     format!("link_{}", &hash[..26])
 }
 
+/// Deterministic id for a suggest-links curation link (pair + relation).
+fn generate_suggested_link_id(memory_a: &str, memory_b: &str, relation: &str) -> String {
+    let hash = blake3::hash(format!("{memory_a}|{relation}|{memory_b}").as_bytes())
+        .to_hex()
+        .to_string();
+    format!("link_{}", &hash[..26])
+}
+
+/// Parsed `proposed_content` payload of a link-proposal /
+/// contradiction-review candidate (ids, relation, and signal values only —
+/// never raw memory bodies).
+struct SuggestedLinkPayload {
+    memory_a: String,
+    memory_b: String,
+    relation: crate::db::MemoryLinkRelation,
+}
+
+fn parse_suggested_link_payload(
+    stored: &StoredCurationCandidate,
+) -> Result<SuggestedLinkPayload, CurateValidationIssue> {
+    let raw = stored.proposed_content.as_deref().ok_or_else(|| {
+        validation_issue(
+            "link_candidate_payload_missing",
+            "Link candidate is missing its proposal payload.",
+            "Regenerate the candidate via `ee graph suggest-links --propose`.",
+        )
+    })?;
+    let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+        validation_issue(
+            "link_candidate_payload_invalid",
+            format!("Link candidate payload is not valid JSON: {error}"),
+            "Regenerate the candidate via `ee graph suggest-links --propose`.",
+        )
+    })?;
+    let memory_a = parsed
+        .get("memoryA")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let memory_b = parsed
+        .get("memoryB")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let relation_raw = parsed
+        .get("relation")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let relation = match relation_raw {
+        "related" => crate::db::MemoryLinkRelation::Related,
+        "supports" => crate::db::MemoryLinkRelation::Supports,
+        "contradicts" => crate::db::MemoryLinkRelation::Contradicts,
+        other => {
+            return Err(validation_issue(
+                "link_candidate_relation_invalid",
+                format!("Link candidate carries unsupported relation `{other}`."),
+                "Regenerate the candidate via `ee graph suggest-links --propose`.",
+            ));
+        }
+    };
+    if memory_a.is_empty() || memory_b.is_empty() || memory_a == memory_b {
+        return Err(validation_issue(
+            "link_candidate_pair_invalid",
+            "Link candidate payload must name two distinct memories.",
+            "Regenerate the candidate via `ee graph suggest-links --propose`.",
+        ));
+    }
+    Ok(SuggestedLinkPayload {
+        memory_a,
+        memory_b,
+        relation,
+    })
+}
+
+/// Apply-time evaluation for link-proposal / contradiction-review
+/// candidates (ADR 0066): validates the payload against live memory state
+/// and plans the typed link creation. Never mutates.
+fn evaluate_link_candidate_for_apply(
+    connection: &DbConnection,
+    stored: &StoredCurationCandidate,
+) -> ApplyDecision {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let current_status = parse_stored_status(&stored.status, &mut errors);
+
+    match current_status {
+        Some(CandidateStatus::Approved) => {}
+        Some(CandidateStatus::Pending) => {
+            errors.push(validation_issue(
+                "candidate_requires_validation",
+                "Candidate must be approved before it can be applied.",
+                format!("Run `ee curate validate {}` first.", stored.id),
+            ));
+            return blocked_apply(
+                stored,
+                None,
+                errors,
+                warnings,
+                format!("ee curate validate {}", stored.id),
+            );
+        }
+        Some(CandidateStatus::Applied) => {
+            warnings.push(validation_issue(
+                "candidate_already_applied",
+                "Candidate has already been applied.",
+                "No apply action is required.",
+            ));
+            return ApplyDecision {
+                application: CurateApplyResult {
+                    status: "already_applied".to_owned(),
+                    decision: "unchanged".to_owned(),
+                    candidate_type: stored.candidate_type.clone(),
+                    target_memory_id: stored.target_memory_id.clone(),
+                    created_memory_id: None,
+                    created_memory: None,
+                    changes: Vec::new(),
+                    errors,
+                    warnings,
+                },
+                to_status: CandidateStatus::Applied.as_str().to_owned(),
+                should_persist: false,
+                memory_update: None,
+                rule_create: None,
+                procedure_create: None,
+                derived_create: None,
+                consolidate_absorb: None,
+                tombstone_memory: false,
+                target_before: None,
+                target_after: None,
+                next_action: "no action required".to_owned(),
+            };
+        }
+        Some(status @ (CandidateStatus::Rejected | CandidateStatus::Expired)) => {
+            errors.push(validation_issue(
+                "candidate_status_terminal",
+                format!("Candidate is in terminal status {}.", status.as_str()),
+                "No apply transition is available for this candidate.",
+            ));
+            return blocked_apply(
+                stored,
+                None,
+                errors,
+                warnings,
+                "no action required".to_owned(),
+            );
+        }
+        None => {
+            return blocked_apply(
+                stored,
+                None,
+                errors,
+                warnings,
+                "ee curate candidates --json".to_owned(),
+            );
+        }
+    }
+
+    let payload = match parse_suggested_link_payload(stored) {
+        Ok(payload) => payload,
+        Err(issue) => {
+            errors.push(issue);
+            return blocked_apply(
+                stored,
+                None,
+                errors,
+                warnings,
+                "ee graph suggest-links --workspace . --json".to_owned(),
+            );
+        }
+    };
+    if stored.candidate_type == CandidateType::ContradictionReview.as_str()
+        && payload.relation != crate::db::MemoryLinkRelation::Contradicts
+    {
+        errors.push(validation_issue(
+            "link_candidate_relation_invalid",
+            "Contradiction-review candidates must carry the contradicts relation.",
+            "Regenerate the candidate via `ee graph suggest-links --propose`.",
+        ));
+        return blocked_apply(
+            stored,
+            None,
+            errors,
+            warnings,
+            "ee graph suggest-links --workspace . --json".to_owned(),
+        );
+    }
+    if stored.target_memory_id.as_deref() != Some(payload.memory_a.as_str()) {
+        errors.push(validation_issue(
+            "link_candidate_pair_invalid",
+            "Link candidate target must be the pair's first memory.",
+            "Regenerate the candidate via `ee graph suggest-links --propose`.",
+        ));
+        return blocked_apply(
+            stored,
+            None,
+            errors,
+            warnings,
+            "ee graph suggest-links --workspace . --json".to_owned(),
+        );
+    }
+    for memory_id in [payload.memory_a.as_str(), payload.memory_b.as_str()] {
+        match connection.get_memory(memory_id) {
+            Ok(Some(memory)) if memory.tombstoned_at.is_none() => {}
+            Ok(_) => {
+                errors.push(validation_issue(
+                    "link_candidate_memory_unavailable",
+                    format!("Memory {memory_id} is missing or tombstoned."),
+                    "Re-run `ee graph suggest-links` against current memory state.",
+                ));
+                return blocked_apply(
+                    stored,
+                    None,
+                    errors,
+                    warnings,
+                    "ee graph suggest-links --workspace . --json".to_owned(),
+                );
+            }
+            Err(error) => {
+                errors.push(validation_issue(
+                    "link_candidate_memory_unavailable",
+                    format!("Failed to load memory {memory_id}: {error}"),
+                    "ee doctor --json",
+                ));
+                return blocked_apply(
+                    stored,
+                    None,
+                    errors,
+                    warnings,
+                    "ee doctor --json".to_owned(),
+                );
+            }
+        }
+    }
+    let already_linked = connection
+        .list_memory_links_for_memory(&payload.memory_a, Some(payload.relation))
+        .map(|links| {
+            links.iter().any(|link| {
+                link.src_memory_id == payload.memory_b || link.dst_memory_id == payload.memory_b
+            })
+        })
+        .unwrap_or(false);
+    if already_linked {
+        warnings.push(validation_issue(
+            "link_candidate_link_exists",
+            "The proposed link already exists; apply is a no-op.",
+            "No action required.",
+        ));
+    }
+
+    let mut changes = Vec::new();
+    push_apply_change(
+        &mut changes,
+        "linkRelation",
+        None,
+        Some(payload.relation.as_str().to_owned()),
+    );
+    push_apply_change(
+        &mut changes,
+        "linkCounterpart",
+        None,
+        Some(payload.memory_b.clone()),
+    );
+
+    ApplyDecision {
+        application: CurateApplyResult {
+            status: "ready".to_owned(),
+            decision: stored.candidate_type.clone(),
+            candidate_type: stored.candidate_type.clone(),
+            target_memory_id: stored.target_memory_id.clone(),
+            created_memory_id: None,
+            created_memory: None,
+            changes,
+            errors,
+            warnings,
+        },
+        to_status: CandidateStatus::Applied.as_str().to_owned(),
+        should_persist: current_status
+            .is_some_and(|status| status.can_transition_to(CandidateStatus::Applied)),
+        memory_update: None,
+        rule_create: None,
+        procedure_create: None,
+        derived_create: None,
+        consolidate_absorb: None,
+        tombstone_memory: false,
+        target_before: None,
+        target_after: None,
+        next_action: format!(
+            "ee graph explain-link {} {} --json",
+            payload.memory_a, payload.memory_b
+        ),
+    }
+}
+
 fn derived_memory_created_audit_details(
     stored: &StoredCurationCandidate,
     metadata: &DerivationMetadata,
@@ -13301,6 +13611,51 @@ fn persist_candidate_application_inner(
     }
 
     let target_memory_id = required_stored_target_memory_id(stored)?;
+    // Link candidates create their typed link here (idempotent: an existing
+    // identical link is a no-op) and fall through to the standard candidate
+    // status/audit bookkeeping with no target-memory mutation.
+    if matches!(
+        CandidateType::from_str(&stored.candidate_type),
+        Ok(CandidateType::LinkProposal | CandidateType::ContradictionReview)
+    ) && let Ok(payload) = parse_suggested_link_payload(stored)
+    {
+        let already_linked = connection
+            .list_memory_links_for_memory(&payload.memory_a, Some(payload.relation))
+            .map(|links| {
+                links.iter().any(|link| {
+                    link.src_memory_id == payload.memory_b || link.dst_memory_id == payload.memory_b
+                })
+            })
+            .unwrap_or(false);
+        if !already_linked {
+            let link_id = generate_suggested_link_id(
+                &payload.memory_a,
+                &payload.memory_b,
+                payload.relation.as_str(),
+            );
+            connection
+                .insert_memory_link(
+                    &link_id,
+                    &crate::db::CreateMemoryLinkInput {
+                        src_memory_id: payload.memory_a.clone(),
+                        dst_memory_id: payload.memory_b.clone(),
+                        relation: payload.relation,
+                        weight: stored.confidence.clamp(0.0, 1.0),
+                        confidence: stored.confidence.clamp(0.0, 1.0),
+                        directed: false,
+                        evidence_count: 1,
+                        last_reinforced_at: Some(applied_at.to_owned()),
+                        source: crate::db::MemoryLinkSource::Agent,
+                        created_by: Some(applied_by.to_owned()),
+                        metadata_json: stored.proposed_content.clone(),
+                    },
+                )
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to create suggested memory link: {error}"),
+                    repair: Some("ee graph explain-link <a> <b> --json".to_owned()),
+                })?;
+        }
+    }
     let memory_changed = if decision.tombstone_memory {
         let changed = connection
             .tombstone_memory(target_memory_id)
