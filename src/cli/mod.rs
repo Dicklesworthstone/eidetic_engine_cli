@@ -9707,6 +9707,10 @@ pub struct CurateDoctorArgs {
     /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+
+    /// Frozen clock (RFC3339) for deterministic age-gated detection in tests.
+    #[arg(long, value_name = "RFC3339")]
+    pub now: Option<String>,
 }
 
 /// Arguments for `ee curate auto-promote` (bd-2r8vp).
@@ -55037,7 +55041,7 @@ where
         class_filter: args.class_filter.as_deref(),
         limit: args.limit,
         trend: args.trend,
-        now_rfc3339: None,
+        now_rfc3339: args.now.as_deref(),
         audit_scan_limit: None,
     };
 

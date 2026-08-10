@@ -4,9 +4,11 @@
 # suggested commands, the resolve-shrinks-queue loop through the real CLI,
 # and learn-gaps query-miss clustering. Real binary, no mocks.
 #
-# Age-gated classes (stale_anchor, contradicted_unresolved >=14d,
-# never_retrieved >=60d, decay_imminent) need clock control and live in the
-# unit/property suites instead — an honest scope note, not silent coverage.
+# Age-gated classes are exercised through the doctor's frozen --now clock
+# (contradicted_unresolved past the 14-day window, never_retrieved past the
+# 60-day window). stale_anchor and decay_imminent still need planted anchors
+# / decay projections and live in the unit suites — an honest scope note,
+# not silent coverage.
 #
 # Environment:
 #   EE_BIN / EE_BINARY  Path to the ee binary (default: `ee` on PATH)
@@ -126,6 +128,40 @@ if [[ "${RESOLVE_EXIT}" -eq 0 && "${ORPHANS_AFTER}" -lt "${ORPHANS_BEFORE}" ]]; 
     event resolving_orphan_shrinks_queue pass
 else
     event resolving_orphan_shrinks_queue fail "link=${RESOLVE_EXIT} before=${ORPHANS_BEFORE} after=${ORPHANS_AFTER}"
+fi
+
+# --- age-gated classes via the frozen doctor clock ------------------------
+# A contradicts pair ages past the 14-day window under --now, and the whole
+# corpus ages past the 60-day never-retrieved window under a later --now.
+run_ee remember "Contradiction side A: always vendor the lockfile." \
+    --workspace "${WS}" --level semantic --kind fact --tags "planted-conflict" --json
+CONF_A="$(remember_id)"
+run_ee remember "Contradiction side B: never vendor the lockfile." \
+    --workspace "${WS}" --level semantic --kind fact --tags "planted-conflict" --json
+CONF_B="$(remember_id)"
+run_ee memory link "${CONF_A}" "${CONF_B}" --relation contradicts --workspace "${WS}" --json
+CONF_LINK=$LAST_EXIT
+
+FUTURE_30D="$(date -u -v+30d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "+30 days" +%Y-%m-%dT%H:%M:%SZ)"
+run_ee curate doctor --workspace "${WS}" --now "${FUTURE_30D}" --json
+D3="${LAST_STDOUT}"
+if [[ "${CONF_LINK}" -eq 0 && "${LAST_EXIT}" -eq 0 ]] \
+    && jq -e --arg a "${CONF_A}" --arg b "${CONF_B}" \
+        '[.data.queue[]? | select(.class == "contradicted_unresolved" and (.memoryId == $a or .memoryId == $b))] | length >= 1' \
+        "${D3}" >/dev/null 2>&1; then
+    event aged_contradiction_detected_under_frozen_clock pass
+else
+    event aged_contradiction_detected_under_frozen_clock fail "link=${CONF_LINK} exit=${LAST_EXIT}; $(jq -c '.data.summary.classCounts' "${D3}" 2>/dev/null)"
+fi
+
+FUTURE_90D="$(date -u -v+90d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "+90 days" +%Y-%m-%dT%H:%M:%SZ)"
+run_ee curate doctor --workspace "${WS}" --now "${FUTURE_90D}" --json
+D4="${LAST_STDOUT}"
+if [[ "${LAST_EXIT}" -eq 0 ]] \
+    && jq -e '(.data.summary.classCounts.never_retrieved // 0) >= 1' "${D4}" >/dev/null 2>&1; then
+    event aged_corpus_reports_never_retrieved pass
+else
+    event aged_corpus_reports_never_retrieved fail "exit=${LAST_EXIT}; $(jq -c '.data.summary.classCounts' "${D4}" 2>/dev/null)"
 fi
 
 # --- learn gaps: repeated missed searches cluster -------------------------
