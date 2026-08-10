@@ -4388,9 +4388,9 @@ mod tests {
             "message classifies permanent gap",
         )?;
         ensure(
-            check.message.contains("Network fetch"),
+            check.message.contains("Network download"),
             true,
-            "message is honest about unavailable network fetch",
+            "message is honest about unavailable network download",
         )?;
         ensure(
             check.message.contains("verified offline artifact"),

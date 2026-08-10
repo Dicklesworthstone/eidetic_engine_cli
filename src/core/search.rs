@@ -17016,7 +17016,10 @@ mod tests {
         assert_eq!(posture["degradedCode"], "rerank_model_unavailable");
         assert_eq!(posture["advisory"]["code"], "rerank_model_unavailable");
         assert_eq!(posture["advisory"]["permanent"], true);
-        assert!(posture["advisory"]["repair"].is_null());
+        assert_eq!(
+            posture["advisory"]["repair"],
+            RERANK_MODEL_UNAVAILABLE_REPAIR
+        );
         assert_eq!(
             posture["advisory"]["resolution"],
             "verified_offline_import_available"
