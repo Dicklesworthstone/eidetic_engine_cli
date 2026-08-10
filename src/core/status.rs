@@ -2178,6 +2178,22 @@ impl Default for PackBudgetBucketReport {
     }
 }
 
+/// Per-source wall-time instrumentation for the status gather (bd-ybul6):
+/// `RUST_LOG=ee::status::gather=debug ee status --json` prints where the
+/// multi-second waits live without touching the snapshot-pinned report
+/// contract. Every source is logged; filtering is the subscriber's job.
+fn timed_gather<T>(source: &'static str, gather: impl FnOnce() -> T) -> T {
+    let started = std::time::Instant::now();
+    let value = gather();
+    tracing::debug!(
+        target: "ee::status::gather",
+        source,
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "status gather source finished"
+    );
+    value
+}
+
 impl StatusReport {
     /// Gather current subsystem status, defaulting to current directory as
     /// workspace when available.
@@ -2250,51 +2266,80 @@ impl StatusReport {
         options: &StatusOptions,
         status_connection_ref: Option<&DbConnection>,
     ) -> Self {
-        let index_status =
-            gather_status_index_status(options.workspace_path.as_deref(), status_connection_ref);
-        let capabilities = CapabilityReport::gather_with_workspace_connection_and_index(
-            options.workspace_path.as_deref(),
-            status_connection_ref,
-            index_status.as_ref(),
-        );
-        let runtime = RuntimeReport::gather();
-        let read_pool =
-            ReadPoolStatusReport::gather_for_workspace(options.workspace_path.as_deref());
-        let write_group_commit =
-            super::write_owner::write_group_commit_telemetry(options.workspace_path.as_deref());
-        let wal = WalStatusReport::gather_with_connection(
-            options.workspace_path.as_deref(),
-            status_connection_ref,
-        );
-        let shard_fanout = gather_shard_fanout_status(options.workspace_path.as_deref());
-        let pack_budget_buckets = gather_pack_budget_buckets_with_connection(
-            options.workspace_path.as_deref(),
-            status_connection_ref,
-        );
-        let qos_posture = gather_qos_posture(options.workspace_path.as_deref());
-        let rch_worker_pressure = gather_rch_worker_pressure(options.workspace_path.as_deref());
-        let verification_posture = gather_verification_posture_with_connection(
-            options.workspace_path.as_deref(),
-            status_connection_ref,
-        );
-        let verification_ledger = gather_rch_verify_ledger_status_with_connection(
-            options.workspace_path.as_deref(),
-            status_connection_ref,
-        );
-        let host_calibration = gather_host_calibration_status(options.workspace_path.as_deref());
-        let (memory_health, memory_health_degradations) = gather_memory_health_with_connection(
-            options.workspace_path.as_deref(),
-            status_connection_ref,
-        );
-        let workspace = gather_workspace_status(options.workspace_path.as_deref());
-        let graph_compute = gather_graph_compute_with_connection(
-            options.workspace_path.as_deref(),
-            status_connection_ref,
-        );
-        let graph_snapshot_artifact = gather_graph_snapshot_artifact_with_connection(
-            options.workspace_path.as_deref(),
-            status_connection_ref,
-        );
+        let index_status = timed_gather("index_status", || {
+            gather_status_index_status(options.workspace_path.as_deref(), status_connection_ref)
+        });
+        let capabilities = timed_gather("capabilities", || {
+            CapabilityReport::gather_with_workspace_connection_and_index(
+                options.workspace_path.as_deref(),
+                status_connection_ref,
+                index_status.as_ref(),
+            )
+        });
+        let runtime = timed_gather("runtime", RuntimeReport::gather);
+        let read_pool = timed_gather("read_pool", || {
+            ReadPoolStatusReport::gather_for_workspace(options.workspace_path.as_deref())
+        });
+        let write_group_commit = timed_gather("write_group_commit", || {
+            super::write_owner::write_group_commit_telemetry(options.workspace_path.as_deref())
+        });
+        let wal = timed_gather("wal", || {
+            WalStatusReport::gather_with_connection(
+                options.workspace_path.as_deref(),
+                status_connection_ref,
+            )
+        });
+        let shard_fanout = timed_gather("shard_fanout", || {
+            gather_shard_fanout_status(options.workspace_path.as_deref())
+        });
+        let pack_budget_buckets = timed_gather("pack_budget_buckets", || {
+            gather_pack_budget_buckets_with_connection(
+                options.workspace_path.as_deref(),
+                status_connection_ref,
+            )
+        });
+        let qos_posture = timed_gather("qos_posture", || {
+            gather_qos_posture(options.workspace_path.as_deref())
+        });
+        let rch_worker_pressure = timed_gather("rch_worker_pressure", || {
+            gather_rch_worker_pressure(options.workspace_path.as_deref())
+        });
+        let verification_posture = timed_gather("verification_posture", || {
+            gather_verification_posture_with_connection(
+                options.workspace_path.as_deref(),
+                status_connection_ref,
+            )
+        });
+        let verification_ledger = timed_gather("verification_ledger", || {
+            gather_rch_verify_ledger_status_with_connection(
+                options.workspace_path.as_deref(),
+                status_connection_ref,
+            )
+        });
+        let host_calibration = timed_gather("host_calibration", || {
+            gather_host_calibration_status(options.workspace_path.as_deref())
+        });
+        let (memory_health, memory_health_degradations) = timed_gather("memory_health", || {
+            gather_memory_health_with_connection(
+                options.workspace_path.as_deref(),
+                status_connection_ref,
+            )
+        });
+        let workspace = timed_gather("workspace", || {
+            gather_workspace_status(options.workspace_path.as_deref())
+        });
+        let graph_compute = timed_gather("graph_compute", || {
+            gather_graph_compute_with_connection(
+                options.workspace_path.as_deref(),
+                status_connection_ref,
+            )
+        });
+        let graph_snapshot_artifact = timed_gather("graph_snapshot_artifact", || {
+            gather_graph_snapshot_artifact_with_connection(
+                options.workspace_path.as_deref(),
+                status_connection_ref,
+            )
+        });
         let skyline_feature_enabled =
             status_skyline_feature_enabled(options.workspace_path.as_deref());
         let skyline_community_count = if skyline_feature_enabled == Some(true) {
@@ -2305,27 +2350,42 @@ impl StatusReport {
         } else {
             None
         };
-        let derived_assets = gather_derived_assets_with_index_status(
-            options.workspace_path.as_deref(),
-            &graph_snapshot_artifact,
-            index_status.as_ref(),
+        let derived_assets = timed_gather("derived_assets", || {
+            gather_derived_assets_with_index_status(
+                options.workspace_path.as_deref(),
+                &graph_snapshot_artifact,
+                index_status.as_ref(),
+            )
+        });
+        let lexical_ram_tier = timed_gather("lexical_ram_tier", || {
+            gather_lexical_ram_tier_status(options.workspace_path.as_deref())
+        });
+        let (curation_health, curation_degradations) = timed_gather("curation_health", || {
+            gather_curation_health_with_connection(
+                options.workspace_path.as_deref(),
+                status_connection_ref,
+            )
+        });
+        let (feedback_health, feedback_degradations) = timed_gather("feedback_health", || {
+            gather_feedback_health_with_connection(
+                options.workspace_path.as_deref(),
+                status_connection_ref,
+            )
+        });
+        let singleflight_posture = timed_gather(
+            "singleflight_posture",
+            super::singleflight::singleflight_posture_report,
         );
-        let lexical_ram_tier = gather_lexical_ram_tier_status(options.workspace_path.as_deref());
-        let (curation_health, curation_degradations) = gather_curation_health_with_connection(
-            options.workspace_path.as_deref(),
-            status_connection_ref,
-        );
-        let (feedback_health, feedback_degradations) = gather_feedback_health_with_connection(
-            options.workspace_path.as_deref(),
-            status_connection_ref,
-        );
-        let singleflight_posture = super::singleflight::singleflight_posture_report();
-        let flight_recorder = gather_flight_recorder_status(options.workspace_path.as_deref());
-        let mesh_storage = gather_mesh_storage_status_with_connection(
-            options.workspace_path.as_deref(),
-            status_connection_ref,
-        );
-        let tailscale_local = gather_tailscale_local_report();
+        let flight_recorder = timed_gather("flight_recorder", || {
+            gather_flight_recorder_status(options.workspace_path.as_deref())
+        });
+        let mesh_storage = timed_gather("mesh_storage", || {
+            gather_mesh_storage_status_with_connection(
+                options.workspace_path.as_deref(),
+                status_connection_ref,
+            )
+        });
+        let tailscale_local = timed_gather("tailscale_local", gather_tailscale_local_report);
         let agent_inventory = AgentInventoryReport::not_inspected();
 
         let mut degradations = Vec::new();
