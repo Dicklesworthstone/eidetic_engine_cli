@@ -1200,6 +1200,12 @@ run_stage "Graph Intel E2E (bd-3a1op.6)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e
 # decisions + next-tagged open loops, and the superseded-note stale marker.
 run_stage "Resume E2E (bd-resume-verb-v0f57)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_resume.sh"
 
+# Gate 6.12696: Memory-debt E2E slice 1 (bd-3ap2m.4). Real binary: planted
+# orphan detected with an Actionable suggested command (healthy linked
+# control stays clean), resolving the debt strictly shrinks the class count,
+# and repeated missed searches form a learn-gaps cluster.
+run_stage "Memory Debt E2E (bd-3ap2m.4)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_memory_debt.sh"
+
 # Gate 6.127: Ergonomics real-binary E2E (bd-1et0v.22). No-Cargo:
 # proves `ee context` remains an alias for canonical `ee pack` while carrying
 # the deprecated_alias info row, and proves PATH-shadow doctor findings are
