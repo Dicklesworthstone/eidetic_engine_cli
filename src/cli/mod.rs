@@ -44363,6 +44363,7 @@ enum DaemonSearchFallbackReason {
     SearchMethodError,
     SearchResultMissing,
     SearchResponseDrift,
+    #[cfg(not(unix))]
     PlatformUnsupported,
 }
 
@@ -44382,6 +44383,7 @@ impl DaemonSearchFallbackReason {
             Self::SearchMethodError => "search method returned an error",
             Self::SearchResultMissing => "search result missing",
             Self::SearchResponseDrift => "search response drift",
+            #[cfg(not(unix))]
             Self::PlatformUnsupported => "daemon search is unsupported on this platform",
         }
     }

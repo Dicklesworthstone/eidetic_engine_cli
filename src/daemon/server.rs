@@ -2010,7 +2010,7 @@ impl DaemonSearchParams {
             speed: options.speed.as_str().to_owned(),
             explain: options.explain,
             include_tombstoned: options.include_tombstoned,
-            as_of: options.as_of.map(|value| value.to_rfc3339()),
+            as_of: options.as_of.as_ref().map(chrono::DateTime::to_rfc3339),
             include_expired: options.include_expired,
             include_future: options.include_future,
             include_stale: options.include_stale,
@@ -2140,11 +2140,12 @@ impl DaemonSearchResult {
                 serde_json::Value::String("data.results".to_owned()),
             );
         }
+        let degraded = crate::output::response_degraded_from_data(&data);
         let response = serde_json::json!({
             "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": true,
             "data": data,
-            "degraded": crate::output::response_degraded_from_data(&data),
+            "degraded": degraded,
         });
         Self {
             schema: DAEMON_SEARCH_RESPONSE_SCHEMA_V1.to_owned(),
