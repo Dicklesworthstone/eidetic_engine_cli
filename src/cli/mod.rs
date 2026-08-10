@@ -11537,6 +11537,9 @@ pub enum MemoryCommand {
     PromoteGlobal(MemoryPromoteGlobalArgs),
     /// Demote (tombstone) a promoted user-global memory.
     DemoteGlobal(MemoryDemoteGlobalArgs),
+    /// Record helpful/harmful feedback on a user-global memory with origin
+    /// backflow (bd-1bfwa.2 engine, wired per the epic's feedback story).
+    OutcomeGlobal(MemoryOutcomeGlobalArgs),
 }
 
 /// Arguments for `ee memory promote-global` (bd-1bfwa.3).
@@ -11575,6 +11578,34 @@ pub struct MemoryDemoteGlobalArgs {
     pub actor: Option<String>,
 
     /// Plan only: report what would be demoted without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee memory outcome-global` (global-lane feedback backflow).
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct MemoryOutcomeGlobalArgs {
+    /// GLOBAL memory ID receiving the outcome signal.
+    #[arg(value_name = "GLOBAL_MEMORY_ID")]
+    pub global_memory_id: String,
+
+    /// Outcome signal: helpful or harmful.
+    #[arg(long, value_name = "SIGNAL")]
+    pub signal: String,
+
+    /// Requested adjustment magnitude; clamped to the engine's per-event cap.
+    #[arg(long, value_name = "WEIGHT")]
+    pub weight: Option<f32>,
+
+    /// Workspace database path (origin-side backflow target).
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Actor recorded in the audit trail.
+    #[arg(long, value_name = "NAME")]
+    pub actor: Option<String>,
+
+    /// Plan only: report the backflow without writing.
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -13801,6 +13832,9 @@ where
         }
         Some(Command::Memory(MemoryCommand::DemoteGlobal(ref args))) => {
             handle_memory_demote_global(&cli, args, stdout, stderr)
+        }
+        Some(Command::Memory(MemoryCommand::OutcomeGlobal(ref args))) => {
+            handle_memory_outcome_global(&cli, args, stdout, stderr)
         }
         // Bead bd-17c65.6.2 (F2) — top-level aliases route by ID prefix.
         Some(Command::Show(ref args)) => handle_show_alias(&cli, args, stdout, stderr),
@@ -36709,6 +36743,92 @@ where
     render_global_lane_report(
         cli,
         "memory demote-global",
+        &human,
+        report.data_json(),
+        stdout,
+    )
+}
+
+fn handle_memory_outcome_global<W, E>(
+    cli: &Cli,
+    args: &MemoryOutcomeGlobalArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::global_promotion::{
+        BackflowOptions, BackflowSignal, backflow_global_feedback,
+    };
+
+    let signal = match args.signal.as_str() {
+        "helpful" => BackflowSignal::Helpful,
+        "harmful" => BackflowSignal::Harmful,
+        other => {
+            let domain_error = DomainError::Usage {
+                message: format!("outcome signal must be helpful or harmful, got `{other}`"),
+                repair: Some(
+                    "ee memory outcome-global <GLOBAL_MEMORY_ID> --signal helpful".to_owned(),
+                ),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let MemoryStoreTarget {
+        workspace: _,
+        database_path,
+    } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let global_paths = match global_store_paths_for_memory_lane() {
+        Ok(paths) => paths,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let options = BackflowOptions {
+        workspace_database_path: &database_path,
+        global_memory_id: &args.global_memory_id,
+        global_paths: &global_paths,
+        signal,
+        weight: args
+            .weight
+            .unwrap_or(crate::core::global_promotion::MAX_BACKFLOW_STEP),
+        actor: args.actor.as_deref(),
+        dry_run: args.dry_run,
+    };
+    let report = match backflow_global_feedback(&options) {
+        Ok(report) => report,
+        Err(message) => {
+            let domain_error = DomainError::Storage {
+                message,
+                repair: Some("ee doctor".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let (origin_workspace, origin_memory) = report
+        .origin
+        .as_ref()
+        .map_or(("-", "-"), |(workspace, memory)| {
+            (workspace.as_str(), memory.as_str())
+        });
+    let human = format!(
+        "Global outcome backflow\n  Global memory: {}\n  Executed: {}\n  Applied delta: {}\n  Origin workspace: {}\n  Origin memory: {}\n",
+        report.global_memory_id,
+        report.executed,
+        report.applied_delta,
+        origin_workspace,
+        origin_memory,
+    );
+    render_global_lane_report(
+        cli,
+        "memory outcome-global",
         &human,
         report.data_json(),
         stdout,
@@ -64362,6 +64482,7 @@ impl NormalizedInvocation {
                     MemoryCommand::Reveal(_) => "memory reveal".to_string(),
                     MemoryCommand::PromoteGlobal(_) => "memory promote-global".to_string(),
                     MemoryCommand::DemoteGlobal(_) => "memory demote-global".to_string(),
+                    MemoryCommand::OutcomeGlobal(_) => "memory outcome-global".to_string(),
                     MemoryCommand::Tags(_) => "memory tags".to_string(),
                 },
                 // Bead bd-17c65.6.2 (F2) — top-level aliases.

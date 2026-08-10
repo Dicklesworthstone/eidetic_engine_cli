@@ -137,6 +137,24 @@ if [[ "${TRUST_A}" == "human_explicit" || "${TRUST_A}" == "agent_validated" ]]; 
         event twin_promotion_plans_merge_not_duplicate fail "exit ${LAST_EXIT}; no merge_into action: $(head -c 250 "${LAST_STDOUT}")"
     fi
 
+    # Outcome backflow: harmful feedback against the promoted global row,
+    # invoked origin-side (the engine adjusts the origin row through the
+    # supplied workspace database), drops the origin's confidence by the
+    # clamped delta and records the feedback event on the global row.
+    run_ee memory outcome-global "${PROMOTED_GID}" --signal harmful --workspace "${WS_A}" --json
+    if [[ "${LAST_EXIT}" -eq 0 ]] \
+        && jq -e '[.. | objects | select(has("appliedDelta"))] | first
+            | (.executed == true)
+              and (.appliedDelta < 0)
+              and (.originConfidenceAfter != null)
+              and (.originConfidenceBefore != null)
+              and (.originConfidenceAfter < .originConfidenceBefore)' \
+            "${LAST_STDOUT}" >/dev/null 2>&1; then
+        event harmful_outcome_backflows_to_origin pass
+    else
+        event harmful_outcome_backflows_to_origin fail "exit ${LAST_EXIT}; $(head -c 250 "${LAST_STDOUT}")"
+    fi
+
     # A planted secret-like string must refuse promotion outright.
     run_ee remember "Deploy rule: export AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLEKEY99 before pushing." \
         --workspace "${WS_A}" --level procedural --kind rule --allow-secret-mention --json

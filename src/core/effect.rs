@@ -2397,6 +2397,11 @@ impl EffectManifest {
                 "Tombstone a promoted user-global memory (withdraw the global copy without touching the origin workspace row), origin parsed from promotion provenance",
             ),
             CommandEffect::durable_write(
+                "memory outcome-global",
+                vec!["memories", "audit_log"],
+                "Record helpful/harmful feedback on a user-global memory and backflow a clamped confidence adjustment to the origin workspace row (bd-1bfwa.2 engine); dry-run writes nothing",
+            ),
+            CommandEffect::durable_write(
                 "memory level",
                 vec!["memories", "search_index_jobs", "audit_log"],
                 "Apply a canonical manual memory-level transition with audit provenance",

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.global_promotion.backflow.v1.json",
+  "title": "ee.global_promotion.backflow.v1",
+  "description": "Feedback-backflow report for ee memory outcome-global: helpful/harmful feedback recorded on a user-global memory, with a clamped confidence adjustment flowed back to the origin workspace row when the global row carries ee-mem:// promotion provenance. Directly-authored global rows (ee remember --global) record feedback with no origin to adjust.",
+  "type": "object",
+  "required": [
+    "schema",
+    "globalMemoryId",
+    "originWorkspaceId",
+    "originMemoryId",
+    "appliedDelta",
+    "originConfidenceBefore",
+    "originConfidenceAfter",
+    "executed"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.global_promotion.backflow.v1"
+    },
+    "globalMemoryId": {
+      "type": "string"
+    },
+    "originWorkspaceId": {
+      "type": ["string", "null"]
+    },
+    "originMemoryId": {
+      "type": ["string", "null"]
+    },
+    "appliedDelta": {
+      "type": "number",
+      "description": "Signed confidence adjustment applied to the origin row; magnitude clamped to the engine's per-event cap (0.05)."
+    },
+    "originConfidenceBefore": {
+      "type": ["number", "null"]
+    },
+    "originConfidenceAfter": {
+      "type": ["number", "null"]
+    },
+    "executed": {
+      "type": "boolean",
+      "description": "False for dry-run plans."
+    }
+  }
+}

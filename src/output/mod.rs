@@ -11597,6 +11597,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: global_demotion_report_schema_definition,
         },
         SchemaEntry {
+            id: "ee.global_promotion.backflow.v1",
+            version: "1",
+            description: "Feedback-backflow report for ee memory outcome-global: feedback on a global row with a clamped origin confidence adjustment when promotion provenance exists.",
+            category: "memory",
+            definition: global_promotion_backflow_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.shadow.retrieval_tuning_report.v1",
             version: "1",
             description: "ADR 0070 offline retrieval-weight tuning report: labeled-evidence counts with honest denominators, deterministic candidate sweep, winner margin, evidence-gate abstention, and reportHash.",
@@ -11616,6 +11623,10 @@ fn global_promotion_report_schema_definition() -> String {
 
 fn global_demotion_report_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.global_demotion.report.v1.json").to_string()
+}
+
+fn global_promotion_backflow_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.global_promotion.backflow.v1.json").to_string()
 }
 
 fn shadow_retrieval_tuning_report_schema_definition() -> String {

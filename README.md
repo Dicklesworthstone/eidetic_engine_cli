@@ -1222,6 +1222,7 @@ ee outcome <candidate-id> --target-type candidate --signal negative --reason "To
 | `ee memory tags <id> [--add <tags>] [--remove <tags>] [--set <tags>] [--clear]` | Deterministic audited tag listing and mutation |
 | `ee memory promote-global <id> [--dry-run]` | Evidence-gated copy-with-link promotion of a workspace memory into the user-global lane; refusals are typed exit-7 plans (`ee.global_promotion.plan.v1`) |
 | `ee memory demote-global <global-id>` | Audited tombstone of a promoted global row (`ee.global_demotion.report.v1`); tombstoned rows never re-enter candidate pools |
+| `ee memory outcome-global <global-id> --signal helpful\|harmful [--dry-run]` | Feedback on a global row with clamped confidence backflow to the origin workspace row (`ee.global_promotion.backflow.v1`) |
 
 ### Graph
 

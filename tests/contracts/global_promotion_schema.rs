@@ -102,6 +102,21 @@ const CASES: &[SchemaCase] = &[
             "originMemoryId",
         ],
     },
+    SchemaCase {
+        id: "ee.global_promotion.backflow.v1",
+        file: "docs/schemas/ee.global_promotion.backflow.v1.json",
+        category: "memory",
+        required: &[
+            "schema",
+            "globalMemoryId",
+            "originWorkspaceId",
+            "originMemoryId",
+            "appliedDelta",
+            "originConfidenceBefore",
+            "originConfidenceAfter",
+            "executed",
+        ],
+    },
 ];
 
 #[test]
