@@ -7093,11 +7093,17 @@ async fn run_search_inner_with_performance(
     let mut trace = SearchPerformanceTrace::default();
     let setup_start = Instant::now();
     let index_dir = options.resolve_index_dir();
+    trace.record_elapsed("search::setup", setup_start);
+    // Runtime-profile resolution gets its own stable phase so a regression
+    // that reintroduces blocking host probes on this shared pre-query path
+    // is attributable from `--explain-performance` output alone
+    // (bd-search-warm-latency-0bh05).
+    let runtime_profile_start = Instant::now();
     let runtime_profile = workspace_state
         .map(|state| state.runtime_profile.clone())
         .unwrap_or_else(|| runtime_profile_for_workspace(&options.workspace_path));
+    trace.record_elapsed("search::runtimeProfile", runtime_profile_start);
     let (effective_limit, limit_capped) = runtime_profile.cap_search_limit(options.limit);
-    trace.record_elapsed("search::setup", setup_start);
 
     let index_exists_start = Instant::now();
     if !index_dir.exists() {

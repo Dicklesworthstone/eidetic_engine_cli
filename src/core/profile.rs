@@ -2767,10 +2767,21 @@ fn gather_path_probes(workspace_root: &Path) -> Vec<PathCapacityProbe> {
     gather_path_probes_with_options(workspace_root, &HostProfileProbeOptions::default())
 }
 
+// Path probes call statvfs per spec path and can block on slow or
+// disconnected mounts, so the runtime hot path must never reach them.
+// The thread-local counter lets tests prove that containment without
+// racing sibling tests that legitimately gather full probes.
+#[cfg(test)]
+thread_local! {
+    static PATH_PROBE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 fn gather_path_probes_with_options(
     workspace_root: &Path,
     options: &HostProfileProbeOptions,
 ) -> Vec<PathCapacityProbe> {
+    #[cfg(test)]
+    PATH_PROBE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let ee_dir = workspace_root.join(".ee");
     let database_path = ee_dir.join("ee.db");
     let index_dir = ee_dir.join("index");
@@ -4238,6 +4249,34 @@ Pages wired down:                             253184.
             operating_profile_for_resources(&cpu, &memory),
             OperatingProfile::Constrained,
             "available memory controls the runtime profile",
+        )
+    }
+
+    #[test]
+    fn runtime_auto_selection_never_executes_path_probes() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+
+        let before = PATH_PROBE_CALLS.with(std::cell::Cell::get);
+        let runtime = runtime_profile_for_workspace(temp.path());
+        let after = PATH_PROBE_CALLS.with(std::cell::Cell::get);
+
+        ensure(
+            runtime.source.as_str(),
+            "host_probe",
+            "workspace without config selects via host probe",
+        )?;
+        ensure(
+            after,
+            before,
+            "runtime auto-selection must not walk statvfs path probes",
+        )?;
+
+        let _full = HostResourceProbeReport::gather_for_workspace(temp.path());
+        let after_full = PATH_PROBE_CALLS.with(std::cell::Cell::get);
+        ensure(
+            after_full,
+            before + 1,
+            "explicit full probe surface still gathers path probes",
         )
     }
 
