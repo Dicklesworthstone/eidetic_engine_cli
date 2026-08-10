@@ -6,6 +6,7 @@
 # Environment:
 #   EE_BIN / EE_BINARY  Path to the ee binary (default: `ee` on PATH)
 #   EE_E2E_TMPDIR       Temp base (default /private/tmp)
+#   EE_EMBED_DOWNLOAD   Model download policy (default: off for deterministic E2E)
 
 set -uo pipefail
 
@@ -23,6 +24,7 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 EE_BIN="${EE_BIN:-${EE_BINARY:-ee}}"
+export EE_EMBED_DOWNLOAD="${EE_EMBED_DOWNLOAD:-off}"
 if [[ "${EE_BIN}" == */* ]]; then
     REAL_EE="${EE_BIN}"
 else
@@ -279,17 +281,41 @@ SCALE_WS="${ROOT}/scale-10k"
 mkdir -p "${SCALE_WS}"
 run_ee init --workspace "${SCALE_WS}" --json
 SCALE_INIT_EXIT=$LAST_EXIT
-STEP=$((STEP + 1))
-SCALE_SEED_STDOUT="${LOG_DIR}/step${STEP}.stdout"
-SCALE_SEED_STDERR="${LOG_DIR}/step${STEP}.stderr"
-awk -v n=10000 'BEGIN {
-    for (i = 1; i <= n; i++) {
-        printf "{\"content\":\"Resume scale row %05d.\",\"level\":\"episodic\",\"kind\":\"note\",\"tags\":[\"session-scale-10k\"]}\n", i
-    }
-}' | "${REAL_EE}" --workspace "${SCALE_WS}" remember --batch --stdin --json \
-    >"${SCALE_SEED_STDOUT}" 2>"${SCALE_SEED_STDERR}"
-SCALE_SEED_EXIT=${PIPESTATUS[1]}
-SCALE_STORED="$(jq -r '.data.storedCount // 0' "${SCALE_SEED_STDOUT}" 2>/dev/null)"
+SCALE_BATCH_LIMIT=512
+SCALE_TOTAL=10000
+SCALE_STORED=0
+SCALE_SEED_EXIT=0
+SCALE_BATCH_START=1
+while [[ "${SCALE_BATCH_START}" -le "${SCALE_TOTAL}" ]]; do
+    SCALE_BATCH_COUNT="${SCALE_BATCH_LIMIT}"
+    SCALE_REMAINING=$((SCALE_TOTAL - SCALE_BATCH_START + 1))
+    if [[ "${SCALE_REMAINING}" -lt "${SCALE_BATCH_COUNT}" ]]; then
+        SCALE_BATCH_COUNT="${SCALE_REMAINING}"
+    fi
+
+    STEP=$((STEP + 1))
+    SCALE_SEED_STDOUT="${LOG_DIR}/step${STEP}.stdout"
+    SCALE_SEED_STDERR="${LOG_DIR}/step${STEP}.stderr"
+    awk -v first="${SCALE_BATCH_START}" -v count="${SCALE_BATCH_COUNT}" 'BEGIN {
+        for (i = first; i < first + count; i++) {
+            printf "{\"content\":\"Resume scale row %05d.\",\"level\":\"episodic\",\"kind\":\"note\",\"tags\":[\"session-scale-10k\"]}\n", i
+        }
+    }' | "${REAL_EE}" --workspace "${SCALE_WS}" remember --batch --stdin --json \
+        >"${SCALE_SEED_STDOUT}" 2>"${SCALE_SEED_STDERR}"
+    SCALE_BATCH_EXIT=${PIPESTATUS[1]}
+    if [[ "${SCALE_BATCH_EXIT}" -ne 0 ]]; then
+        SCALE_SEED_EXIT="${SCALE_BATCH_EXIT}"
+        break
+    fi
+
+    SCALE_BATCH_STORED="$(jq -r '.data.storedCount // 0' "${SCALE_SEED_STDOUT}" 2>/dev/null)"
+    if [[ ! "${SCALE_BATCH_STORED}" =~ ^[0-9]+$ ]]; then
+        SCALE_SEED_EXIT=2
+        break
+    fi
+    SCALE_STORED=$((SCALE_STORED + SCALE_BATCH_STORED))
+    SCALE_BATCH_START=$((SCALE_BATCH_START + SCALE_BATCH_COUNT))
+done
 if [[ "${SCALE_INIT_EXIT}" -eq 0 && "${SCALE_SEED_EXIT}" -eq 0 \
     && "${SCALE_STORED}" -eq 10000 ]]; then
     event scale_10k_seeded pass
