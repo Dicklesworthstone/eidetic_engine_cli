@@ -1195,6 +1195,11 @@ run_stage "Beads Export Fixture Suite (bd-2p297.3)" "./scripts/beads_export_repa
 # curate validate/apply lifecycle creating the typed link.
 run_stage "Graph Intel E2E (bd-3a1op.6)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_graph_intel.sh"
 
+# Gate 6.12695: Session-resume E2E (bd-resume-verb-v0f57). Real binary:
+# empty-store no-session-evidence honesty, tagged-session grouping, revisit
+# decisions + next-tagged open loops, and the superseded-note stale marker.
+run_stage "Resume E2E (bd-resume-verb-v0f57)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_resume.sh"
+
 # Gate 6.127: Ergonomics real-binary E2E (bd-1et0v.22). No-Cargo:
 # proves `ee context` remains an alias for canonical `ee pack` while carrying
 # the deprecated_alias info row, and proves PATH-shadow doctor findings are
