@@ -6448,7 +6448,7 @@ fn synthetic_stale_daemon_disk_full_preflight_does_not_run_cargo() -> TestResult
 }
 
 #[test]
-fn synthetic_recent_failed_excluded_daemon_preflight_does_not_need_override() -> TestResult {
+fn synthetic_recent_failure_outside_effective_candidates_does_not_block() -> TestResult {
     let status_json = r#"{
         "data": {
             "daemon": {
@@ -6483,40 +6483,36 @@ fn synthetic_recent_failed_excluded_daemon_preflight_does_not_need_override() ->
             ("RCH_VERIFY_STATUS_JSON", status_json),
         ],
     )?;
-    if status.success() {
-        return Err("recent failed excluded worker preflight should fail before Cargo".to_owned());
+    if !status.success() {
+        return Err(format!(
+            "recent failure outside effective candidates must not block dispatch: {stdout}"
+        ));
     }
     let report: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("parse recent failure preflight: {error}"))?;
-    if report["status"] != "rch_environment_failure" || report["worker_id"] != "csd" {
+    if report["status"] != "remote_pass" || report["worker_id"] != "css" {
         return Err(format!("unexpected recent failure preflight: {report}"));
     }
-    for expected in [
-        "rch_verify_remote_command_failed",
-        "rch_verify_worker_filter_ignored",
-    ] {
-        if !degraded_contains(&report, expected)? {
-            return Err(format!("missing {expected} in degraded codes: {report}"));
-        }
-    }
-    if degraded_contains(&report, "rch_verify_worker_disk_full")? {
+    if degraded_contains(&report, "rch_verify_worker_filter_ignored")?
+        || degraded_contains(&report, "rch_verify_worker_disk_full")?
+    {
         return Err(format!(
-            "recent fast failure without disk-full transcript should not claim disk-full: {report}"
+            "out-of-candidate failure must not produce worker-filter degradation: {report}"
         ));
     }
     let stdout_tail = report["stdout_tail"]
         .as_str()
         .ok_or_else(|| "missing stdout tail".to_owned())?;
-    if !stdout_tail.contains("recently failed fast") || stdout_tail.contains("[RCH] remote css") {
+    if !stdout_tail.contains("[RCH] remote css") || stdout_tail.contains("recently failed fast") {
         return Err(format!(
-            "recent failure preflight did not short-circuit fake Cargo run: {report}"
+            "out-of-candidate failure should preserve the remote run: {report}"
         ));
     }
     Ok(())
 }
 
 #[test]
-fn synthetic_recent_failed_requested_worker_preflight_honors_rch_workers() -> TestResult {
+fn synthetic_recent_failure_outside_requested_worker_does_not_block() -> TestResult {
     let status_json = r#"{
         "data": {
             "daemon": {
@@ -6553,12 +6549,14 @@ fn synthetic_recent_failed_requested_worker_preflight_honors_rch_workers() -> Te
             ("RCH_WORKERS", "trj"),
         ],
     )?;
-    if status.success() {
-        return Err("recent failed worker outside RCH_WORKERS should fail before Cargo".to_owned());
+    if !status.success() {
+        return Err(format!(
+            "recent failure outside RCH_WORKERS must not block the requested worker: {stdout}"
+        ));
     }
     let report: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("parse requested-worker preflight: {error}"))?;
-    if report["status"] != "rch_environment_failure" || report["worker_id"] != "css" {
+    if report["status"] != "remote_pass" || report["worker_id"] != "trj" {
         return Err(format!("unexpected requested-worker preflight: {report}"));
     }
     if report["requested_workers"] != serde_json::json!(["trj"])
@@ -6569,28 +6567,19 @@ fn synthetic_recent_failed_requested_worker_preflight_honors_rch_workers() -> Te
             "worker inventory arrays were not preserved: {report}"
         ));
     }
-    for expected in [
-        "rch_verify_remote_command_failed",
-        "rch_verify_worker_filter_ignored",
-    ] {
-        if !degraded_contains(&report, expected)? {
-            return Err(format!("missing {expected} in degraded codes: {report}"));
-        }
-    }
-    if degraded_contains(&report, "rch_verify_worker_disk_full")? {
+    if degraded_contains(&report, "rch_verify_worker_filter_ignored")?
+        || degraded_contains(&report, "rch_verify_worker_disk_full")?
+    {
         return Err(format!(
-            "recent requested-worker failure without disk-full transcript should not claim disk-full: {report}"
+            "failure outside the requested set must not produce worker-filter degradation: {report}"
         ));
     }
     let stdout_tail = report["stdout_tail"]
         .as_str()
         .ok_or_else(|| "missing stdout tail".to_owned())?;
-    if !stdout_tail.contains("excluded from requested workers")
-        || !stdout_tail.contains("recently failed fast")
-        || stdout_tail.contains("[RCH] remote trj")
-    {
+    if !stdout_tail.contains("[RCH] remote trj") || stdout_tail.contains("recently failed fast") {
         return Err(format!(
-            "requested-worker preflight did not short-circuit fake Cargo run: {report}"
+            "requested worker should run despite an unrelated worker failure: {report}"
         ));
     }
     let summary = report["summary_markdown"]
@@ -6602,9 +6591,54 @@ fn synthetic_recent_failed_requested_worker_preflight_honors_rch_workers() -> Te
     {
         return Err(format!("summary missing worker arrays: {summary}"));
     }
-    if report["elapsed_ms"] != 0 {
+    Ok(())
+}
+
+#[test]
+fn synthetic_recent_failure_of_only_requested_worker_fails_fast() -> TestResult {
+    let status_json = r#"{
+        "data": {
+            "daemon": {
+                "recent_builds": [
+                    {"worker_id": "trj", "exit_code": 1, "duration_ms": 52903},
+                    {"worker_id": "css", "exit_code": 0, "duration_ms": 2000}
+                ]
+            }
+        }
+    }"#;
+    let (status, stdout, _stderr) = run_script_with_env(
+        &["--", "cargo", "test", "--lib", "requested_worker_probe"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "INFO Selected worker: trj at ubuntu@trj (4 slots, speed 50.0)\n[RCH] remote trj (1.0s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
+            ("RCH_VERIFY_STATUS_JSON", status_json),
+            ("RCH_WORKERS", "trj"),
+        ],
+    )?;
+    if status.success() {
+        return Err("recent failure of the only requested worker must fail fast".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse requested-worker refusal: {error}"))?;
+    if report["status"] != "rch_environment_failure" || report["worker_id"] != "trj" {
+        return Err(format!("unexpected requested-worker refusal: {report}"));
+    }
+    if !degraded_contains(&report, "rch_verify_worker_filter_ignored")? {
+        return Err(format!("missing fail-fast degradation: {report}"));
+    }
+    let stdout_tail = report["stdout_tail"]
+        .as_str()
+        .ok_or_else(|| "missing stdout tail".to_owned())?;
+    if !stdout_tail.contains("every effective requested worker recently failed fast")
+        || stdout_tail.contains("[RCH] remote trj")
+    {
         return Err(format!(
-            "preflight should not measure remote execution: {report}"
+            "requested-worker refusal was not fail-fast: {report}"
         ));
     }
     Ok(())

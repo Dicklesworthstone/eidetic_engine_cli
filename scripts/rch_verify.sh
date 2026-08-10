@@ -2285,8 +2285,8 @@ print(",".join(dict.fromkeys(stale)))
 PY
 }
 
-recent_failed_excluded_daemon_workers() {
-    CONFIGURED_WORKERS="${1:-}" \
+recent_failed_effective_candidate_workers() {
+    ALLOWED_WORKERS="${1:-}" \
     DAEMON_WORKERS="${2:-}" \
     RECENT_FAILURE_MAX_MS="${3:-${RCH_VERIFY_RECENT_FAILURE_MAX_MS:-10000}}" \
     STATUS_JSON="${RCH_VERIFY_STATUS_JSON:-}" \
@@ -2297,11 +2297,11 @@ import json
 import os
 import subprocess
 
-configured = {
+allowed = [
     item.strip()
-    for item in os.environ.get("CONFIGURED_WORKERS", "").split(",")
+    for item in os.environ.get("ALLOWED_WORKERS", "").split(",")
     if item.strip()
-}
+]
 daemon = {
     item.strip()
     for item in os.environ.get("DAEMON_WORKERS", "").split(",")
@@ -2336,10 +2336,11 @@ except Exception:
     raise SystemExit(0)
 
 recent = payload.get("data", {}).get("daemon", {}).get("recent_builds", [])
-stale = []
+candidates = [worker for worker in allowed if worker in daemon]
+failed = set()
 for build in recent:
     worker = str(build.get("worker_id") or "").strip()
-    if not worker or worker in configured or worker not in daemon:
+    if not worker or worker not in candidates:
         continue
     exit_code = build.get("exit_code")
     try:
@@ -2347,10 +2348,12 @@ for build in recent:
     except (TypeError, ValueError):
         duration_ms = 0
     if exit_code not in (None, 0) and 0 < duration_ms <= max_duration_ms:
-        if worker not in stale:
-            stale.append(worker)
+        failed.add(worker)
 
-print(",".join(stale))
+if candidates and all(worker in failed for worker in candidates):
+    print(",".join(candidates))
+else:
+    print("")
 PY
 }
 
@@ -6835,7 +6838,7 @@ if [ "${RCH_VERIFY_FAIL_FAST_STALE_WORKER:-1}" = "1" ]; then
         recent_failure_max_ms="${RCH_VERIFY_REQUESTED_RECENT_FAILURE_MAX_MS:-120000}"
     fi
     stale_disk_full_workers="$(stale_disk_full_daemon_workers "$allowed_workers_csv" "$DAEMON_WORKERS_CSV" "${RCH_VERIFY_DISK_FULL_WORKERS:-}")"
-    stale_recent_failed_workers="$(recent_failed_excluded_daemon_workers "$allowed_workers_csv" "$DAEMON_WORKERS_CSV" "$recent_failure_max_ms")"
+    stale_recent_failed_workers="$(recent_failed_effective_candidate_workers "$allowed_workers_csv" "$DAEMON_WORKERS_CSV" "$recent_failure_max_ms")"
     if [ -n "$stale_disk_full_workers" ]; then
         first_stale_worker="${stale_disk_full_workers%%,*}"
         WORKER_ID_JSON="$(json_quote "$first_stale_worker")"
@@ -6849,7 +6852,7 @@ if [ "${RCH_VERIFY_FAIL_FAST_STALE_WORKER:-1}" = "1" ]; then
     elif [ -n "$stale_recent_failed_workers" ]; then
         first_stale_worker="${stale_recent_failed_workers%%,*}"
         WORKER_ID_JSON="$(json_quote "$first_stale_worker")"
-        preflight_note="[RCH_VERIFY] stale daemon worker(s) excluded from $allowed_workers_note workers and recently failed fast: $stale_recent_failed_workers"
+        preflight_note="[RCH_VERIFY] every effective $allowed_workers_note worker recently failed fast: $stale_recent_failed_workers"
         emit_json true 1 0 "$preflight_note" "" \
             "${build_admission_degraded[@]}" \
             "rch_verify_remote_command_failed" \
