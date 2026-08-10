@@ -1559,6 +1559,10 @@ impl EffectManifest {
             CommandEffect::read_only_db("migrate status", "Report pending schema migrations"),
             CommandEffect::read_only("mcp manifest", "Inspect optional MCP adapter manifest"),
             CommandEffect::read_only("mcp validate", "Validate optional MCP adapter contracts"),
+            CommandEffect::read_only_db(
+                "shadow run",
+                "Execute a shadowable policy evaluator offline (ADR 0070): label extraction, seeded read-only query replay, deterministic candidate sweep, report emission; writes nothing",
+            ),
             CommandEffect::read_only_db("memory drift", "Report read-only memory provenance drift"),
             CommandEffect::read_only_db("memory history", "Show memory revision history"),
             CommandEffect::read_only_db("memory list", "List memories"),

@@ -1065,6 +1065,9 @@ pub enum Command {
     /// Attach, explain, and run deterministic memory sentinel checks.
     #[command(subcommand)]
     Sentinel(SentinelCommand),
+    /// Execute shadowable policy evaluators offline (side-effect-free).
+    #[command(subcommand)]
+    Shadow(ShadowCommand),
     /// Preview and consent-check outbound mesh sharing.
     #[command(subcommand)]
     Share(share::ShareCommand),
@@ -11555,6 +11558,40 @@ pub struct MemoryDemoteGlobalArgs {
     pub dry_run: bool,
 }
 
+/// Shadow-policy evaluation commands (ADR 0070 / bd-2tehh.3).
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum ShadowCommand {
+    /// Execute a shadowable policy evaluator and emit its report.
+    ///
+    /// The policy id comes from the global `--policy` flag
+    /// (`ee shadow run --policy candidate.retrieval.outcome_tuned_weights`).
+    Run(ShadowRunArgs),
+}
+
+/// Arguments for `ee shadow run` (bd-2tehh.3).
+///
+/// The policy id deliberately rides the pre-existing GLOBAL `--policy` flag:
+/// a subcommand-local `#[arg]` with the same id panics at parse against a
+/// `global = true` argument (known clap arg-id collision class).
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ShadowRunArgs {
+    /// Weak-label association window in minutes (ADR 0070 §1; default 30).
+    #[arg(long = "label-window-minutes", value_name = "MINUTES")]
+    pub label_window_minutes: Option<u32>,
+
+    /// Evidence-gate minimum labeled triples (ADR 0070 §4; default 50).
+    #[arg(long = "min-triples", value_name = "N")]
+    pub min_triples: Option<usize>,
+
+    /// Evidence-gate minimum distinct labeled queries (ADR 0070 §4; default 15).
+    #[arg(long = "min-queries", value_name = "N")]
+    pub min_queries: Option<usize>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
 /// Arguments for `ee memory reveal`
 /// (bd-sealed-preregistration-memory-b67be).
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
@@ -14179,6 +14216,9 @@ where
         Some(Command::Search(ref args)) => handle_search(&cli, args, stdout, stderr),
         Some(Command::Similar(ref args)) => handle_similar(&cli, args, stdout, stderr),
         Some(Command::Sentinel(ref command)) => handle_sentinel(&cli, command, stdout, stderr),
+        Some(Command::Shadow(ShadowCommand::Run(ref args))) => {
+            handle_shadow_run(&cli, args, stdout, stderr)
+        }
         Some(Command::Share(ref command)) => share::handle_share(&cli, command, stdout, stderr),
         Some(Command::Mesh(ref command)) => mesh::handle_mesh(&cli, command, stdout, stderr),
         Some(Command::Situation(SituationCommand::Classify(ref args))) => {
@@ -36459,6 +36499,158 @@ where
         report.data_json(),
         stdout,
     )
+}
+
+fn handle_shadow_run<W, E>(
+    cli: &Cli,
+    args: &ShadowRunArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::shadow_tuning::{
+        DEFAULT_LABEL_WINDOW_MINUTES, INSUFFICIENT_OUTCOME_EVIDENCE_CODE, LabelExtractionConfig,
+        RETRIEVAL_TUNING_POLICY_ID, RetrievalTuningGateConfig, ShadowTuningError,
+        render_retrieval_tuning_report_json, run_retrieval_tuning,
+    };
+
+    let Some(policy) = cli.policy_id() else {
+        let domain_error = DomainError::Usage {
+            message: "ee shadow run requires --policy <POLICY_ID>".to_owned(),
+            repair: Some(format!(
+                "ee shadow run --policy {RETRIEVAL_TUNING_POLICY_ID} --json"
+            )),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    };
+    if policy != RETRIEVAL_TUNING_POLICY_ID {
+        let known = crate::shadow::find_shadow_policy_inventory_entry(policy).is_some();
+        let domain_error = DomainError::Usage {
+            message: if known {
+                format!(
+                    "policy {policy} has no runnable evaluator yet; the first runnable policy is {RETRIEVAL_TUNING_POLICY_ID}"
+                )
+            } else {
+                format!("unknown policy id {policy}; see the shadow inventory")
+            },
+            repair: Some("ee schema export ee.shadow_policy_inventory.v1 --json".to_owned()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    let MemoryStoreTarget {
+        workspace,
+        database_path,
+    } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let canonical_workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.clone());
+    let workspace_id = crate::core::curate::stable_workspace_id(&canonical_workspace);
+
+    let extraction = LabelExtractionConfig {
+        label_window_minutes: args
+            .label_window_minutes
+            .unwrap_or(DEFAULT_LABEL_WINDOW_MINUTES),
+    };
+    let mut gate = RetrievalTuningGateConfig::default();
+    if let Some(value) = args.min_triples {
+        gate.min_triples = value;
+    }
+    if let Some(value) = args.min_queries {
+        gate.min_queries = value;
+    }
+
+    let report = match run_retrieval_tuning(
+        &workspace,
+        &database_path,
+        &workspace_id,
+        Utc::now(),
+        &extraction,
+        &gate,
+    ) {
+        Ok(report) => report,
+        Err(ShadowTuningError::Cancelled(_)) => return ProcessExitCode::Cancelled,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: error.to_string(),
+                repair: Some("ee doctor".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let mut degraded: Vec<serde_json::Value> = Vec::new();
+    if report.abstained {
+        // Kept in lockstep with
+        // tests/fixtures/failure_modes/insufficient_outcome_evidence.json.
+        degraded.push(serde_json::json!({
+            "code": INSUFFICIENT_OUTCOME_EVIDENCE_CODE,
+            "severity": "info",
+            "message": "Outcome evidence is below the tuning evidence gate; the retrieval-weights policy abstained.",
+            "repair": "ee outcome <memory-id> --pack <pack-id> --item <rank> --signal helpful --workspace . --json",
+            "details": {
+                "triples": report.labels.triples.len(),
+                "distinctQueries": report.labels.distinct_queries,
+                "minTriples": gate.min_triples,
+                "minQueries": gate.min_queries,
+                "reportHash": report.report_hash,
+            },
+        }));
+    }
+
+    let report_value: serde_json::Value =
+        serde_json::from_str(&render_retrieval_tuning_report_json(&report))
+            .unwrap_or(serde_json::Value::Null);
+    let human = format!(
+        "Shadow run: {RETRIEVAL_TUNING_POLICY_ID}\n  Labeled triples: {} ({} distinct queries)\n  Abstained: {}\n  Promotable: {}\n  Winner: {}\n  Report hash: {}\n",
+        report.labels.triples.len(),
+        report.labels.distinct_queries,
+        report.abstained,
+        report.promotable,
+        report
+            .evaluation
+            .as_ref()
+            .and_then(|evaluation| evaluation.winner.as_ref())
+            .map_or_else(
+                || "none (incumbent stands)".to_owned(),
+                |winner| format!(
+                    "lexical={:.2} semantic={:.2} graph={:.2} (score {:.4})",
+                    winner.weights.lexical,
+                    winner.weights.semantic,
+                    winner.weights.graph,
+                    winner.score
+                )
+            ),
+        report.report_hash,
+    );
+    let envelope = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": {
+            "command": "shadow run",
+            "report": report_value,
+        },
+        "degraded": degraded,
+    });
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&envelope.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(envelope.to_string() + "\n")),
+    }
 }
 
 fn handle_memory_tags<W, E>(
@@ -63813,6 +64005,9 @@ impl NormalizedInvocation {
                 Command::Sentinel(command) => match command {
                     SentinelCommand::Check(_) => "sentinel check".to_string(),
                     SentinelCommand::Explain => "sentinel explain".to_string(),
+                },
+                Command::Shadow(shadow) => match shadow {
+                    ShadowCommand::Run(_) => "shadow run".to_string(),
                 },
                 Command::Share(share) => match share {
                     share::ShareCommand::Preview(_) => "share preview".to_string(),
