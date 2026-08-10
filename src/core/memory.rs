@@ -1989,6 +1989,12 @@ fn remember_index_status(report: &IndexProcessingJobReport) -> String {
 
 const REMEMBER_CONTENTION_MAX_ATTEMPTS: usize = 64;
 const REMEMBER_WORKSPACE_LOCK_TTL_SECS: u64 = 300;
+/// Hard ceiling on total advisory-lock polls, as a multiple of the
+/// stagnation budget (bd-rs4cm): a queue whose holder keeps changing is
+/// allowed up to 8x the stagnant-wait budget (~5 minutes at the capped
+/// 640ms delay) before remember gives up, so deep-but-moving multi-process
+/// queues stop dropping writes while true wedges still fail fast.
+const REMEMBER_LOCK_PROGRESS_MULTIPLIER: usize = 8;
 const REMEMBER_ADVISORY_LOCK_REPAIR_COMMAND: &str =
     "ee diag advisory-lock --workspace . --resource-type workspace --release --json";
 
@@ -2040,9 +2046,21 @@ fn acquire_remember_workspace_lock_with_retry<'a>(
     let lock_id = AdvisoryLockId::workspace(workspace_id);
     let holder_id = format!("remember:{}:{memory_id}", std::process::id());
     let attempts = attempts.max(1);
-    let mut last_holder = None;
+    let mut last_holder: Option<(String, String)> = None;
 
-    for attempt in 0..attempts {
+    // Progress-aware waiting (bd-rs4cm): `attempts` bounds CONSECUTIVE polls
+    // that observe the SAME holder — a stagnant lock (wedged or leaked
+    // holder) still fails within the old fixed budget. A holder that
+    // CHANGES between polls is a queue making progress, so the wait
+    // continues rather than dropping the write with a hard storage error
+    // (the old fixed cliff starved N-writer queues whose total service time
+    // exceeded ~38s). Total waiting stays bounded by a hard ceiling so a
+    // pathological fast-churn queue cannot pin the process forever.
+    let total_poll_ceiling = attempts.saturating_mul(REMEMBER_LOCK_PROGRESS_MULTIPLIER);
+    let mut stagnant_polls = 0usize;
+    let mut total_polls = 0usize;
+
+    loop {
         match connection.acquire_advisory_lock(
             &lock_id,
             &holder_id,
@@ -2061,15 +2079,22 @@ fn acquire_remember_workspace_lock_with_retry<'a>(
                 holder_id,
                 acquired_at,
             }) => {
-                last_holder = Some((holder_id, acquired_at));
-                if attempt + 1 < attempts {
-                    remember_retry_sleep(retry_delay(attempt), "acquire advisory lock")?;
+                let current = (holder_id, acquired_at);
+                if last_holder.as_ref() == Some(&current) {
+                    stagnant_polls += 1;
+                } else {
+                    stagnant_polls = 1;
                 }
+                last_holder = Some(current);
+                total_polls += 1;
+                if stagnant_polls >= attempts || total_polls >= total_poll_ceiling {
+                    break;
+                }
+                remember_retry_sleep(retry_delay(total_polls - 1), "acquire advisory lock")?;
             }
             Err(error) if remember_write_contention_is_retryable(&error) => {
-                if attempt + 1 < attempts {
-                    remember_retry_sleep(retry_delay(attempt), "acquire advisory lock")?;
-                } else {
+                total_polls += 1;
+                if total_polls >= attempts {
                     return Err(DomainError::Storage {
                         message: format!(
                             "advisory lock timeout while acquiring workspace write lock: {error}"
@@ -2077,6 +2102,7 @@ fn acquire_remember_workspace_lock_with_retry<'a>(
                         repair: Some(REMEMBER_ADVISORY_LOCK_REPAIR_COMMAND.to_owned()),
                     });
                 }
+                remember_retry_sleep(retry_delay(total_polls - 1), "acquire advisory lock")?;
             }
             Err(error) => {
                 return Err(DomainError::Storage {
@@ -2093,7 +2119,8 @@ fn acquire_remember_workspace_lock_with_retry<'a>(
     );
     Err(DomainError::Storage {
         message: format!(
-            "advisory lock timeout while waiting for workspace write lock held by {holder}"
+            "advisory lock timeout while waiting for workspace write lock held by {holder} \
+             ({total_polls} polls, {stagnant_polls} without holder progress)"
         ),
         repair: Some(REMEMBER_ADVISORY_LOCK_REPAIR_COMMAND.to_owned()),
     })
@@ -16327,6 +16354,70 @@ mod tests {
         connection
             .release_advisory_lock(&lock_id, "held-by-agent")
             .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn remember_workspace_lock_wait_survives_holder_progress() -> TestResult {
+        // bd-rs4cm: `attempts` bounds SAME-HOLDER stagnation, not total
+        // waiting. With attempts=2, a queue whose holder changes between
+        // polls (simulated inside the retry-delay hook) must keep waiting
+        // past the old fixed cliff and eventually acquire.
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection
+            .ensure_advisory_locks_table()
+            .map_err(|error| error.to_string())?;
+        let lock_id = AdvisoryLockId::workspace("wsp_remember_progress");
+        let acquired = connection
+            .acquire_advisory_lock(&lock_id, "holder-a", Some(300), Some("unit test"))
+            .map_err(|error| error.to_string())?;
+        ensure(acquired.is_acquired(), true, "fixture lock acquired")?;
+
+        let sleep_calls = std::cell::Cell::new(0usize);
+        let guard = acquire_remember_workspace_lock_with_retry(
+            &connection,
+            "wsp_remember_progress",
+            "mem_01234567890123456789012346",
+            2,
+            |_| {
+                let call = sleep_calls.get();
+                sleep_calls.set(call + 1);
+                match call {
+                    0 => {
+                        // holder-a hands off to holder-b: progress.
+                        connection
+                            .release_advisory_lock(&lock_id, "holder-a")
+                            .expect("release holder-a");
+                        assert!(
+                            connection
+                                .acquire_advisory_lock(
+                                    &lock_id,
+                                    "holder-b",
+                                    Some(300),
+                                    Some("unit test"),
+                                )
+                                .expect("acquire holder-b")
+                                .is_acquired()
+                        );
+                    }
+                    1 => {
+                        // holder-b finishes: the lock frees up.
+                        connection
+                            .release_advisory_lock(&lock_id, "holder-b")
+                            .expect("release holder-b");
+                    }
+                    _ => {}
+                }
+                Duration::ZERO
+            },
+        )
+        .map_err(|error| format!("progressing queue must not time out: {error:?}"))?;
+        ensure(
+            sleep_calls.get() >= 2,
+            true,
+            "wait outlasted the old fixed 2-attempt budget",
+        )?;
+        drop(guard);
         connection.close().map_err(|error| error.to_string())
     }
 
