@@ -58,7 +58,11 @@ run_ee() {
 }
 
 run_ee init --workspace "${WS}" --json
-[[ "${LAST_EXIT}" -eq 0 ]] && event init_ok pass || event init_ok fail "init exit ${LAST_EXIT}"
+if [[ "${LAST_EXIT}" -eq 0 ]]; then
+    event init_ok pass
+else
+    event init_ok fail "init exit ${LAST_EXIT}"
+fi
 
 # --- empty store: honest no-session-evidence degradation ------------------
 run_ee resume --workspace "${WS}" --json
@@ -70,21 +74,27 @@ else
     event empty_store_reports_no_evidence fail "exit ${LAST_EXIT}; $(head -c 250 "${LAST_STDOUT}")"
 fi
 
-# --- corpus: two tagged sessions, a queued item, a stale note -------------
+# --- literal acceptance corpus: three tagged sessions, two revisit
+# decisions, one next-tagged item, and a superseded stale note -------------
 run_ee remember "Session A wrapped the parser refactor." \
     --workspace "${WS}" --level episodic --kind note --tags "session-20260801" --json
 run_ee remember "Session A left the lexer half-done." \
     --workspace "${WS}" --level episodic --kind note --tags "session-20260801" --json
 run_ee remember "Session B finished the lexer and started codegen." \
     --workspace "${WS}" --level episodic --kind note --tags "session-20260808" --json
+run_ee remember "Session C prepared the resume handoff." \
+    --workspace "${WS}" --level episodic --kind note --tags "session-20260809" --json
 run_ee remember "Next: wire codegen into the driver." \
-    --workspace "${WS}" --level episodic --kind note --tags "next,codegen" --json
+    --workspace "${WS}" --level semantic --kind note --tags "next,codegen" --json
 STALE_OLD_EXIT=$LAST_EXIT
 run_ee remember "Next: codegen driver wiring landed; next is optimization passes." \
-    --workspace "${WS}" --level episodic --kind note --tags "next,codegen" --json
+    --workspace "${WS}" --level semantic --kind note --tags "next,codegen" --json
 STALE_NEW_EXIT=$LAST_EXIT
-[[ "${STALE_OLD_EXIT}" -eq 0 && "${STALE_NEW_EXIT}" -eq 0 ]] \
-    && event corpus_seeded pass || event corpus_seeded fail "remember exits ${STALE_OLD_EXIT}/${STALE_NEW_EXIT}"
+if [[ "${STALE_OLD_EXIT}" -eq 0 && "${STALE_NEW_EXIT}" -eq 0 ]]; then
+    event corpus_seeded pass
+else
+    event corpus_seeded fail "remember exits ${STALE_OLD_EXIT}/${STALE_NEW_EXIT}"
+fi
 
 run_ee decide record "resume e2e revisit decision" --chosen "ship now" \
     --alternative "wait for perf pass" --rationale "deadline wins" \
@@ -94,8 +104,11 @@ run_ee decide record "resume e2e second decision" --chosen "keep sqlite" \
     --alternative "switch stores" --rationale "franken-stack rule" \
     --revisit-by "+90d" --workspace "${WS}" --json
 DECIDE_TWO=$LAST_EXIT
-[[ "${DECIDE_ONE}" -eq 0 && "${DECIDE_TWO}" -eq 0 ]] \
-    && event decisions_recorded pass || event decisions_recorded fail "decide exits ${DECIDE_ONE}/${DECIDE_TWO}"
+if [[ "${DECIDE_ONE}" -eq 0 && "${DECIDE_TWO}" -eq 0 ]]; then
+    event decisions_recorded pass
+else
+    event decisions_recorded fail "decide exits ${DECIDE_ONE}/${DECIDE_TWO}"
+fi
 
 # --- the bundle -----------------------------------------------------------
 run_ee resume --workspace "${WS}" --json
@@ -107,11 +120,15 @@ else
     event resume_returns_schema fail "exit ${LAST_EXIT}; $(head -c 250 "${R}")"
 fi
 
-if jq -e '[.data.report.sessions[]?.label] | index("session-20260808") != null and index("session-20260801") != null' \
+if jq -e '[.data.report.sessions[]?.label]
+          | length == 3
+            and index("session-20260809") != null
+            and index("session-20260808") != null
+            and index("session-20260801") != null' \
     "${R}" >/dev/null 2>&1; then
-    event tagged_sessions_grouped pass
+    event three_tagged_sessions_grouped pass
 else
-    event tagged_sessions_grouped fail "$(jq -c '[.data.report.sessions[]?.label]' "${R}" 2>/dev/null)"
+    event three_tagged_sessions_grouped fail "$(jq -c '[.data.report.sessions[]?.label]' "${R}" 2>/dev/null)"
 fi
 
 if jq -e '[.data.report.openLoops.revisitDecisions[]? | select(.revisitBy != null)] | length == 2' \
@@ -136,6 +153,26 @@ if jq -e '.data.report.staleCount >= 1
     event superseded_note_carries_stale_marker pass
 else
     event superseded_note_carries_stale_marker fail "staleCount=$(jq -r '.data.report.staleCount' "${R}" 2>/dev/null); $(head -c 250 "${R}")"
+fi
+
+# --- human contract: every declared section remains visible ---------------
+run_ee resume --workspace "${WS}"
+H="${LAST_STDOUT}"
+if [[ "${LAST_EXIT}" -eq 0 ]] \
+    && grep -Fq "Recent end-state:" "${H}" \
+    && grep -Fq "Open loops:" "${H}" \
+    && grep -Fq "Next commands:" "${H}"; then
+    event human_declared_sections_visible pass
+else
+    event human_declared_sections_visible fail "exit ${LAST_EXIT}; $(head -c 250 "${H}")"
+fi
+
+if grep -Fq "queued " "${H}" \
+    && grep -Fq "Next: wire codegen into the driver." "${H}" \
+    && grep -Fq "[STALE]" "${H}"; then
+    event human_open_loop_and_staleness_visible pass
+else
+    event human_open_loop_and_staleness_visible fail "$(head -c 500 "${H}")"
 fi
 
 echo

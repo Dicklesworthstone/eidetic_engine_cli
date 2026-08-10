@@ -17256,6 +17256,7 @@ where
                 report.open_loops.tagged_items.len(),
                 report.stale_count,
             );
+            text.push_str("\nRecent end-state:\n");
             for session in &report.sessions {
                 text.push_str(&format!(
                     "\n[{}] {} memories ({} .. {})\n",
@@ -17271,12 +17272,25 @@ where
                     text.push_str(&format!("  - {}{marker}: {head}\n", session_item.memory_id));
                 }
             }
+            text.push_str("\nOpen loops:\n");
             for decision in &report.open_loops.revisit_decisions {
                 text.push_str(&format!(
-                    "open decision {}: {} (revisit {})\n",
+                    "  - decision {}: {} (revisit {})\n",
                     decision.memory_id,
                     decision.topic,
                     decision.revisit_by.as_deref().unwrap_or("unconditioned")
+                ));
+            }
+            for queued in &report.open_loops.tagged_items {
+                let marker = if queued.stale.is_some() {
+                    " [STALE]"
+                } else {
+                    ""
+                };
+                let head: String = queued.content.chars().take(96).collect();
+                text.push_str(&format!(
+                    "  - queued {}{marker}: {head}\n",
+                    queued.memory_id
                 ));
             }
             if let Some(scan) = &report.nearby_stores
@@ -17290,8 +17304,9 @@ where
                     ));
                 }
             }
+            text.push_str("\nNext commands:\n");
             for command in &report.next_commands {
-                text.push_str(&format!("next: {command}\n"));
+                text.push_str(&format!("  - {command}\n"));
             }
             write_stdout(stdout, &text)
         }
