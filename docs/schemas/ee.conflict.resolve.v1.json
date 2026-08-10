@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.conflict.resolve.v1.json",
+  "title": "ee.conflict.resolve.v1",
+  "description": "Audited conflict-resolution report for ee conflict resolve (ADR 0066). The verb (supersede|reject-one|scope-split|both-valid) is planned against the LIVE conflict surface (stale pairs are refused with conflict_resolve_stale_surface) and mapped onto existing audited atoms only: decide record (which also creates the supersede link and closes the loser's validity window), memory expire, memory link, memory tags. Dry-run is the default; --apply executes the plan fail-fast and reports per-atom audit ids. The rationale is persisted as a kind=decision memory so future packs carry the WHY.",
+  "type": "object",
+  "required": [
+    "schema",
+    "status",
+    "dryRun",
+    "persisted",
+    "verb",
+    "reason",
+    "plan"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.conflict.resolve.v1"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["planned", "applied"]
+    },
+    "dryRun": {
+      "type": "boolean"
+    },
+    "persisted": {
+      "type": "boolean"
+    },
+    "verb": {
+      "type": "string",
+      "enum": ["supersede", "reject-one", "scope-split", "both-valid"]
+    },
+    "reason": {
+      "type": "string"
+    },
+    "plan": {
+      "type": "object",
+      "required": [
+        "conflictId",
+        "verb",
+        "memoryA",
+        "memoryB",
+        "keep",
+        "lose",
+        "actions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "conflictId": {
+          "type": "string"
+        },
+        "verb": {
+          "type": "string",
+          "enum": ["supersede", "reject-one", "scope-split", "both-valid"]
+        },
+        "memoryA": {
+          "type": "string"
+        },
+        "memoryB": {
+          "type": "string"
+        },
+        "keep": {
+          "type": ["string", "null"]
+        },
+        "lose": {
+          "type": ["string", "null"]
+        },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["action"],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "recordDecision",
+                  "expireMemory",
+                  "createLink",
+                  "addTags"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "results": {
+      "type": ["array", "null"],
+      "description": "Per-atom execution evidence; null on dry-run.",
+      "items": {
+        "type": "object",
+        "required": ["action", "auditIds", "createdMemoryId"],
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "auditIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "createdMemoryId": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    }
+  }
+}

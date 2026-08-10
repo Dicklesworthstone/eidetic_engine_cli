@@ -337,6 +337,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `insufficient_outcome_evidence` | info | bd-2tehh.2 (ADR 0070) |
 | `shadow_report_not_persisted` | low | bd-2tehh.3 (ADR 0070) |
 | `conflict_direct` | medium | bd-1zb7k.9 (S8) |
+| `conflict_resolve_stale_surface` | medium | bd-3a1op.4 (ADR 0066) |
 | `conflict_trust_mismatch` | high | bd-1zb7k.9 (S8) |
 | `consensus_no_clusters` | low | bd-1zb7k.9 (S8) |
 | `agent_profile_cold_start` | info | bd-1prrl.2.5 |

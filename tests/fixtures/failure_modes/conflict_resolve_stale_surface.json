@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "conflict_resolve_stale_surface",
+  "introduced_by": {
+    "bead": "bd-3a1op.4"
+  },
+  "surfaces": [
+    "conflict resolve"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee conflict resolve named a memory pair that is not on the CURRENT conflict surface: workspace state moved (a side was expired, re-scoped, or the signal dissolved) between the agent inspecting the conflict and attempting resolution. The command refuses the mutation and returns the focused live surface for re-orientation instead of resolving against stale state.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember \"fact one\" --workspace . --json",
+      "ee remember \"fact two\" --workspace . --json"
+    ],
+    "invocation": "ee conflict resolve <mem-a> <mem-b> --verb both-valid --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "conflict_resolve_stale_surface",
+    "severity": "medium",
+    "message_contains": [
+      "surface"
+    ],
+    "repair_contains": "conflict explain"
+  }
+}

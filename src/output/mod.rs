@@ -10911,6 +10911,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: completion_audit_report_schema_v1_definition,
         },
         SchemaEntry {
+            id: "ee.conflict.resolve.v1",
+            version: "1",
+            description: "Audited conflict-resolution plan/apply report for ee conflict resolve (ADR 0066): verb mapped onto existing audited atoms against the live conflict surface, dry-run default.",
+            category: "graph",
+            definition: conflict_resolve_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.context.agent_profile.v1",
             version: "1",
             description: "Agent-specific retrieval bias summary emitted by ee context --explain --json.",
@@ -12107,6 +12114,10 @@ fn graph_export_response_schema_definition() -> String {
 
 fn graph_suggest_links_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.graph.suggest_links.v1.json").to_string()
+}
+
+fn conflict_resolve_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.conflict.resolve.v1.json").to_string()
 }
 
 fn graph_snapshot_prune_schema_definition() -> String {

@@ -17127,13 +17127,16 @@ where
     E: Write,
 {
     let workspace = cli.resolve_workspace();
+    if let conflict::ConflictCommand::Resolve(args) = command {
+        return handle_conflict_resolve(cli, &workspace, args, stdout, stderr);
+    }
     let surface = match command {
         conflict::ConflictCommand::Explain(args) => {
             conflict::build_conflict_surface_for_memory(&workspace, &args.memory_id)
         }
-        conflict::ConflictCommand::List(_) | conflict::ConflictCommand::Cluster(_) => {
-            conflict::build_conflict_surface(&workspace)
-        }
+        conflict::ConflictCommand::List(_)
+        | conflict::ConflictCommand::Cluster(_)
+        | conflict::ConflictCommand::Resolve(_) => conflict::build_conflict_surface(&workspace),
     };
     let surface = match surface {
         Ok(surface) => surface,
@@ -17145,6 +17148,157 @@ where
             write_stdout(stdout, &conflict::render_conflict_human(&surface, command))
         }
         _ => write_stdout(stdout, &(conflict::render_conflict_json(&surface) + "\n")),
+    }
+}
+
+/// `ee conflict resolve <a> <b> --verb ... [--apply]` (bd-3a1op.4, ADR 0066).
+/// Dry-run by default: prints the full mutation plan; `--apply` executes it
+/// through existing audited core atoms only.
+fn handle_conflict_resolve<W, E>(
+    cli: &Cli,
+    workspace: &Path,
+    args: &conflict::ConflictResolveArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::contradiction_detect::{
+        CONFLICT_RESOLVE_SCHEMA_V1, ConflictResolutionOutcome, ConflictResolveRequest, ResolveVerb,
+        plan_conflict_resolution,
+    };
+
+    let Some(verb) = ResolveVerb::parse(&args.verb) else {
+        let error = DomainError::Usage {
+            message: format!("Unknown resolution verb `{}`.", args.verb),
+            repair: Some("--verb supersede | reject-one | scope-split | both-valid".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    };
+    let surface = match conflict::build_conflict_surface(workspace) {
+        Ok(surface) => surface,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    fn split_tags(raw: Option<&String>) -> Vec<String> {
+        raw.map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|tag| !tag.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    let reason = args
+        .reason
+        .clone()
+        .unwrap_or_else(|| format!("Resolved via ee conflict resolve --verb {}.", verb.as_str()));
+    let request = ConflictResolveRequest {
+        memory_a: &args.memory_a,
+        memory_b: &args.memory_b,
+        verb,
+        keep: args.keep.as_deref(),
+        reason: &reason,
+        scope_a_tags: split_tags(args.scope_a_tags.as_ref()),
+        scope_b_tags: split_tags(args.scope_b_tags.as_ref()),
+    };
+
+    let plan = match plan_conflict_resolution(&surface, &request) {
+        ConflictResolutionOutcome::Plan(plan) => plan,
+        ConflictResolutionOutcome::StaleSurface { current_pairs } => {
+            let error = DomainError::UsageCodeWithDetails {
+                code: "conflict_resolve_stale_surface",
+                message: format!(
+                    "({}, {}) is not a pair on the CURRENT conflict surface; workspace state \
+                     moved since the conflict was inspected.",
+                    args.memory_a, args.memory_b
+                ),
+                repair: Some(
+                    "ee conflict explain <memory-id> --json  # re-orient on the live surface"
+                        .to_owned(),
+                ),
+                details_json: serde_json::json!({ "currentPairs": current_pairs }).to_string(),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+        ConflictResolutionOutcome::PolicyDenied { message, repair } => {
+            let error = DomainError::PolicyDenied {
+                message,
+                repair: Some(repair),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+        ConflictResolutionOutcome::InvalidRequest { message, repair } => {
+            let error = DomainError::Usage {
+                message,
+                repair: Some(repair),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let database_path = workspace.join(".ee").join("ee.db");
+    let mut results: Option<Vec<conflict::ResolutionActionResult>> = None;
+    let mut status = "planned";
+    if args.apply {
+        match conflict::execute_conflict_resolution(
+            workspace,
+            &database_path,
+            &plan,
+            &reason,
+            args.actor.as_deref(),
+        ) {
+            Ok(applied) => {
+                results = Some(applied);
+                status = "applied";
+            }
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        }
+    }
+
+    let data = serde_json::json!({
+        "schema": CONFLICT_RESOLVE_SCHEMA_V1,
+        "status": status,
+        "dryRun": !args.apply,
+        "persisted": args.apply,
+        "verb": verb.as_str(),
+        "reason": reason,
+        "plan": plan,
+        "results": results,
+    });
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let mut text = format!(
+                "conflict resolve {} — {} ↔ {} ({}):\n",
+                verb.as_str(),
+                plan.memory_a,
+                plan.memory_b,
+                status
+            );
+            for action in &plan.actions {
+                text.push_str(&format!(
+                    "  - {}\n",
+                    serde_json::to_string(action).unwrap_or_else(|_| "<action>".to_owned())
+                ));
+            }
+            if !args.apply {
+                text.push_str("  (dry-run: pass --apply to execute)\n");
+            }
+            write_stdout(stdout, &text)
+        }
+        _ => {
+            let envelope = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": data,
+                "degraded": [],
+            });
+            write_stdout(stdout, &(envelope.to_string() + "\n"))
+        }
     }
 }
 
@@ -64807,6 +64961,7 @@ impl NormalizedInvocation {
                     conflict::ConflictCommand::List(_) => "conflict list".to_string(),
                     conflict::ConflictCommand::Explain(_) => "conflict explain".to_string(),
                     conflict::ConflictCommand::Cluster(_) => "conflict cluster".to_string(),
+                    conflict::ConflictCommand::Resolve(_) => "conflict resolve".to_string(),
                 },
                 Command::Sandbox(sandbox_cmd) => match sandbox_cmd {
                     sandbox::SandboxCommand::Remember(_) => "sandbox remember".to_string(),

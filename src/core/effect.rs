@@ -1285,6 +1285,17 @@ impl EffectManifest {
                 "conflict list",
                 "List persisted contradiction/conflict evidence",
             ),
+            CommandEffect::durable_write(
+                "conflict resolve",
+                vec![
+                    "memories",
+                    "memory_links",
+                    "memory_tags",
+                    "search_index_jobs",
+                    "audit_log",
+                ],
+                "Resolve one live conflict pair via verb-mapped EXISTING audited atoms (decide record / memory expire / memory link / memory tags); dry-run plan by default, --apply executes (ADR 0066)",
+            ),
             CommandEffect::read_only_db("context", "Assemble context pack (reads only)"),
             CommandEffect::read_only_db("context-show", "Show a persisted context pack"),
             CommandEffect::read_only_db(

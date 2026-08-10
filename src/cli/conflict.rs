@@ -2,17 +2,20 @@
 //!
 //! Thin CLI layer over
 //! [`crate::core::contradiction_detect::assemble_conflict_surface`] (which reuses
-//! the 7.2 gather + explicit-evidence detector). Read-only: opens the workspace
-//! DB, assembles the ranked conflicting pairs + clusters, projects per subcommand,
-//! and renders the `ee.response.v2` envelope around the `ee.conflict.v1` surface
-//! (or a compact human summary). Never mutates.
+//! the 7.2 gather + explicit-evidence detector). list|explain|cluster are
+//! read-only. `resolve` (bd-3a1op.4, ADR 0066) plans via the pure
+//! [`crate::core::contradiction_detect::plan_conflict_resolution`] engine and,
+//! only under `--apply`, executes the plan through EXISTING audited core atoms
+//! (`decide_record`, `expire_memory`, `update_memory_link`,
+//! `update_memory_tags`) — no novel mutation paths.
 
 use std::path::Path;
 
 use clap::{Args, Subcommand};
 
 use crate::core::contradiction_detect::{
-    ConflictSurface, ContradictionDetectionConfig, assemble_conflict_surface,
+    ConflictResolutionPlan, ConflictSurface, ContradictionDetectionConfig, PlannedResolutionAction,
+    assemble_conflict_surface,
 };
 use crate::db::DbConnection;
 use crate::models::{DomainError, RESPONSE_SCHEMA_V2};
@@ -26,6 +29,177 @@ pub enum ConflictCommand {
     Explain(ConflictExplainArgs),
     /// List detected contradiction clusters (k-truss + Louvain).
     Cluster(ConflictClusterArgs),
+    /// Resolve one conflicting pair through audited mutations (dry-run default).
+    Resolve(ConflictResolveArgs),
+}
+
+/// `ee conflict resolve <MEMORY_A> <MEMORY_B> --verb ...` (bd-3a1op.4).
+#[derive(Clone, Debug, Eq, PartialEq, Args)]
+pub struct ConflictResolveArgs {
+    /// One side of the conflicting pair (order-independent).
+    #[arg(value_name = "MEMORY_A")]
+    pub memory_a: String,
+    /// The other side of the conflicting pair.
+    #[arg(value_name = "MEMORY_B")]
+    pub memory_b: String,
+    /// Resolution verb: supersede | reject-one | scope-split | both-valid.
+    #[arg(long, value_name = "VERB")]
+    pub verb: String,
+    /// Surviving memory id (required by supersede and reject-one).
+    #[arg(long, value_name = "MEMORY_ID")]
+    pub keep: Option<String>,
+    /// Rationale persisted as the decision memory's rationale.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+    /// scope-split only: comma-separated tags scoping memory A.
+    #[arg(long, value_name = "TAGS")]
+    pub scope_a_tags: Option<String>,
+    /// scope-split only: comma-separated tags scoping memory B.
+    #[arg(long, value_name = "TAGS")]
+    pub scope_b_tags: Option<String>,
+    /// Execute the plan. Without this flag the command is a dry-run report.
+    #[arg(long)]
+    pub apply: bool,
+    /// Actor recorded in audit rows.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+}
+
+/// Per-atom execution evidence: every applied mutation names its audit trail.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolutionActionResult {
+    pub action: String,
+    pub audit_ids: Vec<String>,
+    pub created_memory_id: Option<String>,
+}
+
+/// Execute an approved plan through the existing audited core atoms,
+/// fail-fast, returning per-atom audit evidence.
+pub fn execute_conflict_resolution(
+    workspace: &Path,
+    database_path: &Path,
+    plan: &ConflictResolutionPlan,
+    reason: &str,
+    actor: Option<&str>,
+) -> Result<Vec<ResolutionActionResult>, DomainError> {
+    use crate::core::decide::{DecideRecordOptions, decide_record};
+    use crate::core::memory::{
+        ExpireMemoryOptions, MemoryLinkMode, MemoryLinkOptions, MemoryTagsMode, MemoryTagsOptions,
+        expire_memory, update_memory_link, update_memory_tags,
+    };
+    use crate::db::{MemoryLinkRelation, MemoryLinkSource};
+
+    let mut results = Vec::with_capacity(plan.actions.len());
+    for action in &plan.actions {
+        let result = match action {
+            PlannedResolutionAction::RecordDecision {
+                topic,
+                chosen,
+                alternatives,
+                supersedes,
+            } => {
+                let report = decide_record(&DecideRecordOptions {
+                    workspace_path: workspace,
+                    database_path: Some(database_path),
+                    topic,
+                    chosen,
+                    alternatives: alternatives.clone(),
+                    rationale: reason,
+                    revisit_by: None,
+                    supersedes: supersedes.as_deref(),
+                    dry_run: false,
+                    actor,
+                    now: None,
+                })?;
+                ResolutionActionResult {
+                    action: "recordDecision".to_owned(),
+                    audit_ids: [
+                        report.memory_audit_id.clone(),
+                        report.link_audit_id.clone(),
+                        report.expire_audit_id.clone(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+                    created_memory_id: Some(report.decision.memory_id.clone()),
+                }
+            }
+            PlannedResolutionAction::ExpireMemory { memory_id, reason } => {
+                let report = expire_memory(&ExpireMemoryOptions {
+                    workspace_path: workspace,
+                    database_path,
+                    memory_id,
+                    reason: Some(reason),
+                    actor,
+                    dry_run: false,
+                    include_tombstoned: false,
+                })?;
+                ResolutionActionResult {
+                    action: "expireMemory".to_owned(),
+                    audit_ids: report.audit_id.into_iter().collect(),
+                    created_memory_id: None,
+                }
+            }
+            PlannedResolutionAction::CreateLink { from, to, relation } => {
+                let relation =
+                    MemoryLinkRelation::parse(relation).ok_or_else(|| DomainError::Usage {
+                        message: format!("Unknown link relation {relation}."),
+                        repair: None,
+                    })?;
+                let report = update_memory_link(&MemoryLinkOptions {
+                    workspace_path: workspace,
+                    database_path,
+                    memory_id: from,
+                    mode: MemoryLinkMode::Create {
+                        target_memory_id: to.clone(),
+                        relation,
+                        weight: 1.0,
+                        confidence: 1.0,
+                        directed: false,
+                        evidence_count: 0,
+                        source: MemoryLinkSource::Agent,
+                        metadata_json: Some(
+                            serde_json::json!({
+                                "resolution": "both_valid",
+                                "conflictId": plan.conflict_id,
+                            })
+                            .to_string(),
+                        ),
+                    },
+                    actor,
+                    dry_run: false,
+                    include_tombstoned: false,
+                })?;
+                ResolutionActionResult {
+                    action: "createLink".to_owned(),
+                    audit_ids: report.audit_id.into_iter().collect(),
+                    created_memory_id: None,
+                }
+            }
+            PlannedResolutionAction::AddTags { memory_id, tags } => {
+                let report = update_memory_tags(&MemoryTagsOptions {
+                    workspace_path: workspace,
+                    database_path,
+                    memory_id,
+                    mode: MemoryTagsMode::Patch {
+                        add: tags.clone(),
+                        remove: Vec::new(),
+                    },
+                    actor,
+                    dry_run: false,
+                    include_tombstoned: false,
+                })?;
+                ResolutionActionResult {
+                    action: "addTags".to_owned(),
+                    audit_ids: report.audit_ids,
+                    created_memory_id: None,
+                }
+            }
+        };
+        results.push(result);
+    }
+    Ok(results)
 }
 
 /// `ee conflict list`

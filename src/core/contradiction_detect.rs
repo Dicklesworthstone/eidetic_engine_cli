@@ -656,6 +656,331 @@ pub fn assemble_conflict_surface(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Conflict resolution planning (bd-3a1op.4, ADR 0066)
+// ---------------------------------------------------------------------------
+
+/// Wire schema id for the `ee conflict resolve` report.
+pub const CONFLICT_RESOLVE_SCHEMA_V1: &str = "ee.conflict.resolve.v1";
+
+/// Resolution verb vocabulary (ADR 0066 verb table).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResolveVerb {
+    /// Keeper supersedes the loser: supersede link + validity close + decision.
+    Supersede,
+    /// Loser was simply wrong: expire it with the rationale on record.
+    RejectOne,
+    /// Both sides hold in different scopes: tag each side into its scope.
+    ScopeSplit,
+    /// The tension is legitimate: record a `related` link + the decision.
+    BothValid,
+}
+
+impl ResolveVerb {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "supersede" => Some(Self::Supersede),
+            "reject-one" => Some(Self::RejectOne),
+            "scope-split" => Some(Self::ScopeSplit),
+            "both-valid" => Some(Self::BothValid),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Supersede => "supersede",
+            Self::RejectOne => "reject-one",
+            Self::ScopeSplit => "scope-split",
+            Self::BothValid => "both-valid",
+        }
+    }
+}
+
+/// One planned mutation atom. Every atom maps 1:1 onto an EXISTING audited
+/// core operation (`decide_record`, `expire_memory`, `update_memory_link`,
+/// `update_memory_tags`) — the plan never introduces a novel mutation path.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "action", rename_all = "camelCase")]
+pub enum PlannedResolutionAction {
+    /// `decide_record` — when `supersedes` is set the one atom also creates
+    /// the supersede link and closes the loser's validity window.
+    #[serde(rename_all = "camelCase")]
+    RecordDecision {
+        topic: String,
+        chosen: String,
+        alternatives: Vec<String>,
+        supersedes: Option<String>,
+    },
+    /// `expire_memory` — audited soft expiration.
+    #[serde(rename_all = "camelCase")]
+    ExpireMemory { memory_id: String, reason: String },
+    /// `update_memory_link` create — audited explicit typed link.
+    #[serde(rename_all = "camelCase")]
+    CreateLink {
+        from: String,
+        to: String,
+        relation: String,
+    },
+    /// `update_memory_tags` patch(add) — audited scope tagging.
+    #[serde(rename_all = "camelCase")]
+    AddTags {
+        memory_id: String,
+        tags: Vec<String>,
+    },
+}
+
+/// The dry-run-visible mutation plan for one conflict pair.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictResolutionPlan {
+    pub conflict_id: String,
+    pub verb: ResolveVerb,
+    pub memory_a: String,
+    pub memory_b: String,
+    pub keep: Option<String>,
+    pub lose: Option<String>,
+    pub actions: Vec<PlannedResolutionAction>,
+}
+
+/// Inputs to planning, already parsed by the CLI layer.
+#[derive(Clone, Debug)]
+pub struct ConflictResolveRequest<'a> {
+    pub memory_a: &'a str,
+    pub memory_b: &'a str,
+    pub verb: ResolveVerb,
+    pub keep: Option<&'a str>,
+    pub reason: &'a str,
+    pub scope_a_tags: Vec<String>,
+    pub scope_b_tags: Vec<String>,
+}
+
+/// Planning outcome. Refusals are data, not errors, so the CLI can emit the
+/// honest degraded/policy envelope for each case.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConflictResolutionOutcome {
+    Plan(ConflictResolutionPlan),
+    /// The pair is not on the CURRENT conflict surface (state moved since the
+    /// agent ran explain). Carries the focused live view for re-orientation.
+    StaleSurface {
+        current_pairs: Vec<ConflictPairView>,
+    },
+    /// Policy refuses the mutation (exit 7): destructive verb against a
+    /// human-explicit rule memory.
+    PolicyDenied {
+        message: String,
+        repair: String,
+    },
+    /// The request itself is malformed (missing/invalid --keep, scopes, ...).
+    InvalidRequest {
+        message: String,
+        repair: String,
+    },
+}
+
+fn decision_topic(pair: &ConflictPairView) -> String {
+    format!("conflict:{}", pair.conflict_id)
+}
+
+fn head(content: &str) -> String {
+    const MAX: usize = 96;
+    let oneline = content.replace('\n', " ");
+    if oneline.chars().count() <= MAX {
+        oneline
+    } else {
+        let truncated: String = oneline.chars().take(MAX).collect();
+        format!("{truncated}…")
+    }
+}
+
+/// Pure planner: re-checks the pair against the live surface, enforces verb
+/// argument rules and the destructive-verb policy, then maps the verb onto
+/// existing audited atoms per the ADR 0066 verb table.
+#[must_use]
+pub fn plan_conflict_resolution(
+    surface: &ConflictSurface,
+    request: &ConflictResolveRequest<'_>,
+) -> ConflictResolutionOutcome {
+    let pair = surface.pairs.iter().find(|pair| {
+        (pair.memory_a.id == request.memory_a && pair.memory_b.id == request.memory_b)
+            || (pair.memory_a.id == request.memory_b && pair.memory_b.id == request.memory_a)
+    });
+    let Some(pair) = pair else {
+        let mut current: Vec<ConflictPairView> = surface
+            .pairs
+            .iter()
+            .filter(|pair| {
+                [request.memory_a, request.memory_b]
+                    .iter()
+                    .any(|id| pair.memory_a.id == *id || pair.memory_b.id == *id)
+            })
+            .cloned()
+            .collect();
+        current.truncate(8);
+        return ConflictResolutionOutcome::StaleSurface {
+            current_pairs: current,
+        };
+    };
+
+    let needs_keep = matches!(
+        request.verb,
+        ResolveVerb::Supersede | ResolveVerb::RejectOne
+    );
+    let (keep, lose) = if needs_keep {
+        let Some(keep) = request.keep else {
+            return ConflictResolutionOutcome::InvalidRequest {
+                message: format!(
+                    "--verb {} requires --keep <memory-id> naming the surviving side.",
+                    request.verb.as_str()
+                ),
+                repair: format!(
+                    "ee conflict resolve {} {} --verb {} --keep {} --reason \"...\" --json",
+                    request.memory_a,
+                    request.memory_b,
+                    request.verb.as_str(),
+                    request.memory_a
+                ),
+            };
+        };
+        if keep != pair.memory_a.id && keep != pair.memory_b.id {
+            return ConflictResolutionOutcome::InvalidRequest {
+                message: format!("--keep {keep} is neither side of this conflict pair."),
+                repair: format!(
+                    "Pass --keep {} or --keep {}.",
+                    pair.memory_a.id, pair.memory_b.id
+                ),
+            };
+        }
+        let lose = if keep == pair.memory_a.id {
+            pair.memory_b.id.clone()
+        } else {
+            pair.memory_a.id.clone()
+        };
+        (Some(keep.to_owned()), Some(lose))
+    } else {
+        (None, None)
+    };
+
+    if let Some(lose_id) = lose.as_deref() {
+        let loser = if pair.memory_a.id == lose_id {
+            &pair.memory_a
+        } else {
+            &pair.memory_b
+        };
+        if request.verb == ResolveVerb::RejectOne
+            && loser.kind == "rule"
+            && loser.trust_class == "human_explicit"
+        {
+            return ConflictResolutionOutcome::PolicyDenied {
+                message: format!(
+                    "reject-one refuses to expire {lose_id}: it is a human-explicit rule; \
+                     rejecting it outright requires a human decision."
+                ),
+                repair: "Use --verb supersede (records provenance + the decision) or have a \
+                         human run `ee memory expire` directly."
+                    .to_owned(),
+            };
+        }
+    }
+
+    let loser_head = lose.as_deref().map(|id| {
+        if pair.memory_a.id == id {
+            head(&pair.memory_a.content)
+        } else {
+            head(&pair.memory_b.content)
+        }
+    });
+
+    let actions = match request.verb {
+        ResolveVerb::Supersede => {
+            // One existing atom: decide_record(supersedes=loser) creates the
+            // decision memory, the supersede link, AND closes the loser.
+            vec![PlannedResolutionAction::RecordDecision {
+                topic: decision_topic(pair),
+                chosen: format!("keep {}", keep.as_deref().unwrap_or_default()),
+                alternatives: loser_head.into_iter().collect(),
+                supersedes: lose.clone(),
+            }]
+        }
+        ResolveVerb::RejectOne => vec![
+            PlannedResolutionAction::ExpireMemory {
+                memory_id: lose.clone().unwrap_or_default(),
+                reason: request.reason.to_owned(),
+            },
+            PlannedResolutionAction::RecordDecision {
+                topic: decision_topic(pair),
+                chosen: format!(
+                    "keep {}; reject the other side",
+                    keep.as_deref().unwrap_or_default()
+                ),
+                alternatives: loser_head.into_iter().collect(),
+                supersedes: None,
+            },
+        ],
+        ResolveVerb::ScopeSplit => {
+            if request.scope_a_tags.is_empty() || request.scope_b_tags.is_empty() {
+                return ConflictResolutionOutcome::InvalidRequest {
+                    message: "--verb scope-split requires --scope-a-tags and --scope-b-tags \
+                              (comma-separated, both non-empty)."
+                        .to_owned(),
+                    repair: format!(
+                        "ee conflict resolve {} {} --verb scope-split --scope-a-tags rust \
+                         --scope-b-tags python --reason \"...\" --json",
+                        request.memory_a, request.memory_b
+                    ),
+                };
+            }
+            vec![
+                PlannedResolutionAction::AddTags {
+                    memory_id: pair.memory_a.id.clone(),
+                    tags: request.scope_a_tags.clone(),
+                },
+                PlannedResolutionAction::AddTags {
+                    memory_id: pair.memory_b.id.clone(),
+                    tags: request.scope_b_tags.clone(),
+                },
+                PlannedResolutionAction::RecordDecision {
+                    topic: decision_topic(pair),
+                    chosen: format!(
+                        "scope-split: {} → [{}]; {} → [{}]",
+                        pair.memory_a.id,
+                        request.scope_a_tags.join(","),
+                        pair.memory_b.id,
+                        request.scope_b_tags.join(",")
+                    ),
+                    alternatives: Vec::new(),
+                    supersedes: None,
+                },
+            ]
+        }
+        ResolveVerb::BothValid => vec![
+            PlannedResolutionAction::CreateLink {
+                from: pair.memory_a.id.clone(),
+                to: pair.memory_b.id.clone(),
+                relation: "related".to_owned(),
+            },
+            PlannedResolutionAction::RecordDecision {
+                topic: decision_topic(pair),
+                chosen: "both-valid: the tension is legitimate; both memories stand".to_owned(),
+                alternatives: Vec::new(),
+                supersedes: None,
+            },
+        ],
+    };
+
+    ConflictResolutionOutcome::Plan(ConflictResolutionPlan {
+        conflict_id: pair.conflict_id.clone(),
+        verb: request.verb,
+        memory_a: pair.memory_a.id.clone(),
+        memory_b: pair.memory_b.id.clone(),
+        keep,
+        lose,
+        actions,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1151,5 +1476,215 @@ mod tests {
         let second =
             assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
         assert_eq!(first, second, "conflict surface is deterministic");
+    }
+
+    // ---- resolution planner (bd-3a1op.4) ---------------------------------
+
+    use super::{
+        ConflictMemberView, ConflictPairView, ConflictResolutionOutcome, ConflictResolveRequest,
+        ConflictSurface, PlannedResolutionAction, ResolveVerb, plan_conflict_resolution,
+    };
+
+    fn member(id: &str, kind: &str, trust_class: &str) -> ConflictMemberView {
+        ConflictMemberView {
+            id: id.to_owned(),
+            content: format!("content of {id}"),
+            level: "semantic".to_owned(),
+            kind: kind.to_owned(),
+            trust_class: trust_class.to_owned(),
+            trust_rank: 2,
+            confidence: 0.8,
+            importance: 0.5,
+            valid_from: None,
+            valid_to: None,
+            updated_at: "2026-08-10T00:00:00Z".to_owned(),
+            preferred: false,
+        }
+    }
+
+    fn fixture_surface() -> ConflictSurface {
+        ConflictSurface {
+            schema: CONFLICT_SURFACE_SCHEMA_V1,
+            pairs: vec![ConflictPairView {
+                conflict_id: "cfl_fixture_pair".to_owned(),
+                signal: "polarity_opposition".to_owned(),
+                load_bearing_milli: 500,
+                preferred_side: "a".to_owned(),
+                preferred_reason: "higher_trust".to_owned(),
+                memory_a: member(MEM_A, "fact", "agent_inferred"),
+                memory_b: member(MEM_B, "fact", "agent_inferred"),
+            }],
+            clusters: Vec::new(),
+            explicit_edge_count: 1,
+            gathered_signals: Vec::new(),
+            deferred_signals: Vec::new(),
+            fuzzy_near_conflict_skipped: false,
+            degraded: Vec::new(),
+        }
+    }
+
+    fn request<'a>(verb: ResolveVerb, keep: Option<&'a str>) -> ConflictResolveRequest<'a> {
+        ConflictResolveRequest {
+            memory_a: MEM_A,
+            memory_b: MEM_B,
+            verb,
+            keep,
+            reason: "test rationale",
+            scope_a_tags: Vec::new(),
+            scope_b_tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn supersede_plans_the_single_decide_record_atom() {
+        let outcome = plan_conflict_resolution(
+            &fixture_surface(),
+            &request(ResolveVerb::Supersede, Some(MEM_A)),
+        );
+        let ConflictResolutionOutcome::Plan(plan) = outcome else {
+            panic!("expected a plan, got {outcome:?}");
+        };
+        assert_eq!(plan.keep.as_deref(), Some(MEM_A));
+        assert_eq!(plan.lose.as_deref(), Some(MEM_B));
+        assert_eq!(plan.actions.len(), 1, "supersede is ONE decide_record atom");
+        let PlannedResolutionAction::RecordDecision { supersedes, .. } = &plan.actions[0] else {
+            panic!("expected RecordDecision, got {:?}", plan.actions[0]);
+        };
+        assert_eq!(supersedes.as_deref(), Some(MEM_B));
+    }
+
+    #[test]
+    fn reject_one_plans_expire_then_decision_and_reversed_keep_resolves_loser() {
+        // keep=b exercises the orientation-independent keep/lose resolution.
+        let outcome = plan_conflict_resolution(
+            &fixture_surface(),
+            &request(ResolveVerb::RejectOne, Some(MEM_B)),
+        );
+        let ConflictResolutionOutcome::Plan(plan) = outcome else {
+            panic!("expected a plan, got {outcome:?}");
+        };
+        assert_eq!(plan.lose.as_deref(), Some(MEM_A));
+        assert!(matches!(
+            &plan.actions[0],
+            PlannedResolutionAction::ExpireMemory { memory_id, reason }
+                if memory_id == MEM_A && reason == "test rationale"
+        ));
+        assert!(matches!(
+            &plan.actions[1],
+            PlannedResolutionAction::RecordDecision {
+                supersedes: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn keep_required_verbs_refuse_without_keep() {
+        for verb in [ResolveVerb::Supersede, ResolveVerb::RejectOne] {
+            let outcome = plan_conflict_resolution(&fixture_surface(), &request(verb, None));
+            assert!(
+                matches!(outcome, ConflictResolutionOutcome::InvalidRequest { .. }),
+                "{} without --keep must refuse",
+                verb.as_str()
+            );
+        }
+        let outcome = plan_conflict_resolution(
+            &fixture_surface(),
+            &request(ResolveVerb::Supersede, Some(MEM_C)),
+        );
+        assert!(
+            matches!(outcome, ConflictResolutionOutcome::InvalidRequest { .. }),
+            "--keep naming a non-member must refuse"
+        );
+    }
+
+    #[test]
+    fn stale_pair_refuses_with_focused_current_state() {
+        let outcome = plan_conflict_resolution(
+            &fixture_surface(),
+            &ConflictResolveRequest {
+                memory_a: MEM_A,
+                memory_b: MEM_C, // (a,c) is NOT a live pair; (a,b) is
+                verb: ResolveVerb::BothValid,
+                keep: None,
+                reason: "r",
+                scope_a_tags: Vec::new(),
+                scope_b_tags: Vec::new(),
+            },
+        );
+        let ConflictResolutionOutcome::StaleSurface { current_pairs } = outcome else {
+            panic!("expected StaleSurface, got {outcome:?}");
+        };
+        assert_eq!(
+            current_pairs.len(),
+            1,
+            "focused view carries the live (a,b) pair"
+        );
+        assert_eq!(current_pairs[0].memory_a.id, MEM_A);
+    }
+
+    #[test]
+    fn reject_one_of_human_explicit_rule_is_policy_denied() {
+        let mut surface = fixture_surface();
+        surface.pairs[0].memory_b = member(MEM_B, "rule", "human_explicit");
+        let outcome =
+            plan_conflict_resolution(&surface, &request(ResolveVerb::RejectOne, Some(MEM_A)));
+        assert!(
+            matches!(outcome, ConflictResolutionOutcome::PolicyDenied { .. }),
+            "expiring a human-explicit rule via reject-one must be policy-denied, got {outcome:?}"
+        );
+        // supersede of the same memory stays allowed (records provenance).
+        let outcome =
+            plan_conflict_resolution(&surface, &request(ResolveVerb::Supersede, Some(MEM_A)));
+        assert!(matches!(outcome, ConflictResolutionOutcome::Plan(_)));
+    }
+
+    #[test]
+    fn scope_split_requires_both_scopes_and_plans_tags_then_decision() {
+        let outcome =
+            plan_conflict_resolution(&fixture_surface(), &request(ResolveVerb::ScopeSplit, None));
+        assert!(matches!(
+            outcome,
+            ConflictResolutionOutcome::InvalidRequest { .. }
+        ));
+
+        let mut req = request(ResolveVerb::ScopeSplit, None);
+        req.scope_a_tags = vec!["rust".to_owned()];
+        req.scope_b_tags = vec!["python".to_owned()];
+        let outcome = plan_conflict_resolution(&fixture_surface(), &req);
+        let ConflictResolutionOutcome::Plan(plan) = outcome else {
+            panic!("expected a plan, got {outcome:?}");
+        };
+        assert_eq!(plan.actions.len(), 3);
+        assert!(matches!(
+            &plan.actions[0],
+            PlannedResolutionAction::AddTags { memory_id, tags }
+                if memory_id == MEM_A && tags == &vec!["rust".to_owned()]
+        ));
+        assert!(matches!(
+            &plan.actions[2],
+            PlannedResolutionAction::RecordDecision { .. }
+        ));
+    }
+
+    #[test]
+    fn both_valid_plans_related_link_then_decision() {
+        let outcome =
+            plan_conflict_resolution(&fixture_surface(), &request(ResolveVerb::BothValid, None));
+        let ConflictResolutionOutcome::Plan(plan) = outcome else {
+            panic!("expected a plan, got {outcome:?}");
+        };
+        assert_eq!(plan.keep, None);
+        assert!(matches!(
+            &plan.actions[0],
+            PlannedResolutionAction::CreateLink { relation, .. } if relation == "related"
+        ));
+        assert!(matches!(
+            &plan.actions[1],
+            PlannedResolutionAction::RecordDecision {
+                supersedes: None,
+                ..
+            }
+        ));
     }
 }
