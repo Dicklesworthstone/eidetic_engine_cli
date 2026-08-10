@@ -636,11 +636,7 @@ fn record_flock_gate_wait(waited: std::time::Duration, retried: bool) {
         FLOCK_GATE_CONTENDED_ACQUIRES.fetch_add(1, Ordering::Relaxed);
     }
     if wait_ns > 0 {
-        FLOCK_GATE_WAIT_NS_TOTAL
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |total| {
-                Some(total.saturating_add(wait_ns))
-            })
-            .ok();
+        atomic_saturating_add(&FLOCK_GATE_WAIT_NS_TOTAL, wait_ns);
         FLOCK_GATE_MAX_WAIT_NS.fetch_max(wait_ns, Ordering::Relaxed);
     }
 }
@@ -649,12 +645,21 @@ fn record_flock_gate_timeout(waited: std::time::Duration) {
     use std::sync::atomic::Ordering;
     let wait_ns = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
     FLOCK_GATE_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
-    FLOCK_GATE_WAIT_NS_TOTAL
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |total| {
-            Some(total.saturating_add(wait_ns))
-        })
-        .ok();
+    atomic_saturating_add(&FLOCK_GATE_WAIT_NS_TOTAL, wait_ns);
     FLOCK_GATE_MAX_WAIT_NS.fetch_max(wait_ns, Ordering::Relaxed);
+}
+
+fn atomic_saturating_add(counter: &std::sync::atomic::AtomicU64, increment: u64) {
+    use std::sync::atomic::Ordering;
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        let updated = current.saturating_add(increment);
+        match counter.compare_exchange_weak(current, updated, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => return,
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 fn lock_database_write_file(database_path: &Path) -> Result<File> {
@@ -51507,6 +51512,23 @@ mod tests {
         ensure(
             after.timeouts == before.timeouts,
             "uncontended acquisition records no timeout",
+        )
+    }
+
+    #[test]
+    fn flock_gate_wait_counter_adds_and_saturates_without_deprecated_atomics() -> TestResult {
+        let counter = std::sync::atomic::AtomicU64::new(7);
+        super::atomic_saturating_add(&counter, 5);
+        ensure_equal(
+            &counter.load(std::sync::atomic::Ordering::Relaxed),
+            &12,
+            "ordinary atomic wait accumulation",
+        )?;
+        super::atomic_saturating_add(&counter, u64::MAX);
+        ensure_equal(
+            &counter.load(std::sync::atomic::Ordering::Relaxed),
+            &u64::MAX,
+            "atomic wait accumulation saturates",
         )
     }
 
