@@ -1189,6 +1189,12 @@ run_stage "Global Lane E2E (bd-1bfwa.4)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e
 run_stage "Beads Export Repair Self-Test (bd-2p297.1)" "./scripts/beads_export_repair.sh --self-test"
 run_stage "Beads Export Fixture Suite (bd-2p297.3)" "./scripts/beads_export_repair.sh --fixture-suite tests/fixtures/beads_export"
 
+# Gate 6.1269: Graph-intelligence E2E (bd-3a1op.6 / ADR 0066). Real binary:
+# empty-graph honesty, hub-pattern suggestion with opposed-polarity
+# contradiction typing, --propose emission + re-propose dedup, and the
+# curate validate/apply lifecycle creating the typed link.
+run_stage "Graph Intel E2E (bd-3a1op.6)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_graph_intel.sh"
+
 # Gate 6.127: Ergonomics real-binary E2E (bd-1et0v.22). No-Cargo:
 # proves `ee context` remains an alias for canonical `ee pack` while carrying
 # the deprecated_alias info row, and proves PATH-shadow doctor findings are
