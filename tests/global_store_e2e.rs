@@ -129,6 +129,123 @@ fn pack_item_memory_ids(envelope: &serde_json::Value) -> Vec<String> {
 }
 
 #[test]
+fn global_cross_wire_validation_precedes_bootstrap_and_keyed_replay() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().join("workspace");
+    let xdg_data_home = tempdir.path().join("xdg-data");
+    std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&xdg_data_home).map_err(|error| error.to_string())?;
+    let global_paths = GlobalStorePaths::from_data_root(&xdg_data_home.join("ee"));
+
+    let invalid = run_ee(
+        &workspace,
+        &xdg_data_home,
+        &[
+            "remember",
+            "--global",
+            "Global keyed replay must validate first.",
+            "--kind",
+            "episodic",
+            "--idempotency-key",
+            "global-cross-wire",
+            "--json",
+        ],
+    )?;
+    if invalid.status.code() != Some(1) {
+        return Err(format!(
+            "initial global cross-wire exit={:?}, stdout={}, stderr={}",
+            invalid.status.code(),
+            String::from_utf8_lossy(&invalid.stdout),
+            String::from_utf8_lossy(&invalid.stderr)
+        ));
+    }
+    let invalid_json: serde_json::Value = serde_json::from_slice(&invalid.stdout)
+        .map_err(|error| format!("initial global cross-wire stdout was not JSON: {error}"))?;
+    if invalid_json
+        .pointer("/error/code")
+        .and_then(serde_json::Value::as_str)
+        != Some("remember_kind_is_level")
+    {
+        return Err(format!(
+            "initial global cross-wire returned wrong envelope: {invalid_json}"
+        ));
+    }
+    if global_paths.root.exists() {
+        return Err(format!(
+            "invalid global remember bootstrapped {}",
+            global_paths.root.display()
+        ));
+    }
+
+    stdout_json(
+        run_ee(&workspace, &xdg_data_home, &["init", "--json"])?,
+        "ee init",
+    )?;
+    let content = "Global keyed replay must validate first.";
+    stdout_json(
+        run_ee(
+            &workspace,
+            &xdg_data_home,
+            &[
+                "remember",
+                "--global",
+                content,
+                "--kind",
+                "fact",
+                "--idempotency-key",
+                "global-cross-wire",
+                "--json",
+            ],
+        )?,
+        "valid keyed global remember",
+    )?;
+
+    let replay = run_ee(
+        &workspace,
+        &xdg_data_home,
+        &[
+            "remember",
+            "--global",
+            content,
+            "--kind",
+            "semantic",
+            "--idempotency-key",
+            "global-cross-wire",
+            "--json",
+        ],
+    )?;
+    if replay.status.code() != Some(1) {
+        return Err(format!(
+            "cross-wired global replay exit={:?}, stdout={}, stderr={}",
+            replay.status.code(),
+            String::from_utf8_lossy(&replay.stdout),
+            String::from_utf8_lossy(&replay.stderr)
+        ));
+    }
+    let replay_json: serde_json::Value = serde_json::from_slice(&replay.stdout)
+        .map_err(|error| format!("global replay stdout was not JSON: {error}"))?;
+    if replay_json
+        .pointer("/error/code")
+        .and_then(serde_json::Value::as_str)
+        != Some("remember_kind_is_level")
+    {
+        return Err(format!(
+            "cross-wired global replay returned wrong envelope: {replay_json}"
+        ));
+    }
+    let memories = read_global_store_memories(&global_paths, false)
+        .map_err(|error| format!("read global store after cross-wired replay: {error}"))?;
+    if memories.len() != 1 {
+        return Err(format!(
+            "cross-wired global replay mutated row count: {}",
+            memories.len()
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
 fn remember_global_then_pack_reads_from_global_store() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
     let workspace = tempdir.path().join("workspace");

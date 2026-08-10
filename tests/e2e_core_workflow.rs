@@ -2059,6 +2059,13 @@ fn remember_level_kind_cross_wire_guard_public_cli_contract() -> TestResult {
     )?;
     ensure_equal(
         &error_json
+            .pointer("/error/details/providedTruncated")
+            .and_then(serde_json::Value::as_bool),
+        &Some(false),
+        "kind-as-level provided truncation",
+    )?;
+    ensure_equal(
+        &error_json
             .pointer("/error/severity")
             .and_then(serde_json::Value::as_str),
         &Some("low"),
@@ -2079,9 +2086,25 @@ fn remember_level_kind_cross_wire_guard_public_cli_contract() -> TestResult {
         "kind-as-level repair must template the corrected flag",
     )?;
     ensure_equal(
-        &error_json.pointer("/error/details/recovery"),
-        &Some(&serde_json::json!([])),
-        "kind-as-level recovery is a present, empty array",
+        &error_json
+            .pointer("/error/details/recovery/0/kind")
+            .and_then(serde_json::Value::as_str),
+        &Some("flag"),
+        "kind-as-level recovery kind",
+    )?;
+    ensure_equal(
+        &error_json
+            .pointer("/error/details/recovery/0/flagName")
+            .and_then(serde_json::Value::as_str),
+        &Some("--level"),
+        "kind-as-level recovery flag",
+    )?;
+    ensure_equal(
+        &error_json
+            .pointer("/error/details/recovery/0/valueHint")
+            .and_then(serde_json::Value::as_str),
+        &Some("episodic"),
+        "kind-as-level recovery value",
     )?;
 
     // The same guard is reachable through the real `ee note` CLI surface.

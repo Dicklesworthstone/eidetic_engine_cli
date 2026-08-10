@@ -1389,6 +1389,7 @@ fn remember_memory_inner(
     typed_field_assignments: &[String],
     attempt_family: Option<&RememberAttemptFamily<'_>>,
 ) -> Result<RememberMemoryReport, DomainError> {
+    validate_remember_level_kind_cross_wire(options.level, options.kind)?;
     remember_memory_inner_with_store(
         options,
         id_source,
@@ -3826,6 +3827,7 @@ pub(crate) fn prepare_remember_txn_write_for_connection(
     options: &RememberMemoryOptions<'_>,
     defer_index_processing: bool,
 ) -> Result<PreparedRememberTxnWrite, DomainError> {
+    validate_remember_level_kind_cross_wire(options.level, options.kind)?;
     let mut id_source = RememberIdSource::Ambient;
     let prepared =
         prepare_remember_memory_with_store(options, id_source.next_memory_id(), None, &[], None)?;
@@ -5968,6 +5970,35 @@ pub const REMEMBER_KIND_IS_LEVEL_CODE: &str = "remember_kind_is_level";
 /// A canonical memory KIND token was passed as the memory level.
 pub const REMEMBER_LEVEL_IS_KIND_CODE: &str = "remember_level_is_kind";
 
+/// Maximum caller-controlled bytes echoed by a cross-wire usage error.
+const REMEMBER_CROSS_WIRE_ECHO_MAX_BYTES: usize = 128;
+
+fn validate_remember_level_kind_cross_wire(level: &str, kind: &str) -> Result<(), DomainError> {
+    remember_level_kind_cross_wire_error(level, kind).map_or(Ok(()), Err)
+}
+
+fn bounded_remember_cross_wire_echo(raw: &str) -> (String, bool) {
+    if raw.len() <= REMEMBER_CROSS_WIRE_ECHO_MAX_BYTES {
+        return (raw.to_owned(), false);
+    }
+
+    const OMISSION: &str = "…";
+    let remaining = REMEMBER_CROSS_WIRE_ECHO_MAX_BYTES - OMISSION.len();
+    let mut prefix_end = remaining / 2;
+    while prefix_end > 0 && !raw.is_char_boundary(prefix_end) {
+        prefix_end -= 1;
+    }
+    let mut suffix_start = raw.len() - (remaining - prefix_end);
+    while suffix_start < raw.len() && !raw.is_char_boundary(suffix_start) {
+        suffix_start += 1;
+    }
+
+    (
+        format!("{}{}{}", &raw[..prefix_end], OMISSION, &raw[suffix_start..]),
+        true,
+    )
+}
+
 /// Detect level/kind cross-wiring on the raw `--level` / `--kind` tokens
 /// (bd-remember-level-kind-validation-zau2l).
 ///
@@ -5981,10 +6012,11 @@ pub const REMEMBER_LEVEL_IS_KIND_CODE: &str = "remember_level_is_kind";
 pub fn remember_level_kind_cross_wire_error(level: &str, kind: &str) -> Option<DomainError> {
     if let Ok(level_token) = MemoryLevel::from_str(kind) {
         let level_value = level_token.as_str();
+        let (provided, provided_truncated) = bounded_remember_cross_wire_echo(kind);
         return Some(DomainError::UsageCodeWithDetails {
             code: REMEMBER_KIND_IS_LEVEL_CODE,
             message: format!(
-                "`{kind}` is a memory level, not a kind — did you mean `--level {level_value}`? \
+                "`{provided}` is a memory level, not a kind — did you mean `--level {level_value}`? \
                  Canonical kinds: {}. Free-form kinds stay accepted; only the four level names \
                  (working, episodic, semantic, procedural) are reserved.",
                 KNOWN_MEMORY_KINDS.join(", ")
@@ -5995,11 +6027,20 @@ pub fn remember_level_kind_cross_wire_error(level: &str, kind: &str) -> Option<D
             details_json: serde_json::json!({
                 "failureModeCode": REMEMBER_KIND_IS_LEVEL_CODE,
                 "argument": "--kind",
-                "provided": kind,
+                "provided": provided,
+                "providedTruncated": provided_truncated,
                 "didYouMean": {"argument": "--level", "value": level_value},
                 "memoryLevels": KNOWN_MEMORY_LEVELS,
                 "canonicalKinds": KNOWN_MEMORY_KINDS,
-                "recovery": [],
+                "recovery": [{
+                    "priority": 1,
+                    "kind": "flag",
+                    "rationale": "Move the recognized level token to --level and choose the intended memory kind.",
+                    "flagName": "--level",
+                    "valueHint": level_value,
+                    "example": format!("ee remember \"<content>\" --level {level_value} --kind <kind> --json"),
+                    "resultsIn": "The request is validated with separate level and kind taxonomies."
+                }],
             })
             .to_string(),
         });
@@ -6009,10 +6050,11 @@ pub fn remember_level_kind_cross_wire_error(level: &str, kind: &str) -> Option<D
         && !matches!(kind_token, MemoryKind::Custom(_))
     {
         let kind_value = kind_token.as_str().to_owned();
+        let (provided, provided_truncated) = bounded_remember_cross_wire_echo(level);
         return Some(DomainError::UsageCodeWithDetails {
             code: REMEMBER_LEVEL_IS_KIND_CODE,
             message: format!(
-                "`{level}` is a memory kind, not a level — did you mean `--kind {kind_value}`? \
+                "`{provided}` is a memory kind, not a level — did you mean `--kind {kind_value}`? \
                  Levels are: working, episodic, semantic, procedural."
             ),
             repair: Some(format!(
@@ -6021,11 +6063,20 @@ pub fn remember_level_kind_cross_wire_error(level: &str, kind: &str) -> Option<D
             details_json: serde_json::json!({
                 "failureModeCode": REMEMBER_LEVEL_IS_KIND_CODE,
                 "argument": "--level",
-                "provided": level,
+                "provided": provided,
+                "providedTruncated": provided_truncated,
                 "didYouMean": {"argument": "--kind", "value": kind_value},
                 "memoryLevels": KNOWN_MEMORY_LEVELS,
                 "canonicalKinds": KNOWN_MEMORY_KINDS,
-                "recovery": [],
+                "recovery": [{
+                    "priority": 1,
+                    "kind": "flag",
+                    "rationale": "Move the recognized kind token to --kind and choose the intended memory level.",
+                    "flagName": "--kind",
+                    "valueHint": kind_value,
+                    "example": format!("ee remember \"<content>\" --level <level> --kind {kind_value} --json"),
+                    "resultsIn": "The request is validated with separate level and kind taxonomies."
+                }],
             })
             .to_string(),
         });
@@ -6785,6 +6836,7 @@ pub fn remember_memory_with_controls_typed_fields_and_family(
     typed_field_assignments: &[String],
     attempt_family: Option<&RememberAttemptFamily<'_>>,
 ) -> Result<RememberOutcome, DomainError> {
+    validate_remember_level_kind_cross_wire(options.level, options.kind)?;
     if controls.reinforce && !typed_field_assignments.is_empty() {
         return Err(remember_usage_error(
             "--field cannot be combined with --reinforce because reinforcement does not mutate the surviving memory's typed sidecar"
@@ -6920,6 +6972,7 @@ pub fn remember_global_memory_with_controls_and_typed_fields(
     controls: &RememberWriteControls<'_>,
     typed_field_assignments: &[String],
 ) -> Result<RememberOutcome, DomainError> {
+    validate_remember_level_kind_cross_wire(options.level, options.kind)?;
     if controls.reinforce {
         return Err(remember_usage_error(
             "--global cannot be combined with --reinforce".to_owned(),
@@ -11426,6 +11479,11 @@ mod tests {
                 "kind-as-level provided",
             )?;
             ensure(
+                details["providedTruncated"].as_bool(),
+                Some(false),
+                "kind-as-level provided truncation",
+            )?;
+            ensure(
                 details["didYouMean"]["argument"].as_str(),
                 Some("--level"),
                 "kind-as-level didYouMean argument",
@@ -11442,8 +11500,18 @@ mod tests {
             )?;
             ensure(
                 details["recovery"].as_array().map(std::vec::Vec::len),
-                Some(0),
+                Some(1),
                 "kind-as-level recovery",
+            )?;
+            ensure(
+                details["recovery"][0]["flagName"].as_str(),
+                Some("--level"),
+                "kind-as-level recovery flag",
+            )?;
+            ensure(
+                details["recovery"][0]["valueHint"].as_str(),
+                Some(canonical),
+                "kind-as-level recovery value",
             )?;
         }
         Ok(())
@@ -11477,6 +11545,11 @@ mod tests {
                 "level-as-kind provided",
             )?;
             ensure(
+                details["providedTruncated"].as_bool(),
+                Some(false),
+                "level-as-kind provided truncation",
+            )?;
+            ensure(
                 details["didYouMean"]["argument"].as_str(),
                 Some("--kind"),
                 "level-as-kind didYouMean argument",
@@ -11488,11 +11561,52 @@ mod tests {
             )?;
             ensure(
                 details["recovery"].as_array().map(std::vec::Vec::len),
-                Some(0),
+                Some(1),
                 "level-as-kind recovery",
+            )?;
+            ensure(
+                details["recovery"][0]["flagName"].as_str(),
+                Some("--kind"),
+                "level-as-kind recovery flag",
+            )?;
+            ensure(
+                details["recovery"][0]["valueHint"].as_str(),
+                Some(canonical),
+                "level-as-kind recovery value",
             )?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn remember_cross_wire_guard_bounds_caller_controlled_echo() -> TestResult {
+        let provided = format!("episodic{}", " ".repeat(512));
+        let error = remember_level_kind_cross_wire_error("episodic", &provided)
+            .ok_or_else(|| "padded level token as kind must error".to_owned())?;
+        let details = cross_wire_details(&error)?;
+        let echoed = details["provided"]
+            .as_str()
+            .ok_or_else(|| "bounded provided token missing".to_owned())?;
+        ensure(
+            echoed.len() <= REMEMBER_CROSS_WIRE_ECHO_MAX_BYTES,
+            true,
+            "provided token byte cap",
+        )?;
+        ensure(
+            echoed.is_char_boundary(echoed.len()),
+            true,
+            "provided token UTF-8 boundary",
+        )?;
+        ensure(
+            details["providedTruncated"].as_bool(),
+            Some(true),
+            "provided truncation marker",
+        )?;
+        ensure(
+            error.message().contains("--level episodic"),
+            true,
+            "bounded message retains canonical repair",
+        )
     }
 
     #[test]
@@ -11527,6 +11641,48 @@ mod tests {
             REMEMBER_KIND_IS_LEVEL_CODE,
             "double cross-wire precedence",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn remember_cross_wire_guard_precedes_store_creation_in_both_directions() -> TestResult {
+        for (level, kind, expected_code) in [
+            ("episodic", "semantic", REMEMBER_KIND_IS_LEVEL_CODE),
+            ("rule", "fact", REMEMBER_LEVEL_IS_KIND_CODE),
+        ] {
+            let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let result = remember_memory(&RememberMemoryOptions {
+                workspace_path: temp.path(),
+                database_path: None,
+                content: "Cross-wired input must fail before store creation.",
+                workflow_id: None,
+                level,
+                kind,
+                tags: None,
+                confidence: 0.8,
+                source: None,
+                allow_secret_mention: false,
+                valid_from: None,
+                valid_to: None,
+                dry_run: false,
+                auto_link: false,
+                propose_candidates: false,
+            });
+            match result {
+                Err(error) => ensure(error.code(), expected_code, "cross-wire error code")?,
+                Ok(report) => {
+                    return Err(format!(
+                        "cross-wired remember unexpectedly created {}",
+                        report.memory_id
+                    ));
+                }
+            }
+            ensure(
+                temp.path().join(".ee").exists(),
+                false,
+                "cross-wire rejection must not create .ee",
+            )?;
+        }
         Ok(())
     }
 
@@ -12600,6 +12756,54 @@ mod tests {
         .map_err(|error| error.message())?;
 
         Ok((temp, created))
+    }
+
+    #[test]
+    fn remember_cross_wire_rejection_does_not_consume_seeded_memory_id() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut guarded = Deterministic::from_seed(12_344);
+        let result = remember_memory_seeded(
+            &RememberMemoryOptions {
+                workspace_path: temp.path(),
+                database_path: None,
+                content: "A rejected cross-wire must not advance deterministic state.",
+                workflow_id: None,
+                level: "episodic",
+                kind: "semantic",
+                tags: None,
+                confidence: 0.8,
+                source: None,
+                allow_secret_mention: false,
+                valid_from: None,
+                valid_to: None,
+                dry_run: false,
+                auto_link: false,
+                propose_candidates: false,
+            },
+            &mut guarded,
+        );
+        match result {
+            Err(error) => ensure(
+                error.code(),
+                REMEMBER_KIND_IS_LEVEL_CODE,
+                "seeded cross-wire error code",
+            )?,
+            Ok(report) => {
+                return Err(format!(
+                    "cross-wired seeded remember unexpectedly created {}",
+                    report.memory_id
+                ));
+            }
+        }
+
+        let guarded_next = MemoryId::now_seeded(&mut guarded);
+        let mut pristine = Deterministic::from_seed(12_344);
+        let pristine_next = MemoryId::now_seeded(&mut pristine);
+        ensure(
+            guarded_next,
+            pristine_next,
+            "rejected seeded remember leaves the ID stream untouched",
+        )
     }
 
     #[test]
@@ -16450,6 +16654,46 @@ mod tests {
     }
 
     #[test]
+    fn remember_batch_rejects_cross_wire_and_preserves_custom_kind_canonicalization() -> TestResult
+    {
+        let temp = upgrade_test_workspace()?;
+        let input = concat!(
+            "{\"content\":\"Cross-wired batch row.\",\"kind\":\"episodic\",\"idempotencyKey\":\"cross-wire-batch\"}\n",
+            "{\"content\":\"Custom kind batch row.\",\"kind\":\"EpisodicNote\"}\n",
+        );
+        let report = remember_memory_batch_stdin(&upgrade_batch_options(temp.path(), false), input)
+            .map_err(|error| error.message())?;
+
+        ensure(report.stored_count, 1, "one valid batch row stored")?;
+        ensure(report.failed_count, 1, "cross-wired batch row failed")?;
+        ensure(
+            report.results[0].error_code,
+            Some(REMEMBER_KIND_IS_LEVEL_CODE),
+            "batch cross-wire error code",
+        )?;
+        ensure(
+            report.results[0].memory_id.is_none(),
+            true,
+            "failed batch row has no memory id",
+        )?;
+        let custom_id = report.results[1]
+            .memory_id
+            .as_deref()
+            .ok_or_else(|| "custom-kind batch row memory id missing".to_owned())?;
+        let connection = open_upgrade_test_db(temp.path())?;
+        let stored = connection
+            .get_memory(custom_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "custom-kind batch row missing".to_owned())?;
+        ensure(
+            stored.kind,
+            "episodic-note".to_owned(),
+            "custom kind keeps established canonicalization",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
     fn remember_batch_all_failed_drives_exit_five_signal() -> TestResult {
         let temp = upgrade_test_workspace()?;
         let input = "not-json\n{\"level\":\"episodic\"}\n";
@@ -16546,6 +16790,47 @@ mod tests {
     }
 
     #[test]
+    fn remember_cross_wire_validation_precedes_keyed_replay() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let content = "Keyed replay must not bypass level-kind validation.";
+        let controls = RememberWriteControls {
+            reinforce: false,
+            idempotency_key: Some("cross-wire-keyed-replay"),
+            defer_index_processing: false,
+        };
+        let created = upgrade_created_report(
+            remember_memory_with_controls(
+                &upgrade_remember_options(temp.path(), content, 0.8, None, false),
+                &controls,
+            )
+            .map_err(|error| error.message())?,
+            "keyed replay seed",
+        )?;
+
+        let mut cross_wired = upgrade_remember_options(temp.path(), content, 0.8, None, false);
+        cross_wired.kind = "semantic";
+        match remember_memory_with_controls(&cross_wired, &controls) {
+            Err(error) => ensure(
+                error.code(),
+                REMEMBER_KIND_IS_LEVEL_CODE,
+                "keyed replay cross-wire error code",
+            )?,
+            Ok(outcome) => {
+                return Err(format!(
+                    "cross-wired keyed replay unexpectedly succeeded: {outcome:?}"
+                ));
+            }
+        }
+
+        let connection = open_upgrade_test_db(temp.path())?;
+        let memories = connection
+            .list_memories(&created.workspace_id, None, true)
+            .map_err(|error| error.to_string())?;
+        ensure(memories.len(), 1, "keyed replay rejection keeps one row")?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
     fn remember_idempotency_identity_includes_explicit_typed_fields() -> TestResult {
         let temp = upgrade_test_workspace()?;
         let content = "Remote verification won the storage decision.";
@@ -16638,6 +16923,71 @@ mod tests {
             .list_evidence_spans_for_memory(&created.memory_id.to_string())
             .map_err(|error| error.to_string())?;
         ensure(spans.len(), 1, "evidence span attached to surviving memory")?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn remember_cross_wire_validation_precedes_reinforce_without_mutation() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        set_workspace_duplicate_similarity(temp.path(), 0.5)?;
+        let content = "Cross-wired reinforcement must leave its target untouched.";
+        let created = upgrade_created_report(
+            remember_memory_with_controls(
+                &upgrade_remember_options(temp.path(), content, 0.8, None, false),
+                &RememberWriteControls::default(),
+            )
+            .map_err(|error| error.message())?,
+            "reinforce guard seed",
+        )?;
+
+        let mut cross_wired = upgrade_remember_options(temp.path(), content, 0.8, None, false);
+        cross_wired.kind = "semantic";
+        match remember_memory_with_controls(
+            &cross_wired,
+            &RememberWriteControls {
+                reinforce: true,
+                idempotency_key: None,
+                defer_index_processing: false,
+            },
+        ) {
+            Err(error) => ensure(
+                error.code(),
+                REMEMBER_KIND_IS_LEVEL_CODE,
+                "reinforce cross-wire error code",
+            )?,
+            Ok(outcome) => {
+                return Err(format!(
+                    "cross-wired reinforcement unexpectedly succeeded: {outcome:?}"
+                ));
+            }
+        }
+
+        let connection = open_upgrade_test_db(temp.path())?;
+        let memory = connection
+            .get_memory(&created.memory_id.to_string())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "reinforce guard seed missing".to_owned())?;
+        ensure(
+            (memory.confidence - 0.8).abs() <= 1e-5,
+            true,
+            "cross-wire rejection leaves confidence unchanged",
+        )?;
+        ensure(
+            connection
+                .list_evidence_spans_for_memory(&created.memory_id.to_string())
+                .map_err(|error| error.to_string())?
+                .len(),
+            0,
+            "cross-wire rejection writes no evidence span",
+        )?;
+        ensure(
+            connection
+                .list_audit_by_action(audit_actions::MEMORY_REINFORCE, None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            0,
+            "cross-wire rejection writes no reinforcement audit",
+        )?;
         connection.close().map_err(|error| error.to_string())
     }
 

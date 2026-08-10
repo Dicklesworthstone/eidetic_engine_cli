@@ -26,12 +26,13 @@ continue through the established `MemoryKind` canonicalization contract
 | both flags cross-wired | `remember_kind_is_level` wins deterministically |
 
 The guard is implemented in the shared remember core
-(`remember_level_kind_cross_wire_error` in `src/core/memory.rs`, invoked
-before level/kind parsing). The real-binary E2E contract test
-(`remember_level_kind_cross_wire_guard_public_cli_contract`) proves the
-`ee remember` and `ee note` CLI surfaces. Other callers of the same core
-path (batch lines, serve) route through the identical guard but are not
-independently pinned by executable coverage here.
+(`remember_level_kind_cross_wire_error` in `src/core/memory.rs`). Entry guards
+run before idempotency replay, reinforcement, global-store bootstrap, and ID
+allocation; the preparation-layer guard remains as defense in depth. The
+real-binary contracts cover `ee remember`, `ee note`, and `--global`; focused
+core regressions cover keyed replay, reinforcement, batch isolation, and
+seeded ID allocation. The serve and daemon callers use the same guarded core
+boundary.
 
 ## Machine-facing error shape (`ee.error.v2`)
 
@@ -52,11 +53,20 @@ ee remember "auth retry works" --kind episodic --json
       "failureModeCode": "remember_kind_is_level",
       "argument": "--kind",
       "provided": "episodic",
+      "providedTruncated": false,
       "didYouMean": { "argument": "--level", "value": "episodic" },
       "memoryLevels": ["working", "episodic", "semantic", "procedural"],
       "canonicalKinds": ["rule", "fact", "decision", "failure", "command",
                          "convention", "anti-pattern", "risk", "playbook-step"],
-      "recovery": []
+      "recovery": [{
+        "priority": 1,
+        "kind": "flag",
+        "rationale": "Move the recognized level token to --level and choose the intended memory kind.",
+        "flagName": "--level",
+        "valueHint": "episodic",
+        "example": "ee remember \"<content>\" --level episodic --kind <kind> --json",
+        "resultsIn": "The request is validated with separate level and kind taxonomies."
+      }]
     }
   }
 }
@@ -79,7 +89,8 @@ ee remember "auth retry works" --kind EpisodicNote --json
 ```
 
 Agents should key on `error.code` and `error.details.didYouMean` — the
-`provided` field echoes the offending token exactly as given, and
+`provided` field echoes at most 128 UTF-8 bytes of the offending token and
+sets `providedTruncated: true` when bounded, while
 `memoryLevels` / `canonicalKinds` enumerate the valid vocabulary for
 self-repair without a second round trip. Exit code is 1 (usage) in both
 directions; the JSON envelope is written to stdout.
