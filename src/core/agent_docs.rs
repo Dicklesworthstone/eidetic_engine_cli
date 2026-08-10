@@ -805,6 +805,19 @@ pub const STATUS_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     },
 ];
 
+pub const GLOBAL_LANE_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "the global lane is disabled or empty for this workspace",
+        jq: r#".. | objects | select(.code? == "global_lane_disabled")"#,
+        next_action: "Author a first shared rule with `ee remember --global \"<rule>\" --level procedural --kind rule --json`, or enable participation via `ee config set memory.participate true --workspace . --json`.",
+    },
+    FailureBranchEntry {
+        condition: "workspace and global lanes contradict each other",
+        jq: r#".. | objects | select(.code? == "global_lane_conflict_deferred")"#,
+        next_action: "Review both sides and tombstone or revise the stale lane row; neither side is dropped automatically.",
+    },
+];
+
 pub const DOCTOR_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     FailureBranchEntry {
         condition: "one or more checks failed",
@@ -1150,6 +1163,16 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         jq: r#"{answer: .data.answerText, confidence: .data.confidence, citations: [.data.citations[]? | {memoryId, span, text}], sides: (.data.sides // []), nearestEvidence: (.data.nearestEvidence // [])}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.ask.v1""#,
         failure_branches: ASK_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "new-repo-day-one",
+        title: "Get day-one context in a brand-new repo",
+        description: "In a freshly initialized workspace the user-global lane already carries the user's cross-project rules, so primer/search return provenance-backed guidance before any local memory exists.",
+        category: "getting-started",
+        command: "ee primer --workspace . --json",
+        jq: r#"{rules: [.data.primer.sections[]? | select(.name == "rules") | .items[] | {line, lane: (.provenance[0].source_type // "workspace")}], degraded: (.degraded // [])}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true"#,
+        failure_branches: GLOBAL_LANE_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
         id: "workspace-health",

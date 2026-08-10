@@ -50,8 +50,8 @@ the mesh boundary.
 ## Global Knowledge Lane
 
 The user-global lane (`ee remember --global`, `ee memory promote-global`,
-`ee memory demote-global`) shares procedural knowledge across every workspace
-of one user. It is a separate store under the user data root, never the mesh:
+`ee memory demote-global`; ADR 0069 as refined by ADR 0083) shares
+procedural knowledge across every workspace of one user. It is a separate store under the user data root, never the mesh:
 global rows stay on this machine and cross no trust boundary that
 `human_explicit` content could not already cross.
 
