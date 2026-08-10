@@ -6060,14 +6060,17 @@ pub async fn run_search_with_performance_and_filters_with_cx(
     let mut audit_ids = SearchAuditIdSource::Ambient;
 
     let index_dir = options.resolve_index_dir();
-    let embedder_preparation = if options.source_mode.uses_embeddings()
-        && index_dir.exists()
-        && crate::core::index::index_corpus_compatibility_is_current(&index_dir)
-    {
-        Some(prepare_default_search_embedder(cx).await?)
-    } else {
-        None
-    };
+    let embedder_preparation =
+        if options.source_mode.uses_embeddings()
+            && index_dir.exists()
+            && crate::core::index::index_corpus_compatibility_is_current(&index_dir)
+        {
+            Some(prepare_default_search_embedder(cx).await.map_err(|error| {
+                map_frankensearch_error(cx, "search embedder preparation", error)
+            })?)
+        } else {
+            None
+        };
 
     let database_path = options.resolve_database_path();
     if database_path.exists() {
@@ -9465,7 +9468,7 @@ fn search_backend_cancelled(
     SearchError::Cancelled(reason)
 }
 
-fn map_frankensearch_error(
+pub(crate) fn map_frankensearch_error(
     cx: &asupersync::Cx,
     phase: &str,
     error: frankensearch::SearchError,

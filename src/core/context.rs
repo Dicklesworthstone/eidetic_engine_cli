@@ -66,8 +66,8 @@ use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
     SearchOptions, SearchPerformanceTrace, SearchReport, SearchSourceMode, SearchStatus,
-    SearchWorkspaceProbeState, elapsed_timing_json, performance_redaction_json,
-    query_observation_json, run_context_search_with_preloaded_memories,
+    SearchWorkspaceProbeState, elapsed_timing_json, map_frankensearch_error,
+    performance_redaction_json, query_observation_json, run_context_search_with_preloaded_memories,
     run_context_search_with_preloaded_memories_and_workspace_state_with_cx,
     search_degraded_data_json,
 };
@@ -1991,14 +1991,19 @@ pub fn explain_why_not(
         && index_corpus_compatibility_is_current(&index_dir)
     {
         crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
-            prepare_default_search_embedder(&cx).await
+            prepare_default_search_embedder(&cx).await.map_err(|error| {
+                ContextPackError::Search(map_frankensearch_error(
+                    &cx,
+                    "why-not embedder preparation",
+                    error,
+                ))
+            })
         })
         .map_err(|error| {
             ContextPackError::Pack(format!(
                 "Failed to start why-not embedder preparation: {error}"
             ))
-        })?
-        .map_err(ContextPackError::Search)?;
+        })??;
     }
 
     let mut effective_filters = options.filters.clone();
@@ -2357,7 +2362,13 @@ async fn run_context_pack_with_performance_inner(
     {
         let preparation = prepare_default_search_embedder(control.cx)
             .await
-            .map_err(ContextPackError::Search)?;
+            .map_err(|error| {
+                ContextPackError::Search(map_frankensearch_error(
+                    control.cx,
+                    "context embedder preparation",
+                    error,
+                ))
+            })?;
         trace.record_duration("embedderPrepare", preparation.elapsed);
         control.check()?;
     }

@@ -44,7 +44,9 @@ use frankensearch::embed::{
     ConsentSource, DownloadConsent, DownloadProgress, ModelDownloader, ModelLifecycle,
     ModelManifest, verify_dir_cached,
 };
-use frankensearch::{Model2VecEmbedder, ModelCategory, ModelTier, SearchError, VectorIndex};
+use frankensearch::{
+    Embedder as _, Model2VecEmbedder, ModelCategory, ModelTier, SearchError, VectorIndex,
+};
 use sqlmodel_core::Value as SqlValue;
 
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";

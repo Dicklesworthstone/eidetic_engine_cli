@@ -64818,16 +64818,17 @@ mod tests {
         BackupRedaction, BootstrapCommand, BootstrapDocGlob,
         COORDINATION_FALLBACK_INGEST_SCHEMA_V1, COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command,
         ContextPackError, ContextPackOptions, ContextPackOutputOptions, ContextPackProfile,
-        CurateCommand, DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, DaemonCommand, DiagCommand,
-        DiagQuarantineCommand, DiagResourceBudgetArg, DiagResourceCommandClassArg,
-        DiagResourceCostClassArg, DiagResourceDaemonArg, DiagResourceHostCalibrationArg,
-        DiagResourceLanePressureArg, DiagResourceLocalCargoArg, DiagResourceOperatingProfileArg,
-        DiagResourceRchPostureArg, DiagResourceReplayArg, DiagResourceSurfaceArg,
-        DiagResourceWorkloadPressureArg, DomainError, ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES,
-        EconomyCommand, EffectiveRedactionLevel, FieldsLevel, FocusCommand, GraphCommand,
-        GraphSnapshotCommand, HandoffCommand, HookCommand, HotsetCollectOptions, LabCommand,
-        LabSwarmCommand, LabSwarmWorkloadProfile, LearnCommand, LearnExperimentCommand,
-        LensCommand, MIGRATION_REPAIR_COMMAND, MaintenanceCommand, MaintenanceWalCheckpointArgs,
+        CurateCommand, DAEMON_SEARCH_FALLBACK_CODE, DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+        DaemonCommand, DaemonSearchFallbackReason, DiagCommand, DiagQuarantineCommand,
+        DiagResourceBudgetArg, DiagResourceCommandClassArg, DiagResourceCostClassArg,
+        DiagResourceDaemonArg, DiagResourceHostCalibrationArg, DiagResourceLanePressureArg,
+        DiagResourceLocalCargoArg, DiagResourceOperatingProfileArg, DiagResourceRchPostureArg,
+        DiagResourceReplayArg, DiagResourceSurfaceArg, DiagResourceWorkloadPressureArg,
+        DomainError, ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES, EconomyCommand,
+        EffectiveRedactionLevel, FieldsLevel, FocusCommand, GraphCommand, GraphSnapshotCommand,
+        HandoffCommand, HookCommand, HotsetCollectOptions, LabCommand, LabSwarmCommand,
+        LabSwarmWorkloadProfile, LearnCommand, LearnExperimentCommand, LensCommand,
+        MIGRATION_REPAIR_COMMAND, MaintenanceCommand, MaintenanceWalCheckpointArgs,
         MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat, PackCommand,
         PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, ReflectCommand,
         ReflectRequestLedgerCommand, RegressCommand, RegressExplainArgs, RegressionSurfaceArg,
@@ -64838,20 +64839,20 @@ mod tests {
         VerifyRchCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
         WorkspaceHygieneMode, cass_import_domain_error, collect_hotset_retrieval_provenance,
         collect_hotset_signals, context_request_from_options, context_stream_header_frame,
-        context_stream_options_for_request, db_inspect_redact_source_uri,
-        diag_environment_attestation_response_json, doctor_fix_dispatches,
-        doctor_runtime_error_result, environment_attestation_unavailable_sources,
-        format_impact_json, format_search_json_with_mesh_and_recalibration,
-        hook_git_readiness_response_json, hook_status_response_json,
-        hotset_bounded_regular_file_read, hotset_bv_signals_from_robot_json, init_report_exit_code,
-        json_with_data_result_path, mesh, orient_next_commands,
-        parse_completion_audit_evidence_input, parse_context_profile,
+        context_stream_options_for_request, daemon_search_fallback_degradation,
+        db_inspect_redact_source_uri, diag_environment_attestation_response_json,
+        doctor_fix_dispatches, doctor_runtime_error_result,
+        environment_attestation_unavailable_sources, format_impact_json,
+        format_search_json_with_mesh_and_recalibration, hook_git_readiness_response_json,
+        hook_status_response_json, hotset_bounded_regular_file_read,
+        hotset_bv_signals_from_robot_json, init_report_exit_code, json_with_data_result_path, mesh,
+        orient_next_commands, parse_completion_audit_evidence_input, parse_context_profile,
         parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
         plan_cache_diag_degraded, plan_cache_diag_response_json,
         read_environment_attestation_fixture_json, render_bootstrap_degradations, run,
-        write_cancelled_error, write_context_stream_terminal_error, write_domain_error,
-        write_index_rebuild_error,
+        search_via_daemon, validate_daemon_search_capabilities, write_cancelled_error,
+        write_context_stream_terminal_error, write_domain_error, write_index_rebuild_error,
     };
     use crate::cass::CassImportError;
     use crate::config::MeshCommandMode;
@@ -64862,8 +64863,8 @@ mod tests {
     use crate::core::index::IndexRebuildError;
     use crate::core::lab::{InterventionType, SwapRevisionMode};
     use crate::core::search::{
-        ScoreExplanation, ScoreFactor, ScoreSource, SearchError, SearchHit, SearchReport,
-        SearchSourceMode, SearchStatus,
+        ScoreExplanation, ScoreFactor, ScoreSource, SearchDedupMode, SearchError, SearchHit,
+        SearchOptions, SearchReport, SearchSourceMode, SearchStatus,
     };
     use crate::core::why::{
         AgentProfileSelectionExplanation, CoordinationFallbackEvidenceSummary,
@@ -81220,7 +81221,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_search_fallback_degradation_is_stable() {
+    fn daemon_search_fallback_degradation_is_stable() -> TestResult {
         let degradation = daemon_search_fallback_degradation(
             DaemonSearchFallbackReason::CapabilityMethodSchemaDrift,
         );
