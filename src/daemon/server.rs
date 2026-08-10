@@ -1920,9 +1920,11 @@ fn dispatch_with_echo_policy_and_workspace(
 fn dispatch_telemetry(request: &DaemonRequest) -> DaemonResponse {
     let group_commit = crate::core::write_owner::write_group_commit_telemetry(None);
     let singleflight = crate::core::singleflight::singleflight_posture_report();
+    let flock_gate = crate::db::flock_gate_telemetry();
     let inputs = crate::core::contention::ContentionInputs {
         singleflight: Some(singleflight),
         group_commit: Some((&group_commit).into()),
+        flock_gate: Some((&flock_gate).into()),
         ..crate::core::contention::ContentionInputs::default()
     };
     let report = crate::core::contention::build_contention_report(&inputs);

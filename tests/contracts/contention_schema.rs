@@ -12,7 +12,8 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use ee::core::contention::{
-    ContentionInputs, GroupCommitInput, IndexIntakeInput, L2CacheInput, build_contention_report,
+    ContentionInputs, FlockGateInput, GroupCommitInput, IndexIntakeInput, L2CacheInput,
+    build_contention_report,
 };
 use ee::core::write_owner::WriteOwnerStatus;
 use ee::db::read_pool::{AcquireWaitStats, PoolStats};
@@ -172,7 +173,8 @@ fn builder_output_conforms_to_schema_shape() -> TestResult {
     ensure(
         value.get("groupCommit").is_none()
             && value.get("indexIntake").is_none()
-            && value.get("l2Cache").is_none(),
+            && value.get("l2Cache").is_none()
+            && value.get("flockGate").is_none(),
         "future-feature sub-reports must be omitted when absent",
     )?;
     // With no inputs, all three core sources are reported as unavailable gaps.
@@ -255,6 +257,14 @@ fn fully_contended_inputs() -> ContentionInputs {
             misses: 2,
             evictions: 4,
             inserts: 8,
+        }),
+        flock_gate: Some(FlockGateInput {
+            acquires: 16,
+            contended_acquires: 8,
+            // 4 s across 16 acquires: avg lands on exactly 250.0 ms.
+            wait_ns_total: 4_000_000_000,
+            max_wait_ns: 2_500_000_000,
+            timeouts: 2,
         }),
     }
 }
