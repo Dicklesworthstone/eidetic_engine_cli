@@ -637,7 +637,7 @@ fn record_flock_gate_wait(waited: std::time::Duration, retried: bool) {
     }
     if wait_ns > 0 {
         FLOCK_GATE_WAIT_NS_TOTAL
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |total| {
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |total| {
                 Some(total.saturating_add(wait_ns))
             })
             .ok();
@@ -650,7 +650,7 @@ fn record_flock_gate_timeout(waited: std::time::Duration) {
     let wait_ns = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
     FLOCK_GATE_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
     FLOCK_GATE_WAIT_NS_TOTAL
-        .try_update(Ordering::Relaxed, Ordering::Relaxed, |total| {
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |total| {
             Some(total.saturating_add(wait_ns))
         })
         .ok();
