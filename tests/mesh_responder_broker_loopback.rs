@@ -405,7 +405,7 @@ fn real_tailscale_localapi_binds_status_and_whois_to_kernel_source() -> TestResu
                 last_seen_at: Some(CREATED_AT.to_owned()),
             })
             .map_err(|error| format!("persist real responder peer: {error}"))?;
-        let target_adapter = MeshLaneGrantTargetAdapter::new(&peer.peer_id, origin_node_id);
+        let target_adapter = MeshLaneGrantTargetAdapter::new(&peer.peer_id, origin_node_id.clone());
         connection
             .apply_mesh_lane_grant_with_effect(
                 &MeshLaneGrantMutationInput {
