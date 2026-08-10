@@ -96,7 +96,9 @@ const SEARCH_ANALYSIS_PROVENANCE_URI_KEY: &str = "_ee_analysis_provenance_uri";
 const SEARCH_ANALYSIS_CREATED_AT_KEY: &str = "_ee_analysis_created_at";
 const EMBED_MODEL_UNAVAILABLE_MODEL_ID: &str = "EE_EMBED_MODEL_PATH";
 const DEFAULT_SEARCH_RERANK_TOP_K: usize = 50;
-pub const RERANK_MODEL_UNAVAILABLE_ADVISORY: &str = "No usable local reranker is registered; this build cannot fetch or bundle one automatically. Search is using fusion-only ranking. No resolving command exists until the operator supplies a verified reranker artifact.";
+pub const RERANK_MODEL_UNAVAILABLE_ADVISORY: &str = "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.";
+pub const RERANK_MODEL_UNAVAILABLE_REPAIR: &str =
+    "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst";
 const RERANK_MODEL_TOKENIZER: &str = "tokenizer.json";
 const RERANK_MODEL_SAFETENSORS_PRIMARY: &str = "model_f32.safetensors";
 const RERANK_MODEL_SAFETENSORS_FALLBACK: &str = "model.safetensors";
@@ -1491,7 +1493,7 @@ impl SearchDegradation {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
             message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-            repair: None,
+            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
         }
     }
 
@@ -5116,7 +5118,7 @@ fn search_rerank_posture_json(
                     "permanent": true,
                     "message": degradation.message,
                     "repair": degradation.repair,
-                    "resolution": "no_resolving_command_without_verified_artifact",
+                    "resolution": "verified_offline_import_available",
                 })
             });
             let summary = serde_json::json!({
@@ -17017,7 +17019,7 @@ mod tests {
         assert!(posture["advisory"]["repair"].is_null());
         assert_eq!(
             posture["advisory"]["resolution"],
-            "no_resolving_command_without_verified_artifact"
+            "verified_offline_import_available"
         );
         assert_eq!(posture["advisorySummary"]["emittedCount"], 1);
         assert_eq!(posture["advisorySummary"]["suppressedCount"], 0);
@@ -17037,7 +17039,10 @@ mod tests {
         assert_eq!(json["rerank"]["available"], false);
         assert_eq!(json["rerank"]["degradedCode"], "rerank_model_unavailable");
         assert_eq!(json["rerank"]["advisory"]["permanent"], true);
-        assert!(json["rerank"]["advisory"]["repair"].is_null());
+        assert_eq!(
+            json["rerank"]["advisory"]["repair"],
+            RERANK_MODEL_UNAVAILABLE_REPAIR
+        );
         assert_eq!(json["rerank"]["advisorySummary"]["emittedCount"], 1);
         assert_eq!(json["degraded"], serde_json::json!([]));
     }
@@ -17049,7 +17054,10 @@ mod tests {
         assert_eq!(degraded.code, "rerank_model_unavailable");
         assert_eq!(degraded.severity, "low");
         assert_eq!(degraded.message, RERANK_MODEL_UNAVAILABLE_ADVISORY);
-        assert!(degraded.repair.is_none());
+        assert_eq!(
+            degraded.repair.as_deref(),
+            Some(RERANK_MODEL_UNAVAILABLE_REPAIR)
+        );
         assert!(degraded.is_permanent());
         assert!(degraded.data_json().get("permanent").is_none());
     }
@@ -17089,11 +17097,24 @@ mod tests {
 
         assert!(!human.contains("rerank_model_unavailable"));
         assert!(!human.contains(RERANK_MODEL_UNAVAILABLE_ADVISORY));
-        assert!(!human.contains("No resolving command exists"));
+        assert!(!human.contains(RERANK_MODEL_UNAVAILABLE_REPAIR));
         assert!(human.contains("search_index_stale"));
         assert_eq!(json["degraded"].as_array().map(Vec::len), Some(1));
         assert_eq!(json["degraded"][0]["code"], "search_index_stale");
         assert_eq!(json["rerank"]["advisory"]["permanent"], true);
+    }
+
+    #[test]
+    fn staged_permanent_advisory_does_not_mutate_source_session() {
+        let report = rerank_test_report(Vec::new(), vec![SearchDegradation::rerank_model_absent()]);
+        let source = SearchAdvisorySession::default();
+        let mut staged = source.clone();
+
+        let json = report.data_json_with_advisory_session(&mut staged);
+
+        assert_eq!(source, SearchAdvisorySession::default());
+        assert_ne!(staged, source);
+        assert_eq!(json["rerank"]["advisorySummary"]["emittedCount"], 1);
     }
 
     #[test]

@@ -2271,8 +2271,9 @@ fn dispatch_search(
     let mut advisory_session = search_advisory_session
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut staged_advisory_session = advisory_session.clone();
     let method_result =
-        DaemonSearchResult::from_report(&report, options.explain, &mut advisory_session);
+        DaemonSearchResult::from_report(&report, options.explain, &mut staged_advisory_session);
     let result = match serde_json::to_value(method_result) {
         Ok(result) => result,
         Err(error) => {
@@ -2299,9 +2300,7 @@ fn dispatch_search(
     {
         response = response.with_degraded(code);
     }
-    if serde_json::to_vec(&response).map_or(true, |encoded| {
-        encoded.len() > super::DAEMON_RESPONSE_MAX_BYTES
-    }) {
+    if !daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
         return DaemonResponse::err(
             request.request_id.clone(),
             request.agent_id.clone(),
@@ -2310,7 +2309,12 @@ fn dispatch_search(
             "ee.daemon.search response exceeded the daemon response cap; lower --limit or use canonical in-process search.",
         );
     }
+    *advisory_session = staged_advisory_session;
     response
+}
+
+fn daemon_response_fits(response: &DaemonResponse, max_bytes: usize) -> bool {
+    serde_json::to_vec(response).is_ok_and(|encoded| encoded.len() <= max_bytes)
 }
 
 fn daemon_search_params_error(request: &DaemonRequest, message: &str) -> DaemonResponse {
@@ -3777,6 +3781,19 @@ mod tests {
         );
         request.workspace_id = Some("/tmp/ee-daemon-search-contract".to_owned());
         request
+    }
+
+    #[test]
+    fn daemon_response_cap_rejects_undeliverable_candidate() {
+        let response = DaemonResponse::ok(
+            "req-cap-001",
+            TEST_AGENT_ID,
+            Some(TEST_WORKSPACE_ID.to_owned()),
+            serde_json::json!({"payload": "too large for a one-byte cap"}),
+        );
+
+        assert!(!daemon_response_fits(&response, 1));
+        assert!(daemon_response_fits(&response, usize::MAX));
     }
 
     #[cfg(target_vendor = "apple")]

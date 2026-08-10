@@ -155,10 +155,10 @@ expression: search
     "rerank": {
       "advisory": {
         "code": "rerank_model_unavailable",
-        "message": "No usable local reranker is registered; this build cannot fetch or bundle one automatically. Search is using fusion-only ranking. No resolving command exists until the operator supplies a verified reranker artifact.",
+        "message": "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.",
         "permanent": true,
-        "repair": null,
-        "resolution": "no_resolving_command_without_verified_artifact",
+        "repair": "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst",
+        "resolution": "verified_offline_import_available",
         "severity": "low"
       },
       "advisorySummary": {

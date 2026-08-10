@@ -13154,14 +13154,14 @@ advisory. In a long-lived daemon process, the first affected query carries the
 advisory and later queries set `rerank.advisory` to `null`; every response keeps
 `rerank.advisorySummary` with `permanent`, per-response emitted/suppressed
 counts, and cumulative session occurrence/suppression counts. Message contains:
-`No usable local reranker is registered ... fusion-only ranking ... No
-resolving command exists`. The code is omitted from human degradation prose,
+`No usable local reranker is registered ... fusion-only ranking ... verified
+offline reranker artifact`. The code is omitted from human degradation prose,
 per-query `degraded[]`, and the daemon envelope's outer `degraded_codes`.
 
-**Repair hint.** None. Network fetch and bundled installation are unavailable,
-and ee cannot construct an exact workspace-correct command without the path to
-a verified operator-supplied artifact. `ee doctor` owns the permanent
-capability gap and says explicitly that no resolving command currently exists.
+**Repair hint.** `ee model fetch rerank-default --workspace . --from-file
+/path/to/rerank-default-v1.tar.zst`. Network download and bundled installation
+remain unavailable; the command imports a verified operator-supplied artifact
+into the addressed workspace registry.
 
 Registered-artifact registry or load failures are transient uses of the same
 code. They remain in every affected query's `degraded[]` and daemon outer

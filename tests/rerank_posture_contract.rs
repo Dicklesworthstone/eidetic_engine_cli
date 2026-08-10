@@ -1,7 +1,8 @@
 use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::core::search::{
-    RERANK_MODEL_UNAVAILABLE_ADVISORY, ScoreSource, SearchAdvisorySession, SearchDegradation,
-    SearchHit, SearchReport, SearchSourceMode, SearchStatus,
+    RERANK_MODEL_UNAVAILABLE_ADVISORY, RERANK_MODEL_UNAVAILABLE_REPAIR, ScoreSource,
+    SearchAdvisorySession, SearchDegradation, SearchHit, SearchReport, SearchSourceMode,
+    SearchStatus,
 };
 use ee::models::{EmbedBackend, MemoryScope, MemoryScopeStats};
 
@@ -46,13 +47,13 @@ fn ordinary_search_json_is_pure_and_structural() {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
             message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-            repair: None,
+            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
         },
         SearchDegradation {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
             message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-            repair: None,
+            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
         },
     ]);
 
@@ -78,7 +79,10 @@ fn ordinary_search_json_is_pure_and_structural() {
         "rerank_model_unavailable"
     );
     assert_eq!(json["rerank"]["advisory"]["permanent"], true);
-    assert!(json["rerank"]["advisory"]["repair"].is_null());
+    assert_eq!(
+        json["rerank"]["advisory"]["repair"],
+        RERANK_MODEL_UNAVAILABLE_REPAIR
+    );
     assert!(json["rerank"]["advisorySummary"].get("schema").is_none());
     assert_eq!(json["rerank"]["advisorySummary"]["emittedCount"], 1);
     assert_eq!(json["rerank"]["advisorySummary"]["suppressedCount"], 0);
@@ -89,7 +93,7 @@ fn ordinary_search_json_is_pure_and_structural() {
         "permanent capability posture must not repeat in per-query degraded output"
     );
     assert!(!human.contains(RERANK_MODEL_UNAVAILABLE_ADVISORY));
-    assert!(!human.contains("No resolving command exists"));
+    assert!(!human.contains(RERANK_MODEL_UNAVAILABLE_REPAIR));
 }
 
 #[test]
@@ -98,7 +102,7 @@ fn explicit_long_lived_session_emits_permanent_advisory_once() {
         code: "rerank_model_unavailable".to_string(),
         severity: "low".to_string(),
         message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-        repair: None,
+        repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
     }]);
     let mut second = first.clone();
     second.query = "a distinct second query in the same process".to_string();
@@ -136,13 +140,13 @@ fn explicit_session_emits_each_distinct_permanent_advisory_once() {
         code: "rerank_model_unavailable".to_string(),
         severity: "low".to_string(),
         message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-        repair: None,
+        repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
     }]);
     let second = empty_search_report(vec![SearchDegradation {
         code: "rerank_model_unavailable".to_string(),
         severity: "warning".to_string(),
         message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-        repair: None,
+        repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
     }]);
     let repeated_first = first.clone();
     let mut session = SearchAdvisorySession::default();
