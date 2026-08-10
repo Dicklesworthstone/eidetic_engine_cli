@@ -560,6 +560,39 @@ where
     }))
 }
 
+/// Repair guidance for a storeless-workspace miss with safe ordering
+/// (bd-workspace-miss-init-suggestion-sfjvq): re-check the addressing
+/// first, point at nearby populated stores when any exist, and mention
+/// `ee init` LAST and conditionally — state creation must never read as
+/// the first remedy for a lookup miss (agents follow error hints
+/// mechanically, and a mechanical `ee init` at a wrong path plants a junk
+/// store that discovery then finds forever).
+#[must_use]
+pub fn storeless_workspace_repair(database_path: &std::path::Path) -> String {
+    let workspace_dir = database_path
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(std::path::Path::to_path_buf);
+    let nearby = workspace_dir.as_deref().map(|dir| {
+        crate::core::orient::discover_nearby_stores(
+            dir,
+            std::time::Duration::from_millis(crate::core::orient::NEARBY_STORE_SCAN_BUDGET_MS),
+        )
+    });
+    let looked_for = database_path.display();
+    if let Some(scan) = nearby
+        && let Some(best) = scan.stores.first()
+    {
+        return format!(
+            "Re-check --workspace addressing (looked for {looked_for}); a populated store exists at {} ({} docs) — retarget with --workspace {}. Only if you intended to create a NEW store here: ee init --workspace .",
+            best.workspace_root, best.documents, best.workspace_root,
+        );
+    }
+    format!(
+        "Re-check --workspace addressing (looked for {looked_for}). Only if you intended to create a NEW store here: ee init --workspace ."
+    )
+}
+
 /// Serialize a value to JSON, returning a stable error envelope on failure.
 ///
 /// Use for display-only `to_json()` methods where failure should produce valid JSON

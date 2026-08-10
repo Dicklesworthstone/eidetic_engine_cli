@@ -1018,7 +1018,9 @@ fn record_outcome_inner(
     if !options.database_path.exists() {
         return Err(DomainError::Storage {
             message: format!("Database not found at {}", options.database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
+            repair: Some(crate::core::storeless_workspace_repair(
+                options.database_path,
+            )),
         });
     }
 
@@ -2355,7 +2357,7 @@ fn open_existing_database(database_path: &Path) -> Result<DbConnection, DomainEr
     if !database_path.exists() {
         return Err(DomainError::Storage {
             message: format!("Database not found at {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_owned()),
+            repair: Some(crate::core::storeless_workspace_repair(database_path)),
         });
     }
     DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
