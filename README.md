@@ -1874,6 +1874,7 @@ Initial inventoried policies include:
 | Pack selection | `incumbent.pack.mmr_redundancy` | `candidate.pack.facility_location` |
 | Cache admission | `incumbent.cache.no_cache` | `candidate.cache.s3_fifo` |
 | Verification admission | `incumbent.verification.rch_only` | `candidate.verification.environment_attestation` |
+| Retrieval weights | static `[search]` config weights (not a shadowable policy id) | `candidate.retrieval.outcome_tuned_weights` |
 
 Unsupported decision surfaces must abstain instead of promote or reject. The
 current inventory records `unsupported.resource_profile_budget_admission` with
@@ -1883,6 +1884,16 @@ safe shadow implementation.
 Use `--shadow compare --policy <policy-id>` only to collect comparison evidence.
 Shadow mode does not promote candidates, mutate live policy, or replace the
 incumbent result without an explicit future apply step.
+
+The retrieval-weights domain is the first with a full runnable loop:
+`ee shadow run --policy candidate.retrieval.outcome_tuned_weights --json`
+evaluates outcome-labeled evidence offline and persists an
+`ee.shadow.retrieval_tuning_report.v1` report (abstaining honestly below the
+evidence gate); `ee shadow promote [--dry-run]` applies a promotable winner
+as an audited `[search]` config overlay carrying the full prior bytes, and
+`ee shadow demote` restores those bytes exactly. Determinism is preserved
+because adaptation is an explicit, reviewable config change — see
+[docs/agent-ux/retrieval-adaptation.md](docs/agent-ux/retrieval-adaptation.md).
 
 ---
 

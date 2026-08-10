@@ -178,6 +178,19 @@ values `not_required`, `recommended`, `required`, and `satisfied`. The policy is
 deterministic and does not generate keys, mutate memories, or silently promote
 trust; it only reports whether local signing is required for authoritative use.
 
+## Retrieval Adaptation Interplay
+
+Outcome-tuned retrieval weights (ADR 0070, `ee shadow run` /
+`promote` / `demote`) learn only from the feedback stream this trust
+pipeline already gates: quarantined feedback events are excluded from
+label extraction, SPRT and burst-rate quarantine bound harmful-signal
+abuse upstream, and unreplayable labels count against the evidence
+denominator instead of being guessed. Low-quality feedback therefore
+produces an honest abstention (`insufficient_outcome_evidence`), never a
+silent weight change; promotion itself is an audited, byte-reversible
+config overlay. Outcome quality gates adaptation quality. See
+[docs/agent-ux/retrieval-adaptation.md](agent-ux/retrieval-adaptation.md).
+
 ## Command Integration
 
 - `ee pack "<task>" --json` must include selected memories, provenance,

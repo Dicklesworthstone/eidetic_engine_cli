@@ -805,6 +805,19 @@ pub const STATUS_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     },
 ];
 
+pub const RETRIEVAL_TUNING_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "the evidence gate abstained (too few usable outcome triples or margin under threshold)",
+        jq: r#".. | objects | select(.code? == "insufficient_outcome_evidence")"#,
+        next_action: "Keep the incumbent weights and keep emitting outcomes (`ee outcome <memory-id> --pack <pack-id> --item <n> --signal helpful|harmful`); rerun after more real traffic.",
+    },
+    FailureBranchEntry {
+        condition: "the evaluator ran but could not persist the report",
+        jq: r#".. | objects | select(.code? == "shadow_report_not_persisted")"#,
+        next_action: "Fix workspace .ee writability (`ee doctor --workspace . --json`) and rerun before any promote.",
+    },
+];
+
 pub const GLOBAL_LANE_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     FailureBranchEntry {
         condition: "the global lane is disabled or empty for this workspace",
@@ -1163,6 +1176,16 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         jq: r#"{answer: .data.answerText, confidence: .data.confidence, citations: [.data.citations[]? | {memoryId, span, text}], sides: (.data.sides // []), nearestEvidence: (.data.nearestEvidence // [])}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.ask.v1""#,
         failure_branches: ASK_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "monthly-retrieval-tuning",
+        title: "Run the monthly retrieval-weight tuning pass",
+        description: "Evaluate accumulated outcome evidence offline, read the gate's verdict, and promote a winning fusion-weight overlay explicitly — determinism is preserved because adaptation is an audited config change with byte-identical rollback.",
+        category: "maintenance",
+        command: "ee shadow run --policy candidate.retrieval.outcome_tuned_weights --workspace . --json",
+        jq: r#"{abstained: .data.report.abstained, reason: .data.report.abstentionReason, promotable: .data.report.promotable, winner: .data.report.winner, degraded: (.degraded // [])}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true"#,
+        failure_branches: RETRIEVAL_TUNING_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
         id: "new-repo-day-one",
