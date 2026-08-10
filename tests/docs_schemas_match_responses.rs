@@ -868,6 +868,9 @@ fn learn_gaps_renderer_matches_public_payload_shape() -> TestResult {
             },
             matching_agenda_item: None,
             suggested_command: "ee remember --workspace . --level procedural --kind rule 'When asked, record the procedure.' --json".to_string(),
+            status: "open".to_string(),
+            covered_by: None,
+            covered_by_created_at: None,
         }],
         degraded: vec![LearnGapsDegradation {
             code: "learn_gaps_retention_short".to_string(),

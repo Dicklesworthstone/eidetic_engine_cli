@@ -33,6 +33,11 @@ const DEFAULT_LEARN_CLUSTER_SILHOUETTE_CUTOFF: f32 =
 const LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY: &str = "learn.cluster_coherence_threshold";
 pub const DEFAULT_QUERY_MISS_RETENTION_DAYS: u64 = 30;
 const DEFAULT_LEARN_GAPS_LIMIT: u32 = 10;
+/// A gap cluster counts as likely covered when a live memory WRITTEN AFTER
+/// the cluster's last miss scores at least this hash-embedder cosine
+/// similarity against the representative query (bd-3ap2m.4 follow-up: the
+/// remember-from-template loop must visibly close the gap).
+const LIKELY_COVERED_SIMILARITY: f32 = 0.55;
 
 /// Schema for learning agenda report.
 pub const LEARN_AGENDA_SCHEMA_V1: &str = "ee.learn.agenda.v1";
@@ -556,6 +561,20 @@ pub struct LearnGapCluster {
     pub remember_template: LearnGapRememberTemplate,
     pub matching_agenda_item: Option<String>,
     pub suggested_command: String,
+    /// `open` or `likely_covered`: a live memory newer than the last miss
+    /// with >= [`LIKELY_COVERED_SIMILARITY`] similarity flips the cluster to
+    /// likely covered (still listed — the WHY is `covered_by`).
+    #[serde(default = "default_gap_status")]
+    pub status: String,
+    /// The newer memory that likely covers this demand.
+    #[serde(default)]
+    pub covered_by: Option<String>,
+    #[serde(default)]
+    pub covered_by_created_at: Option<String>,
+}
+
+fn default_gap_status() -> String {
+    "open".to_owned()
 }
 
 /// A degraded entry emitted by `ee learn gaps`.
@@ -1039,8 +1058,24 @@ fn learn_gap_cluster(
         &cluster.cluster_key,
         representative_redacted_queries.first(),
     );
-    let (nearest_existing_evidence, nearest_existing_evidence_status) =
+    let (nearest_existing_evidence, nearest_existing_evidence_status, top_hit) =
         nearest_gap_evidence(&representative_redacted_queries, memories);
+    // A sufficiently similar memory WRITTEN AFTER the last recorded miss
+    // means someone likely filled this demand (e.g. via the remember
+    // template): flip the cluster to likely_covered instead of re-nagging.
+    let (status, covered_by, covered_by_created_at) = match &top_hit {
+        Some((memory_id, created_at, similarity))
+            if *similarity >= LIKELY_COVERED_SIMILARITY
+                && created_at.as_str() > cluster.last_seen_raw.as_str() =>
+        {
+            (
+                "likely_covered".to_owned(),
+                Some(memory_id.clone()),
+                Some(created_at.clone()),
+            )
+        }
+        _ => (default_gap_status(), None, None),
+    };
     let suggested_command = format!(
         "ee remember --workspace {} --level {} --kind {} {} --json",
         shell_quote(&workspace.display().to_string()),
@@ -1072,17 +1107,25 @@ fn learn_gap_cluster(
         remember_template,
         matching_agenda_item: matching_open_agenda_item(candidates, &cluster.query_hashes),
         suggested_command,
+        status,
+        covered_by,
+        covered_by_created_at,
     }
 }
+
+/// Top scoring live memory against the representative query:
+/// `(memory_id, created_at, similarity)`.
+type NearestGapTopHit = Option<(String, String, f32)>;
 
 fn nearest_gap_evidence(
     representative_queries: &[String],
     memories: &BTreeMap<String, StoredMemory>,
-) -> (Vec<LearnGapNearestEvidence>, String) {
+) -> (Vec<LearnGapNearestEvidence>, String, NearestGapTopHit) {
     let Some(query) = representative_queries.first() else {
         return (
             Vec::new(),
             "unavailable_raw_query_not_persisted".to_string(),
+            None,
         );
     };
     let live_memories = memories
@@ -1090,7 +1133,7 @@ fn nearest_gap_evidence(
         .filter(|memory| memory.tombstoned_at.is_none())
         .collect::<Vec<_>>();
     if live_memories.is_empty() {
-        return (Vec::new(), "unavailable_no_live_memories".to_string());
+        return (Vec::new(), "unavailable_no_live_memories".to_string(), None);
     }
 
     let embedder = HashEmbedder::default_256();
@@ -1107,6 +1150,7 @@ fn nearest_gap_evidence(
         return (
             Vec::new(),
             "unavailable_no_comparable_embeddings".to_string(),
+            None,
         );
     }
     scored.sort_by(
@@ -1116,6 +1160,9 @@ fn nearest_gap_evidence(
                 .then_with(|| left_memory.id.cmp(&right_memory.id))
         },
     );
+    let top_hit = scored
+        .first()
+        .map(|(memory, similarity)| (memory.id.clone(), memory.created_at.clone(), *similarity));
     let evidence = scored
         .into_iter()
         .take(3)
@@ -1125,7 +1172,7 @@ fn nearest_gap_evidence(
             reason: format!("hash_embedder_cosine_similarity={similarity:.3}"),
         })
         .collect();
-    (evidence, "hash_embedder_scan".to_string())
+    (evidence, "hash_embedder_scan".to_string(), top_hit)
 }
 
 fn query_miss_demand_score(
@@ -4606,6 +4653,128 @@ mod tests {
             return Err(format!(
                 "expected three clustered misses, got {}",
                 gap.miss_count
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn learn_gaps_flip_to_likely_covered_when_a_newer_similar_memory_lands() -> TestResult {
+        let (workspace, database, workspace_id) = seed_learning_workspace("ee-learn-gaps-covered")?;
+        insert_query_miss_audit(
+            &database,
+            &workspace_id,
+            "audit_00000000000000000000000014",
+            "hash_covered_a",
+            "weak_query_recall",
+            Some("search"),
+            Some("zebra hovercraft docking protocol"),
+        )?;
+
+        // Before any covering memory: the cluster is open.
+        let report = show_gaps(&LearnGapsOptions {
+            workspace: workspace.path().to_path_buf(),
+            since: None,
+            limit: 10,
+        })
+        .map_err(|error| error.to_string())?;
+        let gap = report
+            .gaps
+            .first()
+            .ok_or_else(|| "expected the miss cluster".to_string())?;
+        if gap.status != "open" || gap.covered_by.is_some() {
+            return Err(format!(
+                "expected an open cluster before coverage, got {} / {:?}",
+                gap.status, gap.covered_by
+            ));
+        }
+
+        // A dissimilar newer memory must NOT flip the cluster.
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000071",
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "semantic".to_string(),
+                    kind: "fact".to_string(),
+                    content: "Entirely unrelated release-notes bookkeeping detail.".to_string(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_string(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let report = show_gaps(&LearnGapsOptions {
+            workspace: workspace.path().to_path_buf(),
+            since: None,
+            limit: 10,
+        })
+        .map_err(|error| error.to_string())?;
+        let gap = report
+            .gaps
+            .first()
+            .ok_or_else(|| "cluster survived the unrelated memory".to_string())?;
+        if gap.status != "open" {
+            return Err(format!(
+                "dissimilar memory must not cover the gap: {} via {:?}",
+                gap.status, gap.covered_by
+            ));
+        }
+
+        // A similar memory written AFTER the last miss flips it.
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000072",
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_string(),
+                    kind: "rule".to_string(),
+                    content: "Zebra hovercraft docking protocol: engage magnetic clamps before \
+                              the hovercraft docking sequence starts."
+                        .to_string(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_string(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = show_gaps(&LearnGapsOptions {
+            workspace: workspace.path().to_path_buf(),
+            since: None,
+            limit: 10,
+        })
+        .map_err(|error| error.to_string())?;
+        let gap = report
+            .gaps
+            .first()
+            .ok_or_else(|| "cluster must remain listed after coverage".to_string())?;
+        if gap.status != "likely_covered" {
+            return Err(format!(
+                "expected likely_covered after the similar newer memory, got {} (evidence: {:?})",
+                gap.status, gap.nearest_existing_evidence
+            ));
+        }
+        if gap.covered_by.as_deref() != Some("mem_00000000000000000000000072") {
+            return Err(format!(
+                "coveredBy must name the memory: {:?}",
+                gap.covered_by
             ));
         }
         Ok(())

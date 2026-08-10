@@ -194,6 +194,20 @@ else
     event repeated_misses_form_gap_cluster fail "exit ${LAST_EXIT}; $(head -c 300 "${G}")"
 fi
 
+# --- remembering the demand flips the cluster to likely_covered -----------
+run_ee remember "Zebra hovercraft docking protocol: engage the magnetic clamps before docking." \
+    --workspace "${WS}" --level procedural --kind rule --tags "docking" --json
+COVER_EXIT=$LAST_EXIT
+run_ee learn gaps --workspace "${WS}" --json
+G2="${LAST_STDOUT}"
+if [[ "${COVER_EXIT}" -eq 0 && "${LAST_EXIT}" -eq 0 ]] \
+    && jq -e '[(.gaps // .data.gaps)[]? | select(.status == "likely_covered" and .coveredBy != null)] | length >= 1' \
+        "${G2}" >/dev/null 2>&1; then
+    event remembered_demand_marks_cluster_covered pass
+else
+    event remembered_demand_marks_cluster_covered fail "cover=${COVER_EXIT} exit=${LAST_EXIT}; $(jq -c '[(.gaps // .data.gaps)[]? | {status, coveredBy}]' "${G2}" 2>/dev/null)"
+fi
+
 # --- trend: two steward snapshots around a fix show the direction ---------
 run_ee remember "Second planted orphan for the trend arc." \
     --workspace "${WS}" --level semantic --kind fact --tags "planted-orphan-2" --json
