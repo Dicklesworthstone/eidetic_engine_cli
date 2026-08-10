@@ -1181,7 +1181,7 @@ Related docs:
 | `ee curate validate <id>` | Run validation (specificity, duplication, scope, evidence) |
 | `ee curate apply <id>` / `accept <id>` / `reject <id>` / `snooze <id>` / `merge <a> <b>` | Lifecycle transitions |
 | `ee curate disposition` | Evaluate TTL disposition policy without silent mutation (`--apply` is required to write) |
-| `ee learn gaps [--since <RFC3339>] [--limit N] [--json]` | Cluster retained search/ask miss demand into redacted representatives, nearest existing evidence, and remember templates |
+| `ee learn gaps [--since <RFC3339>] [--limit N] [--json]` | Cluster retained search/ask miss demand into redacted representatives, nearest existing evidence, and remember templates; clusters flip to `likely_covered` (with `coveredBy`) once a newer memory satisfies the demand |
 | `ee playbook extract [--since <RFC3339>] [--dry-run]` | Propose procedural-rule candidates from repeated semantic memories |
 | `ee playbook list [--limit N]` | List procedural rules in portable playbook form |
 | `ee playbook export --out <file> [--dry-run]` | Write a no-overwrite portable playbook artifact |

@@ -115,7 +115,14 @@
         "nearestExistingEvidenceStatus": { "type": "string" },
         "rememberTemplate": { "$ref": "#/$defs/rememberTemplate" },
         "matchingAgendaItem": { "type": ["string", "null"] },
-        "suggestedCommand": { "type": "string" }
+        "suggestedCommand": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["open", "likely_covered"],
+          "description": "likely_covered when a live memory written after the cluster's last miss scores at or above the coverage similarity threshold against the representative query; the cluster stays listed with the WHY in coveredBy."
+        },
+        "coveredBy": { "type": ["string", "null"] },
+        "coveredByCreatedAt": { "type": ["string", "null"] }
       }
     },
     "originDemand": {
