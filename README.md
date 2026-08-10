@@ -1243,6 +1243,7 @@ ee outcome <candidate-id> --target-type candidate --signal negative --reason "To
 | `ee graph centrality [--algorithm <name>]` | Read persisted centrality scores, including `pagerank`, `betweenness`, `authority`, `hits-hubs`, and `hits-authorities` |
 | `ee graph centrality-refresh [--dry-run]` | Refresh PageRank / betweenness metrics |
 | `ee graph feature-enrichment [--dry-run]` | Compute bounded graph-derived retrieval features |
+| `ee graph suggest-links [--limit N] [--min-score S] [--propose]` | Typed link prediction (related/supports/contradicts) with blended, explained scoring; `--propose` writes curation candidates, never links directly (`ee.graph.suggest_links.v1`) |
 | `ee insights [--section <name>] [--explain <id>] --json` | Inspect graph-derived findings and memory-centric topology |
 | `ee proximity <memory-a> <memory-b> --json` | Explain Gomory-Hu min-cut proximity between two memory nodes |
 

@@ -18,6 +18,7 @@ rebuilt from memory, link, evidence, and revision rows.
   - `revision_dag`
   - `rule_provenance`
   - `contradiction_subgraph`
+  - `retrieval_affinity`
 - `GraphSnapshotStatus` currently supports `valid`, `stale`, `invalid`, and
   `archived`.
 - `refresh_graph_snapshot` currently persists `memory_links` centrality
@@ -38,6 +39,7 @@ The graph-accretion rollout uses five operational snapshot families:
 | Revision DAG | `revision_dag` | Every memory edit or `logical_id` change | impact analysis, dominance frontiers |
 | Rule provenance | `rule_provenance` | Nightly maintenance and explicit refresh | load-bearing memory badges |
 | Contradiction subgraph | `contradiction_subgraph` | Every `contradicts` memory-link insert | structural health and contradiction clusters |
+| Retrieval affinity | `retrieval_affinity` | `retrieval_affinity_refresh` steward job (cursor over pack ledger + search audits) | `ee graph suggest-links` and diagnostics ONLY — never live ranking (ADR 0066 hard rule, test-pinned) |
 
 The older `session_graph`, `procedure_graph`, `evidence_graph`, and `composite`
 types remain valid schema values, but they are not part of the first
@@ -93,6 +95,7 @@ Canonical lock IDs:
 | Refresh `rule_provenance` | `graph_snapshot` | `<workspace_id>:rule_provenance` |
 | Refresh `contradiction_subgraph` | `graph_snapshot` | `<workspace_id>:contradiction_subgraph` |
 | Prune archived rows | `graph_snapshot_prune` | `<workspace_id>:<graph_type>` |
+| Refresh retrieval affinity | `retrieval_affinity_refresh` | standard job ledger/budget discipline |
 
 Rules:
 
