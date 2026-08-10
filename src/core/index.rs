@@ -4902,7 +4902,6 @@ const EE_MODEL_CACHE_SUBDIR: &str = "models";
 const EE_MODEL2VEC_REGISTRY_SUBDIR: &str = "model2vec";
 const EMBEDDING_REGISTRY_FINGERPRINT_SCHEMA: &str = "ee.embedding_registry_fingerprint.v1";
 pub(crate) const POTION_MODEL_NAME: &str = "potion-multilingual-128M";
-pub(crate) const EMBED_BACKEND_NEURAL_LOCAL: &str = EmbedBackend::NeuralLocal.as_str();
 pub(crate) const EMBED_BACKEND_HASH_FALLBACK: &str = EmbedBackend::HashFallback.as_str();
 const EE_EMBED_DOWNLOAD_AUTO: &str = "auto";
 const EE_EMBED_DOWNLOAD_OFF: &str = "off";
@@ -4955,6 +4954,7 @@ fn detect_default_search_embedder() -> DefaultSearchEmbedder {
     default_search_embedder_for_settings(&settings)
 }
 
+#[cfg(test)]
 fn search_embedder_stack_for_settings(settings: &EeEmbedderSettings) -> EmbedderStack {
     default_search_embedder_for_settings(settings).stack
 }
@@ -5119,11 +5119,6 @@ pub(crate) fn active_embed_backend() -> EmbedBackend {
     } else {
         EmbedBackend::HashFallback
     }
-}
-
-#[must_use]
-pub(crate) fn active_embed_backend_token() -> &'static str {
-    active_embed_backend().as_str()
 }
 
 fn configured_embedder_model_root() -> Option<PathBuf> {
