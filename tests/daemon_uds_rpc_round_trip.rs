@@ -748,6 +748,18 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
         second.error.is_none(),
         format!("second search failed: {second:?}"),
     )?;
+    for (ordinal, response) in [("first", &first), ("second", &second)] {
+        ensure(
+            !response
+                .degraded_codes
+                .iter()
+                .any(|code| code == "rerank_model_unavailable"),
+            format!(
+                "{ordinal} daemon response must not repeat permanent reranker posture in outer degraded_codes: {:?}",
+                response.degraded_codes
+            ),
+        )?;
+    }
     let first_result = first
         .result
         .ok_or_else(|| "first search result missing".to_owned())?;
@@ -799,6 +811,53 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
         format!(
             "repeated warm-daemon calls must preserve ranked results; first={first_result}; second={second_result}"
         ),
+    )?;
+    ensure(
+        first_result
+            .pointer("/response/data/rerank/advisory/permanent")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true),
+        format!("first daemon query must emit permanent advisory once: {first_result}"),
+    )?;
+    ensure(
+        first_result
+            .pointer("/response/data/rerank/advisorySummary/emittedCount")
+            .and_then(serde_json::Value::as_u64)
+            == Some(1)
+            && first_result
+                .pointer("/response/data/rerank/advisorySummary/suppressedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(0),
+        format!("first daemon query advisory summary drifted: {first_result}"),
+    )?;
+    ensure(
+        second_result
+            .pointer("/response/data/rerank/advisory")
+            .is_some_and(serde_json::Value::is_null),
+        format!("second daemon query must suppress repeated advisory: {second_result}"),
+    )?;
+    ensure(
+        second_result
+            .pointer("/response/data/rerank/advisorySummary/permanent")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && second_result
+                .pointer("/response/data/rerank/advisorySummary/emittedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(0)
+            && second_result
+                .pointer("/response/data/rerank/advisorySummary/suppressedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1)
+            && second_result
+                .pointer("/response/data/rerank/advisorySummary/sessionOccurrenceCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(2)
+            && second_result
+                .pointer("/response/data/rerank/advisorySummary/sessionSuppressedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1),
+        format!("second daemon query suppression summary drifted: {second_result}"),
     )?;
     ensure(
         first_result

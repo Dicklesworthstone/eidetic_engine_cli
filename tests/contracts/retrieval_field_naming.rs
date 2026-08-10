@@ -345,7 +345,12 @@ fn search_report_data_json_exposes_rerank_posture_contract() -> TestResult {
         "metrics.fieldCoverage.rerankScoreCount should count rerank scores",
     )?;
 
-    for field in ["rerank_score_count", "score_kind", "degraded_code"] {
+    for field in [
+        "rerank_score_count",
+        "score_kind",
+        "degraded_code",
+        "advisory_summary",
+    ] {
         reject_field(rerank, field, "search.rerank")?;
     }
     if let Some(bad_key) = contains_snake_case_key(&json, "search") {
@@ -409,6 +414,8 @@ fn field_naming_contract_is_stable() -> TestResult {
         "scoreKind",
         "available",
         "degradedCode",
+        "advisory",
+        "advisorySummary",
     ];
 
     let expected_scope_stats_fields = [
@@ -456,7 +463,13 @@ fn field_naming_contract_is_stable() -> TestResult {
         "memory_scope",
         "strict_scope",
     ];
-    let forbidden_rerank_fields = ["top_k", "rerank_score_count", "score_kind", "degraded_code"];
+    let forbidden_rerank_fields = [
+        "top_k",
+        "rerank_score_count",
+        "score_kind",
+        "degraded_code",
+        "advisory_summary",
+    ];
     let forbidden_scope_stats_fields = [
         "scope_applied",
         "strict_scope",

@@ -50,7 +50,7 @@ use super::build_cli_runtime;
 use super::curate::stable_workspace_id;
 use super::index::{DEFAULT_INDEX_SUBDIR, IndexHealth, IndexStatusOptions, get_index_status};
 use super::qos::{QosLaneSummary, summarize_qos_lane_registry};
-use super::search::{RERANK_MODEL_OFFLINE_IMPORT_COMMAND, verify_registered_reranker_loadable};
+use super::search::verify_registered_reranker_loadable;
 use super::singleflight::singleflight_posture_report;
 use super::status::{
     FlightRecorderStatusReport, default_workspace_path, gather_flight_recorder_status,
@@ -2966,8 +2966,8 @@ fn check_embedding_posture(workspace_path: Option<&Path>) -> CheckResult {
 /// A missing reranker is a permanent capability gap for the current process,
 /// not a transient failure of the memory loop. It therefore stays advisory
 /// and never changes the top-line doctor posture. Network fetch remains
-/// unavailable, but the verified offline artifact import is an actionable
-/// operator repair.
+/// unavailable, and no exact resolving command exists until the operator has
+/// supplied a verified artifact path.
 fn reranker_posture_check_result(available: Option<bool>, reason: Option<&str>) -> CheckResult {
     match available {
         Some(true) => CheckResult::ok(
@@ -2978,10 +2978,10 @@ fn reranker_posture_check_result(available: Option<bool>, reason: Option<&str>) 
         Some(false) => CheckResult {
             name: "reranker_posture",
             severity: CheckSeverity::Warning,
-            message: "Permanent capability gap: no usable local reranker is registered. Search uses fusion-only ranking. Network fetch and bundled reranker installation are unavailable; import a verified operator-supplied artifact with `ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst`."
+            message: "Permanent capability gap: no usable local reranker is registered. Search uses fusion-only ranking. Network fetch and bundled reranker installation are unavailable; no resolving command exists until the operator supplies a verified reranker artifact."
                 .to_owned(),
             error_code: None,
-            repair: Some(RERANK_MODEL_OFFLINE_IMPORT_COMMAND),
+            repair: None,
             tier: CheckTier::Advisory,
         },
         None => CheckResult::ok(
@@ -4368,7 +4368,7 @@ mod tests {
     }
 
     #[test]
-    fn reranker_posture_reports_permanent_gap_with_offline_import_repair() -> TestResult {
+    fn reranker_posture_reports_permanent_gap_without_placeholder_repair() -> TestResult {
         let check = reranker_posture_check_result(Some(false), None);
 
         ensure(check.name, "reranker_posture", "check name")?;
@@ -4379,9 +4379,9 @@ mod tests {
         )?;
         ensure(check.tier, CheckTier::Advisory, "check tier")?;
         ensure(
-            check.repair,
-            Some(RERANK_MODEL_OFFLINE_IMPORT_COMMAND),
-            "offline import repair command",
+            check.repair.is_none(),
+            true,
+            "no placeholder repair command",
         )?;
         ensure(
             check.message.contains("Permanent capability gap"),
@@ -4394,9 +4394,9 @@ mod tests {
             "message is honest about unavailable network fetch",
         )?;
         ensure(
-            check.message.contains(RERANK_MODEL_OFFLINE_IMPORT_COMMAND),
+            check.message.contains("no resolving command exists"),
             true,
-            "message names the verified offline import seam",
+            "message is explicit about the absent resolving command",
         )
     }
 

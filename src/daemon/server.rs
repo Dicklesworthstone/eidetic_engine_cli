@@ -44,8 +44,8 @@ use crate::core::context::{
     run_context_pack_with_performance_controlled,
 };
 use crate::core::search::{
-    SearchDedupMode, SearchOptions, SearchReport, SearchSourceMode, TypedMemoryFieldFilter,
-    normalize_memory_kind_filter, run_search_with_filters,
+    SearchAdvisorySession, SearchDedupMode, SearchOptions, SearchReport, SearchSourceMode,
+    TypedMemoryFieldFilter, normalize_memory_kind_filter, run_search_with_filters,
 };
 use crate::models::{MemoryScope, QueryFilters, RedactionLevel};
 use crate::output::{ContextJsonRenderOptions, render_context_response_json_with_options};
@@ -183,6 +183,9 @@ const DAEMON_SCHEDULER_JOIN_TIMEOUT: Duration = Duration::from_millis(750);
 #[derive(Clone, Debug, Default)]
 pub struct DaemonDispatchPolicy {
     bound_workspace_id: Option<String>,
+    /// Permanent search advisories are emitted once for this daemon process.
+    /// Transient query degradations bypass this session and remain per-response.
+    search_advisory_session: Arc<Mutex<SearchAdvisorySession>>,
     /// Set once at daemon start when the workspace is bound and the long-lived
     /// write-owner actor is hosted (Inc 2, bd-wx6ou.3). Carries the shared
     /// runtime + a clone of the actor's submit handle to `dispatch_write`
@@ -198,7 +201,7 @@ impl DaemonDispatchPolicy {
     pub fn for_workspace(workspace_id: impl Into<String>) -> Self {
         Self {
             bound_workspace_id: Some(workspace_id.into()),
-            write_router: None,
+            ..Self::default()
         }
     }
 
@@ -208,6 +211,10 @@ impl DaemonDispatchPolicy {
 
     fn write_router(&self) -> Option<&DaemonWriteRouter> {
         self.write_router.as_ref()
+    }
+
+    fn search_advisory_session(&self) -> &Mutex<SearchAdvisorySession> {
+        &self.search_advisory_session
     }
 }
 
@@ -1797,12 +1804,21 @@ fn dispatch_with_policy_and_shutdown(
         policy.bound_workspace_id(),
         shutdown,
         policy.write_router(),
+        policy.search_advisory_session(),
     )
 }
 
 fn dispatch_with_echo_policy(request: &DaemonRequest, echo_enabled: bool) -> DaemonResponse {
     let shutdown = AtomicBool::new(false);
-    dispatch_with_echo_policy_and_workspace(request, echo_enabled, None, &shutdown, None)
+    let search_advisory_session = Mutex::new(SearchAdvisorySession::default());
+    dispatch_with_echo_policy_and_workspace(
+        request,
+        echo_enabled,
+        None,
+        &shutdown,
+        None,
+        &search_advisory_session,
+    )
 }
 
 fn dispatch_with_echo_policy_and_workspace(
@@ -1811,6 +1827,7 @@ fn dispatch_with_echo_policy_and_workspace(
     bound_workspace_id: Option<&str>,
     shutdown: &AtomicBool,
     write_router: Option<&DaemonWriteRouter>,
+    search_advisory_session: &Mutex<SearchAdvisorySession>,
 ) -> DaemonResponse {
     if request.schema != super::DAEMON_REQUEST_SCHEMA_V1 {
         return DaemonResponse::err(
@@ -1881,7 +1898,7 @@ fn dispatch_with_echo_policy_and_workspace(
             )
         }
         METHOD_CONTEXT => dispatch_context(request, shutdown),
-        METHOD_SEARCH => dispatch_search(request, shutdown),
+        METHOD_SEARCH => dispatch_search(request, shutdown, search_advisory_session),
         METHOD_TELEMETRY => dispatch_telemetry(request),
         METHOD_WRITE => dispatch_write(request, write_router),
         METHOD_WRITE_JOURNAL => dispatch_journal(request, write_router),
@@ -2131,9 +2148,13 @@ pub struct DaemonSearchResult {
 }
 
 impl DaemonSearchResult {
-    fn from_report(report: &SearchReport, explain: bool) -> Self {
+    fn from_report(
+        report: &SearchReport,
+        explain: bool,
+        advisory_session: &mut SearchAdvisorySession,
+    ) -> Self {
         let human = report.human_summary();
-        let mut data = report.data_json();
+        let mut data = report.data_json_with_advisory_session(advisory_session);
         if explain && let Some(object) = data.as_object_mut() {
             object.insert(
                 "resultPath".to_owned(),
@@ -2208,7 +2229,11 @@ impl DaemonSearchResult {
     }
 }
 
-fn dispatch_search(request: &DaemonRequest, shutdown: &AtomicBool) -> DaemonResponse {
+fn dispatch_search(
+    request: &DaemonRequest,
+    shutdown: &AtomicBool,
+    search_advisory_session: &Mutex<SearchAdvisorySession>,
+) -> DaemonResponse {
     if shutdown.load(Ordering::SeqCst) {
         return daemon_shutting_down_response(
             request.request_id.clone(),
@@ -2243,7 +2268,11 @@ fn dispatch_search(request: &DaemonRequest, shutdown: &AtomicBool) -> DaemonResp
             );
         }
     };
-    let method_result = DaemonSearchResult::from_report(&report, options.explain);
+    let mut advisory_session = search_advisory_session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let method_result =
+        DaemonSearchResult::from_report(&report, options.explain, &mut advisory_session);
     let result = match serde_json::to_value(method_result) {
         Ok(result) => result,
         Err(error) => {
@@ -2262,7 +2291,12 @@ fn dispatch_search(request: &DaemonRequest, shutdown: &AtomicBool) -> DaemonResp
         request.workspace_id.clone(),
         result,
     );
-    for code in report.degraded.iter().map(|entry| entry.code.as_str()) {
+    for code in report
+        .degraded
+        .iter()
+        .filter(|entry| !entry.is_permanent())
+        .map(|entry| entry.code.as_str())
+    {
         response = response.with_degraded(code);
     }
     if serde_json::to_vec(&response).map_or(true, |encoded| {
@@ -4059,12 +4093,14 @@ mod tests {
         );
         request.workspace_id = Some("workspace-other".to_owned());
         let shutdown = AtomicBool::new(false);
+        let search_advisory_session = Mutex::new(SearchAdvisorySession::default());
         let response = dispatch_with_echo_policy_and_workspace(
             &request,
             false,
             Some(TEST_WORKSPACE_ID),
             &shutdown,
             None,
+            &search_advisory_session,
         );
         let error = response.error.as_ref().expect("must have error");
         assert_eq!(error.code, DAEMON_METHOD_UNAUTHORIZED_CODE);
@@ -4581,8 +4617,15 @@ mod tests {
             serde_json::json!({}),
         );
         let shutdown = AtomicBool::new(false);
-        let response =
-            dispatch_with_echo_policy_and_workspace(&request, false, None, &shutdown, None);
+        let search_advisory_session = Mutex::new(SearchAdvisorySession::default());
+        let response = dispatch_with_echo_policy_and_workspace(
+            &request,
+            false,
+            None,
+            &shutdown,
+            None,
+            &search_advisory_session,
+        );
 
         assert!(response.error.is_none());
         assert!(shutdown.load(Ordering::SeqCst));

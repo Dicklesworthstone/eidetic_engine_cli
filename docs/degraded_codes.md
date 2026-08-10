@@ -13149,20 +13149,24 @@ ee remember 'Rerank fixture memory about release verification.' --workspace . --
 ee search 'release verification' --workspace . --json
 ```
 
-**Expected emission.** The compact rerank posture carries one structured,
-permanent advisory. Message contains: `No usable local reranker is registered
-... fusion-only ranking`. The code is omitted from the per-query `degraded[]`
-and human degradation prose.
+**Expected emission.** A one-shot search carries one structured permanent
+advisory. In a long-lived daemon process, the first affected query carries the
+advisory and later queries set `rerank.advisory` to `null`; every response keeps
+`rerank.advisorySummary` with `permanent`, per-response emitted/suppressed
+counts, and cumulative session occurrence/suppression counts. Message contains:
+`No usable local reranker is registered ... fusion-only ranking ... No
+resolving command exists`. The code is omitted from human degradation prose,
+per-query `degraded[]`, and the daemon envelope's outer `degraded_codes`.
 
-**Repair hint.** Network fetch and bundled installation remain unavailable.
-Import a verified operator-supplied artifact with
-`ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst`.
-The same exact command is carried by the structured rerank advisory and
-`ee doctor`.
+**Repair hint.** None. Network fetch and bundled installation are unavailable,
+and ee cannot construct an exact workspace-correct command without the path to
+a verified operator-supplied artifact. `ee doctor` owns the permanent
+capability gap and says explicitly that no resolving command currently exists.
 
 Registered-artifact registry or load failures are transient uses of the same
-code. They remain in the affected query's `degraded[]`; the structured rerank
-advisory carries `permanent: false`. Doctor reports the transient load failure
+code. They remain in every affected query's `degraded[]` and daemon outer
+`degraded_codes`; the structured rerank advisory carries `permanent: false` and
+is never session-suppressed. Doctor reports the transient load failure
 separately and does not classify it as a permanent capability gap.
 
 **Fixture.** [`tests/fixtures/failure_modes/rerank_model_unavailable.json`](../tests/fixtures/failure_modes/rerank_model_unavailable.json)

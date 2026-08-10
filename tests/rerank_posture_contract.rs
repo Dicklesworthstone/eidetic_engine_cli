@@ -1,7 +1,7 @@
 use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::core::search::{
-    RERANK_MODEL_OFFLINE_IMPORT_COMMAND, RERANK_MODEL_UNAVAILABLE_ADVISORY, ScoreSource,
-    SearchDegradation, SearchHit, SearchReport, SearchSourceMode, SearchStatus,
+    RERANK_MODEL_UNAVAILABLE_ADVISORY, ScoreSource, SearchAdvisorySession, SearchDegradation,
+    SearchHit, SearchReport, SearchSourceMode, SearchStatus,
 };
 use ee::models::{EmbedBackend, MemoryScope, MemoryScopeStats};
 
@@ -40,19 +40,19 @@ fn empty_search_report(degraded: Vec<SearchDegradation>) -> SearchReport {
 }
 
 #[test]
-fn duplicate_permanent_rerank_rows_collapse_within_each_structured_response() {
+fn ordinary_search_json_is_pure_and_structural() {
     let report = empty_search_report(vec![
         SearchDegradation {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
             message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-            repair: Some(RERANK_MODEL_OFFLINE_IMPORT_COMMAND.to_string()),
+            repair: None,
         },
         SearchDegradation {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
             message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-            repair: Some(RERANK_MODEL_OFFLINE_IMPORT_COMMAND.to_string()),
+            repair: None,
         },
     ]);
 
@@ -78,10 +78,10 @@ fn duplicate_permanent_rerank_rows_collapse_within_each_structured_response() {
         "rerank_model_unavailable"
     );
     assert_eq!(json["rerank"]["advisory"]["permanent"], true);
-    assert_eq!(
-        json["rerank"]["advisory"]["repair"],
-        RERANK_MODEL_OFFLINE_IMPORT_COMMAND
-    );
+    assert!(json["rerank"]["advisory"]["repair"].is_null());
+    assert!(json["rerank"]["advisorySummary"].get("schema").is_none());
+    assert_eq!(json["rerank"]["advisorySummary"]["emittedCount"], 1);
+    assert_eq!(json["rerank"]["advisorySummary"]["suppressedCount"], 0);
     assert_eq!(repeated_json["rerank"], json["rerank"]);
     assert_eq!(
         json["degraded"].as_array().map_or(0, |rows| rows.len()),
@@ -89,7 +89,80 @@ fn duplicate_permanent_rerank_rows_collapse_within_each_structured_response() {
         "permanent capability posture must not repeat in per-query degraded output"
     );
     assert!(!human.contains(RERANK_MODEL_UNAVAILABLE_ADVISORY));
-    assert!(!human.contains(RERANK_MODEL_OFFLINE_IMPORT_COMMAND));
+    assert!(!human.contains("No resolving command exists"));
+}
+
+#[test]
+fn explicit_long_lived_session_emits_permanent_advisory_once() {
+    let first = empty_search_report(vec![SearchDegradation {
+        code: "rerank_model_unavailable".to_string(),
+        severity: "low".to_string(),
+        message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
+        repair: None,
+    }]);
+    let mut second = first.clone();
+    second.query = "a distinct second query in the same process".to_string();
+    let mut session = SearchAdvisorySession::default();
+
+    let first_json = first.data_json_with_advisory_session(&mut session);
+    let second_json = second.data_json_with_advisory_session(&mut session);
+
+    assert_eq!(first_json["rerank"]["advisory"]["permanent"], true);
+    assert_eq!(first_json["rerank"]["advisorySummary"]["emittedCount"], 1);
+    assert_eq!(
+        first_json["rerank"]["advisorySummary"]["suppressedCount"],
+        0
+    );
+    assert!(second_json["rerank"]["advisory"].is_null());
+    assert_eq!(second_json["rerank"]["advisorySummary"]["permanent"], true);
+    assert_eq!(second_json["rerank"]["advisorySummary"]["emittedCount"], 0);
+    assert_eq!(
+        second_json["rerank"]["advisorySummary"]["suppressedCount"],
+        1
+    );
+    assert_eq!(
+        second_json["rerank"]["advisorySummary"]["sessionOccurrenceCount"],
+        2
+    );
+    assert_eq!(
+        second_json["rerank"]["advisorySummary"]["sessionSuppressedCount"],
+        1
+    );
+}
+
+#[test]
+fn explicit_session_emits_each_distinct_permanent_advisory_once() {
+    let first = empty_search_report(vec![SearchDegradation {
+        code: "rerank_model_unavailable".to_string(),
+        severity: "low".to_string(),
+        message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
+        repair: None,
+    }]);
+    let second = empty_search_report(vec![SearchDegradation {
+        code: "rerank_model_unavailable".to_string(),
+        severity: "warning".to_string(),
+        message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
+        repair: None,
+    }]);
+    let repeated_first = first.clone();
+    let mut session = SearchAdvisorySession::default();
+
+    let first_json = first.data_json_with_advisory_session(&mut session);
+    let second_json = second.data_json_with_advisory_session(&mut session);
+    let repeated_first_json = repeated_first.data_json_with_advisory_session(&mut session);
+
+    assert_eq!(first_json["rerank"]["advisory"]["severity"], "low");
+    assert_eq!(second_json["rerank"]["advisory"]["severity"], "warning");
+    assert_eq!(second_json["rerank"]["advisorySummary"]["distinctCount"], 2);
+    assert!(repeated_first_json["rerank"]["advisory"].is_null());
+    assert_eq!(
+        repeated_first_json["rerank"]["advisorySummary"]["distinctCount"],
+        2
+    );
+    assert_eq!(
+        repeated_first_json["rerank"]["advisorySummary"]["sessionSuppressedCount"],
+        1
+    );
 }
 
 #[test]
@@ -102,7 +175,11 @@ fn transient_reranker_load_failure_remains_a_query_degradation() {
         repair: None,
     }]);
 
-    let json = report.data_json();
+    let mut repeated = report.clone();
+    repeated.query = "second transient query".to_string();
+    let mut session = SearchAdvisorySession::default();
+    let json = report.data_json_with_advisory_session(&mut session);
+    let repeated_json = repeated.data_json_with_advisory_session(&mut session);
 
     assert!(json["rerank"].get("permanent").is_none());
     assert_eq!(json["rerank"]["advisory"]["permanent"], false);
@@ -112,4 +189,17 @@ fn transient_reranker_load_failure_remains_a_query_degradation() {
     );
     assert_eq!(json["degraded"].as_array().map(Vec::len), Some(1));
     assert_eq!(json["degraded"][0]["code"], "rerank_model_unavailable");
+    assert_eq!(repeated_json["rerank"]["advisory"]["permanent"], false);
+    assert_eq!(
+        repeated_json["rerank"]["advisorySummary"]["emittedCount"],
+        1
+    );
+    assert_eq!(
+        repeated_json["rerank"]["advisorySummary"]["suppressedCount"],
+        0
+    );
+    assert_eq!(
+        repeated_json["degraded"][0]["code"],
+        "rerank_model_unavailable"
+    );
 }

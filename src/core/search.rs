@@ -96,9 +96,7 @@ const SEARCH_ANALYSIS_PROVENANCE_URI_KEY: &str = "_ee_analysis_provenance_uri";
 const SEARCH_ANALYSIS_CREATED_AT_KEY: &str = "_ee_analysis_created_at";
 const EMBED_MODEL_UNAVAILABLE_MODEL_ID: &str = "EE_EMBED_MODEL_PATH";
 const DEFAULT_SEARCH_RERANK_TOP_K: usize = 50;
-pub const RERANK_MODEL_UNAVAILABLE_ADVISORY: &str = "No usable local reranker is registered; this build cannot fetch or bundle one automatically. Search is using fusion-only ranking.";
-pub const RERANK_MODEL_OFFLINE_IMPORT_COMMAND: &str =
-    "ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst";
+pub const RERANK_MODEL_UNAVAILABLE_ADVISORY: &str = "No usable local reranker is registered; this build cannot fetch or bundle one automatically. Search is using fusion-only ranking. No resolving command exists until the operator supplies a verified reranker artifact.";
 const RERANK_MODEL_TOKENIZER: &str = "tokenizer.json";
 const RERANK_MODEL_SAFETENSORS_PRIMARY: &str = "model_f32.safetensors";
 const RERANK_MODEL_SAFETENSORS_FALLBACK: &str = "model.safetensors";
@@ -806,6 +804,60 @@ pub struct SearchReport {
     pub scope_stats: MemoryScopeStats,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct SearchAdvisoryIdentity {
+    code: String,
+    severity: String,
+    message: String,
+    repair: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SearchAdvisoryObservation {
+    emitted: bool,
+    occurrence_count: u64,
+    distinct_count: usize,
+    session_suppressed_count: u64,
+}
+
+/// Process/session-scoped ledger for permanent search advisories.
+///
+/// Transient degradations never enter this ledger: they remain visible in
+/// every affected response. A fresh one-shot CLI process gets a fresh ledger,
+/// while the long-lived daemon naturally shares the process ledger across its
+/// connection worker threads.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SearchAdvisorySession {
+    occurrences: BTreeMap<SearchAdvisoryIdentity, u64>,
+    suppressed_count: u64,
+}
+
+impl SearchAdvisorySession {
+    fn observe_permanent(&mut self, degradation: &SearchDegradation) -> SearchAdvisoryObservation {
+        let identity = SearchAdvisoryIdentity {
+            code: degradation.code.clone(),
+            severity: degradation.severity.clone(),
+            message: degradation.message.clone(),
+            repair: degradation.repair.clone(),
+        };
+        let occurrence_count = {
+            let occurrence_count = self.occurrences.entry(identity).or_insert(0);
+            *occurrence_count = occurrence_count.saturating_add(1);
+            *occurrence_count
+        };
+        let emitted = occurrence_count == 1;
+        if !emitted {
+            self.suppressed_count = self.suppressed_count.saturating_add(1);
+        }
+        SearchAdvisoryObservation {
+            emitted,
+            occurrence_count,
+            distinct_count: self.occurrences.len(),
+            session_suppressed_count: self.suppressed_count,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SearchPerformanceRun {
     pub report: SearchReport,
@@ -1439,7 +1491,7 @@ impl SearchDegradation {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
             message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-            repair: Some(RERANK_MODEL_OFFLINE_IMPORT_COMMAND.to_string()),
+            repair: None,
         }
     }
 
@@ -2243,6 +2295,21 @@ impl SearchReport {
 
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
+        let mut session = SearchAdvisorySession::default();
+        self.data_json_with_advisory_session(&mut session)
+    }
+
+    /// Render JSON while recording permanent advisories in the supplied
+    /// long-lived process/session ledger.
+    ///
+    /// The ordinary renderer intentionally uses a fresh session so repeated
+    /// serialization stays pure and deterministic. Long-lived owners such as
+    /// the daemon supply and retain their own session explicitly.
+    #[must_use]
+    pub fn data_json_with_advisory_session(
+        &self,
+        session: &mut SearchAdvisorySession,
+    ) -> serde_json::Value {
         let output_redaction_enabled = self.output_redaction_enabled();
         let visible_results = search_display_visible_hits(&self.results);
         let mut metrics = RetrievalMetrics::from_hits_with_floor(
@@ -2441,6 +2508,7 @@ impl SearchReport {
                 &self.degraded,
                 self.rerank_configured_mode,
                 self.rerank_configured_top_k,
+                session,
             ),
             "profileRuntime": self.runtime_profile.data_json(),
             "errors": self.errors,
@@ -5024,6 +5092,7 @@ fn search_rerank_posture_json(
     degraded: &[SearchDegradation],
     configured_mode: crate::config::SearchRerankMode,
     configured_top_k: usize,
+    advisory_session: &mut SearchAdvisorySession,
 ) -> serde_json::Value {
     let rerank_score_count = hits.iter().filter(|hit| hit.rerank_score.is_some()).count();
     let unavailable = degraded
@@ -5037,6 +5106,62 @@ fn search_rerank_posture_json(
     } else {
         "fusion_only"
     };
+    let (advisory, advisory_summary) = match unavailable {
+        Some(degradation) if unavailable_is_permanent => {
+            let observation = advisory_session.observe_permanent(degradation);
+            let advisory = observation.emitted.then(|| {
+                serde_json::json!({
+                    "code": degradation.code,
+                    "severity": degradation.severity,
+                    "permanent": true,
+                    "message": degradation.message,
+                    "repair": degradation.repair,
+                    "resolution": "no_resolving_command_without_verified_artifact",
+                })
+            });
+            let summary = serde_json::json!({
+                "scope": "process",
+                "permanent": true,
+                "distinctCount": observation.distinct_count,
+                "emittedCount": if observation.emitted { 1 } else { 0 },
+                "suppressedCount": if observation.emitted { 0 } else { 1 },
+                "sessionOccurrenceCount": observation.occurrence_count,
+                "sessionSuppressedCount": observation.session_suppressed_count,
+            });
+            (advisory, summary)
+        }
+        Some(degradation) => (
+            Some(serde_json::json!({
+                "code": degradation.code,
+                "severity": degradation.severity,
+                "permanent": false,
+                "message": degradation.message,
+                "repair": degradation.repair,
+                "resolution": "retry_or_inspect_local_registry",
+            })),
+            serde_json::json!({
+                "scope": "response",
+                "permanent": false,
+                "distinctCount": 1,
+                "emittedCount": 1,
+                "suppressedCount": 0,
+                "sessionOccurrenceCount": 1,
+                "sessionSuppressedCount": advisory_session.suppressed_count,
+            }),
+        ),
+        None => (
+            None,
+            serde_json::json!({
+                "scope": "response",
+                "permanent": serde_json::Value::Null,
+                "distinctCount": 0,
+                "emittedCount": 0,
+                "suppressedCount": 0,
+                "sessionOccurrenceCount": 0,
+                "sessionSuppressedCount": advisory_session.suppressed_count,
+            }),
+        ),
+    };
     serde_json::json!({
         "schema": "ee.rerank_posture.v1",
         "mode": mode,
@@ -5046,26 +5171,8 @@ fn search_rerank_posture_json(
         "scoreKind": if rerank_score_count > 0 { "reranked" } else { "rrf_fused" },
         "available": rerank_score_count > 0,
         "degradedCode": unavailable.map(|degradation| degradation.code.as_str()),
-        "advisory": unavailable.map(|degradation| serde_json::json!({
-            "code": degradation.code,
-            "severity": degradation.severity,
-            "permanent": unavailable_is_permanent,
-            "message": if unavailable_is_permanent {
-                RERANK_MODEL_UNAVAILABLE_ADVISORY
-            } else {
-                degradation.message.as_str()
-            },
-            "repair": if unavailable_is_permanent {
-                Some(RERANK_MODEL_OFFLINE_IMPORT_COMMAND)
-            } else {
-                degradation.repair.as_deref()
-            },
-            "resolution": if unavailable_is_permanent {
-                "operator_supplied_artifact_required"
-            } else {
-                "retry_or_inspect_local_registry"
-            },
-        })),
+        "advisory": advisory,
+        "advisorySummary": advisory_summary,
     })
 }
 
@@ -16795,11 +16902,13 @@ mod tests {
     #[test]
     fn rerank_posture_reports_reranked_scores() {
         let hit = synthetic_reranked_hit("mem_reranked", 0.91);
+        let mut advisory_session = SearchAdvisorySession::default();
         let posture = search_rerank_posture_json(
             &[&hit],
             &[],
             crate::config::SearchRerankMode::Auto,
             DEFAULT_SEARCH_RERANK_TOP_K,
+            &mut advisory_session,
         );
 
         assert_eq!(posture["schema"], "ee.rerank_posture.v1");
@@ -16815,8 +16924,14 @@ mod tests {
 
     #[test]
     fn rerank_posture_reports_empty_fusion_only_without_degradation() {
-        let posture =
-            search_rerank_posture_json(&[], &[], crate::config::SearchRerankMode::Off, 12);
+        let mut advisory_session = SearchAdvisorySession::default();
+        let posture = search_rerank_posture_json(
+            &[],
+            &[],
+            crate::config::SearchRerankMode::Off,
+            12,
+            &mut advisory_session,
+        );
 
         assert_eq!(posture["schema"], "ee.rerank_posture.v1");
         assert_eq!(posture["mode"], "fusion_only");
@@ -16834,12 +16949,14 @@ mod tests {
         let fusion = synthetic_hybrid_hit("mem_fusion", 2.0 / 61.0);
         let reranked_b = synthetic_reranked_hit("mem_reranked_b", 0.74);
         let hits = vec![&reranked_a, &fusion, &reranked_b];
+        let mut advisory_session = SearchAdvisorySession::default();
 
         let posture = search_rerank_posture_json(
             &hits,
             &[],
             crate::config::SearchRerankMode::Auto,
             DEFAULT_SEARCH_RERANK_TOP_K,
+            &mut advisory_session,
         );
 
         assert_eq!(posture["mode"], "reranked");
@@ -16858,12 +16975,14 @@ mod tests {
             message: "Index generation is behind the database.".to_string(),
             repair: Some("ee index rebuild --workspace .".to_string()),
         }];
+        let mut advisory_session = SearchAdvisorySession::default();
 
         let posture = search_rerank_posture_json(
             &[&hit],
             &degraded,
             crate::config::SearchRerankMode::Auto,
             DEFAULT_SEARCH_RERANK_TOP_K,
+            &mut advisory_session,
         );
 
         assert_eq!(posture["mode"], "fusion_only");
@@ -16877,11 +16996,13 @@ mod tests {
     fn rerank_posture_reports_fusion_only_degraded() {
         let hit = synthetic_hybrid_hit("mem_fusion", 2.0 / 61.0);
         let degraded = vec![SearchDegradation::rerank_model_absent()];
+        let mut advisory_session = SearchAdvisorySession::default();
         let posture = search_rerank_posture_json(
             &[&hit],
             &degraded,
             crate::config::SearchRerankMode::Auto,
             DEFAULT_SEARCH_RERANK_TOP_K,
+            &mut advisory_session,
         );
 
         assert_eq!(posture["mode"], "fusion_only_degraded");
@@ -16890,21 +17011,21 @@ mod tests {
         assert_eq!(posture["degradedCode"], "rerank_model_unavailable");
         assert_eq!(posture["advisory"]["code"], "rerank_model_unavailable");
         assert_eq!(posture["advisory"]["permanent"], true);
-        assert_eq!(
-            posture["advisory"]["repair"],
-            RERANK_MODEL_OFFLINE_IMPORT_COMMAND
-        );
+        assert!(posture["advisory"]["repair"].is_null());
         assert_eq!(
             posture["advisory"]["resolution"],
-            "operator_supplied_artifact_required"
+            "no_resolving_command_without_verified_artifact"
         );
+        assert_eq!(posture["advisorySummary"]["emittedCount"], 1);
+        assert_eq!(posture["advisorySummary"]["suppressedCount"], 0);
     }
 
     #[test]
     fn search_report_data_json_reports_degraded_rerank_on_empty_results() {
         let report = rerank_test_report(Vec::new(), vec![SearchDegradation::rerank_model_absent()]);
+        let mut advisory_session = SearchAdvisorySession::default();
 
-        let json = report.data_json();
+        let json = report.data_json_with_advisory_session(&mut advisory_session);
 
         assert_eq!(json["resultCount"], 0);
         assert_eq!(json["rerank"]["mode"], "fusion_only_degraded");
@@ -16913,6 +17034,8 @@ mod tests {
         assert_eq!(json["rerank"]["available"], false);
         assert_eq!(json["rerank"]["degradedCode"], "rerank_model_unavailable");
         assert_eq!(json["rerank"]["advisory"]["permanent"], true);
+        assert!(json["rerank"]["advisory"]["repair"].is_null());
+        assert_eq!(json["rerank"]["advisorySummary"]["emittedCount"], 1);
         assert_eq!(json["degraded"], serde_json::json!([]));
     }
 
@@ -16923,10 +17046,7 @@ mod tests {
         assert_eq!(degraded.code, "rerank_model_unavailable");
         assert_eq!(degraded.severity, "low");
         assert_eq!(degraded.message, RERANK_MODEL_UNAVAILABLE_ADVISORY);
-        assert_eq!(
-            degraded.repair.as_deref(),
-            Some(RERANK_MODEL_OFFLINE_IMPORT_COMMAND)
-        );
+        assert!(degraded.repair.is_none());
         assert!(degraded.is_permanent());
         assert!(degraded.data_json().get("permanent").is_none());
     }
@@ -16939,8 +17059,9 @@ mod tests {
                 "The registered local reranker could not be loaded; retry the query or inspect local model status.",
             )],
         );
+        let mut advisory_session = SearchAdvisorySession::default();
 
-        let json = report.data_json();
+        let json = report.data_json_with_advisory_session(&mut advisory_session);
 
         assert_eq!(json["degraded"].as_array().map(Vec::len), Some(1));
         assert_eq!(json["degraded"][0]["code"], "rerank_model_unavailable");
@@ -16958,13 +17079,14 @@ mod tests {
         report
             .degraded
             .push(SearchDegradation::stale_index(Some(2), Some(1)));
+        let mut advisory_session = SearchAdvisorySession::default();
 
         let human = report.human_summary();
-        let json = report.data_json();
+        let json = report.data_json_with_advisory_session(&mut advisory_session);
 
         assert!(!human.contains("rerank_model_unavailable"));
         assert!(!human.contains(RERANK_MODEL_UNAVAILABLE_ADVISORY));
-        assert!(!human.contains(RERANK_MODEL_OFFLINE_IMPORT_COMMAND));
+        assert!(!human.contains("No resolving command exists"));
         assert!(human.contains("search_index_stale"));
         assert_eq!(json["degraded"].as_array().map(Vec::len), Some(1));
         assert_eq!(json["degraded"][0]["code"], "search_index_stale");
