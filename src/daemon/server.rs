@@ -2163,6 +2163,11 @@ fn canonical_contained_path(
     let canonical = match fs::canonicalize(path) {
         Ok(path) => path,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+                return Err(format!(
+                    "field `{field}` must not identify a dangling symbolic link"
+                ));
+            }
             let parent = path
                 .parent()
                 .ok_or_else(|| format!("field `{field}` has no parent directory"))?;
@@ -4477,6 +4482,30 @@ mod tests {
                 .expect_err("symlink escape must be rejected");
             assert!(error.contains("must remain inside the canonical workspace"));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_search_rejects_dangling_final_symlink() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let state_dir = workspace.join(".ee");
+        fs::create_dir_all(&state_dir).expect("workspace state dir");
+        let dangling = state_dir.join("ee.db");
+        std::os::unix::fs::symlink(temp.path().join("outside-missing.db"), &dangling)
+            .expect("dangling database symlink");
+
+        let params = DaemonSearchParams::from_value(&serde_json::json!({
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+            "query": "release",
+            "workspacePath": workspace,
+            "databasePath": dangling
+        }))
+        .expect("strict params");
+        let error = params
+            .into_search_parts(&workspace.display().to_string())
+            .expect_err("dangling final symlink must be rejected");
+        assert!(error.contains("must not identify a dangling symbolic link"));
     }
 
     #[test]
