@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_diff_snapshot_missing",
+  "introduced_by": {
+    "bead": "bd-3a1op.5"
+  },
+  "surfaces": [
+    "graph diff"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee graph diff needs two persisted snapshots of the requested family, but the requested from/to ids (or the --since resolution, or the latest-two default) could not be satisfied — fewer than two non-invalid snapshots exist for the family. The command reports the shortfall honestly instead of recomputing a synthetic side.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee graph diff --graph memory_links --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_diff_snapshot_missing",
+    "severity": "low",
+    "message_contains": [
+      "snapshot"
+    ],
+    "repair_contains": "graph snapshot refresh"
+  }
+}

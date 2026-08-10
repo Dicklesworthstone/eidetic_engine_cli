@@ -206,6 +206,7 @@ Current conventions:
 | `suggest_links_insufficient_graph` | info | bd-3a1op.3 (ADR 0066) |
 | `global_lane_disabled` | info | bd-1bfwa.3 |
 | `global_promotion_redaction_refused` | medium | bd-1bfwa.2 |
+| `graph_diff_snapshot_missing` | low | bd-3a1op.5 (ADR 0066) |
 | `graph_centrality_read` | `ee graph centrality` persisted centrality read degradation. |
 | `graph_dominance` | `ee why` revision-dominance impact analysis degradation. |
 | `graph_export` | `ee graph export` graph snapshot export degradation. |

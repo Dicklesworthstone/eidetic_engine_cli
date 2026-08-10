@@ -1441,6 +1441,10 @@ impl EffectManifest {
             ),
             CommandEffect::read_only_db("graph centrality", "Compute graph centrality metrics"),
             CommandEffect::read_only_db("graph communities", "Compute graph communities"),
+            CommandEffect::read_only_db(
+                "graph diff",
+                "Temporal structural diff between two persisted graph snapshots: add/remove sets, fingerprint-matched community deltas, persisted-centrality movers (ADR 0066); never recomputes centrality inline",
+            ),
             CommandEffect::read_only_db("graph explain-link", "Explain graph link evidence"),
             CommandEffect::read_only_db("graph export", "Export graph projection report"),
             CommandEffect::read_only_db("graph hits", "Compute graph HITS centrality"),

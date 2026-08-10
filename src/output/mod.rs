@@ -10562,6 +10562,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: graph_export_response_schema_definition,
         },
         SchemaEntry {
+            id: "ee.graph.diff.v1",
+            version: "1",
+            description: "Temporal structural diff between two persisted graph snapshots: content-hash-keyed add/remove sets, fingerprint-matched community deltas, persisted-centrality movers (ADR 0066).",
+            category: "graph",
+            definition: graph_diff_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.graph.snapshot_prune.v1",
             version: "1",
             description: "Graph snapshot archived-row prune report",
@@ -12118,6 +12125,10 @@ fn graph_suggest_links_schema_definition() -> String {
 
 fn conflict_resolve_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.conflict.resolve.v1.json").to_string()
+}
+
+fn graph_diff_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.graph.diff.v1.json").to_string()
 }
 
 fn graph_snapshot_prune_schema_definition() -> String {

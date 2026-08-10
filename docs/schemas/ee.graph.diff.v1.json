@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.graph.diff.v1.json",
+  "title": "ee.graph.diff.v1",
+  "description": "Temporal structural diff between two PERSISTED graph snapshots of one family (ADR 0066): node/edge add/remove sets (content-hash keyed, deterministically ordered — diff(A,B) sets are exact complements of diff(B,A)), community deltas via best-overlap fingerprint matching (member-set Jaccard >= 0.5 is the same community; below threshold reports birth/death; membership churn listed), and top-N centrality movers ranked by |delta pagerank| from the centrality values persisted inside each snapshot — never recomputed inline; nodes missing a persisted value on either side are honestly omitted and counted. Summary counts come first; every detail array is bounded at the declared governor truncation point.",
+  "type": "object",
+  "required": [
+    "schema",
+    "graphType",
+    "from",
+    "to",
+    "summary",
+    "nodesAdded",
+    "nodesRemoved",
+    "edgesAdded",
+    "edgesRemoved",
+    "communities",
+    "movers",
+    "detailCap",
+    "truncated"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.graph.diff.v1"
+    },
+    "graphType": {
+      "type": "string"
+    },
+    "from": {
+      "$ref": "#/$defs/snapshotRef"
+    },
+    "to": {
+      "$ref": "#/$defs/snapshotRef"
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "nodesAdded",
+        "nodesRemoved",
+        "edgesAdded",
+        "edgesRemoved",
+        "communitiesMatched",
+        "communityBirths",
+        "communityDeaths",
+        "centralityMovers",
+        "centralityOmitted"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "nodesAdded": { "type": "integer", "minimum": 0 },
+        "nodesRemoved": { "type": "integer", "minimum": 0 },
+        "edgesAdded": { "type": "integer", "minimum": 0 },
+        "edgesRemoved": { "type": "integer", "minimum": 0 },
+        "communitiesMatched": { "type": "integer", "minimum": 0 },
+        "communityBirths": { "type": "integer", "minimum": 0 },
+        "communityDeaths": { "type": "integer", "minimum": 0 },
+        "centralityMovers": { "type": "integer", "minimum": 0 },
+        "centralityOmitted": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "nodesAdded": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "nodesRemoved": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "edgesAdded": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/edge" }
+    },
+    "edgesRemoved": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/edge" }
+    },
+    "communities": {
+      "type": "object",
+      "required": ["matched", "births", "deaths", "unchanged"],
+      "additionalProperties": false,
+      "properties": {
+        "matched": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["fromFingerprint", "toFingerprint", "jaccard", "joined", "left"],
+            "additionalProperties": false,
+            "properties": {
+              "fromFingerprint": { "type": "string" },
+              "toFingerprint": { "type": "string" },
+              "jaccard": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+              "joined": { "type": "array", "items": { "type": "string" } },
+              "left": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "births": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/communityEndpoint" }
+        },
+        "deaths": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/communityEndpoint" }
+        },
+        "unchanged": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "movers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["memoryId", "fromPagerank", "toPagerank", "delta"],
+        "additionalProperties": false,
+        "properties": {
+          "memoryId": { "type": "string" },
+          "fromPagerank": { "type": "number" },
+          "toPagerank": { "type": "number" },
+          "delta": { "type": "number" }
+        }
+      }
+    },
+    "detailCap": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "truncated": {
+      "type": "object",
+      "required": ["nodesAdded", "nodesRemoved", "edgesAdded", "edgesRemoved"],
+      "additionalProperties": false,
+      "properties": {
+        "nodesAdded": { "type": "boolean" },
+        "nodesRemoved": { "type": "boolean" },
+        "edgesAdded": { "type": "boolean" },
+        "edgesRemoved": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "snapshotRef": {
+      "type": "object",
+      "required": ["snapshotId", "snapshotVersion", "createdAt", "nodeCount", "edgeCount"],
+      "additionalProperties": false,
+      "properties": {
+        "snapshotId": { "type": "string" },
+        "snapshotVersion": { "type": "integer", "minimum": 0 },
+        "createdAt": { "type": "string" },
+        "nodeCount": { "type": "integer", "minimum": 0 },
+        "edgeCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "required": ["key", "source", "target", "relation", "directed"],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "type": "string" },
+        "source": { "type": "string" },
+        "target": { "type": "string" },
+        "relation": { "type": "string" },
+        "directed": { "type": "boolean" }
+      }
+    }
+  }
+}

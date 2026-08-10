@@ -68,6 +68,7 @@ pub mod git_ahead;
 pub mod global_promotion;
 pub mod global_store;
 pub mod graph_audit;
+pub mod graph_diff;
 pub mod graph_memory_budget;
 pub mod graph_telemetry;
 pub mod handoff;

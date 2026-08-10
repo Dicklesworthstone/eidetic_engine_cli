@@ -5039,6 +5039,32 @@ pub enum GraphCommand {
     Neighborhood(GraphNeighborhoodArgs),
     /// Predict missing links with blended, typed, explained scoring (ADR 0066).
     SuggestLinks(GraphSuggestLinksArgs),
+    /// Diff two persisted graph snapshots: add/remove sets, community deltas, movers.
+    Diff(GraphDiffArgs),
+}
+
+/// Arguments for `ee graph diff` (ADR 0066 / bd-3a1op.5).
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct GraphDiffArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Snapshot family to diff.
+    #[arg(long = "graph", default_value = "memory_links", value_name = "FAMILY")]
+    pub graph: String,
+
+    /// Older snapshot id (defaults to the second-latest snapshot).
+    #[arg(long, value_name = "SNAPSHOT_ID")]
+    pub from: Option<String>,
+
+    /// Newer snapshot id (defaults to the latest snapshot).
+    #[arg(long, value_name = "SNAPSHOT_ID")]
+    pub to: Option<String>,
+
+    /// RFC3339 timestamp: use the nearest snapshot at or before it as `from`.
+    #[arg(long, value_name = "RFC3339", conflicts_with_all = ["from", "to"])]
+    pub since: Option<String>,
 }
 
 /// Arguments for `ee graph suggest-links` (ADR 0066 / bd-3a1op.3).
@@ -13987,6 +14013,9 @@ where
         }
         Some(Command::Graph(GraphCommand::SuggestLinks(ref args))) => {
             handle_graph_suggest_links(&cli, args, stdout, stderr)
+        }
+        Some(Command::Graph(GraphCommand::Diff(ref args))) => {
+            handle_graph_diff(&cli, args, stdout, stderr)
         }
         Some(Command::Graph(GraphCommand::Neighborhood(ref args))) => {
             handle_graph_neighborhood(&cli, args, stdout, stderr)
@@ -34856,6 +34885,202 @@ fn graph_snapshot_refresh_types(input: &str) -> Result<Vec<crate::db::GraphSnaps
         other => return Err(format!("unknown graph refresh target: {other}")),
     };
     Ok(graph_types)
+}
+
+/// `ee graph diff` (bd-3a1op.5, ADR 0066): temporal structural diff between
+/// two persisted snapshots of one family. Read-only; centrality comes from
+/// the persisted snapshot payloads, never inline recomputation.
+fn handle_graph_diff<W, E>(
+    cli: &Cli,
+    args: &GraphDiffArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::graph_diff::{diff_snapshots, parse_snapshot_graph};
+
+    let graph_type = match args.graph.parse::<crate::db::GraphSnapshotType>() {
+        Ok(graph_type) => graph_type,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error,
+                repair: Some(
+                    "--graph memory_links | causal_evidence | rule_provenance | contradiction_subgraph | retrieval_affinity | ..."
+                        .to_owned(),
+                ),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let workspace =
+        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        let domain_error = DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+    let conn = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(conn) => conn,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to open database: {error}"),
+                repair: None,
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let workspace_id = match resolve_graph_workspace_id(&conn, &workspace, None) {
+        Ok(workspace_id) => workspace_id,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    // Diffable history: everything except Invalid rows (archived snapshots
+    // are exactly what a temporal diff wants to reach back into).
+    let snapshots: Vec<crate::db::StoredGraphSnapshot> =
+        match conn.list_graph_snapshots(&workspace_id, Some(graph_type), 256) {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|row| row.status != crate::db::GraphSnapshotStatus::Invalid)
+                .collect(),
+            Err(error) => {
+                let domain_error = DomainError::Storage {
+                    message: format!("Failed to list graph snapshots: {error}"),
+                    repair: Some("ee doctor --workspace . --json".to_owned()),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+
+    let missing = |what: String| {
+        serde_json::json!({
+            "code": "graph_diff_snapshot_missing",
+            "severity": "low",
+            "message": what,
+            "repair": "ee graph snapshot refresh --workspace . --json",
+        })
+    };
+
+    // Resolve the from/to pair. Rows arrive newest-first.
+    let find = |id: &str| snapshots.iter().find(|row| row.id == id);
+    let (from_row, to_row) = if args.from.is_some() || args.to.is_some() {
+        let to_row = match &args.to {
+            Some(id) => find(id),
+            None => snapshots.first(),
+        };
+        let from_row = match &args.from {
+            Some(id) => find(id),
+            None => snapshots.get(1),
+        };
+        (from_row, to_row)
+    } else if let Some(since) = &args.since {
+        // RFC3339 UTC timestamps compare lexically; nearest ≤ since.
+        let from_row = snapshots
+            .iter()
+            .find(|row| row.created_at.as_str() <= since.as_str());
+        (from_row, snapshots.first())
+    } else {
+        (snapshots.get(1), snapshots.first())
+    };
+
+    let (Some(from_row), Some(to_row)) = (from_row, to_row) else {
+        let requested = args
+            .from
+            .clone()
+            .or_else(|| args.to.clone())
+            .or_else(|| args.since.clone())
+            .unwrap_or_else(|| "latest two".to_owned());
+        let envelope = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
+            "success": true,
+            "data": {
+                "schema": crate::core::graph_diff::GRAPH_DIFF_SCHEMA_V1,
+                "graphType": graph_type.as_str(),
+                "status": "snapshot_missing",
+                "availableSnapshots": snapshots.len(),
+            },
+            "degraded": [missing(format!(
+                "Cannot diff {}: requested snapshots ({requested}) unavailable ({} on record; two needed).",
+                graph_type.as_str(),
+                snapshots.len()
+            ))],
+        });
+        return match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+                stdout,
+                &format!(
+                    "graph diff {}: snapshot(s) missing ({} on record; two needed). Run `ee graph snapshot refresh`.\n",
+                    graph_type.as_str(),
+                    snapshots.len()
+                ),
+            ),
+            _ => write_stdout(stdout, &(envelope.to_string() + "\n")),
+        };
+    };
+
+    let parse = |row: &crate::db::StoredGraphSnapshot| {
+        parse_snapshot_graph(
+            &row.id,
+            row.snapshot_version,
+            &row.created_at,
+            &row.metrics_json,
+        )
+    };
+    let (from_view, to_view) = match (parse(from_row), parse(to_row)) {
+        (Ok(from_view), Ok(to_view)) => (from_view, to_view),
+        (Err(error), _) | (_, Err(error)) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Persisted snapshot payload unreadable: {error}"),
+                repair: Some("ee graph snapshot refresh --workspace . --json".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let report = diff_snapshots(graph_type.as_str(), &from_view, &to_view);
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let summary = &report.summary;
+            write_stdout(
+                stdout,
+                &format!(
+                    "graph diff {} v{}→v{}: +{} / -{} nodes, +{} / -{} edges; communities {} matched, {} born, {} died; {} centrality movers ({} omitted)\n",
+                    report.graph_type,
+                    report.from.snapshot_version,
+                    report.to.snapshot_version,
+                    summary.nodes_added,
+                    summary.nodes_removed,
+                    summary.edges_added,
+                    summary.edges_removed,
+                    summary.communities_matched,
+                    summary.community_births,
+                    summary.community_deaths,
+                    summary.centrality_movers,
+                    summary.centrality_omitted,
+                ),
+            )
+        }
+        _ => {
+            let envelope = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": { "report": report },
+                "degraded": [],
+            });
+            write_stdout(stdout, &(envelope.to_string() + "\n"))
+        }
+    }
 }
 
 fn handle_graph_centrality_read<W, E>(
@@ -64999,6 +65224,7 @@ impl NormalizedInvocation {
                     GraphCommand::FeatureEnrichment(_) => "graph feature-enrichment".to_string(),
                     GraphCommand::Neighborhood(_) => "graph neighborhood".to_string(),
                     GraphCommand::SuggestLinks(_) => "graph suggest-links".to_string(),
+                    GraphCommand::Diff(_) => "graph diff".to_string(),
                 },
                 Command::Index(index) => match index {
                     IndexCommand::Rebuild(_) => "index rebuild".to_string(),
