@@ -162,9 +162,15 @@ struct E2eWorkspace {
 
 impl E2eWorkspace {
     fn create(test_name: &str) -> TestResult<Self> {
-        let base = std::env::var_os("CARGO_TARGET_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+        let base = match std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from) {
+            Some(target_dir) => fs::canonicalize(&target_dir).map_err(|error| {
+                format!(
+                    "canonicalize CARGO_TARGET_DIR {}: {error}",
+                    target_dir.display()
+                )
+            })?,
+            None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"),
+        };
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|error| format!("clock before UNIX_EPOCH: {error}"))?
