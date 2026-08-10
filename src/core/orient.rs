@@ -405,8 +405,23 @@ pub fn discover_nearby_stores(
             continue;
         };
         for entry in entries.flatten() {
+            // A single very wide directory must not bypass the advertised
+            // wall-clock bound while we enumerate it. Checking only between
+            // directories lets one directory with millions of entries turn
+            // this read-only recovery hint into an unbounded walk.
+            if started.elapsed() > budget {
+                scan.truncated = true;
+                frontier.clear();
+                break;
+            }
             let path = entry.path();
-            if !path.is_dir() {
+            // `Path::is_dir` follows symlinks. Discovery is intentionally
+            // confined to the addressed workspace tree, so inspect the
+            // directory entry itself and never traverse a symlinked tree.
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
                 continue;
             }
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -916,6 +931,30 @@ mod tests {
         ensure(
             scan.stores[0].workspace_root.ends_with("open"),
             format!("wrong store surfaced: {:?}", scan.stores),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_does_not_follow_directory_symlinks_outside_workspace() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside = tempfile::tempdir().map_err(|error| error.to_string())?;
+        remember_fixture(
+            outside.path(),
+            "External store must not be discovered through a symlink.",
+            "nearby",
+            None,
+        )?;
+        symlink(outside.path(), workspace.path().join("linked-outside"))
+            .map_err(|error| error.to_string())?;
+
+        let scan = discover_nearby_stores(workspace.path(), scan_budget());
+        ensure_equal(
+            &scan.stores.len(),
+            &0_usize,
+            "symlinked external stores are outside the discovery boundary",
         )
     }
 }
