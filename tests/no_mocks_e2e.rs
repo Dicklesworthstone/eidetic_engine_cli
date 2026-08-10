@@ -3003,9 +3003,9 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         "CASS publish failure outer degradation severity",
     )?;
     ensure_equal(
-        &failed_publish_json.pointer("/data/degraded/0/code"),
-        &Some(&json!("search_index_stale")),
-        "CASS publish failure data degradation code",
+        &failed_publish_json.pointer("/data/degraded"),
+        &None,
+        "CASS publish failure keeps degradation outside the strict import data schema",
     )?;
     ensure_equal(
         &failed_publish_json.pointer("/degraded/0/repair"),
@@ -3017,8 +3017,10 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
             .pointer("/degraded/0/message")
             .and_then(JsonValue::as_str)
             .is_some_and(|message| {
-                message.contains("CASS import committed successfully")
+                message.contains("Search index is stale")
+                    && message.contains("CASS import committed successfully")
                     && message.contains("search-index publication failed")
+                    && message.contains("index is rebuilt")
             }),
         "CASS publish failure must distinguish committed source data from stale derived index",
     )?;
