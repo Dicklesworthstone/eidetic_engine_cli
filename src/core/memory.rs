@@ -1761,6 +1761,12 @@ fn remember_memory_inner_with_store(
             error: None,
             fallback_to_full: None,
         }
+    } else if remember_inline_index_publish_should_defer(
+        &connection,
+        &prepared.workspace_id,
+        &index_job_id,
+    ) {
+        remember_index_job_queued_for_coalescing(&index_job_id)
     } else {
         process_remember_index_job_with_retry(&connection, &index_job_id, &index_dir)?
     };
@@ -2271,6 +2277,63 @@ fn process_remember_index_job_with_retry(
             .to_owned(),
         repair: Some("ee index rebuild --workspace .".to_owned()),
     })
+}
+
+fn remember_inline_index_publish_should_defer(
+    connection: &DbConnection,
+    workspace_id: &str,
+    index_job_id: &str,
+) -> bool {
+    let active_publish = match connection.is_lock_held(&AdvisoryLockId::index(workspace_id)) {
+        Ok(lock) => lock.is_some(),
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::memory",
+                workspace_id,
+                index_job_id,
+                error = %error,
+                "deferring inline remember indexing because publish-lock posture is unavailable"
+            );
+            return true;
+        }
+    };
+    let pending_job_ids = match connection.list_pending_search_index_jobs(workspace_id, Some(2)) {
+        Ok(jobs) => jobs.into_iter().map(|job| job.id).collect::<Vec<_>>(),
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::memory",
+                workspace_id,
+                index_job_id,
+                error = %error,
+                "deferring inline remember indexing because pending-job posture is unavailable"
+            );
+            return true;
+        }
+    };
+    remember_index_publish_is_contended(active_publish, &pending_job_ids, index_job_id)
+}
+
+fn remember_index_publish_is_contended(
+    active_publish: bool,
+    pending_job_ids: &[String],
+    index_job_id: &str,
+) -> bool {
+    active_publish || pending_job_ids.iter().any(|job_id| job_id != index_job_id)
+}
+
+fn remember_index_job_queued_for_coalescing(index_job_id: &str) -> IndexProcessingJobReport {
+    IndexProcessingJobReport {
+        job_id: index_job_id.to_owned(),
+        job_type: SearchIndexJobType::SingleDocument.as_str().to_owned(),
+        document_source: Some("memory".to_owned()),
+        document_id: None,
+        outcome: "skipped".to_owned(),
+        processing_mode: "deferred_to_coalesced_contention_rebuild".to_owned(),
+        documents_total: 1,
+        documents_indexed: 0,
+        error: None,
+        fallback_to_full: None,
+    }
 }
 
 fn remember_index_failure_is_deferable(error: &IndexRebuildError) -> bool {
@@ -4286,6 +4349,12 @@ fn finish_remember_memory_after_primary_commit(
             error: None,
             fallback_to_full: None,
         }
+    } else if remember_inline_index_publish_should_defer(
+        connection,
+        &prepared.workspace_id,
+        &index_job_id,
+    ) {
+        remember_index_job_queued_for_coalescing(&index_job_id)
     } else {
         process_remember_index_job_with_retry(connection, &index_job_id, &index_dir)?
     };
@@ -16512,6 +16581,43 @@ mod tests {
             )),
             false,
             "explicit user cancellation remains terminal",
+        )
+    }
+
+    #[test]
+    fn remember_index_burst_defers_to_one_coalesced_reconcile() -> TestResult {
+        let own_job = "sidx_own";
+        ensure(
+            remember_index_publish_is_contended(false, &[own_job.to_owned()], own_job),
+            false,
+            "a solitary remember retains the immediate-index fast path",
+        )?;
+        ensure(
+            remember_index_publish_is_contended(true, &[own_job.to_owned()], own_job),
+            true,
+            "an active publisher defers the new durable job",
+        )?;
+        ensure(
+            remember_index_publish_is_contended(
+                false,
+                &[own_job.to_owned(), "sidx_peer".to_owned()],
+                own_job,
+            ),
+            true,
+            "a pending peer job defers the burst for coalesced reconciliation",
+        )?;
+
+        let report = remember_index_job_queued_for_coalescing(own_job);
+        ensure(report.outcome, "skipped".to_owned(), "queued outcome")?;
+        ensure(
+            report.processing_mode,
+            "deferred_to_coalesced_contention_rebuild".to_owned(),
+            "bounded burst processing mode",
+        )?;
+        ensure(
+            remember_index_status(&report),
+            "queued".to_owned(),
+            "public burst index posture",
         )
     }
 
