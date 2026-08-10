@@ -99,7 +99,7 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
                 "No initialized workspace at {}. Run `ee init` first.",
                 options.workspace_path.display()
             ),
-            repair: Some("ee init --workspace .".to_owned()),
+            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
         });
         return Ok(FocusSuggestReport {
             recommendations: Vec::new(),

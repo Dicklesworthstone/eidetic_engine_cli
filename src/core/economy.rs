@@ -921,18 +921,18 @@ fn load_memory_economy_metrics(
             message: format!(
                 "Memory economy metrics are unavailable because the database could not be opened: {error}"
             ),
-            repair: Some("ee init --workspace .".to_owned()),
+            repair: Some(crate::core::storeless_workspace_repair(database_path)),
         }
     })?;
     let active_memories = connection
         .list_memories(&workspace_id, None, false)
-        .map_err(economy_metrics_unavailable)?;
+        .map_err(|error| economy_metrics_unavailable(database_path, error))?;
     let all_memories = connection
         .list_memories(&workspace_id, None, true)
-        .map_err(economy_metrics_unavailable)?;
+        .map_err(|error| economy_metrics_unavailable(database_path, error))?;
     let procedures = connection
         .list_procedure_records(&workspace_id, None, u32::MAX)
-        .map_err(economy_metrics_unavailable)?;
+        .map_err(|error| economy_metrics_unavailable(database_path, error))?;
     let (active_procedure_count, fallback_procedures) =
         procedure_reserve_counts(&connection, &procedures)?;
     let tombstoned_count = u32::try_from(
@@ -948,10 +948,10 @@ fn load_memory_economy_metrics(
         .map(|memory| {
             let tags = connection
                 .get_memory_tags(&memory.id)
-                .map_err(economy_metrics_unavailable)?;
+                .map_err(|error| economy_metrics_unavailable(database_path, error))?;
             let feedback = connection
                 .list_feedback_events_for_target("memory", &memory.id)
-                .map_err(economy_metrics_unavailable)?;
+                .map_err(|error| economy_metrics_unavailable(database_path, error))?;
             Ok(memory_metric(memory, &tags, &feedback, now))
         })
         .collect::<Result<Vec<_>, DomainError>>()?;
@@ -981,7 +981,7 @@ fn procedure_reserve_counts(
         active_count = active_count.saturating_add(1);
         let events = connection
             .list_procedure_events(&procedure.id)
-            .map_err(economy_metrics_unavailable)?;
+            .map_err(|error| economy_metrics_unavailable(database_path, error))?;
         if procedure_has_fallback_evidence(procedure, &events) {
             fallback_count = fallback_count.saturating_add(1);
         }
@@ -1033,12 +1033,12 @@ fn text_has_fallback_marker(value: &str) -> bool {
     .any(|marker| value.contains(marker))
 }
 
-fn economy_metrics_unavailable(error: impl fmt::Display) -> DomainError {
+fn economy_metrics_unavailable(database_path: &Path, error: impl fmt::Display) -> DomainError {
     DomainError::UnsatisfiedDegradedMode {
         message: format!(
             "Memory economy metrics are unavailable because workspace storage is not migrated or readable: {error}"
         ),
-        repair: Some("ee init --workspace .".to_owned()),
+        repair: Some(crate::core::storeless_workspace_repair(database_path)),
     }
 }
 

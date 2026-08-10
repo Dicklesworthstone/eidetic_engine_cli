@@ -1845,7 +1845,7 @@ pub fn close_workflow(
     let connection =
         DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
             message: format!("Failed to open database: {error}"),
-            repair: Some("ee init --workspace .".to_string()),
+            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
         })?;
     connection.migrate().map_err(|error| DomainError::Storage {
         message: format!("Failed to migrate database: {error}"),
@@ -1931,7 +1931,7 @@ pub fn create_workflow(
     let connection =
         DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
             message: format!("Failed to open database: {error}"),
-            repair: Some("ee init --workspace .".to_string()),
+            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
         })?;
     connection.migrate().map_err(|error| DomainError::Storage {
         message: format!("Failed to migrate database: {error}"),
@@ -3667,7 +3667,7 @@ fn ensure_database_parent_exists(database_path: &Path) -> Result<(), DomainError
     }
     Err(DomainError::Storage {
         message: format!("Database directory not found at {}", parent.display()),
-        repair: Some("ee init --workspace .".to_owned()),
+        repair: Some(crate::core::storeless_workspace_repair(database_path)),
     })
 }
 
@@ -9800,7 +9800,7 @@ pub fn build_memory_timeline(
     let conn = open_migrated_memory_database(options.database_path).map_err(|message| {
         DomainError::Storage {
             message,
-            repair: Some("ee init --workspace . --json".to_owned()),
+            repair: Some(crate::core::storeless_workspace_repair(options.database_path)),
         }
     })?;
     let workspace_path = options

@@ -789,7 +789,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     if !database_path.is_file() {
         return Err(DomainError::Storage {
             message: format!("database file '{}' does not exist", database_path.display()),
-            repair: Some("ee init --workspace .".to_owned()),
+            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
         });
     }
 

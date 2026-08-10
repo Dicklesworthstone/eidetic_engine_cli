@@ -2312,7 +2312,7 @@ fn ensure_learning_workspace(
     if !database_path.exists() {
         return Err(DomainError::Storage {
             message: format!("Database not found at {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
+            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
         });
     }
     let connection =
@@ -3820,7 +3820,7 @@ fn load_learning_snapshot(workspace: &Path) -> Result<LearningSnapshot, DomainEr
     if !database_path.exists() {
         return Err(DomainError::Storage {
             message: format!("Database not found at {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
+            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
         });
     }
 

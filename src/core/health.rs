@@ -396,7 +396,9 @@ impl HealthScorecardReport {
                 Vec::new(),
                 None,
                 None,
-                StructuralHealthReport::empty_with_degradation(storage_not_ready_degradation()),
+                StructuralHealthReport::empty_with_degradation(storage_not_ready_degradation(Some(
+                    &database_path,
+                ))),
                 Vec::new(),
                 HealthScorecardSnapshotSummary::not_recorded(options.record_snapshot, 0),
                 degraded,
@@ -1103,12 +1105,12 @@ impl StructuralHealthReport {
     #[must_use]
     pub fn gather_with_workspace(workspace_path: Option<&Path>) -> Self {
         let Some(workspace_path) = workspace_path else {
-            return Self::empty_with_degradation(storage_not_ready_degradation());
+            return Self::empty_with_degradation(storage_not_ready_degradation(None));
         };
 
         let database_path = workspace_path.join(".ee").join("ee.db");
         if !database_path.exists() {
-            return Self::empty_with_degradation(storage_not_ready_degradation());
+            return Self::empty_with_degradation(storage_not_ready_degradation(Some(&database_path)));
         }
 
         let connection = match DbConnection::open_file(&database_path) {
@@ -1240,12 +1242,15 @@ impl StructuralHealthReport {
     }
 }
 
-fn storage_not_ready_degradation() -> StructuralHealthDegradation {
+fn storage_not_ready_degradation(database_path: Option<&Path>) -> StructuralHealthDegradation {
     StructuralHealthDegradation {
         code: "storage_not_ready".to_owned(),
         severity: "medium".to_owned(),
         message: "Workspace storage has not been initialized.".to_owned(),
-        repair: Some("ee init --workspace .".to_owned()),
+        repair: Some(match database_path {
+            Some(path) => crate::core::storeless_workspace_repair(path),
+            None => "ee init --workspace .".to_owned(),
+        }),
     }
 }
 

@@ -2642,7 +2642,7 @@ fn open_journal_database(database_path: &Path) -> Result<DbConnection, DomainErr
     if !database_path.exists() {
         return Err(DomainError::Storage {
             message: format!("Database not found at {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_owned()),
+            repair: Some(crate::core::storeless_workspace_repair(database_path)),
         });
     }
     let connection =
