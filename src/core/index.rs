@@ -4907,7 +4907,27 @@ const EE_EMBED_DOWNLOAD_OFF: &str = "off";
 const EE_DOWNLOAD_STATE_PENDING: u8 = 0;
 const EE_DOWNLOAD_STATE_READY: u8 = 1;
 const EE_DOWNLOAD_STATE_FAILED: u8 = 2;
-static DEFAULT_SEARCH_EMBEDDER_STACK: OnceLock<EmbedderStack> = OnceLock::new();
+static DEFAULT_SEARCH_EMBEDDER: OnceLock<DefaultSearchEmbedder> = OnceLock::new();
+
+struct DefaultSearchEmbedder {
+    stack: EmbedderStack,
+    lazy_model2vec: Option<Arc<EeLazyModel2VecEmbedder>>,
+}
+
+impl DefaultSearchEmbedder {
+    fn ready(stack: EmbedderStack) -> Self {
+        Self {
+            stack,
+            lazy_model2vec: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EmbedderPreparation {
+    pub(crate) backend: EmbedBackend,
+    pub(crate) elapsed: Duration,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct EeEmbedderSettings {
@@ -4922,17 +4942,22 @@ enum EeEmbedDownloadMode {
 }
 
 pub(crate) fn default_search_embedder_stack() -> EmbedderStack {
-    DEFAULT_SEARCH_EMBEDDER_STACK
-        .get_or_init(detect_default_search_embedder_stack)
+    DEFAULT_SEARCH_EMBEDDER
+        .get_or_init(detect_default_search_embedder)
+        .stack
         .clone()
 }
 
-fn detect_default_search_embedder_stack() -> EmbedderStack {
+fn detect_default_search_embedder() -> DefaultSearchEmbedder {
     let settings = default_embedder_settings();
-    search_embedder_stack_for_settings(&settings)
+    default_search_embedder_for_settings(&settings)
 }
 
 fn search_embedder_stack_for_settings(settings: &EeEmbedderSettings) -> EmbedderStack {
+    default_search_embedder_for_settings(settings).stack
+}
+
+fn default_search_embedder_for_settings(settings: &EeEmbedderSettings) -> DefaultSearchEmbedder {
     tracing::info!(
         target: "ee::index::embedder",
         download_mode = ?settings.download_mode,
@@ -4963,7 +4988,7 @@ fn search_embedder_stack_for_settings(settings: &EeEmbedderSettings) -> Embedder
                         detected_fast = stack.fast().id(),
                         "EE_EMBED_DOWNLOAD=off; using verified on-disk semantic model"
                     );
-                    return stack_with_hash_quality_fallback(stack);
+                    return DefaultSearchEmbedder::ready(stack_with_hash_quality_fallback(stack));
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -4979,18 +5004,20 @@ fn search_embedder_stack_for_settings(settings: &EeEmbedderSettings) -> Embedder
                 "EE_EMBED_DOWNLOAD=off and no verified on-disk semantic model; using deterministic hash fallback"
             );
         }
-        return hash_fallback_embedder_stack();
+        return DefaultSearchEmbedder::ready(hash_fallback_embedder_stack());
     }
 
     match EmbedderStack::auto_detect_with(Some(&settings.model_root)) {
-        Ok(stack) if stack.fast().is_semantic() => stack_with_hash_quality_fallback(stack),
+        Ok(stack) if stack.fast().is_semantic() => {
+            DefaultSearchEmbedder::ready(stack_with_hash_quality_fallback(stack))
+        }
         Ok(stack) => {
             tracing::info!(
                 target: "ee::index::embedder",
                 detected_fast = stack.fast().id(),
                 "semantic model not present locally; enabling ee-managed first-use download"
             );
-            ee_auto_download_embedder_stack(settings.model_root.clone())
+            ee_auto_download_embedder(settings.model_root.clone())
         }
         Err(_) => {
             tracing::warn!(
@@ -4998,7 +5025,7 @@ fn search_embedder_stack_for_settings(settings: &EeEmbedderSettings) -> Embedder
                 reason = "auto_detect_failed",
                 "Frankensearch default embedder auto-detect failed; enabling ee-managed first-use download"
             );
-            ee_auto_download_embedder_stack(settings.model_root.clone())
+            ee_auto_download_embedder(settings.model_root.clone())
         }
     }
 }
@@ -5024,10 +5051,13 @@ fn hash_fallback_embedder_stack() -> EmbedderStack {
     EmbedderStack::from_parts(fast_embedder, Some(quality_embedder))
 }
 
-fn ee_auto_download_embedder_stack(model_root: PathBuf) -> EmbedderStack {
-    let fast_embedder =
-        Arc::new(EeLazyModel2VecEmbedder::new(model_root)) as Arc<dyn crate::search::Embedder>;
-    EmbedderStack::from_parts(fast_embedder, None)
+fn ee_auto_download_embedder(model_root: PathBuf) -> DefaultSearchEmbedder {
+    let lazy_model2vec = Arc::new(EeLazyModel2VecEmbedder::new(model_root));
+    let fast_embedder = Arc::clone(&lazy_model2vec) as Arc<dyn crate::search::Embedder>;
+    DefaultSearchEmbedder {
+        stack: EmbedderStack::from_parts(fast_embedder, None),
+        lazy_model2vec: Some(lazy_model2vec),
+    }
 }
 
 fn default_embedder_settings() -> EeEmbedderSettings {
@@ -5073,8 +5103,8 @@ fn verified_potion_model_dir(model_dir: &Path) -> bool {
 /// local availability checks and never starts a download.
 #[must_use]
 pub(crate) fn active_embed_backend() -> EmbedBackend {
-    if let Some(stack) = DEFAULT_SEARCH_EMBEDDER_STACK.get() {
-        return if stack.fast().is_semantic() {
+    if let Some(selection) = DEFAULT_SEARCH_EMBEDDER.get() {
+        return if selection.stack.fast().is_semantic() {
             EmbedBackend::NeuralLocal
         } else {
             EmbedBackend::HashFallback
@@ -5272,6 +5302,50 @@ impl EeLazyModel2VecEmbedder {
     fn failed(&self) -> bool {
         self.state.load(Ordering::Acquire) == EE_DOWNLOAD_STATE_FAILED
     }
+}
+
+/// Resolve and initialize the process-default semantic embedder before a
+/// caller acquires a database read snapshot.
+///
+/// A verified local Model2Vec artifact can take long enough to load that doing
+/// so inside a pinned FrankenSQLite snapshot trips the read-pool lifecycle
+/// watchdog. First-use download is even slower. Keeping both operations behind
+/// this caller-`Cx` seam lets search and pack account for the real cold-start
+/// cost while guaranteeing that no snapshot lease is held during model I/O.
+pub(crate) async fn prepare_default_search_embedder(
+    cx: &asupersync::Cx,
+) -> Result<EmbedderPreparation, SearchError> {
+    model_initialization_checkpoint(cx, "before default embedder preparation")?;
+    let started = Instant::now();
+    let selection = DEFAULT_SEARCH_EMBEDDER.get_or_init(detect_default_search_embedder);
+    model_initialization_checkpoint(cx, "after default embedder selection")?;
+
+    if let Some(lazy_model2vec) = selection.lazy_model2vec.as_ref()
+        && !lazy_model2vec.failed()
+        && !lazy_model2vec.is_ready()
+        && let Err(error) = lazy_model2vec.try_load(cx).await
+    {
+        if !lazy_model2vec.record_load_failure(&error) {
+            return Err(error);
+        }
+        tracing::warn!(
+            target: "ee::index::embedder",
+            error = %error,
+            model = POTION_MODEL_NAME,
+            "ee-managed embedding model preparation failed; using deterministic hash fallback for this process"
+        );
+    }
+
+    model_initialization_checkpoint(cx, "after default embedder preparation")?;
+    let backend = if selection.stack.fast().is_semantic() {
+        EmbedBackend::NeuralLocal
+    } else {
+        EmbedBackend::HashFallback
+    };
+    Ok(EmbedderPreparation {
+        backend,
+        elapsed: started.elapsed(),
+    })
 }
 
 pub(crate) fn embedder_reports_pending_model2vec_download(

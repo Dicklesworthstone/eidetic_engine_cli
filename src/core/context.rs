@@ -57,6 +57,7 @@ use crate::config::{
 };
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
+use crate::core::index::{index_corpus_compatibility_is_current, prepare_default_search_embedder};
 use crate::core::memory_drift::{MemoryDriftSelectionHint, memory_drift_selection_hint_for_memory};
 use crate::core::memory_scope::{
     MemoryScopeContext, MeshDisplayProvenance, MeshQueryVisibility, mesh_query_visibility,
@@ -1981,6 +1982,25 @@ pub fn explain_why_not(
         )));
     }
 
+    let index_dir = options
+        .index_dir
+        .clone()
+        .unwrap_or_else(|| options.workspace_path.join(".ee").join("index"));
+    if options.source_mode.uses_embeddings()
+        && index_dir.exists()
+        && index_corpus_compatibility_is_current(&index_dir)
+    {
+        crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+            prepare_default_search_embedder(&cx).await
+        })
+        .map_err(|error| {
+            ContextPackError::Pack(format!(
+                "Failed to start why-not embedder preparation: {error}"
+            ))
+        })?
+        .map_err(ContextPackError::Search)?;
+    }
+
     let mut effective_filters = options.filters.clone();
     if effective_filters.temporal.as_of.is_none() {
         effective_filters.temporal.as_of = options.as_of;
@@ -2326,6 +2346,21 @@ async fn run_context_pack_with_performance_inner(
     control.check()?;
 
     let mut degraded = Vec::new();
+
+    let index_dir = options
+        .index_dir
+        .clone()
+        .unwrap_or_else(|| options.workspace_path.join(".ee").join("index"));
+    if options.source_mode.uses_embeddings()
+        && index_dir.exists()
+        && index_corpus_compatibility_is_current(&index_dir)
+    {
+        let preparation = prepare_default_search_embedder(control.cx)
+            .await
+            .map_err(ContextPackError::Search)?;
+        trace.record_duration("embedderPrepare", preparation.elapsed);
+        control.check()?;
+    }
 
     let (read_pool_config, pin_snapshot) =
         context_read_pool_config(&options.workspace_path, &mut degraded);

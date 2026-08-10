@@ -276,7 +276,7 @@ fn model_cli_auto_declares_bundled_embedding_without_claiming_download() -> Test
             .and_then(|v| v.pointer("/source"))
             .and_then(Value::as_str)
             .ok_or_else(|| "missing active.source".to_string())?,
-        "frankensearch_hash_fallback",
+        "ee_model2vec_download_pending",
         "status active.source before artifact download",
     )?;
     ensure_eq_bool(

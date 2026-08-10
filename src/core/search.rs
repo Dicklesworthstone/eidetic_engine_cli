@@ -42,7 +42,7 @@ use super::degraded_aggregation::{DegradationAggregationInput, aggregate_degrade
 use super::index::{
     EmbeddingPosture, IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport,
     current_embedding_posture, embedder_reports_pending_model2vec_download,
-    get_index_status_with_connection,
+    get_index_status_with_connection, prepare_default_search_embedder,
 };
 use super::memory_drift::{
     MemoryDriftSelectionHint, memory_drift_selection_hint_from_provenance_status,
@@ -451,6 +451,11 @@ impl SearchSourceMode {
             Self::SemanticOnly => "semantic_only",
             Self::Hybrid => "hybrid",
         }
+    }
+
+    #[must_use]
+    pub const fn uses_embeddings(self) -> bool {
+        matches!(self, Self::SemanticOnly | Self::Hybrid)
     }
 }
 
@@ -5936,9 +5941,20 @@ pub async fn run_search_with_performance_and_filters_with_cx(
     kind_filter: Option<&str>,
     typed_field_filters: &[TypedMemoryFieldFilter],
 ) -> Result<SearchPerformanceRun, SearchError> {
+    let total_start = Instant::now();
     search_checkpoint(cx)?;
     let determinism = Deterministic::from_seed(0);
     let mut audit_ids = SearchAuditIdSource::Ambient;
+
+    let index_dir = options.resolve_index_dir();
+    let embedder_preparation = if options.source_mode.uses_embeddings()
+        && index_dir.exists()
+        && crate::core::index::index_corpus_compatibility_is_current(&index_dir)
+    {
+        Some(prepare_default_search_embedder(cx).await?)
+    } else {
+        None
+    };
 
     let database_path = options.resolve_database_path();
     if database_path.exists() {
@@ -5997,10 +6013,17 @@ pub async fn run_search_with_performance_and_filters_with_cx(
                 database_path.display()
             ))
         })?;
-        return result;
+        let mut run = result?;
+        if let Some(preparation) = embedder_preparation {
+            run.performance
+                .record_duration("search::embedderPrepare", preparation.elapsed);
+            run.report.embed_backend = preparation.backend;
+        }
+        run.report.elapsed_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+        return Ok(run);
     }
 
-    let run = run_search_inner_with_performance(
+    let mut run = run_search_inner_with_performance(
         cx,
         options,
         None,
@@ -6018,6 +6041,12 @@ pub async fn run_search_with_performance_and_filters_with_cx(
             database_path.display()
         )));
     }
+    if let Some(preparation) = embedder_preparation {
+        run.performance
+            .record_duration("search::embedderPrepare", preparation.elapsed);
+        run.report.embed_backend = preparation.backend;
+    }
+    run.report.elapsed_ms = total_start.elapsed().as_secs_f64() * 1000.0;
     Ok(run)
 }
 
@@ -7846,6 +7875,20 @@ fn resolve_source_mode(
     index_dir: &Path,
     degraded: &mut Vec<SearchDegradation>,
 ) -> Result<SourceModeResolution, SearchError> {
+    let lexical_available = lexical_search_available(index_dir);
+    if !options.source_mode.uses_embeddings() {
+        return resolve_source_mode_with_tiers(
+            options,
+            degraded,
+            SearchTierState {
+                lexical_available,
+                embed_model_unavailable: None,
+                semantic_embedder_pending: None,
+                semantic_embedder_degraded: None,
+            },
+        );
+    }
+
     let embed_model_unavailable = embed_model_unavailable_reason_from_env();
     let semantic_unavailable = embed_model_unavailable
         .is_none()
@@ -7855,7 +7898,6 @@ fn resolve_source_mode(
         .is_none()
         .then(semantic_retrieval_pending_reason)
         .flatten();
-    let lexical_available = lexical_search_available(index_dir);
     let tiers = SearchTierState {
         lexical_available,
         embed_model_unavailable: embed_model_unavailable.as_deref(),
