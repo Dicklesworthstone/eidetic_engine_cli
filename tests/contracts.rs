@@ -15,6 +15,12 @@ mod graph_suggest_links_schema;
 #[path = "contracts/resume_schema.rs"]
 mod resume_schema;
 
+#[path = "contracts/graph_diff_schema.rs"]
+mod graph_diff_schema;
+
+#[path = "contracts/conflict_resolve_schema.rs"]
+mod conflict_resolve_schema;
+
 #[path = "contracts/cass_robot.rs"]
 mod cass_robot;
 
