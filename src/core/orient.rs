@@ -524,6 +524,7 @@ mod tests {
     use super::*;
     use crate::core::decide::{DecideRecordOptions, decide_record};
     use crate::core::focus::{FocusScope, FocusSetOptions, set_focus};
+    use crate::core::init::{InitOptions, init_workspace};
     use crate::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
     use crate::core::memory::{RememberMemoryOptions, remember_memory};
     use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
@@ -552,6 +553,23 @@ mod tests {
         tags: &str,
         valid_from: Option<&str>,
     ) -> Result<String, String> {
+        if !workspace.join(".ee").join("ee.db").is_file() {
+            let init_report = init_workspace(&InitOptions {
+                workspace_path: workspace.to_path_buf(),
+                dry_run: false,
+                repair_plan: false,
+                force: false,
+                allow_symlink: false,
+                skip_boilerplate: true,
+            });
+            if !init_report.status.is_success() {
+                return Err(format!(
+                    "initialize fixture store failed: {:?}",
+                    init_report.action_errors
+                ));
+            }
+        }
+
         remember_memory(&RememberMemoryOptions {
             workspace_path: workspace,
             database_path: None,
