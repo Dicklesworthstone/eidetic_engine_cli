@@ -1063,7 +1063,7 @@ fn resolved_database_path(
     } else {
         Err(DomainError::Storage {
             message: format!("Database not found at {}", path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(path)),
+            repair: Some(crate::core::storeless_workspace_repair(&path)),
         })
     }
 }
@@ -1077,7 +1077,7 @@ fn ensure_database_parent_exists(database_path: &Path) -> Result<(), DomainError
     }
     Err(DomainError::Storage {
         message: format!("Database directory not found at {}", parent.display()),
-        repair: Some(crate::core::storeless_workspace_repair(path)),
+        repair: Some(crate::core::storeless_workspace_repair(database_path)),
     })
 }
 
