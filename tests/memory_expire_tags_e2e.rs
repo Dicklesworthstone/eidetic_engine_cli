@@ -335,6 +335,72 @@ fn memory_expire_and_tags_are_audited_idempotent_and_logged() -> TestResult {
         "tag apply queues an index job",
     )?;
 
+    // Tag mutation intentionally queues derived-index work rather than
+    // publishing inline. The shared pre-retrieval freshness barrier must drain
+    // that ordinary writer before search observes the memory again.
+    let mut search_after_tags_args = workspace_args(&workspace);
+    search_after_tags_args.extend([
+        "search".to_owned(),
+        "cargo fmt before release".to_owned(),
+        "--source-mode".to_owned(),
+        "lexical_only".to_owned(),
+        "--limit".to_owned(),
+        "10".to_owned(),
+    ]);
+    let search_after_tags_output = run_step(
+        &workspace,
+        &events_path,
+        "search_after_tags",
+        search_after_tags_args,
+    )?;
+    let search_after_tags_json = parse_stdout_json(&search_after_tags_output, "search after tags")?;
+    let updated_hit = search_after_tags_json["data"]["results"]
+        .as_array()
+        .and_then(|results| {
+            results.iter().find(|result| {
+                result.get("memoryId").and_then(JsonValue::as_str) == Some(memory_id.as_str())
+            })
+        })
+        .ok_or_else(|| {
+            format!(
+                "search did not return the tag-mutated memory after queued-index reconciliation: {search_after_tags_json}"
+            )
+        })?;
+    ensure(
+        updated_hit["metadata"]["tags"] == json!(["alpha", "release", "zeta"]),
+        format!(
+            "search must observe the post-mutation tags from the reconciled index: {updated_hit}"
+        ),
+    )?;
+    ensure(
+        !search_after_tags_json["data"]["degraded"]
+            .as_array()
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry.get("code").and_then(JsonValue::as_str) == Some("search_index_stale")
+                })
+            }),
+        format!(
+            "successful queued-index reconciliation must not report a stale search index: {search_after_tags_json}"
+        ),
+    )?;
+
+    let mut index_status_args = workspace_args(&workspace);
+    index_status_args.extend(["index".to_owned(), "status".to_owned()]);
+    let index_status_output = run_step(
+        &workspace,
+        &events_path,
+        "index_status_after_tags_search",
+        index_status_args,
+    )?;
+    let index_status_json = parse_stdout_json(&index_status_output, "index status after tags")?;
+    ensure(
+        index_status_json["data"]["indexGeneration"] == index_status_json["data"]["dbGeneration"],
+        format!(
+            "search must leave the index generation equal to the database generation: {index_status_json}"
+        ),
+    )?;
+
     let tag_duplicate_output = run_step(
         &workspace,
         &events_path,

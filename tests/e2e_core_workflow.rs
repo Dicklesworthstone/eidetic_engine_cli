@@ -301,6 +301,20 @@ fn remember_three_memories_keeps_search_index_fresh_without_manual_rebuild() -> 
         )?;
         memory_ids
             .insert(json_str(&remember_json, "/data/memory_id", "remember memory id")?.to_owned());
+        if memory_ids.len() == 1 {
+            let first_status = run_ee(&["--workspace", &workspace, "index", "status", "--json"])?;
+            ensure_equal(
+                &first_status.status.code(),
+                &Some(EXIT_SUCCESS),
+                "first-write index status exit code",
+            )?;
+            let first_status_json = stdout_json(&first_status)?;
+            ensure_equal(
+                &first_status_json.pointer("/data/indexGeneration"),
+                &first_status_json.pointer("/data/dbGeneration"),
+                "first remember keeps index generation equal to database generation",
+            )?;
+        }
     }
     ensure_equal(&memory_ids.len(), &3usize, "three distinct memories")?;
 

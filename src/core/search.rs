@@ -40,9 +40,10 @@ use crate::runtime::determinism::{Deterministic, Seed};
 
 use super::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use super::index::{
-    EmbeddingPosture, IndexHealth, IndexStatusError, IndexStatusOptions, IndexStatusReport,
-    current_embedding_posture, embedder_reports_pending_model2vec_download,
-    get_index_status_with_connection, prepare_default_search_embedder,
+    EmbeddingPosture, IndexHealth, IndexProcessingOptions, IndexProcessingStatus, IndexStatusError,
+    IndexStatusOptions, IndexStatusReport, current_embedding_posture,
+    embedder_reports_pending_model2vec_download, get_index_status_with_connection,
+    prepare_default_search_embedder, process_index_jobs_coalesced_with_cx,
 };
 use super::memory_drift::{
     MemoryDriftSelectionHint, memory_drift_selection_hint_from_provenance_status,
@@ -78,6 +79,12 @@ pub const SEARCH_SCORE_INTERVAL_SCHEMA_V1: &str = "ee.search.score_interval.v1";
 pub const SEARCH_SCORE_CALIBRATION_SCHEMA_V1: &str = "ee.search.score_calibration.v1";
 pub const SEARCH_SCORE_RECALIBRATION_SCHEMA_V1: &str = "ee.search.score_recalibration.v1";
 pub const QUERY_ASSIST_SCHEMA_V1: &str = "ee.query_assist.v1";
+/// Generation lag above which a stale index is classified as a large gap.
+///
+/// Common synchronous write paths are expected to publish before returning.
+/// Other transactional writers may leave queued jobs, so reads use this
+/// boundary to decide whether a bounded automatic reconciliation is eligible.
+pub const SEARCH_INDEX_LARGE_GAP_THRESHOLD: u64 = 50;
 const SEARCH_QUERY_MISS_AUDIT_SCHEMA_V1: &str = "ee.search.query_miss.v1";
 const INDEX_STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
 const SEARCH_SCORE_COVERAGE_GUARANTEE: f32 = 0.95;
@@ -824,14 +831,17 @@ struct SearchAdvisoryObservation {
 
 /// Process/session-scoped ledger for permanent search advisories.
 ///
-/// Transient degradations never enter this ledger: they remain visible in
-/// every affected response. A fresh one-shot CLI process gets a fresh ledger,
-/// while the long-lived daemon naturally shares the process ledger across its
-/// connection worker threads.
+/// Canonical transient degradations remain visible in every affected response.
+/// The companion `search_index_large_gap` repair advisory is the sole
+/// once-per-process transient: `search_index_stale` itself remains present for
+/// as long as retrieval is actually stale. A fresh one-shot CLI process gets a
+/// fresh ledger, while the long-lived daemon shares the process ledger across
+/// its connection worker threads.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SearchAdvisorySession {
     occurrences: BTreeMap<SearchAdvisoryIdentity, u64>,
     suppressed_count: u64,
+    response_once_occurrences: BTreeMap<String, u64>,
 }
 
 impl SearchAdvisorySession {
@@ -857,6 +867,15 @@ impl SearchAdvisorySession {
             distinct_count: self.occurrences.len(),
             session_suppressed_count: self.suppressed_count,
         }
+    }
+
+    fn emit_response_code_once(&mut self, code: &str) -> bool {
+        let occurrence_count = self
+            .response_once_occurrences
+            .entry(code.to_owned())
+            .or_insert(0);
+        *occurrence_count = occurrence_count.saturating_add(1);
+        *occurrence_count == 1
     }
 }
 
@@ -1535,6 +1554,19 @@ impl SearchDegradation {
     }
 
     #[must_use]
+    fn large_index_gap(db_generation: u64, index_generation: u64) -> Self {
+        let generation_gap = db_generation.saturating_sub(index_generation);
+        Self {
+            code: "search_index_large_gap".to_owned(),
+            severity: "medium".to_owned(),
+            message: format!(
+                "Search index generation gap is {generation_gap}, above the automatic reconciliation limit of {SEARCH_INDEX_LARGE_GAP_THRESHOLD}; automatic read repair was skipped."
+            ),
+            repair: Some("ee index rebuild --workspace .".to_owned()),
+        }
+    }
+
+    #[must_use]
     fn evidence_live_admission_filtered(filtered: usize) -> Self {
         Self {
             code: "evidence_live_admission_filtered".to_string(),
@@ -2120,6 +2152,15 @@ impl SearchDegradation {
     }
 }
 
+fn search_index_gap_is_large(db_generation: u64, index_generation: u64) -> bool {
+    db_generation.saturating_sub(index_generation) > SEARCH_INDEX_LARGE_GAP_THRESHOLD
+}
+
+fn search_index_gap_is_auto_reconcilable(db_generation: u64, index_generation: u64) -> bool {
+    let generation_gap = db_generation.saturating_sub(index_generation);
+    generation_gap > 0 && generation_gap <= SEARCH_INDEX_LARGE_GAP_THRESHOLD
+}
+
 impl ScoreFactor {
     #[must_use]
     pub fn new(
@@ -2514,7 +2555,11 @@ impl SearchReport {
             ),
             "profileRuntime": self.runtime_profile.data_json(),
             "errors": self.errors,
-            "degraded": search_degraded_data_json("search", &self.degraded),
+            "degraded": search_degraded_data_json_with_advisory_session(
+                "search",
+                &self.degraded,
+                session,
+            ),
         });
         if let Some(query_assist) = &self.query_assist
             && let Some(data_object) = data.as_object_mut()
@@ -2668,6 +2713,21 @@ pub(crate) fn search_degraded_data_json(
         value
     })
     .collect()
+}
+
+fn search_degraded_data_json_with_advisory_session(
+    source: &'static str,
+    degraded: &[SearchDegradation],
+    session: &mut SearchAdvisorySession,
+) -> Vec<serde_json::Value> {
+    let mut aggregated = search_degraded_data_json(source, degraded);
+    aggregated.retain(|entry| {
+        let Some(code) = entry.get("code").and_then(serde_json::Value::as_str) else {
+            return true;
+        };
+        code != "search_index_large_gap" || session.emit_response_code_once(code)
+    });
+    aggregated
 }
 
 fn append_degradation_recovery_details(value: &mut serde_json::Value, code: &str) {
@@ -6062,6 +6122,8 @@ pub async fn run_search_with_performance_and_filters_with_cx(
     let mut audit_ids = SearchAuditIdSource::Ambient;
 
     let index_dir = options.resolve_index_dir();
+    let database_path = options.resolve_database_path();
+    reconcile_search_index_before_read_with_cx(cx, options).await;
     let embedder_preparation =
         if options.source_mode.uses_embeddings()
             && index_dir.exists()
@@ -6074,7 +6136,6 @@ pub async fn run_search_with_performance_and_filters_with_cx(
             None
         };
 
-    let database_path = options.resolve_database_path();
     if database_path.exists() {
         let read_pool = registered_process_read_pool(
             DatabaseConfig::file(database_path.clone()),
@@ -7796,10 +7857,22 @@ fn search_degradations_with_connection(
 
     match index_status.health {
         IndexHealth::Ready => Vec::new(),
-        IndexHealth::Stale => vec![SearchDegradation::stale_index(
-            index_status.db_generation,
-            index_status.index_generation,
-        )],
+        IndexHealth::Stale => {
+            let mut degraded = vec![SearchDegradation::stale_index(
+                index_status.db_generation,
+                index_status.index_generation,
+            )];
+            if let (Some(db_generation), Some(index_generation)) =
+                (index_status.db_generation, index_status.index_generation)
+                && search_index_gap_is_large(db_generation, index_generation)
+            {
+                degraded.push(SearchDegradation::large_index_gap(
+                    db_generation,
+                    index_generation,
+                ));
+            }
+            degraded
+        }
         IndexHealth::Missing => vec![SearchDegradation::missing_index()],
         IndexHealth::Corrupt => vec![SearchDegradation::corrupt_index(
             index_status.last_check_error.as_deref(),
@@ -8311,6 +8384,86 @@ fn cached_index_status_for_search(
     }
 
     Ok(index_status)
+}
+
+/// Reconcile a small, known generation gap before opening a read snapshot.
+///
+/// The status read intentionally bypasses the one-second hot-path cache so a
+/// newly queued writer cannot inherit an earlier `Ready` observation. A failed
+/// reconciliation is non-fatal: the subsequent canonical status probe emits
+/// `search_index_stale` and preserves the explicit rebuild repair.
+pub(crate) async fn reconcile_search_index_before_read_with_cx(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+) {
+    let index_dir = options.resolve_index_dir();
+    let status_options = IndexStatusOptions {
+        workspace_path: options.workspace_path.clone(),
+        database_path: options.database_path.clone(),
+        index_dir: Some(index_dir.clone()),
+    };
+    let Ok(status) = get_index_status_with_connection(&status_options, None) else {
+        return;
+    };
+    invalidate_cached_index_status_for_search(options, &index_dir);
+    let Some((db_generation, index_generation)) = status.db_generation.zip(status.index_generation)
+    else {
+        return;
+    };
+    let generation_gap = db_generation.saturating_sub(index_generation);
+    if status.health != IndexHealth::Stale
+        || !search_index_gap_is_auto_reconcilable(db_generation, index_generation)
+    {
+        return;
+    }
+
+    let processing_options = IndexProcessingOptions {
+        workspace_path: options.workspace_path.clone(),
+        database_path: options.database_path.clone(),
+        index_dir: Some(index_dir.clone()),
+        dry_run: false,
+        job_limit: None,
+    };
+    match process_index_jobs_coalesced_with_cx(cx, &processing_options).await {
+        Ok(report)
+            if matches!(
+                report.status,
+                IndexProcessingStatus::Success | IndexProcessingStatus::NoPendingJobs
+            ) =>
+        {
+            tracing::info!(
+                target: "ee::search::index_freshness",
+                generation_gap,
+                completed_jobs = report.completed_jobs,
+                "reconciled queued search-index work before retrieval"
+            );
+        }
+        Ok(report) => {
+            tracing::warn!(
+                target: "ee::search::index_freshness",
+                generation_gap,
+                status = report.status.as_str(),
+                failed_jobs = report.failed_jobs,
+                "pre-retrieval search-index reconciliation did not converge"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::search::index_freshness",
+                generation_gap,
+                error = %error,
+                "pre-retrieval search-index reconciliation failed; continuing with truthful stale-index reporting"
+            );
+        }
+    }
+}
+
+fn invalidate_cached_index_status_for_search(options: &SearchOptions, index_dir: &Path) {
+    let cache_key = IndexStatusCacheKey::from_search_options(options, index_dir);
+    let cache = SEARCH_INDEX_STATUS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = cache.lock() {
+        guard.remove(&cache_key);
+    }
 }
 
 struct DiagSearchSyncResult {
@@ -14203,6 +14356,42 @@ mod tests {
     }
 
     #[test]
+    fn stale_index_large_gap_boundary_is_stable() {
+        assert!(!search_index_gap_is_large(
+            SEARCH_INDEX_LARGE_GAP_THRESHOLD - 1,
+            0
+        ));
+        assert!(!search_index_gap_is_large(
+            SEARCH_INDEX_LARGE_GAP_THRESHOLD,
+            0
+        ));
+        assert!(search_index_gap_is_large(
+            SEARCH_INDEX_LARGE_GAP_THRESHOLD + 1,
+            0
+        ));
+        assert!(!search_index_gap_is_auto_reconcilable(0, 0));
+        assert!(search_index_gap_is_auto_reconcilable(1, 0));
+        assert!(search_index_gap_is_auto_reconcilable(
+            SEARCH_INDEX_LARGE_GAP_THRESHOLD,
+            0
+        ));
+        assert!(!search_index_gap_is_auto_reconcilable(
+            SEARCH_INDEX_LARGE_GAP_THRESHOLD + 1,
+            0
+        ));
+
+        let above = SearchDegradation::large_index_gap(SEARCH_INDEX_LARGE_GAP_THRESHOLD + 1, 0);
+        assert_eq!(above.code, "search_index_large_gap");
+        assert!(above.message.contains(&format!(
+            "above the automatic reconciliation limit of {SEARCH_INDEX_LARGE_GAP_THRESHOLD}"
+        )));
+        assert_eq!(
+            above.repair.as_deref(),
+            Some("ee index rebuild --workspace .")
+        );
+    }
+
+    #[test]
     fn search_data_json_redacts_public_content_metadata() {
         let raw_value = concat!("sk", "_", "search", "_", "secret", "_", "123");
         let report = SearchReport {
@@ -17111,6 +17300,42 @@ mod tests {
         assert_eq!(json["degraded"].as_array().map(Vec::len), Some(1));
         assert_eq!(json["degraded"][0]["code"], "search_index_stale");
         assert_eq!(json["rerank"]["advisory"]["permanent"], true);
+    }
+
+    #[test]
+    fn large_gap_repair_advisory_is_once_while_stale_truth_remains() {
+        let mut first = rerank_test_report(
+            Vec::new(),
+            vec![
+                SearchDegradation::stale_index(Some(102), Some(1)),
+                SearchDegradation::large_index_gap(102, 1),
+            ],
+        );
+        first.rerank_configured_mode = crate::config::SearchRerankMode::Off;
+        let mut changed_generation = first.clone();
+        changed_generation.degraded = vec![
+            SearchDegradation::stale_index(Some(108), Some(2)),
+            SearchDegradation::large_index_gap(108, 2),
+        ];
+        let mut session = SearchAdvisorySession::default();
+
+        let first_json = first.data_json_with_advisory_session(&mut session);
+        let repeated_json = changed_generation.data_json_with_advisory_session(&mut session);
+
+        let first_degraded = first_json["degraded"]
+            .as_array()
+            .expect("first response degraded array");
+        assert!(first_degraded.iter().any(|entry| {
+            entry["code"] == "search_index_stale"
+                && entry["repair"] == "ee index rebuild --workspace ."
+        }));
+        assert!(
+            first_degraded
+                .iter()
+                .any(|entry| entry["code"] == "search_index_large_gap")
+        );
+        assert_eq!(repeated_json["degraded"].as_array().map(Vec::len), Some(1));
+        assert_eq!(repeated_json["degraded"][0]["code"], "search_index_stale");
     }
 
     #[test]

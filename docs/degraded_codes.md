@@ -13593,6 +13593,37 @@ ee status --workspace . --json
 
 ---
 
+## `search_index_large_gap`
+
+**Severity:** medium
+
+**Surfaces:** search, context
+
+**Introduced by:** bd-index-auto-freshness-m5kwf (epic INDEX)
+
+**Trigger.** The database generation is more than 50 generations ahead of the search index, so bounded automatic reconciliation is skipped.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+# Queue more than 50 index-affecting writes without processing their search-index jobs.
+```
+
+**Invocation.**
+
+```bash
+ee search 'any query' --workspace . --json
+```
+
+**Expected emission.** Message contains: `above the automatic reconciliation limit of 50 ... automatic read repair was skipped`
+
+**Repair hint.** ee index rebuild --workspace .
+
+**Fixture.** [`tests/fixtures/failure_modes/search_index_large_gap.json`](../tests/fixtures/failure_modes/search_index_large_gap.json)
+
+---
+
 ## `search_index_stale`
 
 **Severity:** medium

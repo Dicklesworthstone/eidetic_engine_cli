@@ -2339,8 +2339,8 @@ impl DaemonSearchResult {
         advisory_session: &mut SearchAdvisorySession,
         timing: DaemonSearchTiming,
     ) -> Self {
-        let human = report.human_summary();
         let mut data = report.data_json_with_advisory_session(advisory_session);
+        let human = daemon_search_human_summary(report, &data);
         if explain && let Some(object) = data.as_object_mut() {
             object.insert(
                 "resultPath".to_owned(),
@@ -2424,6 +2424,39 @@ impl DaemonSearchResult {
     pub fn into_renderings(self) -> (serde_json::Value, String) {
         (self.response, self.human)
     }
+}
+
+fn daemon_search_human_summary(report: &SearchReport, response_data: &serde_json::Value) -> String {
+    let large_gap_advisory_emitted = response_data
+        .get("degraded")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry.get("code").and_then(serde_json::Value::as_str)
+                    == Some("search_index_large_gap")
+            })
+        });
+    if large_gap_advisory_emitted {
+        return report.human_summary();
+    }
+
+    let mut visible_report = report.clone();
+    visible_report
+        .degraded
+        .retain(|entry| entry.code != "search_index_large_gap");
+    visible_report.human_summary()
+}
+
+fn daemon_search_degraded_codes(result: &DaemonSearchResult) -> Vec<String> {
+    result
+        .response
+        .get("degraded")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("code").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn validate_canonical_degradations(degraded: &serde_json::Value) -> Result<(), String> {
@@ -2739,6 +2772,7 @@ fn dispatch_search(
     );
     method_result.timing.daemon_total =
         DaemonSearchTimingMeasurement::from_duration(daemon_total_start.elapsed());
+    let response_degraded_codes = daemon_search_degraded_codes(&method_result);
     let result = match serde_json::to_value(method_result) {
         Ok(result) => result,
         Err(error) => {
@@ -2757,12 +2791,7 @@ fn dispatch_search(
         request.workspace_id.clone(),
         result,
     );
-    for code in report
-        .degraded
-        .iter()
-        .filter(|entry| !entry.is_permanent())
-        .map(|entry| entry.code.as_str())
-    {
+    for code in response_degraded_codes {
         response = response.with_degraded(code);
     }
     if !daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
@@ -4362,6 +4391,30 @@ mod tests {
         }
     }
 
+    fn stale_index_advisory_report(db_generation: u64, index_generation: u64) -> SearchReport {
+        let mut report = permanent_reranker_advisory_report();
+        report.degraded = vec![
+            crate::core::search::SearchDegradation {
+                code: "search_index_stale".to_owned(),
+                severity: "medium".to_owned(),
+                message: format!(
+                    "Search index is stale. Database generation is {db_generation}; index generation is {index_generation}."
+                ),
+                repair: Some("ee index rebuild --workspace .".to_owned()),
+            },
+            crate::core::search::SearchDegradation {
+                code: "search_index_large_gap".to_owned(),
+                severity: "medium".to_owned(),
+                message: format!(
+                    "Search index generation gap is {}; automatic read repair was skipped.",
+                    db_generation.saturating_sub(index_generation)
+                ),
+                repair: Some("ee index rebuild --workspace .".to_owned()),
+            },
+        ];
+        report
+    }
+
     fn advisory_candidate(
         report: &SearchReport,
         session: &mut SearchAdvisorySession,
@@ -4426,6 +4479,72 @@ mod tests {
                 .pointer("/response/data/rerank/advisorySummary/sessionSuppressedCount")
                 .and_then(serde_json::Value::as_u64),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn large_gap_repair_is_once_but_daemon_stale_truth_remains() {
+        let first_report = stale_index_advisory_report(108, 1);
+        let changed_generation_report = stale_index_advisory_report(112, 2);
+        let mut shared = SearchAdvisorySession::default();
+
+        let mut rejected_stage = shared.clone();
+        let (rejected_response, rejected_result) =
+            advisory_candidate(&first_report, &mut rejected_stage);
+        assert!(
+            rejected_result
+                .pointer("/response/data/degraded")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|entries| entries.iter().any(|entry| {
+                    entry.get("code").and_then(serde_json::Value::as_str)
+                        == Some("search_index_large_gap")
+                }))
+        );
+        assert!(!daemon_response_fits(&rejected_response, 1));
+        assert_eq!(shared, SearchAdvisorySession::default());
+
+        let mut delivered_stage = shared.clone();
+        let (delivered_response, delivered_result) =
+            advisory_candidate(&first_report, &mut delivered_stage);
+        assert!(daemon_response_fits(&delivered_response, usize::MAX));
+        assert!(
+            delivered_result
+                .get("human")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|human| {
+                    human.contains("search_index_stale") && human.contains("search_index_large_gap")
+                })
+        );
+        assert!(
+            delivered_result
+                .pointer("/response/degraded")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|entries| entries.iter().any(|entry| {
+                    entry.get("code").and_then(serde_json::Value::as_str)
+                        == Some("search_index_large_gap")
+                }))
+        );
+        shared = delivered_stage;
+
+        let mut repeated_stage = shared.clone();
+        let repeated_result = DaemonSearchResult::from_report(
+            &changed_generation_report,
+            false,
+            &mut repeated_stage,
+            DaemonSearchTiming::from_trace(
+                Duration::from_millis(1),
+                &SearchPerformanceTrace::default(),
+            ),
+        );
+        assert_eq!(
+            daemon_search_degraded_codes(&repeated_result),
+            vec!["search_index_stale"]
+        );
+        assert!(repeated_result.human.contains("search_index_stale"));
+        assert!(!repeated_result.human.contains("search_index_large_gap"));
+        assert_eq!(
+            repeated_result.response["degraded"][0]["code"],
+            "search_index_stale"
         );
     }
 

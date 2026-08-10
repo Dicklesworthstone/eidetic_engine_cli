@@ -67,7 +67,8 @@ use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
     SearchOptions, SearchPerformanceTrace, SearchReport, SearchSourceMode, SearchStatus,
     SearchWorkspaceProbeState, elapsed_timing_json, map_frankensearch_error,
-    performance_redaction_json, query_observation_json, run_context_search_with_preloaded_memories,
+    performance_redaction_json, query_observation_json, reconcile_search_index_before_read_with_cx,
+    run_context_search_with_preloaded_memories,
     run_context_search_with_preloaded_memories_and_workspace_state_with_cx,
     search_degraded_data_json,
 };
@@ -2356,6 +2357,31 @@ async fn run_context_pack_with_performance_inner(
         .index_dir
         .clone()
         .unwrap_or_else(|| options.workspace_path.join(".ee").join("index"));
+    let search_options = SearchOptions {
+        workspace_path: options.workspace_path.clone(),
+        database_path: Some(database_path.clone()),
+        index_dir: options.index_dir.clone(),
+        query: request.query.clone(),
+        limit: request.candidate_pool,
+        speed: options.speed,
+        explain: false,
+        as_of: context_validity_reference_time(options, &effective_filters),
+        include_tombstoned: options.include_tombstoned,
+        include_expired: context_include_expired(options, &effective_filters),
+        include_future: context_include_future(options, &effective_filters),
+        include_stale: context_include_stale(options, &effective_filters),
+        // Context packing owns relevance and budget filtering after retrieval.
+        // Keep the default candidate pool broad so an exact single-memory match
+        // is not dropped by the interactive search command's presentation floor.
+        // An explicit caller floor still applies for diagnostic/e2e paths.
+        relevance_floor: Some(options.relevance_floor.unwrap_or(0.0)),
+        dedup_mode: crate::core::search::SearchDedupMode::DocId,
+        source_mode: options.source_mode,
+        strict_source_mode: options.strict_source_mode,
+        memory_scope: options.memory_scope,
+        strict_scope: options.strict_scope,
+    };
+    reconcile_search_index_before_read_with_cx(control.cx, &search_options).await;
     if options.source_mode.uses_embeddings()
         && index_dir.exists()
         && index_corpus_compatibility_is_current(&index_dir)
@@ -2452,30 +2478,7 @@ async fn run_context_pack_with_performance_inner(
     let mut search_report =
         match run_context_search_with_preloaded_memories_and_workspace_state_with_cx(
             control.cx,
-            &SearchOptions {
-                workspace_path: options.workspace_path.clone(),
-                database_path: Some(database_path.clone()),
-                index_dir: options.index_dir.clone(),
-                query: request.query.clone(),
-                limit: request.candidate_pool,
-                speed: options.speed,
-                explain: false,
-                as_of: context_validity_reference_time(options, &effective_filters),
-                include_tombstoned: options.include_tombstoned,
-                include_expired: context_include_expired(options, &effective_filters),
-                include_future: context_include_future(options, &effective_filters),
-                include_stale: context_include_stale(options, &effective_filters),
-                // Context packing owns relevance and budget filtering after retrieval.
-                // Keep the default candidate pool broad so an exact single-memory match
-                // is not dropped by the interactive search command's presentation floor.
-                // An explicit caller floor still applies for diagnostic/e2e paths.
-                relevance_floor: Some(options.relevance_floor.unwrap_or(0.0)),
-                dedup_mode: crate::core::search::SearchDedupMode::DocId,
-                source_mode: options.source_mode,
-                strict_source_mode: options.strict_source_mode,
-                memory_scope: options.memory_scope,
-                strict_scope: options.strict_scope,
-            },
+            &search_options,
             read_connection,
             context_write_connection.as_ref(),
             Some(&SearchWorkspaceProbeState {

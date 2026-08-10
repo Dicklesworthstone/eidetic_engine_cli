@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "search_index_large_gap",
+  "introduced_by": {
+    "bead": "bd-index-auto-freshness-m5kwf",
+    "epic_letter": "INDEX"
+  },
+  "surfaces": [
+    "search",
+    "context"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The database generation is more than 50 generations ahead of the search index, so bounded automatic reconciliation is skipped.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# Queue more than 50 index-affecting writes without processing their search-index jobs."
+    ],
+    "invocation": "ee search 'any query' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "search_index_large_gap",
+    "severity": "medium",
+    "message_contains": [
+      "above the automatic reconciliation limit of 50",
+      "automatic read repair was skipped"
+    ],
+    "repair_contains": "ee index rebuild",
+    "repair_string": "ee index rebuild --workspace .",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}

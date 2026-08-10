@@ -2684,6 +2684,26 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &Some(&json!(1)),
         "CASS sessions imported",
     )?;
+    ensure_equal(
+        &import_json.pointer("/data/indexJobsQueued"),
+        &Some(&json!(1)),
+        "CASS index jobs queued",
+    )?;
+    ensure_equal(
+        &import_json.pointer("/data/indexRequiredAction"),
+        &Some(&JsonValue::Null),
+        "successful CASS index publication removes the rebuild action",
+    )?;
+    ensure_equal(
+        &import_json.pointer("/degraded"),
+        &Some(&json!([])),
+        "successful CASS import has no outer degradation",
+    )?;
+    ensure_equal(
+        &import_json.pointer("/data/degraded"),
+        &Some(&json!([])),
+        "successful CASS import has no data degradation",
+    )?;
     ensure(
         import_json
             .pointer("/data/spansImported")
@@ -2751,22 +2771,30 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         }),
         "evidence spans must retain only hashed upstream references with admitted CASS posture",
     )?;
+    let searchable_evidence_id = spans
+        .iter()
+        .find(|span| {
+            span.excerpt
+                .contains("x65f imported CASS evidence remains durable and searchable")
+        })
+        .map(|span| span.id.clone())
+        .ok_or_else(|| "searchable imported evidence span is missing".to_owned())?;
     let stored_session_id = sessions[0].id.clone();
     connection.close().map_err(|error| error.to_string())?;
 
-    let (_index_event, index_json) = run_step_with_env(
+    let (_status_event, status_json) = run_step_with_env(
         scenario_id,
         &events_path,
         &artifact_dir,
         &workspace,
         StepSpec {
-            name: "03_index_rebuild",
+            name: "03_index_status_after_import",
             args: vec![
                 "--workspace".to_owned(),
                 workspace_arg.clone(),
                 "--json".to_owned(),
                 "index".to_owned(),
-                "rebuild".to_owned(),
+                "status".to_owned(),
             ],
             expected_exit_code: 0,
             expected_schema: "ee.response.v2",
@@ -2775,24 +2803,31 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &envs,
     )?;
     ensure_equal(
-        &index_json.pointer("/data/sessions_indexed"),
-        &Some(&json!(1)),
-        "indexed CASS session count",
+        &status_json.pointer("/data/health"),
+        &Some(&json!("ready")),
+        "CASS post-import index health",
+    )?;
+    ensure_equal(
+        &status_json.pointer("/data/dbGeneration"),
+        &status_json.pointer("/data/indexGeneration"),
+        "CASS post-import database and index generations",
     )?;
 
-    let (_search_event, search_json) = run_step_with_env(
+    let (_session_search_event, session_search_json) = run_step_with_env(
         scenario_id,
         &events_path,
         &artifact_dir,
         &workspace,
         StepSpec {
-            name: "04_search_imported_session",
+            name: "04_search_imported_session_without_rebuild",
             args: vec![
                 "--workspace".to_owned(),
-                workspace_arg,
+                workspace_arg.clone(),
                 "--json".to_owned(),
                 "search".to_owned(),
                 "CASS session codex".to_owned(),
+                "--source-mode".to_owned(),
+                "lexical_only".to_owned(),
             ],
             expected_exit_code: 0,
             expected_schema: "ee.response.v2",
@@ -2800,9 +2835,13 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         },
         &envs,
     )?;
-    let search_results = json_array(&search_json, "/data/results", "CASS import search")?;
+    let session_search_results = json_array(
+        &session_search_json,
+        "/data/results",
+        "CASS imported session search",
+    )?;
     ensure(
-        search_results.iter().any(|result| {
+        session_search_results.iter().any(|result| {
             result
                 .get("docId")
                 .and_then(JsonValue::as_str)
@@ -2810,6 +2849,199 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         }),
         "search must retrieve the imported CASS session document",
     )?;
+    ensure(
+        !session_search_json
+            .pointer("/degraded")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry.get("code").and_then(JsonValue::as_str) == Some("search_index_stale")
+                })
+            }),
+        "immediate imported-session search must not report a stale index",
+    )?;
+
+    let (_evidence_search_event, evidence_search_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "05_search_imported_evidence_without_rebuild",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "search".to_owned(),
+                "x65f imported CASS evidence remains durable and searchable".to_owned(),
+                "--source-mode".to_owned(),
+                "lexical_only".to_owned(),
+                "--limit".to_owned(),
+                "10".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v2",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+    let evidence_search_results = json_array(
+        &evidence_search_json,
+        "/data/results",
+        "CASS imported evidence search",
+    )?;
+    ensure(
+        evidence_search_results.iter().any(|result| {
+            result
+                .get("docId")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|doc_id| doc_id == searchable_evidence_id.as_str())
+        }),
+        "search must retrieve the exact imported CASS evidence document",
+    )?;
+    ensure(
+        !evidence_search_json
+            .pointer("/degraded")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry.get("code").and_then(JsonValue::as_str) == Some("search_index_stale")
+                })
+            }),
+        "immediate imported-evidence search must not report a stale index",
+    )?;
+
+    let failure_workspace = log_dir.join("publish-failure-workspace");
+    fs::create_dir_all(&failure_workspace).map_err(|error| error.to_string())?;
+    let failure_workspace_arg = failure_workspace.display().to_string();
+    let failure_database_path = failure_workspace.join(".ee").join("ee.db");
+    let failure_database_arg = failure_database_path.display().to_string();
+    let (_failure_init_event, _) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &failure_workspace,
+        StepSpec {
+            name: "06_init_publish_failure_workspace",
+            args: vec![
+                "--workspace".to_owned(),
+                failure_workspace_arg.clone(),
+                "--json".to_owned(),
+                "init".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v2",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+    let blocked_index_path = failure_workspace.join(".ee").join("index");
+    let preserved_initial_index = failure_workspace.join(".ee").join("index-before-failure");
+    fs::rename(&blocked_index_path, &preserved_initial_index).map_err(|error| {
+        format!(
+            "failed to preserve initialized index {} as {}: {error}",
+            blocked_index_path.display(),
+            preserved_initial_index.display()
+        )
+    })?;
+    fs::write(
+        &blocked_index_path,
+        b"regular file intentionally blocks staged index publication",
+    )
+    .map_err(|error| {
+        format!(
+            "failed to install index publication blocker {}: {error}",
+            blocked_index_path.display()
+        )
+    })?;
+
+    let (_failed_publish_event, failed_publish_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &failure_workspace,
+        StepSpec {
+            name: "07_import_commits_when_index_publish_fails",
+            args: vec![
+                "--workspace".to_owned(),
+                failure_workspace_arg.clone(),
+                "--json".to_owned(),
+                "import".to_owned(),
+                "cass".to_owned(),
+                "--database".to_owned(),
+                failure_database_arg.clone(),
+                "--limit".to_owned(),
+                "5".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v2",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+    ensure_equal(
+        &failed_publish_json.pointer("/data/status"),
+        &Some(&json!("completed")),
+        "CASS import remains committed when index publication fails",
+    )?;
+    ensure_equal(
+        &failed_publish_json.pointer("/data/sessionsImported"),
+        &Some(&json!(1)),
+        "CASS failure-path imported session count",
+    )?;
+    ensure_equal(
+        &failed_publish_json.pointer("/degraded/0/code"),
+        &Some(&json!("search_index_stale")),
+        "CASS publish failure outer degradation code",
+    )?;
+    ensure_equal(
+        &failed_publish_json.pointer("/data/degraded/0/code"),
+        &Some(&json!("search_index_stale")),
+        "CASS publish failure data degradation code",
+    )?;
+    ensure_equal(
+        &failed_publish_json.pointer("/degraded/0/repair"),
+        &failed_publish_json.pointer("/data/indexRequiredAction"),
+        "CASS publish failure keeps the exact rebuild action as repair",
+    )?;
+    ensure(
+        failed_publish_json
+            .pointer("/degraded/0/message")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|message| {
+                message.contains("CASS import committed successfully")
+                    && message.contains("search-index publication failed")
+            }),
+        "CASS publish failure must distinguish committed source data from stale derived index",
+    )?;
+    let failure_connection = DbConnection::open(DatabaseConfig::file(failure_database_path))
+        .map_err(|error| error.to_string())?;
+    let failure_workspaces = failure_connection
+        .list_workspaces()
+        .map_err(|error| error.to_string())?;
+    ensure_equal(
+        &failure_workspaces.len(),
+        &1_usize,
+        "CASS failure-path workspace count",
+    )?;
+    let failure_sessions = failure_connection
+        .list_sessions(&failure_workspaces[0].id)
+        .map_err(|error| error.to_string())?;
+    ensure_equal(
+        &failure_sessions.len(),
+        &1_usize,
+        "CASS publish failure preserves the committed session",
+    )?;
+    let failure_spans = failure_connection
+        .list_evidence_spans_for_session(&failure_sessions[0].id)
+        .map_err(|error| error.to_string())?;
+    ensure(
+        failure_spans.len() >= 3,
+        "CASS publish failure preserves committed evidence spans",
+    )?;
+    failure_connection
+        .close()
+        .map_err(|error| error.to_string())?;
     let stub_invocations =
         fs::read_to_string(&stub_cass.invocation_log).map_err(|error| error.to_string())?;
     ensure(
