@@ -109,7 +109,7 @@ pub struct CassImportDegradation {
 
 impl CassImportDegradation {
     #[must_use]
-    fn data_json(&self) -> JsonValue {
+    pub fn data_json(&self) -> JsonValue {
         json!({
             "code": self.code,
             "severity": self.severity,
@@ -183,7 +183,7 @@ impl CassImportReport {
             code: "search_index_stale",
             severity: "medium",
             message: format!(
-                "CASS import committed successfully, but search-index publication failed: {}",
+                "Search index is stale because CASS import committed successfully, but search-index publication failed: {}; imported rows may be omitted until the index is rebuilt.",
                 detail.into()
             ),
             repair,
@@ -225,21 +225,6 @@ impl CassImportReport {
         })
     }
 
-    /// Render the JSON payload while attaching an actual post-import
-    /// publication degradation. Successful and dry-run payloads retain the
-    /// established import-report shape.
-    #[must_use]
-    pub fn data_json_with_degradation(
-        &self,
-        degradation: Option<&CassImportDegradation>,
-    ) -> JsonValue {
-        let mut data = self.data_json();
-        if let Some(degradation) = degradation {
-            data["degraded"] = JsonValue::Array(vec![degradation.data_json()]);
-        }
-        data
-    }
-
     /// Render a compact human summary.
     #[must_use]
     pub fn human_summary(&self) -> String {
@@ -274,29 +259,6 @@ impl CassImportReport {
             ));
         }
         output
-    }
-
-    /// Render the compact machine summary used by the TOON output mode.
-    #[must_use]
-    pub fn toon_summary_with_degradation(
-        &self,
-        degradation: Option<&CassImportDegradation>,
-    ) -> String {
-        let Some(degradation) = degradation else {
-            return format!(
-                "IMPORT_CASS|{}|{}|{}|{}\n",
-                self.status, self.sessions_discovered, self.sessions_imported, self.spans_imported
-            );
-        };
-        format!(
-            "IMPORT_CASS|{}|{}|{}|{}|degraded={}|repair={}\n",
-            self.status,
-            self.sessions_discovered,
-            self.sessions_imported,
-            self.spans_imported,
-            degradation.code,
-            degradation.repair
-        )
     }
 }
 
@@ -3525,14 +3487,14 @@ mod tests {
                 .contains("CASS import committed successfully"),
             "publish failure distinguishes committed import from derived-index failure",
         )?;
-        let degraded_json = report.data_json_with_degradation(Some(&degradation));
+        let degraded_json = degradation.data_json();
         ensure_equal(
-            &degraded_json["degraded"][0]["severity"],
+            &degraded_json["severity"],
             &json!("medium"),
             "publish failure degradation severity",
         )?;
         ensure_equal(
-            &degraded_json["degraded"][0]["repair"],
+            &degraded_json["repair"],
             &json!(exact_repair),
             "publish failure degradation exact repair",
         )?;

@@ -22106,17 +22106,15 @@ where
                     stdout,
                     &report.human_summary_with_degradation(degradation.as_ref()),
                 ),
-                output::Renderer::Toon => write_stdout(
-                    stdout,
-                    &report.toon_summary_with_degradation(degradation.as_ref()),
-                ),
+                output::Renderer::Toon => {
+                    let json = cass_import_response_v2(&report, degradation.as_ref());
+                    write_stdout(stdout, &output::render_toon_from_json(&json.to_string()))
+                }
                 output::Renderer::Json
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact
                 | output::Renderer::Hook => {
-                    let json = response_v2_json_from_data(
-                        report.data_json_with_degradation(degradation.as_ref()),
-                    );
+                    let json = cass_import_response_v2(&report, degradation.as_ref());
                     write_stdout(stdout, &(json.to_string() + "\n"))
                 }
             }
@@ -22126,6 +22124,22 @@ where
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
     }
+}
+
+fn cass_import_response_v2(
+    report: &CassImportReport,
+    degradation: Option<&CassImportDegradation>,
+) -> serde_json::Value {
+    let degraded = degradation
+        .into_iter()
+        .map(CassImportDegradation::data_json)
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": report.data_json(),
+        "degraded": degraded,
+    })
 }
 
 fn reconcile_cass_import_index(report: &mut CassImportReport) -> Option<CassImportDegradation> {
