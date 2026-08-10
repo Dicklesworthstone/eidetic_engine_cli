@@ -86,6 +86,7 @@ set -euo pipefail
 #   6.12 Ask E2E               - scripts/e2e_ask.sh
 #   6.126 Write Contention E2E - scripts/e2e_single_shot_write_contention.sh
 #   6.1265 Capture Track E2E   - scripts/e2e_capture.sh
+#   6.1266 Shadow Tuning E2E    - scripts/e2e_shadow_retrieval_tuning.sh
 #   6.127 Ergonomics E2E       - scripts/e2e_ergonomics.sh
 #   6.1293 Consolidation E2E   - scripts/e2e_consolidation.sh
 #   6.1295 Embedding Native E2E - scripts/e2e_embedding_native.sh
@@ -1161,6 +1162,13 @@ run_stage "Write Contention E2E (bd-d67os.27)" "EE_E2E_TMPDIR=/private/tmp ./scr
 # from-commit/from-diff remember capture is dry-run-first with anchors,
 # redaction and audit checks, and session-arc proposals stay curation-gated.
 run_stage "Capture Track E2E (bd-2vq2z.20)" "EE_E2E_TMPDIR=/private/tmp EE_E2E_KEEP=1 ./scripts/e2e_capture.sh"
+
+# Gate 6.1266: Shadow retrieval-tuning E2E (bd-2tehh.4 / ADR 0070). Real
+# binary: sparse corpus abstains with the fixture-backed degraded code and
+# persists the report; promote refuses abstained reports with exit 7;
+# a promotable report dry-runs without writing, applies the [search]
+# overlay, and demote restores the prior config bytes exactly.
+run_stage "Shadow Retrieval Tuning E2E (bd-2tehh.4)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_shadow_retrieval_tuning.sh"
 
 # Gate 6.127: Ergonomics real-binary E2E (bd-1et0v.22). No-Cargo:
 # proves `ee context` remains an alias for canonical `ee pack` while carrying
