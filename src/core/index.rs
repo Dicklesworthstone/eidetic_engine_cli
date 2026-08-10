@@ -1925,21 +1925,6 @@ pub(crate) fn process_index_jobs_coalesced(
     .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
 }
 
-/// Async caller-owned-context variant used by bounded pre-read reconciliation.
-pub(crate) async fn process_index_jobs_coalesced_with_cx(
-    cx: &asupersync::Cx,
-    options: &IndexProcessingOptions,
-) -> Result<IndexProcessingReport, IndexRebuildError> {
-    process_index_jobs_with_drain(
-        cx,
-        options,
-        IndexJobDrain::Coalesced {
-            max_corpus_documents: None,
-        },
-    )
-    .await
-}
-
 /// Bounded coalesced processor used by interactive read repair.
 ///
 /// The document ceiling is checked again after the publish lock is held and
