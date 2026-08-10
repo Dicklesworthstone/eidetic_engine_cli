@@ -1460,4 +1460,167 @@ mod tests {
         );
         assert_eq!(MemoryDebtClass::parse("bogus"), None);
     }
+
+    // ---- age-gated detector battery (bd-3ap2m.4): clock-injected ---------
+
+    fn fixed_now() -> DateTime<Utc> {
+        parse_rfc3339("2026-08-10T00:00:00Z").expect("fixed test clock")
+    }
+
+    fn memory_at(id: &str, created_at: &str, updated_at: &str) -> StoredMemory {
+        let mut planted = memory(id, 0.7, 0.5, 0.5);
+        planted.created_at = created_at.to_owned();
+        planted.updated_at = updated_at.to_owned();
+        planted
+    }
+
+    #[test]
+    fn contradicted_unresolved_needs_age_and_no_supersede() {
+        let old = memory_at("mem_old", "2026-07-01T00:00:00Z", "2026-07-01T00:00:00Z");
+        let mut signals = MemoryDebtSignals {
+            contradiction_count: 2,
+            ..MemoryDebtSignals::default()
+        };
+
+        let mut queue = Vec::new();
+        detect_contradicted(&old, &signals, None, fixed_now(), &mut queue);
+        assert_eq!(queue.len(), 1, "40-day-old contradiction must flag");
+        assert_eq!(queue[0].class, MemoryDebtClass::ContradictedUnresolved);
+
+        // Inside the 14-day window: not yet debt.
+        let fresh = memory_at("mem_new", "2026-08-05T00:00:00Z", "2026-08-05T00:00:00Z");
+        let mut queue = Vec::new();
+        detect_contradicted(&fresh, &signals, None, fixed_now(), &mut queue);
+        assert!(queue.is_empty(), "5-day-old contradiction is not debt yet");
+
+        // A supersede resolution clears the class regardless of age.
+        signals.supersedes_count = 1;
+        let mut queue = Vec::new();
+        detect_contradicted(&old, &signals, None, fixed_now(), &mut queue);
+        assert!(queue.is_empty(), "supersede resolution clears the class");
+    }
+
+    #[test]
+    fn never_retrieved_needs_window_and_no_read_evidence() {
+        let old = memory_at("mem_old", "2026-05-01T00:00:00Z", "2026-05-01T00:00:00Z");
+        let mut queue = Vec::new();
+        detect_never_retrieved(
+            &old,
+            &MemoryDebtSignals::default(),
+            None,
+            fixed_now(),
+            &mut queue,
+        );
+        assert_eq!(queue.len(), 1, "101-day-old unread memory must flag");
+
+        let young = memory_at("mem_you", "2026-07-15T00:00:00Z", "2026-07-15T00:00:00Z");
+        let mut queue = Vec::new();
+        detect_never_retrieved(
+            &young,
+            &MemoryDebtSignals::default(),
+            None,
+            fixed_now(),
+            &mut queue,
+        );
+        assert!(queue.is_empty(), "26-day-old memory is inside the window");
+
+        let read_signals = MemoryDebtSignals {
+            last_read_at: Some(fixed_now()),
+            ..MemoryDebtSignals::default()
+        };
+        let mut queue = Vec::new();
+        detect_never_retrieved(&old, &read_signals, None, fixed_now(), &mut queue);
+        assert!(queue.is_empty(), "read evidence clears the class");
+    }
+
+    #[test]
+    fn decay_imminent_gates_on_utility_and_flags_ancient_high_utility() {
+        let mut ancient = memory_at("mem_anc", "2020-01-01T00:00:00Z", "2020-01-01T00:00:00Z");
+        ancient.utility = 0.9;
+        ancient.confidence = 0.4;
+        let mut queue = Vec::new();
+        detect_decay_imminent(&ancient, None, fixed_now(), &mut queue);
+        assert_eq!(
+            queue.len(),
+            1,
+            "six-year-old high-utility memory projects past preserve"
+        );
+        assert_eq!(queue[0].class, MemoryDebtClass::DecayImminentHighUtility);
+
+        let mut low_utility = memory_at("mem_low", "2020-01-01T00:00:00Z", "2020-01-01T00:00:00Z");
+        low_utility.utility = 0.3;
+        let mut queue = Vec::new();
+        detect_decay_imminent(&low_utility, None, fixed_now(), &mut queue);
+        assert!(queue.is_empty(), "utility < 0.6 never enters this class");
+    }
+
+    #[test]
+    fn stale_anchor_flags_only_nonfresh_anchors() {
+        use crate::models::{MemoryAnchorFreshnessState, MemoryAnchorKind, MemoryAnchorSource};
+        let anchor = |state: MemoryAnchorFreshnessState| StoredMemoryAnchor {
+            memory_id: "mem_a".to_owned(),
+            anchor_kind: MemoryAnchorKind::Symbol,
+            anchor_value_hash: "hash".to_owned(),
+            redacted_anchor_value: "core::thing".to_owned(),
+            confidence: 0.9,
+            source: MemoryAnchorSource::Remember,
+            provenance: "test".to_owned(),
+            captured_span_hash: "span".to_owned(),
+            freshness_state: state,
+            generation: 1,
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            updated_at: "2026-01-01T00:00:00Z".to_owned(),
+        };
+        let subject = memory("mem_a", 0.7, 0.5, 0.5);
+
+        let mut queue = Vec::new();
+        detect_stale_anchor(
+            &subject,
+            &[anchor(MemoryAnchorFreshnessState::Stale)],
+            None,
+            &mut queue,
+        );
+        assert_eq!(queue.len(), 1, "stale anchor must flag");
+        assert_eq!(queue[0].class, MemoryDebtClass::StaleAnchor);
+
+        let mut queue = Vec::new();
+        detect_stale_anchor(
+            &subject,
+            &[anchor(MemoryAnchorFreshnessState::Current)],
+            None,
+            &mut queue,
+        );
+        assert!(queue.is_empty(), "current anchors are not debt");
+    }
+
+    #[test]
+    fn detector_battery_is_insertion_order_stable() {
+        // The bd-3ap2m.4 permutation property: running the per-memory
+        // detector battery in any input order and then sorting yields the
+        // identical queue.
+        let corpus = vec![
+            memory_at("mem_01", "2026-05-01T00:00:00Z", "2026-05-01T00:00:00Z"),
+            memory_at("mem_02", "2026-04-01T00:00:00Z", "2026-04-01T00:00:00Z"),
+            memory_at("mem_03", "2026-03-01T00:00:00Z", "2026-03-01T00:00:00Z"),
+        ];
+        let signals = MemoryDebtSignals {
+            contradiction_count: 1,
+            ..MemoryDebtSignals::default()
+        };
+        let run = |order: &[usize]| {
+            let mut queue = Vec::new();
+            for index in order {
+                let subject = &corpus[*index];
+                detect_contradicted(subject, &signals, None, fixed_now(), &mut queue);
+                detect_never_retrieved(subject, &signals, None, fixed_now(), &mut queue);
+                detect_orphan(subject, &signals, None, &mut queue);
+            }
+            sort_debt_queue(&mut queue);
+            queue
+        };
+        let forward = run(&[0, 1, 2]);
+        let reversed = run(&[2, 0, 1]);
+        assert!(!forward.is_empty(), "battery found planted debt");
+        assert_eq!(forward, reversed, "insertion order changed the report");
+    }
 }
