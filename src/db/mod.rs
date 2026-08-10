@@ -11222,13 +11222,8 @@ fn stored_session_from_joined_row(row: &Row, offset: usize) -> Result<Option<Sto
         id: required_text(row, offset, DbOperation::Query, "session_id")?.to_owned(),
         workspace_id: required_text(row, offset + 1, DbOperation::Query, "session_workspace_id")?
             .to_owned(),
-        cass_session_id: required_text(
-            row,
-            offset + 2,
-            DbOperation::Query,
-            "cass_session_id",
-        )?
-        .to_owned(),
+        cass_session_id: required_text(row, offset + 2, DbOperation::Query, "cass_session_id")?
+            .to_owned(),
         source_path: optional_text(row, offset + 3)?.map(str::to_owned),
         agent_name: optional_text(row, offset + 4)?.map(str::to_owned),
         model: optional_text(row, offset + 5)?.map(str::to_owned),
@@ -11236,16 +11231,10 @@ fn stored_session_from_joined_row(row: &Row, offset: usize) -> Result<Option<Sto
         ended_at: optional_text(row, offset + 7)?.map(str::to_owned),
         message_count: required_u32(row, offset + 8, DbOperation::Query, "message_count")?,
         token_count: optional_u32(row, offset + 9, DbOperation::Query, "session_token_count")?,
-        content_hash: required_text(
-            row,
-            offset + 10,
-            DbOperation::Query,
-            "session_content_hash",
-        )?
-        .to_owned(),
-        metadata_json: optional_text(row, offset + 11)?.map(str::to_owned),
-        imported_at: required_text(row, offset + 12, DbOperation::Query, "imported_at")?
+        content_hash: required_text(row, offset + 10, DbOperation::Query, "session_content_hash")?
             .to_owned(),
+        metadata_json: optional_text(row, offset + 11)?.map(str::to_owned),
+        imported_at: required_text(row, offset + 12, DbOperation::Query, "imported_at")?.to_owned(),
         updated_at: required_text(row, offset + 13, DbOperation::Query, "updated_at")?.to_owned(),
     }))
 }
@@ -26094,12 +26083,13 @@ fn validate_pack_record_input(
             message: "pack created_at must be RFC 3339".to_owned(),
         });
     }
-    let item_count = u32::try_from(items.len().saturating_add(evidence_items.len())).map_err(
-        |_| DbError::MalformedRow {
-            operation: DbOperation::Execute,
-            message: "pack item length does not fit u32".to_owned(),
-        },
-    )?;
+    let item_count =
+        u32::try_from(items.len().saturating_add(evidence_items.len())).map_err(|_| {
+            DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "pack item length does not fit u32".to_owned(),
+            }
+        })?;
     if item_count != input.item_count {
         return Err(DbError::MalformedRow {
             operation: DbOperation::Execute,
@@ -26489,15 +26479,7 @@ impl DbConnection {
             operation: DbOperation::Execute,
             message: format!("pack record created_at must be RFC 3339: {error}"),
         })?;
-        self.insert_pack_record_with_timings_at(
-            id,
-            input,
-            items,
-            &[],
-            omissions,
-            created_at,
-            None,
-        )
+        self.insert_pack_record_with_timings_at(id, input, items, &[], omissions, created_at, None)
             .map(|_| ())
     }
 
@@ -26591,10 +26573,7 @@ impl DbConnection {
         timings.ledger_serialization = ledger_start.elapsed();
         timings.item_write_batches =
             pack_insert_batch_count(items.len(), PACK_ITEM_INSERT_BATCH_ROWS).saturating_add(
-                pack_insert_batch_count(
-                    evidence_items.len(),
-                    PACK_EVIDENCE_ITEM_INSERT_BATCH_ROWS,
-                ),
+                pack_insert_batch_count(evidence_items.len(), PACK_EVIDENCE_ITEM_INSERT_BATCH_ROWS),
             );
         timings.omission_write_batches =
             pack_insert_batch_count(omissions.len(), PACK_OMISSION_INSERT_BATCH_ROWS);
@@ -26689,12 +26668,12 @@ impl DbConnection {
                     message: "pack evidence belongs to a different workspace".to_owned(),
                 });
             }
-            let session = self.get_session(&span.session_id)?.ok_or_else(|| {
-                DbError::MalformedRow {
-                    operation: DbOperation::Execute,
-                    message: "pack evidence has no live session provenance".to_owned(),
-                }
-            })?;
+            let session =
+                self.get_session(&span.session_id)?
+                    .ok_or_else(|| DbError::MalformedRow {
+                        operation: DbOperation::Execute,
+                        message: "pack evidence has no live session provenance".to_owned(),
+                    })?;
             if !span.is_direct_pack_admitted_for_session(&input.workspace_id, &session) {
                 return Err(DbError::MalformedRow {
                     operation: DbOperation::Execute,
@@ -26946,9 +26925,11 @@ impl DbConnection {
                 params.push(Value::Text(item.why.clone()));
                 params.push(Value::Text(item.provenance_json.clone()));
                 params.push(Value::Text(item.trust_class.clone()));
-                params.push(item.trust_subclass.as_ref().map_or(Value::Null, |subclass| {
-                    Value::Text(subclass.clone())
-                }));
+                params.push(
+                    item.trust_subclass
+                        .as_ref()
+                        .map_or(Value::Null, |subclass| Value::Text(subclass.clone())),
+                );
             }
             self.execute_for(DbOperation::Execute, &sql, &params)?;
         }
@@ -27224,7 +27205,9 @@ impl DbConnection {
             "SELECT pack_id, evidence_id, entity_revision, rank, section, estimated_tokens, relevance, utility, why, provenance_json, trust_class, trust_subclass FROM pack_evidence_items WHERE pack_id = ?1 ORDER BY rank ASC",
             &[Value::Text(pack_id.to_owned())],
         )?;
-        rows.iter().map(stored_pack_evidence_item_from_row).collect()
+        rows.iter()
+            .map(stored_pack_evidence_item_from_row)
+            .collect()
     }
 
     /// List pack/item metadata that includes a specific memory.
@@ -41481,13 +41464,11 @@ mod tests {
         }
 
         let mut visited = 0_u32;
-        let scan = connection.visit_search_admitted_evidence_spans_for_workspace(
-            workspace_id,
-            |_| {
+        let scan =
+            connection.visit_search_admitted_evidence_spans_for_workspace(workspace_id, |_| {
                 visited = visited.saturating_add(1);
                 Ok(())
-            },
-        )?;
+            })?;
         ensure_equal(
             &scan.pages_read,
             &2,

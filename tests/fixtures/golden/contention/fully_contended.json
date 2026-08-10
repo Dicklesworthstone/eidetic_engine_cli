@@ -63,7 +63,26 @@
     "thrashRatio": 0.5,
     "posture": "warm"
   },
+  "flockGate": {
+    "acquires": 16,
+    "contendedAcquires": 8,
+    "avgWaitMs": 250.0,
+    "maxWaitMs": 2500,
+    "timeouts": 2,
+    "posture": "contended"
+  },
   "topContention": [
+    {
+      "source": "flock_gate",
+      "severity": "contended",
+      "reasonCode": "flock_gate_timeouts",
+      "detail": "write-lock flock gate: 16 acquires (8 contended), max wait 2500 ms, 2 timeouts; separate ee processes are serializing on <db>.write.lock",
+      "suggestedCommands": [
+        "route writers through the daemon write owner: ee daemon start",
+        "reduce the number of concurrent one-shot ee writers",
+        "inspect live daemon-side pressure: ee diag contention --use-daemon"
+      ]
+    },
     {
       "source": "read_pool",
       "severity": "contended",
@@ -103,6 +122,15 @@
       "suggestedCommands": [
         "lower duplicate read pressure or raise the follower timeout",
         "inspect degraded entries before rerunning duplicate work"
+      ]
+    },
+    {
+      "source": "group_commit",
+      "severity": "warm",
+      "reasonCode": "group_commit_active_coalescing",
+      "detail": "group-commit: 4 batches, 8 coalesced writes, 4 fsyncs saved (avg batch 2.00); batching is absorbing durable-write pressure",
+      "suggestedCommands": [
+        "informational: group-commit batching is reducing write fsync pressure"
       ]
     },
     {

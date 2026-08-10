@@ -29342,9 +29342,10 @@ where
     });
     if args.robot_triage {
         let report = &data["report"];
-        let top_contention = report.get("topContention").cloned().unwrap_or_else(
-            || serde_json::Value::Array(Vec::new()),
-        );
+        let top_contention = report
+            .get("topContention")
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
         let overall_posture = report
             .get("overallPosture")
             .cloned()
