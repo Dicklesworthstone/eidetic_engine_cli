@@ -436,7 +436,7 @@ pub fn inspect_artifact(
     let connection =
         DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
             message: format!("Failed to open database: {error}"),
-            repair: Some("ee init --workspace .".to_string()),
+            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
         })?;
     let workspace_id = selected_workspace_id(&connection, &workspace_path)?;
     let artifact = connection
@@ -474,7 +474,7 @@ pub fn list_artifacts(
     let connection =
         DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
             message: format!("Failed to open database: {error}"),
-            repair: Some("ee init --workspace .".to_string()),
+            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
         })?;
     let workspace_id = selected_workspace_id(&connection, &workspace_path)?;
     let artifacts = connection
@@ -1063,7 +1063,7 @@ fn resolved_database_path(
     } else {
         Err(DomainError::Storage {
             message: format!("Database not found at {}", path.display()),
-            repair: Some("ee init --workspace .".to_string()),
+            repair: Some(crate::core::storeless_workspace_repair(path)),
         })
     }
 }
@@ -1077,7 +1077,7 @@ fn ensure_database_parent_exists(database_path: &Path) -> Result<(), DomainError
     }
     Err(DomainError::Storage {
         message: format!("Database directory not found at {}", parent.display()),
-        repair: Some("ee init --workspace .".to_string()),
+        repair: Some(crate::core::storeless_workspace_repair(path)),
     })
 }
 
