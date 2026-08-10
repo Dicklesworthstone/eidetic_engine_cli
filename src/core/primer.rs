@@ -1305,7 +1305,11 @@ mod tests {
                     .iter()
                     .map(|id| candidate(*id, "procedural", "rule", &format!("content {id}")))
                     .collect();
-                let mut rows: Vec<crate::db::StoredMemory> = global_specs
+                // Ids are unique in a real store (primary key); dedupe the
+                // generated specs the same way (last spec wins).
+                let unique_specs: std::collections::BTreeMap<u32, bool> =
+                    global_specs.iter().copied().collect();
+                let mut rows: Vec<crate::db::StoredMemory> = unique_specs
                     .iter()
                     .map(|(id, tombstoned)| {
                         let mut row = global_row(*id, &format!("content {id}"), None);
