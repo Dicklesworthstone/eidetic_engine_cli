@@ -9,6 +9,9 @@ mod contention_schema;
 #[path = "contracts/global_promotion_schema.rs"]
 mod global_promotion_schema;
 
+#[path = "contracts/graph_suggest_links_schema.rs"]
+mod graph_suggest_links_schema;
+
 #[path = "contracts/cass_robot.rs"]
 mod cass_robot;
 
