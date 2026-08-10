@@ -6679,6 +6679,14 @@ if [ -n "$PROOF_BROKER_LEDGER" ]; then
     case "$proof_broker_verdict" in
         dispatch_allowed)
             ;;
+        source_state_mismatch)
+            # bd-088ci: same reasoning as the reservation gate below — the
+            # ledger's proof for this command is bound to an OLDER source
+            # fingerprint, which is the normal state on a moving main and the
+            # broker's own nextAction is rerun_current_source. Dispatch fresh
+            # with the verdict carried as a degraded note.
+            proof_broker_degraded+=("rch_verify_proof_broker_source_state_mismatch")
+            ;;
         reuse_existing)
             RCH_INVOCATION=()
             PROOF_BROKER_JSON="$(proof_broker_mark_json false "$PROOF_BROKER_BYPASS_REASON")"
