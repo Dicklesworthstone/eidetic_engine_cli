@@ -64,6 +64,15 @@ pub const CACHE_PREWARM_SCHEMA: &str = "ee.cache.prewarm.v1";
 /// Degraded code emitted when the prewarm planner receives no usable signal.
 pub const PREWARM_NO_SIGNAL_CODE: &str = "hotset_prewarm_no_signals";
 
+/// Degraded code emitted when `--apply` finds a derived-asset class with
+/// nothing on disk to warm (missing index dir, absent tables, ...). The class
+/// is skipped, not failed: absence of a rebuildable asset is not an error.
+pub const PREWARM_APPLY_ASSET_MISSING_CODE: &str = "hotset_prewarm_apply_asset_missing";
+
+/// Degraded code emitted when `--apply` abstains entirely because the
+/// workspace store is missing — there is nothing safe to warm.
+pub const PREWARM_APPLY_STORE_MISSING_CODE: &str = "hotset_prewarm_apply_store_missing";
+
 /// Degraded code emitted when tier-aware prewarm rejects stale memory tier
 /// metadata instead of using it to bias cache residency.
 pub const MEMORY_TIER_METADATA_STALE_CODE: &str = "memory_tier_metadata_stale";
@@ -1356,6 +1365,174 @@ pub fn cache_prewarm_report_from_manifest_json(
         },
         "degraded": degraded,
     }))
+}
+
+/// Read chunk size for bounded file warming; a cancellation checkpoint runs
+/// between chunks so `--apply` stays responsive to budget/cancel signals.
+const PREWARM_APPLY_CHUNK_BYTES: usize = 1024 * 1024;
+
+/// Bounded, cancellable apply executor (bd-ty3pl.3): warms rebuildable
+/// derived assets by BOUNDED READS ONLY — search index files, and the
+/// database pages backing graph snapshots, pack records, and the read path.
+/// Reading is the warming (OS page cache + connection/WAL open); nothing is
+/// written, mutated, claimed, or probed host-wide. Byte volume is capped by
+/// the profile budget's `max_bytes`, and a cooperative-cancellation
+/// checkpoint runs between file chunks and table touches.
+///
+/// Returns the `applied` report section plus any degraded entries
+/// (asset-missing skips, store-missing abstention).
+pub fn apply_cache_prewarm(
+    cx: &asupersync::Cx,
+    workspace_path: &std::path::Path,
+    options: &CachePrewarmOptions,
+) -> (Value, Vec<Value>) {
+    let mut degraded = Vec::new();
+    let mut classes = serde_json::Map::new();
+    let byte_cap = options.budget.max_bytes as u64;
+    let mut bytes_read_total: u64 = 0;
+
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.is_file() {
+        degraded.push(json!({
+            "code": PREWARM_APPLY_STORE_MISSING_CODE,
+            "severity": "medium",
+            "message": format!(
+                "Cache prewarm --apply abstained: no workspace store at {}.",
+                database_path.display()
+            ),
+            "repair": "Re-check --workspace addressing; prewarm only warms an existing store.",
+        }));
+        return (
+            json!({
+                "status": "abstained",
+                "classes": {},
+                "bytesRead": 0,
+                "byteCap": byte_cap,
+            }),
+            degraded,
+        );
+    }
+
+    // --- search: bounded chunked reads of the index directory ---
+    let index_dir = workspace_path.join(".ee").join("index");
+    let search_class = if index_dir.is_dir() {
+        let mut files_touched = 0u64;
+        let mut bytes_read = 0u64;
+        let mut truncated = false;
+        let mut cancelled = false;
+        let mut stack = vec![index_dir.clone()];
+        'walk: while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let Ok(mut file) = std::fs::File::open(&path) else {
+                    continue;
+                };
+                files_touched += 1;
+                let mut chunk = vec![0u8; PREWARM_APPLY_CHUNK_BYTES];
+                loop {
+                    if cx.checkpoint().is_err() {
+                        cancelled = true;
+                        break 'walk;
+                    }
+                    if bytes_read_total.saturating_add(bytes_read) >= byte_cap {
+                        truncated = true;
+                        break 'walk;
+                    }
+                    match std::io::Read::read(&mut file, &mut chunk) {
+                        Ok(0) => break,
+                        Ok(read) => bytes_read += read as u64,
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+        bytes_read_total = bytes_read_total.saturating_add(bytes_read);
+        json!({
+            "status": if cancelled { "cancelled" } else { "warmed" },
+            "filesTouched": files_touched,
+            "bytesRead": bytes_read,
+            "truncatedByBudget": truncated,
+        })
+    } else {
+        degraded.push(json!({
+            "code": PREWARM_APPLY_ASSET_MISSING_CODE,
+            "severity": "low",
+            "message": format!(
+                "Cache prewarm --apply skipped the search class: no index directory at {}.",
+                index_dir.display()
+            ),
+            "repair": "Run `ee index rebuild --workspace .` if search warming is wanted.",
+        }));
+        json!({ "status": "skipped_missing" })
+    };
+    classes.insert("search".to_owned(), search_class);
+
+    // --- db-backed classes: connection open IS the read-pool warm; bounded
+    // table touches walk the btrees backing graph snapshots and pack records.
+    match crate::db::DbConnection::open_file(&database_path) {
+        Ok(connection) => {
+            classes.insert(
+                "readPool".to_owned(),
+                json!({ "status": "warmed", "connectionOpened": true }),
+            );
+            for (class, table) in [("graph", "graph_snapshots"), ("pack", "pack_records")] {
+                if cx.checkpoint().is_err() {
+                    classes.insert(class.to_owned(), json!({ "status": "cancelled" }));
+                    continue;
+                }
+                match connection.count_table_rows(table) {
+                    Ok(rows) => {
+                        classes.insert(
+                            class.to_owned(),
+                            json!({ "status": "warmed", "rowsTouched": rows }),
+                        );
+                    }
+                    Err(_) => {
+                        degraded.push(json!({
+                            "code": PREWARM_APPLY_ASSET_MISSING_CODE,
+                            "severity": "low",
+                            "message": format!(
+                                "Cache prewarm --apply skipped the {class} class: table {table} is unavailable in this store."
+                            ),
+                            "repair": "Run `ee doctor --workspace . --json` if the store schema looks incomplete.",
+                        }));
+                        classes.insert(class.to_owned(), json!({ "status": "skipped_missing" }));
+                    }
+                }
+            }
+            let _ = connection.close();
+        }
+        Err(error) => {
+            degraded.push(json!({
+                "code": PREWARM_APPLY_ASSET_MISSING_CODE,
+                "severity": "low",
+                "message": format!(
+                    "Cache prewarm --apply skipped db-backed classes: store open failed: {error}."
+                ),
+                "repair": "Run `ee doctor --workspace . --json` to diagnose the store.",
+            }));
+            for class in ["readPool", "graph", "pack"] {
+                classes.insert(class.to_owned(), json!({ "status": "skipped_missing" }));
+            }
+        }
+    }
+
+    (
+        json!({
+            "status": "applied",
+            "classes": Value::Object(classes),
+            "bytesRead": bytes_read_total,
+            "byteCap": byte_cap,
+        }),
+        degraded,
+    )
 }
 
 /// Build a cache-prewarm report and attach advisory memory-tier residency
@@ -3545,5 +3722,81 @@ mod tests {
         let second_json = serde_json::to_string(&second).map_err(|error| error.to_string())?;
         assert_eq!(first_json, second_json);
         Ok(())
+    }
+
+    #[test]
+    fn apply_cache_prewarm_abstains_without_a_store() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cx = asupersync::Cx::for_testing();
+        let options = CachePrewarmOptions::new("standard", CacheBudget::default());
+        let (applied, degraded) = apply_cache_prewarm(&cx, temp.path(), &options);
+        assert_eq!(applied["status"], "abstained");
+        assert!(
+            degraded
+                .iter()
+                .any(|entry| entry["code"] == PREWARM_APPLY_STORE_MISSING_CODE),
+            "store-missing abstention carries its stable code: {degraded:?}"
+        );
+    }
+
+    #[test]
+    fn apply_cache_prewarm_warms_bounded_classes_on_a_real_store() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path();
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir_all(ee_dir.join("index")).expect("index dir");
+        std::fs::write(ee_dir.join("index").join("segment.bin"), vec![7u8; 4096])
+            .expect("index file");
+        let connection =
+            crate::db::DbConnection::open_file(&ee_dir.join("ee.db")).expect("open store");
+        connection.migrate().expect("migrate");
+        connection.close().expect("close");
+
+        let cx = asupersync::Cx::for_testing();
+        let options = CachePrewarmOptions::new("standard", CacheBudget::default());
+        let (applied, degraded) = apply_cache_prewarm(&cx, workspace, &options);
+        assert_eq!(applied["status"], "applied");
+        assert_eq!(applied["classes"]["search"]["status"], "warmed");
+        assert_eq!(
+            applied["classes"]["search"]["bytesRead"]
+                .as_u64()
+                .unwrap_or(0),
+            4096
+        );
+        assert_eq!(applied["classes"]["readPool"]["status"], "warmed");
+        assert_eq!(applied["classes"]["graph"]["status"], "warmed");
+        assert_eq!(applied["classes"]["pack"]["status"], "warmed");
+        assert!(
+            !degraded
+                .iter()
+                .any(|entry| entry["code"] == PREWARM_APPLY_STORE_MISSING_CODE),
+            "no store-missing abstention on a real store"
+        );
+    }
+
+    #[test]
+    fn apply_cache_prewarm_respects_the_byte_cap() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path();
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir_all(ee_dir.join("index")).expect("index dir");
+        std::fs::write(
+            ee_dir.join("index").join("segment.bin"),
+            vec![7u8; 64 * 1024],
+        )
+        .expect("index file");
+        let connection =
+            crate::db::DbConnection::open_file(&ee_dir.join("ee.db")).expect("open store");
+        connection.migrate().expect("migrate");
+        connection.close().expect("close");
+
+        let cx = asupersync::Cx::for_testing();
+        let options = CachePrewarmOptions::new("lean", CacheBudget::new(4, 0));
+        let (applied, _) = apply_cache_prewarm(&cx, workspace, &options);
+        assert_eq!(applied["classes"]["search"]["truncatedByBudget"], true);
+        assert!(
+            applied["bytesRead"].as_u64().unwrap_or(u64::MAX) <= 1024 * 1024,
+            "reads stop within one chunk of a zero byte cap"
+        );
     }
 }

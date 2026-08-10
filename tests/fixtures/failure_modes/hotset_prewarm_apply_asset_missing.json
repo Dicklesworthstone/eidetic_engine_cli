@@ -1,0 +1,24 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "hotset_prewarm_apply_asset_missing",
+  "introduced_by": {"bead": "bd-ty3pl.3", "epic_letter": "O"},
+  "surfaces": ["cache prewarm"],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee cache prewarm --apply found a derived-asset class with nothing on disk to warm (missing index directory, or a store whose backing table is unavailable). The class is skipped with an explicit degraded entry instead of silently reporting a warm that never happened.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee cache prewarm --workspace . --from-hotset hotset.json --apply --json"
+  },
+  "expected_emission": {
+    "code": "hotset_prewarm_apply_asset_missing",
+    "severity": "low",
+    "message_contains": [
+      "Cache prewarm --apply skipped",
+      "class"
+    ],
+    "repair_contains": "ee "
+  }
+}

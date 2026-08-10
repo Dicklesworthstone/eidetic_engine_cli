@@ -1194,6 +1194,13 @@ pub struct CachePrewarmArgs {
     /// Admit a stale hotset intentionally and surface the stale-use degradation.
     #[arg(long = "allow-stale-hotset", action = ArgAction::SetTrue)]
     pub allow_stale_hotset: bool,
+
+    /// Execute the bounded warm pass for admitted asset classes (default is
+    /// the dry-run admission report). Warming is bounded reads only — index
+    /// files and the database pages backing graph/pack/read-pool state —
+    /// capped by the profile budget and cooperatively cancellable.
+    #[arg(long = "apply", action = ArgAction::SetTrue)]
+    pub apply: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -19321,7 +19328,46 @@ where
 {
     let workspace_path = cli.resolve_workspace();
     match build_cache_prewarm_report(args, &workspace_path) {
-        Ok(data) => render_cache_prewarm(cli, &data, stdout),
+        Ok(mut data) => {
+            if args.apply {
+                let options = crate::cache::hotset::CachePrewarmOptions::new(
+                    args.profile.as_str(),
+                    args.profile.budget(),
+                )
+                .with_current_generation(args.current_generation)
+                .with_allow_stale_hotset(args.allow_stale_hotset);
+                let apply_workspace = workspace_path.clone();
+                let (applied, apply_degraded) =
+                    crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+                        crate::cache::hotset::apply_cache_prewarm(&cx, &apply_workspace, &options)
+                    })
+                    .unwrap_or_else(|error| {
+                        (
+                            serde_json::json!({
+                                "status": "abstained",
+                                "classes": {},
+                                "error": error.to_string(),
+                            }),
+                            Vec::new(),
+                        )
+                    });
+                if let Some(object) = data.as_object_mut() {
+                    object.insert("applied".to_owned(), applied);
+                    match object.get_mut("degraded") {
+                        Some(serde_json::Value::Array(existing)) => {
+                            existing.extend(apply_degraded);
+                        }
+                        _ => {
+                            object.insert(
+                                "degraded".to_owned(),
+                                serde_json::Value::Array(apply_degraded),
+                            );
+                        }
+                    }
+                }
+            }
+            render_cache_prewarm(cli, &data, stdout)
+        }
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }

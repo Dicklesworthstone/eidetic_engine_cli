@@ -486,6 +486,8 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `wal_holds_orphaned` | high | bd-17c65.12.6 (derived backup assets) |
 | `cache_hotset_stale` | medium | (TBD) |
 | `hotset_prewarm_no_signals` | low | bd-1zb7k.10.3 (O3) |
+| `hotset_prewarm_apply_asset_missing` | low | bd-ty3pl.3 (hotset prewarm apply) |
+| `hotset_prewarm_apply_store_missing` | medium | bd-ty3pl.3 (hotset prewarm apply) |
 | `memory_tier_metadata_stale` | medium | bd-1prrl.6.4 (Swarm-X) |
 | `cross_shard_skew_detected` | warning | (TBD) |
 | `flight_recorder_directory_unwritable` | medium | (TBD) |

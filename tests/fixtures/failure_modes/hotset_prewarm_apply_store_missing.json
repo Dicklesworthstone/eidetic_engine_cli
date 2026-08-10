@@ -1,0 +1,22 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "hotset_prewarm_apply_store_missing",
+  "introduced_by": {"bead": "bd-ty3pl.3", "epic_letter": "O"},
+  "surfaces": ["cache prewarm"],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee cache prewarm --apply was pointed at a workspace with no store; the apply pass abstains entirely — there is nothing safe to warm — instead of creating state or pretending warming occurred.",
+    "setup_commands": [],
+    "invocation": "ee cache prewarm --workspace /path/with/no/store --from-hotset hotset.json --apply --json"
+  },
+  "expected_emission": {
+    "code": "hotset_prewarm_apply_store_missing",
+    "severity": "medium",
+    "message_contains": [
+      "Cache prewarm --apply abstained",
+      "no workspace store"
+    ],
+    "repair_contains": "Re-check --workspace addressing"
+  }
+}
