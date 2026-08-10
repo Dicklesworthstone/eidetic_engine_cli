@@ -38,7 +38,7 @@ use ee::core::learn::{
 };
 use ee::core::memory::{
     MemoryDetails, MemoryListFilter, MemoryListReport, MemoryShowReport, MemorySummary,
-    MemoryTimelineReport, TimelineChange, TimelineMemory,
+    MemoryTimelineReport, TimelineChange, TimelineMemory, remember_level_kind_cross_wire_error,
 };
 use ee::core::status::StatusReport;
 use ee::core::swarm_next_action::SWARM_NEXT_ACTION_SCHEMA_V1;
@@ -2309,6 +2309,25 @@ fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
             .map_err(|error| format!("{schema_id}: {error}"))?;
     }
 
+    Ok(())
+}
+
+#[test]
+fn remember_level_kind_cross_wire_errors_match_error_schema() -> TestResult {
+    let schema = schema_doc("ee.error.v2")?;
+    for (level, kind, expected_code) in [
+        ("episodic", "episodic", "remember_kind_is_level"),
+        ("rule", "fact", "remember_level_is_kind"),
+    ] {
+        let error = remember_level_kind_cross_wire_error(level, kind).ok_or_else(|| {
+            format!("expected cross-wire error for level={level:?}, kind={kind:?}")
+        })?;
+        let response: Value = serde_json::from_str(&error_response_json(&error))
+            .map_err(|parse| format!("cross-wire error response must be JSON: {parse}"))?;
+        validate_json_schema(&response, &schema, &schema, "$")?;
+        ensure_json_str(&response, "/schema", "ee.error.v2")?;
+        ensure_json_str(&response, "/error/code", expected_code)?;
+    }
     Ok(())
 }
 

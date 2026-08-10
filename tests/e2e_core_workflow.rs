@@ -2120,6 +2120,33 @@ fn remember_level_kind_cross_wire_guard_public_cli_contract() -> TestResult {
         &Some("episodic"),
         "kind-as-level recovery value",
     )?;
+    ensure_equal(
+        &error_json
+            .pointer("/error/details/recovery/0/riskClass")
+            .and_then(serde_json::Value::as_str),
+        &Some("mutating_local_repair"),
+        "kind-as-level recovery risk class",
+    )?;
+    for field in [
+        "requiresHumanApproval",
+        "mutatesExternalState",
+        "mutatesTrackerState",
+    ] {
+        ensure_equal(
+            &error_json
+                .pointer(&format!("/error/details/recovery/0/{field}"))
+                .and_then(serde_json::Value::as_bool),
+            &Some(false),
+            &format!("kind-as-level recovery {field}"),
+        )?;
+    }
+    ensure_equal(
+        &error_json
+            .pointer("/error/details/recovery/0/privacyClass")
+            .and_then(serde_json::Value::as_str),
+        &Some("bounded_command_no_raw_state"),
+        "kind-as-level recovery privacy class",
+    )?;
 
     // The same guard is reachable through the real `ee note` CLI surface.
     let note_cross_wire = run_ee(&[
@@ -2187,6 +2214,13 @@ fn remember_level_kind_cross_wire_guard_public_cli_contract() -> TestResult {
             .and_then(serde_json::Value::as_str),
         &Some("rule"),
         "level-as-kind didYouMean value",
+    )?;
+    ensure_equal(
+        &inverse_json
+            .pointer("/error/details/recovery/0/riskClass")
+            .and_then(serde_json::Value::as_str),
+        &Some("mutating_local_repair"),
+        "level-as-kind recovery risk class",
     )?;
 
     // Planted negative: a noncanonical lookalike custom kind sharing a level
