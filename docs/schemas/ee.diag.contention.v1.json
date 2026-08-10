@@ -198,6 +198,7 @@
         "groupCommit": {"$ref": "#/$defs/groupCommit"},
         "indexIntake": {"$ref": "#/$defs/indexIntake"},
         "l2Cache": {"$ref": "#/$defs/l2Cache"},
+        "flockGate": {"$ref": "#/$defs/flockGate"},
         "topContention": {
           "type": "array",
           "description": "Findings with posture >= warm, ranked by severity (desc) then source (asc).",
@@ -325,6 +326,19 @@
         "evictions": {"type": "integer", "minimum": 0},
         "hitRate": {"type": "number", "minimum": 0.0, "maximum": 1.0},
         "thrashRatio": {"type": "number", "minimum": 0.0},
+        "posture": {"$ref": "#/$defs/posture"}
+      }
+    },
+    "flockGate": {
+      "type": "object",
+      "required": ["acquires", "contendedAcquires", "avgWaitMs", "maxWaitMs", "timeouts", "posture"],
+      "additionalProperties": false,
+      "properties": {
+        "acquires": {"type": "integer", "minimum": 0},
+        "contendedAcquires": {"type": "integer", "minimum": 0},
+        "avgWaitMs": {"type": "number", "minimum": 0.0},
+        "maxWaitMs": {"type": "integer", "minimum": 0},
+        "timeouts": {"type": "integer", "minimum": 0},
         "posture": {"$ref": "#/$defs/posture"}
       }
     },

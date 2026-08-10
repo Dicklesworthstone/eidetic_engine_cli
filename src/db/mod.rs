@@ -563,6 +563,77 @@ fn file_write_owner_depth_for_test(location: &DatabaseLocation) -> usize {
     FILE_WRITE_OWNER_DEPTHS.with(|depths| depths.borrow().get(&key).copied().unwrap_or(0))
 }
 
+/// Process-global flock-gate counters (bd-d67os.12, from the bd-d67os.26
+/// audit): the OS advisory-lock gate on `<db>.write.lock` is what separate
+/// one-shot `ee` processes actually contend on in the no-daemon swarm. These
+/// make that wait observable to `ee diag contention`; a clean daemon-side
+/// posture alone cannot rule out flock starvation.
+static FLOCK_GATE_ACQUIRES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FLOCK_GATE_CONTENDED_ACQUIRES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static FLOCK_GATE_WAIT_NS_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static FLOCK_GATE_MAX_WAIT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FLOCK_GATE_TIMEOUTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Point-in-time snapshot of the process-local flock-gate counters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FlockGateTelemetry {
+    /// Successful gate acquisitions (monotonic).
+    pub acquires: u64,
+    /// Acquisitions that needed at least one blocked retry (monotonic).
+    pub contended_acquires: u64,
+    /// Total acquire wait across all acquisitions, nanoseconds (saturating).
+    pub wait_ns_total: u64,
+    /// Maximum single acquire wait, nanoseconds.
+    pub max_wait_ns: u64,
+    /// Acquisitions that exhausted retries with the contention timeout
+    /// (monotonic).
+    pub timeouts: u64,
+}
+
+/// Snapshot the process-local flock-gate counters.
+#[must_use]
+pub fn flock_gate_telemetry() -> FlockGateTelemetry {
+    use std::sync::atomic::Ordering;
+    FlockGateTelemetry {
+        acquires: FLOCK_GATE_ACQUIRES.load(Ordering::Relaxed),
+        contended_acquires: FLOCK_GATE_CONTENDED_ACQUIRES.load(Ordering::Relaxed),
+        wait_ns_total: FLOCK_GATE_WAIT_NS_TOTAL.load(Ordering::Relaxed),
+        max_wait_ns: FLOCK_GATE_MAX_WAIT_NS.load(Ordering::Relaxed),
+        timeouts: FLOCK_GATE_TIMEOUTS.load(Ordering::Relaxed),
+    }
+}
+
+fn record_flock_gate_wait(waited: std::time::Duration, retried: bool) {
+    use std::sync::atomic::Ordering;
+    let wait_ns = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
+    FLOCK_GATE_ACQUIRES.fetch_add(1, Ordering::Relaxed);
+    if retried {
+        FLOCK_GATE_CONTENDED_ACQUIRES.fetch_add(1, Ordering::Relaxed);
+    }
+    if wait_ns > 0 {
+        FLOCK_GATE_WAIT_NS_TOTAL
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |total| {
+                Some(total.saturating_add(wait_ns))
+            })
+            .ok();
+        FLOCK_GATE_MAX_WAIT_NS.fetch_max(wait_ns, Ordering::Relaxed);
+    }
+}
+
+fn record_flock_gate_timeout(waited: std::time::Duration) {
+    use std::sync::atomic::Ordering;
+    let wait_ns = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
+    FLOCK_GATE_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+    FLOCK_GATE_WAIT_NS_TOTAL
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |total| {
+            Some(total.saturating_add(wait_ns))
+        })
+        .ok();
+    FLOCK_GATE_MAX_WAIT_NS.fetch_max(wait_ns, Ordering::Relaxed);
+}
+
 fn lock_database_write_file(database_path: &Path) -> Result<File> {
     let lock_path = database_path.with_extension("write.lock");
     ensure_database_write_lock_path_has_no_symlink_components(&lock_path)?;
@@ -578,7 +649,9 @@ fn lock_database_write_file(database_path: &Path) -> Result<File> {
     #[cfg(unix)]
     {
         use rustix::io::Errno;
+        let gate_wait_started = std::time::Instant::now();
         let mut acquired = false;
+        let mut retried = false;
         for attempt in 0..FILE_DATABASE_OPEN_MAX_ATTEMPTS {
             match flock(&lock_file, FlockOperation::NonBlockingLockExclusive) {
                 Ok(_) => {
@@ -589,12 +662,14 @@ fn lock_database_write_file(database_path: &Path) -> Result<File> {
                     if (error == Errno::WOULDBLOCK || error == Errno::AGAIN)
                         && attempt + 1 < FILE_DATABASE_OPEN_MAX_ATTEMPTS
                     {
+                        retried = true;
                         sleep_retry_delay_or_cancel(
                             DbOperation::BeginTransaction,
                             advisory_lock_retry_delay(attempt),
                         )?;
                         continue;
                     }
+                    record_flock_gate_timeout(gate_wait_started.elapsed());
                     return Err(DbError::InvalidPath {
                         operation: DbOperation::BeginTransaction,
                         path: lock_path.clone(),
@@ -604,13 +679,17 @@ fn lock_database_write_file(database_path: &Path) -> Result<File> {
             }
         }
         if !acquired {
+            record_flock_gate_timeout(gate_wait_started.elapsed());
             return Err(DbError::InvalidPath {
                 operation: DbOperation::BeginTransaction,
                 path: lock_path,
                 message: "could not acquire database write lock: contention timeout".to_string(),
             });
         }
+        record_flock_gate_wait(gate_wait_started.elapsed(), retried);
     }
+    #[cfg(not(unix))]
+    record_flock_gate_wait(std::time::Duration::ZERO, false);
 
     Ok(lock_file)
 }

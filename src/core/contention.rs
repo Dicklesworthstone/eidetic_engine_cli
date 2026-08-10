@@ -17,8 +17,8 @@ use crate::core::write_owner::WriteOwnerStatus;
 use crate::db::read_pool::PoolStats;
 use crate::models::contention::{
     CONTENTION_DIAG_SCHEMA_V1, ContentionDiagReport, ContentionFinding, ContentionPosture,
-    ContentionSourceGap, GroupCommitContention, IndexIntakeContention, L2CacheContention,
-    ReadPoolContention, SingleflightContention, WriteLockContention,
+    ContentionSourceGap, FlockGateContention, GroupCommitContention, IndexIntakeContention,
+    L2CacheContention, ReadPoolContention, SingleflightContention, WriteLockContention,
 };
 use crate::models::singleflight::SingleFlightPostureReport;
 
@@ -44,6 +44,12 @@ const ACQUIRE_WAIT_P99_HOT_NS: u128 = 50_000_000;
 /// Read-pool acquire-wait p99 (ns) at/above this is contended (1 s).
 const ACQUIRE_WAIT_P99_CONTENDED_NS: u128 = 1_000_000_000;
 
+/// Flock-gate max acquire wait (ms) at/above this is hot.
+const FLOCK_GATE_WAIT_HOT_MS: u64 = 250;
+/// Flock-gate max acquire wait (ms) at/above this is contended (matches the
+/// write-owner queue-wait threshold — same underlying serialization).
+const FLOCK_GATE_WAIT_CONTENDED_MS: u64 = 2_000;
+
 /// Optional future-feature input: group-commit write-intake counters
 /// (Track B, bd-d67os.1..4). Absent until that lands.
 #[derive(Clone, Debug, Default)]
@@ -61,6 +67,30 @@ impl From<&crate::core::write_owner::WriteGroupCommitTelemetry> for GroupCommitI
             batches: report.batches,
             writes_coalesced: report.writes_coalesced,
             fsync_saved: report.fsync_saved,
+        }
+    }
+}
+
+/// Optional input: direct-CLI flock-gate counters on `<db>.write.lock`
+/// (bd-d67os.26 audit — the gate separate one-shot processes contend on in
+/// the no-daemon swarm). Absent when no snapshot was gathered.
+#[derive(Clone, Debug, Default)]
+pub struct FlockGateInput {
+    pub acquires: u64,
+    pub contended_acquires: u64,
+    pub wait_ns_total: u64,
+    pub max_wait_ns: u64,
+    pub timeouts: u64,
+}
+
+impl From<&crate::db::FlockGateTelemetry> for FlockGateInput {
+    fn from(snapshot: &crate::db::FlockGateTelemetry) -> Self {
+        Self {
+            acquires: snapshot.acquires,
+            contended_acquires: snapshot.contended_acquires,
+            wait_ns_total: snapshot.wait_ns_total,
+            max_wait_ns: snapshot.max_wait_ns,
+            timeouts: snapshot.timeouts,
         }
     }
 }
@@ -106,6 +136,8 @@ pub struct ContentionInputs {
     pub index_intake: Option<IndexIntakeInput>,
     /// L2 pack-cache counters. `None` until an aggregate accessor exists.
     pub l2_cache: Option<L2CacheInput>,
+    /// Direct-CLI flock-gate counters. `None` when not gathered.
+    pub flock_gate: Option<FlockGateInput>,
 }
 
 fn classify_write_lock(status: &WriteOwnerStatus, p99_ms: Option<u64>) -> ContentionPosture {
@@ -499,6 +531,57 @@ pub fn build_contention_report(inputs: &ContentionInputs) -> ContentionDiagRepor
         }
     });
 
+    let flock_gate = inputs.flock_gate.as_ref().map(|gate| {
+        let max_wait_ms = gate.max_wait_ns / 1_000_000;
+        let avg_wait_ms = if gate.acquires > 0 {
+            (gate.wait_ns_total as f64 / gate.acquires as f64) / 1_000_000.0
+        } else {
+            0.0
+        };
+        let mut posture = ContentionPosture::Ok;
+        if gate.contended_acquires > 0 {
+            posture = ContentionPosture::Warm;
+        }
+        if max_wait_ms >= FLOCK_GATE_WAIT_HOT_MS {
+            posture = ContentionPosture::Hot;
+        }
+        if gate.timeouts > 0 || max_wait_ms >= FLOCK_GATE_WAIT_CONTENDED_MS {
+            posture = ContentionPosture::Contended;
+        }
+        overall = overall.worst(posture);
+        if posture >= ContentionPosture::Warm {
+            let reason = if gate.timeouts > 0 {
+                "flock_gate_timeouts"
+            } else if max_wait_ms >= FLOCK_GATE_WAIT_HOT_MS {
+                "flock_gate_high_wait"
+            } else {
+                "flock_gate_retry_pressure"
+            };
+            findings.push(finding(
+                "flock_gate",
+                posture,
+                reason,
+                format!(
+                    "write-lock flock gate: {} acquires ({} contended), max wait {} ms, {} timeouts; separate ee processes are serializing on <db>.write.lock",
+                    gate.acquires, gate.contended_acquires, max_wait_ms, gate.timeouts
+                ),
+                &[
+                    "route writers through the daemon write owner: ee daemon start",
+                    "reduce the number of concurrent one-shot ee writers",
+                    "inspect live daemon-side pressure: ee diag contention --use-daemon",
+                ],
+            ));
+        }
+        FlockGateContention {
+            acquires: gate.acquires,
+            contended_acquires: gate.contended_acquires,
+            avg_wait_ms,
+            max_wait_ms,
+            timeouts: gate.timeouts,
+            posture,
+        }
+    });
+
     // Deterministic ordering: severity desc, then source asc.
     findings.sort_by(|a, b| {
         b.severity
@@ -516,6 +599,7 @@ pub fn build_contention_report(inputs: &ContentionInputs) -> ContentionDiagRepor
         group_commit,
         index_intake,
         l2_cache,
+        flock_gate,
         top_contention: findings,
         unavailable_sources: gaps,
     }

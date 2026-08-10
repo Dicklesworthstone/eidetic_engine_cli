@@ -217,6 +217,28 @@ pub struct L2CacheContention {
     pub posture: ContentionPosture,
 }
 
+/// OS advisory-lock (flock) gate contention on `<db>.write.lock` — the gate
+/// separate one-shot `ee` processes actually contend on in the no-daemon
+/// swarm (bd-d67os.26 audit). Sourced from `crate::db::FlockGateTelemetry`
+/// process-local counters; omitted when no snapshot was gathered.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlockGateContention {
+    /// Successful gate acquisitions in this process (monotonic).
+    pub acquires: u64,
+    /// Acquisitions that needed at least one blocked retry (monotonic).
+    pub contended_acquires: u64,
+    /// Rolling average acquire wait, milliseconds.
+    pub avg_wait_ms: f64,
+    /// Maximum observed acquire wait, milliseconds.
+    pub max_wait_ms: u64,
+    /// Acquisitions that exhausted retries and failed with the contention
+    /// timeout (monotonic).
+    pub timeouts: u64,
+    /// Classified posture for this source.
+    pub posture: ContentionPosture,
+}
+
 /// One ranked entry in `topContention`: a source whose posture is at least
 /// `Warm`, with a stable reason code and copy-paste remediation commands.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -275,6 +297,9 @@ pub struct ContentionDiagReport {
     /// L2 pack-cache stats; omitted until an aggregate accessor exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub l2_cache: Option<L2CacheContention>,
+    /// Direct-CLI flock-gate stats; omitted when no snapshot was gathered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flock_gate: Option<FlockGateContention>,
     /// Findings ranked by severity (desc) then source (asc), deterministically.
     pub top_contention: Vec<ContentionFinding>,
     /// Core sources that were expected but not gathered this run.

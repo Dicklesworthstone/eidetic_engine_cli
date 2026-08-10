@@ -4855,6 +4855,12 @@ pub struct DiagContentionArgs {
     /// Explicit daemon socket path. Defaults to the platform per-UID socket.
     #[arg(long = "daemon-socket", value_name = "PATH")]
     pub daemon_socket: Option<PathBuf>,
+
+    /// Agent-facing triage projection: lift the severity-ranked
+    /// `topContention` findings (with copy-paste suggestedCommands) to the
+    /// top of the payload, highest-impact bottleneck first.
+    #[arg(long = "robot-triage", action = ArgAction::SetTrue)]
+    pub robot_triage: bool,
 }
 
 /// Arguments for `ee diag store-integrity`.
@@ -29239,9 +29245,11 @@ fn diag_environment_attestation_response_json(report: &EnvironmentAttestationRep
 fn contention_report_value_in_process() -> serde_json::Value {
     let group_commit = crate::core::write_owner::write_group_commit_telemetry(None);
     let singleflight = crate::core::singleflight::singleflight_posture_report();
+    let flock_gate = crate::db::flock_gate_telemetry();
     let inputs = crate::core::contention::ContentionInputs {
         singleflight: Some(singleflight),
         group_commit: Some((&group_commit).into()),
+        flock_gate: Some((&flock_gate).into()),
         ..crate::core::contention::ContentionInputs::default()
     };
     let report = crate::core::contention::build_contention_report(&inputs);
@@ -29328,13 +29336,27 @@ where
     } else {
         contention_report_value_in_process()
     };
+    let mut data = serde_json::json!({
+        "command": "diag contention",
+        "report": report_value,
+    });
+    if args.robot_triage {
+        let report = &data["report"];
+        let top_contention = report.get("topContention").cloned().unwrap_or_else(
+            || serde_json::Value::Array(Vec::new()),
+        );
+        let overall_posture = report
+            .get("overallPosture")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        data["robotTriage"] = serde_json::Value::Bool(true);
+        data["overallPosture"] = overall_posture;
+        data["topContention"] = top_contention;
+    }
     let response = serde_json::json!({
         "schema": "ee.response.v2",
         "success": true,
-        "data": {
-            "command": "diag contention",
-            "report": report_value,
-        },
+        "data": data,
         "degraded": degraded,
     });
     match cli.renderer() {
