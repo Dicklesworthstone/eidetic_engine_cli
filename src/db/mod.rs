@@ -563,6 +563,29 @@ fn file_write_owner_depth_for_test(location: &DatabaseLocation) -> usize {
     FILE_WRITE_OWNER_DEPTHS.with(|depths| depths.borrow().get(&key).copied().unwrap_or(0))
 }
 
+/// Flock-gate retry budget (bd-d67os.27 item 2). Deliberately wider than
+/// `FILE_DATABASE_OPEN_MAX_ATTEMPTS`: under an N-writer swarm the gate is
+/// the sole cross-process serializer, and the old 8-attempt (~113 ms)
+/// budget starved single-shot writers into their outer retry loops. With
+/// 32 attempts the in-gate budget is ~1.4 s before jitter, which one
+/// depth-one flock holder comfortably fits inside.
+const FLOCK_GATE_MAX_ATTEMPTS: usize = 32;
+
+/// Determinism-safe additive jitter for flock-gate retries (bd-d67os.27
+/// item 2): `advisory_lock_retry_delay` is identical in every process, so
+/// N contending writers back off in lockstep and re-collide (thundering
+/// herd). Seeding off the pid de-synchronizes processes without touching
+/// wall-clock or `rand` (both forbidden for determinism), and the pure
+/// base-delay function stays byte-stable for its golden timing test. The
+/// jitter is bounded by half the 50 ms base-delay cap.
+fn flock_gate_retry_jitter(attempt: usize) -> Duration {
+    let seed = u64::from(std::process::id()).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let salt = seed
+        .rotate_left((attempt as u32) & 63)
+        .wrapping_add(attempt as u64);
+    Duration::from_micros(salt % 25_000)
+}
+
 /// Process-global flock-gate counters (bd-d67os.12, from the bd-d67os.26
 /// audit): the OS advisory-lock gate on `<db>.write.lock` is what separate
 /// one-shot `ee` processes actually contend on in the no-daemon swarm. These
@@ -652,7 +675,7 @@ fn lock_database_write_file(database_path: &Path) -> Result<File> {
         let gate_wait_started = std::time::Instant::now();
         let mut acquired = false;
         let mut retried = false;
-        for attempt in 0..FILE_DATABASE_OPEN_MAX_ATTEMPTS {
+        for attempt in 0..FLOCK_GATE_MAX_ATTEMPTS {
             match flock(&lock_file, FlockOperation::NonBlockingLockExclusive) {
                 Ok(_) => {
                     acquired = true;
@@ -660,12 +683,13 @@ fn lock_database_write_file(database_path: &Path) -> Result<File> {
                 }
                 Err(error) => {
                     if (error == Errno::WOULDBLOCK || error == Errno::AGAIN)
-                        && attempt + 1 < FILE_DATABASE_OPEN_MAX_ATTEMPTS
+                        && attempt + 1 < FLOCK_GATE_MAX_ATTEMPTS
                     {
                         retried = true;
                         sleep_retry_delay_or_cancel(
                             DbOperation::BeginTransaction,
-                            advisory_lock_retry_delay(attempt),
+                            advisory_lock_retry_delay(attempt)
+                                .saturating_add(flock_gate_retry_jitter(attempt)),
                         )?;
                         continue;
                     }
@@ -51048,6 +51072,42 @@ mod tests {
             &super::advisory_lock_retry_delay(100),
             &Duration::from_millis(50),
             "large attempt delay cap",
+        )
+    }
+
+    #[test]
+    fn flock_gate_retry_jitter_is_bounded_and_deterministic() -> TestResult {
+        for attempt in 0..64 {
+            let first = super::flock_gate_retry_jitter(attempt);
+            let second = super::flock_gate_retry_jitter(attempt);
+            ensure_equal(
+                &first,
+                &second,
+                "jitter is deterministic per (pid, attempt)",
+            )?;
+            ensure(
+                first < Duration::from_millis(25),
+                "jitter stays below half the 50ms base-delay cap",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn flock_gate_budget_is_wider_than_open_retry_budget() -> TestResult {
+        // bd-d67os.27 item 2: the gate is the sole cross-process write
+        // serializer; its in-gate budget must comfortably exceed the old
+        // 8-attempt (~113ms) budget that starved single-shot writers.
+        ensure(
+            super::FLOCK_GATE_MAX_ATTEMPTS >= 24,
+            "flock gate retries at least 24 attempts",
+        )?;
+        let total: Duration = (0..super::FLOCK_GATE_MAX_ATTEMPTS)
+            .map(super::advisory_lock_retry_delay)
+            .sum();
+        ensure(
+            total >= Duration::from_millis(1_000),
+            "base in-gate budget is at least one second",
         )
     }
 

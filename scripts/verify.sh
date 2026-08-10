@@ -84,6 +84,7 @@ set -euo pipefail
 #   6.10 LOD Packing E2E       - scripts/e2e_lod_packing.sh
 #   6.11 House Rules E2E       - scripts/e2e_house_rules.sh
 #   6.12 Ask E2E               - scripts/e2e_ask.sh
+#   6.126 Write Contention E2E - scripts/e2e_single_shot_write_contention.sh
 #   6.1265 Capture Track E2E   - scripts/e2e_capture.sh
 #   6.127 Ergonomics E2E       - scripts/e2e_ergonomics.sh
 #   6.1293 Consolidation E2E   - scripts/e2e_consolidation.sh
@@ -1147,6 +1148,14 @@ run_stage "Ask E2E (bd-169v0.5)" "./scripts/e2e_ask.sh"
 # search, pack-item outcome feedback, and outcome trace with ee.test_event.v1
 # evidence.
 run_stage "Journal Capture E2E (bd-1pi9m.6)" "./scripts/e2e_journal_capture.sh"
+
+# Gate 6.126: Single-shot write contention E2E (bd-d67os.27 item 1). No-mock:
+# N concurrent OS processes interleave `ee journal append` and `ee remember`
+# against one workspace DB. Journal appends must never drop (the bd-d67os.26
+# flock-classification fix class, proven end-to-end); remember drops surface
+# as a separate assertion (strict via EE_E2E_STRICT_REMEMBER=1 once the
+# advisory-lock starvation follow-up lands).
+run_stage "Write Contention E2E (bd-d67os.27)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_single_shot_write_contention.sh"
 
 # Gate 6.1265: Capture-track real-binary E2E (bd-2vq2z.20). No-Cargo:
 # proves ambient capture suggestions are read-only and workspace-stable,
