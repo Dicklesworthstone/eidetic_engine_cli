@@ -4249,6 +4249,12 @@ fn singleflight_posture_json() -> String {
 /// discovery elsewhere in this module, which summarizes on-disk swarm
 /// benchmark reports.)
 fn contention_summary_json() -> String {
+    stable_json(&collect_contention_summary())
+}
+
+/// Build the redaction-safe contention summary value shared by the support
+/// bundle file and the handoff capsule section.
+pub(crate) fn collect_contention_summary() -> Value {
     let group_commit = crate::core::write_owner::write_group_commit_telemetry(None);
     let singleflight = singleflight_posture_report();
     let flock_gate = crate::db::flock_gate_telemetry();
@@ -4270,7 +4276,7 @@ fn contention_summary_json() -> String {
             })
         })
         .collect();
-    stable_json(&json!({
+    json!({
         "schema": SUPPORT_BUNDLE_CONTENTION_SUMMARY_SCHEMA_V1,
         "overallPosture": report.overall_posture,
         "writeLockPosture": report.write_lock.posture,
@@ -4287,7 +4293,65 @@ fn contention_summary_json() -> String {
         }),
         "topContention": findings,
         "unavailableSources": report.unavailable_sources,
-    }))
+    })
+}
+
+pub(crate) fn contention_summary_evidence_id(summary: &Value) -> String {
+    let hash = blake3_text_hash(&stable_json(summary));
+    let short_hash = hash.trim_start_matches("blake3:");
+    let short_hash = short_hash.get(..12).unwrap_or(short_hash);
+    format!("contention_summary:{short_hash}")
+}
+
+pub(crate) fn render_contention_summary_for_handoff(summary: &Value) -> String {
+    let overall = summary
+        .get("overallPosture")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let mut lines = vec![format!("Contention posture: {overall}")];
+    for (label, key) in [
+        ("write lock", "writeLockPosture"),
+        ("read pool", "readPoolPosture"),
+        ("single-flight", "singleflightPosture"),
+    ] {
+        if let Some(posture) = summary.get(key).and_then(Value::as_str) {
+            lines.push(format!("- {label}: {posture}"));
+        }
+    }
+    if let Some(gate) = summary.get("flockGate").filter(|gate| !gate.is_null()) {
+        let posture = gate
+            .get("posture")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let timeouts = gate.get("timeouts").and_then(Value::as_u64).unwrap_or(0);
+        lines.push(format!("- flock gate: {posture} ({timeouts} timeouts)"));
+    }
+    let findings = summary
+        .get("topContention")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if findings.is_empty() {
+        lines.push("No contention findings.".to_owned());
+    } else {
+        lines.push(format!("Top findings ({}):", findings.len()));
+        for finding in findings.iter().take(5) {
+            let source = finding
+                .get("source")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let severity = finding
+                .get("severity")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let reason = finding
+                .get("reasonCode")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            lines.push(format!("- {source} [{severity}] {reason}"));
+        }
+    }
+    lines.join("\n")
 }
 
 fn qos_lane_summary_json(workspace: &Path) -> String {

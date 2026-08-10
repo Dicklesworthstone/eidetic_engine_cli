@@ -103,6 +103,7 @@ VOLATILE_FIELD_NAMES=(
     proof_broker_summary
     regression_causality_summary
     shadow_policy_summary
+    contention_summary
     databasePath
     workspacePath
     indexDir

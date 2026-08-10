@@ -30,14 +30,16 @@ use sha2::{Digest, Sha256};
 use crate::core::focus::{focus_state_hash, read_active_focus_state};
 use crate::core::singleflight::singleflight_posture_report;
 use crate::core::support_bundle::{
-    collect_environment_attestation_summary, collect_pack_replay_summary,
-    collect_proof_broker_summary, collect_regression_causality_summary,
-    collect_shadow_policy_summary, environment_attestation_summary_evidence_id,
+    collect_contention_summary, collect_environment_attestation_summary,
+    collect_pack_replay_summary, collect_proof_broker_summary,
+    collect_regression_causality_summary, collect_shadow_policy_summary,
+    contention_summary_evidence_id, environment_attestation_summary_evidence_id,
     pack_replay_summary_evidence_id, proof_broker_summary_evidence_id,
     redact_support_bundle_swarm_brief_summary, regression_causality_summary_evidence_id,
-    render_environment_attestation_summary_for_handoff, render_pack_replay_summary_for_handoff,
-    render_proof_broker_summary_for_handoff, render_regression_causality_summary_for_handoff,
-    render_shadow_policy_summary_for_handoff, shadow_policy_summary_evidence_id,
+    render_contention_summary_for_handoff, render_environment_attestation_summary_for_handoff,
+    render_pack_replay_summary_for_handoff, render_proof_broker_summary_for_handoff,
+    render_regression_causality_summary_for_handoff, render_shadow_policy_summary_for_handoff,
+    shadow_policy_summary_evidence_id,
 };
 use crate::core::swarm_brief::{
     collect_swarm_brief_summary, collect_swarm_incident_summary, collect_swarm_replay_summary,
@@ -492,6 +494,7 @@ pub struct PreviewReport {
     pub proof_broker_summary: Option<serde_json::Value>,
     pub regression_causality_summary: Option<serde_json::Value>,
     pub shadow_policy_summary: Option<serde_json::Value>,
+    pub contention_summary: Option<serde_json::Value>,
     pub token_estimate: usize,
     pub byte_estimate: usize,
     pub redaction_posture: String,
@@ -537,6 +540,7 @@ impl PreviewReport {
             proof_broker_summary: None,
             regression_causality_summary: None,
             shadow_policy_summary: None,
+            contention_summary: None,
             token_estimate: 0,
             byte_estimate: 0,
             redaction_posture: "standard".to_owned(),
@@ -725,6 +729,7 @@ pub struct CreateReport {
     pub proof_broker_summary: Option<serde_json::Value>,
     pub regression_causality_summary: Option<serde_json::Value>,
     pub shadow_policy_summary: Option<serde_json::Value>,
+    pub contention_summary: Option<serde_json::Value>,
     pub token_count: usize,
     pub byte_count: usize,
     pub content_hash: String,
@@ -761,6 +766,7 @@ impl CreateReport {
             proof_broker_summary: None,
             regression_causality_summary: None,
             shadow_policy_summary: None,
+            contention_summary: None,
             token_count: 0,
             byte_count: 0,
             content_hash: String::new(),
@@ -1127,6 +1133,7 @@ pub struct ResumeReport {
     pub proof_broker_summary: Option<serde_json::Value>,
     pub regression_causality_summary: Option<serde_json::Value>,
     pub shadow_policy_summary: Option<serde_json::Value>,
+    pub contention_summary: Option<serde_json::Value>,
     pub artifact_pointers: Vec<ArtifactPointer>,
     pub degradations: Vec<DegradationInfo>,
     pub resumed_at: String,
@@ -1318,6 +1325,7 @@ impl ResumeReport {
             proof_broker_summary: None,
             regression_causality_summary: None,
             shadow_policy_summary: None,
+            contention_summary: None,
             artifact_pointers: Vec::new(),
             degradations: Vec::new(),
             prompt_fragment: None,
@@ -1423,6 +1431,7 @@ fn strip_swarm_diagnostic_section_content_by_id(value: &mut serde_json::Value) {
                         | "proof_broker_summary"
                         | "regression_causality_summary"
                         | "shadow_policy_summary"
+                        | "contention_summary"
                 )
             ) {
                 object.remove("content");
@@ -3485,6 +3494,41 @@ fn add_regression_causality_summary_to_resume(
     );
 }
 
+fn add_contention_summary_to_resume(report: &mut ResumeReport, summary: &serde_json::Value) {
+    let overall = summary
+        .get("overallPosture")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let finding_count = summary
+        .get("topContention")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let posture = format!(
+        "Embedded contention summary: overall_posture={overall}, findings={finding_count}; counts_and_postures_only=true; diagnostic_not_live=true."
+    );
+    report.status_summary = Some(match report.status_summary.take() {
+        Some(existing) => format!("{existing}\n{posture}"),
+        None => posture,
+    });
+    report.artifact_pointers.push(ArtifactPointer {
+        id: contention_summary_evidence_id(summary),
+        path: None,
+        description:
+            "Redaction-safe contention summary embedded in the handoff capsule; postures, counters, and reason codes only — no finding detail text."
+                .to_owned(),
+    });
+    if overall != "ok" {
+        report.next_actions.push(
+            NextAction::new(
+                2,
+                "Re-measure live contention before acting on the embedded posture.",
+            )
+            .with_reason("Embedded contention summaries are point-in-time diagnostic context.")
+            .with_command("ee diag contention --robot-triage --json"),
+        );
+    }
+}
+
 fn add_shadow_policy_summary_to_resume(report: &mut ResumeReport, summary: &serde_json::Value) {
     let status = summary
         .get("status")
@@ -3787,6 +3831,22 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
         token_estimate: shadow_policy_section.token_estimate,
     });
 
+    let contention_summary = collect_contention_summary();
+    let contention_evidence = vec![contention_summary_evidence_id(&contention_summary)];
+    let contention_section = CapsuleSection::new("contention_summary", "Contention Summary")
+        .with_content(render_contention_summary_for_handoff(&contention_summary))
+        .with_confidence(EvidenceConfidence::Verified)
+        .with_evidence(contention_evidence.clone());
+    report.evidence_ids.extend(contention_evidence);
+    report.contention_summary = Some(contention_summary);
+    report.planned_sections.push(PlannedSection {
+        id: contention_section.id.clone(),
+        title: contention_section.title.clone(),
+        confidence: contention_section.confidence.as_str().to_owned(),
+        evidence_count: contention_section.evidence_ids.len(),
+        token_estimate: contention_section.token_estimate,
+    });
+
     let singleflight_posture = singleflight_posture_report();
     let singleflight_section = CapsuleSection::new("singleflight_posture", "Single-flight Posture")
         .with_content(render_singleflight_posture_for_handoff(
@@ -4077,6 +4137,19 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         .saturating_add(shadow_policy_evidence.len());
     report.shadow_policy_summary = Some(shadow_policy_summary.clone());
 
+    let contention_summary = collect_contention_summary();
+    let contention_evidence = vec![contention_summary_evidence_id(&contention_summary)];
+    sections.push(
+        CapsuleSection::new("contention_summary", "Contention Summary")
+            .with_content(render_contention_summary_for_handoff(&contention_summary))
+            .with_confidence(EvidenceConfidence::Verified)
+            .with_evidence(contention_evidence.clone()),
+    );
+    report.evidence_count = report
+        .evidence_count
+        .saturating_add(contention_evidence.len());
+    report.contention_summary = Some(contention_summary.clone());
+
     let singleflight_posture = singleflight_posture_report();
     sections.push(
         CapsuleSection::new("singleflight_posture", "Single-flight Posture")
@@ -4145,6 +4218,7 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         "proof_broker_summary": proof_broker_summary,
         "regression_causality_summary": regression_causality_summary,
         "shadow_policy_summary": shadow_policy_summary,
+        "contention_summary": contention_summary,
         "created_at": created_at,
     });
     let capsule_content = if options.dry_run {
@@ -4551,6 +4625,13 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
         .filter(|value| !value.is_null());
     if let Some(summary) = report.shadow_policy_summary.clone() {
         add_shadow_policy_summary_to_resume(&mut report, &summary);
+    }
+    report.contention_summary = capsule
+        .get("contention_summary")
+        .cloned()
+        .filter(|value| !value.is_null());
+    if let Some(summary) = report.contention_summary.clone() {
+        add_contention_summary_to_resume(&mut report, &summary);
     }
 
     if let Some(sections) = capsule.get("sections").and_then(|v| v.as_array()) {
