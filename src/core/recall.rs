@@ -1099,7 +1099,7 @@ impl RecallDegradedEntry {
     /// `--budget-tokens`. One truncation vocabulary across surfaces (ADR
     /// 0064 §5 supersedes the early `recall_budget_truncated` name); the
     /// recall budget lane reuses the governor code with recall-appropriate
-    /// repair text and carries the `ee.recall.cursor.v1` continuation cursor
+    /// repair text and carries the shared `ee.cursor.v1` continuation cursor
     /// in `details`.
     #[must_use]
     pub fn budget_truncated(

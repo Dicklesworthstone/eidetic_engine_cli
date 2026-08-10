@@ -46750,7 +46750,7 @@ where
 
 /// anchored memories. Read-only. `--budget-tokens` is the recall content
 /// budget (engine lane with its deterministic per-item estimate and
-/// `ee.recall.cursor.v1` continuation); the global `--max-output-tokens`
+/// `ee.cursor.v1` continuation); the global `--max-output-tokens`
 /// governor ceiling composes on top through the shared truncation registry
 /// (`data.recall.items[]`).
 fn handle_recall<W, E>(
