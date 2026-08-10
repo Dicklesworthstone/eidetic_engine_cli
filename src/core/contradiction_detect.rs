@@ -288,6 +288,11 @@ pub struct GatheredConflictEdges {
     /// Set when the link read failed: the gather degrades to no edges rather than
     /// panicking, and the read failure is reported instead of being swallowed.
     pub read_error: Option<String>,
+    /// Canonical pairs a reviewed `both-valid` resolution marked as legitimate
+    /// tension (`ee conflict resolve --verb both-valid` writes a `related` link
+    /// with `resolution=both_valid` metadata): suppressed from the actionable
+    /// pair surface, bd-3a1op.4.
+    pub both_valid_resolved: std::collections::BTreeSet<(String, String)>,
 }
 
 /// Explicit signal kinds the v1 DB-gather covers (the link-based, least-ambiguous
@@ -339,17 +344,40 @@ pub fn gather_explicit_conflict_edges(connection: &DbConnection) -> GatheredConf
                 gathered,
                 deferred,
                 read_error: Some(format!("memory links could not be read: {error}")),
+                both_valid_resolved: std::collections::BTreeSet::new(),
             };
         }
     };
 
     let mut edges = Vec::new();
+    let mut both_valid_resolved = std::collections::BTreeSet::new();
     for link in &links {
         let signal = match link.relation_enum() {
             Some(MemoryLinkRelation::Contradicts) => ExplicitConflictSignal::ContradictionLink,
             Some(MemoryLinkRelation::Supersedes) => ExplicitConflictSignal::Supersession,
-            // Supports / Related / DerivedFrom / CoTag / CoMention and any
-            // unparseable relation are not explicit conflict evidence.
+            Some(MemoryLinkRelation::Related) => {
+                // A reviewed both-valid resolution (bd-3a1op.4) marks the pair
+                // as legitimate tension; record it so the surface suppresses
+                // the pair instead of re-flagging a settled conflict.
+                let resolved = link
+                    .metadata_json
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .and_then(|meta| {
+                        meta.get("resolution")
+                            .and_then(serde_json::Value::as_str)
+                            .map(|value| value == "both_valid")
+                    })
+                    .unwrap_or(false);
+                if resolved {
+                    let (a, b) = (link.src_memory_id.as_str(), link.dst_memory_id.as_str());
+                    let pair = if a <= b { (a, b) } else { (b, a) };
+                    both_valid_resolved.insert((pair.0.to_owned(), pair.1.to_owned()));
+                }
+                continue;
+            }
+            // Supports / DerivedFrom / CoTag / CoMention and any unparseable
+            // relation are not explicit conflict evidence.
             _ => continue,
         };
         edges.push(ConflictEdge::new(
@@ -364,6 +392,7 @@ pub fn gather_explicit_conflict_edges(connection: &DbConnection) -> GatheredConf
         gathered,
         deferred,
         read_error: None,
+        both_valid_resolved,
     }
 }
 
@@ -593,6 +622,13 @@ pub fn assemble_conflict_surface(
 
     let mut pairs: Vec<ConflictPairView> = Vec::new();
     for ((low, high), signal) in &pair_signal {
+        // A reviewed both-valid resolution settled this tension: suppress.
+        if gathered
+            .both_valid_resolved
+            .contains(&(low.clone(), high.clone()))
+        {
+            continue;
+        }
         let (Ok(Some(a)), Ok(Some(b))) = (connection.get_memory(low), connection.get_memory(high))
         else {
             degraded.push(format!(
@@ -1405,6 +1441,76 @@ mod tests {
         assert!(
             after.pairs.is_empty(),
             "tombstoned side must drop the pair from the actionable surface"
+        );
+    }
+
+    #[test]
+    fn surface_suppresses_both_valid_resolved_pairs() {
+        // `ee conflict resolve --verb both-valid` records a related link with
+        // resolution metadata; the settled pair must stop being re-flagged.
+        let connection = open_seeded_db();
+        seed_memory(&connection, MEM_A);
+        seed_memory(&connection, MEM_B);
+        seed_link(
+            &connection,
+            LINK_1,
+            MEM_A,
+            MEM_B,
+            MemoryLinkRelation::Contradicts,
+        );
+        connection
+            .insert_memory_link(
+                LINK_2,
+                &CreateMemoryLinkInput {
+                    src_memory_id: MEM_A.to_owned(),
+                    dst_memory_id: MEM_B.to_owned(),
+                    relation: MemoryLinkRelation::Related,
+                    weight: 1.0,
+                    confidence: 1.0,
+                    directed: false,
+                    evidence_count: 1,
+                    last_reinforced_at: None,
+                    source: MemoryLinkSource::Agent,
+                    created_by: Some("conflict-resolve-test".to_owned()),
+                    metadata_json: Some(
+                        "{\"resolution\":\"both_valid\",\"conflictId\":\"cfl_x\"}".to_owned(),
+                    ),
+                },
+            )
+            .expect("insert resolution link");
+
+        let surface =
+            assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
+        assert!(
+            surface.pairs.is_empty(),
+            "both-valid-resolved pair must be suppressed: {:?}",
+            surface.pairs
+        );
+
+        // A plain related link WITHOUT the resolution marker must not suppress.
+        let connection = open_seeded_db();
+        seed_memory(&connection, MEM_A);
+        seed_memory(&connection, MEM_B);
+        seed_link(
+            &connection,
+            LINK_1,
+            MEM_A,
+            MEM_B,
+            MemoryLinkRelation::Contradicts,
+        );
+        seed_link(
+            &connection,
+            LINK_2,
+            MEM_A,
+            MEM_B,
+            MemoryLinkRelation::Related,
+        );
+        let surface =
+            assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
+        assert_eq!(
+            surface.pairs.len(),
+            1,
+            "plain related link is not a resolution"
         );
     }
 

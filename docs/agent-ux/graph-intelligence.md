@@ -84,9 +84,10 @@ Contracts to rely on:
 - **The WHY persists.** The rationale lands as a `kind=decision` memory
   (typed fields `topic`/`chosen`/`alternatives`/`rationale`/`supersedes`), so
   future packs explaining the area carry the decision.
-- **Known gap:** `both-valid` does not yet suppress the pair from
-  `conflict list` (the detector does not read resolution metadata); the
-  decision memory and link are still recorded.
+- **`both-valid` suppresses too.** The gather reads the resolution
+  metadata on the recorded `related` link and drops the settled pair from
+  the actionable surface (a plain `related` link without the marker does
+  not suppress).
 
 ## Temporal graph diff
 
