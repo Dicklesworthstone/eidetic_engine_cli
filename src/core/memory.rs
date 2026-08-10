@@ -2145,7 +2145,7 @@ fn acquire_remember_workspace_lock_with_retry_and_elapsed<'a>(
                 if no_progress_polls >= attempts {
                     return Err(DomainError::Storage {
                         message: format!(
-                            "advisory lock unavailable after {no_progress_polls} no-progress polls while acquiring workspace write lock"
+                            "advisory lock timeout after {no_progress_polls} no-progress polls because the workspace write lock remained unavailable"
                         ),
                         repair: Some(REMEMBER_ADVISORY_LOCK_REPAIR_COMMAND.to_owned()),
                     });
@@ -16458,7 +16458,10 @@ mod tests {
             .ensure_advisory_locks_table()
             .map_err(|error| error.to_string())?;
         let lock_id = AdvisoryLockId::workspace("wsp_remember_timeout");
-        let sensitive_holder = "remember:4242:mem_sensitive_fixture";
+        // A non-PID holder is intentionally unprobeable, so the fixture cannot
+        // be auto-reclaimed merely because a chosen synthetic PID is absent on
+        // this worker (or held merely because that PID happens to be alive).
+        let sensitive_holder = "fixture-sensitive-holder";
         let acquired = connection
             .acquire_advisory_lock(&lock_id, sensitive_holder, Some(300), Some("unit test"))
             .map_err(|error| error.to_string())?;
@@ -16490,9 +16493,7 @@ mod tests {
             "error envelope carries recovery command",
         )?;
         ensure(
-            !json.contains("remember:")
-                && !json.contains("mem_sensitive_fixture")
-                && !json.contains("4242"),
+            !json.contains(sensitive_holder),
             true,
             "timeout envelope does not expose competing holder identity",
         )?;
