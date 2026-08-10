@@ -96,7 +96,7 @@ const SEARCH_ANALYSIS_PROVENANCE_URI_KEY: &str = "_ee_analysis_provenance_uri";
 const SEARCH_ANALYSIS_CREATED_AT_KEY: &str = "_ee_analysis_created_at";
 const EMBED_MODEL_UNAVAILABLE_MODEL_ID: &str = "EE_EMBED_MODEL_PATH";
 const DEFAULT_SEARCH_RERANK_TOP_K: usize = 50;
-const RERANK_MODEL_UNAVAILABLE_ADVISORY: &str = "No usable local reranker is registered; this build cannot fetch or bundle one automatically. Search is using fusion-only ranking.";
+pub const RERANK_MODEL_UNAVAILABLE_ADVISORY: &str = "No usable local reranker is registered; this build cannot fetch or bundle one automatically. Search is using fusion-only ranking.";
 const RERANK_MODEL_TOKENIZER: &str = "tokenizer.json";
 const RERANK_MODEL_SAFETENSORS_PRIMARY: &str = "model_f32.safetensors";
 const RERANK_MODEL_SAFETENSORS_FALLBACK: &str = "model.safetensors";
@@ -1401,7 +1401,7 @@ impl SearchDegradation {
     /// transient degradation that belongs in every query response.
     #[must_use]
     pub fn is_permanent(&self) -> bool {
-        self.code == "rerank_model_unavailable"
+        self.code == "rerank_model_unavailable" && self.message == RERANK_MODEL_UNAVAILABLE_ADVISORY
     }
 
     #[must_use]
@@ -1424,6 +1424,16 @@ impl SearchDegradation {
             severity: degradation.severity.to_string(),
             message: degradation.message.clone(),
             repair: degradation.repair.clone(),
+        }
+    }
+
+    #[must_use]
+    fn rerank_model_absent() -> Self {
+        Self {
+            code: "rerank_model_unavailable".to_string(),
+            severity: "low".to_string(),
+            message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
+            repair: None,
         }
     }
 
@@ -5013,6 +5023,7 @@ fn search_rerank_posture_json(
     let unavailable = degraded
         .iter()
         .find(|degradation| degradation.code == "rerank_model_unavailable");
+    let unavailable_is_permanent = unavailable.is_some_and(SearchDegradation::is_permanent);
     let mode = if rerank_score_count > 0 {
         "reranked"
     } else if unavailable.is_some() {
@@ -5029,14 +5040,22 @@ fn search_rerank_posture_json(
         "scoreKind": if rerank_score_count > 0 { "reranked" } else { "rrf_fused" },
         "available": rerank_score_count > 0,
         "degradedCode": unavailable.map(|degradation| degradation.code.as_str()),
-        "permanent": unavailable.is_some(),
+        "permanent": unavailable_is_permanent,
         "advisory": unavailable.map(|degradation| serde_json::json!({
             "code": degradation.code,
             "severity": degradation.severity,
-            "permanent": true,
-            "message": RERANK_MODEL_UNAVAILABLE_ADVISORY,
-            "repair": serde_json::Value::Null,
-            "resolution": "operator_supplied_artifact_required",
+            "permanent": unavailable_is_permanent,
+            "message": if unavailable_is_permanent {
+                RERANK_MODEL_UNAVAILABLE_ADVISORY
+            } else {
+                degradation.message.as_str()
+            },
+            "repair": degradation.repair.as_deref(),
+            "resolution": if unavailable_is_permanent {
+                "operator_supplied_artifact_required"
+            } else {
+                "retry_or_inspect_local_registry"
+            },
         })),
     })
 }
@@ -6671,15 +6690,17 @@ fn resolve_search_rerank_runtime(
     let entry = match entry_result {
         Ok(Some(entry)) => entry,
         Ok(None) => {
-            degraded.push(SearchDegradation::rerank_model_unavailable(
-                "No reranker model is registered. Read-only search never auto-registers cached artifacts; run the explicit model fetch command first.",
-            ));
+            degraded.push(SearchDegradation::rerank_model_absent());
             return SearchRerankRuntime::disabled();
         }
-        Err(error) => {
-            degraded.push(SearchDegradation::rerank_model_unavailable(&format!(
-                "Could not inspect the reranker registry: {error}."
-            )));
+        Err(_error) => {
+            tracing::warn!(
+                target: "ee::search::rerank",
+                event = "rerank_registry_inspection_failed",
+            );
+            degraded.push(SearchDegradation::rerank_model_unavailable(
+                "The local reranker registry could not be inspected; retry the query or inspect local model status.",
+            ));
             return SearchRerankRuntime::disabled();
         }
     };
@@ -6699,8 +6720,14 @@ fn resolve_search_rerank_runtime(
                 configured_top_k,
             )
         }
-        Err(error) => {
-            degraded.push(SearchDegradation::rerank_model_unavailable(&error));
+        Err(_error) => {
+            tracing::warn!(
+                target: "ee::search::rerank",
+                event = "rerank_model_load_failed",
+            );
+            degraded.push(SearchDegradation::rerank_model_unavailable(
+                "The registered local reranker could not be loaded; retry the query or inspect local model status.",
+            ));
             SearchRerankRuntime::disabled()
         }
     }
@@ -6736,6 +6763,14 @@ fn load_search_reranker(entry: &StoredModelRegistryEntry) -> Result<Arc<dyn Rera
         )
     })?;
     Ok(Arc::new(frankensearch::SyncRerankerAdapter(reranker)))
+}
+
+/// Validate that a registry row resolves to a loadable local reranker without
+/// exposing the loaded model outside the search subsystem.
+pub(crate) fn verify_registered_reranker_loadable(
+    entry: &StoredModelRegistryEntry,
+) -> Result<(), String> {
+    load_search_reranker(entry).map(drop)
 }
 
 fn verify_reranker_registry_hash(entry: &StoredModelRegistryEntry) -> Result<(), String> {
@@ -16796,9 +16831,7 @@ mod tests {
     #[test]
     fn rerank_posture_reports_fusion_only_degraded() {
         let hit = synthetic_hybrid_hit("mem_fusion", 2.0 / 61.0);
-        let degraded = vec![SearchDegradation::rerank_model_unavailable(
-            "No available reranker model is registered for this workspace.",
-        )];
+        let degraded = vec![SearchDegradation::rerank_model_absent()];
         let posture = search_rerank_posture_json(
             &[&hit],
             &degraded,
@@ -16822,12 +16855,7 @@ mod tests {
 
     #[test]
     fn search_report_data_json_reports_degraded_rerank_on_empty_results() {
-        let report = rerank_test_report(
-            Vec::new(),
-            vec![SearchDegradation::rerank_model_unavailable(
-                "No available reranker model is registered for this workspace.",
-            )],
-        );
+        let report = rerank_test_report(Vec::new(), vec![SearchDegradation::rerank_model_absent()]);
 
         let json = report.data_json();
 
@@ -16844,7 +16872,7 @@ mod tests {
 
     #[test]
     fn rerank_model_unavailable_degradation_is_stable() {
-        let degraded = SearchDegradation::rerank_model_unavailable("offline fixture");
+        let degraded = SearchDegradation::rerank_model_absent();
 
         assert_eq!(degraded.code, "rerank_model_unavailable");
         assert_eq!(degraded.severity, "low");
@@ -16856,13 +16884,31 @@ mod tests {
     }
 
     #[test]
-    fn permanent_rerank_advisory_is_omitted_from_default_degraded_prose() {
-        let mut report = rerank_test_report(
+    fn transient_reranker_load_failure_remains_in_query_degraded() {
+        let report = rerank_test_report(
             Vec::new(),
             vec![SearchDegradation::rerank_model_unavailable(
-                "No available reranker model is registered for this workspace.",
+                "The registered local reranker could not be loaded; retry the query or inspect local model status.",
             )],
         );
+
+        let json = report.data_json();
+
+        assert_eq!(json["degraded"].as_array().map(Vec::len), Some(1));
+        assert_eq!(json["degraded"][0]["code"], "rerank_model_unavailable");
+        assert_eq!(json["degraded"][0]["permanent"], false);
+        assert_eq!(json["rerank"]["permanent"], false);
+        assert_eq!(json["rerank"]["advisory"]["permanent"], false);
+        assert_eq!(
+            json["rerank"]["advisory"]["resolution"],
+            "retry_or_inspect_local_registry"
+        );
+    }
+
+    #[test]
+    fn permanent_rerank_advisory_is_omitted_from_default_degraded_prose() {
+        let mut report =
+            rerank_test_report(Vec::new(), vec![SearchDegradation::rerank_model_absent()]);
         report
             .degraded
             .push(SearchDegradation::stale_index(Some(2), Some(1)));

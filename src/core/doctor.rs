@@ -50,6 +50,7 @@ use super::build_cli_runtime;
 use super::curate::stable_workspace_id;
 use super::index::{DEFAULT_INDEX_SUBDIR, IndexHealth, IndexStatusOptions, get_index_status};
 use super::qos::{QosLaneSummary, summarize_qos_lane_registry};
+use super::search::verify_registered_reranker_loadable;
 use super::singleflight::singleflight_posture_report;
 use super::status::{
     FlightRecorderStatusReport, default_workspace_path, gather_flight_recorder_status,
@@ -270,6 +271,11 @@ impl CheckResult {
     #[must_use]
     pub fn is_topline_healthy(&self) -> bool {
         self.tier == CheckTier::Advisory || self.severity.is_healthy()
+    }
+
+    #[must_use]
+    pub fn is_permanent_capability_gap(&self) -> bool {
+        self.name == "reranker_posture" && self.message.starts_with("Permanent capability gap:")
     }
 }
 
@@ -2989,6 +2995,19 @@ fn reranker_posture_check_result(available: Option<bool>, reason: Option<&str>) 
     }
 }
 
+fn reranker_transient_failure_check(reason: &'static str) -> CheckResult {
+    CheckResult {
+        name: "reranker_posture",
+        severity: CheckSeverity::Warning,
+        message: format!(
+            "Transient reranker failure: {reason} Search uses fusion-only ranking for affected queries; retry or inspect with `ee model status --workspace . --json`."
+        ),
+        error_code: None,
+        repair: None,
+        tier: CheckTier::Advisory,
+    }
+}
+
 /// Read-only doctor check for the local reranker registry posture.
 fn check_reranker_posture(workspace_path: Option<&Path>) -> CheckResult {
     let Some(workspace_path) = workspace_path else {
@@ -3001,26 +3020,51 @@ fn check_reranker_posture(workspace_path: Option<&Path>) -> CheckResult {
 
     let connection = match DbConnection::open_file_read_only(&database_path) {
         Ok(connection) => connection,
-        Err(error) => {
-            return reranker_posture_check_result(
-                None,
-                Some(&format!("model registry read failed: {error}")),
+        Err(_error) => {
+            tracing::warn!(
+                target: "ee::doctor::reranker",
+                event = "reranker_registry_open_failed",
+            );
+            return reranker_transient_failure_check(
+                "the local model registry could not be opened.",
             );
         }
     };
     let workspace_id = stable_workspace_id(workspace_path);
     match connection.list_model_registry_entries(&workspace_id) {
-        Ok(entries) => reranker_posture_check_result(
-            Some(entries.iter().any(|entry| {
+        Ok(mut entries) => {
+            entries.retain(|entry| {
                 entry.purpose == ModelPurpose::Reranker
                     && entry.status == ModelRegistryStatus::Available
-            })),
-            None,
-        ),
-        Err(error) => reranker_posture_check_result(
-            None,
-            Some(&format!("model registry query failed: {error}")),
-        ),
+            });
+            entries.sort_by(|left, right| {
+                left.model_name
+                    .cmp(&right.model_name)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            if entries.is_empty() {
+                return reranker_posture_check_result(Some(false), None);
+            }
+            for entry in &entries {
+                if verify_registered_reranker_loadable(entry).is_ok() {
+                    return reranker_posture_check_result(Some(true), None);
+                }
+            }
+            tracing::warn!(
+                target: "ee::doctor::reranker",
+                event = "registered_reranker_load_failed",
+            );
+            reranker_transient_failure_check(
+                "registered local reranker artifacts could not be loaded.",
+            )
+        }
+        Err(_error) => {
+            tracing::warn!(
+                target: "ee::doctor::reranker",
+                event = "reranker_registry_query_failed",
+            );
+            reranker_transient_failure_check("the local model registry could not be queried.")
+        }
     }
 }
 
@@ -4351,11 +4395,24 @@ mod tests {
     fn reranker_posture_available_and_uninspectable_are_non_blocking() -> TestResult {
         let available = reranker_posture_check_result(Some(true), None);
         let unknown = reranker_posture_check_result(None, Some("no workspace path"));
+        let transient = reranker_transient_failure_check(
+            "registered local reranker artifacts could not be loaded.",
+        );
 
         ensure(available.severity, CheckSeverity::Ok, "available severity")?;
         ensure(available.tier, CheckTier::Advisory, "available tier")?;
         ensure(unknown.severity, CheckSeverity::Ok, "unknown severity")?;
         ensure(unknown.tier, CheckTier::Advisory, "unknown tier")?;
+        ensure(
+            transient.severity,
+            CheckSeverity::Warning,
+            "transient severity",
+        )?;
+        ensure(
+            transient.is_permanent_capability_gap(),
+            false,
+            "transient failure is not a permanent gap",
+        )?;
         ensure(
             unknown.message.contains("could not be inspected"),
             true,

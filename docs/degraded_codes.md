@@ -13125,6 +13125,11 @@ and human degradation prose.
 automatically; `ee doctor` reports that an operator-supplied artifact is
 required rather than inventing a placeholder path.
 
+Registered-artifact registry or load failures are transient uses of the same
+code. They remain in the affected query's `degraded[]` with
+`permanent: false`; doctor reports the transient load failure separately and
+does not classify it as a permanent capability gap.
+
 **Fixture.** [`tests/fixtures/failure_modes/rerank_model_unavailable.json`](../tests/fixtures/failure_modes/rerank_model_unavailable.json)
 
 ---

@@ -6,13 +6,12 @@
     "epic_letter": "RERANK"
   },
   "surfaces": [
-    "search",
-    "doctor"
+    "search"
   ],
   "severity": "low",
   "repair_present": false,
   "trigger": {
-    "description": "The search pipeline is in rerank auto mode, semantic retrieval is available, but no loadable local cross-encoder reranker can be resolved from the workspace model registry/cache.",
+    "description": "The search pipeline is in rerank auto mode, semantic retrieval is available, but the workspace has no available local cross-encoder reranker registry entry.",
     "setup_commands": [
       "ee init --workspace .",
       "ee remember 'Rerank fixture memory about release verification.' --workspace . --level semantic --kind fact --json"

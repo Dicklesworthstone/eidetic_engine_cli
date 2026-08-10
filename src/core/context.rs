@@ -11482,8 +11482,8 @@ mod tests {
     use crate::core::memory_drift::{MemoryDriftSelectionHint, MemoryDriftStatus};
     use crate::core::profile::{OperatingProfile, RuntimeProfileReport};
     use crate::core::search::{
-        PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchHit, SearchReport,
-        SearchStatus,
+        PERFORMANCE_EXPLAIN_SCHEMA_V1, RERANK_MODEL_UNAVAILABLE_ADVISORY, ScoreSource,
+        SearchDegradation, SearchHit, SearchReport, SearchStatus,
     };
     use crate::db::read_pool::{
         AcquireWaitStats, PoolConfig, PoolStats, READ_POOL_UNDERSIZED_P99_THRESHOLD,
@@ -11835,7 +11835,7 @@ mod tests {
                 SearchDegradation {
                     code: "rerank_model_unavailable".to_owned(),
                     severity: "low".to_owned(),
-                    message: "Fusion-only ranking is active.".to_owned(),
+                    message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_owned(),
                     repair: None,
                 },
                 SearchDegradation {

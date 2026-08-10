@@ -543,7 +543,10 @@ run_degradation_lane() {
         and .data.rerank.degradedCode == "rerank_model_unavailable"
         and .data.rerank.rerankScoreCount == 0
         and all(.data.results[]; .scoreKind != "reranked" and (has("rerankScore") | not))
-        and any(.data.degraded[]; .code == "rerank_model_unavailable")
+        and .data.rerank.advisory.permanent == true
+        and .data.rerank.advisory.repair == null
+        and .data.rerank.advisory.resolution == "operator_supplied_artifact_required"
+        and all(.data.degraded[]; .code != "rerank_model_unavailable")
     ' "missing model degrades explicitly to fusion-only"
     initial_order="$(jq -c '[.data.results[].memoryId]' "${LAST_STDOUT_FILE}" 2>/dev/null || printf '[]')"
 
@@ -564,6 +567,8 @@ run_degradation_lane() {
         .success == true
         and .data.rerank.mode == "fusion_only_degraded"
         and .data.rerank.degradedCode == "rerank_model_unavailable"
+        and .data.rerank.advisory.permanent == true
+        and .data.rerank.advisory.repair == null
         and .data.rerank.rerankScoreCount == 0
         and all(.data.results[]; (has("rerankScore") | not))
     ' "rejected corrupt artifact preserves successful fusion-only fallback"
@@ -739,6 +744,8 @@ run_model_backed_lane() {
         and .data.rerank.degradedCode == "rerank_model_unavailable"
         and .data.rerank.rerankScoreCount == 0
         and all(.data.results[]; .scoreKind != "reranked" and (has("rerankScore") | not))
+        and .data.rerank.advisory.permanent == false
+        and .data.rerank.advisory.resolution == "retry_or_inspect_local_registry"
         and any(.data.degraded[]; .code == "rerank_model_unavailable")
     ' "missing registered model degrades explicitly to fusion-only"
     corrupt_order="$(jq -c '[.data.results[].content]' "${LAST_STDOUT_FILE}" 2>/dev/null || printf '[]')"

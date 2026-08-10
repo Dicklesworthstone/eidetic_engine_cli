@@ -661,7 +661,8 @@ case "${rerank_mode}" in
     fusion_only_degraded)
         assert_jq_file "${hybrid_file}" '.data.rerank.available == false' "degraded rerank reports unavailable"
         assert_jq_file "${hybrid_file}" '.data.rerank.degradedCode == "rerank_model_unavailable"' "degraded rerank names unavailable model"
-        assert_jq_file "${hybrid_file}" '[.data.degraded[]? | select(.code == "rerank_model_unavailable")] | length >= 1' "degraded rerank emits degradation"
+        assert_jq_file "${hybrid_file}" '.data.rerank.advisory.permanent == true and .data.rerank.advisory.repair == null and .data.rerank.advisory.resolution == "operator_supplied_artifact_required"' "missing reranker is a permanent structured advisory"
+        assert_jq_file "${hybrid_file}" '[.data.degraded[]? | select(.code == "rerank_model_unavailable")] | length == 0' "permanent reranker gap stays out of query degradations"
         assert_jq_file "${hybrid_file}" '((.data.results // []) | map(select(.scoreKind == "reranked" or has("rerankScore"))) | length) == 0' "fusion-only degraded omits rerankScore"
         run_ee_json_env "rerank_degraded_replay" "${HASH_ENV[@]}" -- \
             search "${RERANK_QUERY}" --workspace "${RERANK_WS}" --limit 3 --relevance-floor 0 --json
@@ -670,6 +671,7 @@ case "${rerank_mode}" in
         first_order="$(jq -c '(.data.results // []) | map(.memoryId // .memory_id // .docId // "")' "${hybrid_file}")"
         replay_order="$(jq -c '(.data.results // []) | map(.memoryId // .memory_id // .docId // "")' "${replay_file}")"
         assert_equal "${replay_order}" "${first_order}" "fusion-only degraded replay preserves order"
+        assert_jq_file "${replay_file}" '.data.rerank.advisory.permanent == true and .data.rerank.advisory.repair == null' "permanent reranker advisory is deterministic"
         observe_search_order "rerank_degraded_replay" "${replay_file}" "${RERANK_TARGET_ID}"
         ;;
     fusion_only)

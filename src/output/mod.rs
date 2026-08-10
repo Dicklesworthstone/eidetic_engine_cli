@@ -5787,14 +5787,14 @@ fn render_doctor_advisories_json(
         .collect::<Vec<_>>();
     parent.field_array_of_objects("advisories", &advisories, |obj, check| {
         render_doctor_check_json(obj, check, include_message, include_verbose_details);
-        obj.field_bool("permanent", doctor_advisory_is_permanent(check));
+        if doctor_advisory_is_permanent(check) {
+            obj.field_bool("permanent", true);
+        }
     });
 }
 
 fn doctor_advisory_is_permanent(check: &CheckResult) -> bool {
-    check.name == "reranker_posture"
-        && check.tier == CheckTier::Advisory
-        && !check.severity.is_healthy()
+    check.tier == CheckTier::Advisory && check.is_permanent_capability_gap()
 }
 
 fn render_doctor_check_json(
@@ -24197,9 +24197,9 @@ mod tests {
             "concise permanent marker",
         )?;
         ensure_equal(
-            &full_value["data"]["advisories"][0]["permanent"],
-            &serde_json::json!(false),
-            "transient advisory marker",
+            &full_value["data"]["advisories"][0].get("permanent"),
+            &None,
+            "transient advisory has no permanent marker",
         )?;
         ensure_equal(
             &full_value["data"]["advisories"][1]["permanent"],

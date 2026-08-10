@@ -1,6 +1,7 @@
 use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::core::search::{
-    ScoreSource, SearchDegradation, SearchHit, SearchReport, SearchSourceMode, SearchStatus,
+    RERANK_MODEL_UNAVAILABLE_ADVISORY, ScoreSource, SearchDegradation, SearchHit, SearchReport,
+    SearchSourceMode, SearchStatus,
 };
 use ee::models::{EmbedBackend, MemoryScope, MemoryScopeStats};
 
@@ -44,13 +45,13 @@ fn repeated_permanent_rerank_rows_collapse_into_one_structured_posture_advisory(
         SearchDegradation {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
-            message: "No available reranker model is registered for this workspace.".to_string(),
+            message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
             repair: None,
         },
         SearchDegradation {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
-            message: "Registered reranker artifact is cached but incomplete.".to_string(),
+            message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
             repair: None,
         },
     ]);
@@ -81,4 +82,27 @@ fn repeated_permanent_rerank_rows_collapse_into_one_structured_posture_advisory(
         0,
         "permanent capability posture must not repeat in per-query degraded output"
     );
+}
+
+#[test]
+fn transient_reranker_load_failure_remains_a_query_degradation() {
+    let report = empty_search_report(vec![SearchDegradation {
+        code: "rerank_model_unavailable".to_string(),
+        severity: "low".to_string(),
+        message: "The registered local reranker could not be loaded; retry the query or inspect local model status."
+            .to_string(),
+        repair: None,
+    }]);
+
+    let json = report.data_json();
+
+    assert_eq!(json["rerank"]["permanent"], false);
+    assert_eq!(json["rerank"]["advisory"]["permanent"], false);
+    assert_eq!(
+        json["rerank"]["advisory"]["resolution"],
+        "retry_or_inspect_local_registry"
+    );
+    assert_eq!(json["degraded"].as_array().map(Vec::len), Some(1));
+    assert_eq!(json["degraded"][0]["code"], "rerank_model_unavailable");
+    assert_eq!(json["degraded"][0]["permanent"], false);
 }
