@@ -1,0 +1,1 @@
+{"dbCount": -1, "doctorOk": false, "expectedState": "db_unhealthy", "expectedCandidate": "none", "note": "no repair direction is safe without DB integrity evidence"}

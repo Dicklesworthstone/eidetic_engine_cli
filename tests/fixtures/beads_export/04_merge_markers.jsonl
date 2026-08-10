@@ -1,0 +1,6 @@
+{"id":"a","title":"one"}
+<<<<<<< HEAD
+{"id":"b","title":"two"}
+=======
+{"id":"b","title":"two-theirs"}
+>>>>>>> theirs

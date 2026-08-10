@@ -1187,6 +1187,7 @@ run_stage "Global Lane E2E (bd-1bfwa.4)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e
 # Fixture-driven: safe-repair candidacy, destructive-export refusal, merge
 # markers, unhealthy DB, transient partial write. No live tracker touched.
 run_stage "Beads Export Repair Self-Test (bd-2p297.1)" "./scripts/beads_export_repair.sh --self-test"
+run_stage "Beads Export Fixture Suite (bd-2p297.3)" "./scripts/beads_export_repair.sh --fixture-suite tests/fixtures/beads_export"
 
 # Gate 6.127: Ergonomics real-binary E2E (bd-1et0v.22). No-Cargo:
 # proves `ee context` remains an alias for canonical `ee pack` while carrying

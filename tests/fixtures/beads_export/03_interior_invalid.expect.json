@@ -1,0 +1,1 @@
+{"dbCount": 3, "doctorOk": true, "expectedState": "invalid_interior_lines", "expectedCandidate": "none", "note": "valid record after the invalid line; interior corruption fails closed"}

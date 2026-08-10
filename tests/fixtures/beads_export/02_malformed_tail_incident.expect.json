@@ -1,0 +1,1 @@
+{"dbCount": 3, "doctorOk": true, "expectedState": "invalid_trailing_line", "expectedCandidate": "forced_export", "note": "the exact bd-2p297 incident shape: '}]}' trailing line after N valid records with DB count matching"}

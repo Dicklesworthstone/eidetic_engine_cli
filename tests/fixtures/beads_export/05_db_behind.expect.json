@@ -1,0 +1,1 @@
+{"dbCount": 0, "doctorOk": true, "expectedState": "count_divergence_db_behind", "expectedCandidate": "none", "note": "healthy JSONL next to an empty DB: forced export would destroy the tracker; repair direction is import"}

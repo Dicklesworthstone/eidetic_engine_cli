@@ -1,0 +1,1 @@
+{"dbCount": 40, "doctorOk": true, "expectedState": "count_divergence_jsonl_behind", "expectedCandidate": "none", "note": "valid records trail the DB beyond tail-repair tolerance; ambiguous"}
