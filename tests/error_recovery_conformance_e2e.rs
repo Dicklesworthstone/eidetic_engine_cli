@@ -351,7 +351,7 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
     ])?;
     let orient_json = stdout_json(&orient, "orient storeless leaf")?;
     let discovery = orient_json
-        .pointer("/storeDiscovery")
+        .pointer("/data/storeDiscovery")
         .ok_or("orient storeless leaf: missing storeDiscovery block")?;
     ensure(
         discovery["storeEmpty"] == serde_json::json!(true)
@@ -361,13 +361,65 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
     let nearby = discovery["nearbyStores"]
         .as_array()
         .ok_or("orient storeless leaf: nearbyStores missing")?;
+    let best = nearby
+        .first()
+        .ok_or("orient nearbyStores must include the populated store")?;
+    let best_path = string_at(best, "/workspaceRoot", "orient best nearby store")?;
+    let best_documents = best["documents"]
+        .as_u64()
+        .ok_or("orient best nearby store: documents must be an integer")?;
+    let best_last_write = string_at(best, "/lastWrite", "orient best nearby store")?;
     ensure(
-        nearby.iter().any(|store| {
-            store["workspaceRoot"]
-                .as_str()
-                .is_some_and(|root| root.contains("nearby_store_root_sfjvq"))
-        }),
-        format!("orient nearbyStores must include the populated store, got: {nearby:?}"),
+        best_path.contains("nearby_store_root_sfjvq"),
+        format!("orient best nearby store must be the populated store, got: {best:?}"),
+    )?;
+    ensure(
+        best_documents > 0,
+        format!("orient best nearby store must report documents > 0, got: {best:?}"),
+    )?;
+    ensure(
+        !best_last_write.is_empty(),
+        format!("orient best nearby store must report lastWrite, got: {best:?}"),
+    )?;
+
+    let first_next_command = string_at(
+        &orient_json,
+        "/data/nextCommands/0",
+        "orient retargeted next command",
+    )?;
+    ensure(
+        first_next_command.starts_with("ee pack ")
+            && first_next_command.contains("--workspace")
+            && first_next_command.contains(best_path),
+        format!(
+            "orient nextCommands[0] must retarget the pack command to the best candidate; \
+             best={best_path:?}, command={first_next_command:?}"
+        ),
+    )?;
+
+    let orient_human = run_ee(&[
+        "--workspace".to_owned(),
+        leaf_str,
+        "orient".to_owned(),
+        "--fast".to_owned(),
+    ])?;
+    ensure(
+        orient_human.status.success(),
+        format!(
+            "human orient failed: {}",
+            String::from_utf8_lossy(&orient_human.stderr)
+        ),
+    )?;
+    let human = String::from_utf8(orient_human.stdout)
+        .map_err(|error| format!("human orient stdout was not UTF-8: {error}"))?;
+    ensure(
+        human.contains(best_path)
+            && human.contains(&format!("{best_documents} docs"))
+            && human.contains(&format!("last write {best_last_write}")),
+        format!(
+            "human orient must print nearby path/documents/last-write; \
+             path={best_path:?}, documents={best_documents}, lastWrite={best_last_write:?}\n{human}"
+        ),
     )?;
     Ok(())
 }
