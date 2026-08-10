@@ -1244,8 +1244,22 @@ ee outcome <candidate-id> --target-type candidate --signal negative --reason "To
 | `ee graph centrality-refresh [--dry-run]` | Refresh PageRank / betweenness metrics |
 | `ee graph feature-enrichment [--dry-run]` | Compute bounded graph-derived retrieval features |
 | `ee graph suggest-links [--limit N] [--min-score S] [--propose]` | Typed link prediction (related/supports/contradicts) with blended, explained scoring; `--propose` writes curation candidates, never links directly (`ee.graph.suggest_links.v1`) |
+| `ee graph diff [--graph <family>] [--from ID] [--to ID] [--since RFC3339]` | Temporal structural diff between two persisted snapshots: content-hash-keyed add/remove sets, fingerprint-matched community deltas, persisted-centrality movers (`ee.graph.diff.v1`) |
 | `ee insights [--section <name>] [--explain <id>] --json` | Inspect graph-derived findings and memory-centric topology |
 | `ee proximity <memory-a> <memory-b> --json` | Explain Gomory-Hu min-cut proximity between two memory nodes |
+
+### Conflicts
+
+| Command | Purpose |
+|---|---|
+| `ee conflict list` / `explain <id>` / `cluster` | Read-only ranked contradiction surface: conflicting pairs with both bodies + the preferred side, and k-truss/Louvain clusters (`ee.conflict.v1`) |
+| `ee conflict resolve <a> <b> --verb supersede\|reject-one\|scope-split\|both-valid [--keep ID] [--reason "..."] [--apply]` | Audited resolution against the LIVE surface; dry-run plan by default. Every mutation maps onto existing audited atoms and the rationale persists as a `kind=decision` memory (`ee.conflict.resolve.v1`) |
+
+Resolution is terminal: a tombstoned side (superseded or rejected) drops the
+pair from the actionable surface, and re-running against a moved surface
+refuses with `conflict_resolve_stale_surface` plus the focused live state.
+See [`docs/agent-ux/graph-intelligence.md`](docs/agent-ux/graph-intelligence.md)
+for the full densification and resolution loop.
 
 ### Index
 
