@@ -288,19 +288,21 @@ fn orient_fast_items_from_pack(
         && let Ok(paths) = crate::core::global_store::default_global_store_paths_from_env()
         && paths.database_path.is_file()
     {
-        let global_connection = DbConnection::open_file_read_only(&paths.database_path)
-            .map_err(|error| format!("Relevant global memory metadata could not be opened: {error}"))?;
-        if global_connection
-            .needs_migration()
-            .map_err(|error| format!("Relevant global memory migration state could not be inspected: {error}"))?
-        {
-            return Err(
-                "Relevant global memory metadata requires a database migration".to_owned(),
-            );
+        let global_connection =
+            DbConnection::open_file_read_only(&paths.database_path).map_err(|error| {
+                format!("Relevant global memory metadata could not be opened: {error}")
+            })?;
+        if global_connection.needs_migration().map_err(|error| {
+            format!("Relevant global memory migration state could not be inspected: {error}")
+        })? {
+            return Err("Relevant global memory metadata requires a database migration".to_owned());
         }
-        let global_memories = global_connection
-            .get_memories_batch(&missing_ids)
-            .map_err(|error| format!("Relevant global memory metadata could not be loaded: {error}"))?;
+        let global_memories =
+            global_connection
+                .get_memories_batch(&missing_ids)
+                .map_err(|error| {
+                    format!("Relevant global memory metadata could not be loaded: {error}")
+                })?;
         let mut global_tags = global_connection
             .get_memory_tags_batch(&missing_ids)
             .map_err(|error| format!("Relevant global memory tags could not be loaded: {error}"))?;
@@ -559,8 +561,8 @@ mod tests {
     use super::*;
     use crate::core::decide::{DecideRecordOptions, decide_record};
     use crate::core::focus::{FocusScope, FocusSetOptions, set_focus};
-    use crate::core::init::{InitOptions, init_workspace};
     use crate::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
+    use crate::core::init::{InitOptions, init_workspace};
     use crate::core::memory::{RememberMemoryOptions, remember_memory};
     use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
     use crate::models::{MemoryId, WorkspaceId};
