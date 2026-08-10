@@ -563,7 +563,10 @@ mod tests {
     use crate::core::focus::{FocusScope, FocusSetOptions, set_focus};
     use crate::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
     use crate::core::init::{InitOptions, init_workspace};
-    use crate::core::memory::{RememberMemoryOptions, remember_memory};
+    use crate::core::memory::{
+        RememberMemoryOptions, RememberOutcome, RememberWriteControls,
+        remember_global_memory_with_controls, remember_memory,
+    };
     use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
     use crate::models::{MemoryId, WorkspaceId};
 
@@ -812,6 +815,147 @@ mod tests {
             return Err("secret-shaped content leaked through fast content".to_owned());
         }
         Ok(())
+    }
+
+    #[test]
+    fn orient_fast_content_hydrates_isolated_global_store() -> TestResult {
+        const CHILD_MARKER: &str = "EE_ORIENT_GLOBAL_STORE_TEST_CHILD";
+        const TEST_ROOT: &str = "EE_ORIENT_GLOBAL_STORE_TEST_ROOT";
+
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let root = std::env::var_os(TEST_ROOT)
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| "isolated global-store child root is missing".to_owned())?;
+            return orient_fast_content_hydrates_isolated_global_store_child(&root);
+        }
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let output =
+            std::process::Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
+                .arg("--exact")
+                .arg("core::orient::tests::orient_fast_content_hydrates_isolated_global_store")
+                .arg("--nocapture")
+                .arg("--test-threads=1")
+                .env(CHILD_MARKER, "1")
+                .env(TEST_ROOT, temp.path())
+                .env("XDG_DATA_HOME", temp.path())
+                .env_remove("HOME")
+                .output()
+                .map_err(|error| format!("launch isolated global-store child: {error}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(format!(
+            "isolated global-store child failed with {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+
+    fn orient_fast_content_hydrates_isolated_global_store_child(root: &Path) -> TestResult {
+        let paths = crate::core::global_store::default_global_store_paths_from_env()
+            .map_err(|error| format!("resolve isolated global store: {error}"))?;
+        ensure(
+            paths.root.starts_with(root),
+            format!(
+                "global store escaped isolated root: root={}, store={}",
+                root.display(),
+                paths.root.display()
+            ),
+        )?;
+
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace)
+            .map_err(|error| format!("create isolated workspace: {error}"))?;
+        remember_fixture(
+            &workspace,
+            "Local workspace decoy about garden irrigation.",
+            "orient-local-decoy",
+            None,
+        )?;
+
+        let global_outcome = remember_global_memory_with_controls(
+            &RememberMemoryOptions {
+                workspace_path: &workspace,
+                database_path: None,
+                content: "Hermetic quasar checksum sentinel applies across workspaces.",
+                workflow_id: None,
+                level: "procedural",
+                kind: "rule",
+                tags: Some("orient-global-proof"),
+                confidence: 0.9,
+                source: None,
+                valid_from: None,
+                valid_to: None,
+                dry_run: false,
+                auto_link: false,
+                propose_candidates: false,
+                allow_secret_mention: false,
+            },
+            &RememberWriteControls::default(),
+        )
+        .map_err(|error| format!("remember isolated global memory: {error:?}"))?;
+        let global_id = match global_outcome {
+            RememberOutcome::Created(report) => report.memory_id.to_string(),
+            other => return Err(format!("global memory was not created: {other:?}")),
+        };
+
+        let database_path = workspace.join(".ee").join("ee.db");
+        let index_report = rebuild_index(&IndexRebuildOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database_path),
+            index_dir: None,
+            dry_run: false,
+        })
+        .map_err(|error| format!("rebuild isolated workspace index: {error:?}"))?;
+        ensure_equal(
+            &index_report.status,
+            &IndexRebuildStatus::Success,
+            "isolated workspace index status",
+        )?;
+
+        let report = orient_fast_content(&OrientFastContentOptions {
+            workspace_path: &workspace,
+            database_path: None,
+            index_dir: None,
+            task: "quasar checksum sentinel",
+            max_tokens: 4_000,
+            candidate_pool: 100,
+        });
+        ensure(
+            report.posture == "ready" && report.issues.is_empty(),
+            format!("isolated global fast content was not ready: {report:?}"),
+        )?;
+        let global_item = report
+            .relevant
+            .iter()
+            .find(|item| item.id == global_id)
+            .ok_or_else(|| format!("global item missing from relevant content: {report:?}"))?;
+        ensure(
+            global_item
+                .snippet
+                .contains("Hermetic quasar checksum sentinel"),
+            format!("global content missing from item: {global_item:?}"),
+        )?;
+        ensure(
+            global_item
+                .tags
+                .iter()
+                .any(|tag| tag == GLOBAL_MEMORY_SCOPE_TAG),
+            format!("global scope tag missing from item: {global_item:?}"),
+        )?;
+        ensure(
+            global_item
+                .provenance
+                .iter()
+                .any(|source| source.note.contains("cross_shard_read")),
+            format!("global provenance lane missing from item: {global_item:?}"),
+        )?;
+        ensure(
+            !report.recent.iter().any(|item| item.id == global_id),
+            format!("global item leaked into workspace-recency section: {report:?}"),
+        )
     }
 
     #[test]
