@@ -38,6 +38,67 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  daemon-search-slo:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: daemon search 10k SLO (stable runner)
+    runs-on:
+      group: ee-perf
+      labels: [self-hosted, linux, x64]
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+      EE_EMBED_DOWNLOAD: "off"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Checkout Franken stack path dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          project_root="$GITHUB_WORKSPACE/.ci/franken-stack/projects"
+          ./scripts/checkout-franken-stack.sh "$project_root"
+          CARGO_PATH_ROOT=".ci/franken-stack/projects" perl -0pi -e '
+            s{/data/projects/(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+            s{\.\./(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+          ' Cargo.toml
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Verify designated performance host
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = "Linux"
+          command -v jq
+          command -v perl
+          uname -a
+          lscpu
+          df -T "$RUNNER_TEMP"
+
+      - name: Enforce cold and warm search p50 budgets
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/ee-daemon-search-target
+          EE_BENCH_ARTIFACT_DIR: ${{ runner.temp }}/ee-daemon-search-artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ee-daemon-search-artifacts"
+          ./scripts/bench.sh --profile daemon-search-slo --json \
+            | tee "$RUNNER_TEMP/ee-daemon-search-artifacts/ee-perf.v1.json"
+
+      - name: Upload daemon search SLO evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daemon-search-slo-${{ github.sha }}
+          path: ${{ runner.temp }}/ee-daemon-search-artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
   verify:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest

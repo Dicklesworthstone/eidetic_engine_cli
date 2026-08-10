@@ -8,6 +8,7 @@ set -eu
 #
 # Usage:
 #   ./scripts/bench.sh --profile ci-smoke --json
+#   ./scripts/bench.sh --profile daemon-search-slo --json
 #   ./scripts/bench.sh --profile nightly
 #   ./scripts/bench.sh --profile stress --check-regression
 #   ./scripts/bench.sh --profile auto_enroll --json
@@ -26,6 +27,7 @@ JSON_OUTPUT=false
 CHECK_REGRESSION=false
 LIST_PROFILES=false
 AUTO_ENROLL_BASELINE_ONLY=false
+BUDGET_MODE="advisory"
 
 usage() {
     sed -n '3,18p' "$0" | sed 's/^# //' | sed 's/^#//'
@@ -89,7 +91,7 @@ if [ ! -f "$BUDGETS_FILE" ]; then
 fi
 
 if [ "$LIST_PROFILES" = "true" ]; then
-    printf '%s\n' "ci-smoke" "nightly" "stress" "auto_enroll" "auto_enroll_idle_24h"
+    printf '%s\n' "ci-smoke" "daemon-search-slo" "nightly" "stress" "auto_enroll" "auto_enroll_idle_24h"
     exit 0
 fi
 
@@ -100,6 +102,14 @@ case "$PROFILE" in
         PROFILE_CLASS="normal_ci"
         WORKLOAD_TIER="small"
         RELEASE_BLOCKING=false
+        ;;
+    daemon-search-slo)
+        BENCHMARKS=""
+        BENCH_ARGS=""
+        PROFILE_CLASS="stable_self_hosted_linux_x64"
+        WORKLOAD_TIER="10k_search"
+        RELEASE_BLOCKING=true
+        BUDGET_MODE="hard"
         ;;
     nightly)
         BENCHMARKS="remember search context tiered_recall pack_size why outcome status workspace_init audit_query index_rebuild concurrent_writes import_cass link graph_pagerank graph_ppr graph_louvain graph_ktruss graph_gomory_hu graph_hits graph_full_stack curate_candidates graph_refresh_cooperative"
@@ -135,7 +145,7 @@ case "$PROFILE" in
         ;;
     *)
         echo "Unknown benchmark profile: $PROFILE" >&2
-        echo "Known profiles: ci-smoke, nightly, stress, auto_enroll, auto_enroll_idle_24h" >&2
+        echo "Known profiles: ci-smoke, daemon-search-slo, nightly, stress, auto_enroll, auto_enroll_idle_24h" >&2
         exit 1
         ;;
 esac
@@ -155,12 +165,19 @@ if [ "$AUTO_ENROLL_BASELINE_ONLY" = "true" ]; then
     echo "[*] Loading auto-enroll performance baseline contract..." >&2
 else
     echo "[*] Building benchmarks..." >&2
-    if [ "$PROFILE" = "ci-smoke" ]; then
-        cargo build --release --bench status >&2
-    else
-        cargo build --release --benches >&2
-        cargo build --release --bin ee >&2
-    fi
+    case "$PROFILE" in
+        ci-smoke)
+            cargo build --release --bench status >&2
+            ;;
+        daemon-search-slo)
+            cargo build --release --bench daemon_round_trip >&2
+            cargo build --release --bin ee >&2
+            ;;
+        *)
+            cargo build --release --benches >&2
+            cargo build --release --bin ee >&2
+            ;;
+    esac
 
     if [ "$PROFILE" = "ci-smoke" ]; then
         echo "[*] Running ci-smoke benchmark profile..." >&2
@@ -185,6 +202,12 @@ append_result() {
     regression_status="${8:-not_checked}"
     allocation_count="${9:-null}"
 
+    if [ "$PROFILE" = "daemon-search-slo" ]; then
+        baseline_ref=null
+    else
+        baseline_ref="{\"file\":\"$BASELINE_FILE\",\"operation\":\"$key\"}"
+    fi
+
     if [ -n "$RESULTS" ]; then
         RESULTS="$RESULTS,"
     fi
@@ -205,11 +228,8 @@ append_result() {
       \"index_size_bytes\": null,
       \"rows_per_sec\": $rows_per_sec,
       \"regression_status\": \"$regression_status\",
-      \"baseline_ref\": {
-        \"file\": \"$BASELINE_FILE\",
-        \"operation\": \"$key\"
-      },
-      \"budget_mode\": \"advisory\"
+      \"baseline_ref\": $baseline_ref,
+      \"budget_mode\": \"$BUDGET_MODE\"
     }"
 
     append_bench_iteration_event "$key" "$status" "$p50_ms" "$p95_ms" "$p99_ms" "$max_ms" "$rows_per_sec" "$regression_status"
@@ -376,6 +396,10 @@ json_timing_ms() {
 }
 
 workload_json() {
+    if [ "$PROFILE" = "daemon-search-slo" ]; then
+        printf '%s' '{"schema":"ee.perf.workload_ref.v1","manifest":"benches/daemon_round_trip.rs","tier":"10k_search","ci_suitability":"stable_self_hosted_linux_x64","memory_count":10000,"agent_count":1}'
+        return
+    fi
     if [ "$AUTO_ENROLL_BASELINE_ONLY" = "true" ]; then
         printf '{"schema":"ee.perf.workload_ref.v1","manifest":"benches/baselines/auto_enroll_perf_v0.json","tier":"%s","ci_suitability":"contract","memory_count":null,"agent_count":null}' "$WORKLOAD_TIER"
         return
@@ -510,6 +534,68 @@ run_criterion_bench() {
         echo "[-] $bench: FAILED" >&2
         FAILED=true
     fi
+}
+
+run_daemon_search_slo() {
+    markers_file="$ARTIFACT_DIR/daemon-search-slo.markers"
+    echo "" >&2
+    echo "[*] Benchmark: daemon-search-slo" >&2
+    echo "    fixture: 10000 documents, prebuilt before measurement" >&2
+    echo "    backend: neural_local required; downloads disabled" >&2
+
+    if output=$(EE_EMBED_DOWNLOAD=off cargo bench --bench daemon_round_trip -- --warm-search-gate 2>&1); then
+        status=0
+    else
+        status=$?
+    fi
+    printf '%s\n' "$output" >"$markers_file"
+    printf '%s\n' "$output" >&2
+
+    marker_number() {
+        marker_key="$1"
+        printf '%s\n' "$output" \
+            | sed -n "s/^${marker_key}=\([0-9][0-9.]*\)$/\1/p" \
+            | tail -n 1
+    }
+    marker_text() {
+        marker_key="$1"
+        printf '%s\n' "$output" \
+            | sed -n "s/^${marker_key}=\([^[:space:]][^[:space:]]*\)$/\1/p" \
+            | tail -n 1
+    }
+
+    cold_p50_ms=$(marker_number "ee_search_cli_cold_10k_p50_ms")
+    warm_p50_ms=$(marker_number "ee_search_daemon_warm_10k_p50_ms")
+    sample_count=$(marker_number "ee_search_daemon_10k_samples")
+    backend=$(marker_text "ee_search_daemon_10k_backend")
+    parity=$(marker_text "ee_search_daemon_10k_result_parity")
+    cold_within_budget=$(awk -v value="${cold_p50_ms:-999999}" 'BEGIN { print (value < 1500.0) ? "yes" : "no" }')
+    warm_within_budget=$(awk -v value="${warm_p50_ms:-999999}" 'BEGIN { print (value < 500.0) ? "yes" : "no" }')
+
+    if [ "$status" -eq 0 ] \
+        && [ -n "$cold_p50_ms" ] \
+        && [ -n "$warm_p50_ms" ] \
+        && [ "$cold_within_budget" = "yes" ] \
+        && [ "$warm_within_budget" = "yes" ] \
+        && [ "$sample_count" = "21" ] \
+        && [ "$backend" = "neural_local" ] \
+        && [ "$parity" = "exact_results_array" ]; then
+        append_result "ee_search_cli_cold_10k" "measured" "$cold_p50_ms" null null null null "within_budget"
+        append_result "ee_search_daemon_warm_10k" "measured" "$warm_p50_ms" null null null null "within_budget"
+        echo "[+] cold fresh-process search: p50=${cold_p50_ms}ms (<1500ms)" >&2
+        echo "[+] warm daemon search: p50=${warm_p50_ms}ms (<500ms)" >&2
+        echo "[+] backend=${backend} samples=${sample_count} parity=${parity}" >&2
+        echo "[+] stage markers: $markers_file" >&2
+        return
+    fi
+
+    [ -n "$cold_p50_ms" ] || cold_p50_ms=null
+    [ -n "$warm_p50_ms" ] || warm_p50_ms=null
+    append_result "ee_search_cli_cold_10k" "failed" "$cold_p50_ms" null null null null "hard_gate_failed"
+    append_result "ee_search_daemon_warm_10k" "failed" "$warm_p50_ms" null null null null "hard_gate_failed"
+    echo "[-] daemon-search-slo failed: exit=${status} backend=${backend:-missing} samples=${sample_count:-missing} parity=${parity:-missing}" >&2
+    echo "[-] retained markers: $markers_file" >&2
+    FAILED=true
 }
 
 run_context_l2_warm_bench() {
@@ -1145,6 +1231,8 @@ append_auto_enroll_baseline_rows() {
 
 if [ "$AUTO_ENROLL_BASELINE_ONLY" = "true" ]; then
     append_auto_enroll_baseline_rows
+elif [ "$PROFILE" = "daemon-search-slo" ]; then
+    run_daemon_search_slo
 else
     for bench in $BENCHMARKS; do
         echo "" >&2
@@ -1157,10 +1245,12 @@ else
     done
 fi
 
-if [ "$PROFILE" != "ci-smoke" ] && [ "$AUTO_ENROLL_BASELINE_ONLY" != "true" ]; then
-    run_context_l2_warm_bench
-    run_context_arena_mode_bench
-fi
+case "$PROFILE" in
+    nightly|stress)
+        run_context_l2_warm_bench
+        run_context_arena_mode_bench
+        ;;
+esac
 
 if [ "$PROFILE" = "ci-smoke" ]; then
     run_pack_replay_freshness_smoke
@@ -1170,6 +1260,11 @@ if [ "$PROFILE" = "ci-smoke" ]; then
 fi
 
 WORKLOAD_JSON=$(workload_json)
+if [ "$PROFILE" = "daemon-search-slo" ]; then
+    PERF_BASELINE_FILE=null
+else
+    PERF_BASELINE_FILE="\"$BASELINE_FILE\""
+fi
 
 # Generate ee.perf.v1 JSON
 PERF_JSON=$(cat <<EOF
@@ -1183,7 +1278,7 @@ PERF_JSON=$(cat <<EOF
   "target_dir": "$TARGET_ROOT",
   "criterion_dir": "$CRITERION_DIR",
   "artifact_dir": "$ARTIFACT_DIR",
-  "budget_mode": "advisory",
+  "budget_mode": "$BUDGET_MODE",
   "release_blocking": $RELEASE_BLOCKING,
   "artifact_redaction": {
     "status": "redaction_safe",
@@ -1195,7 +1290,7 @@ PERF_JSON=$(cat <<EOF
     $RESULTS
   },
   "budgets_file": "benches/budgets.toml",
-  "baseline_file": "$BASELINE_FILE"
+  "baseline_file": $PERF_BASELINE_FILE
 }
 EOF
 )

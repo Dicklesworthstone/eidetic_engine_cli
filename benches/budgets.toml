@@ -31,6 +31,16 @@ measurement_time_secs = 0.5
 release_blocking = false
 advisory = true
 
+[profiles.daemon-search-slo]
+description = "Dedicated stable-runner gate for fresh-process cold search and warm-daemon search over one prebuilt 10k fixture"
+ci_suitability = "stable_self_hosted_linux_x64"
+workload_tier = "10k_search"
+benches = ["daemon_round_trip"]
+sample_size = 21
+warmup_samples = 3
+release_blocking = true
+advisory = false
+
 [profiles.nightly]
 description = "Broader nightly profile over all Criterion benchmark groups"
 ci_suitability = "nightly_ci"
@@ -126,6 +136,14 @@ description = "Store a new memory with indexing"
 p50_ms_max = 38.0
 p99_ms_max = 110.0
 description = "Hybrid lexical+semantic search over 5k memories"
+
+[operations.ee_search_cli_cold_10k]
+p50_ms_max = 1500.0
+description = "Fresh one-shot ee search process over one prebuilt 10k-document hybrid index; exclusive hard ceiling on a stable designated runner"
+
+[operations.ee_search_daemon_warm_10k]
+p50_ms_max = 500.0
+description = "Fresh ee CLI client using one already-running warm daemon over the same prebuilt 10k-document hybrid index; exclusive hard ceiling on a stable designated runner"
 
 [operations.ee_context]
 p50_ms_max = 95.0
