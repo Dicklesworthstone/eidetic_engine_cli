@@ -88,6 +88,7 @@ set -euo pipefail
 #   6.1265 Capture Track E2E   - scripts/e2e_capture.sh
 #   6.1266 Shadow Tuning E2E    - scripts/e2e_shadow_retrieval_tuning.sh
 #   6.1267 Global Lane E2E      - scripts/e2e_global_lane.sh
+#   6.1268 Beads Export Repair  - scripts/beads_export_repair.sh --self-test
 #   6.127 Ergonomics E2E       - scripts/e2e_ergonomics.sh
 #   6.1293 Consolidation E2E   - scripts/e2e_consolidation.sh
 #   6.1295 Embedding Native E2E - scripts/e2e_embedding_native.sh
@@ -1181,6 +1182,11 @@ run_stage "Shadow Retrieval Tuning E2E (bd-2tehh.4)" "EE_E2E_TMPDIR=/private/tmp
 # storeLane=global surfacing, participate=false isolation with the
 # honest global_lane_disabled code, and demote-global tombstoning.
 run_stage "Global Lane E2E (bd-1bfwa.4)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_global_lane.sh"
+
+# Gate 6.1268: Beads export-integrity classifier self-test (bd-2p297.1/.2).
+# Fixture-driven: safe-repair candidacy, destructive-export refusal, merge
+# markers, unhealthy DB, transient partial write. No live tracker touched.
+run_stage "Beads Export Repair Self-Test (bd-2p297.1)" "./scripts/beads_export_repair.sh --self-test"
 
 # Gate 6.127: Ergonomics real-binary E2E (bd-1et0v.22). No-Cargo:
 # proves `ee context` remains an alias for canonical `ee pack` while carrying
