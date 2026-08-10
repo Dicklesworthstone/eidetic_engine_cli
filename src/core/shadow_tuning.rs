@@ -1303,6 +1303,330 @@ pub fn render_retrieval_tuning_report_json(report: &RetrievalTuningReport) -> St
     retrieval_tuning_report_json_value(report, true).to_string()
 }
 
+// ============ S4: promotion mechanics (ADR 0070 §5, bd-2tehh.3) ============
+//
+// Live ranking changes ONLY through this explicit promote step: it validates
+// the persisted report (schema, abstention, promotability, dbGeneration
+// freshness), writes the [search] fusion-weight overlay into the workspace
+// config via toml_edit, and records an audit row carrying the ENTIRE prior
+// config.toml bytes — so demote restores the file byte-identically (RULE 1:
+// nothing lost; a config that did not exist restores as an empty file, never
+// a deletion).
+
+/// Persisted report location under the workspace store directory.
+pub const RETRIEVAL_TUNING_REPORT_FILENAME: &str = "retrieval_tuning_report.json";
+pub const PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION: &str = "shadow.promote_retrieval_weights";
+pub const DEMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION: &str = "shadow.demote_retrieval_weights";
+
+/// `<workspace>/.ee/shadow/retrieval_tuning_report.json`.
+#[must_use]
+pub fn shadow_report_path(workspace_path: &Path) -> std::path::PathBuf {
+    workspace_path
+        .join(".ee")
+        .join("shadow")
+        .join(RETRIEVAL_TUNING_REPORT_FILENAME)
+}
+
+/// Persist the rendered report for the promote step to validate later.
+pub fn persist_retrieval_tuning_report(
+    workspace_path: &Path,
+    report: &RetrievalTuningReport,
+) -> Result<std::path::PathBuf, ShadowTuningError> {
+    let path = shadow_report_path(workspace_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| storage_error("create shadow report directory", &error))?;
+    }
+    std::fs::write(&path, render_retrieval_tuning_report_json(report))
+        .map_err(|error| storage_error("write shadow report", &error))?;
+    Ok(path)
+}
+
+/// Typed promote refusal (exit-7 material at the CLI).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PromoteRefusal {
+    ReportMissing { path: String },
+    ReportInvalid { reason: String },
+    Abstained,
+    NotPromotable { relative_margin: Option<f64> },
+    StaleGeneration { report: u64, current: u64 },
+    NoPriorPromotion,
+}
+
+impl PromoteRefusal {
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self {
+            Self::ReportMissing { path } => {
+                format!("no persisted tuning report at {path}; run ee shadow run first")
+            }
+            Self::ReportInvalid { reason } => format!("persisted tuning report unusable: {reason}"),
+            Self::Abstained => {
+                "the persisted report abstained (insufficient outcome evidence); nothing to promote"
+                    .to_owned()
+            }
+            Self::NotPromotable { relative_margin } => format!(
+                "the persisted report is not promotable (relative margin {:?} below the gate or no strict winner)",
+                relative_margin
+            ),
+            Self::StaleGeneration { report, current } => format!(
+                "the persisted report was evaluated at db generation {report} but the workspace is now at {current}; re-run ee shadow run"
+            ),
+            Self::NoPriorPromotion => {
+                "no prior promotion audit found for this workspace; nothing to demote".to_owned()
+            }
+        }
+    }
+}
+
+/// Outcome of a promote/demote apply (or dry-run plan).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverlayChange {
+    pub applied: bool,
+    /// Full prior config.toml bytes ("" when the file did not exist).
+    pub prior_config: String,
+    pub new_config: String,
+    /// Human-readable per-key diff lines.
+    pub diff: Vec<String>,
+    pub report_hash: Option<String>,
+}
+
+fn workspace_config_path(workspace_path: &Path) -> std::path::PathBuf {
+    workspace_path.join(".ee").join("config.toml")
+}
+
+fn read_config_bytes(workspace_path: &Path) -> Result<(String, bool), ShadowTuningError> {
+    let path = workspace_config_path(workspace_path);
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Ok((contents, true)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((String::new(), false)),
+        Err(error) => Err(storage_error("read workspace config.toml", &error)),
+    }
+}
+
+/// Validate the persisted report and apply the `[search]` fusion-weight
+/// overlay (ADR 0070 §5). Policy refusals come back as `Ok(Err(refusal))`;
+/// storage failures are hard errors.
+#[allow(clippy::type_complexity)]
+pub fn promote_retrieval_weights(
+    workspace_path: &Path,
+    connection: &DbConnection,
+    workspace_id: &str,
+    dry_run: bool,
+) -> Result<Result<OverlayChange, PromoteRefusal>, ShadowTuningError> {
+    let report_path = shadow_report_path(workspace_path);
+    let raw = match std::fs::read_to_string(&report_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Err(PromoteRefusal::ReportMissing {
+                path: report_path.display().to_string(),
+            }));
+        }
+        Err(error) => return Err(storage_error("read shadow report", &error)),
+    };
+    let report: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(Err(PromoteRefusal::ReportInvalid {
+                reason: format!("not valid JSON: {error}"),
+            }));
+        }
+    };
+    if report.get("schema").and_then(serde_json::Value::as_str)
+        != Some(RETRIEVAL_TUNING_REPORT_SCHEMA_V1)
+    {
+        return Ok(Err(PromoteRefusal::ReportInvalid {
+            reason: "schema is not ee.shadow.retrieval_tuning_report.v1".to_owned(),
+        }));
+    }
+    if report.get("abstained").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Ok(Err(PromoteRefusal::Abstained));
+    }
+    if report
+        .get("promotable")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        let relative_margin = report
+            .pointer("/winner/relativeMargin")
+            .and_then(serde_json::Value::as_f64);
+        return Ok(Err(PromoteRefusal::NotPromotable { relative_margin }));
+    }
+    let report_generation = report
+        .get("dbGeneration")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let current_generation = connection
+        .get_workspace_generation(workspace_id)
+        .map_err(|error| storage_error("read workspace generation", &error))?
+        .unwrap_or(0);
+    if report_generation != current_generation {
+        return Ok(Err(PromoteRefusal::StaleGeneration {
+            report: report_generation,
+            current: current_generation,
+        }));
+    }
+    let Some(weights) = report.pointer("/winner/weights") else {
+        return Ok(Err(PromoteRefusal::ReportInvalid {
+            reason: "promotable report has no winner weights".to_owned(),
+        }));
+    };
+    let (Some(lexical), Some(semantic), Some(graph)) = (
+        weights.get("lexical").and_then(serde_json::Value::as_f64),
+        weights.get("semantic").and_then(serde_json::Value::as_f64),
+        weights.get("graph").and_then(serde_json::Value::as_f64),
+    ) else {
+        return Ok(Err(PromoteRefusal::ReportInvalid {
+            reason: "winner weights are not numeric".to_owned(),
+        }));
+    };
+    let report_hash = report
+        .get("reportHash")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+
+    let (prior_config, prior_existed) = read_config_bytes(workspace_path)?;
+    let mut document = prior_config
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| storage_error("parse workspace config.toml", &error))?;
+    let mut diff = Vec::new();
+    {
+        let search_item = document.entry("search").or_insert(toml_edit::table());
+        let Some(search) = search_item.as_table_like_mut() else {
+            return Ok(Err(PromoteRefusal::ReportInvalid {
+                reason: "[search] in config.toml is not a table".to_owned(),
+            }));
+        };
+        for (key, value) in [
+            ("lexical_weight", lexical),
+            ("semantic_weight", semantic),
+            ("graph_weight", graph),
+        ] {
+            let prior = search
+                .get(key)
+                .and_then(toml_edit::Item::as_value)
+                .map(std::string::ToString::to_string);
+            diff.push(format!(
+                "search.{key}: {} -> {value}",
+                prior.as_deref().unwrap_or("(unset)")
+            ));
+            search.insert(key, toml_edit::value(value));
+        }
+    }
+    let new_config = document.to_string();
+
+    let change = OverlayChange {
+        applied: !dry_run,
+        prior_config: prior_config.clone(),
+        new_config: new_config.clone(),
+        diff,
+        report_hash: report_hash.clone(),
+    };
+    if dry_run {
+        return Ok(Ok(change));
+    }
+
+    std::fs::write(workspace_config_path(workspace_path), &new_config)
+        .map_err(|error| storage_error("write workspace config.toml", &error))?;
+    let details = serde_json::json!({
+        "schema": "ee.shadow.retrieval_weights_promotion.v1",
+        "policyId": RETRIEVAL_TUNING_POLICY_ID,
+        "reportHash": report_hash,
+        "priorExisted": prior_existed,
+        "priorConfigToml": prior_config,
+        "newValues": { "lexical": lexical, "semantic": semantic, "graph": graph },
+    })
+    .to_string();
+    connection
+        .insert_audit(
+            &crate::db::generate_audit_id(),
+            &crate::db::CreateAuditInput {
+                workspace_id: Some(workspace_id.to_owned()),
+                actor: None,
+                action: PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION.to_owned(),
+                target_type: Some("workspace".to_owned()),
+                target_id: Some(workspace_id.to_owned()),
+                details: Some(details),
+            },
+        )
+        .map_err(|error| storage_error("record promotion audit", &error))?;
+    Ok(Ok(change))
+}
+
+/// Restore the prior config from the most recent promotion audit
+/// (byte-identical; a previously-absent file restores as empty, never a
+/// deletion) and record the demotion.
+#[allow(clippy::type_complexity)]
+pub fn demote_retrieval_weights(
+    workspace_path: &Path,
+    connection: &DbConnection,
+    workspace_id: &str,
+    dry_run: bool,
+) -> Result<Result<OverlayChange, PromoteRefusal>, ShadowTuningError> {
+    let audits = connection
+        .list_audit_by_action(PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION, None)
+        .map_err(|error| storage_error("list promotion audits", &error))?;
+    let Some(promotion) = audits
+        .iter()
+        .find(|entry| entry.workspace_id.as_deref() == Some(workspace_id))
+    else {
+        return Ok(Err(PromoteRefusal::NoPriorPromotion));
+    };
+    let details: serde_json::Value = promotion
+        .details
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let Some(prior_config) = details
+        .get("priorConfigToml")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(Err(PromoteRefusal::ReportInvalid {
+            reason: "promotion audit carries no priorConfigToml".to_owned(),
+        }));
+    };
+    let (current_config, _) = read_config_bytes(workspace_path)?;
+    let change = OverlayChange {
+        applied: !dry_run,
+        prior_config: current_config,
+        new_config: prior_config.to_owned(),
+        diff: vec![format!(
+            "config.toml restored to pre-promotion bytes ({} bytes)",
+            prior_config.len()
+        )],
+        report_hash: details
+            .get("reportHash")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    };
+    if dry_run {
+        return Ok(Ok(change));
+    }
+    std::fs::write(workspace_config_path(workspace_path), prior_config)
+        .map_err(|error| storage_error("restore workspace config.toml", &error))?;
+    let demote_details = serde_json::json!({
+        "schema": "ee.shadow.retrieval_weights_demotion.v1",
+        "policyId": RETRIEVAL_TUNING_POLICY_ID,
+        "restoredFromAudit": promotion.id,
+        "restoredBytes": prior_config.len(),
+    })
+    .to_string();
+    connection
+        .insert_audit(
+            &crate::db::generate_audit_id(),
+            &crate::db::CreateAuditInput {
+                workspace_id: Some(workspace_id.to_owned()),
+                actor: None,
+                action: DEMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION.to_owned(),
+                target_type: Some("workspace".to_owned()),
+                target_id: Some(workspace_id.to_owned()),
+                details: Some(demote_details),
+            },
+        )
+        .map_err(|error| storage_error("record demotion audit", &error))?;
+    Ok(Ok(change))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -2283,6 +2607,117 @@ mod tests {
             return Err("dbGeneration must be hash-bound".to_owned());
         }
         Ok(())
+    }
+
+    // ===== S4: promotion mechanics tests =====
+
+    fn promotable_report_fixture() -> Result<RetrievalTuningReport, String> {
+        let labels = flip_fixture_label_report()?;
+        let cx = Cx::for_testing();
+        let evaluation =
+            evaluate_fusion_candidates(&cx, &flip_fixture_replays(), &labels.triples, incumbent())
+                .map_err(|error| error.to_string())?;
+        let gate = RetrievalTuningGateConfig {
+            min_triples: 1,
+            min_queries: 1,
+            promote_margin: 0.03,
+        };
+        assemble_retrieval_tuning_report(labels, Some(evaluation), 0, &gate)
+            .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn promote_applies_overlay_and_demote_restores_bytes() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace = tempdir.path();
+        let store_dir = workspace.join(".ee");
+        std::fs::create_dir_all(&store_dir).map_err(|error| error.to_string())?;
+        let database_path = store_dir.join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+
+        let report = promotable_report_fixture()?;
+        persist_retrieval_tuning_report(workspace, &report).map_err(|error| error.to_string())?;
+
+        // Dry-run writes nothing.
+        let plan = promote_retrieval_weights(workspace, &connection, "ws-promote", true)
+            .map_err(|error| error.to_string())?
+            .map_err(|refusal| format!("unexpected refusal: {refusal:?}"))?;
+        if plan.applied || workspace.join(".ee").join("config.toml").exists() {
+            return Err(format!("dry-run must write nothing: {plan:?}"));
+        }
+
+        // Apply: config gains the winner weights; the promotion is audited
+        // with the full prior bytes (empty — no config existed).
+        let change = promote_retrieval_weights(workspace, &connection, "ws-promote", false)
+            .map_err(|error| error.to_string())?
+            .map_err(|refusal| format!("unexpected refusal: {refusal:?}"))?;
+        let written = std::fs::read_to_string(workspace.join(".ee").join("config.toml"))
+            .map_err(|error| error.to_string())?;
+        if !written.contains("lexical_weight") || !written.contains("[search]") {
+            return Err(format!("overlay not written: {written}"));
+        }
+        if !change.prior_config.is_empty() {
+            return Err("prior config must be empty for a fresh workspace".to_owned());
+        }
+        let audits = connection
+            .list_audit_by_action(PROMOTE_RETRIEVAL_WEIGHTS_AUDIT_ACTION, None)
+            .map_err(|error| error.to_string())?;
+        if audits.is_empty() {
+            return Err("promotion must be audited".to_owned());
+        }
+
+        // Demote: byte-identical restoration of the pre-promotion state.
+        let demotion = demote_retrieval_weights(workspace, &connection, "ws-promote", false)
+            .map_err(|error| error.to_string())?
+            .map_err(|refusal| format!("unexpected refusal: {refusal:?}"))?;
+        let restored = std::fs::read_to_string(workspace.join(".ee").join("config.toml"))
+            .map_err(|error| error.to_string())?;
+        if !restored.is_empty() || !demotion.new_config.is_empty() {
+            return Err(format!(
+                "demote must restore the exact prior bytes: {restored:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn promote_refuses_missing_and_stale_reports() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace = tempdir.path();
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_file(workspace.join(".ee").join("ee.db"))
+            .map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+
+        match promote_retrieval_weights(workspace, &connection, "ws-missing", false)
+            .map_err(|error| error.to_string())?
+        {
+            Err(PromoteRefusal::ReportMissing { .. }) => {}
+            other => return Err(format!("missing report must refuse: {other:?}")),
+        }
+
+        // A report evaluated at a different generation is stale.
+        let labels = flip_fixture_label_report()?;
+        let cx = Cx::for_testing();
+        let evaluation =
+            evaluate_fusion_candidates(&cx, &flip_fixture_replays(), &labels.triples, incumbent())
+                .map_err(|error| error.to_string())?;
+        let gate = RetrievalTuningGateConfig {
+            min_triples: 1,
+            min_queries: 1,
+            promote_margin: 0.03,
+        };
+        let stale = assemble_retrieval_tuning_report(labels, Some(evaluation), 5, &gate)
+            .map_err(|error| error.to_string())?;
+        persist_retrieval_tuning_report(workspace, &stale).map_err(|error| error.to_string())?;
+        match promote_retrieval_weights(workspace, &connection, "ws-missing", false)
+            .map_err(|error| error.to_string())?
+        {
+            Err(PromoteRefusal::StaleGeneration { report: 5, .. }) => Ok(()),
+            other => Err(format!("stale report must refuse: {other:?}")),
+        }
     }
 
     #[test]

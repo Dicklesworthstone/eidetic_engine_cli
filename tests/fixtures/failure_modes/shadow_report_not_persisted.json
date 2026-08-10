@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "shadow_report_not_persisted",
+  "introduced_by": {
+    "bead": "bd-2tehh.3",
+    "epic_letter": "SHADOW"
+  },
+  "surfaces": [
+    "shadow"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee shadow run completed its evaluation but could not write the report file under <workspace>/.ee/shadow/ (permissions, disk, or a read-only workspace). The run's own output is unaffected; the low-severity entry flags that a later ee shadow promote will find no persisted report until a run persists one.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "chmod -w .ee"
+    ],
+    "invocation": "ee shadow run --policy candidate.retrieval.outcome_tuned_weights --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "shadow_report_not_persisted",
+    "severity": "low",
+    "message_contains": [
+      "could not be persisted",
+      "promote step"
+    ],
+    "repair_contains": "ee shadow run"
+  }
+}

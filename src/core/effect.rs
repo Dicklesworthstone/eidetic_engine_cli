@@ -2377,6 +2377,16 @@ impl EffectManifest {
                 "Verify supplied bytes against a sealed memory's commitment; on match publish the content through the revise path, mark the seal revealed, and audit memory.reveal — a mismatch mutates nothing and audits memory.reveal_failed (bd-sealed-preregistration-memory-b67be)",
             ),
             CommandEffect::durable_write(
+                "shadow promote",
+                vec!["workspace_config", "audit_log"],
+                "Apply the persisted promotable tuning report's [search] fusion-weight overlay to <workspace>/.ee/config.toml via toml_edit, recording the full prior config bytes in the promotion audit; refusals (missing/stale/abstained/non-promotable report) are typed exit-7 policy denials and dry-run writes nothing (ADR 0070 §5)",
+            ),
+            CommandEffect::durable_write(
+                "shadow demote",
+                vec!["workspace_config", "audit_log"],
+                "Restore the pre-promotion config.toml bytes from the promotion audit (byte-identical; an absent prior restores as empty, never a deletion) and record the demotion",
+            ),
+            CommandEffect::durable_write(
                 "memory promote-global",
                 vec!["memories", "audit_log"],
                 "Promote a workspace memory into the user-global store through the bd-1bfwa.2 policy core (evidence gate, secret re-screen, duplicate merge); refusals are typed exit-7 policy denials and dry-run writes nothing",

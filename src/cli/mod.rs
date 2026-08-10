@@ -11572,6 +11572,23 @@ pub enum ShadowCommand {
     /// The policy id comes from the global `--policy` flag
     /// (`ee shadow run --policy candidate.retrieval.outcome_tuned_weights`).
     Run(ShadowRunArgs),
+    /// Apply the persisted promotable report's fusion-weight overlay to the
+    /// workspace config (audited, reversible with demote).
+    Promote(ShadowApplyArgs),
+    /// Restore the pre-promotion config bytes from the promotion audit.
+    Demote(ShadowApplyArgs),
+}
+
+/// Arguments for `ee shadow promote` / `ee shadow demote` (bd-2tehh.3).
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ShadowApplyArgs {
+    /// Plan only: print the config diff without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee shadow run` (bd-2tehh.3).
@@ -11596,6 +11613,11 @@ pub struct ShadowRunArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+
+    /// Do not persist the report to <workspace>/.ee/shadow/ (the promote
+    /// step validates the persisted report).
+    #[arg(long = "no-persist")]
+    pub no_persist: bool,
 }
 
 /// Arguments for `ee memory reveal`
@@ -14224,6 +14246,12 @@ where
         Some(Command::Sentinel(ref command)) => handle_sentinel(&cli, command, stdout, stderr),
         Some(Command::Shadow(ShadowCommand::Run(ref args))) => {
             handle_shadow_run(&cli, args, stdout, stderr)
+        }
+        Some(Command::Shadow(ShadowCommand::Promote(ref args))) => {
+            handle_shadow_apply(&cli, args, true, stdout, stderr)
+        }
+        Some(Command::Shadow(ShadowCommand::Demote(ref args))) => {
+            handle_shadow_apply(&cli, args, false, stdout, stderr)
         }
         Some(Command::Share(ref command)) => share::handle_share(&cli, command, stdout, stderr),
         Some(Command::Mesh(ref command)) => mesh::handle_mesh(&cli, command, stdout, stderr),
@@ -36594,6 +36622,18 @@ where
     };
 
     let mut degraded: Vec<serde_json::Value> = Vec::new();
+    if !args.no_persist {
+        if let Err(error) =
+            crate::core::shadow_tuning::persist_retrieval_tuning_report(&workspace, &report)
+        {
+            degraded.push(serde_json::json!({
+                "code": "shadow_report_not_persisted",
+                "severity": "low",
+                "message": format!("tuning report could not be persisted for the promote step: {error}"),
+                "repair": "ee shadow run --policy candidate.retrieval.outcome_tuned_weights --json",
+            }));
+        }
+    }
     if report.abstained {
         // Kept in lockstep with
         // tests/fixtures/failure_modes/insufficient_outcome_evidence.json.
@@ -36645,6 +36685,120 @@ where
             "report": report_value,
         },
         "degraded": degraded,
+    });
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&envelope.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(envelope.to_string() + "\n")),
+    }
+}
+
+fn handle_shadow_apply<W, E>(
+    cli: &Cli,
+    args: &ShadowApplyArgs,
+    promote: bool,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::core::shadow_tuning::{demote_retrieval_weights, promote_retrieval_weights};
+
+    let MemoryStoreTarget {
+        workspace,
+        database_path,
+    } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let canonical_workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.clone());
+    let workspace_id = crate::core::curate::stable_workspace_id(&canonical_workspace);
+    let connection = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("open database: {error}"),
+                repair: Some(crate::core::storeless_workspace_repair(&database_path)),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let command_name = if promote {
+        "shadow promote"
+    } else {
+        "shadow demote"
+    };
+    let outcome = if promote {
+        promote_retrieval_weights(&workspace, &connection, &workspace_id, args.dry_run)
+    } else {
+        demote_retrieval_weights(&workspace, &connection, &workspace_id, args.dry_run)
+    };
+    let change = match outcome {
+        Ok(Ok(change)) => change,
+        Ok(Err(refusal)) => {
+            let domain_error = DomainError::PolicyDeniedWithDetails {
+                message: refusal.message(),
+                repair: Some(
+                    "ee shadow run --policy candidate.retrieval.outcome_tuned_weights --json"
+                        .to_owned(),
+                ),
+                details_json: serde_json::json!({ "refusal": format!("{refusal:?}") }).to_string(),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: error.to_string(),
+                repair: Some("ee doctor".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let human = format!(
+        "{}{}\n{}\n",
+        if promote {
+            "Retrieval-weight promotion"
+        } else {
+            "Retrieval-weight demotion"
+        },
+        if change.applied {
+            " applied"
+        } else {
+            " (dry-run, nothing written)"
+        },
+        change
+            .diff
+            .iter()
+            .map(|line| format!("  {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let envelope = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": {
+            "command": command_name,
+            "applied": change.applied,
+            "dryRun": args.dry_run,
+            "diff": change.diff,
+            "reportHash": change.report_hash,
+            "priorConfigBytes": change.prior_config.len(),
+            "newConfigBytes": change.new_config.len(),
+        },
+        "degraded": [],
     });
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human),
@@ -64210,6 +64364,8 @@ impl NormalizedInvocation {
                 },
                 Command::Shadow(shadow) => match shadow {
                     ShadowCommand::Run(_) => "shadow run".to_string(),
+                    ShadowCommand::Promote(_) => "shadow promote".to_string(),
+                    ShadowCommand::Demote(_) => "shadow demote".to_string(),
                 },
                 Command::Share(share) => match share {
                     share::ShareCommand::Preview(_) => "share preview".to_string(),
