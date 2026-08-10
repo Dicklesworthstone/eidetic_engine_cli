@@ -6764,6 +6764,16 @@ if [ -n "$PROOF_BROKER_LEDGER" ]; then
         dispatch_allowed)
             PROOF_BROKER_JSON="$(proof_broker_mark_json true "$PROOF_BROKER_BYPASS_REASON")"
             ;;
+        source_state_mismatch)
+            # bd-088ci: this verdict means "the ledger's proof for this
+            # command is bound to an OLDER source fingerprint" — exactly the
+            # normal state on a moving main, and the broker's own nextAction
+            # is rerun_current_source. Refusing here made every retry after
+            # a source change self-block. Dispatch fresh, carrying the
+            # verdict as a degraded note for honesty.
+            proof_broker_degraded+=("rch_verify_proof_broker_source_state_mismatch")
+            PROOF_BROKER_JSON="$(proof_broker_mark_json true "$PROOF_BROKER_BYPASS_REASON")"
+            ;;
         reuse_existing)
             RCH_INVOCATION=()
             PROOF_BROKER_JSON="$(proof_broker_mark_json false "$PROOF_BROKER_BYPASS_REASON")"
