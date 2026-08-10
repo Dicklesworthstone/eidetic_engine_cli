@@ -704,6 +704,12 @@ pub const EXAMPLES: &[ExampleEntry] = &[
         category: "diagnostics",
     },
     ExampleEntry {
+        title: "Contention triage",
+        description: "Rank hot-path concurrency bottlenecks (write lock, flock gate, read pool) with copy-paste remediation commands; add --use-daemon for live daemon-side counters",
+        command: "ee diag contention --robot-triage --json",
+        category: "diagnostics",
+    },
+    ExampleEntry {
         title: "Inspect command-risk memory",
         description: "Retrieve advisory risk patterns and memories for a command; this example encodes `git status`, and --cmd-base64 or --stdin keeps inspected literals off argv",
         command: "ee preflight check --cmd-base64 Z2l0IHN0YXR1cw== --json",

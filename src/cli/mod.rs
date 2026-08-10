@@ -87186,11 +87186,47 @@ demos:
             Some(crate::models::contention::CONTENTION_DIAG_SCHEMA_V1),
             "in-process contention snapshot is an ee.diag.contention.v1 report"
         );
-        // The two process-global sources the CLI reads directly are present;
+        // The three process-global sources the CLI reads directly are present;
         // overallPosture is always emitted.
         assert!(value.get("groupCommit").is_some());
         assert!(value.get("singleflight").is_some());
+        assert!(value.get("flockGate").is_some());
         assert!(value.get("overallPosture").is_some());
+    }
+
+    #[test]
+    fn diag_contention_robot_triage_lifts_ranked_findings() {
+        let cli = Cli::try_parse_from(["ee", "diag", "contention", "--robot-triage", "--json"])
+            .expect("parse diag contention --robot-triage");
+        let mut stdout = Vec::new();
+        let Some(Command::Diag(DiagCommand::Contention(ref args))) = cli.command else {
+            panic!("expected diag contention args");
+        };
+        assert!(args.robot_triage);
+        let code = super::handle_diag_contention(&cli, args, &mut stdout);
+        assert_eq!(code, ProcessExitCode::Success);
+        let value: serde_json::Value =
+            serde_json::from_slice(&stdout).expect("robot-triage output is JSON");
+        assert_eq!(
+            value.pointer("/data/robotTriage"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert!(value.pointer("/data/overallPosture").is_some());
+        let lifted = value
+            .pointer("/data/topContention")
+            .and_then(serde_json::Value::as_array)
+            .expect("topContention lifted to data");
+        let in_report = value
+            .pointer("/data/report/topContention")
+            .and_then(serde_json::Value::as_array)
+            .expect("full report retained");
+        assert_eq!(lifted, in_report, "lifted ranking mirrors the report");
+        for finding in lifted {
+            assert!(
+                finding.get("suggestedCommands").is_some(),
+                "each lifted finding carries copy-paste suggestedCommands"
+            );
+        }
     }
 
     #[test]

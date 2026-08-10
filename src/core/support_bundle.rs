@@ -168,6 +168,9 @@ pub(crate) const SUPPORT_BUNDLE_INSTALL_FRESHNESS_SUMMARY_SCHEMA_V1: &str =
 const SHADOW_POLICY_SUMMARY_FILE: &str = "shadow_policy_summary.json";
 pub(crate) const SUPPORT_BUNDLE_SHADOW_POLICY_SUMMARY_SCHEMA_V1: &str =
     "ee.support_bundle.shadow_policy_summary.v1";
+const CONTENTION_SUMMARY_FILE: &str = "contention_summary.json";
+pub(crate) const SUPPORT_BUNDLE_CONTENTION_SUMMARY_SCHEMA_V1: &str =
+    "ee.support_bundle.contention_summary.v1";
 const SHADOW_POLICY_ARTIFACT_DIR: &str = "shadow";
 const MAX_SHADOW_POLICY_ARTIFACTS: usize = 16;
 const TOOLCHAIN_PROVENANCE_DEFAULT_TIMEOUT_MS: u64 = 1_500;
@@ -1336,6 +1339,7 @@ struct CollectedDiagnostics {
     regression_causality_summary_json: String,
     environment_attestation_summary_json: String,
     shadow_policy_summary_json: String,
+    contention_summary_json: String,
 }
 
 /// Plan what would be collected without actually creating the bundle.
@@ -1496,6 +1500,10 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         (
             SHADOW_POLICY_SUMMARY_FILE,
             &diagnostics.shadow_policy_summary_json,
+        ),
+        (
+            CONTENTION_SUMMARY_FILE,
+            &diagnostics.contention_summary_json,
         ),
     ];
 
@@ -2085,6 +2093,7 @@ fn collect_diagnostics(
     let install_freshness_summary_json = install_freshness_summary_json();
     let environment_attestation_summary_json = environment_attestation_summary_json(workspace);
     let shadow_policy_summary_json = shadow_policy_summary_json(workspace);
+    let contention_summary_json = contention_summary_json();
     let regression_causality_summary_json =
         regression_causality_summary_json(&regression_causality_support_sections(
             verification_evidence_summary_json.as_str(),
@@ -2133,6 +2142,7 @@ fn collect_diagnostics(
         regression_causality_summary_json,
         environment_attestation_summary_json,
         shadow_policy_summary_json,
+        contention_summary_json,
     })
 }
 
@@ -4230,6 +4240,54 @@ fn singleflight_posture_json() -> String {
         },
         |value| stable_json(&value),
     )
+}
+
+/// Redaction-safe contention summary (bd-d67os.12): postures, counters, and
+/// stable reason codes from the in-process `ee.diag.contention.v1` report.
+/// Finding detail strings and suggested commands are dropped so the bundle
+/// carries counts/posture only. (Distinct from the `swarm_contention` report
+/// discovery elsewhere in this module, which summarizes on-disk swarm
+/// benchmark reports.)
+fn contention_summary_json() -> String {
+    let group_commit = crate::core::write_owner::write_group_commit_telemetry(None);
+    let singleflight = singleflight_posture_report();
+    let flock_gate = crate::db::flock_gate_telemetry();
+    let inputs = crate::core::contention::ContentionInputs {
+        singleflight: Some(singleflight),
+        group_commit: Some((&group_commit).into()),
+        flock_gate: Some((&flock_gate).into()),
+        ..Default::default()
+    };
+    let report = crate::core::contention::build_contention_report(&inputs);
+    let findings: Vec<Value> = report
+        .top_contention
+        .iter()
+        .map(|finding| {
+            json!({
+                "source": finding.source,
+                "severity": finding.severity,
+                "reasonCode": finding.reason_code,
+            })
+        })
+        .collect();
+    stable_json(&json!({
+        "schema": SUPPORT_BUNDLE_CONTENTION_SUMMARY_SCHEMA_V1,
+        "overallPosture": report.overall_posture,
+        "writeLockPosture": report.write_lock.posture,
+        "readPoolPosture": report.read_pool.posture,
+        "singleflightPosture": report.singleflight.posture,
+        "flockGate": report.flock_gate.as_ref().map(|gate| {
+            json!({
+                "posture": gate.posture,
+                "acquires": gate.acquires,
+                "contendedAcquires": gate.contended_acquires,
+                "maxWaitMs": gate.max_wait_ms,
+                "timeouts": gate.timeouts,
+            })
+        }),
+        "topContention": findings,
+        "unavailableSources": report.unavailable_sources,
+    }))
 }
 
 fn qos_lane_summary_json(workspace: &Path) -> String {

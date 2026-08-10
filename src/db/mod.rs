@@ -51052,6 +51052,27 @@ mod tests {
     }
 
     #[test]
+    fn flock_gate_telemetry_counts_acquisitions() -> TestResult {
+        // Counters are process-global and other tests may acquire locks
+        // concurrently, so assert monotonic deltas rather than absolutes.
+        let before = super::flock_gate_telemetry();
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let database_path = tempdir.path().join("flock-gate-telemetry.db");
+        let lock_file = super::lock_database_write_file(&database_path)
+            .map_err(|error| TestFailure::new(format!("acquire flock gate: {error}")))?;
+        drop(lock_file);
+        let after = super::flock_gate_telemetry();
+        ensure(
+            after.acquires > before.acquires,
+            "uncontended acquisition increments the acquire counter",
+        )?;
+        ensure(
+            after.timeouts == before.timeouts,
+            "uncontended acquisition records no timeout",
+        )
+    }
+
+    #[test]
     fn write_owner_flock_contention_classifies_as_transient() -> TestResult {
         // The flock gate's contention exhaustion (lock_database_write_file) surfaces
         // as DbError::InvalidPath; it must be retryable so single-shot writes

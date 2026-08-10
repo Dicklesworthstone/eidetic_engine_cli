@@ -839,5 +839,96 @@ mod tests {
         assert!(value.get("groupCommit").is_none());
         assert!(value.get("indexIntake").is_none());
         assert!(value.get("l2Cache").is_none());
+        assert!(value.get("flockGate").is_none());
+    }
+
+    #[test]
+    fn flock_gate_clean_snapshot_stays_ok() {
+        let inputs = ContentionInputs {
+            write_owner: Some(quiet_write_owner()),
+            read_pool: Some(pool_stats(1, 4, 0, 0)),
+            singleflight: Some(quiet_singleflight()),
+            flock_gate: Some(FlockGateInput {
+                acquires: 12,
+                contended_acquires: 0,
+                wait_ns_total: 600_000,
+                max_wait_ns: 200_000,
+                timeouts: 0,
+            }),
+            ..ContentionInputs::default()
+        };
+        let report = build_contention_report(&inputs);
+        let gate = report.flock_gate.as_ref().expect("flock_gate report");
+        assert_eq!(gate.posture, ContentionPosture::Ok);
+        assert_eq!(gate.acquires, 12);
+        assert_eq!(gate.max_wait_ms, 0);
+        assert!(
+            !report
+                .top_contention
+                .iter()
+                .any(|finding| finding.source == "flock_gate"),
+            "clean gate emits no finding"
+        );
+    }
+
+    #[test]
+    fn flock_gate_retry_pressure_is_warm() {
+        let inputs = ContentionInputs {
+            write_owner: Some(quiet_write_owner()),
+            read_pool: Some(pool_stats(1, 4, 0, 0)),
+            singleflight: Some(quiet_singleflight()),
+            flock_gate: Some(FlockGateInput {
+                acquires: 10,
+                contended_acquires: 3,
+                wait_ns_total: 50_000_000,
+                max_wait_ns: 30_000_000,
+                timeouts: 0,
+            }),
+            ..ContentionInputs::default()
+        };
+        let report = build_contention_report(&inputs);
+        let gate = report.flock_gate.as_ref().expect("flock_gate report");
+        assert_eq!(gate.posture, ContentionPosture::Warm);
+        let finding = report
+            .top_contention
+            .iter()
+            .find(|finding| finding.source == "flock_gate")
+            .expect("flock_gate finding");
+        assert_eq!(finding.reason_code, "flock_gate_retry_pressure");
+        assert!(!finding.suggested_commands.is_empty());
+    }
+
+    #[test]
+    fn flock_gate_timeouts_are_contended_and_rank_first() {
+        let inputs = ContentionInputs {
+            write_owner: Some(quiet_write_owner()),
+            read_pool: Some(pool_stats(1, 4, 0, 0)),
+            singleflight: Some(quiet_singleflight()),
+            flock_gate: Some(FlockGateInput {
+                acquires: 4,
+                contended_acquires: 4,
+                // 10 s over 4 acquires: avg 2500 ms, max 4 s.
+                wait_ns_total: 10_000_000_000,
+                max_wait_ns: 4_000_000_000,
+                timeouts: 2,
+            }),
+            ..ContentionInputs::default()
+        };
+        let report = build_contention_report(&inputs);
+        let gate = report.flock_gate.as_ref().expect("flock_gate report");
+        assert_eq!(gate.posture, ContentionPosture::Contended);
+        assert_eq!(gate.avg_wait_ms, 2500.0);
+        assert_eq!(gate.max_wait_ms, 4000);
+        assert_eq!(report.overall_posture, ContentionPosture::Contended);
+        let first = report.top_contention.first().expect("ranked finding");
+        assert_eq!(first.source, "flock_gate");
+        assert_eq!(first.reason_code, "flock_gate_timeouts");
+        assert!(
+            first
+                .suggested_commands
+                .iter()
+                .any(|command| command.contains("ee daemon start")),
+            "remediation routes writers through the daemon"
+        );
     }
 }
