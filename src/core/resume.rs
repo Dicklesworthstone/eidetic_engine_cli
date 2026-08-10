@@ -38,7 +38,7 @@ pub const OPEN_LOOP_TAGS: [&str; 5] = ["next", "queue", "blocking", "pending", "
 /// Minimum shared tags for the staleness heuristic.
 pub const STALE_SHARED_TAG_MIN: usize = 2;
 /// Wall-clock budget for the nearby-store scan.
-const NEARBY_SCAN_BUDGET_MS: u64 = 250;
+pub const RESUME_NEARBY_SCAN_BUDGET_MS: u64 = 250;
 /// Cap on open-loop tagged items and staleness flags.
 const OPEN_LOOP_CAP: usize = 32;
 
@@ -280,13 +280,14 @@ pub struct ResumeOptions<'a> {
 
 /// Assemble the resume bundle. Read-only.
 pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, DomainError> {
-    let connection =
-        DbConnection::open_file(options.database_path).map_err(|error| DomainError::Storage {
+    let connection = DbConnection::open_file_read_only(options.database_path).map_err(|error| {
+        DomainError::Storage {
             message: format!("Failed to open workspace database: {error}"),
             repair: Some(crate::core::storeless_workspace_repair(
                 options.database_path,
             )),
-        })?;
+        }
+    })?;
     let canonical_workspace = options
         .workspace_path
         .canonicalize()
@@ -381,18 +382,13 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
     let nearby_stores = if episodic_total == 0 {
         Some(discover_nearby_stores(
             options.workspace_path,
-            std::time::Duration::from_millis(NEARBY_SCAN_BUDGET_MS),
+            std::time::Duration::from_millis(RESUME_NEARBY_SCAN_BUDGET_MS),
         ))
     } else {
         None
     };
 
-    let next_commands = vec![
-        "ee decide list --json  # open decisions incl. revisit conditions".to_owned(),
-        "ee orient \"<current task>\" --json  # task-conditioned pack once you know the task"
-            .to_owned(),
-        "ee conflict list --json  # anything contradictory left behind".to_owned(),
-    ];
+    let next_commands = resume_next_commands(nearby_stores.as_ref());
 
     Ok(ResumeReport {
         schema: RESUME_SCHEMA_V1,
@@ -409,14 +405,42 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
     })
 }
 
+fn resume_next_commands(nearby_stores: Option<&NearbyStoreScan>) -> Vec<String> {
+    let mut commands = vec![
+        "ee decide list --json  # open decisions incl. revisit conditions".to_owned(),
+        "ee orient \"<current task>\" --json  # task-conditioned pack once you know the task"
+            .to_owned(),
+        "ee conflict list --json  # anything contradictory left behind".to_owned(),
+    ];
+    if let Some(best) = nearby_stores.and_then(|scan| scan.stores.first()) {
+        let workspace = shell_quote_cli_arg(&best.workspace_root);
+        commands.insert(0, format!("ee resume --workspace {workspace} --json"));
+    }
+    commands
+}
+
+fn shell_quote_cli_arg(value: &str) -> String {
+    if value.is_empty() {
+        "''".to_owned()
+    } else if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
         OPEN_LOOP_TAGS, ResumeItem, SESSION_GAP_SECONDS, STALE_SHARED_TAG_MIN, StaleFlag,
-        apply_staleness, group_sessions,
+        apply_staleness, group_sessions, resume_next_commands,
     };
+    use crate::core::orient::{NearbyStore, NearbyStoreScan};
     use crate::db::StoredMemory;
     use std::collections::BTreeMap;
 
@@ -534,5 +558,24 @@ mod tests {
         assert_eq!(apply_staleness(&mut items, &all, &tags), 0);
         assert!(items[0].stale.is_none());
         assert!(OPEN_LOOP_TAGS.contains(&"next"));
+    }
+
+    #[test]
+    fn nearby_resume_command_is_prepended_and_shell_quoted() {
+        let scan = NearbyStoreScan {
+            stores: vec![NearbyStore {
+                workspace_root: "/tmp/campaign's best root".to_owned(),
+                store_dir: "/tmp/campaign's best root/.ee-campaign".to_owned(),
+                documents: 42,
+                last_write: Some("2026-08-10T14:15:16Z".to_owned()),
+            }],
+            truncated: false,
+        };
+
+        let commands = resume_next_commands(Some(&scan));
+        assert_eq!(
+            commands.first().map(String::as_str),
+            Some("ee resume --workspace '/tmp/campaign'\\''s best root' --json")
+        );
     }
 }

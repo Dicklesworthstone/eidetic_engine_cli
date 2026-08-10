@@ -17248,67 +17248,7 @@ where
 
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
-            let mut text = format!(
-                "resume: {} episodic memories, {} sessions shown, {} open decisions, {} queued items, {} stale flags\n",
-                report.episodic_total,
-                report.sessions.len(),
-                report.open_loops.revisit_decisions.len(),
-                report.open_loops.tagged_items.len(),
-                report.stale_count,
-            );
-            text.push_str("\nRecent end-state:\n");
-            for session in &report.sessions {
-                text.push_str(&format!(
-                    "\n[{}] {} memories ({} .. {})\n",
-                    session.label, session.member_count, session.oldest_at, session.newest_at
-                ));
-                for session_item in &session.items {
-                    let marker = if session_item.stale.is_some() {
-                        " [STALE]"
-                    } else {
-                        ""
-                    };
-                    let head: String = session_item.content.chars().take(96).collect();
-                    text.push_str(&format!("  - {}{marker}: {head}\n", session_item.memory_id));
-                }
-            }
-            text.push_str("\nOpen loops:\n");
-            for decision in &report.open_loops.revisit_decisions {
-                text.push_str(&format!(
-                    "  - decision {}: {} (revisit {})\n",
-                    decision.memory_id,
-                    decision.topic,
-                    decision.revisit_by.as_deref().unwrap_or("unconditioned")
-                ));
-            }
-            for queued in &report.open_loops.tagged_items {
-                let marker = if queued.stale.is_some() {
-                    " [STALE]"
-                } else {
-                    ""
-                };
-                let head: String = queued.content.chars().take(96).collect();
-                text.push_str(&format!(
-                    "  - queued {}{marker}: {head}\n",
-                    queued.memory_id
-                ));
-            }
-            if let Some(scan) = &report.nearby_stores
-                && !scan.stores.is_empty()
-            {
-                text.push_str("\nNearby populated stores:\n");
-                for store in &scan.stores {
-                    text.push_str(&format!(
-                        "  - {} ({} documents)\n",
-                        store.store_dir, store.documents
-                    ));
-                }
-            }
-            text.push_str("\nNext commands:\n");
-            for command in &report.next_commands {
-                text.push_str(&format!("  - {command}\n"));
-            }
-            write_stdout(stdout, &text)
+            write_stdout(stdout, &render_resume_human(&report))
         }
         _ => {
             let envelope = serde_json::json!({
@@ -17320,6 +17260,77 @@ where
             write_stdout(stdout, &(envelope.to_string() + "\n"))
         }
     }
+}
+
+fn render_resume_human(report: &crate::core::resume::ResumeReport) -> String {
+    let mut text = format!(
+        "resume: {} episodic memories, {} sessions shown, {} open decisions, {} queued items, {} stale flags\n",
+        report.episodic_total,
+        report.sessions.len(),
+        report.open_loops.revisit_decisions.len(),
+        report.open_loops.tagged_items.len(),
+        report.stale_count,
+    );
+    text.push_str("\nRecent end-state:\n");
+    for session in &report.sessions {
+        text.push_str(&format!(
+            "\n[{}] {} memories ({} .. {})\n",
+            session.label, session.member_count, session.oldest_at, session.newest_at
+        ));
+        for session_item in &session.items {
+            let marker = if session_item.stale.is_some() {
+                " [STALE]"
+            } else {
+                ""
+            };
+            let head: String = session_item.content.chars().take(96).collect();
+            text.push_str(&format!("  - {}{marker}: {head}\n", session_item.memory_id));
+        }
+    }
+    text.push_str("\nOpen loops:\n");
+    for decision in &report.open_loops.revisit_decisions {
+        text.push_str(&format!(
+            "  - decision {}: {} (revisit {})\n",
+            decision.memory_id,
+            decision.topic,
+            decision.revisit_by.as_deref().unwrap_or("unconditioned")
+        ));
+    }
+    for queued in &report.open_loops.tagged_items {
+        let marker = if queued.stale.is_some() {
+            " [STALE]"
+        } else {
+            ""
+        };
+        let head: String = queued.content.chars().take(96).collect();
+        text.push_str(&format!(
+            "  - queued {}{marker}: {head}\n",
+            queued.memory_id
+        ));
+    }
+    if let Some(scan) = &report.nearby_stores {
+        if !scan.stores.is_empty() {
+            text.push_str("\nNearby populated stores:\n");
+            for store in &scan.stores {
+                let last_write = store.last_write.as_deref().unwrap_or("unknown");
+                text.push_str(&format!(
+                    "  - {} ({} documents, last write {last_write})\n",
+                    store.store_dir, store.documents
+                ));
+            }
+        }
+        if scan.truncated {
+            text.push_str(&format!(
+                "Nearby-store scan hit its {} ms time budget; the candidate list may be incomplete.\n",
+                crate::core::resume::RESUME_NEARBY_SCAN_BUDGET_MS
+            ));
+        }
+    }
+    text.push_str("\nNext commands:\n");
+    for command in &report.next_commands {
+        text.push_str(&format!("  - {command}\n"));
+    }
+    text
 }
 
 /// `ee conflict resolve <a> <b> --verb ... [--apply]` (bd-3a1op.4, ADR 0066).
@@ -67099,6 +67110,40 @@ mod tests {
                 expected,
                 "orient populated truncated nearby-store scan",
             )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resume_human_reports_candidate_last_write_and_truncation_together() -> TestResult {
+        let report = crate::core::resume::ResumeReport {
+            schema: crate::core::resume::RESUME_SCHEMA_V1,
+            workspace_id: "wsp_fixture".to_owned(),
+            episodic_total: 0,
+            sessions: Vec::new(),
+            open_loops: crate::core::resume::OpenLoops::default(),
+            stale_count: 0,
+            nearby_stores: Some(crate::core::orient::NearbyStoreScan {
+                stores: vec![crate::core::orient::NearbyStore {
+                    workspace_root: "/fixture/best campaign".to_owned(),
+                    store_dir: "/fixture/best campaign/.ee-campaign".to_owned(),
+                    documents: 17,
+                    last_write: Some("2026-08-10T14:15:16Z".to_owned()),
+                }],
+                truncated: true,
+            }),
+            next_commands: vec!["ee resume --workspace '/fixture/best campaign' --json".to_owned()],
+        };
+
+        let human = super::render_resume_human(&report);
+        for expected in [
+            "/fixture/best campaign/.ee-campaign",
+            "17 documents",
+            "last write 2026-08-10T14:15:16Z",
+            "Nearby-store scan hit its 250 ms time budget; the candidate list may be incomplete.",
+            "ee resume --workspace '/fixture/best campaign' --json",
+        ] {
+            ensure_contains(&human, expected, "resume nearby-store human posture")?;
         }
         Ok(())
     }

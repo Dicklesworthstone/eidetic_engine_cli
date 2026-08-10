@@ -57,6 +57,24 @@ run_ee() {
     return 0
 }
 
+hash_file() {
+    local path="$1"
+    if [[ ! -e "${path}" ]]; then
+        printf 'MISSING'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "${path}" | awk '{print $1}'
+    else
+        shasum -a 256 "${path}" | awk '{print $1}'
+    fi
+}
+
+store_fingerprint() {
+    local database="$1" path
+    for path in "${database}" "${database}-wal" "${database}-shm"; do
+        printf '%s=%s\n' "$(basename "${path}")" "$(hash_file "${path}")"
+    done
+}
+
 run_ee init --workspace "${WS}" --json
 if [[ "${LAST_EXIT}" -eq 0 ]]; then
     event init_ok pass
@@ -111,8 +129,16 @@ else
 fi
 
 # --- the bundle -----------------------------------------------------------
+STORE_DATABASE="${WS}/.ee/ee.db"
+JSON_HASH_BEFORE="$(store_fingerprint "${STORE_DATABASE}")"
 run_ee resume --workspace "${WS}" --json
 R="${LAST_STDOUT}"
+JSON_HASH_AFTER="$(store_fingerprint "${STORE_DATABASE}")"
+if [[ "${JSON_HASH_BEFORE}" == "${JSON_HASH_AFTER}" ]]; then
+    event json_resume_preserves_db_wal_shm pass
+else
+    event json_resume_preserves_db_wal_shm fail "before=${JSON_HASH_BEFORE//$'\n'/,}; after=${JSON_HASH_AFTER//$'\n'/,}"
+fi
 if [[ "${LAST_EXIT}" -eq 0 ]] \
     && jq -e '.data.report.schema == "ee.resume.v1"' "${R}" >/dev/null 2>&1; then
     event resume_returns_schema pass
@@ -156,8 +182,15 @@ else
 fi
 
 # --- human contract: every declared section remains visible ---------------
+HUMAN_HASH_BEFORE="$(store_fingerprint "${STORE_DATABASE}")"
 run_ee resume --workspace "${WS}"
 H="${LAST_STDOUT}"
+HUMAN_HASH_AFTER="$(store_fingerprint "${STORE_DATABASE}")"
+if [[ "${HUMAN_HASH_BEFORE}" == "${HUMAN_HASH_AFTER}" ]]; then
+    event human_resume_preserves_db_wal_shm pass
+else
+    event human_resume_preserves_db_wal_shm fail "before=${HUMAN_HASH_BEFORE//$'\n'/,}; after=${HUMAN_HASH_AFTER//$'\n'/,}"
+fi
 if [[ "${LAST_EXIT}" -eq 0 ]] \
     && grep -Fq "Recent end-state:" "${H}" \
     && grep -Fq "Open loops:" "${H}" \
@@ -173,6 +206,64 @@ if grep -Fq "queued " "${H}" \
     event human_open_loop_and_staleness_visible pass
 else
     event human_open_loop_and_staleness_visible fail "$(head -c 500 "${H}")"
+fi
+
+# --- cold workspace: nearby populated child retargets resume safely -------
+COLD_WS="${ROOT}/cold start"
+NEARBY_WS="${COLD_WS}/nearby campaign root"
+mkdir -p "${COLD_WS}" "${NEARBY_WS}"
+run_ee init --workspace "${COLD_WS}" --json
+COLD_INIT_EXIT=$LAST_EXIT
+run_ee init --workspace "${NEARBY_WS}" --json
+NEARBY_INIT_EXIT=$LAST_EXIT
+run_ee remember "Nearby campaign has durable state." --workspace "${NEARBY_WS}" \
+    --level semantic --kind note --json
+NEARBY_SEED_EXIT=$LAST_EXIT
+if [[ "${COLD_INIT_EXIT}" -eq 0 && "${NEARBY_INIT_EXIT}" -eq 0 && "${NEARBY_SEED_EXIT}" -eq 0 ]]; then
+    event nearby_store_seeded pass
+else
+    event nearby_store_seeded fail "init/seed exits ${COLD_INIT_EXIT}/${NEARBY_INIT_EXIT}/${NEARBY_SEED_EXIT}"
+fi
+
+COLD_DATABASE="${COLD_WS}/.ee/ee.db"
+COLD_JSON_HASH_BEFORE="$(store_fingerprint "${COLD_DATABASE}")"
+run_ee resume --workspace "${COLD_WS}" --json
+COLD_JSON="${LAST_STDOUT}"
+COLD_JSON_HASH_AFTER="$(store_fingerprint "${COLD_DATABASE}")"
+BEST_ROOT="$(jq -r '.data.report.nearbyStores.stores[0].workspaceRoot // empty' "${COLD_JSON}" 2>/dev/null)"
+BEST_DOCS="$(jq -r '.data.report.nearbyStores.stores[0].documents // 0' "${COLD_JSON}" 2>/dev/null)"
+BEST_LAST_WRITE="$(jq -r '.data.report.nearbyStores.stores[0].lastWrite // empty' "${COLD_JSON}" 2>/dev/null)"
+FIRST_COMMAND="$(jq -r '.data.report.nextCommands[0] // empty' "${COLD_JSON}" 2>/dev/null)"
+EXPECTED_COMMAND="ee resume --workspace '${NEARBY_WS}' --json"
+if [[ "${LAST_EXIT}" -eq 0 && "${BEST_ROOT}" == "${NEARBY_WS}" \
+    && "${BEST_DOCS}" -gt 0 && -n "${BEST_LAST_WRITE}" \
+    && "${FIRST_COMMAND}" == "${EXPECTED_COMMAND}" ]]; then
+    event nearby_store_prepends_quoted_resume pass
+else
+    event nearby_store_prepends_quoted_resume fail "exit=${LAST_EXIT}; root=${BEST_ROOT}; docs=${BEST_DOCS}; lastWrite=${BEST_LAST_WRITE}; command=${FIRST_COMMAND}"
+fi
+if [[ "${COLD_JSON_HASH_BEFORE}" == "${COLD_JSON_HASH_AFTER}" ]]; then
+    event nearby_json_resume_preserves_db_wal_shm pass
+else
+    event nearby_json_resume_preserves_db_wal_shm fail "before=${COLD_JSON_HASH_BEFORE//$'\n'/,}; after=${COLD_JSON_HASH_AFTER//$'\n'/,}"
+fi
+
+COLD_HUMAN_HASH_BEFORE="$(store_fingerprint "${COLD_DATABASE}")"
+run_ee resume --workspace "${COLD_WS}"
+COLD_HUMAN="${LAST_STDOUT}"
+COLD_HUMAN_HASH_AFTER="$(store_fingerprint "${COLD_DATABASE}")"
+if [[ "${LAST_EXIT}" -eq 0 ]] \
+    && grep -Fq "${NEARBY_WS}/.ee" "${COLD_HUMAN}" \
+    && grep -Fq "${BEST_DOCS} documents" "${COLD_HUMAN}" \
+    && grep -Fq "last write ${BEST_LAST_WRITE}" "${COLD_HUMAN}"; then
+    event nearby_human_shows_path_docs_last_write pass
+else
+    event nearby_human_shows_path_docs_last_write fail "exit ${LAST_EXIT}; $(head -c 500 "${COLD_HUMAN}")"
+fi
+if [[ "${COLD_HUMAN_HASH_BEFORE}" == "${COLD_HUMAN_HASH_AFTER}" ]]; then
+    event nearby_human_resume_preserves_db_wal_shm pass
+else
+    event nearby_human_resume_preserves_db_wal_shm fail "before=${COLD_HUMAN_HASH_BEFORE//$'\n'/,}; after=${COLD_HUMAN_HASH_AFTER//$'\n'/,}"
 fi
 
 echo
