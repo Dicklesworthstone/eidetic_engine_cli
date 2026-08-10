@@ -423,6 +423,18 @@ struct RememberEmbedDedupDecision {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+enum RememberEmbedDedupProbe {
+    Disabled,
+    Enabled {
+        hamming_k: u32,
+        cosine_floor: f32,
+        query_fingerprint: SimHash128,
+        content_simhash: MemoryContentSimHash,
+        query_embedding: Vec<f32>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct RememberEmbedDedupLink {
     target_memory_id: String,
     hamming_distance: u32,
@@ -1463,8 +1475,6 @@ fn remember_memory_inner_with_store(
         });
     }
 
-    let mut write_replay_guard = RememberWriteReplayGuard::arm(&prepared.workspace_path)?;
-
     ensure_database_parent_exists(&prepared.database_path)?;
     let connection = open_remember_database_with_retry(&prepared.database_path)?;
     migrate_remember_database_with_retry(&connection)?;
@@ -1475,8 +1485,6 @@ fn remember_memory_inner_with_store(
     )?;
 
     let memory_id = prepared.memory_id.to_string();
-    let _workspace_write_lock =
-        acquire_remember_workspace_lock(&connection, &prepared.workspace_id, &memory_id)?;
     let audit_id = id_source.next_audit_id();
     let policy_bypass_audit_id = prepared
         .policy_bypass
@@ -1526,12 +1534,11 @@ fn remember_memory_inner_with_store(
         document_id: Some(memory_id.clone()),
         documents_total: 1,
     };
-    let embed_dedup_decision = remember_embed_dedup_decision_from_env(&connection, &memory_input)?;
-    let near_duplicates = remember_near_duplicates_from_embed_dedup_decision(&embed_dedup_decision);
-    let embed_dedup_link_id = embed_dedup_decision
-        .link
-        .as_ref()
-        .map(|_| generate_memory_link_id());
+    // Compute the immutable query fingerprint/vector before entering the
+    // serialized writer lane. Candidate lookup remains inside the lane so a
+    // writer that waited behind an identical remember observes and links the
+    // row committed by its predecessor.
+    let embed_dedup_probe = remember_embed_dedup_probe_from_env(&memory_input)?;
     let audit_details = remember_audit_details(
         &memory_id,
         &memory_input,
@@ -1566,6 +1573,20 @@ fn remember_memory_inner_with_store(
         provenance_uri: prepared.provenance_uri.clone(),
         observed_at_ms: u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
     };
+    // Serialize only source-of-truth mutations. Expensive embedding
+    // preparation above and derived index publication below have their own
+    // consistency boundaries and must not consume another writer's
+    // workspace-lock budget.
+    let workspace_write_lock =
+        acquire_remember_workspace_lock(&connection, &prepared.workspace_id, &memory_id)?;
+    let embed_dedup_decision =
+        remember_embed_dedup_decision_from_probe(&connection, &memory_input, &embed_dedup_probe)?;
+    let near_duplicates = remember_near_duplicates_from_embed_dedup_decision(&embed_dedup_decision);
+    let embed_dedup_link_id = embed_dedup_decision
+        .link
+        .as_ref()
+        .map(|_| generate_memory_link_id());
+    let mut write_replay_guard = RememberWriteReplayGuard::arm(&prepared.workspace_path)?;
     crate::core::write_owner::run_one_shot_write_intake(
         &prepared.workspace_path,
         &write_operation,
@@ -1721,6 +1742,9 @@ fn remember_memory_inner_with_store(
         }
     }
 
+    write_replay_guard.mark_clean()?;
+    drop(workspace_write_lock);
+
     let index_dir = prepared.index_dir.clone();
     let index_report = if defer_index_processing {
         // bd-2efx1: leave the job pending; the batch lane drains every
@@ -1771,8 +1795,6 @@ fn remember_memory_inner_with_store(
             ),
         };
 
-    write_replay_guard.mark_clean()?;
-
     let typed_fields =
         remember_typed_fields_value(&prepared.kind, prepared.typed_fields_json.as_deref())?;
     let report = RememberMemoryReport {
@@ -1816,7 +1838,6 @@ fn remember_memory_inner_with_store(
         curation_candidate_degradations,
         near_duplicates,
     };
-    drop(_workspace_write_lock);
     if let Err(error) = connection.close() {
         tracing::warn!(
             target: "ee::memory",
@@ -1989,12 +2010,6 @@ fn remember_index_status(report: &IndexProcessingJobReport) -> String {
 
 const REMEMBER_CONTENTION_MAX_ATTEMPTS: usize = 64;
 const REMEMBER_WORKSPACE_LOCK_TTL_SECS: u64 = 300;
-/// Hard ceiling on total advisory-lock polls, as a multiple of the
-/// stagnation budget (bd-rs4cm): a queue whose holder keeps changing is
-/// allowed up to 8x the stagnant-wait budget (~5 minutes at the capped
-/// 640ms delay) before remember gives up, so deep-but-moving multi-process
-/// queues stop dropping writes while true wedges still fail fast.
-const REMEMBER_LOCK_PROGRESS_MULTIPLIER: usize = 8;
 const REMEMBER_ADVISORY_LOCK_REPAIR_COMMAND: &str =
     "ee diag advisory-lock --workspace . --resource-type workspace --release --json";
 
@@ -2046,7 +2061,7 @@ fn acquire_remember_workspace_lock_with_retry<'a>(
     let lock_id = AdvisoryLockId::workspace(workspace_id);
     let holder_id = format!("remember:{}:{memory_id}", std::process::id());
     let attempts = attempts.max(1);
-    let mut last_holder: Option<(String, String)> = None;
+    let mut progress_token: Option<(String, String)> = None;
 
     // Progress-aware waiting (bd-rs4cm): `attempts` bounds CONSECUTIVE polls
     // that observe the SAME holder — a stagnant lock (wedged or leaked
@@ -2054,13 +2069,12 @@ fn acquire_remember_workspace_lock_with_retry<'a>(
     // CHANGES between polls is a queue making progress, so the wait
     // continues rather than dropping the write with a hard storage error
     // (the old fixed cliff starved N-writer queues whose total service time
-    // exceeded ~38s). Total waiting stays bounded by a hard ceiling so a
-    // pathological fast-churn queue cannot pin the process forever.
-    let total_poll_ceiling = attempts.saturating_mul(REMEMBER_LOCK_PROGRESS_MULTIPLIER);
-    let mut stagnant_polls = 0usize;
-    let mut total_polls = 0usize;
+    // exceeded ~38s). The ambient Cx remains the overall cancellation/deadline
+    // bound; the local counter detects only lack of queue progress.
+    let mut no_progress_polls = 0usize;
 
     loop {
+        remember_retry_sleep(Duration::ZERO, "acquire advisory lock")?;
         match connection.acquire_advisory_lock(
             &lock_id,
             &holder_id,
@@ -2080,29 +2094,28 @@ fn acquire_remember_workspace_lock_with_retry<'a>(
                 acquired_at,
             }) => {
                 let current = (holder_id, acquired_at);
-                if last_holder.as_ref() == Some(&current) {
-                    stagnant_polls += 1;
+                if progress_token.as_ref() == Some(&current) {
+                    no_progress_polls += 1;
                 } else {
-                    stagnant_polls = 1;
+                    progress_token = Some(current);
+                    no_progress_polls = 0;
                 }
-                last_holder = Some(current);
-                total_polls += 1;
-                if stagnant_polls >= attempts || total_polls >= total_poll_ceiling {
+                if no_progress_polls >= attempts {
                     break;
                 }
-                remember_retry_sleep(retry_delay(total_polls - 1), "acquire advisory lock")?;
+                remember_retry_sleep(retry_delay(no_progress_polls), "acquire advisory lock")?;
             }
             Err(error) if remember_write_contention_is_retryable(&error) => {
-                total_polls += 1;
-                if total_polls >= attempts {
+                no_progress_polls += 1;
+                if no_progress_polls >= attempts {
                     return Err(DomainError::Storage {
                         message: format!(
-                            "advisory lock timeout while acquiring workspace write lock: {error}"
+                            "advisory lock unavailable after {no_progress_polls} no-progress polls while acquiring workspace write lock"
                         ),
                         repair: Some(REMEMBER_ADVISORY_LOCK_REPAIR_COMMAND.to_owned()),
                     });
                 }
-                remember_retry_sleep(retry_delay(total_polls - 1), "acquire advisory lock")?;
+                remember_retry_sleep(retry_delay(no_progress_polls - 1), "acquire advisory lock")?;
             }
             Err(error) => {
                 return Err(DomainError::Storage {
@@ -2113,14 +2126,9 @@ fn acquire_remember_workspace_lock_with_retry<'a>(
         }
     }
 
-    let holder = last_holder.map_or_else(
-        || "<unknown holder> at <unknown time>".to_owned(),
-        |(holder_id, acquired_at)| format!("{holder_id} since {acquired_at}"),
-    );
     Err(DomainError::Storage {
         message: format!(
-            "advisory lock timeout while waiting for workspace write lock held by {holder} \
-             ({total_polls} polls, {stagnant_polls} without holder progress)"
+            "advisory lock timeout after {no_progress_polls} no-progress polls while waiting for workspace write lock"
         ),
         repair: Some(REMEMBER_ADVISORY_LOCK_REPAIR_COMMAND.to_owned()),
     })
@@ -4304,30 +4312,70 @@ fn remember_embed_dedup_decision_from_env(
     connection: &DbConnection,
     memory_input: &CreateMemoryInput,
 ) -> Result<RememberEmbedDedupDecision, DomainError> {
+    let probe = remember_embed_dedup_probe_from_env(memory_input)?;
+    remember_embed_dedup_decision_from_probe(connection, memory_input, &probe)
+}
+
+fn remember_embed_dedup_probe_from_env(
+    memory_input: &CreateMemoryInput,
+) -> Result<RememberEmbedDedupProbe, DomainError> {
     let config = EmbedDedupConfig::from_env().map_err(|error| DomainError::Configuration {
         message: error.to_string(),
         repair: Some(error.repair.to_owned()),
     })?;
-    remember_embed_dedup_decision(connection, memory_input, config)
+    Ok(remember_embed_dedup_probe(memory_input, config))
 }
 
+#[cfg(test)]
 fn remember_embed_dedup_decision(
     connection: &DbConnection,
     memory_input: &CreateMemoryInput,
     config: EmbedDedupConfig,
 ) -> Result<RememberEmbedDedupDecision, DomainError> {
+    let probe = remember_embed_dedup_probe(memory_input, config);
+    remember_embed_dedup_decision_from_probe(connection, memory_input, &probe)
+}
+
+fn remember_embed_dedup_probe(
+    memory_input: &CreateMemoryInput,
+    config: EmbedDedupConfig,
+) -> RememberEmbedDedupProbe {
     if !config.enabled {
-        return Ok(RememberEmbedDedupDecision::disabled());
+        return RememberEmbedDedupProbe::Disabled;
     }
 
-    let started = Instant::now();
     let query_fingerprint = crate::search::simhash::simhash_128(&memory_input.content);
-    let content_simhash = query_fingerprint.to_be_bytes();
+    RememberEmbedDedupProbe::Enabled {
+        hamming_k: config.hamming_k,
+        cosine_floor: config.cosine_floor as f32,
+        query_fingerprint,
+        content_simhash: query_fingerprint.to_be_bytes(),
+        query_embedding: HashEmbedder::default_256().embed_sync(&memory_input.content),
+    }
+}
+
+fn remember_embed_dedup_decision_from_probe(
+    connection: &DbConnection,
+    memory_input: &CreateMemoryInput,
+    probe: &RememberEmbedDedupProbe,
+) -> Result<RememberEmbedDedupDecision, DomainError> {
+    let RememberEmbedDedupProbe::Enabled {
+        hamming_k,
+        cosine_floor,
+        query_fingerprint,
+        content_simhash,
+        query_embedding,
+    } = probe
+    else {
+        return Ok(RememberEmbedDedupDecision::disabled());
+    };
+
+    let started = Instant::now();
     let candidates = connection
         .list_memory_simhash_candidates(
             &memory_input.workspace_id,
-            content_simhash,
-            config.hamming_k,
+            *content_simhash,
+            *hamming_k,
             REMEMBER_EMBED_DEDUP_CANDIDATE_LIMIT,
         )
         .map_err(|error| DomainError::Storage {
@@ -4345,7 +4393,7 @@ fn remember_embed_dedup_decision(
             started.elapsed(),
         );
         return Ok(RememberEmbedDedupDecision::fresh(
-            content_simhash,
+            *content_simhash,
             "no_prior_workspace_simhash_candidate",
         ));
     }
@@ -4362,7 +4410,6 @@ fn remember_embed_dedup_decision(
         })?;
 
     let embedder = HashEmbedder::default_256();
-    let query_embedding = embedder.embed_sync(&memory_input.content);
     let candidate_embeddings = candidates
         .iter()
         .filter_map(|candidate| {
@@ -4386,22 +4433,21 @@ fn remember_embed_dedup_decision(
             started.elapsed(),
         );
         return Ok(RememberEmbedDedupDecision::fresh(
-            content_simhash,
+            *content_simhash,
             "simhash_candidate_rows_missing",
         ));
     }
 
-    let cosine_floor = config.cosine_floor as f32;
     let confirmed = first_confirmed_simhash_candidate(
-        query_fingerprint,
-        &query_embedding,
+        *query_fingerprint,
+        query_embedding,
         candidate_embeddings
             .iter()
             .map(|(memory_id, fingerprint, _, embedding)| {
                 (memory_id.as_str(), *fingerprint, embedding.as_slice())
             }),
-        config.hamming_k,
-        cosine_floor,
+        *hamming_k,
+        *cosine_floor,
     );
 
     match confirmed {
@@ -4416,12 +4462,12 @@ fn remember_embed_dedup_decision(
                 started.elapsed(),
             );
             Ok(RememberEmbedDedupDecision::reused(
-                content_simhash,
+                *content_simhash,
                 RememberEmbedDedupLink {
                     target_memory_id: candidate.candidate_id.to_owned(),
                     hamming_distance: candidate.hamming_distance,
                     cosine_similarity: candidate.cosine.similarity,
-                    cosine_floor,
+                    cosine_floor: *cosine_floor,
                 },
             ))
         }
@@ -4439,7 +4485,7 @@ fn remember_embed_dedup_decision(
                 started.elapsed(),
             );
             Ok(RememberEmbedDedupDecision::fresh(
-                content_simhash,
+                *content_simhash,
                 "cosine_under_floor",
             ))
         }
@@ -12375,6 +12421,62 @@ mod tests {
     }
 
     #[test]
+    fn remember_embed_dedup_requeries_after_serialized_writer_progress() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = setup_remember_test_workspace(&connection)?;
+        let content = "Serialize identical remembers before final duplicate selection.";
+        let memory_input = remember_test_memory_input(&workspace_id, content);
+        let config = EmbedDedupConfig {
+            enabled: true,
+            hamming_k: 0,
+            cosine_floor: 0.99,
+        };
+
+        // Model the adversarial schedule precisely: both writers finish their
+        // immutable fingerprint/vector work before either obtains the
+        // workspace lock. The first then commits while the second waits.
+        let first_probe = remember_embed_dedup_probe(&memory_input, config);
+        let second_probe = remember_embed_dedup_probe(&memory_input, config);
+        let first_decision =
+            remember_embed_dedup_decision_from_probe(&connection, &memory_input, &first_probe)
+                .map_err(|error| error.to_string())?;
+        ensure(
+            first_decision.decision,
+            "new_embed",
+            "first writer decision",
+        )?;
+        let first_simhash = first_decision
+            .content_simhash
+            .ok_or_else(|| "enabled first writer omitted content SimHash".to_owned())?;
+        connection
+            .insert_memory_with_content_simhash(
+                "mem_serializeddedupfirst0000000",
+                &memory_input,
+                first_simhash,
+            )
+            .map_err(|error| error.to_string())?;
+
+        // Candidate selection happens only after the second writer enters the
+        // serialized lane, so it must observe the predecessor rather than
+        // replaying a stale pre-lock decision.
+        let second_decision =
+            remember_embed_dedup_decision_from_probe(&connection, &memory_input, &second_probe)
+                .map_err(|error| error.to_string())?;
+        ensure(second_decision.decision, "reuse", "second writer decision")?;
+        ensure(
+            second_decision
+                .link
+                .as_ref()
+                .map(|link| link.target_memory_id.as_str()),
+            Some("mem_serializeddedupfirst0000000"),
+            "second writer links its serialized predecessor",
+        )?;
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
     fn remember_near_duplicates_surface_confirmed_embed_dedup_link() -> TestResult {
         let decision = RememberEmbedDedupDecision::reused(
             [2_u8; 16],
@@ -16321,8 +16423,9 @@ mod tests {
             .ensure_advisory_locks_table()
             .map_err(|error| error.to_string())?;
         let lock_id = AdvisoryLockId::workspace("wsp_remember_timeout");
+        let sensitive_holder = "remember:4242:mem_sensitive_fixture";
         let acquired = connection
-            .acquire_advisory_lock(&lock_id, "held-by-agent", Some(300), Some("unit test"))
+            .acquire_advisory_lock(&lock_id, sensitive_holder, Some(300), Some("unit test"))
             .map_err(|error| error.to_string())?;
         ensure(acquired.is_acquired(), true, "fixture lock acquired")?;
 
@@ -16350,72 +16453,78 @@ mod tests {
             true,
             "error envelope carries recovery command",
         )?;
+        ensure(
+            !json.contains("remember:")
+                && !json.contains("mem_sensitive_fixture")
+                && !json.contains("4242"),
+            true,
+            "timeout envelope does not expose competing holder identity",
+        )?;
 
         connection
-            .release_advisory_lock(&lock_id, "held-by-agent")
+            .release_advisory_lock(&lock_id, sensitive_holder)
             .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())
     }
 
     #[test]
-    fn remember_workspace_lock_wait_survives_holder_progress() -> TestResult {
+    fn remember_workspace_lock_wait_survives_deep_holder_progress() -> TestResult {
         // bd-rs4cm: `attempts` bounds SAME-HOLDER stagnation, not total
-        // waiting. With attempts=2, a queue whose holder changes between
-        // polls (simulated inside the retry-delay hook) must keep waiting
-        // past the old fixed cliff and eventually acquire.
+        // waiting. More than the removed 512-poll ceiling of the first fix
+        // must still acquire while every observation shows queue progress.
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection
             .ensure_advisory_locks_table()
             .map_err(|error| error.to_string())?;
         let lock_id = AdvisoryLockId::workspace("wsp_remember_progress");
         let acquired = connection
-            .acquire_advisory_lock(&lock_id, "holder-a", Some(300), Some("unit test"))
+            .acquire_advisory_lock(&lock_id, "holder-0", Some(300), Some("unit test"))
             .map_err(|error| error.to_string())?;
         ensure(acquired.is_acquired(), true, "fixture lock acquired")?;
 
+        const HOLDER_TURNOVERS: usize = 513;
         let sleep_calls = std::cell::Cell::new(0usize);
+        let delay_attempts = std::cell::RefCell::new(Vec::new());
         let guard = acquire_remember_workspace_lock_with_retry(
             &connection,
             "wsp_remember_progress",
             "mem_01234567890123456789012346",
             2,
-            |_| {
+            |delay_attempt| {
                 let call = sleep_calls.get();
                 sleep_calls.set(call + 1);
-                match call {
-                    0 => {
-                        // holder-a hands off to holder-b: progress.
+                delay_attempts.borrow_mut().push(delay_attempt);
+                let current_holder = format!("holder-{call}");
+                connection
+                    .release_advisory_lock(&lock_id, &current_holder)
+                    .expect("release current holder");
+                if call < HOLDER_TURNOVERS {
+                    let next_holder = format!("holder-{}", call + 1);
+                    assert!(
                         connection
-                            .release_advisory_lock(&lock_id, "holder-a")
-                            .expect("release holder-a");
-                        assert!(
-                            connection
-                                .acquire_advisory_lock(
-                                    &lock_id,
-                                    "holder-b",
-                                    Some(300),
-                                    Some("unit test"),
-                                )
-                                .expect("acquire holder-b")
-                                .is_acquired()
-                        );
-                    }
-                    1 => {
-                        // holder-b finishes: the lock frees up.
-                        connection
-                            .release_advisory_lock(&lock_id, "holder-b")
-                            .expect("release holder-b");
-                    }
-                    _ => {}
+                            .acquire_advisory_lock(
+                                &lock_id,
+                                &next_holder,
+                                Some(300),
+                                Some("unit test"),
+                            )
+                            .expect("acquire next holder")
+                            .is_acquired()
+                    );
                 }
                 Duration::ZERO
             },
         )
         .map_err(|error| format!("progressing queue must not time out: {error:?}"))?;
         ensure(
-            sleep_calls.get() >= 2,
+            sleep_calls.get() > 512,
             true,
-            "wait outlasted the old fixed 2-attempt budget",
+            "wait outlasted the removed 512-poll ceiling",
+        )?;
+        ensure(
+            delay_attempts.borrow().iter().all(|attempt| *attempt == 0),
+            true,
+            "holder turnover resets the no-progress backoff",
         )?;
         drop(guard);
         connection.close().map_err(|error| error.to_string())

@@ -1152,9 +1152,8 @@ run_stage "Journal Capture E2E (bd-1pi9m.6)" "./scripts/e2e_journal_capture.sh"
 # Gate 6.126: Single-shot write contention E2E (bd-d67os.27 item 1). No-mock:
 # N concurrent OS processes interleave `ee journal append` and `ee remember`
 # against one workspace DB. Journal appends must never drop (the bd-d67os.26
-# flock-classification fix class, proven end-to-end); remember drops surface
-# as a separate assertion (strict via EE_E2E_STRICT_REMEMBER=1 once the
-# advisory-lock starvation follow-up lands).
+# flock-classification fix class, proven end-to-end), and progress-aware
+# advisory-lock waiting must keep every remember write lossless (bd-rs4cm).
 run_stage "Write Contention E2E (bd-d67os.27)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_single_shot_write_contention.sh"
 
 # Gate 6.1265: Capture-track real-binary E2E (bd-2vq2z.20). No-Cargo:

@@ -87,11 +87,21 @@ worker() {
                 "contention fact w${worker_id}-${j}" --json 2>>"${results}.stderr")"
             rc=$?
         fi
-        local success
+        local success schema persisted memory_id label
         success="$(jq -r '.success // false' <<<"${out}" 2>/dev/null || echo parse_error)"
-        echo "${kind} ${j} rc=${rc} success=${success}" >>"${results}"
-        if [[ "${rc}" -ne 0 || "${success}" != "true" ]]; then
-            echo "FAILED ${kind} w${worker_id}-${j}: rc=${rc} success=${success} out=$(head -c 300 <<<"${out}")" >>"${results}"
+        schema="$(jq -r '.schema // empty' <<<"${out}" 2>/dev/null || true)"
+        label="w${worker_id}-${j}"
+        echo "${kind} ${j} rc=${rc} success=${success} schema=${schema}" >>"${results}"
+        if [[ "${rc}" -ne 0 || "${success}" != "true" || "${schema}" != "ee.response.v2" ]]; then
+            echo "FAILED ${kind} ${label}: rc=${rc} success=${success} schema=${schema} out=$(head -c 300 <<<"${out}")" >>"${results}"
+        elif [[ "${kind}" == "remember" ]]; then
+            persisted="$(jq -r '.data.persisted // false' <<<"${out}")"
+            memory_id="$(jq -r '.data.memoryId // empty' <<<"${out}")"
+            if [[ "${persisted}" != "true" || -z "${memory_id}" ]]; then
+                echo "FAILED remember ${label}: persisted=${persisted} memoryId=${memory_id:-missing}" >>"${results}"
+            else
+                printf 'MEMORY %s %s\n' "${label}" "${memory_id}" >>"${results}"
+            fi
         fi
     done
 }
@@ -106,15 +116,11 @@ for pid in "${pids[@]}"; do
 done
 
 # --- zero hard failures --------------------------------------------------
-# Journal appends are the bd-d67os.26 fix class (flock-gate classification)
-# and must never drop. Remember drops are asserted separately: remember can
-# still starve on the APPLICATION advisory workspace lock (fixed ~38s wait
-# budget vs queue-depth x per-write service time — see the follow-up bead
-# filed from this e2e's first live run); strict enforcement is gated on
-# EE_E2E_STRICT_REMEMBER=1 until that lands so verify.sh stays honest-green
-# on the class this script was built to prove.
-journal_failed="$(grep -h '^FAILED journal_append' "${LOG_DIR}"/worker*.results 2>/dev/null | wc -l | tr -d ' ')"
-remember_failed="$(grep -h '^FAILED remember' "${LOG_DIR}"/worker*.results 2>/dev/null | wc -l | tr -d ' ')"
+# Journal appends and remembers must both survive the shared-workspace writer
+# queue. bd-rs4cm made remember's advisory-lock wait progress-aware, so any
+# dropped remember is now a hard regression rather than an accepted branch.
+journal_failed="$(grep -hc '^FAILED journal_append' "${LOG_DIR}"/worker*.results 2>/dev/null | awk '{ total += $1 } END { print total + 0 }')"
+remember_failed="$(grep -hc '^FAILED remember' "${LOG_DIR}"/worker*.results 2>/dev/null | awk '{ total += $1 } END { print total + 0 }')"
 if [[ "${journal_failed}" -eq 0 ]]; then
     event zero_dropped_journal_appends pass
 else
@@ -123,12 +129,9 @@ else
 fi
 if [[ "${remember_failed}" -eq 0 ]]; then
     event zero_dropped_remembers pass
-elif [[ "${EE_E2E_STRICT_REMEMBER:-0}" == "1" ]]; then
-    diagnosis="$(grep -h '^FAILED remember' "${LOG_DIR}"/worker*.results | head -2)"
-    event zero_dropped_remembers fail "${remember_failed} remembers dropped; first: ${diagnosis}"
 else
     diagnosis="$(grep -h '^FAILED remember' "${LOG_DIR}"/worker*.results | head -2)"
-    event remember_drops_observed_nonstrict pass "known advisory-lock starvation class: ${remember_failed} dropped; ${diagnosis}"
+    event zero_dropped_remembers fail "${remember_failed} remembers dropped; first: ${diagnosis}"
 fi
 
 # --- persisted counts match what was written -----------------------------
@@ -151,12 +154,47 @@ else
     event journal_rows_persisted fail "expected ${expected_journal} journal entries, listed ${journal_count}"
 fi
 
+memory_rows="${LOG_DIR}/remembered.rows"
+grep -h '^MEMORY ' "${LOG_DIR}"/worker*.results | sort >"${memory_rows}" || true
+recorded_memory_count="$(wc -l <"${memory_rows}" | tr -d ' ')"
+unique_memory_count="$(awk '{print $3}' "${memory_rows}" | sort -u | wc -l | tr -d ' ')"
+if [[ "${recorded_memory_count}" == "${expected_memories}" && "${unique_memory_count}" == "${expected_memories}" ]]; then
+    event remembered_ids_are_complete_and_unique pass
+else
+    event remembered_ids_are_complete_and_unique fail "expected ${expected_memories} response IDs, recorded=${recorded_memory_count}, unique=${unique_memory_count}"
+fi
+
+show_failures=0
+show_diagnosis=""
+while read -r _ label memory_id; do
+    [[ -n "${memory_id:-}" ]] || continue
+    show_json="$("${REAL_EE}" --workspace "${WS}" memory show "${memory_id}" --json 2>/dev/null)"
+    expected_content="contention fact ${label}"
+    if ! jq -e --arg memory_id "${memory_id}" --arg content "${expected_content}" '
+        .schema == "ee.response.v2"
+        and .success == true
+        and .data.found == true
+        and .data.memoryId == $memory_id
+        and .data.memory.content == $content
+    ' <<<"${show_json}" >/dev/null; then
+        show_failures=$((show_failures + 1))
+        if [[ -z "${show_diagnosis}" ]]; then
+            show_diagnosis="${label}/${memory_id}: $(head -c 240 <<<"${show_json}")"
+        fi
+    fi
+done <"${memory_rows}"
+if [[ "${show_failures}" -eq 0 && "${recorded_memory_count}" == "${expected_memories}" ]]; then
+    event every_remember_response_is_durably_readable pass
+else
+    event every_remember_response_is_durably_readable fail "showFailures=${show_failures}; first=${show_diagnosis:-missing response IDs}"
+fi
+
 memory_json="$("${REAL_EE}" --workspace "${WS}" search "contention fact" --limit 100 --json 2>/dev/null)"
 memory_count="$(jq -r '.data.resultCount // (.data.results | length) // -1' <<<"${memory_json}" 2>/dev/null || echo -1)"
-if [[ "${memory_count}" -ge 1 ]]; then
+if [[ "${memory_count}" == "${expected_memories}" ]]; then
     event remembered_facts_searchable pass
 else
-    event remembered_facts_searchable fail "expected searchable facts, resultCount=${memory_count} (expected ~${expected_memories} persisted)"
+    event remembered_facts_searchable fail "expected ${expected_memories} searchable facts, resultCount=${memory_count}"
 fi
 
 echo
