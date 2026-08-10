@@ -48620,10 +48620,17 @@ fn proof_admission_for_fingerprint(
             && record.fingerprint.command_class == fingerprint.command_class
             && record.fingerprint.execution_substrate == fingerprint.execution_substrate
     }) {
+        // bd-088ci: a same-command ledger row at an OLDER fingerprint means
+        // the recorded proof cannot be reused for the current source — the
+        // normal state on a moving main, and precisely why a fresh dispatch
+        // is needed. Refusing here (the old SourceStateMismatch verdict)
+        // made every retry after a source change self-block; callers
+        // treated any non-allowed verdict as a hard stop while the decision
+        // itself said "rerun_current_source".
         return proof_admission_decision(
-            crate::models::ProofBrokerAdmissionVerdict::SourceStateMismatch,
-            vec!["command_match", "fingerprint_mismatch"],
-            "rerun_current_source",
+            crate::models::ProofBrokerAdmissionVerdict::DispatchAllowed,
+            vec!["command_match", "fingerprint_mismatch", "prior_proof_stale"],
+            "dispatch_fresh_proof_for_current_source",
             records
                 .iter()
                 .find_map(|record| record.admission.reuse_run_id.as_deref()),
@@ -74580,7 +74587,7 @@ mod tests {
     }
 
     #[test]
-    fn proof_admit_json_surfaces_source_state_mismatch() -> TestResult {
+    fn proof_admit_stale_fingerprint_dispatches_fresh() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let ledger_path = tempdir.path().join("proof-ledger.json");
         let records = crate::models::sample_proof_broker_ledger_records();
@@ -74635,10 +74642,14 @@ mod tests {
         )?;
         let value: serde_json::Value = serde_json::from_str(&stdout)
             .map_err(|error| format!("proof admit source mismatch stdout must parse: {error}"))?;
+        // bd-088ci: a same-command row at an older fingerprint must ALLOW a
+        // fresh dispatch (the old source_state_mismatch refusal self-blocked
+        // every retry on a moving main) while still naming why the recorded
+        // proof cannot be reused.
         ensure_equal(
             &value["data"]["admission"]["verdict"],
-            &serde_json::json!("source_state_mismatch"),
-            "proof admit source mismatch verdict",
+            &serde_json::json!("dispatch_allowed"),
+            "stale-fingerprint admit verdict",
         )?;
         ensure(
             value["data"]["admission"]["reasonCodes"]
@@ -74647,8 +74658,14 @@ mod tests {
                     reasons
                         .iter()
                         .any(|reason| reason == "fingerprint_mismatch")
+                        && reasons.iter().any(|reason| reason == "prior_proof_stale")
                 }),
-            "proof admit source mismatch includes reason",
+            "stale-fingerprint admit carries the mismatch + stale reasons",
+        )?;
+        ensure_equal(
+            &value["data"]["admission"]["nextAction"],
+            &serde_json::json!("dispatch_fresh_proof_for_current_source"),
+            "stale-fingerprint admit next action",
         )
     }
 
