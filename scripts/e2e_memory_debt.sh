@@ -177,6 +177,27 @@ else
     event repeated_misses_form_gap_cluster fail "exit ${LAST_EXIT}; $(head -c 300 "${G}")"
 fi
 
+# --- trend: two steward snapshots around a fix show the direction ---------
+run_ee remember "Second planted orphan for the trend arc." \
+    --workspace "${WS}" --level semantic --kind fact --tags "planted-orphan-2" --json
+ORPHAN2="$(remember_id)"
+run_ee job run memory_debt_snapshot --workspace "${WS}" --json
+SNAP1=$LAST_EXIT
+run_ee memory link "${ORPHAN2}" "${CTRL_A}" --relation related --workspace "${WS}" --json
+FIX2=$LAST_EXIT
+run_ee job run memory_debt_snapshot --workspace "${WS}" --json
+SNAP2=$LAST_EXIT
+run_ee curate doctor --workspace "${WS}" --trend --json
+T="${LAST_STDOUT}"
+if [[ "${SNAP1}" -eq 0 && "${FIX2}" -eq 0 && "${SNAP2}" -eq 0 && "${LAST_EXIT}" -eq 0 ]] \
+    && jq -e '(.data.trend.snapshots | length) >= 2
+              and (.data.trend.snapshots[0].totalScore < .data.trend.snapshots[1].totalScore)' \
+        "${T}" >/dev/null 2>&1; then
+    event trend_shows_debt_decreasing_after_fix pass
+else
+    event trend_shows_debt_decreasing_after_fix fail "snap1=${SNAP1} fix=${FIX2} snap2=${SNAP2} exit=${LAST_EXIT}; $(jq -c '[.data.trend.snapshots[]? | {generation, totalScore}]' "${T}" 2>/dev/null)"
+fi
+
 echo
 echo "memory debt e2e: ${STEP} steps, ${FAILURES} failures; root ${ROOT}"
 if [[ "${FAILURES}" -gt 0 ]]; then
