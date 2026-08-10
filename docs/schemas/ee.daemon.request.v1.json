@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.daemon.request.v1.json",
   "title": "ee.daemon.request.v1",
-  "description": "Length-prefixed JSON request envelope for the optional `ee daemon` Unix-domain socket RPC introduced by bd-oja31 (SRR1 hot-mode skeleton). Wire framing: 4-byte big-endian unsigned length, then exactly that many bytes of UTF-8 JSON conforming to this schema. The daemon process binds the socket at `${XDG_RUNTIME_DIR}/ee/daemon.sock` on Linux when the runtime dir is a private per-user directory, and at the per-UID `${TMPDIR:-/tmp}/ee-${uid}/daemon.sock` fallback on macOS or wherever XDG_RUNTIME_DIR is unset, empty, or a shared temp root (XDG_RUNTIME_DIR is not standard on Darwin); the daemon never defaults to a bare shared socket name directly under /tmp (bd-3j0td, bd-10ex7). The daemon is opt-in; every CLI command continues to work when the socket is absent. The v1 schema covers `ee.daemon.capabilities` (schema/method discovery), `ee.daemon.echo` (round-trip integrity check), and `ee.daemon.context` (workspace-bound canonical `ee pack` execution that returns an `ee.response.v2` object in the daemon result). Requests carry `agent_id` and optional `workspace_id` so warm-load, audit, and authorization logic can attribute calls without changing the v1 envelope. Workspace-bound methods such as `ee.daemon.context` require a non-empty `workspace_id` matching the daemon's bound workspace and return `daemon_method_unauthorized` on absence or mismatch. This v1 envelope is strict by design: unknown top-level fields and unknown methods are rejected. Clients that might speak a newer protocol MUST first call `ee.daemon.capabilities` with `ee.daemon.request.v1`, inspect the advertised request/response schema versions, method names, and authorization map, then downgrade or fall back to the in-process CLI path when the needed contract is absent.",
+  "description": "Length-prefixed JSON request envelope for the optional `ee daemon` Unix-domain socket RPC introduced by bd-oja31 (SRR1 hot-mode skeleton). Wire framing: 4-byte big-endian unsigned length, then exactly that many bytes of UTF-8 JSON conforming to this schema. The daemon process binds the socket at `${XDG_RUNTIME_DIR}/ee/daemon.sock` on Linux when the runtime dir is a private per-user directory, and at the per-UID `${TMPDIR:-/tmp}/ee-${uid}/daemon.sock` fallback on macOS or wherever XDG_RUNTIME_DIR is unset, empty, or a shared temp root (XDG_RUNTIME_DIR is not standard on Darwin); the daemon never defaults to a bare shared socket name directly under /tmp (bd-3j0td, bd-10ex7). The daemon is opt-in; every CLI command continues to work when the socket is absent. The v1 schema covers capability discovery plus the registered context, search, telemetry, write, journal, shutdown, and diagnostic echo methods. Requests carry `agent_id` and optional `workspace_id` so warm-load, audit, and authorization logic can attribute calls without changing the v1 envelope. Workspace-bound methods such as `ee.daemon.context` and `ee.daemon.search` require a non-empty `workspace_id` matching the daemon's bound workspace and return `daemon_method_unauthorized` on absence or mismatch. This v1 envelope is strict by design: unknown top-level fields and unknown methods are rejected. Clients that might speak a newer protocol MUST first call `ee.daemon.capabilities` with `ee.daemon.request.v1`, inspect the advertised request/response schema versions, method names, authorization map, and method-specific schemas, then downgrade or fall back to the in-process CLI path when the needed contract is absent.",
   "type": "object",
   "required": [
     "schema",
@@ -32,20 +32,25 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 256,
-      "description": "Optional caller workspace identity echoed in the matching response when present. Required for registered workspace-bound methods such as `ee.daemon.context`; those methods return `daemon_method_unauthorized` when this value is absent, blank, or does not match the daemon's bound workspace."
+      "description": "Optional caller workspace identity echoed in the matching response when present. Required for registered workspace-bound methods such as `ee.daemon.context` and `ee.daemon.search`; those methods return `daemon_method_unauthorized` when this value is absent, blank, or does not match the daemon's bound workspace."
     },
     "method": {
       "type": "string",
       "enum": [
         "ee.daemon.capabilities",
         "ee.daemon.echo",
-        "ee.daemon.context"
+        "ee.daemon.context",
+        "ee.daemon.search",
+        "ee.daemon.shutdown",
+        "ee.daemon.telemetry",
+        "ee.daemon.write",
+        "ee.daemon.write_journal"
       ],
-      "description": "Method dispatch name. `ee.daemon.capabilities` returns the daemon protocol discovery payload for v1-to-v2 negotiation. `ee.daemon.echo` returns the supplied params in redaction-stable form for round-trip integrity checks when explicitly enabled. `ee.daemon.context` is a same-UID, workspace-bound canonical `ee pack` path; it requires `workspace_id` authorization first, validates method params, and returns a daemon result containing the canonical `ee.response.v2` pack envelope."
+      "description": "Registered method dispatch name. `ee.daemon.capabilities` is mandatory negotiation before clients use method-specific schemas. `ee.daemon.search` is same-UID and workspace-bound, requires the strict nested `ee.daemon.search.request.v1` schema, and returns `ee.daemon.search.response.v1`; clients must use canonical in-process search when the method or either nested schema is absent."
     },
     "params": {
       "type": "object",
-      "description": "Method-specific parameters. For `ee.daemon.capabilities`, callers SHOULD send an empty object and the daemon ignores its contents. For `ee.daemon.echo` this is an arbitrary JSON object that will be returned in redaction-stable form when echo is explicitly enabled. For `ee.daemon.context`, send a compact pack request object: `task` or `query` (required), `workspacePath` / `workspace_path` / `workspace` (required), optional `databasePath`, `indexDir`, `maxTokens`, `candidatePool`, `maxResults`, `profile`, `speed`, `sourceMode`, `strictSourceMode`, `packProfile`, `resourceProfile`, output-pruning booleans, `readOnly`, `explain`, `noPackDna`, and `timeoutMs`. Authorization uses the envelope `workspace_id`; pack semantics use the canonical in-process pack path.",
+      "description": "Method-specific parameters. `ee.daemon.search` accepts only the camelCase fields declared by `ee.daemon.search.request.v1`: required `schema`, `query`, and `workspacePath`, plus canonical search options. Unknown fields, a schema mismatch, or a `workspacePath` that differs from the envelope `workspace_id` are rejected. Other registered methods retain their documented method-specific shapes.",
       "additionalProperties": true
     }
   }

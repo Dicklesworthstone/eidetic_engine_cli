@@ -14,14 +14,17 @@ use serde_json::Value;
 
 use ee::daemon::DAEMON_RESPONSE_SCHEMA_V1;
 use ee::daemon::protocol::{DaemonRequest, DaemonResponse};
+use ee::daemon::server::{
+    DAEMON_SEARCH_EXECUTION_FAILED_CODE, DAEMON_SEARCH_PARAMS_INVALID_CODE,
+    DAEMON_SEARCH_REQUEST_SCHEMA_V1, DAEMON_SEARCH_RESPONSE_SCHEMA_V1, METHOD_CAPABILITIES,
+    METHOD_CONTEXT, METHOD_ECHO, METHOD_SEARCH, METHOD_SHUTDOWN, METHOD_TELEMETRY, METHOD_WRITE,
+    METHOD_WRITE_JOURNAL,
+};
 
 type TestResult = Result<(), String>;
 
 const REQUEST_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.request.v1.json";
 const RESPONSE_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.response.v1.json";
-const METHOD_CAPABILITIES: &str = "ee.daemon.capabilities";
-const METHOD_CONTEXT: &str = "ee.daemon.context";
-const METHOD_ECHO: &str = "ee.daemon.echo";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -104,12 +107,28 @@ fn capabilities_response() -> Value {
             "methods": [
                 METHOD_CAPABILITIES,
                 METHOD_CONTEXT,
-                METHOD_ECHO
+                METHOD_ECHO,
+                METHOD_SEARCH,
+                METHOD_SHUTDOWN,
+                METHOD_TELEMETRY,
+                METHOD_WRITE,
+                METHOD_WRITE_JOURNAL
             ],
             "authorization": {
                 "ee.daemon.capabilities": "same_uid",
                 "ee.daemon.context": "same_uid_workspace",
-                "ee.daemon.echo": "same_uid"
+                "ee.daemon.echo": "same_uid",
+                "ee.daemon.search": "same_uid_workspace",
+                "ee.daemon.shutdown": "same_uid",
+                "ee.daemon.telemetry": "same_uid",
+                "ee.daemon.write": "same_uid_workspace",
+                "ee.daemon.write_journal": "same_uid_workspace"
+            },
+            "method_schemas": {
+                "ee.daemon.search": {
+                    "request": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+                    "response": DAEMON_SEARCH_RESPONSE_SCHEMA_V1
+                }
             },
             "forward_compat": {
                 "v1_unknown_fields": "rejected",
@@ -225,6 +244,8 @@ fn daemon_response_schema_documents_seed_error_codes() -> TestResult {
         "daemon_context_params_invalid",
         "daemon_context_deadline_exceeded",
         "daemon_context_execution_failed",
+        DAEMON_SEARCH_PARAMS_INVALID_CODE,
+        DAEMON_SEARCH_EXECUTION_FAILED_CODE,
     ] {
         if !description.contains(code) {
             return Err(format!("schema error.description missing {code}"));
@@ -265,7 +286,16 @@ fn daemon_request_schema_advertises_seed_methods() -> TestResult {
         .and_then(Value::as_array)
         .ok_or_else(|| "schema method enum missing".to_string())?;
 
-    for method in [METHOD_CAPABILITIES, METHOD_CONTEXT, METHOD_ECHO] {
+    for method in [
+        METHOD_CAPABILITIES,
+        METHOD_ECHO,
+        METHOD_CONTEXT,
+        METHOD_SEARCH,
+        METHOD_SHUTDOWN,
+        METHOD_TELEMETRY,
+        METHOD_WRITE,
+        METHOD_WRITE_JOURNAL,
+    ] {
         if !methods.iter().any(|value| value.as_str() == Some(method)) {
             return Err(format!("request schema method enum missing {method}"));
         }

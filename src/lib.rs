@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(target_vendor = "apple", feature(peer_credentials_unix_socket))]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 #![doc = "Library surface for the `ee` command-line memory substrate."]
 

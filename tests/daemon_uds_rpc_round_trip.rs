@@ -4,7 +4,8 @@
 //! server on a tempdir UDS, send an `ee.daemon.echo` request, assert
 //! default production servers refuse the diagnostic reflector, send an
 //! `ee.daemon.context` request, assert the result carries the canonical
-//! `ee.response.v2` / `ee.pack.v2` context-pack payload, and shut the
+//! `ee.response.v2` / `ee.pack.v2` context-pack payload, exercise repeated
+//! strict `ee.daemon.search` calls against one long-lived process, and shut the
 //! server down cleanly so the socket file is unlinked.
 //!
 //! Cfg-gated to Unix because the UDS server is Unix-only; non-Unix
@@ -31,6 +32,7 @@ use ee::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptions,
     run_context_pack_with_performance_controlled,
 };
+use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
 use ee::core::outcome::cancel_message;
 use ee::core::search::SearchSourceMode;
 use ee::daemon::{
@@ -40,8 +42,11 @@ use ee::daemon::{
     server::{
         ClientError, DAEMON_CONTEXT_DEADLINE_EXCEEDED_CODE, DAEMON_CONTEXT_PARAMS_INVALID_CODE,
         DAEMON_ECHO_DISABLED_CODE, DAEMON_REQUEST_DECODE_FAILED_CODE,
-        DAEMON_REQUEST_SCHEMA_MISMATCH_CODE, DAEMON_UNKNOWN_METHOD_CODE, METHOD_CAPABILITIES,
-        METHOD_CONTEXT, METHOD_ECHO, client_round_trip, start_server, start_server_for_workspace,
+        DAEMON_REQUEST_SCHEMA_MISMATCH_CODE, DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+        DAEMON_SEARCH_RESPONSE_SCHEMA_V1, DAEMON_UNKNOWN_METHOD_CODE, DaemonSearchResult,
+        METHOD_CAPABILITIES, METHOD_CONTEXT, METHOD_ECHO, METHOD_SEARCH, METHOD_SHUTDOWN,
+        METHOD_TELEMETRY, METHOD_WRITE, METHOD_WRITE_JOURNAL, client_round_trip, start_server,
+        start_server_for_workspace,
     },
 };
 use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
@@ -91,6 +96,33 @@ fn context_request(
 ) -> DaemonRequest {
     let mut request = DaemonRequest::new(request_id, agent_id, METHOD_CONTEXT, params);
     request.workspace_id = Some(TEST_WORKSPACE_ID.to_owned());
+    request
+}
+
+fn search_request(
+    request_id: &'static str,
+    workspace: &Path,
+    database: &Path,
+    index_dir: &Path,
+) -> DaemonRequest {
+    let workspace_id = workspace.display().to_string();
+    let mut request = DaemonRequest::new(
+        request_id,
+        TEST_AGENT_ID,
+        METHOD_SEARCH,
+        serde_json::json!({
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+            "query": "release provenance",
+            "workspacePath": workspace_id,
+            "databasePath": database.display().to_string(),
+            "indexDir": index_dir.display().to_string(),
+            "limit": 5,
+            "speed": "instant",
+            "sourceMode": "hybrid",
+            "memoryScope": "swarm"
+        }),
+    );
+    request.workspace_id = Some(workspace.display().to_string());
     request
 }
 
@@ -622,9 +654,28 @@ fn daemon_capabilities_advertises_schema_and_method_contract_over_wire() -> Test
             == Some(&serde_json::json!([
                 METHOD_CAPABILITIES,
                 METHOD_CONTEXT,
-                METHOD_ECHO
+                METHOD_ECHO,
+                METHOD_SEARCH,
+                METHOD_SHUTDOWN,
+                METHOD_TELEMETRY,
+                METHOD_WRITE,
+                METHOD_WRITE_JOURNAL
             ])),
         format!("capabilities methods wrong; got {result}"),
+    )?;
+    ensure(
+        result
+            .pointer("/method_schemas/ee.daemon.search/request")
+            .and_then(serde_json::Value::as_str)
+            == Some(DAEMON_SEARCH_REQUEST_SCHEMA_V1),
+        format!("search request schema capability wrong; got {result}"),
+    )?;
+    ensure(
+        result
+            .pointer("/method_schemas/ee.daemon.search/response")
+            .and_then(serde_json::Value::as_str)
+            == Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V1),
+        format!("search response schema capability wrong; got {result}"),
     )?;
     ensure(
         result
@@ -646,6 +697,115 @@ fn daemon_capabilities_advertises_schema_and_method_contract_over_wire() -> Test
             .and_then(serde_json::Value::as_str)
             == Some(DAEMON_UNKNOWN_METHOD_CODE),
         format!("strict v1 unknown-method policy missing; got {result}"),
+    )?;
+
+    handle
+        .shutdown()
+        .map_err(|error| format!("shutdown: {error}"))?;
+    Ok(())
+}
+
+#[test]
+fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-search.sock")?;
+    let (workspace, database) = seed_context_workspace(temp.path())?;
+    let index_dir = workspace.join(".ee").join("index");
+    let rebuild = rebuild_index(&IndexRebuildOptions {
+        workspace_path: workspace.clone(),
+        database_path: Some(database.clone()),
+        index_dir: Some(index_dir.clone()),
+        dry_run: false,
+    })
+    .map_err(|error| format!("rebuild search index: {error}"))?;
+    ensure(
+        rebuild.status == IndexRebuildStatus::Success,
+        format!(
+            "search index rebuild must succeed; got {:?}",
+            rebuild.status
+        ),
+    )?;
+
+    let workspace_id = workspace.display().to_string();
+    let mut handle = start_server_for_workspace(&socket_path, workspace_id)
+        .map_err(|error| format!("start_server_for_workspace: {error}"))?;
+
+    let first = client_round_trip(
+        handle.socket_path(),
+        &search_request("req-search-warm-001", &workspace, &database, &index_dir),
+    )
+    .map_err(|error| format!("first search round-trip: {error}"))?;
+    let second = client_round_trip(
+        handle.socket_path(),
+        &search_request("req-search-warm-002", &workspace, &database, &index_dir),
+    )
+    .map_err(|error| format!("second search round-trip: {error}"))?;
+    ensure(
+        first.error.is_none(),
+        format!("first search failed: {first:?}"),
+    )?;
+    ensure(
+        second.error.is_none(),
+        format!("second search failed: {second:?}"),
+    )?;
+    let first_result = first
+        .result
+        .ok_or_else(|| "first search result missing".to_owned())?;
+    let second_result = second
+        .result
+        .ok_or_else(|| "second search result missing".to_owned())?;
+    for result in [&first_result, &second_result] {
+        ensure(
+            result
+                .pointer("/schema")
+                .and_then(serde_json::Value::as_str)
+                == Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V1),
+            format!("method response schema drifted: {result}"),
+        )?;
+        ensure(
+            result
+                .pointer("/response/schema")
+                .and_then(serde_json::Value::as_str)
+                == Some("ee.response.v2"),
+            format!("canonical response schema drifted: {result}"),
+        )?;
+        ensure(
+            result
+                .pointer("/reuseContract/daemonProcess")
+                .and_then(serde_json::Value::as_str)
+                == Some("long_lived"),
+            format!("daemon process reuse contract drifted: {result}"),
+        )?;
+        ensure(
+            result
+                .pointer("/reuseContract/defaultSearchEmbedder")
+                .and_then(serde_json::Value::as_str)
+                == Some("process_scoped"),
+            format!("embedder reuse contract drifted: {result}"),
+        )?;
+        ensure(
+            result
+                .pointer("/reuseContract/searchIndex")
+                .and_then(serde_json::Value::as_str)
+                == Some("per_request"),
+            format!("search index reuse contract drifted: {result}"),
+        )?;
+        DaemonSearchResult::from_value(result.clone())
+            .map_err(|error| format!("strict method response validation: {error}"))?;
+    }
+    ensure(
+        first_result.pointer("/response/data/results")
+            == second_result.pointer("/response/data/results"),
+        format!(
+            "repeated warm-daemon calls must preserve ranked results; first={first_result}; second={second_result}"
+        ),
+    )?;
+    ensure(
+        first_result
+            .pointer("/response/data/results/0/docId")
+            .and_then(serde_json::Value::as_str)
+            == Some("mem_00000000000000000000005001"),
+        format!("seeded memory missing from daemon search: {first_result}"),
     )?;
 
     handle

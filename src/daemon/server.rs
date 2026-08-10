@@ -43,7 +43,10 @@ use crate::core::context::{
     ContextPackOutputOptions, attach_pack_dna_to_context_response,
     run_context_pack_with_performance_controlled,
 };
-use crate::core::search::SearchSourceMode;
+use crate::core::search::{
+    SearchDedupMode, SearchOptions, SearchReport, SearchSourceMode, TypedMemoryFieldFilter,
+    normalize_memory_kind_filter, run_search_with_filters,
+};
 use crate::models::{MemoryScope, QueryFilters, RedactionLevel};
 use crate::output::{ContextJsonRenderOptions, render_context_response_json_with_options};
 use crate::pack::{ContextPackProfile, DEFAULT_COORDINATION_STALE_AFTER_MS, PackResourceProfile};
@@ -72,6 +75,21 @@ pub const DAEMON_ECHO_DISABLED_CODE: &str = "daemon_echo_disabled";
 
 /// Method dispatch name for the warm-loaded `ee pack` path.
 pub const METHOD_CONTEXT: &str = "ee.daemon.context";
+
+/// Method dispatch name for the warm-loaded `ee search` path.
+pub const METHOD_SEARCH: &str = "ee.daemon.search";
+
+/// Strict method-specific request schema for [`METHOD_SEARCH`].
+pub const DAEMON_SEARCH_REQUEST_SCHEMA_V1: &str = "ee.daemon.search.request.v1";
+
+/// Strict method-specific response schema for [`METHOD_SEARCH`].
+pub const DAEMON_SEARCH_RESPONSE_SCHEMA_V1: &str = "ee.daemon.search.response.v1";
+
+/// Error code returned when `ee.daemon.search` params fail strict decoding.
+pub const DAEMON_SEARCH_PARAMS_INVALID_CODE: &str = "daemon_search_params_invalid";
+
+/// Error code returned when canonical search execution or response encoding fails.
+pub const DAEMON_SEARCH_EXECUTION_FAILED_CODE: &str = "daemon_search_execution_failed";
 
 /// Error code returned when `ee.daemon.context` params cannot be
 /// mapped to the canonical pack request shape.
@@ -1747,7 +1765,12 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
         .map_err(io::Error::from)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_vendor = "apple")]
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    stream.peer_cred().map(|credentials| credentials.uid)
+}
+
+#[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
 fn peer_uid(_stream: &UnixStream) -> io::Result<u32> {
     Err(io::Error::other(
         "safe peer credential lookup is not implemented on this Unix target; \
@@ -1858,6 +1881,7 @@ fn dispatch_with_echo_policy_and_workspace(
             )
         }
         METHOD_CONTEXT => dispatch_context(request, shutdown),
+        METHOD_SEARCH => dispatch_search(request, shutdown),
         METHOD_TELEMETRY => dispatch_telemetry(request),
         METHOD_WRITE => dispatch_write(request, write_router),
         METHOD_WRITE_JOURNAL => dispatch_journal(request, write_router),
@@ -1899,6 +1923,369 @@ fn dispatch_telemetry(request: &DaemonRequest) -> DaemonResponse {
             format!("failed to serialize contention telemetry: {error}"),
         ),
     }
+}
+
+fn daemon_search_default_limit() -> u32 {
+    10
+}
+
+fn daemon_search_default_speed() -> String {
+    "default".to_owned()
+}
+
+fn daemon_search_default_dedupe() -> String {
+    "doc_id".to_owned()
+}
+
+fn daemon_search_default_source_mode() -> String {
+    "hybrid".to_owned()
+}
+
+fn daemon_search_default_memory_scope() -> String {
+    "swarm".to_owned()
+}
+
+/// Strict, method-specific request payload for [`METHOD_SEARCH`]. The daemon
+/// envelope remains `ee.daemon.request.v1`; this nested schema lets clients
+/// negotiate search semantics independently of the framing version.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DaemonSearchParams {
+    schema: String,
+    query: String,
+    workspace_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    database_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    index_dir: Option<PathBuf>,
+    #[serde(default = "daemon_search_default_limit")]
+    limit: u32,
+    #[serde(default = "daemon_search_default_speed")]
+    speed: String,
+    #[serde(default)]
+    explain: bool,
+    #[serde(default)]
+    include_tombstoned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    as_of: Option<String>,
+    #[serde(default)]
+    include_expired: bool,
+    #[serde(default)]
+    include_future: bool,
+    #[serde(default)]
+    include_stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    #[serde(default)]
+    field_filters: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    relevance_floor: Option<f32>,
+    #[serde(default = "daemon_search_default_dedupe")]
+    dedupe: String,
+    #[serde(default = "daemon_search_default_source_mode")]
+    source_mode: String,
+    #[serde(default)]
+    strict_source_mode: bool,
+    #[serde(default = "daemon_search_default_memory_scope")]
+    memory_scope: String,
+    #[serde(default)]
+    strict_scope: bool,
+}
+
+impl DaemonSearchParams {
+    /// Build the canonical daemon request from already-validated CLI options.
+    #[must_use]
+    pub fn from_search_options(
+        options: &SearchOptions,
+        kind: Option<&str>,
+        field_filters: &[String],
+    ) -> Self {
+        Self {
+            schema: DAEMON_SEARCH_REQUEST_SCHEMA_V1.to_owned(),
+            query: options.query.clone(),
+            workspace_path: options.workspace_path.clone(),
+            database_path: options.database_path.clone(),
+            index_dir: options.index_dir.clone(),
+            limit: options.limit,
+            speed: options.speed.as_str().to_owned(),
+            explain: options.explain,
+            include_tombstoned: options.include_tombstoned,
+            as_of: options.as_of.map(|value| value.to_rfc3339()),
+            include_expired: options.include_expired,
+            include_future: options.include_future,
+            include_stale: options.include_stale,
+            kind: kind.map(str::to_owned),
+            field_filters: field_filters.to_vec(),
+            relevance_floor: options.relevance_floor,
+            dedupe: options.dedup_mode.as_str().to_owned(),
+            source_mode: options.source_mode.as_str().to_owned(),
+            strict_source_mode: options.strict_source_mode,
+            memory_scope: options.memory_scope.as_str().to_owned(),
+            strict_scope: options.strict_scope,
+        }
+    }
+
+    fn from_value(value: &serde_json::Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone())
+            .map_err(|_| "params do not match ee.daemon.search.request.v1".to_owned())
+    }
+
+    fn into_search_parts(
+        self,
+    ) -> Result<(SearchOptions, Option<String>, Vec<TypedMemoryFieldFilter>), String> {
+        if self.schema != DAEMON_SEARCH_REQUEST_SCHEMA_V1 {
+            return Err(format!(
+                "field `schema` must equal `{DAEMON_SEARCH_REQUEST_SCHEMA_V1}`"
+            ));
+        }
+        if self.query.trim().is_empty() {
+            return Err("field `query` must not be blank".to_owned());
+        }
+        if self
+            .relevance_floor
+            .is_some_and(|floor| !floor.is_finite() || !(0.0..=1.0).contains(&floor))
+        {
+            return Err("field `relevanceFloor` must be between 0.0 and 1.0".to_owned());
+        }
+        let speed = parse_daemon_speed_mode(&self.speed)?;
+        let source_mode = parse_daemon_source_mode(&self.source_mode)?;
+        let dedup_mode = match self.dedupe.trim().to_ascii_lowercase().as_str() {
+            "doc_id" | "doc-id" => SearchDedupMode::DocId,
+            "mi" => SearchDedupMode::MutualInformation,
+            _ => return Err("field `dedupe` must be `doc_id` or `mi`".to_owned()),
+        };
+        let memory_scope = MemoryScope::parse(&self.memory_scope).ok_or_else(|| {
+            "field `memoryScope` must be self, team, global, workspace, verified, or swarm"
+                .to_owned()
+        })?;
+        let as_of = self
+            .as_of
+            .as_deref()
+            .map(chrono::DateTime::parse_from_rfc3339)
+            .transpose()
+            .map_err(|_| "field `asOf` must be an RFC3339 timestamp".to_owned())?
+            .map(|value| value.with_timezone(&chrono::Utc));
+        let kind = self
+            .kind
+            .as_deref()
+            .map(normalize_memory_kind_filter)
+            .transpose()?;
+        let field_filters = self
+            .field_filters
+            .iter()
+            .map(|raw| TypedMemoryFieldFilter::parse(raw))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((
+            SearchOptions {
+                workspace_path: self.workspace_path,
+                database_path: self.database_path,
+                index_dir: self.index_dir,
+                query: self.query,
+                limit: self.limit,
+                speed,
+                explain: self.explain,
+                as_of,
+                include_tombstoned: self.include_tombstoned,
+                include_expired: self.include_expired,
+                include_future: self.include_future,
+                include_stale: self.include_stale,
+                relevance_floor: self.relevance_floor,
+                dedup_mode,
+                source_mode,
+                strict_source_mode: self.strict_source_mode,
+                memory_scope,
+                strict_scope: self.strict_scope,
+            },
+            kind,
+            field_filters,
+        ))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DaemonSearchReuseContract {
+    daemon_process: String,
+    default_search_embedder: String,
+    search_index: String,
+}
+
+impl Default for DaemonSearchReuseContract {
+    fn default() -> Self {
+        Self {
+            daemon_process: "long_lived".to_owned(),
+            default_search_embedder: "process_scoped".to_owned(),
+            search_index: "per_request".to_owned(),
+        }
+    }
+}
+
+/// Strict method-specific success payload returned by [`METHOD_SEARCH`].
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DaemonSearchResult {
+    schema: String,
+    response: serde_json::Value,
+    human: String,
+    reuse_contract: DaemonSearchReuseContract,
+}
+
+impl DaemonSearchResult {
+    fn from_report(report: &SearchReport, explain: bool) -> Self {
+        let human = report.human_summary();
+        let mut data = report.data_json();
+        if explain && let Some(object) = data.as_object_mut() {
+            object.insert(
+                "resultPath".to_owned(),
+                serde_json::Value::String("data.results".to_owned()),
+            );
+        }
+        let response = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
+            "success": true,
+            "data": data,
+            "degraded": crate::output::response_degraded_from_data(&data),
+        });
+        Self {
+            schema: DAEMON_SEARCH_RESPONSE_SCHEMA_V1.to_owned(),
+            response,
+            human,
+            reuse_contract: DaemonSearchReuseContract::default(),
+        }
+    }
+
+    /// Decode and validate the complete method-specific response contract.
+    pub fn from_value(value: serde_json::Value) -> Result<Self, String> {
+        let result: Self = serde_json::from_value(value)
+            .map_err(|_| "result does not match ee.daemon.search.response.v1".to_owned())?;
+        result.validate()?;
+        Ok(result)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.schema != DAEMON_SEARCH_RESPONSE_SCHEMA_V1 {
+            return Err(format!(
+                "result schema must equal `{DAEMON_SEARCH_RESPONSE_SCHEMA_V1}`"
+            ));
+        }
+        if self.reuse_contract != DaemonSearchReuseContract::default() {
+            return Err("daemon search reuse contract drifted".to_owned());
+        }
+        let response = self
+            .response
+            .as_object()
+            .ok_or_else(|| "daemon search response must be an object".to_owned())?;
+        if response.len() != 4
+            || !["schema", "success", "data", "degraded"]
+                .iter()
+                .all(|field| response.contains_key(*field))
+        {
+            return Err("canonical daemon search response field set drifted".to_owned());
+        }
+        if response.get("schema").and_then(serde_json::Value::as_str)
+            != Some(crate::models::RESPONSE_SCHEMA_V2)
+        {
+            return Err("canonical daemon search response schema drifted".to_owned());
+        }
+        if response.get("success").and_then(serde_json::Value::as_bool) != Some(true)
+            || !response
+                .get("data")
+                .is_some_and(serde_json::Value::is_object)
+            || !response
+                .get("degraded")
+                .is_some_and(serde_json::Value::is_array)
+        {
+            return Err("canonical daemon search response shape drifted".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Split the validated payload into canonical machine and human renderings.
+    #[must_use]
+    pub fn into_renderings(self) -> (serde_json::Value, String) {
+        (self.response, self.human)
+    }
+}
+
+fn dispatch_search(request: &DaemonRequest, shutdown: &AtomicBool) -> DaemonResponse {
+    if shutdown.load(Ordering::SeqCst) {
+        return daemon_shutting_down_response(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+        );
+    }
+    let params = match DaemonSearchParams::from_value(&request.params) {
+        Ok(params) => params,
+        Err(message) => return daemon_search_params_error(request, &message),
+    };
+    let requested_workspace = params.workspace_path.display().to_string();
+    if request.workspace_id.as_deref() != Some(requested_workspace.as_str()) {
+        return daemon_search_params_error(
+            request,
+            "field `workspacePath` must exactly match the authorized envelope `workspace_id`",
+        );
+    }
+    let (options, kind, field_filters) = match params.into_search_parts() {
+        Ok(parts) => parts,
+        Err(message) => return daemon_search_params_error(request, &message),
+    };
+    let report = match run_search_with_filters(&options, kind.as_deref(), &field_filters) {
+        Ok(report) => report,
+        Err(error) => {
+            return DaemonResponse::err(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                request.workspace_id.clone(),
+                DAEMON_SEARCH_EXECUTION_FAILED_CODE,
+                format!("ee.daemon.search could not execute canonical search: {error}"),
+            );
+        }
+    };
+    let method_result = DaemonSearchResult::from_report(&report, options.explain);
+    let result = match serde_json::to_value(method_result) {
+        Ok(result) => result,
+        Err(error) => {
+            return DaemonResponse::err(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                request.workspace_id.clone(),
+                DAEMON_SEARCH_EXECUTION_FAILED_CODE,
+                format!("ee.daemon.search could not encode its response: {error}"),
+            );
+        }
+    };
+    let mut response = DaemonResponse::ok(
+        request.request_id.clone(),
+        request.agent_id.clone(),
+        request.workspace_id.clone(),
+        result,
+    );
+    for code in report.degraded.iter().map(|entry| entry.code.as_str()) {
+        response = response.with_degraded(code);
+    }
+    if serde_json::to_vec(&response).map_or(true, |encoded| {
+        encoded.len() > super::DAEMON_RESPONSE_MAX_BYTES
+    }) {
+        return DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            DAEMON_SEARCH_EXECUTION_FAILED_CODE,
+            "ee.daemon.search response exceeded the daemon response cap; lower --limit or use canonical in-process search.",
+        );
+    }
+    response
+}
+
+fn daemon_search_params_error(request: &DaemonRequest, message: &str) -> DaemonResponse {
+    DaemonResponse::err(
+        request.request_id.clone(),
+        request.agent_id.clone(),
+        request.workspace_id.clone(),
+        DAEMON_SEARCH_PARAMS_INVALID_CODE,
+        format!("invalid ee.daemon.search params: {message}"),
+    )
 }
 
 /// Per-connection carrier for the write-routing path (Inc 2, bd-wx6ou.3): the
@@ -3076,7 +3463,7 @@ fn daemon_method_authority(method: &str) -> Option<DaemonAuthority> {
         METHOD_CAPABILITIES | METHOD_ECHO | METHOD_SHUTDOWN | METHOD_TELEMETRY => {
             Some(DaemonAuthority::SameUid)
         }
-        METHOD_CONTEXT | METHOD_WRITE | METHOD_WRITE_JOURNAL => {
+        METHOD_CONTEXT | METHOD_SEARCH | METHOD_WRITE | METHOD_WRITE_JOURNAL => {
             Some(DaemonAuthority::SameUidWorkspace)
         }
         _ => None,
@@ -3136,6 +3523,7 @@ fn daemon_capabilities_result() -> serde_json::Value {
             METHOD_CAPABILITIES,
             METHOD_CONTEXT,
             METHOD_ECHO,
+            METHOD_SEARCH,
             METHOD_SHUTDOWN,
             METHOD_TELEMETRY,
             METHOD_WRITE,
@@ -3145,10 +3533,17 @@ fn daemon_capabilities_result() -> serde_json::Value {
             "ee.daemon.capabilities": daemon_method_authority(METHOD_CAPABILITIES).expect("registered method").as_wire_label(),
             "ee.daemon.context": daemon_method_authority(METHOD_CONTEXT).expect("registered method").as_wire_label(),
             "ee.daemon.echo": daemon_method_authority(METHOD_ECHO).expect("registered method").as_wire_label(),
+            "ee.daemon.search": daemon_method_authority(METHOD_SEARCH).expect("registered method").as_wire_label(),
             "ee.daemon.shutdown": daemon_method_authority(METHOD_SHUTDOWN).expect("registered method").as_wire_label(),
             "ee.daemon.telemetry": daemon_method_authority(METHOD_TELEMETRY).expect("registered method").as_wire_label(),
             "ee.daemon.write": daemon_method_authority(METHOD_WRITE).expect("registered method").as_wire_label(),
             "ee.daemon.write_journal": daemon_method_authority(METHOD_WRITE_JOURNAL).expect("registered method").as_wire_label()
+        },
+        "method_schemas": {
+            "ee.daemon.search": {
+                "request": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+                "response": DAEMON_SEARCH_RESPONSE_SCHEMA_V1
+            }
         },
         "forward_compat": {
             "v1_unknown_fields": "rejected",
@@ -3328,6 +3723,93 @@ mod tests {
         let mut request = DaemonRequest::new(request_id, agent_id, METHOD_CONTEXT, params);
         request.workspace_id = Some(TEST_WORKSPACE_ID.to_owned());
         request
+    }
+
+    fn search_request(params: serde_json::Value) -> DaemonRequest {
+        let mut request = DaemonRequest::new(
+            "req-search-contract-001",
+            TEST_AGENT_ID,
+            METHOD_SEARCH,
+            params,
+        );
+        request.workspace_id = Some("/tmp/ee-daemon-search-contract".to_owned());
+        request
+    }
+
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn apple_peer_uid_uses_safe_std_peer_credentials() {
+        let (_client, server) = UnixStream::pair().expect("create UnixStream pair");
+        assert_eq!(
+            peer_uid(&server).expect("read Apple peer credentials"),
+            current_euid()
+        );
+    }
+
+    #[test]
+    fn dispatch_search_rejects_method_schema_drift_and_unknown_fields() {
+        for params in [
+            serde_json::json!({
+                "schema": "ee.daemon.search.request.v2",
+                "query": "release",
+                "workspacePath": "/tmp/ee-daemon-search-contract"
+            }),
+            serde_json::json!({
+                "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+                "query": "release",
+                "workspacePath": "/tmp/ee-daemon-search-contract",
+                "unknownField": true
+            }),
+        ] {
+            let response = dispatch(&search_request(params));
+            assert!(response.result.is_none());
+            assert_eq!(
+                response.error.as_ref().map(|error| error.code.as_str()),
+                Some(DAEMON_SEARCH_PARAMS_INVALID_CODE)
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_search_binds_params_to_authorized_workspace() {
+        let response = dispatch(&search_request(serde_json::json!({
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+            "query": "release",
+            "workspacePath": "/tmp/a-different-workspace"
+        })));
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code.as_str()),
+            Some(DAEMON_SEARCH_PARAMS_INVALID_CODE)
+        );
+    }
+
+    #[test]
+    fn daemon_search_result_rejects_schema_and_field_drift() {
+        let canonical = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
+            "success": true,
+            "data": {},
+            "degraded": []
+        });
+        let base = serde_json::json!({
+            "schema": DAEMON_SEARCH_RESPONSE_SCHEMA_V1,
+            "response": canonical,
+            "human": "Search results\n",
+            "reuseContract": {
+                "daemonProcess": "long_lived",
+                "defaultSearchEmbedder": "process_scoped",
+                "searchIndex": "per_request"
+            }
+        });
+        assert!(DaemonSearchResult::from_value(base.clone()).is_ok());
+
+        let mut wrong_schema = base.clone();
+        wrong_schema["schema"] = serde_json::json!("ee.daemon.search.response.v2");
+        assert!(DaemonSearchResult::from_value(wrong_schema).is_err());
+
+        let mut unknown_field = base;
+        unknown_field["unexpected"] = serde_json::json!(true);
+        assert!(DaemonSearchResult::from_value(unknown_field).is_err());
     }
 
     fn read_framed_daemon_response(stream: &mut UnixStream) -> DaemonResponse {
@@ -3597,6 +4079,10 @@ mod tests {
             daemon_method_authority(METHOD_CONTEXT),
             Some(DaemonAuthority::SameUidWorkspace)
         );
+        assert_eq!(
+            daemon_method_authority(METHOD_SEARCH),
+            Some(DaemonAuthority::SameUidWorkspace)
+        );
         assert_eq!(daemon_method_authority("ee.daemon.nope"), None);
     }
 
@@ -3636,11 +4122,24 @@ mod tests {
                 METHOD_CAPABILITIES,
                 METHOD_CONTEXT,
                 METHOD_ECHO,
+                METHOD_SEARCH,
                 METHOD_SHUTDOWN,
                 METHOD_TELEMETRY,
                 METHOD_WRITE,
                 METHOD_WRITE_JOURNAL
             ]))
+        );
+        assert_eq!(
+            result
+                .pointer("/method_schemas/ee.daemon.search/request")
+                .and_then(serde_json::Value::as_str),
+            Some(DAEMON_SEARCH_REQUEST_SCHEMA_V1)
+        );
+        assert_eq!(
+            result
+                .pointer("/method_schemas/ee.daemon.search/response")
+                .and_then(serde_json::Value::as_str),
+            Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V1)
         );
         assert_eq!(
             result
