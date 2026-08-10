@@ -3897,7 +3897,7 @@ impl ManualRunner {
                 "morePending": accumulation.more_pending,
             }),
         };
-        (RunOutcome::Completed, Some(consumed), None, Some(details))
+        (RunOutcome::Success, Some(consumed), None, Some(details))
     }
 
     fn execute_primer_refresh(

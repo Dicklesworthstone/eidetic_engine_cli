@@ -11564,7 +11564,7 @@ pub struct ReviewWorkspaceArgs {
     pub database: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+#[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum MemoryCommand {
     /// Expire a memory by writing an audited tombstone.
     Expire(MemoryExpireArgs),
@@ -34215,7 +34215,7 @@ where
                 .to_string();
                 let candidate_id = format!("curate_{}", &digest[..26]);
                 // Re-proposing the same pair dedups to the existing candidate.
-                if let Ok(Some(_)) = conn.get_curation_candidate(&candidate_id) {
+                if let Ok(Some(_)) = conn.get_curation_candidate(workspace_id, &candidate_id) {
                     proposed_ids[index] = Some(candidate_id);
                     continue;
                 }
