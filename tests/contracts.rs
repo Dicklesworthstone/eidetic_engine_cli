@@ -6,6 +6,9 @@ mod dependency_contract_matrix;
 #[path = "contracts/contention_schema.rs"]
 mod contention_schema;
 
+#[path = "contracts/global_promotion_schema.rs"]
+mod global_promotion_schema;
+
 #[path = "contracts/cass_robot.rs"]
 mod cass_robot;
 
