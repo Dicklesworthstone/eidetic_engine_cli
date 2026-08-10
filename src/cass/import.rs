@@ -180,7 +180,7 @@ impl CassImportReport {
         });
         self.index_required_action = Some(repair.clone());
         CassImportDegradation {
-            code: "search_index_stale",
+            code: "cass_import_index_publish_failed",
             severity: "medium",
             message: format!(
                 "Search index is stale because CASS import committed successfully, but search-index publication failed: {}; imported rows may be omitted until the index is rebuilt.",
@@ -3478,7 +3478,7 @@ mod tests {
         )?;
         ensure_equal(
             &degradation.code,
-            &"search_index_stale",
+            &"cass_import_index_publish_failed",
             "publish failure degradation code",
         )?;
         ensure(

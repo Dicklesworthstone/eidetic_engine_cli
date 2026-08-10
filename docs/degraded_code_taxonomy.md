@@ -393,6 +393,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `weak_query_recall` | low | bd-17c65.2.5 (B5) |
 | `search_index_stale` | medium | bd-17c65.2.1 (B1) |
 | `search_index_large_gap` | medium | bd-index-auto-freshness-m5kwf (I) |
+| `cass_import_index_publish_failed` | medium | bd-index-auto-freshness-m5kwf (I) |
 | `search_index_degraded` | medium | bd-17c65.10.6 (J6) |
 | `conformal_calibration_insufficient` | warning | bd-17c65.14.2 (N2) |
 | `search_score_calibration_file_too_large` | warning | bd-1nsk4 |

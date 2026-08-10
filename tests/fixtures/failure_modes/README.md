@@ -29,6 +29,7 @@ in the same commit, keeping the catalog complete by construction.
 | `index_stale` | index status | high | bd-17c65.2.1 (B1) |
 | `search_index_stale` | search, context | medium | bd-17c65.2.1 (B1) |
 | `search_index_large_gap` | search, context | medium | bd-index-auto-freshness-m5kwf (I) |
+| `cass_import_index_publish_failed` | import cass | medium | bd-index-auto-freshness-m5kwf (I) |
 | `evidence_live_admission_filtered` | search, diag search | warning | bd-4frzq (P0) |
 | `index_missing` | search, context | medium | bd-17c65.2.1 (B1) |
 | `index_corrupt` | search, context | high | bd-17c65.2.1 (B1) |

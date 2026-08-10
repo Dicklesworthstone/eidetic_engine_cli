@@ -2994,7 +2994,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
     )?;
     ensure_equal(
         &failed_publish_json.pointer("/degraded/0/code"),
-        &Some(&json!("search_index_stale")),
+        &Some(&json!("cass_import_index_publish_failed")),
         "CASS publish failure outer degradation code",
     )?;
     ensure_equal(

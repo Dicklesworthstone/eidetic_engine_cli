@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "cass_import_index_publish_failed",
+  "introduced_by": {
+    "bead": "bd-index-auto-freshness-m5kwf",
+    "epic_letter": "I"
+  },
+  "surfaces": [
+    "import cass"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A CASS import commits its source rows and queued index job, but the derived search-index publication cannot complete.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# Make the workspace search-index publish target unavailable after import commit."
+    ],
+    "invocation": "ee import cass --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "cass_import_index_publish_failed",
+    "severity": "medium",
+    "message_contains": [
+      "CASS import committed successfully",
+      "search-index publication failed",
+      "index is rebuilt"
+    ],
+    "repair_contains": "ee index rebuild",
+    "repair_string": "ee index rebuild --workspace .",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}
