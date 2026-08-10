@@ -17,7 +17,7 @@ use crate::db::generate_audit_id_seeded;
 use crate::db::{
     CreateAuditInput, DatabaseConfig, DbConnection, DbError, FeedbackEventsFingerprint,
     StoredFeedbackEvent, StoredMemory, StoredModelRegistryEntry, audit_actions, generate_audit_id,
-    read_pool::{PoolConfig, registered_process_read_pool},
+    read_pool::{PoolConfig, ReadConnectionPool, registered_process_read_pool},
 };
 use crate::models::degradation::{
     CONFORMAL_CALIBRATION_INSUFFICIENT_CODE, SEARCH_SCORE_CALIBRATION_FILE_TOO_LARGE_CODE,
@@ -43,7 +43,7 @@ use super::index::{
     EmbeddingPosture, IndexHealth, IndexProcessingOptions, IndexProcessingStatus, IndexStatusError,
     IndexStatusOptions, IndexStatusReport, current_embedding_posture,
     embedder_reports_pending_model2vec_download, get_index_status_with_connection,
-    prepare_default_search_embedder, process_index_jobs_coalesced_with_cx,
+    prepare_default_search_embedder, process_index_jobs_coalesced_with_cx_bounded,
 };
 use super::memory_drift::{
     MemoryDriftSelectionHint, memory_drift_selection_hint_from_provenance_status,
@@ -2179,6 +2179,10 @@ fn search_index_gap_is_large(db_generation: u64, index_generation: u64) -> bool 
 fn search_index_gap_is_auto_reconcilable(db_generation: u64, index_generation: u64) -> bool {
     let generation_gap = db_generation.saturating_sub(index_generation);
     generation_gap > 0 && generation_gap <= SEARCH_INDEX_LARGE_GAP_THRESHOLD
+}
+
+fn search_index_corpus_is_auto_reconcilable(corpus_documents: u64) -> bool {
+    corpus_documents <= SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS
 }
 
 impl ScoreFactor {
@@ -8424,6 +8428,35 @@ pub(crate) async fn reconcile_search_index_before_read_with_cx(
     cx: &asupersync::Cx,
     options: &SearchOptions,
 ) {
+    let child_scope =
+        cx.scope_with_budget(cx.budget_for_timeout(SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT));
+    let owned_options = options.clone();
+    let mut task = match cx.spawn_in(&child_scope, move |child_cx| async move {
+        reconcile_search_index_within_budget(&child_cx, &owned_options).await;
+    }) {
+        Ok(task) => task,
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::search::index_freshness",
+                error = %error,
+                "could not start bounded pre-retrieval index repair; continuing with truthful stale-index reporting"
+            );
+            return;
+        }
+    };
+    if let Err(error) = task.join(cx).await {
+        tracing::warn!(
+            target: "ee::search::index_freshness",
+            error = %error,
+            "bounded pre-retrieval index reconciliation ended before convergence; continuing with truthful stale-index reporting"
+        );
+    }
+}
+
+async fn reconcile_search_index_within_budget(cx: &asupersync::Cx, options: &SearchOptions) {
+    if cx.checkpoint().is_err() {
+        return;
+    }
     let index_dir = options.resolve_index_dir();
     invalidate_cached_index_status_for_search(options, &index_dir);
     let status_options = IndexStatusOptions {
@@ -8432,11 +8465,16 @@ pub(crate) async fn reconcile_search_index_before_read_with_cx(
         index_dir: Some(index_dir.clone()),
     };
     let database_path = options.resolve_database_path();
-    let read_pool = registered_process_read_pool(
+    // This preflight must not inherit the process pool's five-second acquire
+    // wait. A dedicated one-slot pool opens immediately, and the pinned read
+    // transaction makes corpus counts and generation one atomic observation.
+    let read_pool = ReadConnectionPool::new(
         DatabaseConfig::file(database_path),
-        PoolConfig::default_single(),
+        PoolConfig::default_single()
+            .with_acquire_timeout(Duration::ZERO)
+            .with_max_pin_duration(SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT),
     );
-    let Ok(read_snapshot) = read_pool.acquire_snapshot(false) else {
+    let Ok(read_snapshot) = read_pool.acquire_snapshot(true) else {
         return;
     };
     let Ok(connection) = read_snapshot.checked_connection() else {
@@ -8460,7 +8498,7 @@ pub(crate) async fn reconcile_search_index_before_read_with_cx(
         .saturating_add(u64::from(status.db_artifact_count))
         .saturating_add(u64::from(status.db_rule_count))
         .saturating_add(u64::from(status.db_evidence_admitted_count));
-    if corpus_documents > SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS {
+    if !search_index_corpus_is_auto_reconcilable(corpus_documents) {
         tracing::info!(
             target: "ee::search::index_freshness",
             generation_gap,
@@ -8471,6 +8509,11 @@ pub(crate) async fn reconcile_search_index_before_read_with_cx(
         return;
     }
     drop(read_snapshot);
+    drop(read_pool);
+
+    if cx.checkpoint().is_err() {
+        return;
+    }
 
     let processing_options = IndexProcessingOptions {
         workspace_path: options.workspace_path.clone(),
@@ -8483,24 +8526,14 @@ pub(crate) async fn reconcile_search_index_before_read_with_cx(
                 .min(u32::try_from(SEARCH_INDEX_LARGE_GAP_THRESHOLD).unwrap_or(u32::MAX)),
         ),
     };
-    let child_scope =
-        cx.scope_with_budget(cx.budget_for_timeout(SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT));
-    let mut task = match cx.spawn_in(&child_scope, move |child_cx| async move {
-        process_index_jobs_coalesced_with_cx(&child_cx, &processing_options).await
-    }) {
-        Ok(task) => task,
-        Err(error) => {
-            tracing::warn!(
-                target: "ee::search::index_freshness",
-                generation_gap,
-                error = %error,
-                "could not start bounded pre-retrieval index repair; continuing with truthful stale-index reporting"
-            );
-            return;
-        }
-    };
-    match task.join(cx).await {
-        Ok(Ok(report))
+    match process_index_jobs_coalesced_with_cx_bounded(
+        cx,
+        &processing_options,
+        u32::try_from(SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS).unwrap_or(u32::MAX),
+    )
+    .await
+    {
+        Ok(report)
             if matches!(
                 report.status,
                 IndexProcessingStatus::Success | IndexProcessingStatus::NoPendingJobs
@@ -8513,7 +8546,7 @@ pub(crate) async fn reconcile_search_index_before_read_with_cx(
                 "reconciled queued search-index work before retrieval"
             );
         }
-        Ok(Ok(report)) => {
+        Ok(report) => {
             tracing::warn!(
                 target: "ee::search::index_freshness",
                 generation_gap,
@@ -8522,20 +8555,12 @@ pub(crate) async fn reconcile_search_index_before_read_with_cx(
                 "pre-retrieval search-index reconciliation did not converge"
             );
         }
-        Ok(Err(error)) => {
-            tracing::warn!(
-                target: "ee::search::index_freshness",
-                generation_gap,
-                error = %error,
-                "pre-retrieval search-index reconciliation failed; continuing with truthful stale-index reporting"
-            );
-        }
         Err(error) => {
             tracing::warn!(
                 target: "ee::search::index_freshness",
                 generation_gap,
                 error = %error,
-                "bounded pre-retrieval search-index reconciliation ended before convergence; continuing with truthful stale-index reporting"
+                "pre-retrieval search-index reconciliation failed; continuing with truthful stale-index reporting"
             );
         }
     }
@@ -14461,6 +14486,12 @@ mod tests {
         assert!(!search_index_gap_is_auto_reconcilable(
             SEARCH_INDEX_LARGE_GAP_THRESHOLD + 1,
             0
+        ));
+        assert!(search_index_corpus_is_auto_reconcilable(
+            SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS
+        ));
+        assert!(!search_index_corpus_is_auto_reconcilable(
+            SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS + 1
         ));
 
         let above = SearchDegradation::large_index_gap(SEARCH_INDEX_LARGE_GAP_THRESHOLD + 1, 0);

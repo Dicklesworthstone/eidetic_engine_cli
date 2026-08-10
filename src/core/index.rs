@@ -1913,7 +1913,14 @@ pub(crate) fn process_index_jobs_coalesced(
     options: &IndexProcessingOptions,
 ) -> Result<IndexProcessingReport, IndexRebuildError> {
     crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
-        process_index_jobs_with_drain(&cx, options, IndexJobDrain::Coalesced).await
+        process_index_jobs_with_drain(
+            &cx,
+            options,
+            IndexJobDrain::Coalesced {
+                max_corpus_documents: None,
+            },
+        )
+        .await
     })
     .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
 }
@@ -1923,13 +1930,41 @@ pub(crate) async fn process_index_jobs_coalesced_with_cx(
     cx: &asupersync::Cx,
     options: &IndexProcessingOptions,
 ) -> Result<IndexProcessingReport, IndexRebuildError> {
-    process_index_jobs_with_drain(cx, options, IndexJobDrain::Coalesced).await
+    process_index_jobs_with_drain(
+        cx,
+        options,
+        IndexJobDrain::Coalesced {
+            max_corpus_documents: None,
+        },
+    )
+    .await
+}
+
+/// Bounded coalesced processor used by interactive read repair.
+///
+/// The document ceiling is checked again after the publish lock is held and
+/// the authoritative source snapshot has been collected. That closes the
+/// race where a writer enlarges the corpus after the read-side preflight but
+/// before the coalesced rebuild snapshots its actual inputs.
+pub(crate) async fn process_index_jobs_coalesced_with_cx_bounded(
+    cx: &asupersync::Cx,
+    options: &IndexProcessingOptions,
+    max_corpus_documents: u32,
+) -> Result<IndexProcessingReport, IndexRebuildError> {
+    process_index_jobs_with_drain(
+        cx,
+        options,
+        IndexJobDrain::Coalesced {
+            max_corpus_documents: Some(max_corpus_documents),
+        },
+    )
+    .await
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum IndexJobDrain {
     Ordinary,
-    Coalesced,
+    Coalesced { max_corpus_documents: Option<u32> },
 }
 
 async fn process_index_jobs_with_drain(
@@ -2016,13 +2051,16 @@ async fn process_index_jobs_with_drain(
             }
             reports
         }
-        IndexJobDrain::Coalesced => {
+        IndexJobDrain::Coalesced {
+            max_corpus_documents,
+        } => {
             process_selected_index_jobs_coalesced_with_cx(
                 cx,
                 &db,
                 &workspace_id,
                 &index_dir,
                 pending_jobs,
+                max_corpus_documents,
             )
             .await?
         }
@@ -2135,8 +2173,37 @@ fn process_selected_index_jobs_coalesced(
     selected: Vec<StoredSearchIndexJob>,
 ) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError> {
     crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
-        process_selected_index_jobs_coalesced_with_cx(&cx, db, workspace_id, index_dir, selected)
-            .await
+        process_selected_index_jobs_coalesced_with_cx(
+            &cx,
+            db,
+            workspace_id,
+            index_dir,
+            selected,
+            None,
+        )
+        .await
+    })
+    .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
+}
+
+#[cfg(test)]
+fn process_selected_index_jobs_coalesced_bounded(
+    db: &DbConnection,
+    workspace_id: &str,
+    index_dir: &Path,
+    selected: Vec<StoredSearchIndexJob>,
+    max_corpus_documents: u32,
+) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError> {
+    crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+        process_selected_index_jobs_coalesced_with_cx(
+            &cx,
+            db,
+            workspace_id,
+            index_dir,
+            selected,
+            Some(max_corpus_documents),
+        )
+        .await
     })
     .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
 }
@@ -2187,6 +2254,7 @@ async fn process_selected_index_jobs_coalesced_with_cx(
     workspace_id: &str,
     index_dir: &Path,
     selected: Vec<StoredSearchIndexJob>,
+    max_corpus_documents: Option<u32>,
 ) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError> {
     process_selected_index_jobs_coalesced_after_snapshot_with_cx(
         cx,
@@ -2194,6 +2262,7 @@ async fn process_selected_index_jobs_coalesced_with_cx(
         workspace_id,
         index_dir,
         selected,
+        max_corpus_documents,
         || Ok(()),
     )
     .await
@@ -2218,6 +2287,7 @@ where
         workspace_id,
         index_dir,
         selected,
+        None,
         after_snapshot,
     )
     .await
@@ -2229,6 +2299,7 @@ async fn process_selected_index_jobs_coalesced_after_snapshot_with_cx<F>(
     workspace_id: &str,
     index_dir: &Path,
     selected: Vec<StoredSearchIndexJob>,
+    max_corpus_documents: Option<u32>,
     after_snapshot: F,
 ) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError>
 where
@@ -2276,6 +2347,33 @@ where
         open_job_ids,
         ..
     } = collect_workspace_index_source_snapshot(db, workspace_id)?;
+    if max_corpus_documents.is_some_and(|limit| documents_total > limit) {
+        let limit = max_corpus_documents.unwrap_or(u32::MAX);
+        for finalizer in &mut job_finalizers {
+            finalizer.mark_cancelled();
+        }
+        drop(job_finalizers);
+        requeue_cancelled_search_index_jobs(db, workspace_id)?;
+        let message = format!(
+            "coalesced index repair deferred because the authoritative corpus contains \
+             {documents_total} documents, above the interactive limit of {limit}"
+        );
+        for job in &claimed {
+            reports.push(IndexProcessingJobReport {
+                job_id: job.id.clone(),
+                job_type: job.job_type.clone(),
+                document_source: job.document_source.clone(),
+                document_id: job.document_id.clone(),
+                outcome: "skipped".to_owned(),
+                processing_mode: COALESCED_MODE.to_owned(),
+                fallback_to_full: None,
+                documents_total,
+                documents_indexed: 0,
+                error: Some(message.clone()),
+            });
+        }
+        return Ok(reports);
+    }
     if let Err(error) = after_snapshot() {
         if matches!(&error, IndexRebuildError::Cancelled(_)) {
             for finalizer in &mut job_finalizers {
@@ -12067,6 +12165,82 @@ mod tests {
             repeated.jobs.is_empty(),
             "repeat per-job report must be empty",
         )
+    }
+
+    #[test]
+    fn bounded_coalesced_repair_rechecks_corpus_after_preflight_growth() -> TestResult {
+        let root = unique_test_dir("bounded-coalesced-post-preflight-growth");
+        let workspace = root.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        let job_id = "sidx_boundedcoalesced0000000000";
+        seed_reembed_database(&workspace, &database)?;
+        queue_pending_index_job(&database, job_id)?;
+
+        let connection = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let (preflight_counts, _) =
+            current_index_corpus_counts(&connection, "wsp_01234567890123456789012345")
+                .map_err(|e| e.to_string())?;
+        ensure(
+            preflight_counts.total() == 4,
+            "bounded fixture preflight corpus count",
+        )?;
+        connection
+            .insert_memory(
+                "mem_boundedgrowth00000000000000",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                    level: "episodic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "A concurrent writer enlarged the corpus after preflight.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("file://bounded-race-fixture".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: Some("unit-test".to_owned()),
+                    tags: vec!["bounded-race".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        let selected = connection
+            .list_pending_search_index_jobs("wsp_01234567890123456789012345", Some(1))
+            .map_err(|e| e.to_string())?;
+        let reports = process_selected_index_jobs_coalesced_bounded(
+            &connection,
+            "wsp_01234567890123456789012345",
+            &index_dir,
+            selected,
+            preflight_counts.total(),
+        )
+        .map_err(|e| e.to_string())?;
+        ensure(
+            reports.len() == 1 && reports[0].outcome == "skipped",
+            format!("bounded repair must skip the enlarged corpus: {reports:?}"),
+        )?;
+        ensure(
+            reports[0]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("above the interactive limit of 4")),
+            "bounded repair skip reason",
+        )?;
+        let stored = connection
+            .get_search_index_job(job_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "bounded repair job disappeared".to_owned())?;
+        ensure(
+            stored.status_enum() == Some(SearchIndexJobStatus::Pending),
+            "bounded repair must leave deferred work pending",
+        )?;
+        ensure(
+            !index_dir.join(INDEX_METADATA_FILE).exists(),
+            "bounded repair must not publish an oversized corpus",
+        )?;
+        connection.close().map_err(|e| e.to_string())
     }
 
     #[test]

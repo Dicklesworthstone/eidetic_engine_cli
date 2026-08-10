@@ -934,7 +934,7 @@ fn load_memory_economy_metrics(
         .list_procedure_records(&workspace_id, None, u32::MAX)
         .map_err(|error| economy_metrics_unavailable(database_path, error))?;
     let (active_procedure_count, fallback_procedures) =
-        procedure_reserve_counts(&connection, &procedures)?;
+        procedure_reserve_counts(&connection, database_path, &procedures)?;
     let tombstoned_count = u32::try_from(
         all_memories
             .iter()
@@ -968,6 +968,7 @@ fn load_memory_economy_metrics(
 
 fn procedure_reserve_counts(
     connection: &DbConnection,
+    database_path: &Path,
     procedures: &[StoredProcedure],
 ) -> Result<(u32, u32), DomainError> {
     let mut active_count = 0u32;
