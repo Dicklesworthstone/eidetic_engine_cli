@@ -119,6 +119,9 @@ jobs:
             cargo test --locked --test model_bundled_embedding_cli_e2e \
               registered_model2vec_fixture_is_neural_without_overrides_or_download_path -- \
               --ignored --exact --nocapture
+            cargo test --locked --test model_bundled_embedding_cli_e2e \
+              registered_noncanonical_model2vec_source_is_neural_without_egress -- \
+              --ignored --exact --nocapture
           EE_UNSHARE
 
       - name: Enforce cold and warm search p50 budgets

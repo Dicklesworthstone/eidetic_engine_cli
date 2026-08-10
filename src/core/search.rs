@@ -43,7 +43,7 @@ use super::index::{
     EmbeddingPosture, IndexHealth, IndexProcessingOptions, IndexProcessingStatus, IndexStatusError,
     IndexStatusOptions, IndexStatusReport, current_embedding_posture,
     embedder_reports_pending_model2vec_download, get_index_status_with_connection,
-    prepare_default_search_embedder, process_index_jobs_coalesced_with_cx_bounded,
+    prepare_search_embedder_for_workspace, process_index_jobs_coalesced_with_cx_bounded,
 };
 use super::memory_drift::{
     MemoryDriftSelectionHint, memory_drift_selection_hint_from_provenance_status,
@@ -6148,17 +6148,23 @@ pub async fn run_search_with_performance_and_filters_with_cx(
     let index_dir = options.resolve_index_dir();
     let database_path = options.resolve_database_path();
     reconcile_search_index_before_read_with_cx(cx, options).await;
-    let embedder_preparation =
-        if options.source_mode.uses_embeddings()
-            && index_dir.exists()
-            && crate::core::index::index_corpus_compatibility_is_current(&index_dir)
-        {
-            Some(prepare_default_search_embedder(cx).await.map_err(|error| {
-                map_frankensearch_error(cx, "search embedder preparation", error)
-            })?)
-        } else {
-            None
-        };
+    let embedder_preparation = if options.source_mode.uses_embeddings()
+        && index_dir.exists()
+        && crate::core::index::index_corpus_compatibility_is_current(&index_dir)
+    {
+        Some(
+            prepare_search_embedder_for_workspace(cx, &options.workspace_path, &database_path)
+                .await
+                .map_err(|error| {
+                    map_frankensearch_error(cx, "search embedder preparation", error)
+                })?,
+        )
+    } else {
+        None
+    };
+    let fast_embedder_override = embedder_preparation
+        .as_ref()
+        .map(|preparation| Arc::clone(&preparation.fast_embedder));
 
     if database_path.exists() {
         let read_pool = registered_process_read_pool(
@@ -6198,6 +6204,7 @@ pub async fn run_search_with_performance_and_filters_with_cx(
                 None,
                 true,
                 None,
+                fast_embedder_override.clone(),
             )
             .await
             .and_then(|mut run| {
@@ -6236,6 +6243,7 @@ pub async fn run_search_with_performance_and_filters_with_cx(
         None,
         true,
         None,
+        fast_embedder_override,
     )
     .await?;
     if kind_filter.is_some() || !typed_field_filters.is_empty() {
@@ -6422,6 +6430,7 @@ pub fn run_context_search_with_read_connection_seeded_and_audit_connection(
             read_connection,
             audit_connection,
             rerank_seed,
+            None,
         )
         .await
         .map(|run| run.report)
@@ -6433,6 +6442,7 @@ pub fn run_context_search_with_preloaded_memories(
     read_connection: &DbConnection,
     audit_connection: Option<&DbConnection>,
     determinism: &Deterministic<Seed>,
+    fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
 ) -> Result<ContextSearchReport, SearchError> {
     let rerank_seed = determinism.shared_child("search.rerank");
     with_search_root(|cx| async move {
@@ -6442,6 +6452,7 @@ pub fn run_context_search_with_preloaded_memories(
             read_connection,
             audit_connection,
             rerank_seed,
+            fast_embedder_override,
         )
         .await
     })
@@ -6453,6 +6464,7 @@ pub async fn run_context_search_with_preloaded_memories_with_cx(
     read_connection: &DbConnection,
     audit_connection: Option<&DbConnection>,
     rerank_seed: Deterministic<Seed>,
+    fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
 ) -> Result<ContextSearchReport, SearchError> {
     run_context_search_with_preloaded_memories_and_workspace_state_with_cx(
         cx,
@@ -6461,6 +6473,7 @@ pub async fn run_context_search_with_preloaded_memories_with_cx(
         audit_connection,
         None,
         rerank_seed,
+        fast_embedder_override,
     )
     .await
 }
@@ -6481,6 +6494,7 @@ pub fn run_context_search_with_preloaded_memories_and_workspace_state(
             audit_connection,
             workspace_state,
             rerank_seed,
+            None,
         )
         .await
     })
@@ -6493,6 +6507,7 @@ pub async fn run_context_search_with_preloaded_memories_and_workspace_state_with
     audit_connection: Option<&DbConnection>,
     workspace_state: Option<&SearchWorkspaceProbeState>,
     rerank_seed: Deterministic<Seed>,
+    fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
 ) -> Result<ContextSearchReport, SearchError> {
     // Context candidate conversion batch-loads memories itself, so passthrough
     // swarm/workspace scopes do not need search-analysis metadata on every hit.
@@ -6508,6 +6523,7 @@ pub async fn run_context_search_with_preloaded_memories_and_workspace_state_with
         workspace_state,
         false,
         Some(&mut preloaded_memories),
+        fast_embedder_override,
     )
     .await?;
     Ok(ContextSearchReport {
@@ -7157,6 +7173,7 @@ async fn run_search_inner(
         None,
         include_passthrough_scope_analysis_metadata,
         preloaded_memories,
+        None,
     )
     .await
     .map(|run| run.report)
@@ -7172,12 +7189,23 @@ async fn run_search_inner_with_performance(
     workspace_state: Option<&SearchWorkspaceProbeState>,
     include_passthrough_scope_analysis_metadata: bool,
     mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
+    fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
 ) -> Result<SearchPerformanceRun, SearchError> {
     search_checkpoint(cx)?;
     let start = Instant::now();
     let mut trace = SearchPerformanceTrace::default();
     let setup_start = Instant::now();
     let index_dir = options.resolve_index_dir();
+    let embed_backend = fast_embedder_override.as_ref().map_or_else(
+        crate::core::index::active_embed_backend,
+        |embedder| {
+            if embedder.is_semantic() {
+                EmbedBackend::NeuralLocal
+            } else {
+                EmbedBackend::HashFallback
+            }
+        },
+    );
     trace.record_elapsed("search::setup", setup_start);
     // Runtime-profile resolution gets its own stable phase so a regression
     // that reintroduces blocking host probes on this shared pre-query path
@@ -7222,7 +7250,12 @@ async fn run_search_inner_with_performance(
     trace.record_elapsed("search::degradationSetup", degradation_start);
 
     let source_mode_start = Instant::now();
-    let source_mode = resolve_source_mode(options, &index_dir, &mut degraded)?;
+    let source_mode = resolve_source_mode(
+        options,
+        &index_dir,
+        &mut degraded,
+        fast_embedder_override.as_deref(),
+    )?;
     push_model_lifecycle_search_degradation(options, read_connection, &mut degraded);
     trace.record_elapsed("search::sourceModeResolve", source_mode_start);
     let rerank_resolve_start = Instant::now();
@@ -7245,7 +7278,7 @@ async fn run_search_inner_with_performance(
         return Ok(SearchPerformanceRun {
             report: SearchReport {
                 status: SearchStatus::NoResults,
-                embed_backend: crate::core::index::active_embed_backend(),
+                embed_backend,
                 query: options.query.clone(),
                 requested_limit: options.limit,
                 results: Vec::new(),
@@ -7286,7 +7319,7 @@ async fn run_search_inner_with_performance(
         rerank_seed,
         rerank_runtime,
         fusion_weights,
-        None,
+        fast_embedder_override,
         &mut trace,
     )
     .await;
@@ -7618,7 +7651,7 @@ async fn run_search_inner_with_performance(
             Ok(SearchPerformanceRun {
                 report: SearchReport {
                     status,
-                    embed_backend: crate::core::index::active_embed_backend(),
+                    embed_backend,
                     query: options.query.clone(),
                     requested_limit: options.limit,
                     results: above_floor,
@@ -7657,7 +7690,7 @@ async fn run_search_inner_with_performance(
             Ok(SearchPerformanceRun {
                 report: SearchReport {
                     status: SearchStatus::IndexError,
-                    embed_backend: crate::core::index::active_embed_backend(),
+                    embed_backend,
                     query: options.query.clone(),
                     requested_limit: options.limit,
                     results: Vec::new(),
@@ -7706,6 +7739,7 @@ pub async fn run_diag_search_with_cx(
 ) -> Result<SearchDiagnosticReport, SearchError> {
     search_checkpoint(cx)?;
     let start = Instant::now();
+    let embed_backend = crate::core::index::active_embed_backend();
     let index_dir = options.resolve_index_dir();
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
     let (effective_limit, limit_capped) = runtime_profile.cap_search_limit(options.limit);
@@ -7827,7 +7861,7 @@ pub async fn run_diag_search_with_cx(
         resolve_search_rerank_config(&options.workspace_path);
     let final_report = SearchReport {
         status,
-        embed_backend: crate::core::index::active_embed_backend(),
+        embed_backend,
         query: options.query.clone(),
         requested_limit: options.limit,
         results: above_floor,
@@ -8095,6 +8129,7 @@ fn resolve_source_mode(
     options: &SearchOptions,
     index_dir: &Path,
     degraded: &mut Vec<SearchDegradation>,
+    fast_embedder_override: Option<&dyn crate::search::Embedder>,
 ) -> Result<SourceModeResolution, SearchError> {
     let lexical_available = lexical_search_available(index_dir);
     if !options.source_mode.uses_embeddings() {
@@ -8111,12 +8146,11 @@ fn resolve_source_mode(
     }
 
     let embed_model_unavailable = embed_model_unavailable_reason_from_env();
-    let semantic_unavailable = embed_model_unavailable
-        .is_none()
+    let prepared_semantic = fast_embedder_override.is_some_and(|embedder| embedder.is_semantic());
+    let semantic_unavailable = (!prepared_semantic && embed_model_unavailable.is_none())
         .then(semantic_retrieval_unavailable_reason)
         .flatten();
-    let semantic_pending = embed_model_unavailable
-        .is_none()
+    let semantic_pending = (!prepared_semantic && embed_model_unavailable.is_none())
         .then(semantic_retrieval_pending_reason)
         .flatten();
     let tiers = SearchTierState {
@@ -13369,7 +13403,7 @@ mod tests {
         let index_dir = options.resolve_index_dir();
         let mut degraded = Vec::new();
 
-        let resolution = resolve_source_mode(&options, &index_dir, &mut degraded)
+        let resolution = resolve_source_mode(&options, &index_dir, &mut degraded, None)
             .map_err(|error| error.to_string())?;
 
         assert_eq!(resolution.applied, SearchSourceMode::LexicalOnly);
@@ -13387,7 +13421,7 @@ mod tests {
         let index_dir = options.resolve_index_dir();
         let mut degraded = Vec::new();
 
-        let error = match resolve_source_mode(&options, &index_dir, &mut degraded) {
+        let error = match resolve_source_mode(&options, &index_dir, &mut degraded, None) {
             Ok(_) => {
                 return Err(
                     "strict lexical-only mode should fail when lexical index is unavailable"
@@ -13414,7 +13448,7 @@ mod tests {
         let index_dir = options.resolve_index_dir();
         let mut degraded = Vec::new();
 
-        let resolution = resolve_source_mode(&options, &index_dir, &mut degraded)
+        let resolution = resolve_source_mode(&options, &index_dir, &mut degraded, None)
             .map_err(|error| error.to_string())?;
 
         assert_eq!(resolution.applied, SearchSourceMode::SemanticOnly);
@@ -13430,7 +13464,7 @@ mod tests {
         let index_dir = options.resolve_index_dir();
         let mut degraded = Vec::new();
 
-        let resolution = resolve_source_mode(&options, &index_dir, &mut degraded)
+        let resolution = resolve_source_mode(&options, &index_dir, &mut degraded, None)
             .map_err(|error| error.to_string())?;
 
         assert_eq!(resolution.applied, SearchSourceMode::SemanticOnly);

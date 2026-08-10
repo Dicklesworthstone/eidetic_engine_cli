@@ -22,12 +22,15 @@ retrieval.
 | `OPENAI_API_KEY` | embeddings | no | Presence adds an `ee doctor` info note; local semantic retrieval never consumes API keys or remote embedding APIs. |
 
 Embedding model resolution is deterministic: `EE_EMBED_MODEL_DIR` has highest
-precedence, followed by a manifest-verified machine registry entry at
-`models/model2vec/potion-multilingual-128M/`, then the legacy/default
-`models/potion-multilingual-128M/` cache, and finally an optional first-use
-download. `EE_EMBED_DOWNLOAD=off` disables only that last network step; it does
-not disable a verified local neural model. Search, pack, and orient expose the
-effective `embed_backend` token as either `neural_local` or `hash_fallback`.
+precedence, followed by an available workspace model-registry row whose local
+`source_uri`, pinned model identity, manifest, dimension, distance metric, and
+content hash all verify. The manifest-verified machine registry layout at
+`models/model2vec/potion-multilingual-128M/`, the legacy/default
+`models/potion-multilingual-128M/` cache, and an optional first-use download
+follow in that order. `EE_EMBED_DOWNLOAD=off` disables only that last network
+step; it does not disable a verified local neural model. Search, pack, and full
+orient expose the actually executed `embed_backend` token as either
+`neural_local` or `hash_fallback`.
 
 ## Runtime variables
 
@@ -62,7 +65,7 @@ effective `embed_backend` token as either `neural_local` or `hash_fallback`.
 | `EE_EMBED_DEDUP_ENABLED` | embeddings | boolean flag | `false` | Enable insert-time embedding deduplication after storage and write-path gates are wired. | Disabled by default so `ee remember` remains byte-compatible until the storage, dedup-link, and e2e beads land. |
 | `EE_EMBED_DEDUP_HAMMING_K` | embeddings | integer `0..=128` | `12` | Set the maximum SimHash Hamming distance admitted to dedup cosine confirmation. | Affects only the cheap SimHash candidate gate; cosine confirmation is still mandatory before embedding reuse. |
 | `EE_EMBED_DOWNLOAD` | embeddings | enum (`auto`, `off`) | `auto` | Control bundled embedding model network downloads with auto or off. | `auto` permits ee to fetch `potion-multilingual-128M` on the first embedding operation. `off` forbids network access but still loads a manifest-verified local model; it falls back to deterministic hashing only when no verified local model exists. Progress and notices go to stderr only. |
-| `EE_EMBED_MODEL_DIR` | embeddings | path | none | Override the bundled embedding model cache directory used by ee. | Resolution order is the explicit override, a manifest-verified machine registry entry at `models/model2vec/potion-multilingual-128M/`, the legacy/default `models/potion-multilingual-128M/` cache, then an optional first-use download. Pre-populate either supported layout for an air-gapped machine. |
+| `EE_EMBED_MODEL_DIR` | embeddings | path | none | Override the bundled embedding model cache directory used by ee. | Resolution order is the explicit override, a verified local `source_uri` from the workspace model registry, the manifest-verified machine registry layout at `models/model2vec/potion-multilingual-128M/`, the legacy/default `models/potion-multilingual-128M/` cache, then an optional first-use download. Pre-populate either supported layout or register another verified local path for an air-gapped machine. |
 | `EE_EMBED_MODEL_PATH` | embeddings | path | none | Fault-injection path used to simulate an unavailable search embedder; this does not load alternate models. | Not a user-facing model loader or model-selection knob. Missing paths force `embed_model_unavailable` when lexical fallback remains available; use `EE_EMBED_MODEL_DIR` with `EE_EMBED_DOWNLOAD=auto` or a pre-populated `potion-multilingual-128M/` cache for real bundled-model control. |
 | `EE_EXPERIMENTAL_TRIAD` | output | boolean flag | none | Compatibility no-op for the promoted ee pack/note/why aliases. | Retained so spike-era scripts continue to run; it no longer gates behavior. |
 | `EE_FLIGHT_RECORDER` | diagnostics | boolean flag | `false` | Enable the redacted command flight recorder for ee subcommands. | Disabled by default; when enabled, command traces must stay redacted and retention-bounded. |

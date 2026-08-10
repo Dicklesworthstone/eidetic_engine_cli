@@ -16,7 +16,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ee::core::model::{BUNDLED_EMBEDDING_DIMENSION, BUNDLED_EMBEDDING_MODEL_ID};
+#[cfg(unix)]
+use ee::db::{CreateModelRegistryInput, DbConnection, StoredModelRegistryEntry};
 use ee::models::{MODEL_LIST_SCHEMA_V1, MODEL_STATUS_SCHEMA_V2, RESPONSE_SCHEMA_V2};
+#[cfg(unix)]
+use ee::models::{ModelProvider, ModelPurpose, ModelRegistryStatus};
 #[cfg(unix)]
 use frankensearch::embed::{ModelManifest, verify_dir_cached};
 use serde_json::{Map, Value, json};
@@ -860,6 +864,471 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
     }
     network_tripwire.assert_unused()?;
     Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires the real potion-multilingual-128M fixture"]
+fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestResult {
+    let fixture_root = std::env::var_os("EE_EMBED_MODEL_FIXTURE_DIR")
+        .map(PathBuf::from)
+        .ok_or_else(|| "EE_EMBED_MODEL_FIXTURE_DIR must name the real model fixture".to_string())?;
+    let fixture_model_dir = resolve_fixture_model_dir(&fixture_root)?;
+    verify_dir_cached(&ModelManifest::potion_128m(), &fixture_model_dir).map_err(|error| {
+        format!("real model fixture failed frozen manifest verification: {error}")
+    })?;
+
+    let workspace = E2eWorkspace::create("registered-noncanonical-model2vec-offline")?;
+    let bootstrap_model_parent = workspace.path.join("explicit-model-override");
+    fs::create_dir_all(&bootstrap_model_parent)
+        .map_err(|error| format!("create {}: {error}", bootstrap_model_parent.display()))?;
+    let bootstrap_model_dir = bootstrap_model_parent.join(BUNDLED_EMBEDDING_MODEL_ID);
+    std::os::unix::fs::symlink(&fixture_model_dir, &bootstrap_model_dir).map_err(|error| {
+        format!(
+            "link real model fixture {} for explicit bootstrap at {}: {error}",
+            fixture_model_dir.display(),
+            bootstrap_model_dir.display()
+        )
+    })?;
+    let noncanonical_parent = workspace.path.join("private-model-store");
+    fs::create_dir_all(&noncanonical_parent)
+        .map_err(|error| format!("create {}: {error}", noncanonical_parent.display()))?;
+    let noncanonical_model_dir = noncanonical_parent.join("verified-artifact");
+    std::os::unix::fs::symlink(&fixture_model_dir, &noncanonical_model_dir).map_err(|error| {
+        format!(
+            "link real model fixture {} at noncanonical path {}: {error}",
+            fixture_model_dir.display(),
+            noncanonical_model_dir.display()
+        )
+    })?;
+
+    let network_tripwire = NetworkTripwire::start()?;
+    let mut bootstrap_env = network_tripwire.proxy_env();
+    bootstrap_env.extend([
+        (
+            "EE_EMBED_MODEL_DIR".to_string(),
+            path_string(&bootstrap_model_dir),
+        ),
+        ("EE_EMBED_DOWNLOAD".to_string(), "off".to_string()),
+    ]);
+    let init = run_ee_with_env(
+        &workspace,
+        "registry_path_init",
+        &["init", "--workspace", workspace.workspace_arg()?, "--json"],
+        &bootstrap_env,
+    )?;
+    ensure_success(&init, "registry-path ee init")?;
+    let remember = run_ee_with_env(
+        &workspace,
+        "registry_path_remember",
+        &[
+            "remember",
+            "A verified noncanonical registry path supports offline semantic retrieval.",
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--no-auto-link",
+            "--no-propose-candidates",
+            "--json",
+        ],
+        &bootstrap_env,
+    )?;
+    ensure_success(&remember, "registry-path ee remember")?;
+    let remember_json = stdout_json(&remember, "registry-path ee remember")?;
+    let remember_data = response_data(&remember_json, "registry-path ee remember")?;
+    let memory_id = remember_data
+        .get("memoryId")
+        .or_else(|| remember_data.get("memory_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "registry-path remember response missing memory ID".to_string())?
+        .to_owned();
+    let reembed = run_ee_with_env(
+        &workspace,
+        "registry_path_reembed",
+        &[
+            "index",
+            "reembed",
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--json",
+        ],
+        &bootstrap_env,
+    )?;
+    ensure_success(&reembed, "registry-path ee index reembed")?;
+
+    let initial_entry = model2vec_registry_entry(&workspace)?;
+    let verified_hash = initial_entry
+        .content_hash
+        .clone()
+        .ok_or_else(|| "available Model2Vec registry row missing content hash".to_string())?;
+    let registered_entry = update_model2vec_registry_entry(
+        &workspace,
+        BUNDLED_EMBEDDING_MODEL_ID,
+        ModelRegistryStatus::Available,
+        Some(path_string(&noncanonical_model_dir)),
+        Some(verified_hash.clone()),
+    )?;
+    ensure_eq_str(
+        registered_entry.source_uri.as_deref().unwrap_or_default(),
+        path_string(&noncanonical_model_dir).as_str(),
+        "persisted noncanonical Model2Vec source URI",
+    )?;
+
+    let mut offline_env = network_tripwire.proxy_env();
+    offline_env.push(("EE_EMBED_DOWNLOAD".to_string(), "off".to_string()));
+    let query = "offline noncanonical semantic registry path";
+    let search = run_ee_with_env(
+        &workspace,
+        "registry_path_search",
+        &[
+            "search",
+            query,
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--relevance-floor",
+            "0",
+            "--json",
+        ],
+        &offline_env,
+    )?;
+    ensure_success(&search, "registry-path ee search")?;
+    ensure_response_embed_backend(&search, "registry-path ee search", "neural_local")?;
+    let search_json = stdout_json(&search, "registry-path ee search")?;
+    let remembered_hit = search_json
+        .pointer("/data/results")
+        .and_then(Value::as_array)
+        .and_then(|results| {
+            results.iter().find(|result| {
+                result.get("memoryId").and_then(Value::as_str) == Some(memory_id.as_str())
+            })
+        })
+        .ok_or_else(|| format!("registry-path neural search omitted memory {memory_id}"))?;
+    if remembered_hit
+        .get("fastScore")
+        .and_then(Value::as_f64)
+        .is_none()
+    {
+        return Err("registry-path neural search did not execute a semantic fastScore".to_string());
+    }
+    ensure_text_absent(
+        &search.stdout,
+        "embed_model_unavailable",
+        "registry-path neural search degradation",
+    )?;
+
+    let pack = run_ee_with_env(
+        &workspace,
+        "registry_path_pack",
+        &[
+            "pack",
+            query,
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--max-tokens",
+            "800",
+            "--json",
+        ],
+        &offline_env,
+    )?;
+    ensure_success(&pack, "registry-path ee pack")?;
+    ensure_response_embed_backend(&pack, "registry-path ee pack", "neural_local")?;
+
+    let orient = run_ee_with_env(
+        &workspace,
+        "registry_path_orient",
+        &[
+            "orient",
+            query,
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--json",
+        ],
+        &offline_env,
+    )?;
+    ensure_success(&orient, "registry-path full ee orient")?;
+    ensure_response_embed_backend(&orient, "registry-path full ee orient", "neural_local")?;
+
+    let database_state_before_why_not = database_artifact_state(&workspace)?;
+    let why_not = run_ee_with_env(
+        &workspace,
+        "registry_path_why_not",
+        &[
+            "why-not",
+            &memory_id,
+            "--task",
+            query,
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--json",
+        ],
+        &offline_env,
+    )?;
+    ensure_success(&why_not, "registry-path ee why-not")?;
+    ensure_text_absent(
+        &why_not.stdout,
+        "embed_model_unavailable",
+        "registry-path neural why-not degradation",
+    )?;
+    let database_state_after_why_not = database_artifact_state(&workspace)?;
+    if database_state_after_why_not != database_state_before_why_not {
+        return Err(format!(
+            "registry-path why-not mutated database artifacts: before={database_state_before_why_not:?} after={database_state_after_why_not:?}"
+        ));
+    }
+
+    let missing_source = workspace.path.join("missing-model-source");
+    update_model2vec_registry_entry(
+        &workspace,
+        BUNDLED_EMBEDDING_MODEL_ID,
+        ModelRegistryStatus::Available,
+        Some(path_string(&missing_source)),
+        Some(verified_hash.clone()),
+    )?;
+    let missing = run_offline_registry_fallback_search(
+        &workspace,
+        "registry_path_missing_source",
+        query,
+        &offline_env,
+    )?;
+
+    update_model2vec_registry_entry(
+        &workspace,
+        BUNDLED_EMBEDDING_MODEL_ID,
+        ModelRegistryStatus::Unavailable,
+        Some(path_string(&noncanonical_model_dir)),
+        Some(verified_hash.clone()),
+    )?;
+    let unavailable = run_offline_registry_fallback_search(
+        &workspace,
+        "registry_path_unavailable_row",
+        query,
+        &offline_env,
+    )?;
+
+    let unverified_model_dir = noncanonical_parent.join("unverified-artifact");
+    fs::create_dir_all(&unverified_model_dir)
+        .map_err(|error| format!("create {}: {error}", unverified_model_dir.display()))?;
+    update_model2vec_registry_entry(
+        &workspace,
+        BUNDLED_EMBEDDING_MODEL_ID,
+        ModelRegistryStatus::Available,
+        Some(path_string(&unverified_model_dir)),
+        Some(verified_hash.clone()),
+    )?;
+    let unverified = run_offline_registry_fallback_search(
+        &workspace,
+        "registry_path_unverified_source",
+        query,
+        &offline_env,
+    )?;
+
+    update_model2vec_registry_entry(
+        &workspace,
+        "wrong-model-name",
+        ModelRegistryStatus::Available,
+        Some(path_string(&noncanonical_model_dir)),
+        Some(verified_hash.clone()),
+    )?;
+    let mismatched_name = run_offline_registry_fallback_search(
+        &workspace,
+        "registry_path_mismatched_name",
+        query,
+        &offline_env,
+    )?;
+
+    update_model2vec_registry_entry(
+        &workspace,
+        BUNDLED_EMBEDDING_MODEL_ID,
+        ModelRegistryStatus::Available,
+        Some(path_string(&noncanonical_model_dir)),
+        Some(format!("blake3:{}", "0".repeat(64))),
+    )?;
+    let mismatched_hash = run_offline_registry_fallback_search(
+        &workspace,
+        "registry_path_mismatched_hash",
+        query,
+        &offline_env,
+    )?;
+
+    update_model2vec_registry_entry(
+        &workspace,
+        BUNDLED_EMBEDDING_MODEL_ID,
+        ModelRegistryStatus::Available,
+        Some("https://models.invalid/potion-multilingual-128M".to_string()),
+        Some(verified_hash),
+    )?;
+    let nonlocal = run_offline_registry_fallback_search(
+        &workspace,
+        "registry_path_nonlocal_source",
+        query,
+        &offline_env,
+    )?;
+
+    for (name, output) in [
+        ("init", &init),
+        ("remember", &remember),
+        ("reembed", &reembed),
+        ("search", &search),
+        ("pack", &pack),
+        ("orient", &orient),
+        ("why_not", &why_not),
+        ("missing", &missing),
+        ("unavailable", &unavailable),
+        ("unverified", &unverified),
+        ("mismatched_name", &mismatched_name),
+        ("mismatched_hash", &mismatched_hash),
+        ("nonlocal", &nonlocal),
+    ] {
+        ensure_text_absent(
+            &output.stderr,
+            "downloading the local embedding model",
+            &format!("{name} download notice"),
+        )?;
+    }
+
+    for unexpected_cache_path in [
+        workspace
+            .xdg_data
+            .join("ee/models/model2vec/potion-multilingual-128M"),
+        workspace
+            .xdg_data
+            .join("ee/models/potion-multilingual-128M"),
+    ] {
+        if unexpected_cache_path.exists() {
+            return Err(format!(
+                "offline registry resolution created cache path {}",
+                unexpected_cache_path.display()
+            ));
+        }
+    }
+    network_tripwire.assert_unused()
+}
+
+#[cfg(unix)]
+fn model2vec_registry_entry(workspace: &E2eWorkspace) -> TestResult<StoredModelRegistryEntry> {
+    let database_path = workspace.path.join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("open {}: {error}", database_path.display()))?;
+    let stored_workspace = connection
+        .get_workspace_by_path(workspace.workspace_arg()?)
+        .map_err(|error| format!("read registry workspace: {error}"))?
+        .ok_or_else(|| "registry workspace row missing".to_string())?;
+    connection
+        .list_model_registry_entries(&stored_workspace.id)
+        .map_err(|error| format!("list model registry entries: {error}"))?
+        .into_iter()
+        .find(|entry| {
+            entry.provider == ModelProvider::Model2Vec && entry.purpose == ModelPurpose::Embedding
+        })
+        .ok_or_else(|| "Model2Vec embedding registry row missing".to_string())
+}
+
+#[cfg(unix)]
+fn update_model2vec_registry_entry(
+    workspace: &E2eWorkspace,
+    model_name: &str,
+    status: ModelRegistryStatus,
+    source_uri: Option<String>,
+    content_hash: Option<String>,
+) -> TestResult<StoredModelRegistryEntry> {
+    let entry = model2vec_registry_entry(workspace)?;
+    let database_path = workspace.path.join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("open {}: {error}", database_path.display()))?;
+    let updated = connection
+        .update_model_registry_entry(
+            &entry.id,
+            &CreateModelRegistryInput {
+                workspace_id: entry.workspace_id.clone(),
+                provider: entry.provider,
+                model_name: model_name.to_string(),
+                purpose: entry.purpose,
+                dimension: entry.dimension,
+                distance_metric: entry.distance_metric,
+                status,
+                version: entry.version.clone(),
+                source_uri,
+                content_hash,
+                metadata_json: entry.metadata_json.clone(),
+                last_checked_at: entry.last_checked_at.clone(),
+            },
+        )
+        .map_err(|error| format!("update Model2Vec registry entry: {error}"))?;
+    if !updated {
+        return Err(format!(
+            "Model2Vec registry row {} was not updated",
+            entry.id
+        ));
+    }
+    connection
+        .get_model_registry_entry(&entry.id)
+        .map_err(|error| format!("read updated Model2Vec registry entry: {error}"))?
+        .ok_or_else(|| format!("updated Model2Vec registry row {} missing", entry.id))
+}
+
+#[cfg(unix)]
+fn run_offline_registry_fallback_search(
+    workspace: &E2eWorkspace,
+    phase: &str,
+    query: &str,
+    env: &[(String, String)],
+) -> TestResult<Output> {
+    let output = run_ee_with_env(
+        workspace,
+        phase,
+        &[
+            "search",
+            query,
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--relevance-floor",
+            "0",
+            "--json",
+        ],
+        env,
+    )?;
+    ensure_success(&output, phase)?;
+    ensure_response_embed_backend(&output, phase, "hash_fallback")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.contains("embed_model_unavailable") {
+        return Err(format!(
+            "{phase} did not report explicit embed_model_unavailable fallback"
+        ));
+    }
+    Ok(output)
+}
+
+#[cfg(unix)]
+fn database_artifact_state(workspace: &E2eWorkspace) -> TestResult<Vec<(String, Option<String>)>> {
+    let database = workspace.path.join(".ee").join("ee.db");
+    [
+        database.clone(),
+        database.with_file_name("ee.db-wal"),
+        database.with_file_name("ee.db-shm"),
+    ]
+    .into_iter()
+    .map(|path| {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                format!(
+                    "database artifact path is not valid UTF-8: {}",
+                    path.display()
+                )
+            })?
+            .to_string();
+        if !path.exists() {
+            return Ok((name, None));
+        }
+        let bytes = fs::read(&path)
+            .map_err(|error| format!("read database artifact {}: {error}", path.display()))?;
+        Ok((name, Some(blake3::hash(&bytes).to_hex().to_string())))
+    })
+    .collect()
 }
 
 #[cfg(unix)]

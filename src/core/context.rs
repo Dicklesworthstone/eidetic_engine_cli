@@ -57,7 +57,9 @@ use crate::config::{
 };
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
-use crate::core::index::{index_corpus_compatibility_is_current, prepare_default_search_embedder};
+use crate::core::index::{
+    index_corpus_compatibility_is_current, prepare_search_embedder_for_workspace,
+};
 use crate::core::memory_drift::{MemoryDriftSelectionHint, memory_drift_selection_hint_for_memory};
 use crate::core::memory_scope::{
     MemoryScopeContext, MeshDisplayProvenance, MeshQueryVisibility, mesh_query_visibility,
@@ -1987,25 +1989,30 @@ pub fn explain_why_not(
         .index_dir
         .clone()
         .unwrap_or_else(|| options.workspace_path.join(".ee").join("index"));
-    if options.source_mode.uses_embeddings()
+    let fast_embedder_override = if options.source_mode.uses_embeddings()
         && index_dir.exists()
         && index_corpus_compatibility_is_current(&index_dir)
     {
-        crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
-            prepare_default_search_embedder(&cx).await.map_err(|error| {
-                ContextPackError::Search(map_frankensearch_error(
-                    &cx,
-                    "why-not embedder preparation",
-                    error,
-                ))
-            })
+        let preparation = crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+            prepare_search_embedder_for_workspace(&cx, &options.workspace_path, &database_path)
+                .await
+                .map_err(|error| {
+                    ContextPackError::Search(map_frankensearch_error(
+                        &cx,
+                        "why-not embedder preparation",
+                        error,
+                    ))
+                })
         })
         .map_err(|error| {
             ContextPackError::Pack(format!(
                 "Failed to start why-not embedder preparation: {error}"
             ))
         })??;
-    }
+        Some(preparation.fast_embedder)
+    } else {
+        None
+    };
 
     let mut effective_filters = options.filters.clone();
     if effective_filters.temporal.as_of.is_none() {
@@ -2063,6 +2070,7 @@ pub fn explain_why_not(
         read_connection,
         None,
         determinism,
+        fast_embedder_override,
     ) {
         Ok(context_search) => {
             search_preloaded_memories = context_search.preloaded_memories;
@@ -2382,22 +2390,34 @@ async fn run_context_pack_with_performance_inner(
         strict_scope: options.strict_scope,
     };
     reconcile_search_index_before_read_with_cx(control.cx, &search_options).await;
-    if options.source_mode.uses_embeddings()
+    let embedder_preparation = if options.source_mode.uses_embeddings()
         && index_dir.exists()
         && index_corpus_compatibility_is_current(&index_dir)
     {
-        let preparation = prepare_default_search_embedder(control.cx)
-            .await
-            .map_err(|error| {
-                ContextPackError::Search(map_frankensearch_error(
-                    control.cx,
-                    "context embedder preparation",
-                    error,
-                ))
-            })?;
+        let preparation = prepare_search_embedder_for_workspace(
+            control.cx,
+            &options.workspace_path,
+            &database_path,
+        )
+        .await
+        .map_err(|error| {
+            ContextPackError::Search(map_frankensearch_error(
+                control.cx,
+                "context embedder preparation",
+                error,
+            ))
+        })?;
         trace.record_duration("embedderPrepare", preparation.elapsed);
         control.check()?;
-    }
+        Some(preparation)
+    } else {
+        None
+    };
+    let prepared_embed_backend = embedder_preparation
+        .as_ref()
+        .map_or_else(crate::core::index::active_embed_backend, |preparation| {
+            preparation.backend
+        });
 
     let (read_pool_config, pin_snapshot) =
         context_read_pool_config(&options.workspace_path, &mut degraded);
@@ -2445,6 +2465,7 @@ async fn run_context_pack_with_performance_inner(
             &request,
             &effective_filters,
             output_redaction_enabled,
+            prepared_embed_backend,
             &mut degraded,
         );
         if let Some(context) = &l2_context
@@ -2486,6 +2507,9 @@ async fn run_context_pack_with_performance_inner(
                 output_redaction_enabled,
             }),
             determinism.shared_child("search.rerank"),
+            embedder_preparation
+                .as_ref()
+                .map(|preparation| Arc::clone(&preparation.fast_embedder)),
         )
         .await
         {
@@ -5656,6 +5680,7 @@ fn context_pack_l2_prepare(
     request: &ContextRequest,
     filters: &crate::models::QueryFilters,
     output_redaction_enabled: bool,
+    embed_backend: EmbedBackend,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<ContextPackL2Context> {
     let workspace_id = context_pack_l2_workspace_id(connection, &options.workspace_path);
@@ -5707,7 +5732,7 @@ fn context_pack_l2_prepare(
         database_generation,
         index_generation: context_pack_l2_index_generation(options),
         graph_generation,
-        embed_backend: crate::core::index::active_embed_backend(),
+        embed_backend,
         redaction_level: options.redaction_level,
         request: request.clone(),
         output_options: options.output_options,

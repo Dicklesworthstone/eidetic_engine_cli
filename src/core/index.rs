@@ -18,11 +18,11 @@ use crate::db::{
     AcquireLockResult, AdvisoryLockId, CreateSearchIndexJobInput, DbConnection, DbError,
     DbOperation, EVIDENCE_CANONICAL_PROVENANCE_REVISION, EVIDENCE_SCREENING_VERSION,
     EVIDENCE_SECURITY_POLICY_EPOCH, EvidenceAdmissionReport, ModelRegistryUpsertOutcome,
-    SearchIndexJobStatus, SearchIndexJobType, StoredSearchIndexJob,
+    SearchIndexJobStatus, SearchIndexJobType, StoredModelRegistryEntry, StoredSearchIndexJob,
 };
 use crate::models::model_registry::{
     EmbeddingMetadataRecord, EmbeddingPooling, EmbeddingVectorDtype, ModelDistanceMetric,
-    ModelProvider, ModelRegistryStatus,
+    ModelProvider, ModelPurpose, ModelRegistryStatus,
 };
 use crate::models::{CorpusRevision, INDEX_INTAKE_FALLBACK_CORPUS_REVISION_MISMATCH, MemoryId};
 use crate::models::{
@@ -1570,11 +1570,12 @@ pub async fn rebuild_index_with_cx(
     }
 
     let _recovery_action = recover_interrupted_publish(&index_dir)?;
-    let registry_stack = default_embedder_stack();
+    let registry_stack = workspace_embedder_stack(&db, &workspace_id)?;
     ensure_active_embedding_registry_record(&db, &workspace_id, &registry_stack)?;
-    let build_result = publish_full_index_generation(
+    let build_result = publish_full_index_generation_with_stack(
         cx,
         &index_dir,
+        registry_stack,
         indexable_docs,
         source_generation,
         document_counts,
@@ -1639,7 +1640,10 @@ pub async fn reembed_index_with_cx(
     cx: &asupersync::Cx,
     options: &IndexReembedOptions,
 ) -> Result<IndexReembedReport, IndexRebuildError> {
-    reembed_index_with_cx_and_stack(cx, options, default_embedder_stack()).await
+    let db = DbConnection::open_file(&options.resolve_database_path())?;
+    let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
+    let stack = workspace_embedder_stack(&db, &workspace_id)?;
+    reembed_index_with_cx_and_stack(cx, options, stack).await
 }
 
 async fn reembed_index_with_cx_and_stack(
@@ -2416,9 +2420,11 @@ where
     }
 
     let _recovery_action = recover_interrupted_publish(index_dir)?;
-    let build_result = publish_full_index_generation(
+    let stack = workspace_embedder_stack(db, workspace_id)?;
+    let build_result = publish_full_index_generation_with_stack(
         cx,
         index_dir,
+        stack,
         indexable_docs,
         published_generation,
         document_counts,
@@ -2617,9 +2623,11 @@ where
     let result = async {
         let _recovery_action = recover_interrupted_publish(index_dir)?;
         let fallback_to_full = None;
-        let build_result = publish_full_index_generation(
+        let stack = workspace_embedder_stack(db, &job.workspace_id)?;
+        let build_result = publish_full_index_generation_with_stack(
             cx,
             index_dir,
+            stack,
             indexable_docs,
             published_generation,
             document_counts,
@@ -2769,29 +2777,6 @@ fn incremental_fallback(
         reason,
         detail: detail.into(),
     }
-}
-
-async fn publish_full_index_generation<F>(
-    cx: &asupersync::Cx,
-    index_dir: &Path,
-    indexable_docs: Vec<crate::search::IndexableDocument>,
-    generation: u64,
-    document_counts: IndexDocumentCounts,
-    commit_tail: F,
-) -> Result<BuildStats, IndexRebuildError>
-where
-    F: FnOnce() -> Result<(), IndexRebuildError>,
-{
-    publish_full_index_generation_with_stack(
-        cx,
-        index_dir,
-        default_embedder_stack(),
-        indexable_docs,
-        generation,
-        document_counts,
-        commit_tail,
-    )
-    .await
 }
 
 async fn publish_full_index_generation_with_stack<F>(
@@ -5015,10 +5000,10 @@ impl DefaultSearchEmbedder {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct EmbedderPreparation {
     pub(crate) backend: EmbedBackend,
     pub(crate) elapsed: Duration,
+    pub(crate) fast_embedder: Arc<dyn crate::search::Embedder>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5184,6 +5169,111 @@ fn resolve_default_embedder_model_root_with(
         return registry_root;
     }
     model_cache_root.to_path_buf()
+}
+
+fn registry_source_is_local(source: &str) -> bool {
+    !source.trim().is_empty()
+        && !source.contains("://")
+        && !source.starts_with("urn:")
+        && !source.starts_with("model:")
+}
+
+fn registered_model2vec_source_path(
+    db: &DbConnection,
+    entry: &StoredModelRegistryEntry,
+) -> Result<Option<PathBuf>, DbError> {
+    let Some(source) = entry
+        .source_uri
+        .as_deref()
+        .filter(|source| registry_source_is_local(source))
+    else {
+        return Ok(None);
+    };
+    let path = Path::new(source);
+    if path.is_absolute() {
+        return Ok(Some(path.to_path_buf()));
+    }
+    Ok(db
+        .get_workspace(&entry.workspace_id)?
+        .map(|workspace| PathBuf::from(workspace.path).join(path)))
+}
+
+fn registered_model2vec_stack(
+    db: &DbConnection,
+    workspace_id: &str,
+) -> Result<Option<EmbedderStack>, DbError> {
+    let Some(entry) = db.find_model_registry_entry(
+        workspace_id,
+        ModelProvider::Model2Vec,
+        POTION_MODEL_NAME,
+        ModelPurpose::Embedding,
+    )?
+    else {
+        return Ok(None);
+    };
+    if entry.status != ModelRegistryStatus::Available {
+        return Ok(None);
+    }
+    let Some(model_dir) = registered_model2vec_source_path(db, &entry)? else {
+        tracing::warn!(
+            target: "ee::index::embedder",
+            registry_id = entry.id,
+            reason = "nonlocal_or_missing_source_uri",
+            "skipping unusable registered Model2Vec entry"
+        );
+        return Ok(None);
+    };
+    if !verified_potion_model_dir(&model_dir) {
+        tracing::warn!(
+            target: "ee::index::embedder",
+            registry_id = entry.id,
+            reason = "manifest_verification_failed",
+            "skipping unusable registered Model2Vec entry"
+        );
+        return Ok(None);
+    }
+    let Ok(embedder) = Model2VecEmbedder::load_with_name(&model_dir, POTION_MODEL_NAME) else {
+        tracing::warn!(
+            target: "ee::index::embedder",
+            registry_id = entry.id,
+            reason = "model_load_failed",
+            "skipping unusable registered Model2Vec entry"
+        );
+        return Ok(None);
+    };
+    let fingerprint = active_embedder_fingerprint(&embedder, ModelProvider::Model2Vec);
+    let hash_matches = entry
+        .content_hash
+        .as_deref()
+        .is_some_and(|hash| hash.eq_ignore_ascii_case(&fingerprint.content_hash));
+    let dimension_matches = entry.dimension == u32::try_from(embedder.dimension()).ok();
+    let distance_matches = entry.distance_metric == Some(ModelDistanceMetric::Cosine);
+    if !hash_matches || !dimension_matches || !distance_matches {
+        tracing::warn!(
+            target: "ee::index::embedder",
+            registry_id = entry.id,
+            reason = "registry_identity_or_hash_mismatch",
+            "skipping unusable registered Model2Vec entry"
+        );
+        return Ok(None);
+    }
+
+    let fast = Arc::new(embedder) as Arc<dyn crate::search::Embedder>;
+    Ok(Some(stack_with_hash_quality_fallback(
+        EmbedderStack::from_parts(fast, None),
+    )))
+}
+
+fn workspace_embedder_stack(
+    db: &DbConnection,
+    workspace_id: &str,
+) -> Result<EmbedderStack, DbError> {
+    if configured_embedder_model_root().is_none()
+        && let Some(stack) = registered_model2vec_stack(db, workspace_id)?
+    {
+        return Ok(stack);
+    }
+    Ok(default_embedder_stack())
 }
 
 fn verified_potion_model_dir(model_dir: &Path) -> bool {
@@ -5433,7 +5523,42 @@ pub(crate) async fn prepare_default_search_embedder(
     Ok(EmbedderPreparation {
         backend,
         elapsed: started.elapsed(),
+        fast_embedder: selection.stack.fast_arc(),
     })
+}
+
+pub(crate) async fn prepare_search_embedder_for_workspace(
+    cx: &asupersync::Cx,
+    workspace_path: &Path,
+    database_path: &Path,
+) -> Result<EmbedderPreparation, SearchError> {
+    let started = Instant::now();
+    if configured_embedder_model_root().is_none() && database_path.exists() {
+        let db = DbConnection::open_file_read_only(database_path).map_err(|error| {
+            SearchError::Index(format!("Failed to open model registry: {error}"))
+        })?;
+        if let Some(workspace_id) =
+            workspace_id_for_index_status(&db, workspace_path).map_err(|error| {
+                SearchError::Index(format!(
+                    "Failed to resolve model registry workspace: {error}"
+                ))
+            })?
+            && let Some(stack) =
+                registered_model2vec_stack(&db, &workspace_id).map_err(|error| {
+                    SearchError::Index(format!("Failed to read model registry: {error}"))
+                })?
+        {
+            return Ok(EmbedderPreparation {
+                backend: EmbedBackend::NeuralLocal,
+                elapsed: started.elapsed(),
+                fast_embedder: stack.fast_arc(),
+            });
+        }
+    }
+
+    let mut preparation = prepare_default_search_embedder(cx).await?;
+    preparation.elapsed = started.elapsed();
+    Ok(preparation)
 }
 
 pub(crate) fn embedder_reports_pending_model2vec_download(
@@ -5690,9 +5815,22 @@ pub(crate) fn ensure_loaded_embedding_registry_record(
         return Ok(());
     }
 
-    let Some(input) = active_embedding_registry_input(workspace_id, fast_embedder)? else {
+    let Some(mut input) = active_embedding_registry_input(workspace_id, fast_embedder)? else {
         return Ok(());
     };
+    if let Some(existing) = db.find_model_registry_entry(
+        workspace_id,
+        input.provider,
+        &input.model_name,
+        ModelPurpose::Embedding,
+    )? && existing.content_hash == input.content_hash
+        && existing
+            .source_uri
+            .as_deref()
+            .is_some_and(registry_source_is_local)
+    {
+        input.source_uri = existing.source_uri;
+    }
 
     match db.upsert_embedding_metadata_record(&generate_model_registry_id(), &input)? {
         ModelRegistryUpsertOutcome::Inserted => {

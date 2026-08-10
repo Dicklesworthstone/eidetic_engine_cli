@@ -2248,10 +2248,13 @@ The semantic stack is in degraded lexical-fallback mode because the bundled
 local Model2Vec model could not be loaded or an explicit fault-injection path
 was set. Default installs use the pinned `potion-multilingual-128M` model from
 Frankensearch. Resolution checks `EE_EMBED_MODEL_DIR` first, then the verified
-machine registry layout under `models/model2vec/`, then the legacy cache, and
-only then permits a one-time download. `EE_EMBED_DOWNLOAD=off` forbids that
-network step without disabling a verified local model. Pre-populate either
-supported cache layout for an air-gapped host, then re-embed:
+local `source_uri` of a matching available workspace model-registry row, then
+the machine registry layout under `models/model2vec/`, then the legacy cache,
+and only then permits a one-time download. Registry selection verifies the
+pinned model identity, frozen manifest, dimension, cosine metric, and persisted
+content hash. `EE_EMBED_DOWNLOAD=off` forbids that network step without
+disabling a verified local model. Pre-populate either supported cache layout or
+register another verified local path for an air-gapped host, then re-embed:
 
 ```bash
 ee index reembed --workspace .
