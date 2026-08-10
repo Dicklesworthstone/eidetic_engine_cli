@@ -1325,9 +1325,10 @@ mod tests {
 
                 // Deterministic shuffle from the seed vector.
                 for (index, seed) in shuffle_seed.iter().enumerate() {
-                    if rows.len() > 1 {
-                        let swap = seed % rows.len();
-                        rows.swap(index % rows.len(), swap);
+                    let row_count = rows.len();
+                    if row_count > 1 {
+                        let swap = seed % row_count;
+                        rows.swap(index % row_count, swap);
                     }
                 }
                 let mut in_shuffled_order = base.clone();
