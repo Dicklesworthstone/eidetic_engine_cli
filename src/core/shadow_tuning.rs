@@ -843,6 +843,23 @@ fn score_candidate(
     total
 }
 
+/// Score one candidate weight vector against replayed pools and labels
+/// (the ADR §2 outcome-weighted rank metric). Exposed for property tests
+/// and diagnostic tooling; the sweep uses the same path internally.
+#[must_use]
+pub fn score_fusion_candidate(
+    replays: &[QueryReplay],
+    labels: &[LabeledTriple],
+    weights: TuningWeights,
+) -> f64 {
+    let replays_by_query: BTreeMap<&str, &QueryReplay> = replays
+        .iter()
+        .map(|replay| (replay.query.as_str(), replay))
+        .collect();
+    let grouped = group_label_gains(labels);
+    score_candidate(&replays_by_query, &grouped, weights.to_fusion())
+}
+
 /// One evaluated candidate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CandidateScore {
