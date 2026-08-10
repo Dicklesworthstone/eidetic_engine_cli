@@ -441,22 +441,35 @@ bounded_lsof() {
     if ! command -v lsof >/dev/null 2>&1; then
         return 127
     fi
-    local timeout_bin
-    timeout_bin=$(timeout_command)
-    if [ -n "$timeout_bin" ]; then
-        # -k escalates to SIGKILL: on macOS an lsof stuck in uninterruptible
-        # disk-wait (stalled USB/network volume) ignores SIGTERM, and a bare
-        # `timeout 2s` then waits forever — which serialized EVERY
-        # rch_verify preflight on this host behind hung lsof zombies
-        # (observed 2026-08-10).
-        "$timeout_bin" -k 1s 2s lsof "$@"
-        return
+    # Poll-and-abandon instead of any wait-based bound: on macOS an lsof
+    # blocked in uninterruptible disk-wait (a stalled external or network
+    # volume — lsof scans every open file system-wide, so ANY stalled mount
+    # wedges it) survives SIGKILL, and `timeout`/`timeout -k`/perl-alarm all
+    # wait for the unkillable child — which serialized every rch_verify
+    # preflight on this host behind hung lsof zombies (observed 2026-08-10,
+    # stalled /Volumes mount). Abandoning the child leaks one D-state
+    # process the kernel reaps when the volume recovers; that beats an
+    # infinite preflight hang.
+    local out
+    out=$(mktemp "${TMPDIR:-/tmp}/bounded_lsof.XXXXXX") || return 1
+    lsof "$@" >"$out" 2>/dev/null &
+    local lsof_pid=$!
+    local waited=0
+    while kill -0 "$lsof_pid" 2>/dev/null && [ "$waited" -lt 20 ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    if kill -0 "$lsof_pid" 2>/dev/null; then
+        kill -9 "$lsof_pid" 2>/dev/null || true
+        disown "$lsof_pid" 2>/dev/null || true
+        rm -f "$out"
+        return 124
     fi
-    if command -v perl >/dev/null 2>&1; then
-        perl -e 'alarm shift; exec @ARGV' 2 lsof "$@"
-    else
-        lsof "$@"
-    fi
+    local status=0
+    wait "$lsof_pid" || status=$?
+    cat "$out"
+    rm -f "$out"
+    return "$status"
 }
 
 timeout_command() {
