@@ -3,7 +3,7 @@
   "code": "search_index_large_gap",
   "introduced_by": {
     "bead": "bd-index-auto-freshness-m5kwf",
-    "epic_letter": "INDEX"
+    "epic_letter": "I"
   },
   "surfaces": [
     "search",

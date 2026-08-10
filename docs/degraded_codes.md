@@ -13599,7 +13599,7 @@ ee status --workspace . --json
 
 **Surfaces:** search, context
 
-**Introduced by:** bd-index-auto-freshness-m5kwf (epic INDEX)
+**Introduced by:** bd-index-auto-freshness-m5kwf (epic I)
 
 **Trigger.** The database generation is more than 50 generations ahead of the search index, so bounded automatic reconciliation is skipped.
 
