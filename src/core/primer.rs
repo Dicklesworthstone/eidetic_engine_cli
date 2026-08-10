@@ -1352,7 +1352,7 @@ mod tests {
                 let lane_count = in_given_order.iter().filter(|c| c.global_lane).count();
                 let expected: std::collections::BTreeSet<u32> = global_specs
                     .iter()
-                    .filter(|(id, tombstoned)| !**tombstoned && !workspace_ids.contains(id))
+                    .filter(|(id, tombstoned)| !*tombstoned && !workspace_ids.contains(id))
                     .map(|(id, _)| *id)
                     .collect();
                 prop_assert_eq!(
