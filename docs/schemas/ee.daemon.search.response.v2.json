@@ -37,7 +37,7 @@
       "properties": {
         "schema": {"type": "string", "const": "ee.response.v2"},
         "success": {"type": "boolean", "const": true},
-        "degraded": {"type": "array", "items": {"type": "object"}},
+        "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}},
         "data": {
           "type": "object",
           "required": ["command", "status", "embed_backend", "query", "request", "scopeStats", "results", "consensus", "conflicts", "resultCount", "elapsedMs", "metrics", "rerank", "profileRuntime", "errors", "degraded"],
@@ -67,6 +67,20 @@
     }
   },
   "$defs": {
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
+        "message": {"type": "string"},
+        "repair": {"type": "string"},
+        "repairKind": {"type": "string", "enum": ["actionable", "template", "placeholder", "unknown", "empty"]},
+        "sources": {"type": "array", "items": {"type": "string"}},
+        "details": {"type": "object"}
+      }
+    },
     "timing": {
       "type": "object",
       "required": ["elapsedMs", "elapsedMsBucket", "nondeterministic"],

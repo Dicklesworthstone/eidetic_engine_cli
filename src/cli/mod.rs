@@ -81340,13 +81340,82 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn daemon_search_capability_and_query_share_one_deadline() -> TestResult {
+        use std::io::{Read, Write};
+
+        fn read_request(
+            stream: &mut std::os::unix::net::UnixStream,
+        ) -> Result<crate::daemon::protocol::DaemonRequest, String> {
+            let mut prefix = [0_u8; 4];
+            stream
+                .read_exact(&mut prefix)
+                .map_err(|error| error.to_string())?;
+            let body_len =
+                usize::try_from(u32::from_be_bytes(prefix)).map_err(|error| error.to_string())?;
+            let mut body = vec![0_u8; body_len];
+            stream
+                .read_exact(&mut body)
+                .map_err(|error| error.to_string())?;
+            serde_json::from_slice(&body).map_err(|error| error.to_string())
+        }
+
+        fn write_response(
+            stream: &mut std::os::unix::net::UnixStream,
+            response: &crate::daemon::protocol::DaemonResponse,
+        ) -> Result<(), String> {
+            let body = serde_json::to_vec(response).map_err(|error| error.to_string())?;
+            let length = u32::try_from(body.len()).map_err(|error| error.to_string())?;
+            stream
+                .write_all(&length.to_be_bytes())
+                .and_then(|()| stream.write_all(&body))
+                .and_then(|()| stream.flush())
+                .map_err(|error| error.to_string())
+        }
+
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let socket_path = temp.path().join("slow-daemon.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket_path)
             .map_err(|error| error.to_string())?;
-        let server = std::thread::spawn(move || {
-            let _connection = listener.accept();
-            std::thread::sleep(std::time::Duration::from_millis(150));
+        let server = std::thread::spawn(move || -> TestResult {
+            let (mut capabilities_stream, _) =
+                listener.accept().map_err(|error| error.to_string())?;
+            let capabilities_request = read_request(&mut capabilities_stream)?;
+            ensure_equal(
+                &capabilities_request.method.as_str(),
+                &crate::daemon::server::METHOD_CAPABILITIES,
+                "first daemon search phase",
+            )?;
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let capabilities_response = crate::daemon::protocol::DaemonResponse::ok(
+                capabilities_request.request_id,
+                capabilities_request.agent_id,
+                capabilities_request.workspace_id,
+                serde_json::json!({
+                    "protocol": "ee.daemon",
+                    "request_schemas": [crate::daemon::DAEMON_REQUEST_SCHEMA_V1],
+                    "response_schemas": [crate::daemon::DAEMON_RESPONSE_SCHEMA_V1],
+                    "methods": [crate::daemon::server::METHOD_SEARCH],
+                    "authorization": {
+                        "ee.daemon.search": "same_uid_workspace"
+                    },
+                    "method_schemas": {
+                        "ee.daemon.search": {
+                            "request": crate::daemon::server::DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+                            "response": crate::daemon::server::DAEMON_SEARCH_RESPONSE_SCHEMA_V2
+                        }
+                    }
+                }),
+            );
+            write_response(&mut capabilities_stream, &capabilities_response)?;
+
+            let (mut search_stream, _) = listener.accept().map_err(|error| error.to_string())?;
+            let search_request = read_request(&mut search_stream)?;
+            ensure_equal(
+                &search_request.method.as_str(),
+                &crate::daemon::server::METHOD_SEARCH,
+                "second daemon search phase",
+            )?;
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            Ok(())
         });
         let options = SearchOptions {
             workspace_path: temp.path().to_path_buf(),
@@ -81374,21 +81443,21 @@ mod tests {
             &options,
             None,
             &[],
-            started + std::time::Duration::from_millis(40),
+            started + std::time::Duration::from_millis(600),
         );
+        let elapsed = started.elapsed();
+        server
+            .join()
+            .map_err(|_| "slow daemon thread panicked".to_owned())??;
         ensure_equal(
             &result,
             &Err(DaemonSearchFallbackReason::DeadlineExceeded),
             "cumulative daemon search deadline",
         )?;
         ensure(
-            started.elapsed() < std::time::Duration::from_millis(120),
-            "capability timeout must not grant a fresh search timeout",
-        )?;
-        server
-            .join()
-            .map_err(|_| "slow daemon thread panicked".to_owned())?;
-        Ok(())
+            elapsed < std::time::Duration::from_millis(700),
+            "successful capability negotiation must not grant a fresh search timeout",
+        )
     }
 
     #[test]

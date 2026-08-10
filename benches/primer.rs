@@ -62,6 +62,7 @@ fn fixture_candidates() -> Vec<PrimerCandidate> {
                 updated_at: format!("2026-01-{:02}T00:00:00Z", (index % 28) + 1),
                 provenance_uri: Some("bench://primer".to_owned()),
                 superseded: index % 97 == 96,
+                global_lane: false,
             }
         })
         .collect()
@@ -83,6 +84,7 @@ fn bench_settings() -> PrimerSettings {
         format: PrimerFormat::Markdown,
         config_hash: primer_config_hash(600, true),
         redact_secrets: true,
+        global_lane_enabled: false,
     }
 }
 

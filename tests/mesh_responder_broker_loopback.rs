@@ -515,18 +515,21 @@ fn real_tailscale_localapi_binds_status_and_whois_to_kernel_source() -> TestResu
             .map_err(|error| format!("reload real responder peer: {error}"))?
             .ok_or_else(|| "real responder peer disappeared".to_owned())?;
         connection
-            .revoke_mesh_lane(&MeshLaneGrantMutationInput {
-                workspace_id: workspace_id.to_owned(),
-                peer_id: peer_id.clone(),
-                target_adapter: MeshLaneGrantTargetAdapter::new(
-                    &peer_id,
-                    current_peer.origin_node_id,
-                ),
-                material_lane: MeshLane::Metadata,
-                expected_generation: 1,
-                approval_config_digest: None,
-                updated_at: Some("2026-08-09T00:02:00Z".to_owned()),
-            })
+            .revoke_mesh_lane_with_effect(
+                &MeshLaneGrantMutationInput {
+                    workspace_id: workspace_id.to_owned(),
+                    peer_id: peer_id.clone(),
+                    target_adapter: MeshLaneGrantTargetAdapter::new(
+                        &peer_id,
+                        current_peer.origin_node_id,
+                    ),
+                    material_lane: MeshLane::Metadata,
+                    expected_generation: 1,
+                    approval_config_digest: None,
+                    updated_at: Some("2026-08-09T00:02:00Z".to_owned()),
+                },
+                |_| Ok::<(), String>(()),
+            )
             .map_err(|error| format!("revoke real responder lane: {error}"))?;
         store
             .store_pair_key(

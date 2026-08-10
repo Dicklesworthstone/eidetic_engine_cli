@@ -2406,6 +2406,11 @@ impl DaemonSearchResult {
         {
             return Err("canonical daemon search response shape drifted".to_owned());
         }
+        validate_canonical_degradations(
+            response
+                .get("degraded")
+                .ok_or_else(|| "canonical daemon search degraded list missing".to_owned())?,
+        )?;
         validate_canonical_search_data(
             response
                 .get("data")
@@ -2419,6 +2424,52 @@ impl DaemonSearchResult {
     pub fn into_renderings(self) -> (serde_json::Value, String) {
         (self.response, self.human)
     }
+}
+
+fn validate_canonical_degradations(degraded: &serde_json::Value) -> Result<(), String> {
+    const REQUIRED: &[&str] = &["code", "severity", "message"];
+    const OPTIONAL: &[&str] = &["repair", "repairKind", "sources", "details"];
+    let entries = degraded
+        .as_array()
+        .ok_or_else(|| "canonical daemon search degraded list must be an array".to_owned())?;
+    for (index, entry) in entries.iter().enumerate() {
+        let context = format!("canonical daemon search degraded[{index}]");
+        validate_exact_object_fields(entry, &context, REQUIRED, OPTIONAL)?;
+        let object = entry
+            .as_object()
+            .ok_or_else(|| format!("{context} must be an object"))?;
+        if !["code", "message"]
+            .iter()
+            .all(|field| object.get(*field).is_some_and(serde_json::Value::is_string))
+        {
+            return Err(format!("{context} code and message must be strings"));
+        }
+        if !matches!(
+            object.get("severity").and_then(serde_json::Value::as_str),
+            Some("info" | "low" | "warning" | "medium" | "high" | "critical")
+        ) {
+            return Err(format!("{context} severity drifted"));
+        }
+        if object.get("repair").is_some_and(|value| !value.is_string())
+            || object.get("repairKind").is_some_and(|value| {
+                !matches!(
+                    value.as_str(),
+                    Some("actionable" | "template" | "placeholder" | "unknown" | "empty")
+                )
+            })
+            || object.get("sources").is_some_and(|value| {
+                !value
+                    .as_array()
+                    .is_some_and(|sources| sources.iter().all(serde_json::Value::is_string))
+            })
+            || object
+                .get("details")
+                .is_some_and(|value| !value.is_object())
+        {
+            return Err(format!("{context} optional field shape drifted"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_exact_object_fields(
@@ -4554,6 +4605,15 @@ mod tests {
             }
         });
         assert!(DaemonSearchResult::from_value(base.clone()).is_ok());
+
+        let mut degradation_drift = base.clone();
+        degradation_drift["response"]["degraded"] = serde_json::json!([{
+            "code": "rerank_model_unavailable",
+            "severity": "info",
+            "message": "reranker unavailable",
+            "unexpected": true
+        }]);
+        assert!(DaemonSearchResult::from_value(degradation_drift).is_err());
 
         let mut wrong_schema = base.clone();
         wrong_schema["schema"] = serde_json::json!("ee.daemon.search.response.v1");

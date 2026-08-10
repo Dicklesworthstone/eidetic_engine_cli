@@ -283,6 +283,11 @@ fn daemon_search_method_schemas_pin_paths_timings_and_nested_strictness() -> Tes
         ),
         (
             &response,
+            "/$defs/degradation/additionalProperties",
+            "canonical response degradation",
+        ),
+        (
+            &response,
             "/properties/timing/additionalProperties",
             "search timing",
         ),
