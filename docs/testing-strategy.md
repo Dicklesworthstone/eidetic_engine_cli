@@ -566,9 +566,10 @@ same workspace-aware embedder, rejects any semantic-unavailable degradation,
 and hashes the database, WAL, and shared-memory artifacts before and after to
 prove the registry lookup remains read-only.
 The same fixture rewrites the registry row through
-missing, unavailable, unverified, mismatched-name, mismatched-hash, and nonlocal
-states; each must report explicit `hash_fallback` with downloads off while the
-network tripwire records zero connection attempts.
+missing, unavailable, unverified, mismatched-name, mismatched-hash,
+mismatched-dimension, mismatched-distance, and nonlocal states; each must report
+explicit `hash_fallback` with downloads off while the network tripwire records
+zero connection attempts.
 
 The harness pins the analyst paraphrase regression by storing an RBLX
 bookings/FCF memory, querying a zero-ticker paraphrase, and requiring that the

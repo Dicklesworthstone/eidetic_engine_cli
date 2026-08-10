@@ -20,7 +20,7 @@ use ee::core::model::{BUNDLED_EMBEDDING_DIMENSION, BUNDLED_EMBEDDING_MODEL_ID};
 use ee::db::{CreateModelRegistryInput, DbConnection, StoredModelRegistryEntry};
 use ee::models::{MODEL_LIST_SCHEMA_V1, MODEL_STATUS_SCHEMA_V2, RESPONSE_SCHEMA_V2};
 #[cfg(unix)]
-use ee::models::{ModelProvider, ModelPurpose, ModelRegistryStatus};
+use ee::models::{ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus};
 #[cfg(unix)]
 use frankensearch::embed::{ModelManifest, verify_dir_cached};
 use serde_json::{Map, Value, json};
@@ -976,6 +976,8 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         ModelRegistryStatus::Available,
         Some(path_string(&noncanonical_model_dir)),
         Some(verified_hash.clone()),
+        Some(BUNDLED_EMBEDDING_DIMENSION),
+        Some(ModelDistanceMetric::Cosine),
     )?;
     ensure_eq_str(
         registered_entry.source_uri.as_deref().unwrap_or_default(),
@@ -1092,6 +1094,8 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         ModelRegistryStatus::Available,
         Some(path_string(&missing_source)),
         Some(verified_hash.clone()),
+        Some(BUNDLED_EMBEDDING_DIMENSION),
+        Some(ModelDistanceMetric::Cosine),
     )?;
     let missing = run_offline_registry_fallback_search(
         &workspace,
@@ -1106,6 +1110,8 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         ModelRegistryStatus::Unavailable,
         Some(path_string(&noncanonical_model_dir)),
         Some(verified_hash.clone()),
+        Some(BUNDLED_EMBEDDING_DIMENSION),
+        Some(ModelDistanceMetric::Cosine),
     )?;
     let unavailable = run_offline_registry_fallback_search(
         &workspace,
@@ -1123,6 +1129,8 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         ModelRegistryStatus::Available,
         Some(path_string(&unverified_model_dir)),
         Some(verified_hash.clone()),
+        Some(BUNDLED_EMBEDDING_DIMENSION),
+        Some(ModelDistanceMetric::Cosine),
     )?;
     let unverified = run_offline_registry_fallback_search(
         &workspace,
@@ -1137,6 +1145,8 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         ModelRegistryStatus::Available,
         Some(path_string(&noncanonical_model_dir)),
         Some(verified_hash.clone()),
+        Some(BUNDLED_EMBEDDING_DIMENSION),
+        Some(ModelDistanceMetric::Cosine),
     )?;
     let mismatched_name = run_offline_registry_fallback_search(
         &workspace,
@@ -1151,6 +1161,8 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         ModelRegistryStatus::Available,
         Some(path_string(&noncanonical_model_dir)),
         Some(format!("blake3:{}", "0".repeat(64))),
+        Some(BUNDLED_EMBEDDING_DIMENSION),
+        Some(ModelDistanceMetric::Cosine),
     )?;
     let mismatched_hash = run_offline_registry_fallback_search(
         &workspace,
@@ -1163,8 +1175,42 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         &workspace,
         BUNDLED_EMBEDDING_MODEL_ID,
         ModelRegistryStatus::Available,
+        Some(path_string(&noncanonical_model_dir)),
+        Some(verified_hash.clone()),
+        Some(BUNDLED_EMBEDDING_DIMENSION.saturating_add(1)),
+        Some(ModelDistanceMetric::Cosine),
+    )?;
+    let mismatched_dimension = run_offline_registry_fallback_search(
+        &workspace,
+        "registry_path_mismatched_dimension",
+        query,
+        &offline_env,
+    )?;
+
+    update_model2vec_registry_entry(
+        &workspace,
+        BUNDLED_EMBEDDING_MODEL_ID,
+        ModelRegistryStatus::Available,
+        Some(path_string(&noncanonical_model_dir)),
+        Some(verified_hash.clone()),
+        Some(BUNDLED_EMBEDDING_DIMENSION),
+        Some(ModelDistanceMetric::Dot),
+    )?;
+    let mismatched_distance = run_offline_registry_fallback_search(
+        &workspace,
+        "registry_path_mismatched_distance",
+        query,
+        &offline_env,
+    )?;
+
+    update_model2vec_registry_entry(
+        &workspace,
+        BUNDLED_EMBEDDING_MODEL_ID,
+        ModelRegistryStatus::Available,
         Some("https://models.invalid/potion-multilingual-128M".to_string()),
         Some(verified_hash),
+        Some(BUNDLED_EMBEDDING_DIMENSION),
+        Some(ModelDistanceMetric::Cosine),
     )?;
     let nonlocal = run_offline_registry_fallback_search(
         &workspace,
@@ -1186,6 +1232,8 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         ("unverified", &unverified),
         ("mismatched_name", &mismatched_name),
         ("mismatched_hash", &mismatched_hash),
+        ("mismatched_dimension", &mismatched_dimension),
+        ("mismatched_distance", &mismatched_distance),
         ("nonlocal", &nonlocal),
     ] {
         ensure_text_absent(
@@ -1239,6 +1287,8 @@ fn update_model2vec_registry_entry(
     status: ModelRegistryStatus,
     source_uri: Option<String>,
     content_hash: Option<String>,
+    dimension: Option<u32>,
+    distance_metric: Option<ModelDistanceMetric>,
 ) -> TestResult<StoredModelRegistryEntry> {
     let entry = model2vec_registry_entry(workspace)?;
     let database_path = workspace.path.join(".ee").join("ee.db");
@@ -1252,8 +1302,8 @@ fn update_model2vec_registry_entry(
                 provider: entry.provider,
                 model_name: model_name.to_string(),
                 purpose: entry.purpose,
-                dimension: entry.dimension,
-                distance_metric: entry.distance_metric,
+                dimension,
+                distance_metric,
                 status,
                 version: entry.version.clone(),
                 source_uri,
