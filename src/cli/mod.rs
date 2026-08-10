@@ -37659,6 +37659,20 @@ where
         .map(str::to_owned)
         .unwrap_or_else(|| orient_start_backend.as_str().to_owned());
 
+    // Empty-store orientation is a dead end without a pointer at nearby
+    // populated stores (bd-orient-store-discovery-ft1z5): agents get
+    // dropped into arbitrary cwds and rationally stop using ee when the
+    // first orient reports nothing.
+    let (store_discovery, nearby_best) =
+        orient_store_discovery(&workspace_path, args.fast, &pack, fast_content.as_ref());
+    let mut next_commands = orient_next_commands(&workspace_path, &args.task, args.max_tokens);
+    if let Some(best_workspace) = &nearby_best {
+        next_commands.insert(
+            0,
+            orient_pack_command(Path::new(best_workspace), &args.task, args.max_tokens),
+        );
+    }
+
     let data = serde_json::json!({
         "schema": "ee.orient.v1",
         "command": "orient",
@@ -37679,7 +37693,8 @@ where
         "decisions": decisions,
         "learnGaps": learn_gaps,
         "revivals": revivals,
-        "nextCommands": orient_next_commands(&workspace_path, &args.task, args.max_tokens),
+        "storeDiscovery": store_discovery,
+        "nextCommands": next_commands,
     });
 
     match cli.renderer() {
@@ -37907,6 +37922,59 @@ fn orient_next_commands(workspace: &Path, task: &str, max_tokens: u32) -> Vec<St
     ]
 }
 
+/// True when the mode-relevant orientation content came back empty.
+fn orient_store_looks_empty(
+    fast: bool,
+    pack: &serde_json::Value,
+    fast_content: Option<&serde_json::Value>,
+) -> bool {
+    let items_empty = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(<[serde_json::Value]>::is_empty)
+    };
+    if fast {
+        let Some(content) = fast_content else {
+            return true;
+        };
+        items_empty(content.get("recent")) && items_empty(content.get("relevant"))
+    } else {
+        items_empty(pack.pointer("/pack/items"))
+    }
+}
+
+/// Scan for nearby populated stores when orientation came back empty
+/// (bd-orient-store-discovery-ft1z5). Returns the JSON block plus the best
+/// candidate workspace for a retargeted next command.
+fn orient_store_discovery(
+    workspace: &Path,
+    fast: bool,
+    pack: &serde_json::Value,
+    fast_content: Option<&serde_json::Value>,
+) -> (serde_json::Value, Option<String>) {
+    if !orient_store_looks_empty(fast, pack, fast_content) {
+        return (
+            serde_json::json!({ "storeEmpty": false, "scanned": false }),
+            None,
+        );
+    }
+    let scan = crate::core::orient::discover_nearby_stores(
+        workspace,
+        std::time::Duration::from_millis(crate::core::orient::NEARBY_STORE_SCAN_BUDGET_MS),
+    );
+    let best = scan
+        .stores
+        .first()
+        .map(|store| store.workspace_root.clone());
+    let value = serde_json::json!({
+        "storeEmpty": true,
+        "scanned": true,
+        "truncated": scan.truncated,
+        "nearbyStores": scan.stores,
+    });
+    (value, best)
+}
+
 fn orient_pack_command(workspace: &Path, task: &str, max_tokens: u32) -> String {
     let workspace = shell_quote_cli_arg(&workspace.display().to_string());
     let task = shell_quote_cli_arg(task);
@@ -38004,6 +38072,49 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
     );
     if let Some(fast_content) = data.get("fastContent").filter(|value| value.is_object()) {
         render_orient_fast_content_human(&mut out, fast_content);
+    }
+    if data
+        .pointer("/storeDiscovery/storeEmpty")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        let nearby = data
+            .pointer("/storeDiscovery/nearbyStores")
+            .and_then(serde_json::Value::as_array);
+        match nearby {
+            Some(stores) if !stores.is_empty() => {
+                out.push_str("\nThis store is empty, but populated stores exist nearby:\n");
+                for store in stores {
+                    let path = store
+                        .get("workspace_root")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("-");
+                    let documents = store
+                        .get("documents")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    let last_write = store
+                        .get("last_write")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("-");
+                    out.push_str(&format!(
+                        "  {path} ({documents} docs, last write {last_write})\n"
+                    ));
+                }
+                out.push_str("The first Next command below is retargeted at the best candidate.\n");
+            }
+            _ => {
+                if data
+                    .pointer("/storeDiscovery/truncated")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                {
+                    out.push_str(
+                        "\nThis store is empty; the nearby-store scan hit its time budget before finishing.\n",
+                    );
+                }
+            }
+        }
     }
     if let Some(revivals) = data.get("revivals").filter(|value| value.is_object()) {
         out.push_str(&render_revival_evaluation_human(revivals));
