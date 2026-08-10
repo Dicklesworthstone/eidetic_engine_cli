@@ -111,6 +111,50 @@ else
     fi
 fi
 
+# --- promotable-trust arcs: apply, twin-merge, secret refusal -----------
+# These need a promotable trust class on plain `ee remember` rows; the
+# branch is taken from the ACTUAL class read back above, mirroring the
+# dry-run assertion.
+if [[ "${TRUST_A}" == "human_explicit" || "${TRUST_A}" == "agent_validated" ]]; then
+    run_ee memory promote-global "${MEMORY_A}" --workspace "${WS_A}" --json
+    PROMOTED_GID="$(jq -r '.data.report.globalMemoryId // empty' "${LAST_STDOUT}")"
+    if [[ "${LAST_EXIT}" -eq 0 && -n "${PROMOTED_GID}" ]]; then
+        event promote_apply_creates_global_row pass
+    else
+        event promote_apply_creates_global_row fail "exit ${LAST_EXIT}; $(head -c 250 "${LAST_STDOUT}")"
+    fi
+
+    # Same content promoted from a DIFFERENT workspace must merge into the
+    # existing global row, not create a duplicate.
+    run_ee remember "Always run the schema drift gate before altering public JSON." \
+        --workspace "${WS_B}" --level procedural --kind rule --json
+    MEMORY_B="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
+    run_ee memory promote-global "${MEMORY_B}" --workspace "${WS_B}" --dry-run --json
+    if jq -e '[.. | objects | select(.action? == "merge_into")] | length >= 1' \
+        "${LAST_STDOUT}" >/dev/null 2>&1; then
+        event twin_promotion_plans_merge_not_duplicate pass
+    else
+        event twin_promotion_plans_merge_not_duplicate fail "exit ${LAST_EXIT}; no merge_into action: $(head -c 250 "${LAST_STDOUT}")"
+    fi
+
+    # A planted secret-like string must refuse promotion outright.
+    run_ee remember "Deploy rule: export AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLEKEY99 before pushing." \
+        --workspace "${WS_A}" --level procedural --kind rule --allow-secret-mention --json
+    SECRET_MEMORY="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
+    if [[ -n "${SECRET_MEMORY}" ]]; then
+        run_ee memory promote-global "${SECRET_MEMORY}" --workspace "${WS_A}" --dry-run --json
+        if [[ "${LAST_EXIT}" -eq 7 ]] && grep -qiE 'redact|secret' "${LAST_STDOUT}"; then
+            event secret_promotion_refused pass
+        else
+            event secret_promotion_refused fail "exit ${LAST_EXIT} (wanted 7 + redaction reasons): $(head -c 250 "${LAST_STDOUT}")"
+        fi
+    else
+        event secret_promotion_refused fail "secret-bearing remember did not store (exit ${LAST_EXIT})"
+    fi
+else
+    event promotable_trust_arcs_skipped pass "trust class ${TRUST_A:-unknown} is not promotable; apply/merge/secret arcs exercised only via the refusal branch above"
+fi
+
 # --- direct global authorship + cross-workspace surfacing ---------------
 run_ee remember "Global house rule: never git reset --hard in shared trees." \
     --global --level procedural --kind rule --json
