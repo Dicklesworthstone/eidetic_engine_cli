@@ -937,6 +937,20 @@ pub struct RchWorkerPressureReport {
 
 impl RchWorkerPressureReport {
     #[must_use]
+    pub fn not_collected() -> Self {
+        Self {
+            schema: RCH_WORKER_PRESSURE_SCHEMA_V1,
+            status: "not_collected".to_string(),
+            worker_count: 0,
+            usable_worker_count: 0,
+            blocked_worker_count: 0,
+            stale_worker_count: 0,
+            unknown_worker_count: 0,
+            workers: Vec::new(),
+        }
+    }
+
+    #[must_use]
     pub fn pressure_unknown() -> Self {
         Self {
             schema: RCH_WORKER_PRESSURE_SCHEMA_V1,

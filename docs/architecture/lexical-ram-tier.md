@@ -77,12 +77,19 @@ schema. The status schema pins the field shape so consumers
 can distinguish disabled, heap-warmloaded, macOS-limited, unsupported, and
 historical retired states.
 
+`ee status --json` defaults to the summary field profile and does not touch
+lexical index files. Full status surfaces (`--fields standard`, `--fields
+full`, human, Markdown, TOON, or `--meta`) run the bounded collector. The
+`collectionStatus` field distinguishes `not_collected` from `observed` so a
+skipped summary probe cannot be mistaken for a disabled optimization.
+
 For Linux, an enabled tier reports the heap warmload fallback instead of
 claiming OS-level pinning:
 
 ```jsonc
 {
   "schema": "ee.status.search.lexical_ram_tier.v1",
+  "collectionStatus": "observed",
   "platform": "linux",
   "supported": true,
   "enabled": true,

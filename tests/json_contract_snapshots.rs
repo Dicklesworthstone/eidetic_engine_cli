@@ -843,6 +843,7 @@ fn scrub_profile_probe(value: &mut Value) {
             path.insert("availableBytes".to_string(), json!(0));
             path.insert("exists".to_string(), json!(false));
             path.insert("nearestExistingAncestor".to_string(), json!(false));
+            path.insert("probeStatus".to_string(), json!("observed"));
             path.insert("sameFilesystemAsWorkspace".to_string(), json!(false));
             path.insert("totalBytes".to_string(), json!(0));
         }

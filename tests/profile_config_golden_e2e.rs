@@ -137,8 +137,12 @@ fn scrub_probe(probe: &mut Value) {
         if let Some(paths) = object.get_mut("paths").and_then(Value::as_array_mut) {
             for path in paths {
                 if let Some(path) = path.as_object_mut() {
-                    path.insert("exists".to_string(), json!("[BOOL]"));
-                    path.insert("nearestExistingAncestor".to_string(), json!("[BOOL]"));
+                    path.insert("exists".to_string(), json!("[BOOL_OR_NULL]"));
+                    path.insert(
+                        "nearestExistingAncestor".to_string(),
+                        json!("[BOOL_OR_NULL]"),
+                    );
+                    path.insert("probeStatus".to_string(), json!("[PROBE_STATUS]"));
                     path.insert(
                         "sameFilesystemAsWorkspace".to_string(),
                         json!("[BOOL_OR_NULL]"),

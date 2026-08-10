@@ -103,6 +103,7 @@ pub const LEXICAL_RAM_TIER_HUGEPAGES_ENV: &str = "EE_LEXICAL_INDEX_HUGEPAGES";
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LexicalRamTierPlatform {
+    NotCollected,
     Linux,
     MacosLimited,
     WindowsLimited,
@@ -373,6 +374,7 @@ pub enum LexicalRamTierFallbackPath {
 #[serde(rename_all = "camelCase")]
 pub struct LexicalRamTierResult {
     pub schema: &'static str,
+    pub collection_status: &'static str,
     pub platform: LexicalRamTierPlatform,
     pub supported: bool,
     pub enabled: bool,
@@ -402,6 +404,7 @@ impl LexicalRamTierResult {
     ) -> Self {
         Self {
             schema: STATUS_SEARCH_LEXICAL_RAM_TIER_SCHEMA_V1,
+            collection_status: "observed",
             platform,
             supported: platform.supports_full_pinning(),
             enabled: config.enabled,
@@ -416,6 +419,34 @@ impl LexicalRamTierResult {
             page_faults_post: 0,
             fallback_path: LexicalRamTierFallbackPath::None,
             index_path: Some(index_path.to_path_buf()),
+            index_revision: None,
+            degraded_codes: Vec::new(),
+            degraded_code_set: HashSet::new(),
+        }
+    }
+
+    /// Return an explicit, allocation-light posture for status surfaces that
+    /// intentionally skip optional index I/O.
+    #[must_use]
+    pub fn not_collected() -> Self {
+        let platform = LexicalRamTierPlatform::NotCollected;
+        Self {
+            schema: STATUS_SEARCH_LEXICAL_RAM_TIER_SCHEMA_V1,
+            collection_status: "not_collected",
+            platform,
+            supported: platform.supports_full_pinning(),
+            enabled: false,
+            attempted: false,
+            succeeded: false,
+            hugepages_requested: false,
+            hugepages_granted: false,
+            populate_requested: false,
+            bytes_mmapped: 0,
+            bytes_warmloaded: 0,
+            page_faults_pre: 0,
+            page_faults_post: 0,
+            fallback_path: LexicalRamTierFallbackPath::None,
+            index_path: None,
             index_revision: None,
             degraded_codes: Vec::new(),
             degraded_code_set: HashSet::new(),
@@ -586,6 +617,7 @@ pub fn pin_lexical_index_files(
             result.push_unique_code(LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE);
             result
         }
+        LexicalRamTierPlatform::NotCollected => result,
         LexicalRamTierPlatform::WindowsLimited | LexicalRamTierPlatform::OtherUnsupported => {
             result.attempted = true;
             result.fallback_path = LexicalRamTierFallbackPath::HeapOnly;
@@ -906,10 +938,25 @@ mod tests {
     fn result_schema_matches_documented_id() {
         let result = pin_lexical_index_files(fake_index_dir(), &LexicalRamTierConfig::disabled());
         assert_eq!(result.schema, STATUS_SEARCH_LEXICAL_RAM_TIER_SCHEMA_V1);
+        assert_eq!(result.collection_status, "observed");
         assert_eq!(
             STATUS_SEARCH_LEXICAL_RAM_TIER_SCHEMA_V1,
             "ee.status.search.lexical_ram_tier.v1"
         );
+    }
+
+    #[test]
+    fn not_collected_result_performs_no_index_claims() {
+        let result = LexicalRamTierResult::not_collected();
+
+        assert_eq!(result.collection_status, "not_collected");
+        assert_eq!(result.platform, LexicalRamTierPlatform::NotCollected);
+        assert!(!result.attempted);
+        assert!(!result.succeeded);
+        assert_eq!(result.fallback_path, LexicalRamTierFallbackPath::None);
+        assert!(result.index_path.is_none());
+        assert!(result.index_revision.is_none());
+        assert!(result.degraded_codes.is_empty());
     }
 
     #[test]

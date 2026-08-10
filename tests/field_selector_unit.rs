@@ -402,6 +402,7 @@ fn explicit_list_and_preset_additions_are_precise() -> TestResult {
             "verificationPosture",
             "verificationLedger",
             "hostCalibration",
+            "search",
             "capabilities",
             "runtime",
         ],

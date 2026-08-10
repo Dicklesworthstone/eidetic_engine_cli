@@ -1150,6 +1150,8 @@ fn update_str_list(hasher: &mut blake3::Hasher, label: &str, values: &[&str]) {
 /// renderer without pulling the full status module.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FlightRecorderPosture {
+    /// Configuration was observed but optional filesystem checks were skipped.
+    NotCollected,
     /// `EE_FLIGHT_RECORDER` is unset or `false`; no traces are being written.
     Disabled,
     /// Enabled, directory writable, retention within bounds.
@@ -1169,6 +1171,7 @@ impl FlightRecorderPosture {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::NotCollected => "not_collected",
             Self::Disabled => "disabled",
             Self::Enabled => "enabled",
             Self::RetentionOutOfRange => "retention_out_of_range",
@@ -1188,7 +1191,7 @@ impl FlightRecorderPosture {
     #[must_use]
     pub const fn reason_code(self) -> Option<&'static str> {
         match self {
-            Self::Disabled | Self::Enabled => None,
+            Self::NotCollected | Self::Disabled | Self::Enabled => None,
             Self::RetentionOutOfRange => Some("flight_recorder_retention_out_of_range"),
             Self::DirectoryUnwritable => Some("flight_recorder_directory_unwritable"),
             Self::DirectoryInsideGit => Some("flight_recorder_directory_inside_git"),
@@ -1201,7 +1204,7 @@ impl FlightRecorderPosture {
     #[must_use]
     pub const fn repair_command(self) -> Option<&'static str> {
         match self {
-            Self::Disabled | Self::Enabled => None,
+            Self::NotCollected | Self::Disabled | Self::Enabled => None,
             Self::RetentionOutOfRange => {
                 Some("Set EE_FLIGHT_RECORDER_RETENTION_DAYS to a value in [1, 30].")
             }
@@ -1872,6 +1875,7 @@ mod tests {
     #[test]
     fn posture_reason_and_repair_are_non_destructive_for_every_variant() {
         let variants = [
+            FlightRecorderPosture::NotCollected,
             FlightRecorderPosture::Disabled,
             FlightRecorderPosture::Enabled,
             FlightRecorderPosture::RetentionOutOfRange,
@@ -1916,6 +1920,7 @@ mod tests {
     fn posture_writing_predicate_matches_enabled_only() {
         assert!(FlightRecorderPosture::Enabled.is_writing());
         for non_writing in [
+            FlightRecorderPosture::NotCollected,
             FlightRecorderPosture::Disabled,
             FlightRecorderPosture::RetentionOutOfRange,
             FlightRecorderPosture::DirectoryUnwritable,

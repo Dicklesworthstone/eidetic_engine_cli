@@ -16,44 +16,21 @@ expression: status
     },
     "command": "status",
     "flightRecorder": {
-      "directory": "[WORKSPACE]/obs/flight_recorder",
+      "directory": "[NOT_COLLECTED]",
       "enabled": false,
       "maxBytes": 268435456,
       "reason": null,
       "redactionLevel": "strict",
-      "repair": null,
+      "repair": "Run `ee status --workspace . --json --fields standard` to inspect the flight-recorder directory.",
       "retentionDays": 7,
       "schema": "ee.flight_recorder.status.v1",
-      "status": "disabled",
+      "status": "not_collected",
       "writing": false
     },
     "hostCalibration": {
-      "budgetDeltas": [
-        "[HOST_DEPENDENT]"
-      ],
-      "calibrationFreshness": "[HOST_DEPENDENT]",
-      "confidence": "[HOST_DEPENDENT]",
-      "configuredProfile": "[HOST_DEPENDENT]",
-      "degraded": [
-        "[HOST_DEPENDENT]"
-      ],
-      "effectiveProfile": "[HOST_DEPENDENT]",
-      "hostClass": "[HOST_DEPENDENT]",
-      "hostProfileSchema": "ee.host_profile.v1",
-      "profileCeiling": "[HOST_DEPENDENT]",
-      "reasonCodes": [
-        "[HOST_DEPENDENT]"
-      ],
-      "recommendedProfile": "[HOST_DEPENDENT]",
-      "redactionStatus": "label_only_paths_presence_only_env_no_raw_values",
-      "repairActions": [
-        "[HOST_DEPENDENT]"
-      ],
+      "repair": "Run `ee status --workspace . --json --fields standard` to collect host calibration.",
       "schema": "ee.host_calibration.posture.v1",
-      "targetDirPosture": "[HOST_DEPENDENT]",
-      "topologyWarnings": [
-        "[HOST_DEPENDENT]"
-      ]
+      "status": "not_collected"
     },
     "posture": {
       "overall": "ok",
@@ -129,17 +106,17 @@ expression: status
           "status": "ok"
         },
         {
-          "checksPassed": 1,
+          "checksPassed": 0,
           "fallback": null,
           "id": "flight_recorder",
-          "reason": null,
+          "reason": "not_collected",
           "status": "ok"
         },
         {
-          "checksPassed": 1,
+          "checksPassed": 0,
           "fallback": null,
           "id": "rch_worker_pressure",
-          "reason": null,
+          "reason": "not_collected",
           "status": "ok"
         },
         {
@@ -163,7 +140,9 @@ expression: status
         ],
         "status": "ok",
         "subsystemsSkipped": [
-          "pack"
+          "pack",
+          "flight_recorder",
+          "rch_worker_pressure"
         ],
         "subsystemsUsed": [
           "runtime",
@@ -175,8 +154,6 @@ expression: status
           "curate",
           "feedback",
           "singleflight",
-          "flight_recorder",
-          "rch_worker_pressure",
           "maintenance",
           "agent_detection"
         ]
@@ -207,11 +184,33 @@ expression: status
       "blockedWorkerCount": 0,
       "schema": "ee.rch.worker_pressure.v1",
       "staleWorkerCount": 0,
-      "status": "pressure_unknown",
+      "status": "not_collected",
       "unknownWorkerCount": 0,
       "usableWorkerCount": 0,
       "workerCount": 0,
       "workers": []
+    },
+    "search": {
+      "lexicalRamTier": {
+        "attempted": false,
+        "bytesMmapped": 0,
+        "bytesWarmloaded": 0,
+        "collectionStatus": "not_collected",
+        "degradedCodes": [],
+        "enabled": false,
+        "fallbackPath": "none",
+        "hugepagesGranted": false,
+        "hugepagesRequested": false,
+        "indexPath": null,
+        "indexRevision": null,
+        "pageFaultsPost": 0,
+        "pageFaultsPre": 0,
+        "platform": "not_collected",
+        "populateRequested": false,
+        "schema": "ee.status.search.lexical_ram_tier.v1",
+        "succeeded": false,
+        "supported": false
+      }
     },
     "singleFlight": {
       "activeLeaderCount": 0,

@@ -251,7 +251,7 @@ use crate::core::session_budget::{BudgetPlannerInput, plan_cheapest_next_command
 #[cfg(test)]
 use crate::core::session_budget::SESSION_BUDGET_PLAN_SCHEMA_V1;
 use crate::core::status::{
-    StatusOptions, StatusReport, StatusSkylineReport, WalStatusReport,
+    StatusOptions, StatusProbeMode, StatusReport, StatusSkylineReport, WalStatusReport,
     wal_checkpoint_bytes_threshold,
 };
 use crate::core::subscribe::{
@@ -431,7 +431,8 @@ pub struct Cli {
     #[arg(skip)]
     format_explicit: bool,
 
-    /// Control output fields by preset or comma-separated canonical names; may appear before or after subcommands.
+    /// Control output fields by preset or comma-separated canonical names.
+    /// On `ee status`, minimal/summary skip optional external probes.
     #[arg(
         long,
         global = true,
@@ -12661,6 +12662,20 @@ impl FieldsLevel {
     }
 }
 
+#[must_use]
+const fn status_probe_mode(profile: output::FieldProfile, wants_meta: bool) -> StatusProbeMode {
+    if !wants_meta
+        && matches!(
+            profile,
+            output::FieldProfile::Minimal | output::FieldProfile::Summary
+        )
+    {
+        StatusProbeMode::Summary
+    } else {
+        StatusProbeMode::Full
+    }
+}
+
 /// Cards output verbosity level (EE-341).
 ///
 /// Controls which cards are included in structured output:
@@ -14331,16 +14346,6 @@ where
                     }
                 };
             }
-            let report = if workspace_source == WorkspaceSource::Cwd
-                && !workspace_path.join(".ee").is_dir()
-            {
-                StatusReport::gather_with_options(&StatusOptions {
-                    workspace_path: None,
-                })
-            } else {
-                StatusReport::gather_for_workspace(&workspace_path)
-            };
-            let timing = timing_capture.finish();
             let profile = if !cli.fields_explicit
                 && matches!(
                     cli.renderer(),
@@ -14353,6 +14358,19 @@ where
             } else {
                 cli.fields_level().to_field_profile()
             };
+            let probe_mode = status_probe_mode(profile, cli.wants_meta());
+            let status_workspace = if workspace_source == WorkspaceSource::Cwd
+                && !workspace_path.join(".ee").is_dir()
+            {
+                None
+            } else {
+                Some(workspace_path)
+            };
+            let report = StatusReport::gather_with_options(&StatusOptions {
+                workspace_path: status_workspace,
+                probe_mode,
+            });
+            let timing = timing_capture.finish();
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &output::render_status_human(&report))
@@ -73893,7 +73911,10 @@ mod tests {
 
     #[test]
     fn status_json_default_uses_compact_summary_fields() -> TestResult {
-        let (exit, stdout, stderr) = invoke(&["ee", "status", "--json"]);
+        crate::core::profile::reset_path_probe_calls_for_test();
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().to_string_lossy().into_owned();
+        let (exit, stdout, stderr) = invoke(&["ee", "--workspace", &workspace, "status", "--json"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "status JSON exit")?;
         ensure(stderr.is_empty(), "status JSON stderr must be empty")?;
         let json: serde_json::Value =
@@ -73916,6 +73937,54 @@ mod tests {
                 .and_then(serde_json::Value::as_array)
                 .is_some(),
             "default status JSON keeps top-level degraded array",
+        )?;
+        ensure_equal(
+            &json["data"]["rchWorkerPressure"]["status"],
+            &serde_json::json!("not_collected"),
+            "summary RCH posture is explicit",
+        )?;
+        ensure_equal(
+            &json["data"]["hostCalibration"]["status"],
+            &serde_json::json!("not_collected"),
+            "summary host calibration posture is explicit",
+        )?;
+        ensure_equal(
+            &json["data"]["flightRecorder"]["status"],
+            &serde_json::json!("not_collected"),
+            "summary flight-recorder filesystem posture is explicit",
+        )?;
+        ensure_equal(
+            &json["data"]["search"]["lexicalRamTier"]["collectionStatus"],
+            &serde_json::json!("not_collected"),
+            "summary lexical RAM-tier posture is explicit",
+        )?;
+        ensure_equal(
+            &json["data"]["search"]["lexicalRamTier"]["attempted"],
+            &serde_json::json!(false),
+            "summary lexical RAM-tier probe is not attempted",
+        )?;
+        ensure(
+            json["data"]["search"]["lexicalRamTier"]["indexPath"].is_null(),
+            "summary lexical RAM-tier path is absent",
+        )?;
+        ensure_equal(
+            &json["data"]["search"]["lexicalRamTier"]["degradedCodes"],
+            &serde_json::json!([]),
+            "summary lexical RAM-tier skip emits no false degradation",
+        )?;
+        let skipped = json["data"]["posture"]["thisOperation"]["subsystemsSkipped"]
+            .as_array()
+            .ok_or_else(|| "summary status has subsystemsSkipped array".to_owned())?;
+        for subsystem in ["flight_recorder", "rch_worker_pressure"] {
+            ensure(
+                skipped.iter().any(|value| value == subsystem),
+                &format!("summary status marks {subsystem} skipped"),
+            )?;
+        }
+        ensure_equal(
+            &crate::core::profile::path_probe_calls_for_test(),
+            &0,
+            "default summary JSON skips host path probes",
         )
     }
 
@@ -74990,7 +75059,17 @@ mod tests {
 
     #[test]
     fn status_format_toon_writes_toon_to_stdout_only() -> TestResult {
-        let (exit, stdout, stderr) = invoke(&["ee", "status", "--format", "toon"]);
+        crate::core::profile::reset_path_probe_calls_for_test();
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().to_string_lossy().into_owned();
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "status",
+            "--format",
+            "toon",
+        ]);
         ensure_equal(&exit, &ProcessExitCode::Success, "status format TOON exit")?;
         ensure_starts_with(&stdout, "schema: ee.response.v2", "status TOON schema")?;
         ensure_contains(&stdout, "command: status", "status TOON command")?;
@@ -74998,17 +75077,37 @@ mod tests {
         ensure_contains(&stdout, "degraded[", "status TOON degradation section")?;
         ensure_contains(&stdout, "repair:", "status TOON degradation columns")?;
         ensure_ends_with(&stdout, '\n', "status TOON trailing newline")?;
-        ensure(stderr.is_empty(), "status format TOON stderr must be empty")
+        ensure(stderr.is_empty(), "status format TOON stderr must be empty")?;
+        ensure_equal(
+            &crate::core::profile::path_probe_calls_for_test(),
+            &1,
+            "default TOON status retains full host path probes",
+        )
     }
 
     #[test]
     fn status_meta_includes_timing_fields() -> TestResult {
-        let (exit, stdout, stderr) = invoke(&["ee", "--meta", "--json", "status"]);
+        crate::core::profile::reset_path_probe_calls_for_test();
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().to_string_lossy().into_owned();
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "--meta",
+            "--json",
+            "status",
+        ]);
         ensure_equal(&exit, &ProcessExitCode::Success, "status meta exit")?;
         ensure_contains(&stdout, "\"meta\":", "status has meta object")?;
         ensure_contains(&stdout, "\"timing\":", "meta has timing object")?;
         ensure_contains(&stdout, "\"elapsedMs\":", "timing has elapsedMs")?;
-        ensure(stderr.is_empty(), "status meta stderr must be empty")
+        ensure(stderr.is_empty(), "status meta stderr must be empty")?;
+        ensure_equal(
+            &crate::core::profile::path_probe_calls_for_test(),
+            &1,
+            "meta status retains full host path probes",
+        )
     }
 
     #[test]
@@ -75594,6 +75693,36 @@ mod tests {
     }
 
     #[test]
+    fn status_probe_mode_matrix_preserves_explicit_full_collection() -> TestResult {
+        for profile in [
+            output::FieldProfile::Minimal,
+            output::FieldProfile::Summary,
+            output::FieldProfile::Standard,
+            output::FieldProfile::Full,
+        ] {
+            let expected = if matches!(
+                profile,
+                output::FieldProfile::Minimal | output::FieldProfile::Summary
+            ) {
+                StatusProbeMode::Summary
+            } else {
+                StatusProbeMode::Full
+            };
+            ensure_equal(
+                &status_probe_mode(profile, false),
+                &expected,
+                "non-meta status probe mode",
+            )?;
+            ensure_equal(
+                &status_probe_mode(profile, true),
+                &StatusProbeMode::Full,
+                "meta status probe mode",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn parser_accepts_fields_flag_after_nested_swarm_brief_subcommand() -> TestResult {
         let parsed = Cli::try_parse_from(["ee", "swarm", "brief", "--fields=summary"])
             .map(|cli| cli.fields_level())
@@ -75767,6 +75896,7 @@ mod tests {
         // against the ambient cwd/env, and a live ambient workspace with
         // degradations would otherwise leak state into the minimal
         // projection under full-suite runs.
+        crate::core::profile::reset_path_probe_calls_for_test();
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = dir.path().to_string_lossy().into_owned();
         let (_, stdout, _) = invoke(&[
@@ -75785,25 +75915,121 @@ mod tests {
         ensure(
             !stdout.contains("\"runtime\":{"),
             "minimal excludes runtime object",
+        )?;
+        ensure_equal(
+            &crate::core::profile::path_probe_calls_for_test(),
+            &0,
+            "minimal status skips host path probes",
+        )
+    }
+
+    #[test]
+    fn fields_summary_skips_external_status_probes() -> TestResult {
+        crate::core::profile::reset_path_probe_calls_for_test();
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().to_string_lossy().into_owned();
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "status",
+            "--json",
+            "--fields",
+            "summary",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "fields summary exit")?;
+        ensure(stderr.is_empty(), "fields summary stderr empty")?;
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("fields summary JSON parses: {error}"))?;
+        ensure_equal(
+            &value["data"]["rchWorkerPressure"]["status"],
+            &serde_json::json!("not_collected"),
+            "summary RCH posture",
+        )?;
+        ensure_equal(
+            &value["data"]["hostCalibration"]["status"],
+            &serde_json::json!("not_collected"),
+            "summary host calibration posture",
+        )?;
+        ensure_equal(
+            &value["data"]["flightRecorder"]["status"],
+            &serde_json::json!("not_collected"),
+            "summary flight-recorder posture",
+        )?;
+        ensure_equal(
+            &value["data"]["search"]["lexicalRamTier"]["collectionStatus"],
+            &serde_json::json!("not_collected"),
+            "summary lexical RAM-tier posture",
+        )?;
+        ensure_equal(
+            &value["data"]["search"]["lexicalRamTier"]["attempted"],
+            &serde_json::json!(false),
+            "summary lexical RAM-tier attempt posture",
+        )?;
+        ensure(
+            value["data"]["search"]["lexicalRamTier"]["indexPath"].is_null(),
+            "summary lexical RAM-tier omits index path",
+        )?;
+        ensure_equal(
+            &value["data"]["search"]["lexicalRamTier"]["degradedCodes"],
+            &serde_json::json!([]),
+            "summary lexical RAM-tier has no false degradation",
+        )?;
+        ensure_equal(
+            &crate::core::profile::path_probe_calls_for_test(),
+            &0,
+            "summary status skips host path probes",
         )
     }
 
     #[test]
     fn fields_standard_includes_arrays() -> TestResult {
-        let (_, stdout, _) = invoke(&["ee", "status", "--json", "--fields", "standard"]);
+        crate::core::profile::reset_path_probe_calls_for_test();
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().to_string_lossy().into_owned();
+        let (_, stdout, _) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "status",
+            "--json",
+            "--fields",
+            "standard",
+        ]);
         ensure_contains(&stdout, "\"fields\":\"standard\"", "standard indicator")?;
         ensure_contains(
             &stdout,
             "\"degraded\":[",
             "standard includes degraded array",
+        )?;
+        ensure_equal(
+            &crate::core::profile::path_probe_calls_for_test(),
+            &1,
+            "standard status retains full host path probes",
         )
     }
 
     #[test]
     fn fields_full_includes_repair_hints() -> TestResult {
-        let (_, stdout, _) = invoke(&["ee", "status", "--json", "--fields", "full"]);
+        crate::core::profile::reset_path_probe_calls_for_test();
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().to_string_lossy().into_owned();
+        let (_, stdout, _) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "status",
+            "--json",
+            "--fields",
+            "full",
+        ]);
         ensure_contains(&stdout, "\"fields\":\"full\"", "full indicator")?;
-        ensure_contains(&stdout, "\"repair\":", "full includes repair hints")
+        ensure_contains(&stdout, "\"repair\":", "full includes repair hints")?;
+        ensure_equal(
+            &crate::core::profile::path_probe_calls_for_test(),
+            &1,
+            "full status retains host path probes",
+        )
     }
 
     #[test]
@@ -75912,10 +76138,18 @@ mod tests {
 
     #[test]
     fn stream_isolation_human_status_writes_to_stdout_only() -> TestResult {
-        let (exit, stdout, stderr) = invoke(&["ee", "status"]);
+        crate::core::profile::reset_path_probe_calls_for_test();
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().to_string_lossy().into_owned();
+        let (exit, stdout, stderr) = invoke(&["ee", "--workspace", &workspace, "status"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "human status exit")?;
         ensure(!stdout.is_empty(), "human status stdout has content")?;
-        ensure(stderr.is_empty(), "human status stderr must be empty")
+        ensure(stderr.is_empty(), "human status stderr must be empty")?;
+        ensure_equal(
+            &crate::core::profile::path_probe_calls_for_test(),
+            &1,
+            "default human status retains full host path probes",
+        )
     }
 
     #[test]

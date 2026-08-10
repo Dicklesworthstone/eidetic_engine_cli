@@ -62,8 +62,9 @@ use super::index::{
     get_index_status_with_connection,
 };
 use super::outcome::{DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR};
+use super::source_run::SourceRunKind;
 use super::swarm_brief::{
-    RchWorkerPressureReport, SwarmBriefCommandRunner, SystemSwarmBriefCommandRunner,
+    RchWorkerPressureReport, SourceRunSwarmBriefRunner, SwarmBriefCommandRunner,
     parse_rch_worker_pressure_report,
 };
 use super::tailscale_probe::{
@@ -116,7 +117,7 @@ const FLIGHT_RECORDER_DEFAULT_RETENTION_DAYS: u32 = 7;
 const FLIGHT_RECORDER_DEFAULT_MAX_BYTES: u64 = 268_435_456;
 const FLIGHT_RECORDER_DEFAULT_REDACTION_LEVEL: &str = "strict";
 const DEFAULT_WAL_CHECKPOINT_BYTES_THRESHOLD: u64 = 64 * 1024 * 1024;
-const RCH_WORKER_PRESSURE_TIMEOUT_MS: u64 = 1_500;
+const RCH_WORKER_PRESSURE_TIMEOUT_MS: u64 = 500;
 const RCH_WORKER_PRESSURE_COMMAND: &str = "rch status --workers --jobs --json";
 pub const WAL_GROWTH_EXCEEDS_THRESHOLD_CODE: &str = "wal_growth_exceeds_threshold";
 pub const WAL_GROWTH_NO_WRITER_CODE: &str = "wal_growth_no_writer";
@@ -872,10 +873,28 @@ fn high_watermark_lag(source: Option<u64>, asset: Option<u64>) -> Option<u64> {
     }
 }
 
+/// External-probe depth for status collection.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum StatusProbeMode {
+    /// Return the cheap local summary without spawning tools or touching
+    /// optional external mounts/services.
+    Summary,
+    /// Collect the full bounded external posture.
+    #[default]
+    Full,
+}
+
+impl StatusProbeMode {
+    const fn includes_external(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
 /// Inputs for workspace-aware status inspection.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StatusOptions {
     pub workspace_path: Option<PathBuf>,
+    pub probe_mode: StatusProbeMode,
 }
 
 /// Schema emitted by `ee status --skyline`.
@@ -1745,6 +1764,28 @@ pub struct FlightRecorderStatusReport {
 
 impl FlightRecorderStatusReport {
     #[must_use]
+    pub fn not_collected() -> Self {
+        Self {
+            schema: FLIGHT_RECORDER_STATUS_SCHEMA_V1,
+            posture: FlightRecorderPosture::NotCollected,
+            enabled: flight_recorder_enabled_from_env_value(
+                read_env_var(EnvVar::FlightRecorder).as_deref(),
+            ),
+            writing: false,
+            directory: PathBuf::from("[NOT_COLLECTED]"),
+            retention_days: flight_recorder_retention_days_from_env_value(
+                read_env_var_or_default(EnvVar::FlightRecorderRetentionDays).as_deref(),
+            ),
+            max_bytes: FLIGHT_RECORDER_DEFAULT_MAX_BYTES,
+            redaction_level: FLIGHT_RECORDER_DEFAULT_REDACTION_LEVEL,
+            reason: None,
+            repair: Some(
+                "Run `ee status --workspace . --json --fields standard` to inspect the flight-recorder directory.",
+            ),
+        }
+    }
+
+    #[must_use]
     pub fn disabled(directory: PathBuf) -> Self {
         flight_recorder_status_from_parts(
             false,
@@ -1988,6 +2029,7 @@ impl ScaleEnvelopeReport {
     pub fn gather_for_workspace(workspace_path: &Path) -> Self {
         let options = StatusOptions {
             workspace_path: Some(workspace_path.to_path_buf()),
+            probe_mode: StatusProbeMode::Full,
         };
         let database_path = workspace_database_path(workspace_path);
         if database_path.exists() {
@@ -2201,6 +2243,7 @@ impl StatusReport {
     pub fn gather() -> Self {
         Self::gather_with_options(&StatusOptions {
             workspace_path: default_workspace_path(),
+            probe_mode: StatusProbeMode::Full,
         })
     }
 
@@ -2210,6 +2253,7 @@ impl StatusReport {
     pub fn gather_for_workspace(workspace_path: &Path) -> Self {
         Self::gather_with_options(&StatusOptions {
             workspace_path: Some(workspace_path.to_path_buf()),
+            probe_mode: StatusProbeMode::Full,
         })
     }
 
@@ -2302,7 +2346,11 @@ impl StatusReport {
             gather_qos_posture(options.workspace_path.as_deref())
         });
         let rch_worker_pressure = timed_gather("rch_worker_pressure", || {
-            gather_rch_worker_pressure(options.workspace_path.as_deref())
+            if options.probe_mode.includes_external() {
+                gather_rch_worker_pressure(options.workspace_path.as_deref())
+            } else {
+                RchWorkerPressureReport::not_collected()
+            }
         });
         let verification_posture = timed_gather("verification_posture", || {
             gather_verification_posture_with_connection(
@@ -2317,7 +2365,11 @@ impl StatusReport {
             )
         });
         let host_calibration = timed_gather("host_calibration", || {
-            gather_host_calibration_status(options.workspace_path.as_deref())
+            if options.probe_mode.includes_external() {
+                gather_host_calibration_status(options.workspace_path.as_deref())
+            } else {
+                None
+            }
         });
         let (memory_health, memory_health_degradations) = timed_gather("memory_health", || {
             gather_memory_health_with_connection(
@@ -2358,7 +2410,11 @@ impl StatusReport {
             )
         });
         let lexical_ram_tier = timed_gather("lexical_ram_tier", || {
-            gather_lexical_ram_tier_status(options.workspace_path.as_deref())
+            if options.probe_mode.includes_external() {
+                gather_lexical_ram_tier_status(options.workspace_path.as_deref())
+            } else {
+                LexicalRamTierResult::not_collected()
+            }
         });
         let (curation_health, curation_degradations) = timed_gather("curation_health", || {
             gather_curation_health_with_connection(
@@ -2377,7 +2433,11 @@ impl StatusReport {
             super::singleflight::singleflight_posture_report,
         );
         let flight_recorder = timed_gather("flight_recorder", || {
-            gather_flight_recorder_status(options.workspace_path.as_deref())
+            if options.probe_mode.includes_external() {
+                gather_flight_recorder_status(options.workspace_path.as_deref())
+            } else {
+                FlightRecorderStatusReport::not_collected()
+            }
         });
         let mesh_storage = timed_gather("mesh_storage", || {
             gather_mesh_storage_status_with_connection(
@@ -2385,7 +2445,13 @@ impl StatusReport {
                 status_connection_ref,
             )
         });
-        let tailscale_local = timed_gather("tailscale_local", gather_tailscale_local_report);
+        let tailscale_local = timed_gather("tailscale_local", || {
+            if options.probe_mode.includes_external() {
+                gather_tailscale_local_report()
+            } else {
+                None
+            }
+        });
         let agent_inventory = AgentInventoryReport::not_inspected();
 
         let mut degradations = Vec::new();
@@ -3289,7 +3355,7 @@ pub fn gather_rch_verify_ledger_status_with_connection(
 
 #[must_use]
 pub fn gather_rch_worker_pressure(workspace_path: Option<&Path>) -> RchWorkerPressureReport {
-    let runner = SystemSwarmBriefCommandRunner;
+    let runner = SourceRunSwarmBriefRunner::new(SourceRunKind::Rch);
     gather_rch_worker_pressure_with_runner(&runner, workspace_path)
 }
 
@@ -3529,18 +3595,26 @@ fn status_posture_report(
             singleflight_posture_reason(singleflight_posture),
             singleflight_posture_fallback(singleflight_posture),
         ),
-        posture_row(
-            "flight_recorder",
-            flight_recorder_posture_status(flight_recorder),
-            flight_recorder.reason,
-            flight_recorder.repair,
-        ),
-        posture_row(
-            "rch_worker_pressure",
-            rch_worker_pressure_status,
-            rch_worker_pressure_posture_reason(rch_worker_pressure),
-            rch_worker_pressure_posture_fallback(rch_worker_pressure),
-        ),
+        if matches!(flight_recorder.posture, FlightRecorderPosture::NotCollected) {
+            posture_row_not_collected("flight_recorder")
+        } else {
+            posture_row(
+                "flight_recorder",
+                flight_recorder_posture_status(flight_recorder),
+                flight_recorder.reason,
+                flight_recorder.repair,
+            )
+        },
+        if rch_worker_pressure.status == "not_collected" {
+            posture_row_not_collected("rch_worker_pressure")
+        } else {
+            posture_row(
+                "rch_worker_pressure",
+                rch_worker_pressure_status,
+                rch_worker_pressure_posture_reason(rch_worker_pressure),
+                rch_worker_pressure_posture_fallback(rch_worker_pressure),
+            )
+        },
         posture_row(
             "maintenance",
             maintenance_posture_status(derived_assets),
@@ -3558,24 +3632,28 @@ fn status_posture_report(
         operation_posture_status(capabilities),
         rch_worker_pressure_status,
     ]);
+    let mut subsystems_used = vec![
+        "runtime",
+        "storage",
+        "shard_fanout",
+        "search",
+        "memory",
+        "graph_compute",
+        "curate",
+        "feedback",
+        "singleflight",
+    ];
+    let mut subsystems_skipped = vec!["pack"];
+    if options.probe_mode.includes_external() {
+        subsystems_used.extend(["flight_recorder", "rch_worker_pressure"]);
+    } else {
+        subsystems_skipped.extend(["flight_recorder", "rch_worker_pressure"]);
+    }
+    subsystems_used.extend(["maintenance", "agent_detection"]);
     let operation = OperationPostureReport {
         status: operation_status,
-        subsystems_used: vec![
-            "runtime",
-            "storage",
-            "shard_fanout",
-            "search",
-            "memory",
-            "graph_compute",
-            "curate",
-            "feedback",
-            "singleflight",
-            "flight_recorder",
-            "rch_worker_pressure",
-            "maintenance",
-            "agent_detection",
-        ],
-        subsystems_skipped: vec!["pack"],
+        subsystems_used,
+        subsystems_skipped,
         degradations_applied: degradations
             .iter()
             .map(|degradation| degradation.code)
@@ -3606,6 +3684,10 @@ fn posture_row(
         row = row.with_fallback(fallback);
     }
     row
+}
+
+fn posture_row_not_collected(id: &'static str) -> SubsystemPostureReport {
+    SubsystemPostureReport::new(id, SubsystemPostureStatus::Ok).with_reason("not_collected")
 }
 
 const fn checks_passed_for(status: SubsystemPostureStatus) -> u32 {
@@ -4059,9 +4141,9 @@ const fn flight_recorder_posture_status(
     report: &FlightRecorderStatusReport,
 ) -> SubsystemPostureStatus {
     match report.posture {
-        FlightRecorderPosture::Disabled | FlightRecorderPosture::Enabled => {
-            SubsystemPostureStatus::Ok
-        }
+        FlightRecorderPosture::NotCollected
+        | FlightRecorderPosture::Disabled
+        | FlightRecorderPosture::Enabled => SubsystemPostureStatus::Ok,
         FlightRecorderPosture::RetentionOutOfRange
         | FlightRecorderPosture::DirectoryUnwritable
         | FlightRecorderPosture::DirectoryInsideGit => SubsystemPostureStatus::DegradedRequired,
@@ -6088,6 +6170,11 @@ mod tests {
         output: Result<SwarmBriefCommandOutput, SwarmBriefCommandError>,
     }
 
+    #[derive(Default)]
+    struct RecordingRchRunner {
+        call: std::sync::Mutex<Option<(String, Vec<String>, PathBuf, u64)>>,
+    }
+
     #[test]
     fn flight_recorder_status_defaults_to_disabled_redacted_posture() -> TestResult {
         let report = flight_recorder_status_from_parts(
@@ -6152,6 +6239,30 @@ mod tests {
             _timeout_ms: u64,
         ) -> Result<SwarmBriefCommandOutput, SwarmBriefCommandError> {
             self.output.clone()
+        }
+    }
+
+    impl SwarmBriefCommandRunner for RecordingRchRunner {
+        fn run(
+            &self,
+            program: &str,
+            args: &[&str],
+            cwd: &Path,
+            timeout_ms: u64,
+        ) -> Result<SwarmBriefCommandOutput, SwarmBriefCommandError> {
+            let mut call = self
+                .call
+                .lock()
+                .map_err(|_| SwarmBriefCommandError::Unavailable("lock poisoned".to_owned()))?;
+            *call = Some((
+                program.to_owned(),
+                args.iter().map(|arg| (*arg).to_owned()).collect(),
+                cwd.to_path_buf(),
+                timeout_ms,
+            ));
+            Err(SwarmBriefCommandError::Unavailable(
+                "recording runner".to_owned(),
+            ))
         }
     }
 
@@ -6334,6 +6445,44 @@ mod tests {
     }
 
     #[test]
+    fn gather_rch_worker_pressure_uses_bounded_exact_route() -> TestResult {
+        let runner = RecordingRchRunner::default();
+        let workspace = Path::new("/workspace/status-probe");
+
+        let report = gather_rch_worker_pressure_with_runner(&runner, Some(workspace));
+        let call = runner
+            .call
+            .lock()
+            .map_err(|_| "recording runner lock poisoned".to_owned())?
+            .clone()
+            .ok_or_else(|| "RCH runner was not called".to_owned())?;
+
+        ensure(
+            report.status,
+            "pressure_unknown".to_owned(),
+            "fallback status",
+        )?;
+        ensure(call.0, "rch".to_owned(), "RCH program")?;
+        ensure(
+            call.1,
+            vec![
+                "status".to_owned(),
+                "--workers".to_owned(),
+                "--jobs".to_owned(),
+                "--json".to_owned(),
+            ],
+            "RCH arguments",
+        )?;
+        ensure(call.2, workspace.to_path_buf(), "RCH cwd")?;
+        ensure(call.3, 500, "RCH timeout")?;
+        ensure(
+            RCH_WORKER_PRESSURE_TIMEOUT_MS,
+            500,
+            "production RCH timeout constant",
+        )
+    }
+
+    #[test]
     fn tailscale_socket_override_replaces_default_candidates() -> TestResult {
         let mut config = TailscaleSocketProbeConfig::mesh_enabled();
 
@@ -6433,6 +6582,100 @@ mod tests {
             "derived assets should be reported",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn summary_probe_mode_skips_external_status_sources() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        super::super::profile::reset_path_probe_calls_for_test();
+
+        let report = StatusReport::gather_with_options(&StatusOptions {
+            workspace_path: Some(temp.path().to_path_buf()),
+            probe_mode: StatusProbeMode::Summary,
+        });
+
+        ensure(
+            report.rch_worker_pressure.status,
+            "not_collected".to_owned(),
+            "summary RCH posture",
+        )?;
+        ensure(
+            report.host_calibration.is_none(),
+            true,
+            "summary host calibration omitted",
+        )?;
+        ensure(
+            report.tailscale_local.is_none(),
+            true,
+            "summary Tailscale probe omitted",
+        )?;
+        ensure(
+            report.flight_recorder.posture,
+            FlightRecorderPosture::NotCollected,
+            "summary flight-recorder filesystem posture",
+        )?;
+        ensure(
+            report.lexical_ram_tier.collection_status,
+            "not_collected",
+            "summary lexical RAM-tier posture",
+        )?;
+        for subsystem_id in ["flight_recorder", "rch_worker_pressure"] {
+            let row = report
+                .posture
+                .subsystems
+                .iter()
+                .find(|row| row.id == subsystem_id)
+                .ok_or_else(|| format!("missing {subsystem_id} posture row"))?;
+            ensure(row.checks_passed, 0, "skipped source checks passed")?;
+            ensure(row.reason, Some("not_collected"), "skipped source reason")?;
+            ensure(
+                report
+                    .posture
+                    .this_operation
+                    .subsystems_used
+                    .contains(&subsystem_id),
+                false,
+                "skipped source is not used",
+            )?;
+            ensure(
+                report
+                    .posture
+                    .this_operation
+                    .subsystems_skipped
+                    .contains(&subsystem_id),
+                true,
+                "skipped source is listed as skipped",
+            )?;
+        }
+        ensure(
+            super::super::profile::path_probe_calls_for_test(),
+            0,
+            "summary status must not inspect filesystem capacity",
+        )?;
+        ensure(
+            StatusProbeMode::Summary.includes_external(),
+            false,
+            "summary probe policy",
+        )?;
+        ensure(
+            StatusProbeMode::Full.includes_external(),
+            true,
+            "full probe policy",
+        )
+    }
+
+    #[test]
+    fn workspace_status_defaults_to_full_probe_mode() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        super::super::profile::reset_path_probe_calls_for_test();
+
+        let _report = StatusReport::gather_for_workspace(temp.path());
+
+        ensure(
+            super::super::profile::path_probe_calls_for_test(),
+            1,
+            "non-CLI status consumers retain full external collection",
+        )
     }
 
     #[test]

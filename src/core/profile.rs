@@ -121,8 +121,8 @@ fn host_probe_degradations(
             degraded.push(HostProbeDegradation::warning(
                 "path_capacity_unavailable",
                 format!(
-                    "Capacity for path label `{}` could not be inspected.",
-                    path.label
+                    "Capacity for path label `{}` could not be inspected (probe status `{}`).",
+                    path.label, path.probe_status
                 ),
                 "Check filesystem permissions or configure profile budgets explicitly.",
             ));
@@ -1836,7 +1836,8 @@ fn disk_reason_code(probe: &HostResourceProbeReport) -> &'static str {
     match available_bytes {
         Some(bytes) if bytes >= 256 * GIB => "disk_capacity_swarm_ready",
         Some(bytes) if bytes >= 16 * GIB => "disk_capacity_sufficient",
-        _ => "disk_capacity_constrained",
+        Some(_) => "disk_capacity_constrained",
+        None => "disk_capacity_unknown",
     }
 }
 
@@ -1845,7 +1846,8 @@ fn target_dir_reason_code(probe: &HostResourceProbeReport) -> &'static str {
     match cargo_target.and_then(|path| path.same_filesystem_as_workspace) {
         Some(false) if probe.environment.cargo_target_dir_configured => "target_dir_external",
         Some(false) => "target_dir_isolated",
-        _ => "target_dir_shared",
+        Some(true) => "target_dir_shared",
+        None => "target_dir_unknown",
     }
 }
 
@@ -2740,8 +2742,9 @@ pub struct PathCapacityProbe {
     pub role: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    pub exists: bool,
-    pub nearest_existing_ancestor: bool,
+    pub exists: Option<bool>,
+    pub probe_status: &'static str,
+    pub nearest_existing_ancestor: Option<bool>,
     pub same_filesystem_as_workspace: Option<bool>,
     pub total_bytes: Option<u64>,
     pub available_bytes: Option<u64>,
@@ -2762,6 +2765,23 @@ struct PathSpec<'a> {
     path: &'a Path,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BoundedPathProbeResult {
+    exists: Option<bool>,
+    capacity: Option<(bool, FsCapacity)>,
+    status: &'static str,
+}
+
+impl BoundedPathProbeResult {
+    const fn unavailable(status: &'static str) -> Self {
+        Self {
+            exists: None,
+            capacity: None,
+            status,
+        }
+    }
+}
+
 #[cfg(test)]
 fn gather_path_probes(workspace_root: &Path) -> Vec<PathCapacityProbe> {
     gather_path_probes_with_options(workspace_root, &HostProfileProbeOptions::default())
@@ -2772,25 +2792,183 @@ mod bounded_probe_tests {
     use super::*;
 
     #[test]
-    fn bounded_path_probe_reports_existing_directory() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (exists, capacity) =
-            bounded_path_probe(temp.path()).expect("healthy mount probes within budget");
-        assert!(exists);
-        assert!(capacity.is_some(), "capacity resolves on a live filesystem");
-    }
-
-    #[test]
-    fn bounded_path_probe_missing_path_uses_nearest_ancestor() {
+    fn bounded_path_probe_batch_reports_path_truth() {
         let temp = tempfile::tempdir().expect("tempdir");
         let missing = temp.path().join("not-created-yet");
-        let (exists, capacity) =
-            bounded_path_probe(&missing).expect("healthy mount probes within budget");
-        assert!(!exists);
-        let (used_ancestor, _) = capacity.expect("ancestor capacity resolves");
+        let paths = [temp.path().to_path_buf(), missing];
+        let guard = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let results = bounded_path_probes_with_guard_and_operation(
+            &paths,
+            guard,
+            std::sync::Arc::new(|path| (path.exists(), capacity_for_path(path))),
+        );
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].status, "observed");
+        assert_eq!(results[0].exists, Some(true));
+        assert!(
+            results[0].capacity.is_some(),
+            "capacity resolves on a live filesystem"
+        );
+        assert_eq!(results[1].status, "observed");
+        assert_eq!(results[1].exists, Some(false));
+        let (used_ancestor, _) = results[1].capacity.expect("ancestor capacity resolves");
         assert!(
             used_ancestor,
             "capacity came from the nearest existing ancestor"
+        );
+    }
+
+    #[test]
+    fn bounded_path_probe_batch_uses_one_shared_deadline() {
+        let paths = (0..10)
+            .map(|index| PathBuf::from(format!("path-{index}")))
+            .collect::<Vec<_>>();
+        let guard = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_release = std::sync::Arc::clone(&release);
+        let started = std::time::Instant::now();
+        let results = bounded_path_probes_with_guard_and_operation(
+            &paths,
+            std::sync::Arc::clone(&guard),
+            std::sync::Arc::new(move |_| {
+                while !worker_release.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                (false, None)
+            }),
+        );
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(PATH_PROBE_TIMEOUT_MS * 4),
+            "all path probes share one timeout budget"
+        );
+        assert!(results.iter().all(|result| result.status == "timed_out"));
+        assert!(results.iter().all(|result| result.exists.is_none()));
+
+        let busy = bounded_path_probes_with_guard_and_operation(
+            &paths,
+            std::sync::Arc::clone(&guard),
+            std::sync::Arc::new(|_| panic!("busy batches must not spawn workers")),
+        );
+        assert!(busy.iter().all(|result| result.status == "busy"));
+
+        release.store(true, std::sync::atomic::Ordering::Release);
+        let recovery_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while guard.load(std::sync::atomic::Ordering::Acquire)
+            && std::time::Instant::now() < recovery_deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            !guard.load(std::sync::atomic::Ordering::Acquire),
+            "guard clears after every abandoned worker exits"
+        );
+        let recovered = bounded_path_probes_with_guard_and_operation(
+            &[PathBuf::from("recovered")],
+            guard,
+            std::sync::Arc::new(|_| (true, None)),
+        );
+        assert_eq!(recovered[0].status, "observed");
+        assert_eq!(recovered[0].exists, Some(true));
+    }
+
+    #[test]
+    fn bounded_path_probe_batch_refuses_parallel_worker_accumulation() {
+        let paths = vec![PathBuf::from("one"), PathBuf::from("two")];
+        let guard = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let results = bounded_path_probes_with_guard_and_operation(
+            &paths,
+            guard,
+            std::sync::Arc::new(|_| panic!("busy batches must not spawn workers")),
+        );
+
+        assert!(results.iter().all(|result| result.status == "busy"));
+        assert!(results.iter().all(|result| result.exists.is_none()));
+    }
+
+    #[test]
+    fn bounded_path_probe_batch_releases_guard_when_workers_cannot_spawn() {
+        let paths = vec![PathBuf::from("one"), PathBuf::from("two")];
+        let guard = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let results = bounded_path_probes_with_guard_operation_and_spawner(
+            &paths,
+            std::sync::Arc::clone(&guard),
+            std::sync::Arc::new(|_| panic!("spawn failures must not run probes")),
+            std::sync::Arc::new(|_| Err(std::io::Error::other("injected spawn failure"))),
+        );
+
+        assert!(
+            results
+                .iter()
+                .all(|result| result.status == "worker_unavailable")
+        );
+        assert!(results.iter().all(|result| result.exists.is_none()));
+        assert!(
+            !guard.load(std::sync::atomic::Ordering::Acquire),
+            "all spawn failures release the batch guard"
+        );
+    }
+
+    #[test]
+    fn path_probe_preserves_pre_deadline_completion_after_receiver_deschedule() {
+        let guard = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let results = bounded_path_probes_with_guard_operation_spawner_and_before_receive(
+            &[PathBuf::from("completed-before-deadline")],
+            guard,
+            std::sync::Arc::new(|_| (true, None)),
+            std::sync::Arc::new(|task| {
+                task();
+                std::thread::Builder::new()
+                    .name("ee-path-probe-finished-test".to_owned())
+                    .spawn(|| {})
+            }),
+            std::sync::Arc::new(|| {
+                std::thread::sleep(std::time::Duration::from_millis(PATH_PROBE_TIMEOUT_MS + 50));
+            }),
+        );
+
+        assert_eq!(results[0].status, "observed");
+        assert_eq!(results[0].exists, Some(true));
+    }
+
+    #[test]
+    fn timed_out_path_probe_serializes_unknown_not_missing() {
+        let probe = PathCapacityProbe {
+            label: "cargo_target",
+            role: "build_cache_directory",
+            path: None,
+            exists: None,
+            probe_status: "timed_out",
+            nearest_existing_ancestor: None,
+            same_filesystem_as_workspace: None,
+            total_bytes: None,
+            available_bytes: None,
+            redaction: "path_not_emitted",
+        };
+        let value = serde_json::to_value(probe).expect("path probe serializes");
+
+        assert!(value["exists"].is_null());
+        assert!(value["nearestExistingAncestor"].is_null());
+        assert_eq!(value["probeStatus"], "timed_out");
+    }
+
+    #[test]
+    fn path_probe_status_vocabulary_matches_public_schema() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../docs/schemas/ee.host_profile.v1.json"))
+                .expect("host-profile schema parses");
+        let statuses = schema["$defs"]["pathCapacityProbe"]["properties"]["probeStatus"]["enum"]
+            .as_array()
+            .expect("probeStatus enum");
+        let actual = statuses
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            vec!["observed", "timed_out", "busy", "worker_unavailable"]
         );
     }
 }
@@ -2804,45 +2982,197 @@ thread_local! {
     static PATH_PROBE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// Per-path probe budget (bd-ybul6). `stat`/`statvfs` on a stalled mount
+#[cfg(test)]
+pub(crate) fn reset_path_probe_calls_for_test() {
+    PATH_PROBE_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn path_probe_calls_for_test() -> u64 {
+    PATH_PROBE_CALLS.with(std::cell::Cell::get)
+}
+
+/// Aggregate path-probe budget (bd-ybul6). `stat`/`statvfs` on a stalled mount
 /// (USB ExFAT under swarm churn, disconnected network volume) blocks
 /// in-kernel for seconds and cannot be interrupted — sampled `ee status`
-/// runs spent 100% of a 2.6-6.6s wall stall inside `statvfs`. Each spec
-/// probe therefore runs on a worker thread that is ABANDONED on timeout
-/// (the thread finishes or dies with the kernel wait; a one-shot process
-/// exits regardless), so one dead mount costs one bounded wait instead of
-/// wedging every status/diag invocation.
+/// runs spent 100% of a 2.6-6.6s wall stall inside `statvfs`. All spec probes
+/// run concurrently under one shared deadline. Timed-out workers are
+/// abandoned, and a single in-flight guard prevents repeated status calls in
+/// a long-lived process from accumulating more workers behind the same mount.
 const PATH_PROBE_TIMEOUT_MS: u64 = 250;
+static PATH_PROBE_BATCH_IN_FLIGHT: std::sync::LazyLock<
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+> = std::sync::LazyLock::new(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
 
-/// `(exists, capacity_for_path(..))` computed on an abandoned-on-timeout
-/// worker thread; `None` means the probe timed out on a stalled mount.
-fn bounded_path_probe(path: &Path) -> Option<(bool, Option<(bool, FsCapacity)>)> {
-    let display = path.display().to_string();
-    let owned = path.to_path_buf();
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let spawned = std::thread::Builder::new()
-        .name("ee-path-probe".to_owned())
-        .spawn(move || {
-            let exists = owned.exists();
-            let capacity = capacity_for_path(&owned);
-            let _ = sender.send((exists, capacity));
-        });
-    if spawned.is_err() {
-        // Thread spawn failure: probe inline as the pre-bound code did.
-        return Some((path.exists(), capacity_for_path(path)));
-    }
-    match receiver.recv_timeout(std::time::Duration::from_millis(PATH_PROBE_TIMEOUT_MS)) {
-        Ok(result) => Some(result),
-        Err(_) => {
-            tracing::debug!(
-                target: "ee::profile::probe",
-                path = %display,
-                timeout_ms = PATH_PROBE_TIMEOUT_MS,
-                "path capacity probe abandoned on a stalled mount"
-            );
-            None
+type PathProbeOperation =
+    dyn Fn(&Path) -> (bool, Option<(bool, FsCapacity)>) + Send + Sync + 'static;
+type PathProbeTask = Box<dyn FnOnce() + Send + 'static>;
+type PathProbeSpawner =
+    dyn Fn(PathProbeTask) -> std::io::Result<std::thread::JoinHandle<()>> + Send + Sync + 'static;
+
+struct PathProbeWorkerCompletion {
+    remaining: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for PathProbeWorkerCompletion {
+    fn drop(&mut self) {
+        if self
+            .remaining
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+            == 1
+        {
+            self.in_flight
+                .store(false, std::sync::atomic::Ordering::Release);
         }
     }
+}
+
+fn bounded_path_probes(paths: &[PathBuf]) -> Vec<BoundedPathProbeResult> {
+    bounded_path_probes_with_guard_and_operation(
+        paths,
+        std::sync::Arc::clone(&PATH_PROBE_BATCH_IN_FLIGHT),
+        std::sync::Arc::new(|path| (path.exists(), capacity_for_path(path))),
+    )
+}
+
+fn bounded_path_probes_with_guard_and_operation(
+    paths: &[PathBuf],
+    in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    operation: std::sync::Arc<PathProbeOperation>,
+) -> Vec<BoundedPathProbeResult> {
+    bounded_path_probes_with_guard_operation_and_spawner(
+        paths,
+        in_flight,
+        operation,
+        std::sync::Arc::new(|task| {
+            std::thread::Builder::new()
+                .name("ee-path-probe".to_owned())
+                .spawn(task)
+        }),
+    )
+}
+
+fn bounded_path_probes_with_guard_operation_and_spawner(
+    paths: &[PathBuf],
+    in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    operation: std::sync::Arc<PathProbeOperation>,
+    spawner: std::sync::Arc<PathProbeSpawner>,
+) -> Vec<BoundedPathProbeResult> {
+    bounded_path_probes_with_guard_operation_spawner_and_before_receive(
+        paths,
+        in_flight,
+        operation,
+        spawner,
+        std::sync::Arc::new(|| {}),
+    )
+}
+
+fn bounded_path_probes_with_guard_operation_spawner_and_before_receive(
+    paths: &[PathBuf],
+    in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    operation: std::sync::Arc<PathProbeOperation>,
+    spawner: std::sync::Arc<PathProbeSpawner>,
+    before_receive: std::sync::Arc<dyn Fn() + Send + Sync + 'static>,
+) -> Vec<BoundedPathProbeResult> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    if in_flight
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return vec![BoundedPathProbeResult::unavailable("busy"); paths.len()];
+    }
+
+    let deadline = std::time::Instant::now()
+        .checked_add(std::time::Duration::from_millis(PATH_PROBE_TIMEOUT_MS))
+        .unwrap_or_else(std::time::Instant::now);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let remaining = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(paths.len()));
+    let mut results = vec![None; paths.len()];
+
+    for (index, path) in paths.iter().cloned().enumerate() {
+        let sender = sender.clone();
+        let worker_remaining = std::sync::Arc::clone(&remaining);
+        let operation = std::sync::Arc::clone(&operation);
+        let worker_in_flight = std::sync::Arc::clone(&in_flight);
+        let spawned = spawner(Box::new(move || {
+            let _completion = PathProbeWorkerCompletion {
+                remaining: worker_remaining,
+                in_flight: worker_in_flight,
+            };
+            let (exists, capacity) = operation(&path);
+            let completed_at = std::time::Instant::now();
+            let _ = sender.send((
+                index,
+                completed_at,
+                BoundedPathProbeResult {
+                    exists: Some(exists),
+                    capacity,
+                    status: "observed",
+                },
+            ));
+        }));
+        if spawned.is_err() {
+            results[index] = Some(BoundedPathProbeResult::unavailable("worker_unavailable"));
+            if remaining.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+                in_flight.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+    }
+    drop(sender);
+    before_receive();
+
+    let mut received = results.iter().filter(|result| result.is_some()).count();
+    while received < paths.len() {
+        while let Ok((index, completed_at, result)) = receiver.try_recv() {
+            if completed_at <= deadline && results[index].replace(result).is_none() {
+                received += 1;
+            }
+        }
+        if received == paths.len() {
+            break;
+        }
+        let Some(wait) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            break;
+        };
+        match receiver.recv_timeout(wait) {
+            Ok((index, completed_at, result)) => {
+                if completed_at <= deadline && results[index].replace(result).is_none() {
+                    received += 1;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    while let Ok((index, completed_at, result)) = receiver.try_recv() {
+        if completed_at <= deadline {
+            let _ = results[index].replace(result);
+        }
+    }
+
+    results
+        .into_iter()
+        .enumerate()
+        .map(|(index, result)| {
+            result.unwrap_or_else(|| {
+                tracing::debug!(
+                    target: "ee::profile::probe",
+                    probe_index = index,
+                    timeout_ms = PATH_PROBE_TIMEOUT_MS,
+                    "path capacity probe abandoned on a stalled mount"
+                );
+                BoundedPathProbeResult::unavailable("timed_out")
+            })
+        })
+        .collect()
 }
 
 fn gather_path_probes_with_options(
@@ -2859,10 +3189,6 @@ fn gather_path_probes_with_options(
     let cargo_target_dir = env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace_root.join("target"));
-    let workspace_capacity = bounded_path_probe(workspace_root)
-        .and_then(|(_, capacity)| capacity)
-        .map(|(_, capacity)| capacity);
-
     let specs = [
         PathSpec {
             label: "workspace",
@@ -2901,15 +3227,27 @@ fn gather_path_probes_with_options(
         },
     ];
 
+    let bounded = bounded_path_probes(
+        &specs
+            .iter()
+            .map(|spec| spec.path.to_path_buf())
+            .collect::<Vec<_>>(),
+    );
+    let workspace_capacity = bounded
+        .first()
+        .and_then(|result| result.capacity)
+        .map(|(_, capacity)| capacity);
+
     specs
         .iter()
-        .map(|spec| {
-            let (exists, capacity) = bounded_path_probe(spec.path).unwrap_or((false, None));
+        .zip(bounded)
+        .map(|(spec, result)| {
+            let capacity = result.capacity;
             let (nearest_existing_ancestor, capacity) = match capacity {
                 Some((nearest_existing_ancestor, capacity)) => {
-                    (nearest_existing_ancestor, Some(capacity))
+                    (Some(nearest_existing_ancestor), Some(capacity))
                 }
-                None => (false, None),
+                None => (None, None),
             };
             let same_filesystem_as_workspace =
                 capacity
@@ -2924,7 +3262,8 @@ fn gather_path_probes_with_options(
                 path: options
                     .include_paths
                     .then(|| spec.path.to_string_lossy().into_owned()),
-                exists,
+                exists: result.exists,
+                probe_status: result.status,
                 nearest_existing_ancestor,
                 same_filesystem_as_workspace,
                 total_bytes: capacity.map(|capacity| capacity.total_bytes),
@@ -4024,7 +4363,18 @@ Pages wired down:                             253184.
                 cgroup_limit_bytes: None,
                 source: "test_synthetic",
             },
-            paths: vec![],
+            paths: vec![PathCapacityProbe {
+                label: "cargo_target",
+                role: "build_cache_directory",
+                path: None,
+                exists: Some(true),
+                probe_status: "observed",
+                nearest_existing_ancestor: Some(false),
+                same_filesystem_as_workspace: Some(true),
+                total_bytes: Some(64 * GIB),
+                available_bytes: Some(64 * GIB),
+                redaction: "path_not_emitted",
+            }],
             tools: vec![],
             environment: EnvironmentProbe {
                 tmpdir_configured: false,
@@ -4064,8 +4414,9 @@ Pages wired down:                             253184.
                 label: "workspace",
                 role: "workspace_root",
                 path: None,
-                exists: false,
-                nearest_existing_ancestor: false,
+                exists: Some(false),
+                probe_status: "observed",
+                nearest_existing_ancestor: Some(false),
                 same_filesystem_as_workspace: None,
                 total_bytes: None,
                 available_bytes: None,
@@ -4411,7 +4762,13 @@ Pages wired down:                             253184.
 
     #[test]
     fn rch_only_topology_reports_blocker_not_local_weakness() -> TestResult {
-        let probe = probe_with_resources(Some(16), 64);
+        let mut probe = probe_with_resources(Some(16), 64);
+        let cargo_target = probe
+            .paths
+            .iter_mut()
+            .find(|path| path.label == "cargo_target")
+            .ok_or_else(|| "synthetic cargo-target path is missing".to_owned())?;
+        cargo_target.available_bytes = Some(GIB);
         let report = classify_host_profile(
             &probe,
             &HostClassificationOptions {
@@ -4438,6 +4795,44 @@ Pages wired down:                             253184.
                 .iter()
                 .any(|action| action.kind == "rch_status_probe"),
             "rch topology repair action",
+        )
+    }
+
+    #[test]
+    fn unavailable_path_capacity_stays_unknown_in_host_classification() -> TestResult {
+        let mut probe = probe_with_resources(Some(16), 64);
+        let cargo_target = probe
+            .paths
+            .iter_mut()
+            .find(|path| path.label == "cargo_target")
+            .ok_or_else(|| "synthetic cargo-target path is missing".to_owned())?;
+        cargo_target.exists = None;
+        cargo_target.probe_status = "timed_out";
+        cargo_target.nearest_existing_ancestor = None;
+        cargo_target.same_filesystem_as_workspace = None;
+        cargo_target.total_bytes = None;
+        cargo_target.available_bytes = None;
+        probe.complete = false;
+
+        let report = classify_host_profile(
+            &probe,
+            &HostClassificationOptions {
+                calibration_freshness: HostCalibrationFreshness::Fresh,
+                synthetic_fixture_profile: None,
+            },
+        );
+
+        ensure_true(
+            report.reason_codes.contains(&"disk_capacity_unknown"),
+            "unknown disk reason code",
+        )?;
+        ensure_true(
+            report.reason_codes.contains(&"target_dir_unknown"),
+            "unknown target-dir reason code",
+        )?;
+        ensure_true(
+            report.host_class != HostClass::RchOnlyTopology,
+            "unknown path data must not manufacture an RCH-only topology",
         )
     }
 

@@ -92,6 +92,7 @@
         "label",
         "role",
         "exists",
+        "probeStatus",
         "nearestExistingAncestor",
         "sameFilesystemAsWorkspace",
         "totalBytes",
@@ -103,12 +104,19 @@
         "label": { "type": "string" },
         "role": { "type": "string" },
         "path": { "type": "string" },
-        "exists": { "type": "boolean" },
-        "nearestExistingAncestor": { "type": "boolean" },
+        "exists": { "type": ["boolean", "null"] },
+        "probeStatus": {
+          "type": "string",
+          "enum": ["observed", "timed_out", "busy", "worker_unavailable"]
+        },
+        "nearestExistingAncestor": { "type": ["boolean", "null"] },
         "sameFilesystemAsWorkspace": { "type": ["boolean", "null"] },
         "totalBytes": { "type": ["integer", "null"], "minimum": 0 },
         "availableBytes": { "type": ["integer", "null"], "minimum": 0 },
-        "redaction": { "type": "string", "const": "path_not_emitted" }
+        "redaction": {
+          "type": "string",
+          "enum": ["path_not_emitted", "path_emitted_by_operator_request"]
+        }
       }
     },
     "toolProbe": {

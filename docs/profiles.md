@@ -219,8 +219,8 @@ fixture in the implementing bead.
 |----------|-------|
 | CPU | `cpu_logical_cores_constrained`, `cpu_logical_cores_portable`, `cpu_logical_cores_workstation`, `cpu_logical_cores_swarm` |
 | Memory | `memory_available_constrained`, `memory_available_portable`, `memory_available_workstation`, `memory_available_swarm` |
-| Disk | `disk_capacity_constrained`, `disk_capacity_sufficient`, `disk_capacity_swarm_ready` |
-| Target dir | `target_dir_shared`, `target_dir_isolated`, `target_dir_external` |
+| Disk | `disk_capacity_unknown`, `disk_capacity_constrained`, `disk_capacity_sufficient`, `disk_capacity_swarm_ready` |
+| Target dir | `target_dir_unknown`, `target_dir_shared`, `target_dir_isolated`, `target_dir_external` |
 | RCH topology | `rch_topology_missing`, `rch_topology_available`, `rch_topology_version_skew`, `rch_topology_workspace_metadata_blocked`, `rch_topology_remote_required` |
 | Calibration freshness | `calibration_fresh`, `calibration_stale`, `calibration_partial`, `calibration_synthetic_only`, `calibration_contradictory`, `calibration_missing`, `calibration_unavailable` |
 | Synthetic fixtures | `synthetic_fixture_constrained`, `synthetic_fixture_portable`, `synthetic_fixture_workstation`, `synthetic_fixture_swarm` |

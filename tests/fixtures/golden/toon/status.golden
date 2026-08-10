@@ -303,6 +303,7 @@ data:
   search:
     lexicalRamTier:
       schema: ee.status.search.lexical_ram_tier.v1
+      collectionStatus: observed
       platform: linux
       supported: true
       enabled: false

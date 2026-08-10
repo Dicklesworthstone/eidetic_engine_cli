@@ -1999,6 +1999,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "verificationPosture",
                 "verificationLedger",
                 "hostCalibration",
+                "search",
                 "capabilities",
             ],
             FieldProfile::Standard => &[
@@ -4581,7 +4582,7 @@ fn render_host_calibration_posture_json(
             calibration.field_str("status", "not_collected");
             calibration.field_str(
                 "repair",
-                "Run `ee status --workspace . --json` from an initialized workspace.",
+                "Run `ee status --workspace . --json --fields standard` to collect host calibration.",
             );
         });
     }
@@ -5185,6 +5186,7 @@ fn render_search_status_json(
     parent.field_object("search", |search| {
         search.field_object("lexicalRamTier", |tier| {
             tier.field_str("schema", lexical_ram_tier.schema);
+            tier.field_str("collectionStatus", lexical_ram_tier.collection_status);
             tier.field_str(
                 "platform",
                 lexical_ram_tier_platform_name(lexical_ram_tier.platform),
@@ -5233,6 +5235,7 @@ fn lexical_ram_tier_platform_name(
     platform: crate::search::lexical_ram_tier::LexicalRamTierPlatform,
 ) -> &'static str {
     match platform {
+        crate::search::lexical_ram_tier::LexicalRamTierPlatform::NotCollected => "not_collected",
         crate::search::lexical_ram_tier::LexicalRamTierPlatform::Linux => "linux",
         crate::search::lexical_ram_tier::LexicalRamTierPlatform::MacosLimited => "macos_limited",
         crate::search::lexical_ram_tier::LexicalRamTierPlatform::WindowsLimited => {
@@ -15393,6 +15396,9 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
             render_verification_posture_json(d, &report.verification_posture);
             render_rch_verify_ledger_status_json(d, &report.verification_ledger);
             render_host_calibration_posture_json(d, report.host_calibration.as_ref());
+            if matches!(profile, FieldProfile::Summary) {
+                render_search_status_json(d, &report.lexical_ram_tier);
+            }
             d.field_object("capabilities", |c| {
                 c.field_str("runtime", report.capabilities.runtime.as_str());
                 c.field_str("storage", report.capabilities.storage.as_str());

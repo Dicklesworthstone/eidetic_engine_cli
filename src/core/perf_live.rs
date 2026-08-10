@@ -278,6 +278,7 @@ pub fn collect_perf_live_snapshot<R: SwarmBriefCommandRunner>(
 ) -> PerfLiveSnapshot {
     let status = StatusReport::gather_with_options(&StatusOptions {
         workspace_path: Some(options.workspace.clone()),
+        probe_mode: crate::core::status::StatusProbeMode::Full,
     });
     let mut degraded = status_degradations(&status);
     let surfaces = PerfLiveSurfaces::default();

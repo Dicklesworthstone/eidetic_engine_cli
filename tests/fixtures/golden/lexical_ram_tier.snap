@@ -1,6 +1,7 @@
 {
   "schema": "ee.status.search.lexical_ram_tier.v1",
   "scenario": "linux_heap_warmload",
+  "collectionStatus": "observed",
   "platform": "linux",
   "supported": true,
   "enabled": true,

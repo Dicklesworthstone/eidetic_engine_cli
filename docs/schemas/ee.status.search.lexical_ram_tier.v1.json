@@ -6,6 +6,7 @@
   "type": "object",
   "required": [
     "schema",
+    "collectionStatus",
     "platform",
     "supported",
     "enabled",
@@ -28,10 +29,16 @@
       "type": "string",
       "const": "ee.status.search.lexical_ram_tier.v1"
     },
+    "collectionStatus": {
+      "type": "string",
+      "enum": ["observed", "not_collected"],
+      "description": "Whether the optional lexical index probe ran for this response. Summary status uses not_collected and performs no index I/O."
+    },
     "platform": {
       "type": "string",
-      "description": "Coarse host classification for the lexical RAM-tier optimization.",
+      "description": "Coarse host classification for the lexical RAM-tier optimization, or not_collected when summary status intentionally skipped host/index inspection.",
       "enum": [
+        "not_collected",
         "linux",
         "macos_limited",
         "windows_limited",
@@ -112,12 +119,18 @@
         "minLength": 1
       },
       "uniqueItems": true,
-      "description": "Stable degraded[] codes documented in tests/fixtures/failure_modes/. Empty only when the optimization succeeded fully."
+      "description": "Stable degraded[] codes documented in tests/fixtures/failure_modes/. Empty when the optimization succeeded fully or when collectionStatus is not_collected."
     }
   },
   "allOf": [
     {
-      "if": {"properties": {"enabled": {"const": false}}, "required": ["enabled"]},
+      "if": {
+        "properties": {
+          "collectionStatus": {"const": "observed"},
+          "enabled": {"const": false}
+        },
+        "required": ["collectionStatus", "enabled"]
+      },
       "then": {
         "properties": {
           "attempted": {"const": false},
@@ -125,6 +138,31 @@
           "fallbackPath": {"const": "disabled_by_operator"}
         },
         "required": ["attempted", "succeeded", "fallbackPath"]
+      }
+    },
+    {
+      "if": {
+        "properties": {"collectionStatus": {"const": "not_collected"}},
+        "required": ["collectionStatus"]
+      },
+      "then": {
+        "properties": {
+          "enabled": {"const": false},
+          "attempted": {"const": false},
+          "succeeded": {"const": false},
+          "platform": {"const": "not_collected"},
+          "hugepagesRequested": {"const": false},
+          "hugepagesGranted": {"const": false},
+          "populateRequested": {"const": false},
+          "bytesMmapped": {"const": 0},
+          "bytesWarmloaded": {"const": 0},
+          "pageFaultsPre": {"const": 0},
+          "pageFaultsPost": {"const": 0},
+          "fallbackPath": {"const": "none"},
+          "indexPath": {"type": "null"},
+          "indexRevision": {"type": "null"},
+          "degradedCodes": {"maxItems": 0}
+        }
       }
     },
     {

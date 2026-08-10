@@ -3125,6 +3125,10 @@ fn check_flight_recorder(report: &FlightRecorderStatusReport) -> CheckResult {
         report.directory.display()
     );
     match report.posture {
+        crate::obs::FlightRecorderPosture::NotCollected => CheckResult::ok(
+            "flight_recorder",
+            format!("Flight recorder filesystem posture was not collected; {detail}."),
+        ),
         crate::obs::FlightRecorderPosture::Disabled => CheckResult::ok(
             "flight_recorder",
             format!("Flight recorder is disabled by default; {detail}."),
