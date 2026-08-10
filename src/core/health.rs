@@ -396,9 +396,9 @@ impl HealthScorecardReport {
                 Vec::new(),
                 None,
                 None,
-                StructuralHealthReport::empty_with_degradation(storage_not_ready_degradation(Some(
-                    &database_path,
-                ))),
+                StructuralHealthReport::empty_with_degradation(storage_not_ready_degradation(
+                    Some(&database_path),
+                )),
                 Vec::new(),
                 HealthScorecardSnapshotSummary::not_recorded(options.record_snapshot, 0),
                 degraded,
@@ -1110,7 +1110,9 @@ impl StructuralHealthReport {
 
         let database_path = workspace_path.join(".ee").join("ee.db");
         if !database_path.exists() {
-            return Self::empty_with_degradation(storage_not_ready_degradation(Some(&database_path)));
+            return Self::empty_with_degradation(storage_not_ready_degradation(Some(
+                &database_path,
+            )));
         }
 
         let connection = match DbConnection::open_file(&database_path) {

@@ -9800,7 +9800,9 @@ pub fn build_memory_timeline(
     let conn = open_migrated_memory_database(options.database_path).map_err(|message| {
         DomainError::Storage {
             message,
-            repair: Some(crate::core::storeless_workspace_repair(options.database_path)),
+            repair: Some(crate::core::storeless_workspace_repair(
+                options.database_path,
+            )),
         }
     })?;
     let workspace_path = options
