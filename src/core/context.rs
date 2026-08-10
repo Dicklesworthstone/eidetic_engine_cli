@@ -1993,16 +1993,21 @@ pub fn explain_why_not(
         && index_dir.exists()
         && index_corpus_compatibility_is_current(&index_dir)
     {
+        let embedder_database_path = database_path.clone();
         let preparation = crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
-            prepare_search_embedder_for_workspace(&cx, &options.workspace_path, &database_path)
-                .await
-                .map_err(|error| {
-                    ContextPackError::Search(map_frankensearch_error(
-                        &cx,
-                        "why-not embedder preparation",
-                        error,
-                    ))
-                })
+            prepare_search_embedder_for_workspace(
+                &cx,
+                &options.workspace_path,
+                &embedder_database_path,
+            )
+            .await
+            .map_err(|error| {
+                ContextPackError::Search(map_frankensearch_error(
+                    &cx,
+                    "why-not embedder preparation",
+                    error,
+                ))
+            })
         })
         .map_err(|error| {
             ContextPackError::Pack(format!(

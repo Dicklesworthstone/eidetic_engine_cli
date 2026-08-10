@@ -5535,17 +5535,24 @@ pub(crate) async fn prepare_search_embedder_for_workspace(
     let started = Instant::now();
     if configured_embedder_model_root().is_none() && database_path.exists() {
         let db = DbConnection::open_file_read_only(database_path).map_err(|error| {
-            SearchError::Index(format!("Failed to open model registry: {error}"))
+            SearchError::SubsystemError {
+                subsystem: "model registry",
+                source: Box::new(error),
+            }
         })?;
         if let Some(workspace_id) =
             workspace_id_for_index_status(&db, workspace_path).map_err(|error| {
-                SearchError::Index(format!(
-                    "Failed to resolve model registry workspace: {error}"
-                ))
+                SearchError::SubsystemError {
+                    subsystem: "model registry",
+                    source: Box::new(error),
+                }
             })?
             && let Some(stack) =
                 registered_model2vec_stack(&db, &workspace_id).map_err(|error| {
-                    SearchError::Index(format!("Failed to read model registry: {error}"))
+                    SearchError::SubsystemError {
+                        subsystem: "model registry",
+                        source: Box::new(error),
+                    }
                 })?
         {
             return Ok(EmbedderPreparation {
