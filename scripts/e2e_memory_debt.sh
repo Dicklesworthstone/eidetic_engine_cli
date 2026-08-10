@@ -164,6 +164,23 @@ else
     event aged_corpus_reports_never_retrieved fail "exit=${LAST_EXIT}; $(jq -c '.data.summary.classCounts' "${D4}" 2>/dev/null)"
 fi
 
+# --- low_trust_high_rank: a persisted pack ranks a low-confidence memory --
+run_ee remember "Thermobaric widget calibration requires the phase-locked spindle." \
+    --workspace "${WS}" --level semantic --kind fact --tags "widget" --confidence 0.4 --json
+LOWTRUST="$(remember_id)"
+run_ee pack "thermobaric widget calibration" --workspace "${WS}" --json
+PACK_EXIT=$LAST_EXIT
+run_ee curate doctor --workspace "${WS}" --json
+D5="${LAST_STDOUT}"
+if [[ "${PACK_EXIT}" -eq 0 && "${LAST_EXIT}" -eq 0 && -n "${LOWTRUST}" ]] \
+    && jq -e --arg id "${LOWTRUST}" \
+        '[.data.queue[]? | select(.memoryId == $id and .class == "low_trust_high_rank")] | length >= 1' \
+        "${D5}" >/dev/null 2>&1; then
+    event low_trust_pack_rank_detected pass
+else
+    event low_trust_pack_rank_detected fail "pack=${PACK_EXIT} exit=${LAST_EXIT} id=${LOWTRUST}; $(jq -c '.data.summary.classCounts' "${D5}" 2>/dev/null)"
+fi
+
 # --- learn gaps: repeated missed searches cluster -------------------------
 for _ in 1 2 3; do
     run_ee search "zebra hovercraft docking protocol" --workspace "${WS}" --json
