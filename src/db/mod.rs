@@ -9034,6 +9034,110 @@ END;
     "blake3:v101_attempt_family_immutability_repair_2026_08_09",
 );
 
+/// V102: Retrieval-affinity projection (ADR 0066 / bd-3a1op.2).
+///
+/// Rebuilds `graph_snapshots` with the `retrieval_affinity` family admitted
+/// to the `graph_type` CHECK (create/copy/drop/rename under the FK-relaxed
+/// machinery so the witness/result children keep referencing the table by
+/// name), and adds the append-only co-occurrence accumulation plus its
+/// consumption cursor. Privacy: accumulation rows carry memory ids and
+/// counters only — never query text or content.
+pub const V102_RETRIEVAL_AFFINITY_PROJECTION: Migration = Migration::new(
+    102,
+    "retrieval_affinity_projection",
+    r#"
+CREATE TABLE graph_snapshots_v102_new (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'gsnap_*' AND length(id) = 31),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    snapshot_version INTEGER NOT NULL CHECK (snapshot_version > 0),
+    schema_version TEXT NOT NULL CHECK (length(trim(schema_version)) > 0),
+    graph_type TEXT NOT NULL CHECK (graph_type IN (
+        'memory_links',
+        'session_graph',
+        'procedure_graph',
+        'evidence_graph',
+        'composite',
+        'causal_evidence',
+        'revision_dag',
+        'rule_provenance',
+        'contradiction_subgraph',
+        'retrieval_affinity'
+    )),
+    node_count INTEGER NOT NULL CHECK (node_count >= 0),
+    edge_count INTEGER NOT NULL CHECK (edge_count >= 0),
+    metrics_json TEXT NOT NULL CHECK (json_valid(metrics_json)),
+    content_hash TEXT NOT NULL CHECK (content_hash GLOB 'blake3:*'),
+    source_generation INTEGER NOT NULL CHECK (source_generation >= 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    expires_at TEXT CHECK (expires_at IS NULL OR length(trim(expires_at)) > 0),
+    status TEXT NOT NULL DEFAULT 'valid' CHECK (status IN (
+        'valid', 'stale', 'invalid', 'archived'
+    )),
+    UNIQUE (workspace_id, graph_type, snapshot_version)
+);
+
+INSERT INTO graph_snapshots_v102_new (
+    id,
+    workspace_id,
+    snapshot_version,
+    schema_version,
+    graph_type,
+    node_count,
+    edge_count,
+    metrics_json,
+    content_hash,
+    source_generation,
+    created_at,
+    expires_at,
+    status
+)
+SELECT
+    id,
+    workspace_id,
+    snapshot_version,
+    schema_version,
+    graph_type,
+    node_count,
+    edge_count,
+    metrics_json,
+    content_hash,
+    source_generation,
+    created_at,
+    expires_at,
+    status
+FROM graph_snapshots;
+
+DROP TABLE graph_snapshots;
+ALTER TABLE graph_snapshots_v102_new RENAME TO graph_snapshots;
+
+CREATE INDEX idx_graph_snapshots_v102_workspace ON graph_snapshots(workspace_id);
+CREATE INDEX idx_graph_snapshots_v102_type ON graph_snapshots(graph_type);
+CREATE INDEX idx_graph_snapshots_v102_version ON graph_snapshots(snapshot_version);
+CREATE INDEX idx_graph_snapshots_v102_status ON graph_snapshots(status);
+CREATE INDEX idx_graph_snapshots_v102_created ON graph_snapshots(created_at);
+
+CREATE TABLE retrieval_affinity_accumulation (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    memory_a TEXT NOT NULL CHECK (memory_a GLOB 'mem_*'),
+    memory_b TEXT NOT NULL CHECK (memory_b GLOB 'mem_*' AND memory_b > memory_a),
+    weight REAL NOT NULL CHECK (weight >= 0.0),
+    last_event_at TEXT NOT NULL CHECK (length(trim(last_event_at)) > 0),
+    PRIMARY KEY (workspace_id, memory_a, memory_b)
+);
+
+CREATE INDEX idx_retrieval_affinity_accumulation_workspace
+ON retrieval_affinity_accumulation(workspace_id);
+
+CREATE TABLE retrieval_affinity_cursor (
+    workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+    pack_ledger_rowid INTEGER NOT NULL DEFAULT 0 CHECK (pack_ledger_rowid >= 0),
+    search_audit_rowid INTEGER NOT NULL DEFAULT 0 CHECK (search_audit_rowid >= 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0)
+);
+"#,
+    "blake3:v102_retrieval_affinity_projection_2026_08_10",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -9137,6 +9241,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V099_MESH_PEER_TRANSPORT_IDENTITY,
     V100_PACK_EVIDENCE_ITEMS,
     V101_ATTEMPT_FAMILY_IMMUTABILITY_REPAIR,
+    V102_RETRIEVAL_AFFINITY_PROJECTION,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -9189,6 +9294,7 @@ fn migration_requires_foreign_key_relaxation(migration: &Migration) -> bool {
         V092_PROCEDURAL_RULE_PEER_HUMAN_ATTESTED_TRUST.version(),
         V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST.version(),
         V096_MEMORY_SENTINEL_POLARITY.version(),
+        V102_RETRIEVAL_AFFINITY_PROJECTION.version(),
     ]
     .contains(&migration.version())
 }
@@ -30673,6 +30779,7 @@ pub enum GraphSnapshotType {
     RevisionDag,
     RuleProvenance,
     ContradictionSubgraph,
+    RetrievalAffinity,
 }
 
 impl GraphSnapshotType {
@@ -30688,6 +30795,7 @@ impl GraphSnapshotType {
             Self::RevisionDag => "revision_dag",
             Self::RuleProvenance => "rule_provenance",
             Self::ContradictionSubgraph => "contradiction_subgraph",
+            Self::RetrievalAffinity => "retrieval_affinity",
         }
     }
 }
@@ -30712,6 +30820,7 @@ impl std::str::FromStr for GraphSnapshotType {
             "revision_dag" => Ok(Self::RevisionDag),
             "rule_provenance" => Ok(Self::RuleProvenance),
             "contradiction_subgraph" => Ok(Self::ContradictionSubgraph),
+            "retrieval_affinity" => Ok(Self::RetrievalAffinity),
             other => Err(format!("unknown graph snapshot type: {other}")),
         }
     }
@@ -30867,6 +30976,151 @@ impl DbConnection {
         )?;
 
         Ok(())
+    }
+
+    // ── Retrieval-affinity accumulation (ADR 0066 / bd-3a1op.2) ──────────
+
+    /// Read the append-only consumption cursor for the retrieval-affinity
+    /// accumulator; zeros when no row exists yet.
+    pub fn retrieval_affinity_cursor(&self, workspace_id: &str) -> Result<(i64, i64)> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT pack_ledger_rowid, search_audit_rowid FROM retrieval_affinity_cursor WHERE workspace_id = ?1",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+        match rows.first() {
+            Some(row) => Ok((
+                required_i64(row, 0, DbOperation::Query, "pack_ledger_rowid")?,
+                required_i64(row, 1, DbOperation::Query, "search_audit_rowid")?,
+            )),
+            None => Ok((0, 0)),
+        }
+    }
+
+    /// Persist the consumption cursor (idempotent upsert).
+    pub fn write_retrieval_affinity_cursor(
+        &self,
+        workspace_id: &str,
+        pack_ledger_rowid: i64,
+        search_audit_rowid: i64,
+        updated_at: &str,
+    ) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO retrieval_affinity_cursor (workspace_id, pack_ledger_rowid, search_audit_rowid, updated_at) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(workspace_id) DO UPDATE SET pack_ledger_rowid = excluded.pack_ledger_rowid, search_audit_rowid = excluded.search_audit_rowid, updated_at = excluded.updated_at",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::BigInt(pack_ledger_rowid),
+                Value::BigInt(search_audit_rowid),
+                Value::Text(updated_at.to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Accumulate co-occurrence weight deltas (pairs are canonicalized by the
+    /// caller: `memory_a < memory_b`). Additive upsert; privacy: ids and
+    /// counters only.
+    pub fn apply_retrieval_affinity_deltas(
+        &self,
+        workspace_id: &str,
+        deltas: &[(String, String, f64)],
+        event_at: &str,
+    ) -> Result<()> {
+        for (memory_a, memory_b, delta) in deltas {
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO retrieval_affinity_accumulation (workspace_id, memory_a, memory_b, weight, last_event_at) VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT(workspace_id, memory_a, memory_b) DO UPDATE SET weight = weight + excluded.weight, last_event_at = MAX(last_event_at, excluded.last_event_at)",
+                &[
+                    Value::Text(workspace_id.to_string()),
+                    Value::Text(memory_a.clone()),
+                    Value::Text(memory_b.clone()),
+                    Value::Double(*delta),
+                    Value::Text(event_at.to_string()),
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// List every accumulated affinity edge for a workspace in deterministic
+    /// (memory_a, memory_b) order.
+    pub fn list_retrieval_affinity_edges(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<(String, String, f64, String)>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT memory_a, memory_b, weight, last_event_at FROM retrieval_affinity_accumulation WHERE workspace_id = ?1 ORDER BY memory_a, memory_b",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+        let mut edges = Vec::with_capacity(rows.len());
+        for row in &rows {
+            edges.push((
+                required_text(row, 0, DbOperation::Query, "memory_a")?.to_string(),
+                required_text(row, 1, DbOperation::Query, "memory_b")?.to_string(),
+                required_f64(row, 2, DbOperation::Query, "weight")?,
+                required_text(row, 3, DbOperation::Query, "last_event_at")?.to_string(),
+            ));
+        }
+        Ok(edges)
+    }
+
+    /// New `search.returned_mem` audit rows after `after_rowid`, bounded.
+    /// Returns `(rowid, workspace_id, memory_id, details_json)`.
+    pub fn list_search_returned_mem_after(
+        &self,
+        after_rowid: i64,
+        limit: u32,
+    ) -> Result<Vec<(i64, Option<String>, String, String, String)>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT rowid, workspace_id, target_id, details, timestamp FROM audit_log WHERE rowid > ?1 AND action = 'search.returned_mem' AND target_id IS NOT NULL AND details IS NOT NULL ORDER BY rowid ASC LIMIT ?2",
+            &[
+                Value::BigInt(after_rowid),
+                Value::from_u64_clamped(u64::from(limit)),
+            ],
+        )?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            out.push((
+                required_i64(row, 0, DbOperation::Query, "rowid")?,
+                optional_text(row, 1)?.map(str::to_string),
+                required_text(row, 2, DbOperation::Query, "target_id")?.to_string(),
+                required_text(row, 3, DbOperation::Query, "details")?.to_string(),
+                required_text(row, 4, DbOperation::Query, "timestamp")?.to_string(),
+            ));
+        }
+        Ok(out)
+    }
+
+    /// New pack-record rows after `after_rowid`, bounded. Returns
+    /// `(rowid, pack_id, workspace_id, created_at)`.
+    pub fn list_pack_records_after(
+        &self,
+        after_rowid: i64,
+        limit: u32,
+    ) -> Result<Vec<(i64, String, String, String)>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT rowid, id, workspace_id, created_at FROM pack_records WHERE rowid > ?1 ORDER BY rowid ASC LIMIT ?2",
+            &[
+                Value::BigInt(after_rowid),
+                Value::from_u64_clamped(u64::from(limit)),
+            ],
+        )?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            out.push((
+                required_i64(row, 0, DbOperation::Query, "rowid")?,
+                required_text(row, 1, DbOperation::Query, "id")?.to_string(),
+                required_text(row, 2, DbOperation::Query, "workspace_id")?.to_string(),
+                required_text(row, 3, DbOperation::Query, "created_at")?.to_string(),
+            ));
+        }
+        Ok(out)
     }
 
     /// Get a graph snapshot by ID.
