@@ -15,8 +15,8 @@ use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 
 use crate::cass::{
-    CassClient, CassImportError, CassImportOptions, CassImportReport, discover_import_binary,
-    import_cass_sessions, parse_import_since_duration,
+    CassClient, CassImportDegradation, CassImportError, CassImportOptions, CassImportReport,
+    discover_import_binary, import_cass_sessions, parse_import_since_duration,
 };
 use crate::config::env_registry::{EnvVar, read, read_os};
 use crate::config::{
@@ -22100,17 +22100,23 @@ where
 
     match import_cass_sessions(&cass_client, &options) {
         Ok(mut report) => {
-            reconcile_cass_import_index(&mut report);
+            let degradation = reconcile_cass_import_index(&mut report);
             match cli.renderer() {
-                output::Renderer::Human | output::Renderer::Markdown => {
-                    write_stdout(stdout, &report.human_summary())
-                }
-                output::Renderer::Toon => write_stdout(stdout, &report.toon_summary()),
+                output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+                    stdout,
+                    &report.human_summary_with_degradation(degradation.as_ref()),
+                ),
+                output::Renderer::Toon => write_stdout(
+                    stdout,
+                    &report.toon_summary_with_degradation(degradation.as_ref()),
+                ),
                 output::Renderer::Json
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact
                 | output::Renderer::Hook => {
-                    let json = response_v2_json_from_data(report.data_json());
+                    let json = response_v2_json_from_data(
+                        report.data_json_with_degradation(degradation.as_ref()),
+                    );
                     write_stdout(stdout, &(json.to_string() + "\n"))
                 }
             }
@@ -22122,14 +22128,17 @@ where
     }
 }
 
-fn reconcile_cass_import_index(report: &mut CassImportReport) {
+fn reconcile_cass_import_index(report: &mut CassImportReport) -> Option<CassImportDegradation> {
     if report.dry_run || report.index_jobs_queued == 0 {
-        return;
+        return None;
     }
 
     match publish_cass_import_index(report) {
-        Ok(()) => report.record_index_publish_success(),
-        Err(detail) => report.record_index_publish_failure(detail),
+        Ok(()) => {
+            report.record_index_publish_success();
+            None
+        }
+        Err(detail) => Some(report.record_index_publish_failure(detail)),
     }
 }
 

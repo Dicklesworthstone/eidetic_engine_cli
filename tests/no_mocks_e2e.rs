@@ -2699,11 +2699,6 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &Some(&json!([])),
         "successful CASS import has no outer degradation",
     )?;
-    ensure_equal(
-        &import_json.pointer("/data/degraded"),
-        &Some(&json!([])),
-        "successful CASS import has no data degradation",
-    )?;
     ensure(
         import_json
             .pointer("/data/spansImported")
@@ -2806,6 +2801,13 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &status_json.pointer("/data/health"),
         &Some(&json!("ready")),
         "CASS post-import index health",
+    )?;
+    ensure(
+        status_json
+            .pointer("/data/dbGeneration")
+            .and_then(JsonValue::as_u64)
+            .is_some(),
+        "CASS post-import database generation must be present",
     )?;
     ensure_equal(
         &status_json.pointer("/data/dbGeneration"),
@@ -2944,13 +2946,9 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
             preserved_initial_index.display()
         )
     })?;
-    fs::write(
-        &blocked_index_path,
-        b"regular file intentionally blocks staged index publication",
-    )
-    .map_err(|error| {
+    std::os::unix::fs::symlink(&preserved_initial_index, &blocked_index_path).map_err(|error| {
         format!(
-            "failed to install index publication blocker {}: {error}",
+            "failed to install deterministic index publication blocker {}: {error}",
             blocked_index_path.display()
         )
     })?;
@@ -2990,9 +2988,19 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         "CASS failure-path imported session count",
     )?;
     ensure_equal(
+        &failed_publish_json.pointer("/data/indexJobsQueued"),
+        &Some(&json!(1)),
+        "CASS failure-path queued index job count",
+    )?;
+    ensure_equal(
         &failed_publish_json.pointer("/degraded/0/code"),
         &Some(&json!("search_index_stale")),
         "CASS publish failure outer degradation code",
+    )?;
+    ensure_equal(
+        &failed_publish_json.pointer("/degraded/0/severity"),
+        &Some(&json!("medium")),
+        "CASS publish failure outer degradation severity",
     )?;
     ensure_equal(
         &failed_publish_json.pointer("/data/degraded/0/code"),

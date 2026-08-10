@@ -155,7 +155,6 @@ pub struct CassImportReport {
     pub spans_imported: u32,
     pub index_jobs_queued: u32,
     pub index_required_action: Option<String>,
-    pub degraded: Vec<CassImportDegradation>,
     pub status: String,
     pub sessions: Vec<ImportedCassSession>,
 }
@@ -165,22 +164,22 @@ impl CassImportReport {
     /// manual-rebuild action.
     pub fn record_index_publish_success(&mut self) {
         self.index_required_action = None;
-        self.degraded
-            .retain(|entry| entry.code != "search_index_stale");
     }
 
     /// Preserve the committed import while truthfully reporting that its
     /// derived search index still requires the exact advertised rebuild.
-    pub fn record_index_publish_failure(&mut self, detail: impl Into<String>) {
+    pub fn record_index_publish_failure(
+        &mut self,
+        detail: impl Into<String>,
+    ) -> CassImportDegradation {
         let repair = self.index_required_action.clone().unwrap_or_else(|| {
             index_required_action(
                 Path::new(&self.workspace_path),
                 self.database_path.as_deref().map(Path::new),
             )
         });
-        self.degraded
-            .retain(|entry| entry.code != "search_index_stale");
-        self.degraded.push(CassImportDegradation {
+        self.index_required_action = Some(repair.clone());
+        CassImportDegradation {
             code: "search_index_stale",
             severity: "medium",
             message: format!(
@@ -188,7 +187,7 @@ impl CassImportReport {
                 detail.into()
             ),
             repair,
-        });
+        }
     }
 
     /// Render the stable JSON data payload for the response envelope.
@@ -210,7 +209,6 @@ impl CassImportReport {
             "spansImported": self.spans_imported,
             "indexJobsQueued": self.index_jobs_queued,
             "indexRequiredAction": self.index_required_action,
-            "degraded": self.degraded.iter().map(CassImportDegradation::data_json).collect::<Vec<_>>(),
             "status": self.status,
             "sessions": self.sessions.iter().map(|session| {
                 let source_path = redact_import_report_source_ref(&session.source_path);
@@ -227,6 +225,21 @@ impl CassImportReport {
         })
     }
 
+    /// Render the JSON payload while attaching an actual post-import
+    /// publication degradation. Successful and dry-run payloads retain the
+    /// established import-report shape.
+    #[must_use]
+    pub fn data_json_with_degradation(
+        &self,
+        degradation: Option<&CassImportDegradation>,
+    ) -> JsonValue {
+        let mut data = self.data_json();
+        if let Some(degradation) = degradation {
+            data["degraded"] = JsonValue::Array(vec![degradation.data_json()]);
+        }
+        data
+    }
+
     /// Render a compact human summary.
     #[must_use]
     pub fn human_summary(&self) -> String {
@@ -235,7 +248,7 @@ impl CassImportReport {
             .since
             .as_deref()
             .map_or_else(String::new, |cutoff| format!(" since {cutoff}"));
-        let mut output = format!(
+        format!(
             "{mode}CASS import {status}{since}: {imported} imported, {skipped} skipped, {spans} spans, {index_jobs} index jobs from {discovered} discovered sessions\n",
             status = self.status,
             imported = self.sessions_imported,
@@ -243,36 +256,46 @@ impl CassImportReport {
             spans = self.spans_imported,
             index_jobs = self.index_jobs_queued,
             discovered = self.sessions_discovered,
-        );
-        if !self.degraded.is_empty() {
-            output.push_str("  Degraded:\n");
-            for degradation in &self.degraded {
-                output.push_str(&format!(
-                    "    - {}: {} Repair: {}\n",
-                    degradation.code, degradation.message, degradation.repair
-                ));
-            }
+        )
+    }
+
+    /// Render the human summary with an actual post-import publication
+    /// degradation.
+    #[must_use]
+    pub fn human_summary_with_degradation(
+        &self,
+        degradation: Option<&CassImportDegradation>,
+    ) -> String {
+        let mut output = self.human_summary();
+        if let Some(degradation) = degradation {
+            output.push_str(&format!(
+                "  Degraded:\n    - {}: {} Repair: {}\n",
+                degradation.code, degradation.message, degradation.repair
+            ));
         }
         output
     }
 
     /// Render the compact machine summary used by the TOON output mode.
     #[must_use]
-    pub fn toon_summary(&self) -> String {
-        let index_status = if self.dry_run {
-            "dry_run"
-        } else if self.degraded.is_empty() && self.index_required_action.is_none() {
-            "published"
-        } else if self.degraded.is_empty() {
-            "queued"
-        } else {
-            "degraded"
+    pub fn toon_summary_with_degradation(
+        &self,
+        degradation: Option<&CassImportDegradation>,
+    ) -> String {
+        let Some(degradation) = degradation else {
+            return format!(
+                "IMPORT_CASS|{}|{}|{}|{}\n",
+                self.status, self.sessions_discovered, self.sessions_imported, self.spans_imported
+            );
         };
-        let degraded_code = self.degraded.first().map_or("none", |entry| entry.code);
-        let repair = self.index_required_action.as_deref().unwrap_or("none");
         format!(
-            "IMPORT_CASS|{}|{}|{}|{}|index={index_status}|degraded={degraded_code}|repair={repair}\n",
-            self.status, self.sessions_discovered, self.sessions_imported, self.spans_imported
+            "IMPORT_CASS|{}|{}|{}|{}|degraded={}|repair={}\n",
+            self.status,
+            self.sessions_discovered,
+            self.sessions_imported,
+            self.spans_imported,
+            degradation.code,
+            degradation.repair
         )
     }
 }
@@ -813,7 +836,6 @@ pub fn import_cass_sessions(
         spans_imported,
         index_jobs_queued,
         index_required_action: Some(index_required_action(&workspace_path, Some(&database_path))),
-        degraded: Vec::new(),
         status: "completed".to_string(),
         sessions: session_reports,
     })
@@ -1731,7 +1753,6 @@ fn dry_run_report(
         spans_imported: 0,
         index_jobs_queued: 0,
         index_required_action: None,
-        degraded: Vec::new(),
         status: "dry_run".to_string(),
         sessions: sessions
             .into_iter()
@@ -3444,7 +3465,6 @@ mod tests {
             index_required_action: Some(
                 "ee index rebuild --workspace /tmp/work --database /tmp/work/.ee/ee.db".to_string(),
             ),
-            degraded: Vec::new(),
             status: "completed".to_string(),
             sessions: vec![ImportedCassSession {
                 source_path: "cass-session://safe-session".to_string(),
@@ -3488,22 +3508,33 @@ mod tests {
             .index_required_action
             .clone()
             .ok_or_else(|| "fixture rebuild action is missing".to_owned())?;
-        report.record_index_publish_failure("injected staged publisher failure");
+        let degradation = report.record_index_publish_failure("injected staged publisher failure");
         ensure_equal(
             &report.index_required_action.as_deref(),
             &Some(exact_repair.as_str()),
             "publish failure preserves exact repair",
         )?;
         ensure_equal(
-            &report.degraded[0].code,
+            &degradation.code,
             &"search_index_stale",
             "publish failure degradation code",
         )?;
         ensure(
-            report.degraded[0]
+            degradation
                 .message
                 .contains("CASS import committed successfully"),
             "publish failure distinguishes committed import from derived-index failure",
+        )?;
+        let degraded_json = report.data_json_with_degradation(Some(&degradation));
+        ensure_equal(
+            &degraded_json["degraded"][0]["severity"],
+            &json!("medium"),
+            "publish failure degradation severity",
+        )?;
+        ensure_equal(
+            &degraded_json["degraded"][0]["repair"],
+            &json!(exact_repair),
+            "publish failure degradation exact repair",
         )?;
 
         report.record_index_publish_success();
@@ -3512,11 +3543,7 @@ mod tests {
             &None,
             "publish success removes rebuild action",
         )?;
-        ensure_equal(
-            &report.degraded.len(),
-            &0_usize,
-            "publish success removes stale degradation",
-        )
+        Ok(())
     }
 
     #[test]
@@ -3539,7 +3566,6 @@ mod tests {
             spans_imported: 2,
             index_jobs_queued: 1,
             index_required_action: None,
-            degraded: Vec::new(),
             status: "completed".to_string(),
             sessions: vec![ImportedCassSession {
                 source_path: format!(
