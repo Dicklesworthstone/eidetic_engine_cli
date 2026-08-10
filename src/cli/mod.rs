@@ -8705,6 +8705,12 @@ pub struct SearchArgs {
     )]
     pub query: Option<String>,
 
+    /// Read-only diagnostic: run the query against every workspace
+    /// registered in the addressed database (rows labeled per workspace)
+    /// plus the global lane. An inspection surface, never a pack input.
+    #[arg(long = "all-workspaces", conflicts_with = "family")]
+    pub all_workspaces: bool,
+
     /// Retrieve every admitted member of one attempt family without using the search index.
     #[arg(
         long,
@@ -44921,6 +44927,196 @@ where
     }
 }
 
+/// Bounded workspace fan-out for `ee search --all-workspaces`.
+const ALL_WORKSPACES_SCAN_CAP: usize = 16;
+
+fn handle_search_all_workspaces<W, E>(
+    cli: &Cli,
+    args: &SearchArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let Some(query) = args.query.as_ref() else {
+        return write_domain_error(
+            &DomainError::Usage {
+                message: "search --all-workspaces requires a positional query".to_owned(),
+                repair: Some("Use `ee search --all-workspaces --json -- <query>`.".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    };
+    let MemoryStoreTarget {
+        workspace,
+        database_path,
+    } = match resolve_memory_store_target(cli, false, None) {
+        Ok(target) => target,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let connection = match crate::db::DbConnection::open_file_read_only(&database_path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("open database read-only: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let registered = match connection.list_workspaces() {
+        Ok(rows) => rows,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("list registered workspaces: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let total_registered = registered.len();
+    let truncated = total_registered > ALL_WORKSPACES_SCAN_CAP;
+
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    for stored in registered.into_iter().take(ALL_WORKSPACES_SCAN_CAP) {
+        let target_workspace = PathBuf::from(&stored.path);
+        // The addressed workspace searches through its own resolved paths;
+        // other registered workspaces must have a live store on disk.
+        let is_current = target_workspace == workspace
+            || target_workspace
+                .canonicalize()
+                .ok()
+                .is_some_and(|canonical| Some(canonical) == workspace.canonicalize().ok());
+        if !is_current && !target_workspace.join(".ee").join("ee.db").is_file() {
+            rows.push(serde_json::json!({
+                "workspaceId": stored.id,
+                "workspacePath": stored.path,
+                "searched": false,
+                "reason": "store_missing_on_disk",
+            }));
+            continue;
+        }
+        let options = crate::core::search::SearchOptions {
+            workspace_path: target_workspace,
+            database_path: None,
+            index_dir: None,
+            query: query.clone(),
+            limit: args.limit,
+            speed: args.speed,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            dedup_mode: crate::core::search::SearchDedupMode::DocId,
+            source_mode: crate::core::search::SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: crate::models::MemoryScope::default(),
+            strict_scope: false,
+        };
+        match crate::core::search::run_search(&options) {
+            Ok(report) => {
+                let hits: Vec<serde_json::Value> = report
+                    .results
+                    .iter()
+                    .map(|hit| {
+                        serde_json::json!({
+                            "docId": hit.doc_id,
+                            "score": hit.score,
+                            "source": hit.source.as_str(),
+                            "storeLane": hit
+                                .metadata
+                                .as_ref()
+                                .and_then(|metadata| metadata.get("storeLane"))
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null),
+                        })
+                    })
+                    .collect();
+                rows.push(serde_json::json!({
+                    "workspaceId": stored.id,
+                    "workspacePath": stored.path,
+                    "searched": true,
+                    "hitCount": hits.len(),
+                    "hits": hits,
+                }));
+            }
+            Err(error) => {
+                rows.push(serde_json::json!({
+                    "workspaceId": stored.id,
+                    "workspacePath": stored.path,
+                    "searched": false,
+                    "reason": format!("search failed: {error}"),
+                }));
+            }
+        }
+    }
+
+    let human = {
+        let mut out = format!(
+            "All-workspaces search (inspection only): {query}\nRegistered workspaces: {total_registered}{}\n",
+            if truncated {
+                format!(" (scanned first {ALL_WORKSPACES_SCAN_CAP})")
+            } else {
+                String::new()
+            }
+        );
+        for row in &rows {
+            let path = row
+                .get("workspacePath")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            if row.get("searched") == Some(&serde_json::Value::Bool(true)) {
+                let count = row
+                    .get("hitCount")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                out.push_str(&format!("  {path}: {count} hits\n"));
+            } else {
+                let reason = row
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("-");
+                out.push_str(&format!("  {path}: not searched ({reason})\n"));
+            }
+        }
+        out
+    };
+    let envelope = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": {
+            "command": "search --all-workspaces",
+            "query": query,
+            "inspectionOnly": true,
+            "registeredWorkspaces": total_registered,
+            "scanCap": ALL_WORKSPACES_SCAN_CAP,
+            "truncated": truncated,
+            "rows": rows,
+        },
+        "degraded": [],
+    });
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human),
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&envelope.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(envelope.to_string() + "\n")),
+    }
+}
+
 fn handle_search<W, E>(
     cli: &Cli,
     args: &SearchArgs,
@@ -44936,6 +45132,9 @@ where
     }
     if let Some(family_id) = args.family.as_deref() {
         return handle_search_family(cli, args, family_id, stdout, stderr);
+    }
+    if args.all_workspaces {
+        return handle_search_all_workspaces(cli, args, stdout, stderr);
     }
     let Some(query) = args.query.as_ref() else {
         return write_domain_error(
@@ -63999,6 +64198,9 @@ impl NormalizedInvocation {
                 Command::Impact(_) => "impact".to_string(),
                 Command::Search(args) if args.recalibrate_now => {
                     "search --recalibrate-now".to_string()
+                }
+                Command::Search(args) if args.all_workspaces => {
+                    "search --all-workspaces".to_string()
                 }
                 Command::Search(_) => "search".to_string(),
                 Command::Similar(_) => "similar".to_string(),

@@ -1715,6 +1715,10 @@ impl EffectManifest {
             CommandEffect::read_only("schema list", "List response schemas"),
             CommandEffect::read_only_db("search", "Search memories"),
             CommandEffect::read_only_db(
+                "search --all-workspaces",
+                "Read-only diagnostic: run one query across every workspace registered in the addressed database plus the global lane, rows labeled per workspace; inspection surface, never a pack input",
+            ),
+            CommandEffect::read_only_db(
                 "sentinel explain",
                 "Explain sentinel specifications and prior results",
             ),
