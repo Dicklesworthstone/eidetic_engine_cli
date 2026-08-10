@@ -17,7 +17,7 @@ use super::context::{
 use super::decide::{DecideItem, DecideRevisitOptions, decide_revisit};
 use super::search::SearchSourceMode;
 use crate::db::DbConnection;
-use crate::models::{DomainError, MemoryScope, RedactionLevel};
+use crate::models::{DomainError, GLOBAL_MEMORY_SCOPE_TAG, MemoryScope, RedactionLevel};
 use crate::pack::{ContextPackProfile, PackResourceProfile, RenderedPackProvenance};
 use crate::search::SpeedMode;
 
@@ -272,12 +272,47 @@ fn orient_fast_items_from_pack(
         .map(|item| item.memory_id.to_string())
         .collect::<Vec<_>>();
     let memory_refs = memory_ids.iter().map(String::as_str).collect::<Vec<_>>();
-    let memories = connection
+    let mut memories = connection
         .get_memories_batch(&memory_refs)
         .map_err(|error| format!("Relevant memory metadata could not be loaded: {error}"))?;
-    let tags = connection
+    let mut tags = connection
         .get_memory_tags_batch(&memory_refs)
         .map_err(|error| format!("Relevant memory tags could not be loaded: {error}"))?;
+
+    let missing_ids = memory_ids
+        .iter()
+        .filter(|id| !memories.contains_key(id.as_str()))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if !missing_ids.is_empty()
+        && let Ok(paths) = crate::core::global_store::default_global_store_paths_from_env()
+        && paths.database_path.is_file()
+    {
+        let global_connection = DbConnection::open_file_read_only(&paths.database_path)
+            .map_err(|error| format!("Relevant global memory metadata could not be opened: {error}"))?;
+        if global_connection
+            .needs_migration()
+            .map_err(|error| format!("Relevant global memory migration state could not be inspected: {error}"))?
+        {
+            return Err(
+                "Relevant global memory metadata requires a database migration".to_owned(),
+            );
+        }
+        let global_memories = global_connection
+            .get_memories_batch(&missing_ids)
+            .map_err(|error| format!("Relevant global memory metadata could not be loaded: {error}"))?;
+        let mut global_tags = global_connection
+            .get_memory_tags_batch(&missing_ids)
+            .map_err(|error| format!("Relevant global memory tags could not be loaded: {error}"))?;
+        for id in global_memories.keys() {
+            let item_tags = global_tags.entry(id.clone()).or_default();
+            if !item_tags.iter().any(|tag| tag == GLOBAL_MEMORY_SCOPE_TAG) {
+                item_tags.push(GLOBAL_MEMORY_SCOPE_TAG.to_owned());
+            }
+        }
+        memories.extend(global_memories);
+        tags.extend(global_tags);
+    }
 
     let mut rendered = Vec::with_capacity(items.len());
     for item in items {
@@ -720,7 +755,13 @@ mod tests {
             max_tokens: 4_000,
             candidate_pool: 100,
         });
-        ensure_equal(&report.posture, &"ready", "fast-content posture")?;
+        ensure(
+            report.posture == "ready",
+            format!(
+                "fast-content posture: expected \"ready\", got {:?}; issues={:?}",
+                report.posture, report.issues
+            ),
+        )?;
         if report.recent.is_empty() || report.relevant.is_empty() {
             return Err(format!(
                 "fast content must return both sections from a populated indexed store: {report:?}"
