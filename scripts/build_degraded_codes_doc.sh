@@ -148,6 +148,7 @@ HEADER
         invocation="$(jq -r '.trigger.invocation // ""' "$fixture")"
         repair_present="$(jq -r '.repair_present // false' "$fixture")"
         repair_contains="$(jq -r '.expected_emission.repair_contains // ""' "$fixture")"
+        repair_string="$(jq -r '.expected_emission.repair_string // ""' "$fixture")"
         message_contains="$(jq -r '(.expected_emission.message_contains // []) | join(" ... ")' "$fixture")"
         retired="$(jq -r '.retired // false' "$fixture")"
         retired_bead="$(jq -r '.retired_by.bead // ""' "$fixture")"
@@ -208,7 +209,10 @@ HEADER
 
         echo ""
         echo "**Expected emission.** Message contains: \`$message_contains\`"
-        if [ "$repair_present" = "true" ] && [ -n "$repair_contains" ] && [ "$repair_contains" != "null" ]; then
+        if [ "$repair_present" = "true" ] && [ -n "$repair_string" ] && [ "$repair_string" != "null" ]; then
+            echo ""
+            echo "**Repair hint.** $repair_string"
+        elif [ "$repair_present" = "true" ] && [ -n "$repair_contains" ] && [ "$repair_contains" != "null" ]; then
             echo ""
             echo "**Repair hint.** \`$repair_contains\`"
         elif [ "$repair_present" = "true" ]; then

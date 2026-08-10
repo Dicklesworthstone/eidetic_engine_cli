@@ -6,12 +6,31 @@ use ee::core::search::{
 };
 use ee::models::{EmbedBackend, MemoryScope, MemoryScopeStats};
 
+const DEGRADED_CODES_DOC: &str = include_str!("../docs/degraded_codes.md");
+const DEGRADED_CODES_DOC_BUILDER: &str = include_str!("../scripts/build_degraded_codes_doc.sh");
+
 fn runtime_profile() -> RuntimeProfileReport {
     RuntimeProfileReport::for_profile(OperatingProfile::Swarm, "rerank-posture-contract")
 }
 
 fn scope_stats() -> MemoryScopeStats {
     MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0)
+}
+
+#[test]
+fn generated_catalog_preserves_the_exact_offline_reranker_repair() {
+    assert!(
+        DEGRADED_CODES_DOC.contains(&format!(
+            "**Repair hint.** {RERANK_MODEL_UNAVAILABLE_REPAIR}"
+        )),
+        "the agent-facing catalog must publish the exact actionable offline repair"
+    );
+    assert!(
+        DEGRADED_CODES_DOC_BUILDER.contains(
+            "repair_string=\"$(jq -r '.expected_emission.repair_string // \"\"' \"$fixture\")\"",
+        ),
+        "regeneration must prefer the pinned repair_string over repair_contains"
+    );
 }
 
 fn empty_search_report(degraded: Vec<SearchDegradation>) -> SearchReport {

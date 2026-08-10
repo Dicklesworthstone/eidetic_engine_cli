@@ -13086,7 +13086,7 @@ ee model status --workspace . --json
 
 **Expected emission.** Message contains: `registered default rerank model hash ... bundled manifest`
 
-**Repair hint.** `ee model fetch rerank-default`
+**Repair hint.** Remove the corrupt model artifact and rerun `ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst`.
 
 **Fixture.** [`tests/fixtures/failure_modes/rerank_model_corrupt.json`](../tests/fixtures/failure_modes/rerank_model_corrupt.json)
 
@@ -13117,7 +13117,7 @@ ee model status --workspace . --json
 
 **Expected emission.** Message contains: `reranker is registered ... no default rerank model artifact`
 
-**Repair hint.** `ee model fetch rerank-default`
+**Repair hint.** ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst
 
 **Fixture.** [`tests/fixtures/failure_modes/rerank_model_missing.json`](../tests/fixtures/failure_modes/rerank_model_missing.json)
 
@@ -13148,7 +13148,7 @@ ee search 'release verification' --workspace . --json
 
 **Expected emission.** Message contains: `No usable local reranker is registered ... fusion-only ranking ... verified offline reranker artifact`
 
-**Repair hint.** `ee model fetch rerank-default`
+**Repair hint.** ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst
 
 **Fixture.** [`tests/fixtures/failure_modes/rerank_model_unavailable.json`](../tests/fixtures/failure_modes/rerank_model_unavailable.json)
 
