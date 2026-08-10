@@ -1898,7 +1898,7 @@ fn dispatch_with_echo_policy_and_workspace(
                 }),
             )
         }
-        METHOD_CONTEXT => dispatch_context(request, shutdown),
+        METHOD_CONTEXT => dispatch_context(request, shutdown, search_advisory_session),
         METHOD_SEARCH => dispatch_search(request, shutdown, search_advisory_session),
         METHOD_TELEMETRY => dispatch_telemetry(request),
         METHOD_WRITE => dispatch_write(request, write_router),
@@ -3696,7 +3696,11 @@ impl DaemonContextParams {
     }
 }
 
-fn dispatch_context(request: &DaemonRequest, shutdown: &AtomicBool) -> DaemonResponse {
+fn dispatch_context(
+    request: &DaemonRequest,
+    shutdown: &AtomicBool,
+    search_advisory_session: &Mutex<SearchAdvisorySession>,
+) -> DaemonResponse {
     if shutdown.load(Ordering::SeqCst) {
         return daemon_shutting_down_response(
             request.request_id.clone(),
@@ -3803,21 +3807,7 @@ fn dispatch_context(request: &DaemonRequest, shutdown: &AtomicBool) -> DaemonRes
             "ee.daemon.context deadline expired while rendering the response.",
         );
     }
-    if rendered.len() > super::DAEMON_RESPONSE_MAX_BYTES {
-        return DaemonResponse::err(
-            request.request_id.clone(),
-            request.agent_id.clone(),
-            request.workspace_id.clone(),
-            DAEMON_CONTEXT_EXECUTION_FAILED_CODE,
-            format!(
-                "ee.daemon.context rendered {} bytes, exceeding the {}-byte daemon response cap; \
-                 lower maxTokens or use the in-process CLI pack path.",
-                rendered.len(),
-                super::DAEMON_RESPONSE_MAX_BYTES
-            ),
-        );
-    }
-    let result = match serde_json::from_str::<serde_json::Value>(&rendered) {
+    let mut result = match serde_json::from_str::<serde_json::Value>(&rendered) {
         Ok(result) => result,
         Err(error) => {
             return DaemonResponse::err(
@@ -3829,6 +3819,17 @@ fn dispatch_context(request: &DaemonRequest, shutdown: &AtomicBool) -> DaemonRes
             );
         }
     };
+    let mut advisory_session = search_advisory_session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut staged_advisory_session = advisory_session.clone();
+    filter_context_large_gap_advisory(&mut result, &mut staged_advisory_session);
+    if daemon_context_deadline_expired(context_started, params.timeout_ms) {
+        return daemon_context_deadline_response(
+            request,
+            "ee.daemon.context deadline expired while finalizing degradations.",
+        );
+    }
     let degraded_codes = result
         .pointer("/data/degraded")
         .and_then(serde_json::Value::as_array)
@@ -3846,7 +3847,50 @@ fn dispatch_context(request: &DaemonRequest, shutdown: &AtomicBool) -> DaemonRes
     for code in degraded_codes {
         response = response.with_degraded(code);
     }
+    if !daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
+        return DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            DAEMON_CONTEXT_EXECUTION_FAILED_CODE,
+            format!(
+                "ee.daemon.context response exceeded the {}-byte daemon response cap; lower maxTokens or use the in-process CLI pack path.",
+                super::DAEMON_RESPONSE_MAX_BYTES
+            ),
+        );
+    }
+    *advisory_session = staged_advisory_session;
     response
+}
+
+fn filter_context_large_gap_advisory(
+    response: &mut serde_json::Value,
+    session: &mut SearchAdvisorySession,
+) {
+    const CODE: &str = "search_index_large_gap";
+    let has_large_gap = ["/degraded", "/data/degraded"].into_iter().any(|pointer| {
+        response
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry.get("code").and_then(serde_json::Value::as_str) == Some(CODE)
+                })
+            })
+    });
+    if !has_large_gap || session.emit_response_code_once(CODE) {
+        return;
+    }
+    for pointer in ["/degraded", "/data/degraded"] {
+        if let Some(entries) = response
+            .pointer_mut(pointer)
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            entries.retain(|entry| {
+                entry.get("code").and_then(serde_json::Value::as_str) != Some(CODE)
+            });
+        }
+    }
 }
 
 fn daemon_context_deadline_expired(started: Instant, timeout_ms: Option<u64>) -> bool {
@@ -4546,6 +4590,52 @@ mod tests {
             repeated_result.response["degraded"][0]["code"],
             "search_index_stale"
         );
+    }
+
+    #[test]
+    fn context_large_gap_advisory_is_staged_once_without_hiding_stale_truth() {
+        fn context_response() -> serde_json::Value {
+            let degraded = serde_json::json!([
+                {"code": "search_index_stale", "severity": "medium", "message": "stale"},
+                {"code": "search_index_large_gap", "severity": "medium", "message": "large"}
+            ]);
+            serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": {"degraded": degraded.clone()},
+                "degraded": degraded,
+            })
+        }
+
+        let mut shared = SearchAdvisorySession::default();
+        let mut rejected_stage = shared.clone();
+        let mut rejected = context_response();
+        filter_context_large_gap_advisory(&mut rejected, &mut rejected_stage);
+        assert!(rejected["degraded"].as_array().is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry["code"] == "search_index_large_gap")
+        }));
+        assert_eq!(shared, SearchAdvisorySession::default());
+
+        let mut delivered_stage = shared.clone();
+        let mut delivered = context_response();
+        filter_context_large_gap_advisory(&mut delivered, &mut delivered_stage);
+        shared = delivered_stage;
+
+        let mut repeated_stage = shared.clone();
+        let mut repeated = context_response();
+        filter_context_large_gap_advisory(&mut repeated, &mut repeated_stage);
+        for pointer in ["/degraded", "/data/degraded"] {
+            let codes = repeated
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_array)
+                .expect("degraded array")
+                .iter()
+                .filter_map(|entry| entry["code"].as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(codes, vec!["search_index_stale"]);
+        }
     }
 
     #[cfg(target_vendor = "apple")]
