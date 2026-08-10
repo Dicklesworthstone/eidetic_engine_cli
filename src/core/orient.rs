@@ -25,6 +25,32 @@ pub const ORIENT_DECISIONS_SCHEMA_V1: &str = "ee.orient.decisions.v1";
 pub const ORIENT_FAST_CONTENT_SCHEMA_V1: &str = "ee.orient.fast_content.v1";
 pub const ORIENT_FAST_CONTENT_LIMIT: usize = 5;
 
+/// Maximum child-directory depth scanned by nearby-store discovery.
+pub const NEARBY_STORE_CHILD_DEPTH: usize = 3;
+/// Maximum nearby stores reported (ranked by document count).
+pub const NEARBY_STORE_REPORT_LIMIT: usize = 5;
+/// Default wall-clock budget for one discovery scan.
+pub const NEARBY_STORE_SCAN_BUDGET_MS: u64 = 200;
+
+/// Directory names never descended into during nearby-store discovery.
+const NEARBY_STORE_SKIP_DIRS: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "venv",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".cache",
+    ".rch-tmp",
+    ".doctor",
+];
+
+/// Store directory names that mark a candidate workspace.
+const NEARBY_STORE_MARKERS: &[&str] = &[".ee", ".ee-campaign"];
+
 #[derive(Clone, Debug)]
 pub struct OrientDecisionOptions<'a> {
     pub workspace_path: &'a Path,
@@ -306,6 +332,161 @@ pub fn orient_decisions(
     })
 }
 
+// ============ nearby-store discovery (bd-orient-store-discovery-ft1z5) ============
+//
+// When the addressed workspace has an empty (or missing) store, agents are
+// usually one directory away from the real one — and an empty-store answer
+// with no pointer reads as "ee has nothing for you", silently destroying
+// ee's value for the session. Discovery scans child directories (bounded
+// depth, skip-listed, time-capped) and parents up to the git root for
+// populated stores, so the orientation output can point at them.
+
+/// One discovered populated store near the addressed workspace.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NearbyStore {
+    /// Workspace root that owns the store (the directory containing `.ee`
+    /// or `.ee-campaign`).
+    pub workspace_root: String,
+    /// The store directory itself.
+    pub store_dir: String,
+    /// Total memory rows in the store (all workspaces, tombstones included —
+    /// a presence signal, not a curation metric).
+    pub documents: u64,
+    /// Store database file mtime (RFC 3339): the last actual write.
+    pub last_write: Option<String>,
+}
+
+/// Bounded discovery result.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct NearbyStoreScan {
+    /// Ranked by document count (desc), then path; capped at
+    /// [`NEARBY_STORE_REPORT_LIMIT`].
+    pub stores: Vec<NearbyStore>,
+    /// True when the scan hit its wall-clock budget before covering every
+    /// candidate directory.
+    pub truncated: bool,
+}
+
+/// Scan for populated stores near `workspace_path`.
+///
+/// Read-only and loud about nothing: unreadable directories and stores that
+/// fail to open are skipped (permission-denied children must not fail
+/// orientation). The addressed workspace's own store is excluded.
+#[must_use]
+pub fn discover_nearby_stores(
+    workspace_path: &Path,
+    budget: std::time::Duration,
+) -> NearbyStoreScan {
+    let started = std::time::Instant::now();
+    let mut scan = NearbyStoreScan::default();
+    let own_roots: Vec<std::path::PathBuf> = workspace_path
+        .canonicalize()
+        .map(|canonical| vec![canonical])
+        .unwrap_or_else(|_| vec![workspace_path.to_path_buf()]);
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+
+    // (a) children, breadth-first, bounded depth.
+    let mut frontier = vec![(workspace_path.to_path_buf(), 0_usize)];
+    while let Some((dir, depth)) = frontier.pop() {
+        if started.elapsed() > budget {
+            scan.truncated = true;
+            break;
+        }
+        if depth > 0 {
+            candidates.push(dir.clone());
+        }
+        if depth >= NEARBY_STORE_CHILD_DEPTH {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if NEARBY_STORE_SKIP_DIRS.contains(&name) || NEARBY_STORE_MARKERS.contains(&name) {
+                continue;
+            }
+            frontier.push((path, depth + 1));
+        }
+    }
+
+    // (b) parents up to (and including) the git root.
+    let mut parent = workspace_path.parent();
+    while let Some(dir) = parent {
+        if started.elapsed() > budget {
+            scan.truncated = true;
+            break;
+        }
+        candidates.push(dir.to_path_buf());
+        if dir.join(".git").exists() {
+            break;
+        }
+        parent = dir.parent();
+    }
+
+    for candidate in candidates {
+        if started.elapsed() > budget {
+            scan.truncated = true;
+            break;
+        }
+        let canonical = candidate
+            .canonicalize()
+            .unwrap_or_else(|_| candidate.clone());
+        if own_roots.contains(&canonical) {
+            continue;
+        }
+        for marker in NEARBY_STORE_MARKERS {
+            let store_dir = candidate.join(marker);
+            let database = store_dir.join("ee.db");
+            if !database.is_file() {
+                continue;
+            }
+            let Some(profile) = nearby_store_profile(&database) else {
+                continue;
+            };
+            let (documents, last_write) = profile;
+            if documents == 0 {
+                continue;
+            }
+            scan.stores.push(NearbyStore {
+                workspace_root: candidate.display().to_string(),
+                store_dir: store_dir.display().to_string(),
+                documents,
+                last_write,
+            });
+        }
+    }
+
+    scan.stores.sort_by(|left, right| {
+        right
+            .documents
+            .cmp(&left.documents)
+            .then_with(|| left.workspace_root.cmp(&right.workspace_root))
+    });
+    scan.stores.truncate(NEARBY_STORE_REPORT_LIMIT);
+    scan
+}
+
+/// Read `(memory rows, db mtime)` from a candidate store, skipping quietly
+/// on any failure.
+fn nearby_store_profile(database: &Path) -> Option<(u64, Option<String>)> {
+    let connection = DbConnection::open_file_read_only(database).ok()?;
+    let documents = connection.count_table_rows("memories").ok()?;
+    let documents = u64::try_from(documents).unwrap_or(0);
+    let last_write = std::fs::metadata(database)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .map(|modified| DateTime::<Utc>::from(modified).to_rfc3339());
+    Some((documents, last_write))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,6 +508,10 @@ mod tests {
         } else {
             Err(format!("{context}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn ensure(condition: bool, message: String) -> TestResult {
+        if condition { Ok(()) } else { Err(message) }
     }
 
     fn remember_fixture(
@@ -572,6 +757,98 @@ mod tests {
             &report.decisions[0].topic,
             &"Prompt format".to_owned(),
             "decision topic",
+        )
+    }
+
+    // ===== nearby-store discovery tests (bd-orient-store-discovery-ft1z5) =====
+
+    fn scan_budget() -> std::time::Duration {
+        // Tests use a generous budget so slow CI disks cannot flake the
+        // truncation-free assertions.
+        std::time::Duration::from_secs(10)
+    }
+
+    #[test]
+    fn discovery_finds_populated_child_store() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let child = temp.path().join("campaign");
+        std::fs::create_dir_all(&child).map_err(|error| error.to_string())?;
+        remember_fixture(&child, "Nearby store rule one.", "nearby", None)?;
+
+        let scan = discover_nearby_stores(temp.path(), scan_budget());
+        ensure_equal(&scan.stores.len(), &1_usize, "one nearby store")?;
+        ensure(
+            scan.stores[0].workspace_root.ends_with("campaign"),
+            format!("workspace root wrong: {:?}", scan.stores[0]),
+        )?;
+        ensure(
+            scan.stores[0].documents >= 1,
+            format!("document count wrong: {:?}", scan.stores[0]),
+        )?;
+        ensure(
+            scan.stores[0].last_write.is_some(),
+            "last_write must be populated".to_owned(),
+        )
+    }
+
+    #[test]
+    fn discovery_ranks_candidates_by_document_count() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let small = temp.path().join("small");
+        let large = temp.path().join("large");
+        std::fs::create_dir_all(&small).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&large).map_err(|error| error.to_string())?;
+        remember_fixture(&small, "Small store single rule.", "nearby", None)?;
+        remember_fixture(&large, "Large store rule one.", "nearby", None)?;
+        remember_fixture(&large, "Large store rule two.", "nearby", None)?;
+
+        let scan = discover_nearby_stores(temp.path(), scan_budget());
+        ensure_equal(&scan.stores.len(), &2_usize, "two nearby stores")?;
+        ensure(
+            scan.stores[0].workspace_root.ends_with("large"),
+            format!("largest store must rank first: {:?}", scan.stores),
+        )?;
+        ensure(
+            scan.stores[0].documents > scan.stores[1].documents,
+            format!("ranking must be by document count: {:?}", scan.stores),
+        )
+    }
+
+    #[test]
+    fn discovery_excludes_own_store_and_empty_dirs() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        // The addressed workspace has its own populated store: it must not
+        // report itself, and an empty sibling dir contributes nothing.
+        remember_fixture(temp.path(), "Own store rule.", "own", None)?;
+        std::fs::create_dir_all(temp.path().join("empty_child"))
+            .map_err(|error| error.to_string())?;
+
+        let scan = discover_nearby_stores(temp.path(), scan_budget());
+        ensure_equal(&scan.stores.len(), &0_usize, "no nearby stores reported")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_skips_permission_denied_children_without_error() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let open_child = temp.path().join("open");
+        let locked = temp.path().join("locked");
+        std::fs::create_dir_all(&open_child).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&locked).map_err(|error| error.to_string())?;
+        remember_fixture(&open_child, "Reachable store rule.", "nearby", None)?;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .map_err(|error| error.to_string())?;
+
+        let scan = discover_nearby_stores(temp.path(), scan_budget());
+        // Restore permissions so tempdir cleanup succeeds.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&scan.stores.len(), &1_usize, "reachable store still found")?;
+        ensure(
+            scan.stores[0].workspace_root.ends_with("open"),
+            format!("wrong store surfaced: {:?}", scan.stores),
         )
     }
 }
