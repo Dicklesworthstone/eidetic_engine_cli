@@ -2767,6 +2767,34 @@ fn gather_path_probes(workspace_root: &Path) -> Vec<PathCapacityProbe> {
     gather_path_probes_with_options(workspace_root, &HostProfileProbeOptions::default())
 }
 
+#[cfg(test)]
+mod bounded_probe_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_path_probe_reports_existing_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (exists, capacity) =
+            bounded_path_probe(temp.path()).expect("healthy mount probes within budget");
+        assert!(exists);
+        assert!(capacity.is_some(), "capacity resolves on a live filesystem");
+    }
+
+    #[test]
+    fn bounded_path_probe_missing_path_uses_nearest_ancestor() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing = temp.path().join("not-created-yet");
+        let (exists, capacity) =
+            bounded_path_probe(&missing).expect("healthy mount probes within budget");
+        assert!(!exists);
+        let (used_ancestor, _) = capacity.expect("ancestor capacity resolves");
+        assert!(
+            used_ancestor,
+            "capacity came from the nearest existing ancestor"
+        );
+    }
+}
+
 // Path probes call statvfs per spec path and can block on slow or
 // disconnected mounts, so the runtime hot path must never reach them.
 // The thread-local counter lets tests prove that containment without
@@ -2774,6 +2802,47 @@ fn gather_path_probes(workspace_root: &Path) -> Vec<PathCapacityProbe> {
 #[cfg(test)]
 thread_local! {
     static PATH_PROBE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Per-path probe budget (bd-ybul6). `stat`/`statvfs` on a stalled mount
+/// (USB ExFAT under swarm churn, disconnected network volume) blocks
+/// in-kernel for seconds and cannot be interrupted — sampled `ee status`
+/// runs spent 100% of a 2.6-6.6s wall stall inside `statvfs`. Each spec
+/// probe therefore runs on a worker thread that is ABANDONED on timeout
+/// (the thread finishes or dies with the kernel wait; a one-shot process
+/// exits regardless), so one dead mount costs one bounded wait instead of
+/// wedging every status/diag invocation.
+const PATH_PROBE_TIMEOUT_MS: u64 = 250;
+
+/// `(exists, capacity_for_path(..))` computed on an abandoned-on-timeout
+/// worker thread; `None` means the probe timed out on a stalled mount.
+fn bounded_path_probe(path: &Path) -> Option<(bool, Option<(bool, FsCapacity)>)> {
+    let display = path.display().to_string();
+    let owned = path.to_path_buf();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("ee-path-probe".to_owned())
+        .spawn(move || {
+            let exists = owned.exists();
+            let capacity = capacity_for_path(&owned);
+            let _ = sender.send((exists, capacity));
+        });
+    if spawned.is_err() {
+        // Thread spawn failure: probe inline as the pre-bound code did.
+        return Some((path.exists(), capacity_for_path(path)));
+    }
+    match receiver.recv_timeout(std::time::Duration::from_millis(PATH_PROBE_TIMEOUT_MS)) {
+        Ok(result) => Some(result),
+        Err(_) => {
+            tracing::debug!(
+                target: "ee::profile::probe",
+                path = %display,
+                timeout_ms = PATH_PROBE_TIMEOUT_MS,
+                "path capacity probe abandoned on a stalled mount"
+            );
+            None
+        }
+    }
 }
 
 fn gather_path_probes_with_options(
@@ -2790,7 +2859,9 @@ fn gather_path_probes_with_options(
     let cargo_target_dir = env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace_root.join("target"));
-    let workspace_capacity = capacity_for_path(workspace_root).map(|(_, capacity)| capacity);
+    let workspace_capacity = bounded_path_probe(workspace_root)
+        .and_then(|(_, capacity)| capacity)
+        .map(|(_, capacity)| capacity);
 
     let specs = [
         PathSpec {
@@ -2833,8 +2904,7 @@ fn gather_path_probes_with_options(
     specs
         .iter()
         .map(|spec| {
-            let exists = spec.path.exists();
-            let capacity = capacity_for_path(spec.path);
+            let (exists, capacity) = bounded_path_probe(spec.path).unwrap_or((false, None));
             let (nearest_existing_ancestor, capacity) = match capacity {
                 Some((nearest_existing_ancestor, capacity)) => {
                     (nearest_existing_ancestor, Some(capacity))
