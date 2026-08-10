@@ -259,6 +259,28 @@ WARMED_COUNTS="$(jq -c '{
     staleRejected: (.data.rejected.staleEntries // 0)
 }' "$LAST_STDOUT")"
 
+# bd-ty3pl.3 apply executor: the same manifest under --apply performs
+# bounded READS ONLY and reports per-class warm status + byte accounting.
+run_step cache_prewarm_apply \
+    --workspace "$WORKSPACE" \
+    --json \
+    cache \
+    prewarm \
+    --from-hotset "$HOTSET_JSON" \
+    --profile standard \
+    --current-generation "$CURRENT_GENERATION" \
+    --apply
+jq -e '
+  (.data.applied.status // "") != ""
+  and (.data.applied.bytesRead >= 0)
+  and (.data.applied.classes.search != null)
+  and (.data.applied.classes.readPool != null)
+' "$LAST_STDOUT" >/dev/null || {
+    printf 'hotset prewarm e2e failed: apply report missing per-class warm evidence\n' >&2
+    sed -n '1,40p' "$LAST_STDOUT" >&2 || true
+    exit 1
+}
+
 run_step search_after --workspace "$WORKSPACE" --json search "$QUERY" --relevance-floor 0.0
 SEARCH_AFTER="$LAST_STDOUT"
 run_step pack_after --workspace "$WORKSPACE" --json pack "$QUERY" --max-tokens 2000
