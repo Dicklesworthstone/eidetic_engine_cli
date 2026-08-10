@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.graph.suggest_links.v1.json",
+  "title": "ee.graph.suggest_links.v1",
+  "description": "Read-only link-prediction report for ee graph suggest-links (ADR 0066): bounded candidate generation (shared capped neighbor, capped tag, or retrieval-affinity edge), fnx-backed Adamic-Adar and preferential attachment, tag Jaccard, symmetrized PPR, and the retrieval-affinity signal (honestly omitted when cold), blended with per-batch min-max normalization. Suggestions are typed (related|supports|contradicts) and every row carries raw per-signal values plus a human-readable reason. Default is a report; --propose emits curation candidates and never writes links directly.",
+  "type": "object",
+  "required": [
+    "schema",
+    "suggestions",
+    "candidateCount",
+    "affinityCold",
+    "proposed"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.graph.suggest_links.v1"
+    },
+    "suggestions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "memoryA",
+          "memoryB",
+          "score",
+          "suggestedRelation",
+          "signals",
+          "reason"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "memoryA": {
+            "type": "string"
+          },
+          "memoryB": {
+            "type": "string"
+          },
+          "score": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0
+          },
+          "suggestedRelation": {
+            "type": "string",
+            "enum": ["related", "supports", "contradicts"]
+          },
+          "signals": {
+            "type": "object",
+            "required": [
+              "adamicAdar",
+              "jaccardTags",
+              "ppr",
+              "affinity",
+              "preferentialAttachment"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "adamicAdar": {
+                "type": "number"
+              },
+              "jaccardTags": {
+                "type": "number"
+              },
+              "ppr": {
+                "type": "number"
+              },
+              "affinity": {
+                "type": "number"
+              },
+              "preferentialAttachment": {
+                "type": "number"
+              }
+            }
+          },
+          "reason": {
+            "type": "string"
+          },
+          "proposedCandidateId": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    },
+    "candidateCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "affinityCold": {
+      "type": "boolean"
+    },
+    "proposed": {
+      "type": "boolean",
+      "description": "True when --propose wrote curation candidates for the listed suggestions."
+    }
+  }
+}

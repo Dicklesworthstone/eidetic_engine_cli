@@ -5037,6 +5037,24 @@ pub enum GraphCommand {
     FeatureEnrichment(GraphFeatureEnrichmentArgs),
     /// Show the deterministic memory-link neighborhood for a memory.
     Neighborhood(GraphNeighborhoodArgs),
+    /// Predict missing links with blended, typed, explained scoring (ADR 0066).
+    SuggestLinks(GraphSuggestLinksArgs),
+}
+
+/// Arguments for `ee graph suggest-links` (ADR 0066 / bd-3a1op.3).
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct GraphSuggestLinksArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Maximum suggestions to emit.
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+
+    /// Minimum blended score to include.
+    #[arg(long = "min-score", default_value_t = 0.0)]
+    pub min_score: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
@@ -13959,6 +13977,9 @@ where
         }
         Some(Command::Graph(GraphCommand::FeatureEnrichment(ref args))) => {
             handle_graph_feature_enrichment(&cli, args, stdout, stderr)
+        }
+        Some(Command::Graph(GraphCommand::SuggestLinks(ref args))) => {
+            handle_graph_suggest_links(&cli, args, stdout, stderr)
         }
         Some(Command::Graph(GraphCommand::Neighborhood(ref args))) => {
             handle_graph_neighborhood(&cli, args, stdout, stderr)
@@ -33634,6 +33655,300 @@ impl GraphAlgorithmInput {
 }
 
 #[cfg(feature = "graph")]
+fn handle_graph_suggest_links<W, E>(
+    cli: &Cli,
+    args: &GraphSuggestLinksArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    #[cfg(feature = "graph")]
+    {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        use crate::core::suggest_links::{
+            SuggestLinksInput, generate_candidate_pairs, suggest_links,
+        };
+
+        let options = GraphReadOptions {
+            database: args.database.as_deref(),
+            min_weight: None,
+            min_confidence: None,
+            link_limit: Some(100_000),
+            limit: None,
+            include_tombstoned: false,
+        };
+        let input = match graph_algorithm_input(cli, options) {
+            Ok(input) => input,
+            Err(domain_error) => {
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+        let database_path = match graph_database_path(cli, args.database.as_deref()) {
+            Ok(path) => path,
+            Err(domain_error) => {
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+        let conn = match crate::db::DbConnection::open_file(&database_path) {
+            Ok(conn) => conn,
+            Err(error) => {
+                let domain_error = DomainError::Storage {
+                    message: format!("Failed to open database: {error}"),
+                    repair: Some("ee doctor --json".to_string()),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+
+        // Node set from the capped link graph.
+        let mut node_ids: BTreeSet<String> = BTreeSet::new();
+        for link in &input.links {
+            node_ids.insert(link.src_memory_id.clone());
+            node_ids.insert(link.dst_memory_id.clone());
+        }
+
+        // Retrieval-affinity edges from the latest projection snapshot
+        // (honestly omitted when cold).
+        let workspace_path =
+            resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+        let workspace_id = conn
+            .get_workspace_by_path(&workspace_path.to_string_lossy())
+            .ok()
+            .flatten()
+            .map(|workspace| workspace.id);
+        let affinity: Option<BTreeMap<(String, String), f64>> =
+            workspace_id.as_deref().and_then(|workspace_id| {
+                conn.get_latest_graph_snapshot(
+                    workspace_id,
+                    crate::db::GraphSnapshotType::RetrievalAffinity,
+                )
+                .ok()
+                .flatten()
+                .and_then(|snapshot| {
+                    serde_json::from_str::<serde_json::Value>(&snapshot.metrics_json).ok()
+                })
+                .and_then(|metrics| {
+                    metrics
+                        .get("edges")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|edges| {
+                            edges
+                                .iter()
+                                .filter_map(|edge| {
+                                    let a = edge.get("a")?.as_str()?.to_owned();
+                                    let b = edge.get("b")?.as_str()?.to_owned();
+                                    let weight = edge.get("weight")?.as_f64()?;
+                                    Some(((a, b), weight))
+                                })
+                                .collect::<BTreeMap<_, _>>()
+                        })
+                })
+            });
+        if let Some(edges) = &affinity {
+            for (a, b) in edges.keys() {
+                node_ids.insert(a.clone());
+                node_ids.insert(b.clone());
+            }
+        }
+
+        // Tags for the node set.
+        let node_refs: Vec<&str> = node_ids.iter().map(String::as_str).collect();
+        let tags_raw = conn.get_memory_tags_batch(&node_refs).unwrap_or_default();
+        let tags: BTreeMap<String, BTreeSet<String>> = tags_raw
+            .into_iter()
+            .map(|(memory_id, tags)| (memory_id, tags.into_iter().collect()))
+            .collect();
+        // Tag-only memories still need node entries for candidate generation;
+        // tags come from the batch above so the node set is already complete.
+
+        let links: Vec<(String, String)> = input
+            .links
+            .iter()
+            .map(|link| (link.src_memory_id.clone(), link.dst_memory_id.clone()))
+            .collect();
+
+        // Pre-compute candidates so PPR runs only for endpoints that will be
+        // scored (seed cap keeps the walk bounded).
+        let mut prepared = SuggestLinksInput {
+            links,
+            tags,
+            ppr: BTreeMap::new(),
+            affinity,
+            content: BTreeMap::new(),
+            weights: crate::core::suggest_links::SuggestBlendWeights::default(),
+            contradiction: crate::core::suggest_links::ContradictionThresholds::default(),
+            limit: args.limit,
+            min_score: args.min_score,
+        };
+        let candidates = generate_candidate_pairs(&prepared);
+
+        const PPR_SEED_CAP: usize = 64;
+        let mut seeds: BTreeSet<String> = BTreeSet::new();
+        for (left, right) in &candidates {
+            if seeds.len() >= PPR_SEED_CAP {
+                break;
+            }
+            seeds.insert(left.clone());
+            if seeds.len() < PPR_SEED_CAP {
+                seeds.insert(right.clone());
+            }
+        }
+        let mut ppr_scores: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+        for seed in &seeds {
+            let Ok(seed_id) = seed.parse::<crate::models::MemoryId>() else {
+                continue;
+            };
+            let mut seed_map = BTreeMap::new();
+            seed_map.insert(seed_id, 1.0);
+            if let Ok(scores) =
+                crate::graph::ppr::compute_personalized_pagerank(&input.directed, &seed_map)
+            {
+                ppr_scores.insert(
+                    seed.clone(),
+                    scores
+                        .into_iter()
+                        .map(|(memory_id, score)| (memory_id.to_string(), score))
+                        .collect(),
+                );
+            }
+        }
+        for (left, right) in &candidates {
+            let forward = ppr_scores
+                .get(left)
+                .and_then(|scores| scores.get(right))
+                .copied()
+                .unwrap_or(0.0);
+            let backward = ppr_scores
+                .get(right)
+                .and_then(|scores| scores.get(left))
+                .copied()
+                .unwrap_or(0.0);
+            if forward + backward > 0.0 {
+                prepared
+                    .ppr
+                    .insert((left.clone(), right.clone()), forward + backward);
+            }
+        }
+
+        // Content for typed relations, bounded to candidate endpoints.
+        const CONTENT_FETCH_CAP: usize = 512;
+        let mut content: BTreeMap<String, String> = BTreeMap::new();
+        for (left, right) in &candidates {
+            for memory_id in [left, right] {
+                if content.len() >= CONTENT_FETCH_CAP {
+                    break;
+                }
+                if !content.contains_key(memory_id)
+                    && let Ok(Some(memory)) = conn.get_memory(memory_id)
+                {
+                    content.insert(memory_id.clone(), memory.content);
+                }
+            }
+        }
+        prepared.content = content;
+
+        let report = suggest_links(&prepared);
+
+        let mut degraded: Vec<serde_json::Value> = Vec::new();
+        if report.affinity_cold {
+            degraded.push(serde_json::json!({
+                "code": crate::core::retrieval_affinity::RETRIEVAL_AFFINITY_COLD_CODE,
+                "severity": "info",
+                "message": "Retrieval-affinity snapshot absent (cold); the blend proceeded without that signal.",
+                "repair": "ee steward run retrieval_affinity_refresh --workspace . --json  # after some real search/pack traffic",
+            }));
+        }
+        if report.candidate_count == 0 {
+            degraded.push(serde_json::json!({
+                "code": "suggest_links_insufficient_graph",
+                "severity": "info",
+                "message": "No bounded candidate pairs: too few links, tags, or affinity edges for any predictor to score.",
+                "repair": "ee memory link <id> <target-id> --relation related --json  # or add tags; suggestions need some graph evidence",
+            }));
+        }
+        let suggestions_json: Vec<serde_json::Value> = report
+            .suggestions
+            .iter()
+            .map(|suggestion| {
+                serde_json::json!({
+                    "memoryA": suggestion.memory_a,
+                    "memoryB": suggestion.memory_b,
+                    "score": (suggestion.score * 1_000_000.0).round() / 1_000_000.0,
+                    "suggestedRelation": suggestion.suggested_relation.as_str(),
+                    "signals": {
+                        "adamicAdar": suggestion.signals.adamic_adar,
+                        "jaccardTags": suggestion.signals.jaccard_tags,
+                        "ppr": suggestion.signals.ppr,
+                        "affinity": suggestion.signals.affinity,
+                        "preferentialAttachment": suggestion.signals.preferential_attachment,
+                    },
+                    "reason": suggestion.reason,
+                    "proposedCandidateId": serde_json::Value::Null,
+                })
+            })
+            .collect();
+        let data = serde_json::json!({
+            "command": "graph suggest-links",
+            "report": {
+                "schema": "ee.graph.suggest_links.v1",
+                "suggestions": suggestions_json,
+                "candidateCount": report.candidate_count,
+                "affinityCold": report.affinity_cold,
+                "proposed": false,
+            },
+        });
+        let response = serde_json::json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": data,
+            "degraded": degraded,
+        });
+        match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                let mut out = format!(
+                    "link suggestions ({} of {} candidates)\n",
+                    report.suggestions.len(),
+                    report.candidate_count
+                );
+                for suggestion in &report.suggestions {
+                    out.push_str(&format!(
+                        "  {:.4}  {}  {} <-> {}\n",
+                        suggestion.score,
+                        suggestion.suggested_relation.as_str(),
+                        suggestion.memory_a,
+                        suggestion.memory_b,
+                    ));
+                }
+                if report.affinity_cold {
+                    out.push_str("(retrieval-affinity signal cold; omitted honestly)\n");
+                }
+                write_stdout(stdout, &out)
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&response.to_string()) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+        }
+    }
+    #[cfg(not(feature = "graph"))]
+    {
+        let _ = (args, stderr);
+        write_graph_surface_data(
+            cli,
+            stdout,
+            graph_feature_disabled_data("graph suggest-links"),
+        )
+    }
+}
+
 fn graph_algorithm_input(
     cli: &Cli,
     options: GraphReadOptions<'_>,
@@ -64426,6 +64741,7 @@ impl NormalizedInvocation {
                     GraphCommand::CentralityRefresh(_) => "graph centrality-refresh".to_string(),
                     GraphCommand::FeatureEnrichment(_) => "graph feature-enrichment".to_string(),
                     GraphCommand::Neighborhood(_) => "graph neighborhood".to_string(),
+                    GraphCommand::SuggestLinks(_) => "graph suggest-links".to_string(),
                 },
                 Command::Index(index) => match index {
                     IndexCommand::Rebuild(_) => "index rebuild".to_string(),

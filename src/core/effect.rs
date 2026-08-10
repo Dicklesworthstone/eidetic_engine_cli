@@ -1438,6 +1438,10 @@ impl EffectManifest {
             CommandEffect::read_only_db("graph neighborhood", "Inspect graph neighborhood"),
             CommandEffect::read_only_db("graph pagerank", "Compute graph PageRank scores"),
             CommandEffect::read_only_db("graph path", "Find graph shortest path"),
+            CommandEffect::read_only_db(
+                "graph suggest-links",
+                "Predict missing memory links with bounded, typed, explained blended scoring (ADR 0066); read-only report",
+            ),
             CommandEffect::read_only(
                 "handoff completion-audit",
                 "Audit objective completion evidence without mutation",

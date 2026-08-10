@@ -203,11 +203,21 @@ fn typed_relation(
     }
 }
 
-/// Generate bounded candidates and score them with the blended predictor
-/// suite. Deterministic: ordering is score desc, then pair id.
+/// Bounded candidate generation (public so the CLI can pre-compute PPR
+/// seeds for exactly the pairs that will be scored). Deterministic order.
 #[must_use]
-pub fn suggest_links(input: &SuggestLinksInput) -> SuggestLinksReport {
-    // ── existing-link set + capped neighbor lists ─────────────────────────
+pub fn generate_candidate_pairs(input: &SuggestLinksInput) -> Vec<(String, String)> {
+    let (_, _, candidates) = bounded_candidates(input);
+    candidates
+}
+
+fn bounded_candidates(
+    input: &SuggestLinksInput,
+) -> (
+    BTreeSet<(String, String)>,
+    BTreeMap<String, Vec<String>>,
+    Vec<(String, String)>,
+) {
     let mut linked: BTreeSet<(String, String)> = BTreeSet::new();
     let mut neighbors: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for (left, right) in &input.links {
@@ -218,19 +228,20 @@ pub fn suggest_links(input: &SuggestLinksInput) -> SuggestLinksReport {
         neighbors.entry(left.as_str()).or_default().insert(right);
         neighbors.entry(right.as_str()).or_default().insert(left);
     }
-    // Deterministic per-node cap: keep the lexicographically first
-    // NEIGHBOR_FANOUT_CAP neighbors (edge weights are uniform here).
-    let capped_neighbors: BTreeMap<&str, Vec<&str>> = neighbors
+    let capped_neighbors: BTreeMap<String, Vec<String>> = neighbors
         .iter()
         .map(|(node, set)| {
             (
-                *node,
-                set.iter().copied().take(NEIGHBOR_FANOUT_CAP).collect(),
+                (*node).to_owned(),
+                set.iter()
+                    .copied()
+                    .take(NEIGHBOR_FANOUT_CAP)
+                    .map(str::to_owned)
+                    .collect(),
             )
         })
         .collect();
 
-    // ── candidate pairs: shared neighbor, shared tag, or affinity edge ────
     let mut candidates: BTreeSet<(String, String)> = BTreeSet::new();
     for adjacent in capped_neighbors.values() {
         for (left_index, left) in adjacent.iter().enumerate() {
@@ -271,7 +282,15 @@ pub fn suggest_links(input: &SuggestLinksInput) -> SuggestLinksReport {
             }
         }
     }
-    let candidate_pairs: Vec<(String, String)> = candidates.into_iter().collect();
+    let ordered: Vec<(String, String)> = candidates.iter().cloned().collect();
+    (linked, capped_neighbors, ordered)
+}
+
+/// Generate bounded candidates and score them with the blended predictor
+/// suite. Deterministic: ordering is score desc, then pair id.
+#[must_use]
+pub fn suggest_links(input: &SuggestLinksInput) -> SuggestLinksReport {
+    let (_linked, capped_neighbors, candidate_pairs) = bounded_candidates(input);
     let candidate_count = candidate_pairs.len();
     if candidate_pairs.is_empty() {
         return SuggestLinksReport {
@@ -283,9 +302,9 @@ pub fn suggest_links(input: &SuggestLinksInput) -> SuggestLinksReport {
     // ── graph signals via fnx over the undirected link graph ─────────────
     let mut graph = Graph::new(CompatibilityMode::Strict);
     for (node, adjacent) in &capped_neighbors {
-        graph.add_node(*node);
+        graph.add_node(node.as_str());
         for neighbor in adjacent {
-            let _ = graph.add_edge(*node, *neighbor);
+            let _ = graph.add_edge(node.as_str(), neighbor.as_str());
         }
     }
     for (left, right) in &candidate_pairs {

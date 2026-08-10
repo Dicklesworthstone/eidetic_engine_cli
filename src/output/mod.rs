@@ -10569,6 +10569,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: graph_snapshot_prune_schema_definition,
         },
         SchemaEntry {
+            id: "ee.graph.suggest_links.v1",
+            version: "1",
+            description: "Typed link-prediction report for ee graph suggest-links: bounded candidates, blended fnx-backed signals with raw per-signal values, and curation-candidate emission via --propose.",
+            category: "graph",
+            definition: graph_suggest_links_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::witness_retention::WITNESS_PRUNE_REPORT_SCHEMA_V1,
             version: "1",
             description: "Graph algorithm witness prune report",
@@ -12096,6 +12103,10 @@ fn reflection_request_ledger_diagnostics_schema_definition() -> String {
 
 fn graph_export_response_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.graph.export.v1.json").to_string()
+}
+
+fn graph_suggest_links_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.graph.suggest_links.v1.json").to_string()
 }
 
 fn graph_snapshot_prune_schema_definition() -> String {
