@@ -4739,7 +4739,7 @@ fn proof_broker_wait_for_inflight_refuses_before_remote_dispatch() -> TestResult
 }
 
 #[test]
-fn proof_broker_source_mismatch_refuses_before_remote_dispatch() -> TestResult {
+fn proof_broker_source_mismatch_reserves_and_dispatches_current_source() -> TestResult {
     let ledger = unique_tmp_path("proof-broker-source-mismatch-ledger").join("ledger.json");
     fs::create_dir_all(
         ledger
@@ -4780,22 +4780,30 @@ fn proof_broker_source_mismatch_refuses_before_remote_dispatch() -> TestResult {
             ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire),
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
-                "[RCH] remote should-not-run (0.1s)\n",
+                "Selected worker: css\n[RCH] remote css (0.1s)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "css"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "css"),
         ],
     )?;
-    if status.success() {
-        return Err("source mismatch admission should refuse before RCH".to_owned());
+    if !status.success() {
+        return Err(format!(
+            "source mismatch should reserve and rerun current source\nstdout:\n{stdout}\nstderr:\n{_stderr}"
+        ));
     }
     let report: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("parse proof broker source mismatch report: {error}"))?;
-    if report["status"] != "proof_broker_refused"
-        || report["proof_broker"]["verdict"] != "source_state_mismatch"
-        || report["proof_broker"]["remoteCargoLaunched"] != false
+    if report["status"] != "remote_pass"
+        || report["worker_id"] != "css"
+        || report["proof_broker"]["originalVerdict"] != "source_state_mismatch"
+        || report["proof_broker"]["verdict"] != "dispatch_allowed"
+        || report["proof_broker"]["reservation"]["status"] != "acquired"
+        || report["proof_broker"]["dispatchAttempted"] != true
+        || report["proof_broker"]["remoteCargoLaunched"] != true
     {
         return Err(format!(
-            "source mismatch admission did not refuse: {report}"
+            "source mismatch admission did not reserve and dispatch: {report}"
         ));
     }
     if !degraded_contains(&report, "rch_verify_proof_broker_source_state_mismatch")? {
@@ -4953,6 +4961,116 @@ fn proof_broker_local_cargo_bypass_is_unusable_without_bypass() -> TestResult {
     if !invocations.contains("--local-cargo-tripwire-class class:local_cargo_bypass_detected") {
         return Err(format!(
             "local Cargo bypass class was not sent to proof admission: {invocations}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_broker_unknown_local_cargo_policy_fails_closed() -> TestResult {
+    let ledger = unique_tmp_path("proof-broker-local-unknown-ledger").join("ledger.json");
+    fs::create_dir_all(
+        ledger
+            .parent()
+            .ok_or_else(|| "ledger path missing parent".to_owned())?,
+    )
+    .map_err(|error| format!("create proof-broker ledger dir: {error}"))?;
+    fs::write(&ledger, "[]").map_err(|error| format!("write proof-broker ledger: {error}"))?;
+    let ledger_arg = ledger
+        .to_str()
+        .ok_or_else(|| "ledger path is not utf-8".to_owned())?;
+    let clean_tripwire = r#"{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"ok","count":0,"processes":[],"detectedLocalBuilds":[]}"#;
+    let unknown_tripwire = r#"{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"ok","count":0,"processes":[],"detectedLocalBuilds":[{"policyStatus":"unknown_informational"}]}"#;
+
+    let args = [
+        "--skip-build-admission",
+        "--proof-broker-ledger",
+        ledger_arg,
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "proof_broker_local_unknown",
+    ];
+    let common_remote_env = [
+        ("RCH_VERIFY_PROOF_BROKER_NATIVE", "1"),
+        (
+            "RCH_VERIFY_FAKE_OUTPUT",
+            "Selected worker: css\n[RCH] remote css (0.1s)\n",
+        ),
+        ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+        ("RCH_VERIFY_CONFIGURED_WORKERS", "css"),
+        ("RCH_VERIFY_DAEMON_WORKERS", "css"),
+    ];
+    let mut clean_env = common_remote_env.to_vec();
+    clean_env.push(("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", clean_tripwire));
+    let (first_status, first_stdout, first_stderr) = run_script_with_env(&args, &clean_env)?;
+    if !first_status.success() {
+        return Err(format!(
+            "clean native proof did not seed the completed same-command ledger\nstdout:\n{first_stdout}\nstderr:\n{first_stderr}"
+        ));
+    }
+
+    let mut unknown_env = common_remote_env.to_vec();
+    unknown_env.push(("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", unknown_tripwire));
+    let (status, stdout, _stderr) = run_script_with_env(&args, &unknown_env)?;
+    if status.success() {
+        return Err("unknown local Cargo policy should refuse before RCH".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse proof broker local unknown report: {error}"))?;
+    if report["status"] != "proof_broker_refused"
+        || report["proof_broker"]["verdict"] != "unknown_insufficient_evidence"
+        || report["proof_broker"]["fingerprint"]["localCargoTripwireClass"]
+            != "class:tripwire_unknown"
+        || report["proof_broker"]["remoteCargoLaunched"] != false
+    {
+        return Err(format!(
+            "unknown local policy did not fail closed: {report}"
+        ));
+    }
+    if !degraded_contains(
+        &report,
+        "rch_verify_proof_broker_unknown_insufficient_evidence",
+    )? || !degraded_contains(&report, "rch_verify_local_cargo_process_policy_unknown")?
+    {
+        return Err(format!(
+            "unknown local policy degraded codes missing: {report}"
+        ));
+    }
+    let mut rows: Value = serde_json::from_str(
+        &fs::read_to_string(&ledger)
+            .map_err(|error| format!("read native proof ledger: {error}"))?,
+    )
+    .map_err(|error| format!("parse native proof ledger: {error}"))?;
+    if rows.as_array().map_or(0, Vec::len) != 1
+        || rows[0]["state"] != "completed"
+        || rows[0]["fingerprint"]["localCargoTripwireClass"] != "class:tripwire_clean"
+    {
+        return Err(format!(
+            "unknown policy should not dispatch or replace the older completed proof: {rows}"
+        ));
+    }
+
+    rows[0]["fingerprint"] = report["proof_broker"]["fingerprint"].clone();
+    fs::write(
+        &ledger,
+        serde_json::to_vec(&rows)
+            .map_err(|error| format!("serialize exact unknown proof ledger: {error}"))?,
+    )
+    .map_err(|error| format!("write exact unknown proof ledger: {error}"))?;
+    let (exact_status, exact_stdout, _exact_stderr) = run_script_with_env(&args, &unknown_env)?;
+    if exact_status.success() {
+        return Err("an exact completed proof with unknown policy must not be reused".to_owned());
+    }
+    let exact_report: Value = serde_json::from_str(&exact_stdout)
+        .map_err(|error| format!("parse exact unknown proof report: {error}"))?;
+    if exact_report["status"] != "proof_broker_refused"
+        || exact_report["proof_broker"]["verdict"] != "unknown_insufficient_evidence"
+        || exact_report["proof_broker"]["remoteCargoLaunched"] != false
+    {
+        return Err(format!(
+            "exact unknown-policy proof was not refused before reuse: {exact_report}"
         ));
     }
     Ok(())

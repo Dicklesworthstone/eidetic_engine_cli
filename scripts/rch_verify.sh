@@ -1049,10 +1049,41 @@ try:
     tripwire_count = int(tripwire.get("count") or 0)
 except (TypeError, ValueError):
     tripwire_count = 0
-if tripwire_status == "ok" and tripwire_count == 0:
+detected_builds = []
+for field in ("detectedLocalBuilds", "processes"):
+    rows = tripwire.get(field)
+    if isinstance(rows, list):
+        detected_builds.extend(item for item in rows if isinstance(item, dict))
+informational_policy_statuses = {
+    "editor_tooling_informational",
+    "unkillable_stale_informational",
+}
+blocking_policy_statuses = {
+    "local_cargo_disallowed",
+    "local_cargo_read_only_lock_holder",
+    "local_rust_tool_disallowed",
+}
+observed_policy_statuses = {
+    str(item.get("policyStatus") or "")
+    for item in detected_builds
+    if isinstance(item, dict)
+}
+unknown_policy_statuses = {
+    status
+    for status in observed_policy_statuses
+    if status not in informational_policy_statuses | blocking_policy_statuses
+}
+if unknown_policy_statuses:
+    local_cargo_tripwire_class = "class:tripwire_unknown"
+elif (
+    tripwire_status == "ok"
+    and tripwire_count == 0
+    and not (observed_policy_statuses & blocking_policy_statuses)
+):
     local_cargo_tripwire_class = "class:tripwire_clean"
 elif (
     tripwire_count > 0
+    or bool(observed_policy_statuses & blocking_policy_statuses)
     or "bypass" in tripwire_status
     or "blocked" in tripwire_status
 ):
@@ -1322,9 +1353,40 @@ matched = next((record for record in records if isinstance(record, dict) and (
     (record.get("fingerprint") or {}).get("fingerprintId") == fingerprint["fingerprintId"]
     or semantic_fingerprint(record.get("fingerprint")) == semantic_fingerprint(fingerprint)
 )), None)
-decision = None
+unknown = []
+if fingerprint["sourceTreeFingerprint"] == "class:unknown_source":
+    unknown.append("source_fingerprint_missing")
+if fingerprint["envFingerprintClass"] == "class:unknown_env":
+    unknown.append("env_class_missing")
+if fingerprint["rchRuntimeClass"] == "class:unknown_rch_runtime":
+    unknown.append("rch_runtime_unknown")
+if fingerprint["localCargoTripwireClass"] == "class:tripwire_unknown":
+    unknown.append("tripwire_unknown")
+if fingerprint["buildAdmissionPosture"] == "class:admission_unknown":
+    unknown.append("build_admission_unknown")
+
+if unknown:
+    decision = admission(
+        "unknown_insufficient_evidence",
+        unknown,
+        "collect_source_and_environment_evidence",
+    )
+elif "mismatch" in fingerprint["rchRuntimeClass"] or "no_worker" in fingerprint["workerRequirement"] or "blocked" in fingerprint["buildAdmissionPosture"]:
+    decision = admission(
+        "environment_blocked",
+        ["environment_or_worker_blocked"],
+        "repair_remote_runtime_before_dispatch",
+    )
+elif "bypass" in fingerprint["localCargoTripwireClass"] or "blocked" in fingerprint["localCargoTripwireClass"]:
+    decision = admission(
+        "proof_unusable",
+        ["local_cargo_tripwire_blocked", "remote_required"],
+        "discard_local_cargo_evidence_and_rerun_remote",
+    )
+else:
+    decision = None
 now = utc_now()
-if matched:
+if decision is None and matched:
     state = matched.get("state")
     prior = matched.get("admission") if isinstance(matched.get("admission"), dict) else {}
     if state == "in_flight":
@@ -1374,25 +1436,8 @@ if decision is None:
         record["fingerprint"].get("commandHash") == fingerprint["commandHash"] and
         record["fingerprint"].get("commandClass") == fingerprint["commandClass"] and
         record["fingerprint"].get("executionSubstrate") == fingerprint["executionSubstrate"]), None)
-    unknown = []
-    if fingerprint["sourceTreeFingerprint"] == "class:unknown_source":
-        unknown.append("source_fingerprint_missing")
-    if fingerprint["envFingerprintClass"] == "class:unknown_env":
-        unknown.append("env_class_missing")
-    if fingerprint["rchRuntimeClass"] == "class:unknown_rch_runtime":
-        unknown.append("rch_runtime_unknown")
-    if fingerprint["localCargoTripwireClass"] == "class:tripwire_unknown":
-        unknown.append("tripwire_unknown")
-    if fingerprint["buildAdmissionPosture"] == "class:admission_unknown":
-        unknown.append("build_admission_unknown")
     if command_match:
         decision = admission("source_state_mismatch", ["command_match", "fingerprint_mismatch"], "rerun_current_source")
-    elif unknown:
-        decision = admission("unknown_insufficient_evidence", unknown, "collect_source_and_environment_evidence")
-    elif "mismatch" in fingerprint["rchRuntimeClass"] or "no_worker" in fingerprint["workerRequirement"] or "blocked" in fingerprint["buildAdmissionPosture"]:
-        decision = admission("environment_blocked", ["environment_or_worker_blocked"], "repair_remote_runtime_before_dispatch")
-    elif "bypass" in fingerprint["localCargoTripwireClass"] or "blocked" in fingerprint["localCargoTripwireClass"]:
-        decision = admission("proof_unusable", ["local_cargo_tripwire_blocked", "remote_required"], "discard_local_cargo_evidence_and_rerun_remote")
     else:
         decision = admission("dispatch_allowed", ["no_equivalent_record", "read_only_admission"], "launch_single_rch_proof")
 
@@ -1465,6 +1510,25 @@ print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 PY
 }
 
+proof_broker_promote_source_mismatch_json() {
+    JSON_INPUT="${PROOF_BROKER_JSON:-null}" python3 - <<'PY'
+import json
+import os
+
+try:
+    payload = json.loads(os.environ.get("JSON_INPUT") or "null")
+except Exception:
+    payload = None
+if not isinstance(payload, dict):
+    payload = {"enabled": False}
+if payload.get("verdict") == "source_state_mismatch":
+    payload["originalVerdict"] = "source_state_mismatch"
+    payload["verdict"] = "dispatch_allowed"
+    payload["nextAction"] = "reserve_and_rerun_current_source"
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+}
+
 proof_broker_remote_result_json() {
     local remote_launched="${1:?remote launched bool required}"
     JSON_INPUT="${PROOF_BROKER_JSON:-null}" \
@@ -1504,7 +1568,10 @@ run_proof_broker_admission() {
     fi
 
     local ee_bin=""
-    if [ -n "$PROOF_BROKER_EE_BIN" ]; then
+    if [ "${RCH_VERIFY_PROOF_BROKER_NATIVE:-0}" = "1" ]; then
+        PROOF_BROKER_JSON="$(run_native_proof_broker_admission)"
+        return 0
+    elif [ -n "$PROOF_BROKER_EE_BIN" ]; then
         ee_bin="$PROOF_BROKER_EE_BIN"
     elif ! ee_bin="$(candidate_ee_bin)"; then
         PROOF_BROKER_JSON="$(run_native_proof_broker_admission)"
@@ -6020,8 +6087,32 @@ try:
     local_cargo_process_count = int(local_cargo_processes.get("count") or 0)
 except (TypeError, ValueError):
     local_cargo_process_count = 0
+detected_local_builds = []
+for field in ("detectedLocalBuilds", "processes"):
+    rows = local_cargo_processes.get(field)
+    if isinstance(rows, list):
+        detected_local_builds.extend(item for item in rows if isinstance(item, dict))
+known_local_cargo_policy_statuses = {
+    "editor_tooling_informational",
+    "local_cargo_disallowed",
+    "local_cargo_read_only_lock_holder",
+    "local_rust_tool_disallowed",
+    "unkillable_stale_informational",
+}
+unknown_local_cargo_policy_statuses = sorted({
+    str(item.get("policyStatus") or "")
+    for item in detected_local_builds
+    if isinstance(item, dict)
+    and str(item.get("policyStatus") or "") not in known_local_cargo_policy_statuses
+})
 if local_cargo_process_count > 0 and "rch_verify_local_cargo_processes_present" not in degraded:
     degraded.append("rch_verify_local_cargo_processes_present")
+    proof["degraded_codes"] = degraded
+if (
+    unknown_local_cargo_policy_statuses
+    and "rch_verify_local_cargo_process_policy_unknown" not in degraded
+):
+    degraded.append("rch_verify_local_cargo_process_policy_unknown")
     proof["degraded_codes"] = degraded
 
 worker_state_code_set = {
@@ -6059,6 +6150,7 @@ if not proof_broker_bypassed:
         and code not in {
             "rch_verify_proof_broker_reuse_existing",
             "rch_verify_proof_broker_bypassed",
+            "rch_verify_proof_broker_source_state_mismatch",
         }
     }
 
@@ -6684,8 +6776,11 @@ if [ -n "$PROOF_BROKER_LEDGER" ]; then
             # ledger's proof for this command is bound to an OLDER source
             # fingerprint, which is the normal state on a moving main and the
             # broker's own nextAction is rerun_current_source. Dispatch fresh
-            # with the verdict carried as a degraded note.
+            # with the verdict carried as a degraded note. Promote the
+            # admission before the atomic reservation so concurrent reruns of
+            # the new fingerprint cannot both launch.
             proof_broker_degraded+=("rch_verify_proof_broker_source_state_mismatch")
+            PROOF_BROKER_JSON="$(proof_broker_promote_source_mismatch_json)"
             ;;
         reuse_existing)
             RCH_INVOCATION=()
