@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "global_lane_conflict_deferred",
+  "introduced_by": {
+    "bead": "bd-1bfwa.3"
+  },
+  "surfaces": [
+    "pack"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Pack assembly found a workspace memory and a global-lane memory contradicting each other on the same subject. Neither side is silently dropped: both stay in the candidate pool with globalLane markers and the contradiction is deferred to the operator.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember \"rule: use tabs\" --workspace . --level procedural --kind rule",
+      "ee remember \"rule: use spaces\" --global --level procedural --kind rule"
+    ],
+    "invocation": "ee pack \"formatting rules\" --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "global_lane_conflict_deferred",
+    "severity": "info",
+    "message_contains": [
+      "Global/workspace lane contradiction detected",
+      "globalLane markers"
+    ],
+    "repair_contains": "tombstone or revise the stale lane row"
+  }
+}

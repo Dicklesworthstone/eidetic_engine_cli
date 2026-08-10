@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "global_lane_disabled",
+  "introduced_by": {
+    "bead": "bd-1bfwa.3"
+  },
+  "surfaces": [
+    "search",
+    "pack",
+    "primer"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "A retrieval surface ran with the global memory lane excluded \u2014 no global store exists yet, the workspace has participate=false, or [memory] include_global=false. The lane's absence is reported honestly instead of silently returning workspace-only results.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee search \"anything\" --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "global_lane_disabled",
+    "severity": "info",
+    "message_contains": [
+      "Global memory lane did not contribute"
+    ],
+    "repair_contains": "global"
+  }
+}

@@ -201,6 +201,8 @@ Current conventions:
 | `economy_simulation` | `ee economy simulate` attention-budget simulation degradation. |
 | `focus` | `ee focus` passive focus-state degradation. |
 | `git` | Swarm brief Git source degradation. |
+| `global_lane_conflict_deferred` | info | bd-1bfwa.3 |
+| `global_lane_disabled` | info | bd-1bfwa.3 |
 | `global_promotion_redaction_refused` | medium | bd-1bfwa.2 |
 | `graph_centrality_read` | `ee graph centrality` persisted centrality read degradation. |
 | `graph_dominance` | `ee why` revision-dominance impact analysis degradation. |

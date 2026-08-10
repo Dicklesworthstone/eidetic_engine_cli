@@ -87,6 +87,7 @@ set -euo pipefail
 #   6.126 Write Contention E2E - scripts/e2e_single_shot_write_contention.sh
 #   6.1265 Capture Track E2E   - scripts/e2e_capture.sh
 #   6.1266 Shadow Tuning E2E    - scripts/e2e_shadow_retrieval_tuning.sh
+#   6.1267 Global Lane E2E      - scripts/e2e_global_lane.sh
 #   6.127 Ergonomics E2E       - scripts/e2e_ergonomics.sh
 #   6.1293 Consolidation E2E   - scripts/e2e_consolidation.sh
 #   6.1295 Embedding Native E2E - scripts/e2e_embedding_native.sh
@@ -1169,6 +1170,13 @@ run_stage "Capture Track E2E (bd-2vq2z.20)" "EE_E2E_TMPDIR=/private/tmp EE_E2E_K
 # a promotable report dry-runs without writing, applies the [search]
 # overlay, and demote restores the prior config bytes exactly.
 run_stage "Shadow Retrieval Tuning E2E (bd-2tehh.4)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_shadow_retrieval_tuning.sh"
+
+# Gate 6.1267: Global knowledge lane E2E (bd-1bfwa.4). Three real
+# workspaces + a hermetic XDG user-global store: evidence-gated promote
+# (branch asserted from the actual trust class), cross-workspace
+# storeLane=global surfacing, participate=false isolation with the
+# honest global_lane_disabled code, and demote-global tombstoning.
+run_stage "Global Lane E2E (bd-1bfwa.4)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_global_lane.sh"
 
 # Gate 6.127: Ergonomics real-binary E2E (bd-1et0v.22). No-Cargo:
 # proves `ee context` remains an alias for canonical `ee pack` while carrying
