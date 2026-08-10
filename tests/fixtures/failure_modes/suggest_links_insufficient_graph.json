@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "suggest_links_insufficient_graph",
+  "introduced_by": {
+    "bead": "bd-3a1op.3"
+  },
+  "surfaces": [
+    "graph suggest-links"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee graph suggest-links ran against a workspace whose link/tag/affinity evidence yields zero bounded candidate pairs (too few nodes or edges for any predictor to score). The command reports the empty result honestly instead of relaxing the candidate bound.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee graph suggest-links --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "suggest_links_insufficient_graph",
+    "severity": "info",
+    "message_contains": [
+      "candidate"
+    ],
+    "repair_contains": "link"
+  }
+}

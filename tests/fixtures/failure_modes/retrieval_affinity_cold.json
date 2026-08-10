@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "retrieval_affinity_cold",
+  "introduced_by": {
+    "bead": "bd-3a1op.2"
+  },
+  "surfaces": [
+    "steward run retrieval_affinity_refresh",
+    "graph suggest-links"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "The retrieval-affinity projection has no accumulated evidence yet (fresh workspace, or all weights decayed below threshold). Consumers proceed honestly without the affinity signal instead of fabricating one: the steward refresh reports status=cold and suggest-links zero-weights the signal.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee steward run retrieval_affinity_refresh --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "retrieval_affinity_cold",
+    "severity": "info",
+    "message_contains": [
+      "cold"
+    ],
+    "repair_contains": "search"
+  }
+}

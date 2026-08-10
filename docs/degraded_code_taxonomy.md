@@ -202,6 +202,8 @@ Current conventions:
 | `focus` | `ee focus` passive focus-state degradation. |
 | `git` | Swarm brief Git source degradation. |
 | `global_lane_conflict_deferred` | info | bd-1bfwa.3 |
+| `retrieval_affinity_cold` | info | bd-3a1op.2 (ADR 0066) |
+| `suggest_links_insufficient_graph` | info | bd-3a1op.3 (ADR 0066) |
 | `global_lane_disabled` | info | bd-1bfwa.3 |
 | `global_promotion_redaction_refused` | medium | bd-1bfwa.2 |
 | `graph_centrality_read` | `ee graph centrality` persisted centrality read degradation. |
