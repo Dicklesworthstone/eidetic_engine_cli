@@ -65721,10 +65721,10 @@ mod tests {
         PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, ReflectCommand,
         ReflectRequestLedgerCommand, RegressCommand, RegressExplainArgs, RegressionSurfaceArg,
         RevivalObservationMode, RuleCommand, SESSION_BUDGET_PLAN_SCHEMA_V1, ShadowMode,
-        SituationCommand, StatusArgs, SupportCommand, SwarmBriefArgs, SwarmCommand,
-        SwarmRepairPlanArgs, SwarmWorkPacketArgs, TaskFrameCommand, TaskFrameSubgoalCommand,
-        TripwireCommand, TrustCommand, VerificationEvidenceAuthority, VerifyCommand,
-        VerifyRchCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
+        SituationCommand, StatusArgs, StatusProbeMode, SupportCommand, SwarmBriefArgs,
+        SwarmCommand, SwarmRepairPlanArgs, SwarmWorkPacketArgs, TaskFrameCommand,
+        TaskFrameSubgoalCommand, TripwireCommand, TrustCommand, VerificationEvidenceAuthority,
+        VerifyCommand, VerifyRchCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
         WorkspaceHygieneMode, cass_import_domain_error, collect_hotset_retrieval_provenance,
         collect_hotset_signals, context_request_from_options, context_stream_header_frame,
         context_stream_options_for_request, daemon_search_fallback_degradation,
@@ -65739,8 +65739,9 @@ mod tests {
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
         plan_cache_diag_degraded, plan_cache_diag_response_json,
         read_environment_attestation_fixture_json, render_bootstrap_degradations, run,
-        search_via_daemon, validate_daemon_search_capabilities, write_cancelled_error,
-        write_context_stream_terminal_error, write_domain_error, write_index_rebuild_error,
+        search_via_daemon, status_probe_mode, validate_daemon_search_capabilities,
+        write_cancelled_error, write_context_stream_terminal_error, write_domain_error,
+        write_index_rebuild_error,
     };
     use crate::cass::CassImportError;
     use crate::config::MeshCommandMode;
