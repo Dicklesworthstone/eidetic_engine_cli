@@ -8352,6 +8352,10 @@ impl CandidateType {
             Self::Supersede | Self::Split => 0.5,
             Self::Retract => 0.7,
             Self::Tombstone => 0.9,
+            // Link-graph proposals (bd-3a1op.3): applying one creates an
+            // explicit typed link, which a later curation can remove — about
+            // as reversible as a consolidate.
+            Self::LinkProposal | Self::ContradictionReview => 0.3,
         }
     }
 }

@@ -156,7 +156,7 @@ pub fn accumulate_retrieval_affinity(
     let search_len = search_rows.len();
     let mut current_key: Option<String> = None;
     let mut current_set: Vec<(String, u32)> = Vec::new();
-    let mut flush =
+    let flush =
         |set: &mut Vec<(String, u32)>, deltas: &mut BTreeMap<(String, String), f64>| -> u64 {
             let mut updated = 0;
             if set.len() > 1 {

@@ -16557,8 +16557,16 @@ mod tests {
                 "deadline-like index cancellation is deferable after commit",
             )?;
             let report = remember_index_job_queued_after_transient_failure("sidx_fixture", &error);
-            ensure(report.job_id, "sidx_fixture".to_owned(), "queued job id")?;
-            ensure(report.outcome, "skipped".to_owned(), "queued outcome")?;
+            ensure(
+                report.job_id.clone(),
+                "sidx_fixture".to_owned(),
+                "queued job id",
+            )?;
+            ensure(
+                report.outcome.clone(),
+                "skipped".to_owned(),
+                "queued outcome",
+            )?;
             ensure(
                 remember_index_status(&report),
                 "queued".to_owned(),
@@ -16608,9 +16616,13 @@ mod tests {
         )?;
 
         let report = remember_index_job_queued_for_coalescing(own_job);
-        ensure(report.outcome, "skipped".to_owned(), "queued outcome")?;
         ensure(
-            report.processing_mode,
+            report.outcome.clone(),
+            "skipped".to_owned(),
+            "queued outcome",
+        )?;
+        ensure(
+            report.processing_mode.clone(),
             "deferred_to_coalesced_contention_rebuild".to_owned(),
             "bounded burst processing mode",
         )?;
