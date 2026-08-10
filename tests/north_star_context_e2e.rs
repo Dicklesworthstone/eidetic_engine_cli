@@ -195,7 +195,7 @@ fn seed_cleanup_memories(dir: &Path) -> TestResult {
             "procedural",
         ),
         (
-            "Use git stash instead of discarding uncommitted changes.",
+            "Preserve uncommitted changes with a WIP commit instead of discarding them.",
             "rule",
             "procedural",
         ),
