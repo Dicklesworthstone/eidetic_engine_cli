@@ -97,6 +97,28 @@ pub struct ImportedCassSession {
     pub missing_metadata: Vec<String>,
 }
 
+/// Response-affecting degradation emitted when durable CASS import succeeds
+/// but its derived search-index publication does not.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CassImportDegradation {
+    pub code: &'static str,
+    pub severity: &'static str,
+    pub message: String,
+    pub repair: String,
+}
+
+impl CassImportDegradation {
+    #[must_use]
+    fn data_json(&self) -> JsonValue {
+        json!({
+            "code": self.code,
+            "severity": self.severity,
+            "message": self.message,
+            "repair": self.repair,
+        })
+    }
+}
+
 /// Stable per-session status string.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImportSessionStatus {
@@ -133,11 +155,42 @@ pub struct CassImportReport {
     pub spans_imported: u32,
     pub index_jobs_queued: u32,
     pub index_required_action: Option<String>,
+    pub degraded: Vec<CassImportDegradation>,
     pub status: String,
     pub sessions: Vec<ImportedCassSession>,
 }
 
 impl CassImportReport {
+    /// Mark every queued import job as published and remove the obsolete
+    /// manual-rebuild action.
+    pub fn record_index_publish_success(&mut self) {
+        self.index_required_action = None;
+        self.degraded
+            .retain(|entry| entry.code != "search_index_stale");
+    }
+
+    /// Preserve the committed import while truthfully reporting that its
+    /// derived search index still requires the exact advertised rebuild.
+    pub fn record_index_publish_failure(&mut self, detail: impl Into<String>) {
+        let repair = self.index_required_action.clone().unwrap_or_else(|| {
+            index_required_action(
+                Path::new(&self.workspace_path),
+                self.database_path.as_deref().map(Path::new),
+            )
+        });
+        self.degraded
+            .retain(|entry| entry.code != "search_index_stale");
+        self.degraded.push(CassImportDegradation {
+            code: "search_index_stale",
+            severity: "medium",
+            message: format!(
+                "CASS import committed successfully, but search-index publication failed: {}",
+                detail.into()
+            ),
+            repair,
+        });
+    }
+
     /// Render the stable JSON data payload for the response envelope.
     #[must_use]
     pub fn data_json(&self) -> JsonValue {
@@ -157,6 +210,7 @@ impl CassImportReport {
             "spansImported": self.spans_imported,
             "indexJobsQueued": self.index_jobs_queued,
             "indexRequiredAction": self.index_required_action,
+            "degraded": self.degraded.iter().map(CassImportDegradation::data_json).collect::<Vec<_>>(),
             "status": self.status,
             "sessions": self.sessions.iter().map(|session| {
                 let source_path = redact_import_report_source_ref(&session.source_path);
@@ -181,7 +235,7 @@ impl CassImportReport {
             .since
             .as_deref()
             .map_or_else(String::new, |cutoff| format!(" since {cutoff}"));
-        format!(
+        let mut output = format!(
             "{mode}CASS import {status}{since}: {imported} imported, {skipped} skipped, {spans} spans, {index_jobs} index jobs from {discovered} discovered sessions\n",
             status = self.status,
             imported = self.sessions_imported,
@@ -189,6 +243,36 @@ impl CassImportReport {
             spans = self.spans_imported,
             index_jobs = self.index_jobs_queued,
             discovered = self.sessions_discovered,
+        );
+        if !self.degraded.is_empty() {
+            output.push_str("  Degraded:\n");
+            for degradation in &self.degraded {
+                output.push_str(&format!(
+                    "    - {}: {} Repair: {}\n",
+                    degradation.code, degradation.message, degradation.repair
+                ));
+            }
+        }
+        output
+    }
+
+    /// Render the compact machine summary used by the TOON output mode.
+    #[must_use]
+    pub fn toon_summary(&self) -> String {
+        let index_status = if self.dry_run {
+            "dry_run"
+        } else if self.degraded.is_empty() && self.index_required_action.is_none() {
+            "published"
+        } else if self.degraded.is_empty() {
+            "queued"
+        } else {
+            "degraded"
+        };
+        let degraded_code = self.degraded.first().map_or("none", |entry| entry.code);
+        let repair = self.index_required_action.as_deref().unwrap_or("none");
+        format!(
+            "IMPORT_CASS|{}|{}|{}|{}|index={index_status}|degraded={degraded_code}|repair={repair}\n",
+            self.status, self.sessions_discovered, self.sessions_imported, self.spans_imported
         )
     }
 }
@@ -729,6 +813,7 @@ pub fn import_cass_sessions(
         spans_imported,
         index_jobs_queued,
         index_required_action: Some(index_required_action(&workspace_path, Some(&database_path))),
+        degraded: Vec::new(),
         status: "completed".to_string(),
         sessions: session_reports,
     })
@@ -1646,6 +1731,7 @@ fn dry_run_report(
         spans_imported: 0,
         index_jobs_queued: 0,
         index_required_action: None,
+        degraded: Vec::new(),
         status: "dry_run".to_string(),
         sessions: sessions
             .into_iter()
@@ -3342,7 +3428,7 @@ mod tests {
 
     #[test]
     fn report_json_identifies_import_command_and_session_status() -> TestResult {
-        let report = CassImportReport {
+        let mut report = CassImportReport {
             schema: IMPORT_CASS_SCHEMA_V1,
             workspace_path: "/tmp/work".to_string(),
             database_path: Some("/tmp/work/.ee/ee.db".to_string()),
@@ -3358,6 +3444,7 @@ mod tests {
             index_required_action: Some(
                 "ee index rebuild --workspace /tmp/work --database /tmp/work/.ee/ee.db".to_string(),
             ),
+            degraded: Vec::new(),
             status: "completed".to_string(),
             sessions: vec![ImportedCassSession {
                 source_path: "cass-session://safe-session".to_string(),
@@ -3395,6 +3482,40 @@ mod tests {
             &json["sessions"][0]["indexJobId"],
             &json!("sidx_abc"),
             "session index job",
+        )?;
+
+        let exact_repair = report
+            .index_required_action
+            .clone()
+            .ok_or_else(|| "fixture rebuild action is missing".to_owned())?;
+        report.record_index_publish_failure("injected staged publisher failure");
+        ensure_equal(
+            &report.index_required_action.as_deref(),
+            &Some(exact_repair.as_str()),
+            "publish failure preserves exact repair",
+        )?;
+        ensure_equal(
+            &report.degraded[0].code,
+            &"search_index_stale",
+            "publish failure degradation code",
+        )?;
+        ensure(
+            report.degraded[0]
+                .message
+                .contains("CASS import committed successfully"),
+            "publish failure distinguishes committed import from derived-index failure",
+        )?;
+
+        report.record_index_publish_success();
+        ensure_equal(
+            &report.index_required_action,
+            &None,
+            "publish success removes rebuild action",
+        )?;
+        ensure_equal(
+            &report.degraded.len(),
+            &0_usize,
+            "publish success removes stale degradation",
         )
     }
 
@@ -3418,6 +3539,7 @@ mod tests {
             spans_imported: 2,
             index_jobs_queued: 1,
             index_required_action: None,
+            degraded: Vec::new(),
             status: "completed".to_string(),
             sessions: vec![ImportedCassSession {
                 source_path: format!(

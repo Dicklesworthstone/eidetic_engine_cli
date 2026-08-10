@@ -15,8 +15,8 @@ use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 
 use crate::cass::{
-    CassClient, CassImportError, CassImportOptions, discover_import_binary, import_cass_sessions,
-    parse_import_since_duration,
+    CassClient, CassImportError, CassImportOptions, CassImportReport, discover_import_binary,
+    import_cass_sessions, parse_import_since_duration,
 };
 use crate::config::env_registry::{EnvVar, read, read_os};
 use crate::config::{
@@ -141,9 +141,10 @@ use crate::core::impact::{
     ImpactError, ImpactOptions, ImpactReport, ImpactSurfaceQuery, run_impact,
 };
 use crate::core::index::{
-    INDEX_PUBLISH_LOCK_CONTENTION_CODE, IndexRebuildError, IndexRebuildOptions, IndexRebuildReport,
-    IndexRebuildStatus, IndexReembedOptions, IndexStatusOptions, IndexVacuumOptions,
-    get_index_status, get_index_vacuum_report, rebuild_index, reembed_index,
+    DEFAULT_INDEX_SUBDIR, INDEX_PUBLISH_LOCK_CONTENTION_CODE, IndexHealth, IndexRebuildError,
+    IndexRebuildOptions, IndexRebuildReport, IndexRebuildStatus, IndexReembedOptions,
+    IndexStatusOptions, IndexVacuumOptions, get_index_status, get_index_status_with_connection,
+    get_index_vacuum_report, process_pending_index_jobs_coalesced, rebuild_index, reembed_index,
 };
 use crate::core::init::{InitOptions, InitReport, init_workspace};
 use crate::core::install::{
@@ -22098,38 +22099,107 @@ where
     };
 
     match import_cass_sessions(&cass_client, &options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &report.human_summary())
+        Ok(mut report) => {
+            reconcile_cass_import_index(&mut report);
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &report.human_summary())
+                }
+                output::Renderer::Toon => write_stdout(stdout, &report.toon_summary()),
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    let json = response_v2_json_from_data(report.data_json());
+                    write_stdout(stdout, &(json.to_string() + "\n"))
+                }
             }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &format!(
-                    "IMPORT_CASS|{}|{}|{}|{}\n",
-                    report.status,
-                    report.sessions_discovered,
-                    report.sessions_imported,
-                    report.spans_imported
-                ),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V2,
-                    "success": true,
-                    "degraded": [],
-                    "data": report.data_json(),
-                });
-                write_stdout(stdout, &(json.to_string() + "\n"))
-            }
-        },
+        }
         Err(error) => {
             let domain_error = cass_import_domain_error(&error);
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
     }
+}
+
+fn reconcile_cass_import_index(report: &mut CassImportReport) {
+    if report.dry_run || report.index_jobs_queued == 0 {
+        return;
+    }
+
+    match publish_cass_import_index(report) {
+        Ok(()) => report.record_index_publish_success(),
+        Err(detail) => report.record_index_publish_failure(detail),
+    }
+}
+
+fn publish_cass_import_index(report: &CassImportReport) -> Result<(), String> {
+    let database_path = report
+        .database_path
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| "committed CASS import report omitted its database path".to_owned())?;
+    let workspace_path = PathBuf::from(&report.workspace_path);
+    let index_dir = workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR);
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("failed to reopen the committed import database: {error}"))?;
+    let workspace_id = resolve_database_workspace_id(&connection, &workspace_path)
+        .map_err(|error| format!("failed to resolve the imported workspace: {error}"))?;
+
+    let expected_job_ids = report
+        .sessions
+        .iter()
+        .filter_map(|session| session.index_job_id.as_deref())
+        .collect::<BTreeSet<_>>();
+    if u32::try_from(expected_job_ids.len()).ok() != Some(report.index_jobs_queued) {
+        return Err(format!(
+            "import report listed {} distinct index job IDs for {} queued jobs",
+            expected_job_ids.len(),
+            report.index_jobs_queued
+        ));
+    }
+
+    let processing_reports =
+        process_pending_index_jobs_coalesced(&connection, &workspace_id, &index_dir, None)
+            .map_err(|error| format!("coalesced index publication could not start: {error}"))?;
+
+    for job_id in expected_job_ids {
+        let job = connection
+            .get_search_index_job(job_id)
+            .map_err(|error| format!("failed to verify search-index job {job_id}: {error}"))?
+            .ok_or_else(|| format!("search-index job {job_id} disappeared after publication"))?;
+        if job.status != "completed" {
+            let detail = processing_reports
+                .iter()
+                .find(|processing| processing.job_id == job_id)
+                .and_then(|processing| processing.error.as_deref())
+                .unwrap_or("publisher did not complete the queued job");
+            return Err(format!(
+                "search-index job {job_id} ended with status {}: {detail}",
+                job.status
+            ));
+        }
+    }
+
+    let status = get_index_status_with_connection(
+        &IndexStatusOptions {
+            workspace_path,
+            database_path: Some(database_path),
+            index_dir: Some(index_dir),
+        },
+        Some(&connection),
+    )
+    .map_err(|error| format!("failed to verify the published index generation: {error}"))?;
+    if status.health != IndexHealth::Ready || status.db_generation != status.index_generation {
+        return Err(format!(
+            "published index did not reach the committed database generation (health={}, db_generation={:?}, index_generation={:?})",
+            status.health.as_str(),
+            status.db_generation,
+            status.index_generation
+        ));
+    }
+
+    Ok(())
 }
 
 /// GH#21: resolve the wall-clock budget for CASS subprocess calls.
