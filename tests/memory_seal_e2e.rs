@@ -325,3 +325,56 @@ fn reveal_without_seal_and_seal_guards_fail_closed() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn attestation_bundle_carries_the_seal_block_offline() -> TestResult {
+    // bd-2ea4a: `ee attest memory` must embed the commit-reveal material so
+    // a third party verifies commitment-before-outcome without the database.
+    let workspace = temp_workspace()?;
+    let ws = workspace.path().to_string_lossy().to_string();
+    let (memory_id, commitment) = init_and_seal(workspace.path())?;
+
+    let attest = run_ee(&ws, &["attest", "memory", &memory_id, "--json"])?;
+    ensure_success(&attest, "attest memory (sealed)")?;
+    let envelope = stdout_json(&attest, "attest memory (sealed)")?;
+    let bundle = envelope
+        .pointer("/data/bundle")
+        .ok_or_else(|| format!("attest: no bundle in {envelope}"))?;
+    ensure(
+        bundle
+            .pointer("/schema")
+            .and_then(serde_json::Value::as_str)
+            == Some("ee.attestation.bundle.v2"),
+        format!("bundle schema must be v2: {bundle}"),
+    )?;
+    ensure(
+        bundle
+            .pointer("/seal/contentCommitment")
+            .and_then(serde_json::Value::as_str)
+            == Some(commitment.as_str()),
+        format!("bundle seal must carry the exact commitment: {bundle}"),
+    )?;
+    ensure(
+        bundle
+            .pointer("/seal/revealedAt")
+            .is_some_and(serde_json::Value::is_null),
+        "unrevealed seal must report revealedAt null",
+    )?;
+
+    // Unsealed memories must NOT carry a seal key (v1-identical shape).
+    let plain = run_ee(&ws, &["remember", "an ordinary unsealed note", "--json"])?;
+    ensure_success(&plain, "remember unsealed")?;
+    let plain_id = stdout_json(&plain, "remember unsealed")?
+        .pointer("/data/memoryId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("unsealed remember: no memory id")?
+        .to_owned();
+    let attest_plain = run_ee(&ws, &["attest", "memory", &plain_id, "--json"])?;
+    ensure_success(&attest_plain, "attest memory (unsealed)")?;
+    let plain_envelope = stdout_json(&attest_plain, "attest memory (unsealed)")?;
+    ensure(
+        plain_envelope.pointer("/data/bundle/seal").is_none(),
+        format!("unsealed bundle must omit the seal key: {plain_envelope}"),
+    )?;
+    Ok(())
+}
