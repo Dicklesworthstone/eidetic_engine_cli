@@ -12,3 +12,5 @@
  111 110 00:03:13 /opt/homebrew/bin/python3 - 900000 /tmp/stdout /tmp/stderr /tmp/meta /Users/jemanuel/projects/eidetic_engine_cli env RCH_WORKER=vmi1149989 RCH_REQUIRE_REMOTE=1 /Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 exec -- cargo test --lib lod_ -- --nocapture
  112 111 00:03:13 /Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 exec -- cargo test --lib lod_ -- --nocapture
  113 1 00:00:51 ssh -i /Users/jemanuel/.ssh/contabo_vps_ed25519 -o BatchMode=yes ubuntu@212.90.121.76 cd /data/projects/eidetic_engine_cli_manual_turquoise-20260607T152024Z && mkdir -p .manual-target-data && TMPDIR=/tmp CARGO_TARGET_DIR=/data/projects/eidetic_engine_cli_manual_turquoise-20260607T152024Z/.manual-target-data cargo test --lib global_memory_scope -- --nocapture
+ 114 1 13:29:00 /Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/rust-analyzer
+ 115 114 00:01:04 /Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo check --quiet --workspace --message-format=json --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml --keep-going
