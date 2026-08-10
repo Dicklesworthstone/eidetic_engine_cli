@@ -2870,6 +2870,14 @@ fn execute_daemon_txn_batch(
                 repair: Some("retry the writes separately".to_string()),
             });
         }
+        if let DaemonTxnBatchEntry::Remember(params) = entry
+            && let Some(error) = crate::core::memory::remember_level_kind_cross_wire_error(
+                &params.level,
+                &params.kind,
+            )
+        {
+            return Err(error);
+        }
     }
     let connection = crate::db::DbConnection::open_file(&database_path).map_err(|error| {
         crate::models::DomainError::Storage {
@@ -4404,6 +4412,52 @@ mod tests {
         assert!(
             entries.is_empty(),
             "journal insert must roll back when a later outcome op fails"
+        );
+    }
+
+    #[test]
+    fn invalid_daemon_remember_batch_does_not_create_store() {
+        let dir = tempfile::Builder::new()
+            .prefix("daemon-invalid-remember-batch")
+            .tempdir_in(std::env::temp_dir())
+            .expect("tempdir");
+        let workspace_path = dir.path().canonicalize().expect("canonical workspace");
+        let store_dir = workspace_path.join(".ee");
+        let database_path = store_dir.join("ee.db");
+        let remember_op =
+            |content: &str, kind: &str| crate::core::write_owner::WriteOperation::Custom {
+                operation_type: DaemonWriteParams::ACTOR_OPERATION_TYPE.to_string(),
+                payload: serde_json::to_value(DaemonWriteParams {
+                    workspace_path: workspace_path.clone(),
+                    content: content.to_string(),
+                    level: "episodic".to_string(),
+                    kind: kind.to_string(),
+                    tags: None,
+                    confidence: 0.8,
+                    source: Some("manual://daemon-invalid-remember-batch".to_string()),
+                    workflow_id: None,
+                    auto_link: false,
+                    propose_candidates: false,
+                })
+                .expect("remember payload"),
+            };
+
+        let result = execute_daemon_txn_batch(&[
+            remember_op("Valid row before the invalid row.", "fact"),
+            remember_op("Cross-wired row must reject the batch.", "semantic"),
+        ]);
+        let error = result.expect_err("cross-wired remember must reject the batch");
+        assert_eq!(
+            error.code(),
+            crate::core::memory::REMEMBER_KIND_IS_LEVEL_CODE
+        );
+        assert!(
+            !database_path.exists(),
+            "invalid daemon remember batch must not create the database"
+        );
+        assert!(
+            !store_dir.exists(),
+            "invalid daemon remember batch must not create the store directory"
         );
     }
 
