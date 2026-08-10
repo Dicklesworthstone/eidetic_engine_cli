@@ -625,6 +625,29 @@ ONE positional test-name filter — multiple filters die remotely with
 "unexpected argument" and the malformed command gets cached as a known
 blocker (`--skip-known-blocker` to clear).
 
+### Ghost in-flight rows after a killed collector (2026-08-10)
+
+When the LOCAL wrapper (`rch_verify.sh` and the shell that launched it) is
+killed mid-proof — host cleanup, session reaper, OOM — the remote build may
+keep running, but nothing will ever collect it, and the broker ledger keeps
+an in-flight row for the command fingerprint. Every same-fingerprint
+relaunch then refuses with `wait_for_inflight` **forever**, because the row
+has no liveness tie to the dead collector.
+
+Recognize it: your task/wrapper was reported killed (not failed), no local
+`rch_verify` processes survive (`pgrep -f rch_verify`), and the relaunch's
+verify JSON shows `proof_broker_refused` with
+`rch_verify_proof_broker_wait_for_inflight`.
+
+Recover: relaunch with `--proof-broker-bypass "<reason>"` naming the dead
+collector (task ids / PIDs) — the reason string is durable evidence, so be
+specific. Do not clear ledgers by hand. Also prefer SERIAL lanes after a
+mass kill: a parallel fanout is both the likeliest kill trigger and the
+producer of multiple ghost rows at once. A cheap first lane after recovery
+is `cargo test --locked --lib --no-run` — it compiles the full lib-test
+target in a fraction of a battery's time and names every born-red site
+before you spend a 3-hour attempt window.
+
 ### Local Cargo bypass detected
 
 ```text
