@@ -584,6 +584,47 @@ error[E0XXX]: ...
    routing JSON; it knows about the reservation database and recommends the
    right action.
 
+### Proof-broker / admission starvation (three modes, fixed 2026-08-10)
+
+All three present as endless `proof_broker_refused` / `rch_environment_failure`
+retry loops with `dispatchAttempted=false` and zero remote Cargo runs.
+Diagnose with the broker block of the verify JSON
+(`proof_broker.verdict`, `reasonCodes`) plus the tripwire section — do NOT
+keep retrying blind; each mode has a distinct signature:
+
+1. **Editor flycheck classified as a bypass** — tripwire rows with
+   rust-analyzer as the parent used to flip `bypass_detected`, starving the
+   whole machine whenever an editor was open. Fixed in
+   `scripts/check-local-cargo-tripwire.sh`: such rows (and hour-plus
+   `stat U/D` unkillable orphans) classify `*_informational` and are
+   excluded from the blocking count. If you still see `bypass_detected`,
+   the rows are real agent bypasses — inspect, never kill.
+2. **`source_state_mismatch` self-block** — verdict with
+   `reasonCodes=[command_match, fingerprint_mismatch]` means the ledger's
+   proof for this command is bound to an OLDER source, i.e. the normal
+   state on a moving main. Both wrapper gates now dispatch fresh with a
+   degraded note (and the ee-side broker returns `dispatch_allowed` +
+   `prior_proof_stale` from 0a93b6c7 onward). On older installed binaries,
+   use `--proof-broker-bypass "<why>"` with the inspection reason.
+3. **Stale-worker preflight vetoing a healthy pin** — the fail-fast
+   preflight refused dispatches pinned to healthy workers because an
+   UNRELATED worker failed another agent's job within the freshness
+   window. The preflight now only fails when the failed worker is in THIS
+   dispatch's candidate set; `RCH_VERIFY_FAIL_FAST_STALE_WORKER=0` is the
+   escape hatch on older wrapper copies.
+
+Related timeout facts learned the hard way: the attempt lever is
+`RCH_VERIFY_ATTEMPT_TIMEOUT_MS` (a bare `ATTEMPT_TIMEOUT_MS` is silently
+ignored) and the REMOTE kill for big batteries is `RCH_TEST_TIMEOUT_SEC`
+(default 1800 — a cold-cache full-tree battery dies mid-compile at exactly
+30 min with rc=124). A timed-out attempt can leave a `rejected` ledger row
+that later refuses reruns with `proof_unusable/remote_proof_failed`; after
+inspecting that the failure was the client timeout, rerun with
+`--proof-broker-bypass` documenting the inspection. `cargo test` accepts
+ONE positional test-name filter — multiple filters die remotely with
+"unexpected argument" and the malformed command gets cached as a known
+blocker (`--skip-known-blocker` to clear).
+
 ### Local Cargo bypass detected
 
 ```text
