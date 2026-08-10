@@ -2063,18 +2063,27 @@ impl DomainError {
                     },
                 ]
             }
-            // R-012 (Pass 2): Storage + "database not found" is the most
-            // common first-time error path — agents that run `ee context`,
-            // `ee remember`, `ee why`, or any other workspace-touching
-            // command before `ee init` hit this. Surface the structured
-            // recovery actions so the JSON envelope's details.recovery[]
-            // tells the agent exactly what to do, not just the prose
-            // repair hint.
+            // A missing addressed store is not evidence that the caller
+            // intended to create a new one. Agents follow recovery actions
+            // mechanically, so point at an existing workspace first and
+            // keep state creation last and explicitly conditional.
             Self::Storage { .. } if message.contains("database not found") => vec![
+                RecoveryAction::flag(
+                    1,
+                    "--workspace",
+                    "<path>",
+                    "Re-check the addressed path and point at the intended initialized workspace.",
+                ),
+                RecoveryAction::env(
+                    2,
+                    "EE_DATABASE_PATH",
+                    "<absolute path to ee.db>",
+                    "Override the default <workspace>/.ee/ee.db location when the database lives elsewhere.",
+                ),
                 RecoveryAction {
-                    priority: 1,
+                    priority: 3,
                     kind: RecoveryKind::Seed,
-                    rationale: "Initialize the workspace at cwd; idempotent and audited."
+                    rationale: "Only if this path was intentionally chosen for a new store, initialize it explicitly."
                         .to_owned(),
                     env_name: None,
                     value_hint: None,
@@ -2085,18 +2094,6 @@ impl DomainError {
                     results_in: None,
                     example: None,
                 },
-                RecoveryAction::flag(
-                    2,
-                    "--workspace",
-                    "<path>",
-                    "Point at an already-initialized workspace instead of cwd.",
-                ),
-                RecoveryAction::env(
-                    3,
-                    "EE_DATABASE_PATH",
-                    "<absolute path to ee.db>",
-                    "Override the default <workspace>/.ee/ee.db location when the database lives elsewhere.",
-                ),
             ],
             // Audit render failures are surfaced as storage errors because
             // the requested report could not cross the stable JSON boundary.
@@ -2733,27 +2730,27 @@ mod tests {
 
     #[test]
     fn domain_error_recovery_for_storage_database_not_found() {
-        // R-012 (Pass 2): the canonical first-time path. An agent that runs
-        // `ee context` / `ee remember` / `ee why` before `ee init` hits this
-        // error. The structured recovery[] must surface `ee init` as the
-        // top action and provide alternative escape hatches via flag/env.
+        // A store miss most often means the caller addressed the wrong
+        // workspace. Machine-facing recovery must not turn that lookup miss
+        // into a new empty store before offering non-mutating corrections.
         let error = super::DomainError::Storage {
             message: "Database not found at /tmp/x/.ee/ee.db".to_owned(),
             repair: Some("ee init --workspace .".to_owned()),
         };
         let actions = error.recovery_actions();
         assert_eq!(actions.len(), 3, "expected 3 options, got {actions:?}");
-        assert_eq!(actions[0].kind, super::RecoveryKind::Seed);
+        assert_eq!(actions[0].kind, super::RecoveryKind::Flag);
         assert_eq!(actions[0].priority, 1);
+        assert_eq!(actions[0].flag_name.as_deref(), Some("--workspace"));
+        assert_eq!(actions[1].kind, super::RecoveryKind::Env);
+        assert_eq!(actions[1].env_name.as_deref(), Some("EE_DATABASE_PATH"));
+        assert_eq!(actions[2].kind, super::RecoveryKind::Seed);
+        assert_eq!(actions[2].priority, 3);
         assert_eq!(
-            actions[0].command.as_deref(),
+            actions[2].command.as_deref(),
             Some("ee init --workspace ."),
-            "ee init must be the top recovery action"
+            "ee init must remain the final, conditional recovery action"
         );
-        assert_eq!(actions[1].kind, super::RecoveryKind::Flag);
-        assert_eq!(actions[1].flag_name.as_deref(), Some("--workspace"));
-        assert_eq!(actions[2].kind, super::RecoveryKind::Env);
-        assert_eq!(actions[2].env_name.as_deref(), Some("EE_DATABASE_PATH"));
     }
 
     #[test]

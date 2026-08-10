@@ -151,26 +151,29 @@ fn assert_storage_recovery_contract(case: &ConformanceCase, output: &Output) -> 
 
     ensure(
         recovery[0]["priority"] == serde_json::json!(1)
-            && recovery[0]["kind"] == serde_json::json!("seed")
-            && recovery[0]["command"] == serde_json::json!("ee init --workspace ."),
-        format!("{}: first recovery action must run ee init", case.id),
+            && recovery[0]["kind"] == serde_json::json!("flag")
+            && recovery[0]["flagName"] == serde_json::json!("--workspace")
+            && recovery[0]["valueHint"] == serde_json::json!("<path>"),
+        format!(
+            "{}: first recovery action must correct workspace addressing",
+            case.id
+        ),
     )?;
     ensure(
         recovery[1]["priority"] == serde_json::json!(2)
-            && recovery[1]["kind"] == serde_json::json!("flag")
-            && recovery[1]["flagName"] == serde_json::json!("--workspace")
-            && recovery[1]["valueHint"] == serde_json::json!("<path>"),
+            && recovery[1]["kind"] == serde_json::json!("env")
+            && recovery[1]["envName"] == serde_json::json!("EE_DATABASE_PATH"),
         format!(
-            "{}: second recovery action must point at initialized workspace",
+            "{}: second recovery action must expose EE_DATABASE_PATH",
             case.id
         ),
     )?;
     ensure(
         recovery[2]["priority"] == serde_json::json!(3)
-            && recovery[2]["kind"] == serde_json::json!("env")
-            && recovery[2]["envName"] == serde_json::json!("EE_DATABASE_PATH"),
+            && recovery[2]["kind"] == serde_json::json!("seed")
+            && recovery[2]["command"] == serde_json::json!("ee init --workspace ."),
         format!(
-            "{}: third recovery action must expose EE_DATABASE_PATH",
+            "{}: ee init must be the final conditional recovery action",
             case.id
         ),
     )?;
