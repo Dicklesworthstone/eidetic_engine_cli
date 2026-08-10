@@ -8711,8 +8711,9 @@ pub struct SearchArgs {
     )]
     pub family: Option<String>,
 
-    /// Opt in to the long-lived daemon search path. Capability or schema
-    /// negotiation failures safely fall back to canonical in-process search.
+    /// Opt in to the long-lived daemon search path. Capability negotiation
+    /// and search share one two-second attempt; timeout or schema failures
+    /// safely fall back to canonical in-process search.
     #[arg(long = "use-daemon", action = ArgAction::SetTrue, conflicts_with = "family")]
     pub use_daemon: bool,
 
@@ -44347,6 +44348,8 @@ where
 }
 
 const DAEMON_SEARCH_FALLBACK_CODE: &str = "daemon_search_fallback";
+#[cfg(unix)]
+const DAEMON_SEARCH_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DaemonSearchFallbackReason {
@@ -44363,6 +44366,7 @@ enum DaemonSearchFallbackReason {
     SearchMethodError,
     SearchResultMissing,
     SearchResponseDrift,
+    DeadlineExceeded,
     #[cfg(not(unix))]
     PlatformUnsupported,
 }
@@ -44383,6 +44387,7 @@ impl DaemonSearchFallbackReason {
             Self::SearchMethodError => "search method returned an error",
             Self::SearchResultMissing => "search result missing",
             Self::SearchResponseDrift => "search response drift",
+            Self::DeadlineExceeded => "capability and search deadline exceeded",
             #[cfg(not(unix))]
             Self::PlatformUnsupported => "daemon search is unsupported on this platform",
         }
@@ -44432,7 +44437,7 @@ fn validate_daemon_search_capabilities(
     capabilities: &serde_json::Value,
 ) -> Result<(), DaemonSearchFallbackReason> {
     use crate::daemon::server::{
-        DAEMON_SEARCH_REQUEST_SCHEMA_V1, DAEMON_SEARCH_RESPONSE_SCHEMA_V1, METHOD_SEARCH,
+        DAEMON_SEARCH_REQUEST_SCHEMA_V1, DAEMON_SEARCH_RESPONSE_SCHEMA_V2, METHOD_SEARCH,
     };
     use crate::daemon::{DAEMON_REQUEST_SCHEMA_V1, DAEMON_RESPONSE_SCHEMA_V1};
 
@@ -44471,7 +44476,7 @@ fn validate_daemon_search_capabilities(
         || capabilities
             .pointer("/method_schemas/ee.daemon.search/response")
             .and_then(serde_json::Value::as_str)
-            != Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V1)
+            != Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V2)
     {
         return Err(DaemonSearchFallbackReason::CapabilityMethodSchemaDrift);
     }
@@ -44484,12 +44489,6 @@ fn search_via_daemon(
     options: &SearchOptions,
     kind_filter: Option<&str>,
 ) -> Result<(serde_json::Value, String), DaemonSearchFallbackReason> {
-    use crate::daemon::protocol::DaemonRequest;
-    use crate::daemon::server::{
-        DaemonSearchParams, DaemonSearchResult, METHOD_CAPABILITIES, METHOD_SEARCH,
-        client_round_trip,
-    };
-
     if let Some(reason) = daemon_search_unsupported_reason(args) {
         return Err(reason);
     }
@@ -44497,6 +44496,43 @@ fn search_via_daemon(
         .daemon_socket
         .clone()
         .unwrap_or_else(crate::daemon::default_daemon_socket_path);
+    let mut options = options.clone();
+    if let Ok(canonical_workspace) = std::fs::canonicalize(&options.workspace_path) {
+        options.workspace_path = canonical_workspace;
+    }
+    let kind_filter = kind_filter.map(str::to_owned);
+    let field_filters = args.field_filters.clone();
+    let deadline = std::time::Instant::now() + DAEMON_SEARCH_ATTEMPT_TIMEOUT;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = search_via_daemon_before(
+            &socket_path,
+            &options,
+            kind_filter.as_deref(),
+            &field_filters,
+            deadline,
+        );
+        let _ = sender.send(result);
+    });
+    receiver
+        .recv_timeout(DAEMON_SEARCH_ATTEMPT_TIMEOUT)
+        .map_err(|_| DaemonSearchFallbackReason::DeadlineExceeded)?
+}
+
+#[cfg(unix)]
+fn search_via_daemon_before(
+    socket_path: &std::path::Path,
+    options: &SearchOptions,
+    kind_filter: Option<&str>,
+    field_filters: &[String],
+    deadline: std::time::Instant,
+) -> Result<(serde_json::Value, String), DaemonSearchFallbackReason> {
+    use crate::daemon::protocol::DaemonRequest;
+    use crate::daemon::server::{
+        ClientError, DaemonSearchParams, DaemonSearchResult, METHOD_CAPABILITIES, METHOD_SEARCH,
+        client_round_trip_before,
+    };
+
     let agent_id = crate::core::memory_scope::current_agent_name()
         .unwrap_or_else(|| "ee-cli-search".to_owned());
     let capabilities_request = DaemonRequest::new(
@@ -44505,8 +44541,13 @@ fn search_via_daemon(
         METHOD_CAPABILITIES,
         serde_json::json!({}),
     );
-    let capabilities_response = client_round_trip(&socket_path, &capabilities_request)
-        .map_err(|_| DaemonSearchFallbackReason::CapabilityRoundTripFailed)?;
+    let capabilities_response =
+        client_round_trip_before(socket_path, &capabilities_request, deadline).map_err(
+            |error| match error {
+                ClientError::DeadlineExceeded => DaemonSearchFallbackReason::DeadlineExceeded,
+                _ => DaemonSearchFallbackReason::CapabilityRoundTripFailed,
+            },
+        )?;
     if capabilities_response.error.is_some() {
         return Err(DaemonSearchFallbackReason::CapabilityMethodError);
     }
@@ -44516,7 +44557,7 @@ fn search_via_daemon(
         .ok_or(DaemonSearchFallbackReason::CapabilityMethodError)?;
     validate_daemon_search_capabilities(capabilities)?;
 
-    let params = DaemonSearchParams::from_search_options(options, kind_filter, &args.field_filters);
+    let params = DaemonSearchParams::from_search_options(options, kind_filter, field_filters);
     let params = serde_json::to_value(params)
         .map_err(|_| DaemonSearchFallbackReason::RequestEncodingFailed)?;
     let workspace_id = options.workspace_path.display().to_string();
@@ -44527,8 +44568,11 @@ fn search_via_daemon(
         params,
     );
     request.workspace_id = Some(workspace_id);
-    let response = client_round_trip(&socket_path, &request)
-        .map_err(|_| DaemonSearchFallbackReason::SearchRoundTripFailed)?;
+    let response =
+        client_round_trip_before(socket_path, &request, deadline).map_err(|error| match error {
+            ClientError::DeadlineExceeded => DaemonSearchFallbackReason::DeadlineExceeded,
+            _ => DaemonSearchFallbackReason::SearchRoundTripFailed,
+        })?;
     if response.error.is_some() {
         return Err(DaemonSearchFallbackReason::SearchMethodError);
     }
@@ -81193,7 +81237,7 @@ mod tests {
             "method_schemas": {
                 "ee.daemon.search": {
                     "request": crate::daemon::server::DAEMON_SEARCH_REQUEST_SCHEMA_V1,
-                    "response": crate::daemon::server::DAEMON_SEARCH_RESPONSE_SCHEMA_V1
+                    "response": crate::daemon::server::DAEMON_SEARCH_RESPONSE_SCHEMA_V2
                 }
             }
         })
@@ -81213,7 +81257,7 @@ mod tests {
 
         let mut schema_drift = capabilities;
         schema_drift["method_schemas"]["ee.daemon.search"]["response"] =
-            serde_json::json!("ee.daemon.search.response.v2");
+            serde_json::json!("ee.daemon.search.response.v1");
         assert_eq!(
             validate_daemon_search_capabilities(&schema_drift),
             Err(DaemonSearchFallbackReason::CapabilityMethodSchemaDrift)
@@ -81291,6 +81335,60 @@ mod tests {
             &Err(DaemonSearchFallbackReason::CapabilityRoundTripFailed),
             "missing daemon socket fallback reason",
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_search_capability_and_query_share_one_deadline() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let socket_path = temp.path().join("slow-daemon.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path)
+            .map_err(|error| error.to_string())?;
+        let server = std::thread::spawn(move || {
+            let _connection = listener.accept();
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        });
+        let options = SearchOptions {
+            workspace_path: temp.path().to_path_buf(),
+            database_path: None,
+            index_dir: None,
+            query: "release".to_owned(),
+            limit: 10,
+            speed: crate::search::SpeedMode::Default,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        };
+        let started = std::time::Instant::now();
+        let result = super::search_via_daemon_before(
+            &socket_path,
+            &options,
+            None,
+            &[],
+            started + std::time::Duration::from_millis(40),
+        );
+        ensure_equal(
+            &result,
+            &Err(DaemonSearchFallbackReason::DeadlineExceeded),
+            "cumulative daemon search deadline",
+        )?;
+        ensure(
+            started.elapsed() < std::time::Duration::from_millis(120),
+            "capability timeout must not grant a fresh search timeout",
+        )?;
+        server
+            .join()
+            .map_err(|_| "slow daemon thread panicked".to_owned())?;
+        Ok(())
     }
 
     #[test]

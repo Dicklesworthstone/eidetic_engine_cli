@@ -118,6 +118,14 @@
     "meshTrustAdjustment": {
       "description": "Optional trust-adjustment payload copied from mesh metadata when present."
     },
+    "content": {
+      "type": "string",
+      "description": "Redaction-safe top-level memory body preview. The forbidden contentPreview synonym is never emitted."
+    },
+    "content_truncated": {
+      "type": "boolean",
+      "description": "True only when content was shortened to the bounded search preview."
+    },
     "contentRedacted": {"type": "boolean"},
     "redactions": {
       "type": "array",

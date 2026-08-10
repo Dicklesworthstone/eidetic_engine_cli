@@ -16,7 +16,7 @@ use ee::daemon::DAEMON_RESPONSE_SCHEMA_V1;
 use ee::daemon::protocol::{DaemonRequest, DaemonResponse};
 use ee::daemon::server::{
     DAEMON_SEARCH_EXECUTION_FAILED_CODE, DAEMON_SEARCH_PARAMS_INVALID_CODE,
-    DAEMON_SEARCH_REQUEST_SCHEMA_V1, DAEMON_SEARCH_RESPONSE_SCHEMA_V1, METHOD_CAPABILITIES,
+    DAEMON_SEARCH_REQUEST_SCHEMA_V1, DAEMON_SEARCH_RESPONSE_SCHEMA_V2, METHOD_CAPABILITIES,
     METHOD_CONTEXT, METHOD_ECHO, METHOD_SEARCH, METHOD_SHUTDOWN, METHOD_TELEMETRY, METHOD_WRITE,
     METHOD_WRITE_JOURNAL,
 };
@@ -25,6 +25,8 @@ type TestResult = Result<(), String>;
 
 const REQUEST_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.request.v1.json";
 const RESPONSE_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.response.v1.json";
+const SEARCH_REQUEST_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.search.request.v1.json";
+const SEARCH_RESPONSE_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.search.response.v2.json";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -127,7 +129,7 @@ fn capabilities_response() -> Value {
             "method_schemas": {
                 "ee.daemon.search": {
                     "request": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
-                    "response": DAEMON_SEARCH_RESPONSE_SCHEMA_V1
+                    "response": DAEMON_SEARCH_RESPONSE_SCHEMA_V2
                 }
             },
             "forward_compat": {
@@ -252,6 +254,69 @@ fn daemon_response_schema_documents_seed_error_codes() -> TestResult {
         }
     }
 
+    Ok(())
+}
+
+#[test]
+fn daemon_search_method_schemas_pin_paths_timings_and_nested_strictness() -> TestResult {
+    let request = read_schema(SEARCH_REQUEST_SCHEMA_PATH)?;
+    let response = read_schema(SEARCH_RESPONSE_SCHEMA_PATH)?;
+    if request.pointer("/$id").and_then(Value::as_str)
+        != Some("https://eidetic-engine/schemas/ee.daemon.search.request.v1.json")
+        || response.pointer("/$id").and_then(Value::as_str)
+            != Some("https://eidetic-engine/schemas/ee.daemon.search.response.v2.json")
+    {
+        return Err("daemon search method schema ids drifted".to_owned());
+    }
+    for (schema, pointer, context) in [
+        (&request, "/additionalProperties", "search request"),
+        (&response, "/additionalProperties", "search response"),
+        (
+            &response,
+            "/properties/response/additionalProperties",
+            "canonical response",
+        ),
+        (
+            &response,
+            "/properties/response/properties/data/additionalProperties",
+            "canonical search data",
+        ),
+        (
+            &response,
+            "/properties/timing/additionalProperties",
+            "search timing",
+        ),
+        (
+            &response,
+            "/$defs/searchDocument/additionalProperties",
+            "search document",
+        ),
+    ] {
+        if schema.pointer(pointer).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("{context} must reject unknown fields"));
+        }
+    }
+    let timing_required = collect_string_set(
+        &response["properties"]["timing"]["required"],
+        "search timing required",
+    )?;
+    let expected_timing = string_set(&["daemonTotal", "embedderPreparation", "indexOpen", "query"]);
+    if timing_required != expected_timing {
+        return Err(format!(
+            "search timing required fields drifted; expected {expected_timing:?}, got {timing_required:?}"
+        ));
+    }
+    let request_description = request
+        .pointer("/description")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "search request description missing".to_owned())?;
+    for phrase in ["absolute", "canonical", "symlink escape"] {
+        if !request_description.contains(phrase) {
+            return Err(format!(
+                "search request containment contract missing {phrase:?}"
+            ));
+        }
+    }
     Ok(())
 }
 

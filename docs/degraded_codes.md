@@ -3874,7 +3874,8 @@ DaemonRequest{schema="ee.daemon.request.v0_wrong", method="ee.daemon.echo"} sent
 
 **Trigger.** An opt-in warm daemon search cannot negotiate the exact envelope,
 method, authorization, and method-specific request/response schemas, or its
-round-trip fails. The CLI executes canonical in-process search and records why
+round-trip fails, or the single cumulative two-second capability-plus-search
+attempt expires. The CLI executes canonical in-process search and records why
 the requested acceleration path was not used.
 
 **Setup.**

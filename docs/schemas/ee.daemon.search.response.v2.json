@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.daemon.search.response.v2.json",
+  "title": "ee.daemon.search.response.v2",
+  "description": "Strict nested success result for ee.daemon.search. daemonTotal begins at method dispatch and ends after canonical machine/human rendering; daemon envelope serialization, frame writing, and transport time are excluded. embedderPreparation, indexOpen, and query aggregate named canonical SearchPerformanceTrace spans and are null when that phase did not run. All timings are observational and nondeterministic.",
+  "type": "object",
+  "required": ["schema", "response", "human", "reuseContract", "timing"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.daemon.search.response.v2"},
+    "human": {"type": "string"},
+    "reuseContract": {
+      "type": "object",
+      "required": ["daemonProcess", "defaultSearchEmbedder", "searchIndex"],
+      "additionalProperties": false,
+      "properties": {
+        "daemonProcess": {"type": "string", "const": "long_lived"},
+        "defaultSearchEmbedder": {"type": "string", "const": "process_scoped"},
+        "searchIndex": {"type": "string", "const": "per_request"}
+      }
+    },
+    "timing": {
+      "type": "object",
+      "required": ["daemonTotal", "embedderPreparation", "indexOpen", "query"],
+      "additionalProperties": false,
+      "properties": {
+        "daemonTotal": {"$ref": "#/$defs/timing"},
+        "embedderPreparation": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/timing"}]},
+        "indexOpen": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/timing"}]},
+        "query": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/timing"}]}
+      }
+    },
+    "response": {
+      "type": "object",
+      "required": ["schema", "success", "data", "degraded"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.response.v2"},
+        "success": {"type": "boolean", "const": true},
+        "degraded": {"type": "array", "items": {"type": "object"}},
+        "data": {
+          "type": "object",
+          "required": ["command", "status", "embed_backend", "query", "request", "scopeStats", "results", "consensus", "conflicts", "resultCount", "elapsedMs", "metrics", "rerank", "profileRuntime", "errors", "degraded"],
+          "additionalProperties": false,
+          "properties": {
+            "command": {"type": "string", "const": "search"},
+            "status": {"type": "string", "enum": ["success", "no_results", "index_not_found", "index_error"]},
+            "embed_backend": {"type": "string", "enum": ["neural_local", "hash_fallback"]},
+            "query": {"type": "string"},
+            "request": {"type": "object"},
+            "scopeStats": {"type": "object"},
+            "results": {"type": "array", "items": {"$ref": "#/$defs/searchDocument"}},
+            "consensus": {"type": "array"},
+            "conflicts": {"type": "array"},
+            "resultCount": {"type": "integer", "minimum": 0},
+            "elapsedMs": {"type": "number", "minimum": 0},
+            "metrics": {"type": "object"},
+            "rerank": {"type": "object"},
+            "profileRuntime": {"type": "object"},
+            "errors": {"type": "array"},
+            "degraded": {"type": "array"},
+            "queryAssist": {"type": "object"},
+            "resultPath": {"type": "string", "const": "data.results"}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "timing": {
+      "type": "object",
+      "required": ["elapsedMs", "elapsedMsBucket", "nondeterministic"],
+      "additionalProperties": false,
+      "properties": {
+        "elapsedMs": {"type": "number", "minimum": 0},
+        "elapsedMsBucket": {"type": "string", "enum": ["lt_1ms", "1_9ms", "10_49ms", "50_99ms", "100_499ms", "500_999ms", "gte_1000ms"]},
+        "nondeterministic": {"type": "boolean", "const": true}
+      }
+    },
+    "searchDocument": {
+      "type": "object",
+      "required": ["docId", "score", "relevanceScore", "scoreKind", "scoreInterval", "coverageGuarantee", "calibrated", "source", "why", "provenance"],
+      "additionalProperties": false,
+      "properties": {
+        "docId": {"type": "string"},
+        "memoryId": {"type": "string"},
+        "score": {"type": "number"},
+        "relevanceScore": {"type": "number", "minimum": 0, "maximum": 1},
+        "scoreKind": {"type": "string", "enum": ["unit_normalized", "rrf_fused", "reranked"]},
+        "scoreInterval": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+        "coverageGuarantee": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "calibrated": {"type": "boolean"},
+        "source": {"type": "string", "enum": ["lexical", "semantic_fast", "semantic_quality", "hybrid", "reranked"]},
+        "why": {"type": "string"},
+        "provenance": {"type": "array"},
+        "fastScore": {"type": "number"},
+        "qualityScore": {"type": "number"},
+        "lexicalScore": {"type": "number"},
+        "rerankScore": {"type": "number"},
+        "metadata": {"type": "object"},
+        "driftHint": {},
+        "meshProvenance": {"type": "object"},
+        "meshTrustAdjustment": {},
+        "content": {"type": "string"},
+        "content_truncated": {"type": "boolean"},
+        "contentRedacted": {"type": "boolean"},
+        "redactions": {"type": "array"},
+        "tombstoned": {"type": "boolean"},
+        "tombstonedAt": {"type": "string"},
+        "validFrom": {"type": "string"},
+        "validTo": {"type": "string"},
+        "validityStatus": {"type": "string"},
+        "validityWindowKind": {"type": "string"},
+        "explanation": {"type": "object"}
+      }
+    }
+  }
+}

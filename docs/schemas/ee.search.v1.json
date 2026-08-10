@@ -31,6 +31,10 @@
         "embed_backend": {"type": "string", "enum": ["neural_local", "hash_fallback"]},
         "query": {"type": "string"},
         "status": {"type": "string"},
+        "request": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "scopeStats": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "consensus": {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        "conflicts": {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
         "resultCount": {"type": "integer"},
         "results": {
           "type": "array",
@@ -42,6 +46,8 @@
               "memoryId": {"type": "string"},
               "docId": {"type": "string"},
               "score": {"type": "number"},
+              "relevanceScore": {"type": "number", "minimum": 0, "maximum": 1},
+              "scoreKind": {"type": "string", "enum": ["unit_normalized", "rrf_fused", "reranked"]},
               "scoreInterval": {
                 "type": "array",
                 "items": {"type": "number"},
@@ -59,10 +65,25 @@
                 "type": "boolean",
                 "description": "True when a conformal residual quantile produced the scoreInterval/coverageGuarantee. When false, scoreInterval is the trivial [0,1] band and coverageGuarantee is null; treat `score` as an uncalibrated raw fusion score, not a calibrated [0,1] relevance."
               },
-              "source": {"type": "string", "enum": ["lexical", "semantic_fast", "semantic_quality", "hybrid", "lexical_only", "semantic_only"]},
+              "source": {"type": "string", "enum": ["lexical", "semantic_fast", "semantic_quality", "hybrid", "reranked"]},
               "why": {"type": "string"},
               "fastScore": {"type": ["number", "null"]},
+              "qualityScore": {"type": ["number", "null"]},
               "lexicalScore": {"type": ["number", "null"]},
+              "rerankScore": {"type": ["number", "null"]},
+              "content": {"type": "string"},
+              "content_truncated": {"type": "boolean"},
+              "contentRedacted": {"type": "boolean"},
+              "redactions": {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+              "driftHint": {"$ref": "#/$defs/jsonValue"},
+              "meshProvenance": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+              "meshTrustAdjustment": {"$ref": "#/$defs/jsonValue"},
+              "tombstoned": {"type": "boolean"},
+              "tombstonedAt": {"type": "string"},
+              "validFrom": {"type": "string"},
+              "validTo": {"type": "string"},
+              "validityStatus": {"type": "string"},
+              "validityWindowKind": {"type": "string"},
               "metadata": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
               "provenance": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
               "explanation": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
@@ -72,9 +93,11 @@
         "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
         "errors": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
         "metrics": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "rerank": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "queryAssist": {"$ref": "#/$defs/queryAssist"},
         "elapsedMs": {"type": "number"},
-        "profileRuntime": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+        "profileRuntime": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "resultPath": {"type": "string", "const": "data.results"}
       }
     }
   },

@@ -70,6 +70,7 @@ fn full_emitted_search_document() -> Result<Value, String> {
         metadata: Some(serde_json::json!({
             "level": "procedural",
             "kind": "rule",
+            "content": "Run the canonical release verification sequence before publishing. ".repeat(6),
             "provenance_uri": "file://AGENTS.md#L42",
             "scoreInterval": [0.72, 0.97],
             "coverageGuarantee": 0.95,
@@ -160,7 +161,16 @@ fn minimal_emitted_search_document() -> Result<Value, String> {
 fn search_document_v1_validates_full_real_emission() -> TestResult {
     let schema = read_schema()?;
     let document = full_emitted_search_document()?;
-    validate_json_schema(&document, &schema, "$")
+    validate_json_schema(&document, &schema, "$")?;
+    if !document.get("content").is_some_and(Value::is_string)
+        || document.get("content_truncated").and_then(Value::as_bool) != Some(true)
+        || document.get("contentPreview").is_some()
+    {
+        return Err(format!(
+            "canonical bounded content fields drifted: {document}"
+        ));
+    }
+    Ok(())
 }
 
 #[test]

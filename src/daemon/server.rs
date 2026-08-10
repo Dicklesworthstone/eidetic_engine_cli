@@ -44,8 +44,9 @@ use crate::core::context::{
     run_context_pack_with_performance_controlled,
 };
 use crate::core::search::{
-    SearchAdvisorySession, SearchDedupMode, SearchOptions, SearchReport, SearchSourceMode,
-    TypedMemoryFieldFilter, normalize_memory_kind_filter, run_search_with_filters,
+    SearchAdvisorySession, SearchDedupMode, SearchOptions, SearchPerformanceTrace, SearchReport,
+    SearchSourceMode, TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
+    run_search_with_performance_and_filters,
 };
 use crate::models::{MemoryScope, QueryFilters, RedactionLevel};
 use crate::output::{ContextJsonRenderOptions, render_context_response_json_with_options};
@@ -83,7 +84,7 @@ pub const METHOD_SEARCH: &str = "ee.daemon.search";
 pub const DAEMON_SEARCH_REQUEST_SCHEMA_V1: &str = "ee.daemon.search.request.v1";
 
 /// Strict method-specific response schema for [`METHOD_SEARCH`].
-pub const DAEMON_SEARCH_RESPONSE_SCHEMA_V1: &str = "ee.daemon.search.response.v1";
+pub const DAEMON_SEARCH_RESPONSE_SCHEMA_V2: &str = "ee.daemon.search.response.v2";
 
 /// Error code returned when `ee.daemon.search` params fail strict decoding.
 pub const DAEMON_SEARCH_PARAMS_INVALID_CODE: &str = "daemon_search_params_invalid";
@@ -2049,6 +2050,7 @@ impl DaemonSearchParams {
 
     fn into_search_parts(
         self,
+        authorized_workspace_id: &str,
     ) -> Result<(SearchOptions, Option<String>, Vec<TypedMemoryFieldFilter>), String> {
         if self.schema != DAEMON_SEARCH_REQUEST_SCHEMA_V1 {
             return Err(format!(
@@ -2092,11 +2094,30 @@ impl DaemonSearchParams {
             .iter()
             .map(|raw| TypedMemoryFieldFilter::parse(raw))
             .collect::<Result<Vec<_>, _>>()?;
+        let workspace_path = canonical_workspace_path(&self.workspace_path, "workspacePath")?;
+        let authorized_workspace =
+            canonical_workspace_path(Path::new(authorized_workspace_id), "workspace_id")?;
+        if workspace_path != authorized_workspace {
+            return Err(
+                "field `workspacePath` must identify the authorized envelope `workspace_id`"
+                    .to_owned(),
+            );
+        }
+        let database_path = self
+            .database_path
+            .as_deref()
+            .map(|path| canonical_contained_path(&workspace_path, path, "databasePath"))
+            .transpose()?;
+        let index_dir = self
+            .index_dir
+            .as_deref()
+            .map(|path| canonical_contained_path(&workspace_path, path, "indexDir"))
+            .transpose()?;
         Ok((
             SearchOptions {
-                workspace_path: self.workspace_path,
-                database_path: self.database_path,
-                index_dir: self.index_dir,
+                workspace_path,
+                database_path,
+                index_dir,
                 query: self.query,
                 limit: self.limit,
                 speed,
@@ -2119,6 +2140,55 @@ impl DaemonSearchParams {
     }
 }
 
+fn canonical_workspace_path(path: &Path, field: &str) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err(format!("field `{field}` must be an absolute path"));
+    }
+    let canonical = fs::canonicalize(path)
+        .map_err(|error| format!("field `{field}` could not be canonicalized: {error}"))?;
+    if !canonical.is_dir() {
+        return Err(format!("field `{field}` must identify a directory"));
+    }
+    Ok(canonical)
+}
+
+fn canonical_contained_path(
+    canonical_workspace: &Path,
+    path: &Path,
+    field: &str,
+) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err(format!("field `{field}` must be an absolute path"));
+    }
+    let canonical = match fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .ok_or_else(|| format!("field `{field}` has no parent directory"))?;
+            let file_name = path
+                .file_name()
+                .ok_or_else(|| format!("field `{field}` has no final path component"))?;
+            fs::canonicalize(parent)
+                .map_err(|parent_error| {
+                    format!("field `{field}` parent could not be canonicalized: {parent_error}")
+                })?
+                .join(file_name)
+        }
+        Err(error) => {
+            return Err(format!(
+                "field `{field}` could not be canonicalized: {error}"
+            ));
+        }
+    };
+    if !canonical.starts_with(canonical_workspace) {
+        return Err(format!(
+            "field `{field}` must remain inside the canonical workspace"
+        ));
+    }
+    Ok(canonical)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct DaemonSearchReuseContract {
@@ -2137,6 +2207,115 @@ impl Default for DaemonSearchReuseContract {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DaemonSearchTimingMeasurement {
+    elapsed_ms: f64,
+    elapsed_ms_bucket: String,
+    nondeterministic: bool,
+}
+
+impl DaemonSearchTimingMeasurement {
+    fn from_duration(duration: Duration) -> Self {
+        let elapsed_ms = duration.as_secs_f64() * 1_000.0;
+        let rendered = elapsed_timing_json(elapsed_ms);
+        Self {
+            elapsed_ms: rendered
+                .get("elapsedMs")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(elapsed_ms),
+            elapsed_ms_bucket: rendered
+                .get("elapsedMsBucket")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("gte_1000ms")
+                .to_owned(),
+            nondeterministic: true,
+        }
+    }
+
+    fn validate(&self, field: &str) -> Result<(), String> {
+        if !self.elapsed_ms.is_finite() || self.elapsed_ms < 0.0 {
+            return Err(format!(
+                "timing `{field}.elapsedMs` must be finite and non-negative"
+            ));
+        }
+        if !matches!(
+            self.elapsed_ms_bucket.as_str(),
+            "lt_1ms" | "1_9ms" | "10_49ms" | "50_99ms" | "100_499ms" | "500_999ms" | "gte_1000ms"
+        ) {
+            return Err(format!("timing `{field}.elapsedMsBucket` drifted"));
+        }
+        if !self.nondeterministic {
+            return Err(format!(
+                "timing `{field}` must declare nondeterministic=true"
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DaemonSearchTiming {
+    daemon_total: DaemonSearchTimingMeasurement,
+    embedder_preparation: Option<DaemonSearchTimingMeasurement>,
+    index_open: Option<DaemonSearchTimingMeasurement>,
+    query: Option<DaemonSearchTimingMeasurement>,
+}
+
+impl DaemonSearchTiming {
+    fn from_trace(daemon_total: Duration, trace: &SearchPerformanceTrace) -> Self {
+        Self {
+            daemon_total: DaemonSearchTimingMeasurement::from_duration(daemon_total),
+            embedder_preparation: aggregate_search_timings(trace, &["search::embedderPrepare"]),
+            index_open: aggregate_search_timings(
+                trace,
+                &[
+                    "searchSync::lexicalOpen",
+                    "searchSync::twoTierOpen",
+                    "searchSync::attachLexical",
+                ],
+            ),
+            query: aggregate_search_timings(
+                trace,
+                &["searchSync::lexicalSearch", "searchSync::searchCollect"],
+            ),
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        self.daemon_total.validate("daemonTotal")?;
+        for (field, timing) in [
+            ("embedderPreparation", self.embedder_preparation.as_ref()),
+            ("indexOpen", self.index_open.as_ref()),
+            ("query", self.query.as_ref()),
+        ] {
+            if let Some(timing) = timing {
+                timing.validate(field)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn aggregate_search_timings(
+    trace: &SearchPerformanceTrace,
+    names: &[&str],
+) -> Option<DaemonSearchTimingMeasurement> {
+    let durations = trace
+        .timings()
+        .filter(|(name, _)| names.contains(name))
+        .map(|(_, elapsed)| elapsed)
+        .collect::<Vec<_>>();
+    (!durations.is_empty()).then(|| {
+        DaemonSearchTimingMeasurement::from_duration(
+            durations
+                .into_iter()
+                .fold(Duration::ZERO, Duration::saturating_add),
+        )
+    })
+}
+
 /// Strict method-specific success payload returned by [`METHOD_SEARCH`].
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -2145,6 +2324,7 @@ pub struct DaemonSearchResult {
     response: serde_json::Value,
     human: String,
     reuse_contract: DaemonSearchReuseContract,
+    timing: DaemonSearchTiming,
 }
 
 impl DaemonSearchResult {
@@ -2152,6 +2332,7 @@ impl DaemonSearchResult {
         report: &SearchReport,
         explain: bool,
         advisory_session: &mut SearchAdvisorySession,
+        timing: DaemonSearchTiming,
     ) -> Self {
         let human = report.human_summary();
         let mut data = report.data_json_with_advisory_session(advisory_session);
@@ -2169,25 +2350,26 @@ impl DaemonSearchResult {
             "degraded": degraded,
         });
         Self {
-            schema: DAEMON_SEARCH_RESPONSE_SCHEMA_V1.to_owned(),
+            schema: DAEMON_SEARCH_RESPONSE_SCHEMA_V2.to_owned(),
             response,
             human,
             reuse_contract: DaemonSearchReuseContract::default(),
+            timing,
         }
     }
 
     /// Decode and validate the complete method-specific response contract.
     pub fn from_value(value: serde_json::Value) -> Result<Self, String> {
         let result: Self = serde_json::from_value(value)
-            .map_err(|_| "result does not match ee.daemon.search.response.v1".to_owned())?;
+            .map_err(|_| "result does not match ee.daemon.search.response.v2".to_owned())?;
         result.validate()?;
         Ok(result)
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.schema != DAEMON_SEARCH_RESPONSE_SCHEMA_V1 {
+        if self.schema != DAEMON_SEARCH_RESPONSE_SCHEMA_V2 {
             return Err(format!(
-                "result schema must equal `{DAEMON_SEARCH_RESPONSE_SCHEMA_V1}`"
+                "result schema must equal `{DAEMON_SEARCH_RESPONSE_SCHEMA_V2}`"
             ));
         }
         if self.reuse_contract != DaemonSearchReuseContract::default() {
@@ -2219,7 +2401,12 @@ impl DaemonSearchResult {
         {
             return Err("canonical daemon search response shape drifted".to_owned());
         }
-        Ok(())
+        validate_canonical_search_data(
+            response
+                .get("data")
+                .ok_or_else(|| "canonical daemon search data missing".to_owned())?,
+        )?;
+        self.timing.validate()
     }
 
     /// Split the validated payload into canonical machine and human renderings.
@@ -2229,11 +2416,224 @@ impl DaemonSearchResult {
     }
 }
 
+fn validate_exact_object_fields(
+    value: &serde_json::Value,
+    context: &str,
+    required: &[&str],
+    optional: &[&str],
+) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{context} must be an object"))?;
+    if let Some(missing) = required.iter().find(|field| !object.contains_key(**field)) {
+        return Err(format!("{context} is missing required field `{missing}`"));
+    }
+    if let Some(unknown) = object
+        .keys()
+        .find(|field| !required.contains(&field.as_str()) && !optional.contains(&field.as_str()))
+    {
+        return Err(format!("{context} contains unknown field `{unknown}`"));
+    }
+    Ok(())
+}
+
+fn validate_canonical_search_data(data: &serde_json::Value) -> Result<(), String> {
+    const REQUIRED: &[&str] = &[
+        "command",
+        "status",
+        "embed_backend",
+        "query",
+        "request",
+        "scopeStats",
+        "results",
+        "consensus",
+        "conflicts",
+        "resultCount",
+        "elapsedMs",
+        "metrics",
+        "rerank",
+        "profileRuntime",
+        "errors",
+        "degraded",
+    ];
+    validate_exact_object_fields(
+        data,
+        "canonical search data",
+        REQUIRED,
+        &["queryAssist", "resultPath"],
+    )?;
+    if data.get("command").and_then(serde_json::Value::as_str) != Some("search") {
+        return Err("canonical search data command drifted".to_owned());
+    }
+    if !matches!(
+        data.get("status").and_then(serde_json::Value::as_str),
+        Some("success" | "no_results" | "index_not_found" | "index_error")
+    ) {
+        return Err("canonical search data status drifted".to_owned());
+    }
+    if !matches!(
+        data.get("embed_backend")
+            .and_then(serde_json::Value::as_str),
+        Some("neural_local" | "hash_fallback")
+    ) {
+        return Err("canonical search embed_backend drifted".to_owned());
+    }
+    if !data.get("query").is_some_and(serde_json::Value::is_string)
+        || ![
+            "request",
+            "scopeStats",
+            "metrics",
+            "rerank",
+            "profileRuntime",
+        ]
+        .iter()
+        .all(|field| data.get(*field).is_some_and(serde_json::Value::is_object))
+        || !["consensus", "conflicts", "errors", "degraded"]
+            .iter()
+            .all(|field| data.get(*field).is_some_and(serde_json::Value::is_array))
+    {
+        return Err("canonical search nested data shape drifted".to_owned());
+    }
+    let elapsed_ms = data
+        .get("elapsedMs")
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| "canonical search elapsedMs must be a number".to_owned())?;
+    if !elapsed_ms.is_finite() || elapsed_ms < 0.0 {
+        return Err("canonical search elapsedMs must be finite and non-negative".to_owned());
+    }
+    let results = data
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "canonical search results must be an array".to_owned())?;
+    let result_count = data
+        .get("resultCount")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "canonical search resultCount must be a non-negative integer".to_owned())?;
+    if result_count != results.len() as u64 {
+        return Err("canonical search resultCount does not match results length".to_owned());
+    }
+    for (index, result) in results.iter().enumerate() {
+        validate_canonical_search_result(result, index)?;
+    }
+    if data
+        .get("queryAssist")
+        .is_some_and(|value| !value.is_object())
+    {
+        return Err("canonical search queryAssist must be an object".to_owned());
+    }
+    if data
+        .get("resultPath")
+        .is_some_and(|value| value.as_str() != Some("data.results"))
+    {
+        return Err("canonical search resultPath drifted".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_canonical_search_result(
+    result: &serde_json::Value,
+    index: usize,
+) -> Result<(), String> {
+    const REQUIRED: &[&str] = &[
+        "docId",
+        "score",
+        "relevanceScore",
+        "scoreKind",
+        "scoreInterval",
+        "coverageGuarantee",
+        "calibrated",
+        "source",
+        "why",
+        "provenance",
+    ];
+    const OPTIONAL: &[&str] = &[
+        "memoryId",
+        "fastScore",
+        "qualityScore",
+        "lexicalScore",
+        "rerankScore",
+        "metadata",
+        "driftHint",
+        "meshProvenance",
+        "meshTrustAdjustment",
+        "content",
+        "content_truncated",
+        "contentRedacted",
+        "redactions",
+        "tombstoned",
+        "tombstonedAt",
+        "validFrom",
+        "validTo",
+        "validityStatus",
+        "validityWindowKind",
+        "explanation",
+    ];
+    let context = format!("canonical search result[{index}]");
+    validate_exact_object_fields(result, &context, REQUIRED, OPTIONAL)?;
+    if !["docId", "why"]
+        .iter()
+        .all(|field| result.get(*field).is_some_and(serde_json::Value::is_string))
+        || !result
+            .get("provenance")
+            .is_some_and(serde_json::Value::is_array)
+        || !result
+            .get("calibrated")
+            .is_some_and(serde_json::Value::is_boolean)
+    {
+        return Err(format!("{context} required field types drifted"));
+    }
+    for field in ["score", "relevanceScore"] {
+        let value = result
+            .get(field)
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| format!("{context}.{field} must be a number"))?;
+        if !value.is_finite() {
+            return Err(format!("{context}.{field} must be finite"));
+        }
+    }
+    let relevance = result["relevanceScore"].as_f64().unwrap_or_default();
+    if !(0.0..=1.0).contains(&relevance) {
+        return Err(format!("{context}.relevanceScore must be between 0 and 1"));
+    }
+    if !matches!(
+        result.get("scoreKind").and_then(serde_json::Value::as_str),
+        Some("unit_normalized" | "rrf_fused" | "reranked")
+    ) || !matches!(
+        result.get("source").and_then(serde_json::Value::as_str),
+        Some("lexical" | "semantic_fast" | "semantic_quality" | "hybrid" | "reranked")
+    ) {
+        return Err(format!("{context} score/source vocabulary drifted"));
+    }
+    let interval = result
+        .get("scoreInterval")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("{context}.scoreInterval must be an array"))?;
+    if interval.len() != 2
+        || !interval
+            .iter()
+            .all(|value| value.as_f64().is_some_and(f64::is_finite))
+    {
+        return Err(format!(
+            "{context}.scoreInterval must contain two finite numbers"
+        ));
+    }
+    if !result.get("coverageGuarantee").is_some_and(|value| {
+        value.is_null()
+            || value
+                .as_f64()
+                .is_some_and(|number| number.is_finite() && (0.0..=1.0).contains(&number))
+    }) {
+        return Err(format!("{context}.coverageGuarantee drifted"));
+    }
+    Ok(())
+}
+
 fn dispatch_search(
     request: &DaemonRequest,
     shutdown: &AtomicBool,
     search_advisory_session: &Mutex<SearchAdvisorySession>,
 ) -> DaemonResponse {
+    let daemon_total_start = Instant::now();
     if shutdown.load(Ordering::SeqCst) {
         return daemon_shutting_down_response(
             request.request_id.clone(),
@@ -2245,35 +2645,44 @@ fn dispatch_search(
         Ok(params) => params,
         Err(message) => return daemon_search_params_error(request, &message),
     };
-    let requested_workspace = params.workspace_path.display().to_string();
-    if request.workspace_id.as_deref() != Some(requested_workspace.as_str()) {
+    let Some(authorized_workspace_id) = request.workspace_id.as_deref() else {
         return daemon_search_params_error(
             request,
-            "field `workspacePath` must exactly match the authorized envelope `workspace_id`",
+            "authorized envelope `workspace_id` is missing",
         );
-    }
-    let (options, kind, field_filters) = match params.into_search_parts() {
+    };
+    let (options, kind, field_filters) = match params.into_search_parts(authorized_workspace_id) {
         Ok(parts) => parts,
         Err(message) => return daemon_search_params_error(request, &message),
     };
-    let report = match run_search_with_filters(&options, kind.as_deref(), &field_filters) {
-        Ok(report) => report,
-        Err(error) => {
-            return DaemonResponse::err(
-                request.request_id.clone(),
-                request.agent_id.clone(),
-                request.workspace_id.clone(),
-                DAEMON_SEARCH_EXECUTION_FAILED_CODE,
-                format!("ee.daemon.search could not execute canonical search: {error}"),
-            );
-        }
-    };
+    let search_run =
+        match run_search_with_performance_and_filters(&options, kind.as_deref(), &field_filters) {
+            Ok(run) => run,
+            Err(error) => {
+                return DaemonResponse::err(
+                    request.request_id.clone(),
+                    request.agent_id.clone(),
+                    request.workspace_id.clone(),
+                    DAEMON_SEARCH_EXECUTION_FAILED_CODE,
+                    format!("ee.daemon.search could not execute canonical search: {error}"),
+                );
+            }
+        };
+    let report = search_run.report;
     let mut advisory_session = search_advisory_session
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut staged_advisory_session = advisory_session.clone();
-    let method_result =
-        DaemonSearchResult::from_report(&report, options.explain, &mut staged_advisory_session);
+    let timing =
+        DaemonSearchTiming::from_trace(daemon_total_start.elapsed(), &search_run.performance);
+    let mut method_result = DaemonSearchResult::from_report(
+        &report,
+        options.explain,
+        &mut staged_advisory_session,
+        timing,
+    );
+    method_result.timing.daemon_total =
+        DaemonSearchTimingMeasurement::from_duration(daemon_total_start.elapsed());
     let result = match serde_json::to_value(method_result) {
         Ok(result) => result,
         Err(error) => {
@@ -3537,7 +3946,7 @@ fn authorize_daemon_method(
                 ));
             };
             if let Some(bound_workspace_id) = bound_workspace_id
-                && workspace_id != bound_workspace_id
+                && !workspace_ids_match(workspace_id, bound_workspace_id)
             {
                 return Err(method_unauthorized_response(
                     request,
@@ -3547,6 +3956,18 @@ fn authorize_daemon_method(
             Ok(())
         }
     }
+}
+
+fn workspace_ids_match(requested: &str, bound: &str) -> bool {
+    if requested == bound {
+        return true;
+    }
+    let requested = Path::new(requested);
+    let bound = Path::new(bound);
+    fs::canonicalize(requested)
+        .ok()
+        .zip(fs::canonicalize(bound).ok())
+        .is_some_and(|(requested, bound)| requested == bound)
 }
 
 fn method_unauthorized_response(request: &DaemonRequest, message: &'static str) -> DaemonResponse {
@@ -3589,7 +4010,7 @@ fn daemon_capabilities_result() -> serde_json::Value {
         "method_schemas": {
             "ee.daemon.search": {
                 "request": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
-                "response": DAEMON_SEARCH_RESPONSE_SCHEMA_V1
+                "response": DAEMON_SEARCH_RESPONSE_SCHEMA_V2
             }
         },
         "forward_compat": {
@@ -3608,30 +4029,50 @@ pub fn client_round_trip(
     socket_path: &Path,
     request: &DaemonRequest,
 ) -> Result<DaemonResponse, ClientError> {
+    client_round_trip_before(
+        socket_path,
+        request,
+        Instant::now() + DAEMON_DEFAULT_RPC_TIMEOUT,
+    )
+}
+
+/// Apply a caller-owned cumulative deadline to one daemon round-trip's framed
+/// I/O. The deadline may be shared across capability negotiation and the
+/// method call so per-request socket timeouts cannot accidentally multiply it.
+/// The CLI additionally bounds the whole worker attempt, including connect.
+pub fn client_round_trip_before(
+    socket_path: &Path,
+    request: &DaemonRequest,
+    deadline: Instant,
+) -> Result<DaemonResponse, ClientError> {
+    ensure_client_deadline(deadline)?;
     let mut stream = UnixStream::connect(socket_path).map_err(ClientError::Connect)?;
-    stream
-        .set_read_timeout(Some(DAEMON_DEFAULT_RPC_TIMEOUT))
-        .map_err(ClientError::Io)?;
-    stream
-        .set_write_timeout(Some(DAEMON_DEFAULT_RPC_TIMEOUT))
-        .map_err(ClientError::Io)?;
+    set_client_deadline(&stream, deadline)?;
 
     let body = serde_json::to_vec(request).map_err(ClientError::Encode)?;
     use std::io::Write;
     let length = u32::try_from(body.len())
         .map_err(|_| ClientError::RequestTooLarge { actual: body.len() })?;
+    set_client_deadline(&stream, deadline)?;
     stream
         .write_all(&length.to_be_bytes())
-        .map_err(ClientError::Io)?;
-    stream.write_all(&body).map_err(ClientError::Io)?;
-    stream.flush().map_err(ClientError::Io)?;
+        .map_err(|error| client_io_error(error, deadline))?;
+    set_client_deadline(&stream, deadline)?;
+    stream
+        .write_all(&body)
+        .map_err(|error| client_io_error(error, deadline))?;
+    set_client_deadline(&stream, deadline)?;
+    stream
+        .flush()
+        .map_err(|error| client_io_error(error, deadline))?;
 
     // Read the response with the same frame shape.
     let mut response_prefix = [0_u8; 4];
     use std::io::Read;
+    set_client_deadline(&stream, deadline)?;
     stream
         .read_exact(&mut response_prefix)
-        .map_err(ClientError::Io)?;
+        .map_err(|error| client_io_error(error, deadline))?;
     let announced = u32::from_be_bytes(response_prefix);
     let announced_usize =
         usize::try_from(announced).map_err(|_| ClientError::ResponseTooLarge { announced })?;
@@ -3639,7 +4080,10 @@ pub fn client_round_trip(
         return Err(ClientError::ResponseTooLarge { announced });
     }
     let mut buffer = vec![0_u8; announced_usize];
-    stream.read_exact(&mut buffer).map_err(ClientError::Io)?;
+    set_client_deadline(&stream, deadline)?;
+    stream
+        .read_exact(&mut buffer)
+        .map_err(|error| client_io_error(error, deadline))?;
     let response: DaemonResponse = serde_json::from_slice(&buffer).map_err(ClientError::Decode)?;
     if response.schema != super::DAEMON_RESPONSE_SCHEMA_V1 {
         return Err(ClientError::ResponseSchemaMismatch {
@@ -3668,9 +4112,39 @@ pub fn client_round_trip(
     Ok(response)
 }
 
+fn ensure_client_deadline(deadline: Instant) -> Result<Duration, ClientError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(ClientError::DeadlineExceeded)
+}
+
+fn set_client_deadline(stream: &UnixStream, deadline: Instant) -> Result<(), ClientError> {
+    let remaining = ensure_client_deadline(deadline)?;
+    stream
+        .set_read_timeout(Some(remaining))
+        .map_err(ClientError::Io)?;
+    stream
+        .set_write_timeout(Some(remaining))
+        .map_err(ClientError::Io)
+}
+
+fn client_io_error(error: io::Error, deadline: Instant) -> ClientError {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    ) || Instant::now() >= deadline
+    {
+        ClientError::DeadlineExceeded
+    } else {
+        ClientError::Io(error)
+    }
+}
+
 /// Errors that can occur on the client side of a UDS round-trip.
 #[derive(Debug)]
 pub enum ClientError {
+    DeadlineExceeded,
     Connect(io::Error),
     Io(io::Error),
     Encode(serde_json::Error),
@@ -3702,6 +4176,7 @@ pub enum ClientError {
 impl std::fmt::Display for ClientError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::DeadlineExceeded => write!(formatter, "daemon round-trip deadline exceeded"),
             Self::Connect(source) => {
                 write!(formatter, "failed to connect to daemon socket: {source}")
             }
@@ -3743,6 +4218,7 @@ impl std::fmt::Display for ClientError {
 impl std::error::Error for ClientError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::DeadlineExceeded => None,
             Self::Connect(source) | Self::Io(source) => Some(source),
             Self::Encode(source) | Self::Decode(source) => Some(source),
             Self::RequestTooLarge { .. }
@@ -3796,6 +4272,107 @@ mod tests {
         assert!(daemon_response_fits(&response, usize::MAX));
     }
 
+    fn permanent_reranker_advisory_report() -> SearchReport {
+        SearchReport {
+            status: crate::core::search::SearchStatus::NoResults,
+            embed_backend: crate::models::EmbedBackend::HashFallback,
+            query: "release".to_owned(),
+            requested_limit: 10,
+            results: Vec::new(),
+            elapsed_ms: 1.0,
+            errors: Vec::new(),
+            degraded: vec![crate::core::search::SearchDegradation {
+                code: "rerank_model_unavailable".to_owned(),
+                severity: "warning".to_owned(),
+                message: crate::core::search::RERANK_MODEL_UNAVAILABLE_ADVISORY.to_owned(),
+                repair: Some(crate::core::search::RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+            }],
+            runtime_profile: crate::core::profile::RuntimeProfileReport::for_profile(
+                crate::core::profile::OperatingProfile::Workstation,
+                "daemon_advisory_delivery_test",
+            ),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: 50,
+            relevance_floor_applied: Some(0.0),
+            candidates_below_floor: 0,
+            query_assist: None,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: crate::models::MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        }
+    }
+
+    fn advisory_candidate(
+        report: &SearchReport,
+        session: &mut SearchAdvisorySession,
+    ) -> (DaemonResponse, serde_json::Value) {
+        let result = serde_json::to_value(DaemonSearchResult::from_report(
+            report,
+            false,
+            session,
+            DaemonSearchTiming::from_trace(
+                Duration::from_millis(1),
+                &SearchPerformanceTrace::default(),
+            ),
+        ))
+        .expect("encode method result");
+        let response = DaemonResponse::ok(
+            "req-advisory-delivery",
+            TEST_AGENT_ID,
+            Some(TEST_WORKSPACE_ID.to_owned()),
+            result.clone(),
+        );
+        (response, result)
+    }
+
+    #[test]
+    fn rejected_search_response_does_not_consume_permanent_advisory() {
+        let report = permanent_reranker_advisory_report();
+        let mut shared = SearchAdvisorySession::default();
+
+        let mut rejected_stage = shared.clone();
+        let (rejected_response, rejected_result) = advisory_candidate(&report, &mut rejected_stage);
+        assert_eq!(
+            rejected_result
+                .pointer("/response/data/rerank/advisory/code")
+                .and_then(serde_json::Value::as_str),
+            Some("rerank_model_unavailable")
+        );
+        assert!(!daemon_response_fits(&rejected_response, 1));
+        assert_eq!(shared, SearchAdvisorySession::default());
+
+        let mut delivered_stage = shared.clone();
+        let (delivered_response, delivered_result) =
+            advisory_candidate(&report, &mut delivered_stage);
+        assert!(daemon_response_fits(&delivered_response, usize::MAX));
+        assert_eq!(
+            delivered_result
+                .pointer("/response/data/rerank/advisory/code")
+                .and_then(serde_json::Value::as_str),
+            Some("rerank_model_unavailable")
+        );
+        assert_eq!(shared, SearchAdvisorySession::default());
+        shared = delivered_stage;
+
+        let mut repeated_stage = shared.clone();
+        let (_, repeated_result) = advisory_candidate(&report, &mut repeated_stage);
+        assert!(
+            repeated_result
+                .pointer("/response/data/rerank/advisory")
+                .is_some_and(serde_json::Value::is_null)
+        );
+        assert_eq!(
+            repeated_result
+                .pointer("/response/data/rerank/advisorySummary/sessionSuppressedCount")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+    }
+
     #[cfg(target_vendor = "apple")]
     #[test]
     fn apple_peer_uid_uses_safe_std_peer_credentials() {
@@ -3843,33 +4420,142 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn daemon_search_paths_are_canonical_and_workspace_contained() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let state_dir = workspace.join(".ee");
+        fs::create_dir_all(&state_dir).expect("workspace state dir");
+        let workspace_alias = temp.path().join("workspace-alias");
+        std::os::unix::fs::symlink(&workspace, &workspace_alias).expect("workspace symlink");
+
+        let params = DaemonSearchParams::from_value(&serde_json::json!({
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+            "query": "release",
+            "workspacePath": workspace_alias,
+            "databasePath": workspace.join(".ee/ee.db"),
+            "indexDir": workspace.join(".ee/index")
+        }))
+        .expect("strict params");
+        let (options, _, _) = params
+            .into_search_parts(&workspace.display().to_string())
+            .expect("canonical aliases inside the workspace are accepted");
+        assert_eq!(
+            options.workspace_path,
+            fs::canonicalize(&workspace).unwrap()
+        );
+        assert_eq!(options.database_path, Some(workspace.join(".ee/ee.db")));
+        assert_eq!(options.index_dir, Some(workspace.join(".ee/index")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_search_rejects_symlink_escape_for_database_and_index() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let state_dir = workspace.join(".ee");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&state_dir).expect("workspace state dir");
+        fs::create_dir_all(&outside).expect("outside dir");
+        let escape = state_dir.join("escape");
+        std::os::unix::fs::symlink(&outside, &escape).expect("escape symlink");
+
+        for (field, escaped_path) in [
+            ("databasePath", escape.join("ee.db")),
+            ("indexDir", escape.clone()),
+        ] {
+            let mut value = serde_json::json!({
+                "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+                "query": "release",
+                "workspacePath": workspace
+            });
+            value[field] = serde_json::json!(escaped_path);
+            let params = DaemonSearchParams::from_value(&value).expect("strict params");
+            let error = params
+                .into_search_parts(&workspace.display().to_string())
+                .expect_err("symlink escape must be rejected");
+            assert!(error.contains("must remain inside the canonical workspace"));
+        }
+    }
+
     #[test]
     fn daemon_search_result_rejects_schema_and_field_drift() {
         let canonical = serde_json::json!({
             "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": true,
-            "data": {},
+            "data": {
+                "command": "search",
+                "status": "no_results",
+                "embed_backend": "hash_fallback",
+                "query": "release",
+                "request": {},
+                "scopeStats": {},
+                "results": [],
+                "consensus": [],
+                "conflicts": [],
+                "resultCount": 0,
+                "elapsedMs": 1.0,
+                "metrics": {},
+                "rerank": {},
+                "profileRuntime": {},
+                "errors": [],
+                "degraded": []
+            },
             "degraded": []
         });
         let base = serde_json::json!({
-            "schema": DAEMON_SEARCH_RESPONSE_SCHEMA_V1,
+            "schema": DAEMON_SEARCH_RESPONSE_SCHEMA_V2,
+            "response": canonical.clone(),
+            "human": "Search results\n",
+            "reuseContract": {
+                "daemonProcess": "long_lived",
+                "defaultSearchEmbedder": "process_scoped",
+                "searchIndex": "per_request"
+            },
+            "timing": {
+                "daemonTotal": {
+                    "elapsedMs": 2.0,
+                    "elapsedMsBucket": "1_9ms",
+                    "nondeterministic": true
+                },
+                "embedderPreparation": null,
+                "indexOpen": null,
+                "query": null
+            }
+        });
+        assert!(DaemonSearchResult::from_value(base.clone()).is_ok());
+
+        let mut wrong_schema = base.clone();
+        wrong_schema["schema"] = serde_json::json!("ee.daemon.search.response.v1");
+        assert!(DaemonSearchResult::from_value(wrong_schema).is_err());
+
+        let mut unknown_field = base;
+        unknown_field["unexpected"] = serde_json::json!(true);
+        assert!(DaemonSearchResult::from_value(unknown_field).is_err());
+
+        let mut nested_drift = serde_json::json!({
+            "schema": DAEMON_SEARCH_RESPONSE_SCHEMA_V2,
             "response": canonical,
             "human": "Search results\n",
             "reuseContract": {
                 "daemonProcess": "long_lived",
                 "defaultSearchEmbedder": "process_scoped",
                 "searchIndex": "per_request"
+            },
+            "timing": {
+                "daemonTotal": {
+                    "elapsedMs": 2.0,
+                    "elapsedMsBucket": "1_9ms",
+                    "nondeterministic": true
+                },
+                "embedderPreparation": null,
+                "indexOpen": null,
+                "query": null
             }
         });
-        assert!(DaemonSearchResult::from_value(base.clone()).is_ok());
-
-        let mut wrong_schema = base.clone();
-        wrong_schema["schema"] = serde_json::json!("ee.daemon.search.response.v2");
-        assert!(DaemonSearchResult::from_value(wrong_schema).is_err());
-
-        let mut unknown_field = base;
-        unknown_field["unexpected"] = serde_json::json!(true);
-        assert!(DaemonSearchResult::from_value(unknown_field).is_err());
+        nested_drift["response"]["data"]["unknown"] = serde_json::json!(true);
+        assert!(DaemonSearchResult::from_value(nested_drift).is_err());
     }
 
     fn read_framed_daemon_response(stream: &mut UnixStream) -> DaemonResponse {
@@ -4201,7 +4887,7 @@ mod tests {
             result
                 .pointer("/method_schemas/ee.daemon.search/response")
                 .and_then(serde_json::Value::as_str),
-            Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V1)
+            Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V2)
         );
         assert_eq!(
             result

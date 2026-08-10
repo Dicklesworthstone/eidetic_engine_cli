@@ -46,11 +46,11 @@
         "ee.daemon.write",
         "ee.daemon.write_journal"
       ],
-      "description": "Registered method dispatch name. `ee.daemon.capabilities` is mandatory negotiation before clients use method-specific schemas. `ee.daemon.search` is same-UID and workspace-bound, requires the strict nested `ee.daemon.search.request.v1` schema, and returns `ee.daemon.search.response.v1`; clients must use canonical in-process search when the method or either nested schema is absent."
+      "description": "Registered method dispatch name. `ee.daemon.capabilities` is mandatory negotiation before clients use method-specific schemas. `ee.daemon.search` is same-UID and workspace-bound, requires the strict nested `ee.daemon.search.request.v1` schema, and returns `ee.daemon.search.response.v2`; clients must use canonical in-process search when the method or either nested schema is absent."
     },
     "params": {
       "type": "object",
-      "description": "Method-specific parameters. `ee.daemon.search` accepts only the camelCase fields declared by `ee.daemon.search.request.v1`: required `schema`, `query`, and `workspacePath`, plus canonical search options. Unknown fields, a schema mismatch, or a `workspacePath` that differs from the envelope `workspace_id` are rejected. Other registered methods retain their documented method-specific shapes.",
+      "description": "Method-specific parameters. `ee.daemon.search` accepts only the camelCase fields declared by `ee.daemon.search.request.v1`: required `schema`, `query`, and `workspacePath`, plus canonical search options. Unknown fields or a schema mismatch are rejected. Search paths must be absolute; the canonical workspace must equal the canonical envelope `workspace_id`, and explicit database/index paths must remain canonically contained by that workspace so symlink escapes are rejected. Other registered methods retain their documented method-specific shapes.",
       "additionalProperties": true
     }
   }
