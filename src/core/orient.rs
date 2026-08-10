@@ -353,7 +353,8 @@ pub struct NearbyStore {
     /// Total memory rows in the store (all workspaces, tombstones included —
     /// a presence signal, not a curation metric).
     pub documents: u64,
-    /// Store database file mtime (RFC 3339): the last actual write.
+    /// Newest regular database or WAL file mtime (RFC 3339): the last actual
+    /// durable write. The shared-memory sidecar is intentionally excluded.
     pub last_write: Option<String>,
 }
 
@@ -475,17 +476,32 @@ pub fn discover_nearby_stores(
     scan
 }
 
-/// Read `(memory rows, db mtime)` from a candidate store, skipping quietly
-/// on any failure.
+/// Read `(memory rows, newest db/WAL mtime)` from a candidate store, skipping
+/// quietly on any failure.
 fn nearby_store_profile(database: &Path) -> Option<(u64, Option<String>)> {
     let connection = DbConnection::open_file_read_only(database).ok()?;
     let documents = connection.count_table_rows("memories").ok()?;
     let documents = u64::try_from(documents).unwrap_or(0);
-    let last_write = std::fs::metadata(database)
-        .ok()
-        .and_then(|metadata| metadata.modified().ok())
-        .map(|modified| DateTime::<Utc>::from(modified).to_rfc3339());
+    let last_write = nearby_store_last_write(database);
     Some((documents, last_write))
+}
+
+fn nearby_store_last_write(database: &Path) -> Option<String> {
+    let mut wal_path = database.as_os_str().to_os_string();
+    wal_path.push("-wal");
+    let wal_path = std::path::PathBuf::from(wal_path);
+
+    [database, wal_path.as_path()]
+        .into_iter()
+        .filter_map(|path| {
+            let metadata = std::fs::symlink_metadata(path).ok()?;
+            if !metadata.file_type().is_file() {
+                return None;
+            }
+            metadata.modified().ok()
+        })
+        .max()
+        .map(|modified| DateTime::<Utc>::from(modified).to_rfc3339())
 }
 
 #[cfg(test)]
@@ -789,6 +805,56 @@ mod tests {
         ensure(
             scan.stores[0].last_write.is_some(),
             "last_write must be populated".to_owned(),
+        )
+    }
+
+    #[test]
+    fn discovery_last_write_uses_newer_wal_and_ignores_shm() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database = temp.path().join("ee.db");
+        let wal = temp.path().join("ee.db-wal");
+        let shm = temp.path().join("ee.db-shm");
+        std::fs::write(&database, b"database fixture").map_err(|error| error.to_string())?;
+        std::fs::write(&wal, b"wal fixture").map_err(|error| error.to_string())?;
+        std::fs::write(&shm, b"shm fixture").map_err(|error| error.to_string())?;
+
+        let database_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let wal_time = database_time + std::time::Duration::from_secs(60);
+        let shm_time = wal_time + std::time::Duration::from_secs(60);
+        for (path, modified) in [
+            (&database, database_time),
+            (&wal, wal_time),
+            (&shm, shm_time),
+        ] {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .map_err(|error| error.to_string())?
+                .set_times(std::fs::FileTimes::new().set_modified(modified))
+                .map_err(|error| error.to_string())?;
+        }
+
+        let before = [
+            std::fs::read(&database).map_err(|error| error.to_string())?,
+            std::fs::read(&wal).map_err(|error| error.to_string())?,
+            std::fs::read(&shm).map_err(|error| error.to_string())?,
+        ];
+        let last_write = nearby_store_last_write(&database);
+        let after = [
+            std::fs::read(&database).map_err(|error| error.to_string())?,
+            std::fs::read(&wal).map_err(|error| error.to_string())?,
+            std::fs::read(&shm).map_err(|error| error.to_string())?,
+        ];
+
+        ensure_equal(
+            &last_write,
+            &Some(DateTime::<Utc>::from(wal_time).to_rfc3339()),
+            "newest durable store write",
+        )?;
+        ensure_equal(
+            &after,
+            &before,
+            "mtime inspection must not mutate artifacts",
         )
     }
 

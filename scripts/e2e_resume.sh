@@ -17,6 +17,10 @@ if ! command -v jq >/dev/null 2>&1; then
     echo "jq missing" >&2
     exit 3
 fi
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 missing" >&2
+    exit 3
+fi
 
 EE_BIN="${EE_BIN:-${EE_BINARY:-ee}}"
 if [[ "${EE_BIN}" == */* ]]; then
@@ -73,6 +77,10 @@ store_fingerprint() {
     for path in "${database}" "${database}-wal" "${database}-shm"; do
         printf '%s=%s\n' "$(basename "${path}")" "$(hash_file "${path}")"
     done
+}
+
+now_ms() {
+    python3 -c 'import time; print(time.monotonic_ns() // 1000000)'
 }
 
 run_ee init --workspace "${WS}" --json
@@ -264,6 +272,52 @@ if [[ "${COLD_HUMAN_HASH_BEFORE}" == "${COLD_HUMAN_HASH_AFTER}" ]]; then
     event nearby_human_resume_preserves_db_wal_shm pass
 else
     event nearby_human_resume_preserves_db_wal_shm fail "before=${COLD_HUMAN_HASH_BEFORE//$'\n'/,}; after=${COLD_HUMAN_HASH_AFTER//$'\n'/,}"
+fi
+
+# --- bounded 10k corpus: real store, bounded output, <2s command ----------
+SCALE_WS="${ROOT}/scale-10k"
+mkdir -p "${SCALE_WS}"
+run_ee init --workspace "${SCALE_WS}" --json
+SCALE_INIT_EXIT=$LAST_EXIT
+STEP=$((STEP + 1))
+SCALE_SEED_STDOUT="${LOG_DIR}/step${STEP}.stdout"
+SCALE_SEED_STDERR="${LOG_DIR}/step${STEP}.stderr"
+awk -v n=10000 'BEGIN {
+    for (i = 1; i <= n; i++) {
+        printf "{\"content\":\"Resume scale row %05d.\",\"level\":\"episodic\",\"kind\":\"note\",\"tags\":[\"session-scale-10k\"]}\n", i
+    }
+}' | "${REAL_EE}" --workspace "${SCALE_WS}" remember --batch --stdin --json \
+    >"${SCALE_SEED_STDOUT}" 2>"${SCALE_SEED_STDERR}"
+SCALE_SEED_EXIT=${PIPESTATUS[1]}
+SCALE_STORED="$(jq -r '.data.storedCount // 0' "${SCALE_SEED_STDOUT}" 2>/dev/null)"
+if [[ "${SCALE_INIT_EXIT}" -eq 0 && "${SCALE_SEED_EXIT}" -eq 0 \
+    && "${SCALE_STORED}" -eq 10000 ]]; then
+    event scale_10k_seeded pass
+else
+    event scale_10k_seeded fail "init=${SCALE_INIT_EXIT}; seed=${SCALE_SEED_EXIT}; stored=${SCALE_STORED}"
+fi
+
+SCALE_DATABASE="${SCALE_WS}/.ee/ee.db"
+SCALE_HASH_BEFORE="$(store_fingerprint "${SCALE_DATABASE}")"
+SCALE_STARTED_MS="$(now_ms)"
+run_ee resume --workspace "${SCALE_WS}" --json
+SCALE_ELAPSED_MS=$(( $(now_ms) - SCALE_STARTED_MS ))
+SCALE_JSON="${LAST_STDOUT}"
+SCALE_HASH_AFTER="$(store_fingerprint "${SCALE_DATABASE}")"
+if [[ "${LAST_EXIT}" -eq 0 && "${SCALE_ELAPSED_MS}" -lt 2000 ]] \
+    && jq -e '.data.report.episodicTotal == 10000
+        and (.data.report.sessions | length) == 1
+        and .data.report.sessions[0].memberCount == 10000
+        and (.data.report.sessions[0].items | length) == 20' \
+        "${SCALE_JSON}" >/dev/null 2>&1; then
+    event scale_10k_resume_under_2s_and_bounded pass
+else
+    event scale_10k_resume_under_2s_and_bounded fail "exit=${LAST_EXIT}; elapsedMs=${SCALE_ELAPSED_MS}; $(head -c 300 "${SCALE_JSON}")"
+fi
+if [[ "${SCALE_HASH_BEFORE}" == "${SCALE_HASH_AFTER}" ]]; then
+    event scale_10k_resume_preserves_db_wal_shm pass
+else
+    event scale_10k_resume_preserves_db_wal_shm fail "before=${SCALE_HASH_BEFORE//$'\n'/,}; after=${SCALE_HASH_AFTER//$'\n'/,}"
 fi
 
 echo

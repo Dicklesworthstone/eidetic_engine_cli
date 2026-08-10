@@ -301,7 +301,17 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
         })?;
 
     let ids: Vec<&str> = all_live.iter().map(|memory| memory.id.as_str()).collect();
-    let tags = connection.get_memory_tags_batch(&ids).unwrap_or_default();
+    let tags = connection
+        .get_memory_tags_batch(&ids)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to load memory tags required for resume session grouping, open-loop detection, and staleness: {error}"
+            ),
+            repair: Some(
+                "Run `ee doctor --workspace . --json`, repair the reported storage failure, then retry `ee resume`."
+                    .to_owned(),
+            ),
+        })?;
 
     // Recent end-state: episodic memories, newest first (created_at desc, id
     // desc as the deterministic tie-break).
@@ -336,24 +346,27 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
         include_superseded: false,
         limit: 200,
         now: None,
-    });
-    let revisit_decisions = match decide {
-        Ok(report) => report
-            .decisions
-            .into_iter()
-            .filter(|decision| decision.revisit_by.is_some() && !decision.superseded)
-            .map(|decision| ResumeDecision {
-                memory_id: decision.memory_id,
-                topic: decision.topic,
-                chosen: decision.chosen,
-                revisit_by: decision.revisit_by,
-                revisit_status: decision.revisit_status,
-                created_at: decision.created_at,
-            })
-            .collect(),
-        // A store without the decide surface still resumes; loops are empty.
-        Err(_) => Vec::new(),
-    };
+    })
+    .map_err(|error| DomainError::Storage {
+        message: format!("Failed to load revisit decisions required for resume open loops: {error}"),
+        repair: Some(
+            "Run `ee doctor --workspace . --json`, repair the reported storage failure, then retry `ee resume`."
+                .to_owned(),
+        ),
+    })?;
+    let revisit_decisions = decide
+        .decisions
+        .into_iter()
+        .filter(|decision| decision.revisit_by.is_some() && !decision.superseded)
+        .map(|decision| ResumeDecision {
+            memory_id: decision.memory_id,
+            topic: decision.topic,
+            chosen: decision.chosen,
+            revisit_by: decision.revisit_by,
+            revisit_status: decision.revisit_status,
+            created_at: decision.created_at,
+        })
+        .collect();
 
     let mut tagged_items: Vec<ResumeItem> = all_live
         .iter()
@@ -437,12 +450,14 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        OPEN_LOOP_TAGS, ResumeItem, SESSION_GAP_SECONDS, STALE_SHARED_TAG_MIN, StaleFlag,
-        apply_staleness, group_sessions, resume_next_commands,
+        OPEN_LOOP_TAGS, ResumeItem, ResumeOptions, SESSION_GAP_SECONDS, STALE_SHARED_TAG_MIN,
+        StaleFlag, apply_staleness, build_resume_report, group_sessions, resume_next_commands,
     };
     use crate::core::orient::{NearbyStore, NearbyStoreScan};
-    use crate::db::StoredMemory;
+    use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection, StoredMemory};
+    use crate::models::{DomainError, MemoryId};
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     fn memory(id: &str, level: &str, kind: &str, created_at: &str) -> StoredMemory {
         StoredMemory {
@@ -469,6 +484,61 @@ mod tests {
             valid_from: None,
             valid_to: None,
         }
+    }
+
+    fn resume_storage_fixture(
+        kind: &str,
+        tags: &[&str],
+    ) -> Result<(tempfile::TempDir, PathBuf, PathBuf), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("workspace");
+        let store = workspace.join(".ee");
+        std::fs::create_dir_all(&store).map_err(|error| error.to_string())?;
+        let database = store.join("ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let canonical = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::workspace::stable_workspace_id(&canonical);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: canonical.display().to_string(),
+                    name: Some("resume-storage-fixture".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x52534d45)).to_string();
+        let content = if kind == "decision" {
+            "Topic: Resume failure propagation\nChosen: preserve truth\nOptions: preserve truth | hide failure\nRationale: False success is unsafe."
+        } else {
+            "Resume storage failure fixture."
+        };
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id,
+                    level: "episodic".to_owned(),
+                    kind: kind.to_owned(),
+                    content: content.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.9,
+                    importance: 0.9,
+                    provenance_uri: Some("test://resume-storage-failure".to_owned()),
+                    trust_class: "agent_assertion".to_owned(),
+                    trust_subclass: None,
+                    tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+        Ok((temp, workspace, database))
     }
 
     #[test]
@@ -558,6 +628,62 @@ mod tests {
         assert_eq!(apply_staleness(&mut items, &all, &tags), 0);
         assert!(items[0].stale.is_none());
         assert!(OPEN_LOOP_TAGS.contains(&"next"));
+    }
+
+    #[test]
+    fn tag_storage_failure_is_not_reported_as_an_empty_resume() -> Result<(), String> {
+        let (_temp, workspace, database) = resume_storage_fixture("note", &["next", "queue"])?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("DROP TABLE memory_tags")
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        match build_resume_report(&ResumeOptions {
+            workspace_path: &workspace,
+            database_path: &database,
+            sessions: 3,
+        }) {
+            Err(DomainError::Storage { message, repair }) => {
+                assert!(message.contains("Failed to load memory tags required for resume"));
+                assert!(
+                    repair
+                        .as_deref()
+                        .is_some_and(|value| value.contains("ee doctor --workspace . --json"))
+                );
+                Ok(())
+            }
+            other => Err(format!("expected resume tag storage error, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn decision_storage_failure_is_not_reported_as_zero_revisit_decisions() -> Result<(), String> {
+        let (_temp, workspace, database) = resume_storage_fixture("decision", &[])?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("DROP TABLE memory_links")
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        match build_resume_report(&ResumeOptions {
+            workspace_path: &workspace,
+            database_path: &database,
+            sessions: 3,
+        }) {
+            Err(DomainError::Storage { message, repair }) => {
+                assert!(message.contains("Failed to load revisit decisions required for resume"));
+                assert!(
+                    repair
+                        .as_deref()
+                        .is_some_and(|value| value.contains("ee doctor --workspace . --json"))
+                );
+                Ok(())
+            }
+            other => Err(format!(
+                "expected resume revisit-decision storage error, got {other:?}"
+            )),
+        }
     }
 
     #[test]
