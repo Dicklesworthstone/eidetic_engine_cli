@@ -524,7 +524,7 @@ const NEGATION_WORDS: &[&str] = &[
     "invalid",
 ];
 
-fn has_negation(text: &str) -> bool {
+pub(crate) fn has_negation(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     NEGATION_WORDS.iter().any(|&neg| {
         lower

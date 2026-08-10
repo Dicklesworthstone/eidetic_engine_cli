@@ -129,6 +129,7 @@ pub mod status;
 pub mod store_integrity;
 pub mod streams;
 pub mod subscribe;
+pub mod suggest_links;
 pub mod support_bundle;
 pub mod swarm_brief;
 pub mod swarm_brief_delta;
