@@ -444,7 +444,12 @@ bounded_lsof() {
     local timeout_bin
     timeout_bin=$(timeout_command)
     if [ -n "$timeout_bin" ]; then
-        "$timeout_bin" 2s lsof "$@"
+        # -k escalates to SIGKILL: on macOS an lsof stuck in uninterruptible
+        # disk-wait (stalled USB/network volume) ignores SIGTERM, and a bare
+        # `timeout 2s` then waits forever — which serialized EVERY
+        # rch_verify preflight on this host behind hung lsof zombies
+        # (observed 2026-08-10).
+        "$timeout_bin" -k 1s 2s lsof "$@"
         return
     fi
     if command -v perl >/dev/null 2>&1; then
