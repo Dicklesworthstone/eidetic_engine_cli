@@ -483,19 +483,11 @@ fn local_cargo_process_scan_evidence(process_scan: &Value) -> Vec<EvidenceRecord
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("unavailable");
-    let count = process_scan
-        .get("count")
-        .and_then(Value::as_u64)
-        .unwrap_or_else(|| {
-            process_scan
-                .get("detectedLocalBuilds")
-                .and_then(Value::as_array)
-                .map_or(0, |items| items.len() as u64)
-        });
+    let count = super::support_bundle::local_cargo_tripwire_blocking_count(process_scan);
     let source = "local Cargo active-process tripwire";
 
-    match status {
-        "bypass_detected" => vec![evidence_record(
+    if super::support_bundle::local_cargo_tripwire_detected_bypass(process_scan) {
+        vec![evidence_record(
             "local_cargo_tripwire",
             "cargo/build/test command",
             source,
@@ -504,25 +496,28 @@ fn local_cargo_process_scan_evidence(process_scan: &Value) -> Vec<EvidenceRecord
             &format!(
                 "local_cargo_policy_state=local_disallowed_attempt; active process scan detected {count} local Cargo/rustc process(es) for this workspace without rch exec"
             ),
-        )],
-        "clean" | "ok" => vec![evidence_record(
-            "local_cargo_tripwire",
-            "cargo/build/test command",
-            source,
-            EvidenceRecordStatus::Pass,
-            "supporting",
-            "local_cargo_policy_state=remote_required_ready; active process scan found no local Cargo/rustc bypass",
-        )],
-        _ => vec![evidence_record(
-            "local_cargo_tripwire",
-            "cargo/build/test command",
-            source,
-            EvidenceRecordStatus::Inconclusive,
-            "weak",
-            &format!(
-                "local_cargo_policy_state=unknown; active process scan unavailable ({status})"
-            ),
-        )],
+        )]
+    } else {
+        match status {
+            "clean" | "ok" => vec![evidence_record(
+                "local_cargo_tripwire",
+                "cargo/build/test command",
+                source,
+                EvidenceRecordStatus::Pass,
+                "supporting",
+                "local_cargo_policy_state=remote_required_ready; active process scan found no local Cargo/rustc bypass",
+            )],
+            _ => vec![evidence_record(
+                "local_cargo_tripwire",
+                "cargo/build/test command",
+                source,
+                EvidenceRecordStatus::Inconclusive,
+                "weak",
+                &format!(
+                    "local_cargo_policy_state=unknown; active process scan unavailable ({status})"
+                ),
+            )],
+        }
     }
 }
 
@@ -2294,6 +2289,39 @@ mod tests {
             records[0].summary.contains("remote_required_ready"),
             "clean process-scan evidence must preserve the ready policy state"
         );
+    }
+
+    #[test]
+    fn completion_report_treats_informational_process_rows_as_clean_policy_evidence() {
+        let records = local_cargo_process_scan_evidence(&serde_json::json!({
+            "schema": "ee.rch_local_cargo_tripwire.v1",
+            "mode": "probe_processes",
+            "status": "ok",
+            "count": 0,
+            "detectedLocalBuilds": [
+                {"policyStatus": "editor_tooling_informational"},
+                {"policyStatus": "unkillable_stale_informational"}
+            ],
+        }));
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, EvidenceRecordStatus::Pass);
+        assert!(records[0].summary.contains("remote_required_ready"));
+    }
+
+    #[test]
+    fn completion_report_blocks_unknown_informational_lookalike() {
+        let records = local_cargo_process_scan_evidence(&serde_json::json!({
+            "schema": "ee.rch_local_cargo_tripwire.v1",
+            "mode": "probe_processes",
+            "status": "ok",
+            "count": 0,
+            "detectedLocalBuilds": [{"policyStatus": "unknown_informational"}],
+        }));
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, EvidenceRecordStatus::Fail);
+        assert!(records[0].summary.contains("local_disallowed_attempt"));
     }
 
     #[test]

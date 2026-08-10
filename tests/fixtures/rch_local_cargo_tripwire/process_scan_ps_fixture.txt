@@ -13,4 +13,17 @@
  112 111 00:03:13 /Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 exec -- cargo test --lib lod_ -- --nocapture
  113 1 00:00:51 ssh -i /Users/jemanuel/.ssh/contabo_vps_ed25519 -o BatchMode=yes ubuntu@212.90.121.76 cd /data/projects/eidetic_engine_cli_manual_turquoise-20260607T152024Z && mkdir -p .manual-target-data && TMPDIR=/tmp CARGO_TARGET_DIR=/data/projects/eidetic_engine_cli_manual_turquoise-20260607T152024Z/.manual-target-data cargo test --lib global_memory_scope -- --nocapture
  114 1 13:29:00 /Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/rust-analyzer
- 115 114 00:01:04 /Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo check --quiet --workspace --message-format=json --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml --keep-going
+ 115 117 00:01:04 /Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo check --quiet --workspace --message-format=json --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml --keep-going
+ 116 1 02:00:00 /Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo check --workspace --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 117 114 00:01:05 /bin/zsh -c cargo check --quiet --workspace --message-format=json --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml --keep-going
+ 118 115 00:00:55 /Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/rustc --crate-name ee /Users/jemanuel/projects/eidetic_engine_cli/src/lib.rs
+ 119 1 00:01:30 /bin/zsh -c echo rust-analyzer
+ 120 119 00:01:00 /Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo check --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 121 114 00:00:50 /Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml --lib
+ 122 114 00:00:40 /Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo build --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 123 114 00:00:30 /Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo bench --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 124 1 00:59:59 /Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo check --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 125 1 02:00:00 /Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo check --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 126 1 02:00:00 /Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo check --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 127 1 02:00:00 /Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo check --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 128 1 01:00:00 /Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo check --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml

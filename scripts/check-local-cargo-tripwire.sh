@@ -37,6 +37,7 @@ PACKAGE_CACHE_PIDS_FIXTURE=""
 WORKTREE_FIXTURE=""
 TMUX_PANES_FIXTURE=""
 TMUX_PANES_TEXT_FIXTURE=""
+PROCESS_STAT_TEXT_FIXTURE=""
 
 usage() {
     sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
@@ -217,11 +218,81 @@ classify_command() {
 
 # True when a ps etime value is at least one hour (dd-hh:mm:ss or hh:mm:ss).
 elapsed_at_least_one_hour() {
-    case "$1" in
-        *-*) return 0 ;;
-        *:*:*) return 0 ;;
+    local elapsed="$1"
+    local days=0
+    local hours
+    case "$elapsed" in
+        *-*)
+            days=${elapsed%%-*}
+            elapsed=${elapsed#*-}
+            ;;
+    esac
+    case "$elapsed" in
+        *:*:*) hours=${elapsed%%:*} ;;
         *) return 1 ;;
     esac
+    case "$days:$hours" in
+        *[!0-9:]*|:*) return 1 ;;
+    esac
+    [ "$days" -gt 0 ] || [ "$hours" -ge 1 ]
+}
+
+process_stat_for_pid() {
+    local pid="$1"
+    if [ -n "$PROCESS_STAT_TEXT_FIXTURE" ]; then
+        printf '%s\n' "$PROCESS_STAT_TEXT_FIXTURE" |
+            awk -v wanted_pid="$pid" '$1 == wanted_pid { print $2; exit }'
+        return
+    fi
+    if [ -n "$PS_FIXTURE" ]; then
+        return 0
+    fi
+    ps -o stat= -p "$pid" 2>/dev/null | tr -d ' '
+}
+
+process_descends_from_rust_analyzer_check() {
+    local ps_text="$1"
+    local child_pid="$2"
+    local current_pid="$child_pid"
+    local current_cmd
+    local executable
+    local subcommand
+    local parent_pid
+    local saw_cargo_check=false
+    local depth=0
+
+    while [ -n "$current_pid" ] && [ "$current_pid" != "0" ] && [ "$depth" -lt 32 ]; do
+        current_cmd=$(parent_command_from_ps_output "$ps_text" "$current_pid")
+        executable=$(printf '%s\n' "$current_cmd" | awk '{print $1}')
+        case "$executable" in
+            rust-analyzer|*/rust-analyzer)
+                [ "$saw_cargo_check" = true ]
+                return
+                ;;
+        esac
+        if command_mentions_rust_tool "$current_cmd"; then
+            subcommand=$(cargo_subcommand_from_command "$current_cmd")
+            if [ -n "$subcommand" ]; then
+                [ "$subcommand" = "check" ] || return 1
+                saw_cargo_check=true
+            fi
+        fi
+        parent_pid=$(parent_pid_from_ps_output "$ps_text" "$current_pid")
+        if [ -z "$parent_pid" ] || [ "$parent_pid" = "0" ] || [ "$parent_pid" = "$current_pid" ]; then
+            return 1
+        fi
+        current_pid="$parent_pid"
+        depth=$((depth + 1))
+    done
+    return 1
+}
+
+blocking_process_count() {
+    awk -F'\t' '
+        $10 != "editor_tooling_informational" &&
+        $10 != "unkillable_stale_informational" { count += 1 }
+        END { print count + 0 }
+    '
 }
 
 probe_processes() {
@@ -345,24 +416,21 @@ probe_processes() {
         # informational so it does not block proof-broker admission — on a
         # dev Mac with an open editor the old classification starved every
         # compliant RCH dispatch on the machine.
-        local policy_parent_cmd
-        policy_parent_cmd=$(parent_command_from_ps_output "$ps_output" "$ppid")
-        case "$policy_parent_cmd" in
-            *rust-analyzer*)
-                policy_status="editor_tooling_informational"
-                reason="cargo ${subcommand:-check} spawned by rust-analyzer (editor check-on-save); informational, not an RCH bypass"
-                ;;
-        esac
+        if process_descends_from_rust_analyzer_check "$ps_output" "$pid"; then
+            policy_status="editor_tooling_informational"
+            reason="cargo ${subcommand:-check} descended from rust-analyzer (editor check-on-save); informational, not an RCH bypass"
+        fi
         # Unkillable-stale exemption (bd-088ci): a process stuck in
         # uninterruptible I/O wait (stat U/D, e.g. on a stalled external
         # volume) for an hour+ cannot be executing new builds and cannot be
         # killed; blocking admission on it wedges the machine until reboot.
-        # Skipped under PS_FIXTURE so the self-test never probes live pids.
-        if [ -z "$PS_FIXTURE" ] && [ "$policy_status" != "editor_tooling_informational" ]; then
+        # Fixture-backed process state keeps this branch deterministic in the
+        # self-test and prevents fixture pids from probing unrelated live pids.
+        if [ "$policy_status" != "editor_tooling_informational" ]; then
             local live_stat
-            live_stat=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')
+            live_stat=$(process_stat_for_pid "$pid")
             case "$live_stat" in
-                *U*|*D*)
+                U*|D*)
                     if elapsed_at_least_one_hour "$elapsed"; then
                         policy_status="unkillable_stale_informational"
                         reason="process in uninterruptible I/O wait (stat ${live_stat}) for ${elapsed}; cannot execute new builds or be killed — excluded from admission blocking"
@@ -1466,20 +1534,36 @@ EOF
         local old_ps_fixture="$PS_FIXTURE"
         local old_package_cache_pids_fixture="$PACKAGE_CACHE_PIDS_FIXTURE"
         local old_tmux_panes_text_fixture="$TMUX_PANES_TEXT_FIXTURE"
+        local old_process_stat_text_fixture="$PROCESS_STAT_TEXT_FIXTURE"
         PS_FIXTURE="tests/fixtures/rch_local_cargo_tripwire/process_scan_ps_fixture.txt"
         PACKAGE_CACHE_PIDS_FIXTURE="102"
+        PROCESS_STAT_TEXT_FIXTURE=$(cat <<'EOF'
+116 U+
+124 U+
+125 R+
+127 D
+128 U+
+EOF
+)
         TMUX_PANES_TEXT_FIXTURE=$(cat <<'EOF'
 %22	102	eidetic_engine_cli:0.2	/Users/jemanuel/projects/eidetic_engine_cli	eidetic_engine_cli__cc_test
 EOF
 )
         fixture_body=$(probe_processes | sort -n -k1,1)
-        fixture_count=$(printf '%s\n' "$fixture_body" | awk -F'\t' '$10 !~ /_informational$/' | grep -c . || true)
+        fixture_count=$(printf '%s\n' "$fixture_body" | blocking_process_count)
+        local unknown_informational_count
+        unknown_informational_count=$(printf '999\t1\t00:01:00\tcargo\tcheck\t-\t-\t-\tnot_observed\tunknown_informational\tcargo check\tunknown status\n' | blocking_process_count)
+        if [ "$unknown_informational_count" -ne 1 ]; then
+            printf 'self-test FAILED: unknown informational-looking status must remain blocking\n' >&2
+            exit 1
+        fi
         fixture_report=$(emit_json_probe "$fixture_body" "$fixture_count" "$worktree_body" "$worktree_count")
         PS_FIXTURE="$old_ps_fixture"
         PACKAGE_CACHE_PIDS_FIXTURE="$old_package_cache_pids_fixture"
         TMUX_PANES_TEXT_FIXTURE="$old_tmux_panes_text_fixture"
+        PROCESS_STAT_TEXT_FIXTURE="$old_process_stat_text_fixture"
         if ! printf '%s' "$fixture_report" | jq -e '
-            .count == 3
+            .count == 10
             and .forbiddenWorktreeCount == 2
             and .localBuildPolicy.status == "blocked"
             and .worktreePolicy.status == "blocked"
@@ -1490,6 +1574,12 @@ EOF
             and any(.detectedLocalBuilds[]; .policyStatus == "local_cargo_disallowed" and .subcommand == "test" and .manifestPath == "/Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml" and .tmuxPane.paneId == null)
             and any(.detectedLocalBuilds[]; .policyStatus == "local_rust_tool_disallowed" and .commandKind == "rustc")
             and any(.detectedLocalBuilds[]; .policyStatus == "editor_tooling_informational" and .subcommand == "check")
+            and any(.detectedLocalBuilds[]; .policyStatus == "editor_tooling_informational" and .commandKind == "rustc" and .pid == "118")
+            and any(.detectedLocalBuilds[]; .policyStatus == "unkillable_stale_informational" and .pid == "116")
+            and any(.detectedLocalBuilds[]; .policyStatus == "unkillable_stale_informational" and .pid == "127")
+            and any(.detectedLocalBuilds[]; .policyStatus == "unkillable_stale_informational" and .pid == "128" and .elapsed == "01:00:00")
+            and all(.detectedLocalBuilds[] | select(.pid == "120" or .pid == "121" or .pid == "122" or .pid == "123"); .policyStatus == "local_cargo_disallowed")
+            and all(.detectedLocalBuilds[] | select(.pid == "124" or .pid == "125" or .pid == "126"); .policyStatus == "local_cargo_disallowed")
             and any(.forbiddenWorktrees[]; .path == "/Users/jemanuel/projects/ee-clean-verify" and .detached == true and .severity == "critical")
             and any(.forbiddenWorktrees[]; .path == "/tmp/eidetic-engine-extra" and .branch == "refs/heads/feature" and .detached == false)
             and any(.repairActions[]; .kind == "request_human_worktree_cleanup_approval")
@@ -1536,7 +1626,7 @@ case "$MODE" in
         if [ -n "$BODY" ]; then
             # Blocking count excludes editor-tooling rows (bd-088ci): they
             # are reported for visibility but must not gate RCH admission.
-            COUNT=$(printf '%s\n' "$BODY" | awk -F'\t' '$10 !~ /_informational$/' | grep -c . || true)
+            COUNT=$(printf '%s\n' "$BODY" | blocking_process_count)
         else
             COUNT=0
         fi

@@ -624,15 +624,9 @@ fn local_cargo_tripwire_entry(
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("unavailable");
-    let count = process_scan
-        .get("count")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let bypass_detected = status_text == "bypass_detected"
-        || process_scan
-            .get("detectedLocalBuilds")
-            .and_then(Value::as_array)
-            .is_some_and(|items| !items.is_empty());
+    let count = crate::core::support_bundle::local_cargo_tripwire_blocking_count(process_scan);
+    let bypass_detected =
+        crate::core::support_bundle::local_cargo_tripwire_detected_bypass(process_scan);
     let mut degraded_codes = Vec::new();
     let (authority, status, summary) = if bypass_detected {
         degraded_codes.push(EnvironmentAttestationDegradedCode::LocalCargoBypassDetected);
@@ -2292,6 +2286,70 @@ mod tests {
         );
         assert_eq!(metric_value(tripwire, "input_origin"), Some("fixture"));
         assert!(tripwire.summary.contains("Fixture-supplied"));
+    }
+
+    #[test]
+    fn informational_local_cargo_rows_do_not_contradict_attestation() {
+        let brief = report_with_sources(vec![ready_source(SwarmBriefSourceKind::Git)]);
+        let process_scan = json!({
+            "schema": "ee.rch_local_cargo_tripwire.v1",
+            "mode": "probe_processes",
+            "status": "ok",
+            "count": 0,
+            "detectedLocalBuilds": [
+                {"policyStatus": "editor_tooling_informational"},
+                {"policyStatus": "unkillable_stale_informational"}
+            ]
+        });
+        let attestation = environment_attestation_from_swarm_brief_with_inputs(
+            &brief,
+            EnvironmentAttestationInputs {
+                generated_at: fixed_time(),
+                local_cargo_process_scan: Some(&process_scan),
+                local_cargo_process_scan_origin:
+                    EnvironmentAttestationLocalCargoScanOrigin::LiveProbe,
+                ci_proof_lane_snapshot: None,
+            },
+        );
+        let tripwire = entry(
+            &attestation,
+            EnvironmentAttestationSourceKind::LocalCargoTripwire,
+        );
+
+        assert_eq!(tripwire.status, EnvironmentAttestationSourceStatus::Ok);
+        assert_ne!(
+            attestation.verdict,
+            EnvironmentAttestationVerdict::LocalCargoBypassDetected
+        );
+        assert!(!attestation.summary.local_cargo_fallback_observed);
+    }
+
+    #[test]
+    fn unknown_informational_lookalike_still_contradicts_attestation() {
+        let brief = report_with_sources(vec![ready_source(SwarmBriefSourceKind::Git)]);
+        let process_scan = json!({
+            "schema": "ee.rch_local_cargo_tripwire.v1",
+            "mode": "probe_processes",
+            "status": "ok",
+            "count": 0,
+            "detectedLocalBuilds": [{"policyStatus": "unknown_informational"}]
+        });
+        let attestation = environment_attestation_from_swarm_brief_with_inputs(
+            &brief,
+            EnvironmentAttestationInputs {
+                generated_at: fixed_time(),
+                local_cargo_process_scan: Some(&process_scan),
+                local_cargo_process_scan_origin:
+                    EnvironmentAttestationLocalCargoScanOrigin::LiveProbe,
+                ci_proof_lane_snapshot: None,
+            },
+        );
+
+        assert_eq!(
+            attestation.verdict,
+            EnvironmentAttestationVerdict::LocalCargoBypassDetected
+        );
+        assert!(attestation.summary.local_cargo_fallback_observed);
     }
 
     #[test]

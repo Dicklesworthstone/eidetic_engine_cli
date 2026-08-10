@@ -4548,12 +4548,24 @@ fn local_cargo_tripwire_json(workspace: &Path) -> String {
             "message": error.to_string(),
         })
     });
-    let build_admission_status = if build_admission.admitted {
+    let process_scan = local_cargo_tripwire_process_scan_json(workspace);
+    local_cargo_tripwire_json_from_inputs(
+        build_admission.admitted,
+        build_admission_json,
+        process_scan,
+    )
+}
+
+fn local_cargo_tripwire_json_from_inputs(
+    build_admission_admitted: bool,
+    build_admission_json: Value,
+    process_scan: Value,
+) -> String {
+    let build_admission_status = if build_admission_admitted {
         "remote_required_ready"
     } else {
         "remote_required_blocked"
     };
-    let process_scan = local_cargo_tripwire_process_scan_json(workspace);
     let process_status = process_scan
         .get("status")
         .and_then(Value::as_str)
@@ -4577,25 +4589,22 @@ fn local_cargo_tripwire_json(workspace: &Path) -> String {
         .get("disk_pressure_context")
         .cloned()
         .unwrap_or(Value::Null);
-    let process_scan_detected_bypass = process_status == "bypass_detected"
-        || detected_local_builds
-            .as_array()
-            .is_some_and(|items| !items.is_empty());
+    let process_scan_detected_bypass = local_cargo_tripwire_detected_bypass(&process_scan);
     let policy_state = if process_scan_detected_bypass {
         "local_disallowed_attempt"
-    } else if !build_admission.admitted {
+    } else if !build_admission_admitted {
         "remote_required_blocked"
     } else {
         "remote_required_ready"
     };
     let collection_status = if process_scan_detected_bypass {
         "local_cargo_bypass_detected"
-    } else if process_status == "clean" {
+    } else if matches!(process_status, "clean" | "ok") {
         "policy_and_live_process_scan"
     } else {
         "policy_summary_process_scan_unavailable"
     };
-    let policy_status = if process_scan_detected_bypass || !build_admission.admitted {
+    let policy_status = if process_scan_detected_bypass || !build_admission_admitted {
         "blocked"
     } else {
         "enforced"
@@ -4632,7 +4641,7 @@ fn local_cargo_tripwire_json(workspace: &Path) -> String {
             {
                 "kind": "build_admission",
                 "result": build_admission_status,
-                "admitted": build_admission.admitted,
+                "admitted": build_admission_admitted,
             },
             process_evidence
         ],
@@ -4888,6 +4897,33 @@ pub(crate) fn local_cargo_tripwire_process_scan_json(workspace: &Path) -> Value 
             Some(&error.to_string()),
         ),
     }
+}
+
+pub(crate) fn local_cargo_tripwire_blocking_count(process_scan: &Value) -> u64 {
+    let explicit_count = process_scan
+        .get("count")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let blocking_rows = process_scan
+        .get("detectedLocalBuilds")
+        .and_then(Value::as_array)
+        .map_or(0, |items| {
+            items
+                .iter()
+                .filter(|item| {
+                    !matches!(
+                        item.get("policyStatus").and_then(Value::as_str),
+                        Some("editor_tooling_informational" | "unkillable_stale_informational")
+                    )
+                })
+                .count() as u64
+        });
+    explicit_count.max(blocking_rows)
+}
+
+pub(crate) fn local_cargo_tripwire_detected_bypass(process_scan: &Value) -> bool {
+    process_scan.get("status").and_then(Value::as_str) == Some("bypass_detected")
+        || local_cargo_tripwire_blocking_count(process_scan) > 0
 }
 
 fn unavailable_local_cargo_process_scan_json(reason: &str, detail: Option<&str>) -> Value {
@@ -12147,6 +12183,55 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn informational_local_cargo_rows_do_not_block_support_bundle_policy() {
+        let scan = json!({
+            "schema": "ee.rch_local_cargo_tripwire.v1",
+            "status": "ok",
+            "count": 0,
+            "detectedLocalBuilds": [
+                {"policyStatus": "editor_tooling_informational"},
+                {"policyStatus": "unkillable_stale_informational"}
+            ]
+        });
+
+        assert_eq!(local_cargo_tripwire_blocking_count(&scan), 0);
+        assert!(!local_cargo_tripwire_detected_bypass(&scan));
+        let summary: Value = serde_json::from_str(&local_cargo_tripwire_json_from_inputs(
+            true,
+            json!({"admitted": true}),
+            scan,
+        ))
+        .expect("injected tripwire summary must parse");
+        assert_eq!(
+            summary.pointer("/collectionStatus"),
+            Some(&json!("policy_and_live_process_scan"))
+        );
+        assert_eq!(
+            summary.pointer("/localBuildPolicy/status"),
+            Some(&json!("enforced"))
+        );
+        assert_eq!(summary.pointer("/processScan/status"), Some(&json!("ok")));
+
+        let inconsistent = json!({
+            "schema": "ee.rch_local_cargo_tripwire.v1",
+            "status": "ok",
+            "count": 0,
+            "detectedLocalBuilds": [{"policyStatus": "local_cargo_disallowed"}]
+        });
+        assert_eq!(local_cargo_tripwire_blocking_count(&inconsistent), 1);
+        assert!(local_cargo_tripwire_detected_bypass(&inconsistent));
+
+        let lookalike = json!({
+            "schema": "ee.rch_local_cargo_tripwire.v1",
+            "status": "ok",
+            "count": 0,
+            "detectedLocalBuilds": [{"policyStatus": "unknown_informational"}]
+        });
+        assert_eq!(local_cargo_tripwire_blocking_count(&lookalike), 1);
+        assert!(local_cargo_tripwire_detected_bypass(&lookalike));
     }
 
     #[test]
