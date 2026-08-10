@@ -818,6 +818,19 @@ pub const RETRIEVAL_TUNING_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     },
 ];
 
+pub const RESUME_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "the store has no episodic session evidence to resume from",
+        jq: r#".degraded[]? | select(.code == "resume_no_session_evidence")"#,
+        next_action: "Check data.report.nearbyStores for the populated store (a monorepo subdirectory often owns it), or start capturing session end-state with `ee remember \"<note>\" --level episodic --workspace . --json`.",
+    },
+    FailureBranchEntry {
+        condition: "surfaced items carry stale markers",
+        jq: r#"[.. | objects | select(.stale? != null) | {memoryId, supersededBy: .stale.supersededBy}]"#,
+        next_action: "Trust the newer memory named in supersededBy; do not act on the flagged note.",
+    },
+];
+
 pub const GLOBAL_LANE_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     FailureBranchEntry {
         condition: "the global lane is disabled or empty for this workspace",
@@ -1186,6 +1199,16 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         jq: r#"{abstained: .data.report.abstained, reason: .data.report.abstentionReason, promotable: .data.report.promotable, winner: .data.report.winner, degraded: (.degraded // [])}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: RETRIEVAL_TUNING_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "session-resume",
+        title: "Resume a session — where was I?",
+        description: "Start every returning session with the resume bundle instead of a task-less orient: last sessions' end-state newest first, revisit-conditioned decisions, next/queue/blocking-tagged items, and staleness flags on superseded notes.",
+        category: "getting-started",
+        command: "ee resume --workspace . --json",
+        jq: r#"{sessions: [.data.report.sessions[]? | {label, memberCount, newestAt}], openDecisions: [.data.report.openLoops.revisitDecisions[]? | {topic, revisitBy}], queued: [.data.report.openLoops.taggedItems[]? | {memoryId, tags}], staleCount: .data.report.staleCount}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.report.schema == "ee.resume.v1""#,
+        failure_branches: RESUME_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
         id: "new-repo-day-one",
