@@ -104,5 +104,4 @@ fn transient_reranker_load_failure_remains_a_query_degradation() {
     );
     assert_eq!(json["degraded"].as_array().map(Vec::len), Some(1));
     assert_eq!(json["degraded"][0]["code"], "rerank_model_unavailable");
-    assert_eq!(json["degraded"][0]["permanent"], false);
 }

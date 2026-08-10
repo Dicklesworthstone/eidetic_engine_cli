@@ -1411,7 +1411,6 @@ impl SearchDegradation {
             "severity": self.severity,
             "message": self.message,
             "repair": self.repair,
-            "permanent": self.is_permanent(),
         });
         append_degradation_recovery_details(&mut value, &self.code);
         value
@@ -15717,7 +15716,7 @@ mod tests {
         assert_eq!(json["severity"], "high");
         assert!(json["message"].as_str().is_some_and(|m| !m.is_empty()));
         assert!(json["repair"].as_str().is_some());
-        assert_eq!(json["permanent"], false);
+        assert!(json.get("permanent").is_none());
     }
 
     #[test]
@@ -16896,7 +16895,6 @@ mod tests {
 
         assert_eq!(json["degraded"].as_array().map(Vec::len), Some(1));
         assert_eq!(json["degraded"][0]["code"], "rerank_model_unavailable");
-        assert_eq!(json["degraded"][0]["permanent"], false);
         assert_eq!(json["rerank"]["permanent"], false);
         assert_eq!(json["rerank"]["advisory"]["permanent"], false);
         assert_eq!(
