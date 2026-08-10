@@ -1107,6 +1107,22 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
     update_model2vec_registry_entry(
         &workspace,
         BUNDLED_EMBEDDING_MODEL_ID,
+        ModelRegistryStatus::Available,
+        None,
+        Some(verified_hash.clone()),
+        Some(BUNDLED_EMBEDDING_DIMENSION),
+        Some(ModelDistanceMetric::Cosine),
+    )?;
+    let unregistered = run_offline_registry_fallback_search(
+        &workspace,
+        "registry_path_unregistered_source",
+        query,
+        &offline_env,
+    )?;
+
+    update_model2vec_registry_entry(
+        &workspace,
+        BUNDLED_EMBEDDING_MODEL_ID,
         ModelRegistryStatus::Unavailable,
         Some(path_string(&noncanonical_model_dir)),
         Some(verified_hash.clone()),
@@ -1228,6 +1244,7 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         ("orient", &orient),
         ("why_not", &why_not),
         ("missing", &missing),
+        ("unregistered", &unregistered),
         ("unavailable", &unavailable),
         ("unverified", &unverified),
         ("mismatched_name", &mismatched_name),
