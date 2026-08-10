@@ -16715,9 +16715,12 @@ mod tests {
                 sleep_calls.set(call + 1);
                 delay_attempts.borrow_mut().push(delay_attempt);
                 let current_holder = format!("holder-{call}");
-                connection
-                    .release_advisory_lock(&lock_id, &current_holder)
-                    .expect("release current holder");
+                assert!(
+                    connection
+                        .release_advisory_lock(&lock_id, &current_holder)
+                        .is_ok(),
+                    "release current holder"
+                );
                 if call < HOLDER_TURNOVERS {
                     let next_holder = format!("holder-{}", call + 1);
                     assert!(
@@ -16728,8 +16731,8 @@ mod tests {
                                 Some(300),
                                 Some("unit test"),
                             )
-                            .expect("acquire next holder")
-                            .is_acquired()
+                            .is_ok_and(|result| result.is_acquired()),
+                        "acquire next holder"
                     );
                 }
                 Duration::ZERO
@@ -16775,9 +16778,12 @@ mod tests {
                 let call = sleep_calls.get();
                 sleep_calls.set(call + 1);
                 let current_holder = format!("holder-{call}");
-                connection
-                    .release_advisory_lock(&lock_id, &current_holder)
-                    .expect("release current holder");
+                assert!(
+                    connection
+                        .release_advisory_lock(&lock_id, &current_holder)
+                        .is_ok(),
+                    "release current holder"
+                );
                 let next_holder = format!("holder-{}", call + 1);
                 assert!(
                     connection
@@ -16787,8 +16793,8 @@ mod tests {
                             Some(300),
                             Some("unit test"),
                         )
-                        .expect("acquire next holder")
-                        .is_acquired()
+                        .is_ok_and(|result| result.is_acquired()),
+                    "acquire next holder"
                 );
                 Duration::ZERO
             },
