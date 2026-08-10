@@ -600,6 +600,12 @@ pub fn assemble_conflict_surface(
             ));
             continue;
         };
+        // A tombstoned side means the conflict was already resolved (superseded,
+        // rejected, or expired): the pair is history, not an actionable conflict.
+        // Deterministic — keyed on the persisted tombstone, never wall clock.
+        if a.tombstoned_at.is_some() || b.tombstoned_at.is_some() {
+            continue;
+        }
         let (preferred, reason, a_pref, b_pref) = preferred_side(&a, &b);
         pairs.push(ConflictPairView {
             conflict_id: conflict_pair_id(low, high),
@@ -1373,6 +1379,33 @@ mod tests {
         assert_eq!(pair.signal, "contradiction_link");
         assert!(pair.load_bearing_milli > 0);
         assert!(surface.degraded.is_empty());
+    }
+
+    #[test]
+    fn surface_drops_pairs_with_a_tombstoned_side() {
+        // A resolved conflict (loser expired/superseded → tombstoned) must
+        // leave the actionable surface: this is what makes `ee conflict
+        // resolve` terminal and its stale-surface re-run refusal real.
+        let connection = open_seeded_db();
+        seed_memory_trust(&connection, MEM_A, "human_explicit");
+        seed_memory_trust(&connection, MEM_B, "agent_assertion");
+        seed_link(
+            &connection,
+            LINK_1,
+            MEM_A,
+            MEM_B,
+            MemoryLinkRelation::Contradicts,
+        );
+        let before =
+            assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
+        assert_eq!(before.pairs.len(), 1, "live pair surfaces first");
+
+        assert!(connection.tombstone_memory(MEM_B).expect("tombstone loser"));
+        let after = assemble_conflict_surface(&connection, ContradictionDetectionConfig::default());
+        assert!(
+            after.pairs.is_empty(),
+            "tombstoned side must drop the pair from the actionable surface"
+        );
     }
 
     #[test]

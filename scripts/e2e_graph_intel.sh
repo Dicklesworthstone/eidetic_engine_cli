@@ -158,6 +158,49 @@ else
     event applied_link_visible_in_graph fail "no candidate id from propose"
 fi
 
+# --- conflict resolve (bd-3a1op.4): dry-run plan, apply, stale refusal ---
+# The applied contradiction-review candidate created a contradicts link
+# between a and b, so the pair is now on the conflict surface.
+run_ee conflict list --workspace "${WS}" --json
+RESOLVE_PAIR_PRESENT="$(jq -r --arg a "${MEM_A}" --arg b "${MEM_B}" \
+    '[.data.pairs[]? | select((.memoryA.id == $a and .memoryB.id == $b) or (.memoryA.id == $b and .memoryB.id == $a))] | length' \
+    "${LAST_STDOUT}" 2>/dev/null)"
+if [[ "${RESOLVE_PAIR_PRESENT:-0}" -ge 1 ]]; then
+    event conflict_surface_lists_pair pass
+else
+    event conflict_surface_lists_pair fail "pair absent: $(head -c 250 "${LAST_STDOUT}")"
+fi
+
+run_ee conflict resolve "${MEM_A}" "${MEM_B}" --verb supersede --keep "${MEM_A}" \
+    --reason "always-rule wins; never-rule superseded in e2e" --workspace "${WS}" --json
+if [[ "${LAST_EXIT}" -eq 0 ]] \
+    && jq -e '.data.dryRun == true and .data.status == "planned" and (.data.plan.actions | length) >= 1' \
+        "${LAST_STDOUT}" >/dev/null 2>&1; then
+    event resolve_dry_run_plans_without_mutation pass
+else
+    event resolve_dry_run_plans_without_mutation fail "exit ${LAST_EXIT}; $(head -c 250 "${LAST_STDOUT}")"
+fi
+
+run_ee conflict resolve "${MEM_A}" "${MEM_B}" --verb supersede --keep "${MEM_A}" \
+    --reason "always-rule wins; never-rule superseded in e2e" --apply --workspace "${WS}" --json
+DECISION_MEMORY="$(jq -r '[.data.results[]? | select(.createdMemoryId != null)][0].createdMemoryId // empty' "${LAST_STDOUT}" 2>/dev/null)"
+if [[ "${LAST_EXIT}" -eq 0 && -n "${DECISION_MEMORY}" ]] \
+    && jq -e '.data.status == "applied" and ([.data.results[]?.auditIds[]?] | length) >= 2' \
+        "${LAST_STDOUT}" >/dev/null 2>&1; then
+    event resolve_apply_supersede_audited pass
+else
+    event resolve_apply_supersede_audited fail "exit ${LAST_EXIT}; decision=${DECISION_MEMORY}; $(head -c 250 "${LAST_STDOUT}")"
+fi
+
+# The loser is expired, so the same pair is no longer resolvable: stale refusal.
+run_ee conflict resolve "${MEM_A}" "${MEM_B}" --verb supersede --keep "${MEM_A}" \
+    --reason "re-run" --workspace "${WS}" --json
+if [[ "${LAST_EXIT}" -ne 0 ]] && grep -q 'conflict_resolve_stale_surface' "${LAST_STDOUT}" "${LOG_DIR}/step${STEP}.stderr"; then
+    event resolved_pair_rerun_refused_stale pass
+else
+    event resolved_pair_rerun_refused_stale fail "exit ${LAST_EXIT}; $(head -c 250 "${LAST_STDOUT}")"
+fi
+
 echo
 echo "graph intel e2e: ${STEP} steps, ${FAILURES} failures; root ${ROOT}"
 if [[ "${FAILURES}" -gt 0 ]]; then
