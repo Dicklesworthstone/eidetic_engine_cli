@@ -356,7 +356,7 @@ probe_processes() {
         # Skip tracker evidence commands. They can include `cargo test`
         # in a Beads comment body while the live process is `br`/wrapper
         # plumbing rather than Cargo.
-        if is_tracker_evidence_command "$cmd"; then
+        if is_tracker_evidence_process_command "$cmd"; then
             continue
         fi
         # Skip explicit SSH remote-proof launchers. Their argv can contain a
@@ -719,6 +719,21 @@ is_tracker_evidence_command() {
         return 1
     fi
     printf '%s' "$cmd" | grep -Eq '(^|[[:space:]/.])scripts/br_retry\.sh[[:space:]]+comments[[:space:]]+add([[:space:]]|$)|(^|[[:space:]/])br[[:space:]]+comments[[:space:]]+add([[:space:]]|$)'
+}
+
+is_tracker_evidence_process_command() {
+    local cmd="$1"
+    # `ps` flattens argv and loses the quote boundary around `--message`.
+    # A direct `br comments add ... --message "...; cargo --locked ..."`
+    # process therefore looks like a shell command list to
+    # is_tracker_evidence_command even though `br` receives the semicolon and
+    # Cargo text as inert prose. Trust only the live executable boundary here:
+    # a direct br process is evidence plumbing, while `sh -c 'br ...; cargo'`
+    # still starts with sh and remains visible to the ordinary Cargo scan.
+    if printf '%s' "$cmd" | grep -Eq '^([^[:space:]]*/)?br[[:space:]]+comments[[:space:]]+add([[:space:]]|$)'; then
+        return 0
+    fi
+    is_tracker_evidence_command "$cmd"
 }
 
 command_kind_from_command() {

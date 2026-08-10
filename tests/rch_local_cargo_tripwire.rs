@@ -339,6 +339,42 @@ fn process_probe_ignores_rch_diagnose_dry_run_payloads() -> TestResult {
 }
 
 #[test]
+fn process_probe_ignores_direct_br_comment_with_shell_like_cargo_prose() -> TestResult {
+    let fixture = "\
+ 55380 613 00:02 br comments add bd-088ci --message lock mismatch observed; cargo --locked correctly refused the rewrite --json
+ 55382 613 00:02 cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 55383 613 00:02 /bin/zsh -c br comments add bd-088ci --message done; cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+";
+    let (code, report) = probe_with_ps_fixture(fixture, "")?;
+    if code != 1 {
+        return Err(format!(
+            "expected probe exit 1 from executable Cargo forms; got {code}: {report}"
+        ));
+    }
+    let processes = report["processes"]
+        .as_array()
+        .ok_or_else(|| format!("missing processes array: {report}"))?;
+    if processes.len() != 2
+        || processes[0]["pid"] != "55382"
+        || processes[1]["pid"] != "55383"
+        || processes.iter().any(|process| process["pid"] == "55380")
+    {
+        return Err(format!(
+            "direct br comment prose must be ignored without hiding executable Cargo forms: {processes:?}"
+        ));
+    }
+    if processes
+        .iter()
+        .any(|process| process["policyStatus"] != "local_cargo_disallowed")
+    {
+        return Err(format!(
+            "Cargo executable and shell execution rows must remain fail-closed: {processes:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn process_probe_ignores_stable_rch_verify_shell_without_rch_exec_child() -> TestResult {
     let fixture = "\
  839 69255 00:00 bash -s -- --summary --no-write --known-blocker-override -- cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml -- --nocapture
