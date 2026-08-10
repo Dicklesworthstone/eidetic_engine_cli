@@ -38283,7 +38283,7 @@ fn orient_store_looks_empty(
     let items_empty = |value: Option<&serde_json::Value>| {
         value
             .and_then(serde_json::Value::as_array)
-            .is_none_or(<[serde_json::Value]>::is_empty)
+            .is_none_or(|items| items.is_empty())
     };
     if fast {
         let Some(content) = fast_content else {
