@@ -1285,6 +1285,82 @@ mod tests {
         );
     }
 
+    /// bd-1bfwa.4 precedence-determinism property: for arbitrary
+    /// overlapping workspace/global pools, the workspace row always wins an
+    /// exact-content twin, tombstoned rows never enter, and the merged
+    /// output is byte-identical regardless of global-row insertion order.
+    #[test]
+    fn merge_global_candidates_precedence_is_order_independent() {
+        use proptest::prelude::*;
+        let mut runner =
+            proptest::test_runner::TestRunner::new(proptest::test_runner::Config::with_cases(64));
+        let strategy = (
+            proptest::collection::vec(0u32..12, 0..6),
+            proptest::collection::vec((0u32..12, proptest::bool::ANY), 0..8),
+            proptest::collection::vec(proptest::num::usize::ANY, 0..8),
+        );
+        runner
+            .run(&strategy, |(workspace_ids, global_specs, shuffle_seed)| {
+                let base: Vec<PrimerCandidate> = workspace_ids
+                    .iter()
+                    .map(|id| candidate(*id, "procedural", "rule", &format!("content {id}")))
+                    .collect();
+                let mut rows: Vec<crate::db::StoredMemory> = global_specs
+                    .iter()
+                    .map(|(id, tombstoned)| {
+                        let mut row = global_row(*id, &format!("content {id}"), None);
+                        if *tombstoned {
+                            row.tombstoned_at = Some("2026-06-03T00:00:00Z".to_owned());
+                        }
+                        row
+                    })
+                    .collect();
+
+                let mut in_given_order = base.clone();
+                merge_global_candidates(&mut in_given_order, &rows);
+
+                // Deterministic shuffle from the seed vector.
+                for (index, seed) in shuffle_seed.iter().enumerate() {
+                    if rows.len() > 1 {
+                        let swap = seed % rows.len();
+                        rows.swap(index % rows.len(), swap);
+                    }
+                }
+                let mut in_shuffled_order = base.clone();
+                merge_global_candidates(&mut in_shuffled_order, &rows);
+
+                prop_assert_eq!(
+                    &in_given_order,
+                    &in_shuffled_order,
+                    "merge output must not depend on global-row order"
+                );
+
+                let workspace_content: std::collections::BTreeSet<&str> =
+                    base.iter().map(|c| c.content.as_str()).collect();
+                for merged in &in_given_order {
+                    if merged.global_lane {
+                        prop_assert!(
+                            !workspace_content.contains(merged.content.as_str()),
+                            "workspace twin must win over the global row"
+                        );
+                    }
+                }
+                let lane_count = in_given_order.iter().filter(|c| c.global_lane).count();
+                let expected: std::collections::BTreeSet<u32> = unique_specs
+                    .iter()
+                    .filter(|(id, tombstoned)| !**tombstoned && !workspace_ids.contains(id))
+                    .map(|(id, _)| *id)
+                    .collect();
+                prop_assert_eq!(
+                    lane_count,
+                    expected.len(),
+                    "every live, non-twin global row enters exactly once"
+                );
+                Ok(())
+            })
+            .expect("precedence property holds");
+    }
+
     #[test]
     fn merge_global_candidates_skips_tombstoned_rows() {
         let mut candidates = vec![candidate(1, "procedural", "rule", "workspace rule")];
