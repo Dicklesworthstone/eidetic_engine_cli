@@ -521,6 +521,9 @@ pub enum JobType {
     /// Distill journal entries into curation candidates (ADR 0062 §6 /
     /// bd-1pi9m.3).
     JournalDistill,
+    /// Refresh the retrieval-affinity accumulation and snapshot
+    /// (ADR 0066 §2 / bd-3a1op.2).
+    RetrievalAffinityRefresh,
     /// Custom job type for extensions.
     Custom,
 }
@@ -548,6 +551,7 @@ impl JobType {
             Self::GarbageCollection => "garbage_collection",
             Self::PrimerRefresh => "primer_refresh",
             Self::JournalDistill => "journal_distill",
+            Self::RetrievalAffinityRefresh => "retrieval_affinity_refresh",
             Self::Custom => "custom",
         }
     }
@@ -574,6 +578,7 @@ impl JobType {
             Self::GarbageCollection,
             Self::JournalDistill,
             Self::PrimerRefresh,
+            Self::RetrievalAffinityRefresh,
             Self::Custom,
         ]
     }
@@ -607,6 +612,9 @@ impl JobType {
             Self::PrimerRefresh => "Re-warm the workspace primer cache",
             Self::JournalDistill => {
                 "Distill undistilled journal entries into pending curation candidates"
+            }
+            Self::RetrievalAffinityRefresh => {
+                "Accumulate retrieval co-occurrence evidence and refresh the affinity snapshot"
             }
             Self::Custom => "Custom job type",
         }
@@ -658,6 +666,7 @@ impl FromStr for JobType {
             "garbage_collection" => Ok(Self::GarbageCollection),
             "primer_refresh" => Ok(Self::PrimerRefresh),
             "journal_distill" => Ok(Self::JournalDistill),
+            "retrieval_affinity_refresh" => Ok(Self::RetrievalAffinityRefresh),
             "custom" => Ok(Self::Custom),
             _ => Err(ParseJobTypeError {
                 input: s.to_owned(),
@@ -1905,6 +1914,10 @@ pub fn default_budgets_for_job_type(job_type: JobType) -> Vec<ResourceBudget> {
         JobType::PrimerRefresh => vec![
             ResourceBudget::time_limit_ms(30_000), // 30 seconds
             ResourceBudget::item_limit(8),
+        ],
+        JobType::RetrievalAffinityRefresh => vec![
+            ResourceBudget::time_limit_ms(60_000), // 1 minute
+            ResourceBudget::item_limit(1_024),
         ],
         JobType::CachePruning => vec![
             ResourceBudget::time_limit_ms(60_000), // 1 minute
@@ -3422,6 +3435,7 @@ impl ManualRunner {
             JobType::GarbageCollection => self.execute_garbage_collection(budget),
             JobType::PrimerRefresh => self.execute_primer_refresh(budget),
             JobType::JournalDistill => self.execute_journal_distill(budget),
+            JobType::RetrievalAffinityRefresh => self.execute_retrieval_affinity_refresh(budget),
             JobType::Custom => self.execute_custom_job(),
         }
     }
@@ -3742,6 +3756,150 @@ impl ManualRunner {
     /// a byte-identical cache hit. Bounded: warms the default budget for
     /// both formats; honors dry-run by skipping (the job is purely a cache
     /// write). Failures degrade to a failed job, never a panic.
+    fn execute_retrieval_affinity_refresh(
+        &self,
+        _budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        if self.options.dry_run {
+            return (
+                RunOutcome::Skipped,
+                None,
+                Some(
+                    "retrieval-affinity refresh writes accumulation rows; skipped in dry-run"
+                        .to_owned(),
+                ),
+                Some(json!({
+                    "schema": "ee.steward.retrieval_affinity_refresh.v1",
+                    "status": "skipped_dry_run",
+                })),
+            );
+        }
+        let Some(database_path) = self.resolve_database_path() else {
+            return (
+                RunOutcome::Failed,
+                None,
+                Some("Retrieval-affinity refresh requires a database path or workspace path with .ee/ee.db".to_owned()),
+                None,
+            );
+        };
+        if !database_path.exists() {
+            return (
+                RunOutcome::Failed,
+                None,
+                Some(format!(
+                    "Retrieval-affinity refresh database does not exist: {}",
+                    database_path.display()
+                )),
+                None,
+            );
+        }
+        let connection = match DbConnection::open_file(&database_path) {
+            Ok(connection) => connection,
+            Err(error) => {
+                return (
+                    RunOutcome::Failed,
+                    None,
+                    Some(format!("Failed to open affinity database: {error}")),
+                    None,
+                );
+            }
+        };
+        if let Err(error) = connection.migrate() {
+            return (
+                RunOutcome::Failed,
+                None,
+                Some(format!("Retrieval-affinity migration failed: {error}")),
+                None,
+            );
+        }
+        let workspace_path = self.normalized_workspace_path();
+        let workspace_id = match connection.get_workspace_by_path(&workspace_path.to_string_lossy())
+        {
+            Ok(Some(workspace)) => workspace.id,
+            Ok(None) => {
+                return (
+                    RunOutcome::Skipped,
+                    None,
+                    Some("workspace is not registered; nothing to accumulate".to_owned()),
+                    None,
+                );
+            }
+            Err(error) => {
+                return (
+                    RunOutcome::Failed,
+                    None,
+                    Some(format!("Affinity workspace lookup failed: {error}")),
+                    None,
+                );
+            }
+        };
+        let now = Utc::now().to_rfc3339();
+        let accumulation = match crate::core::retrieval_affinity::accumulate_retrieval_affinity(
+            &connection,
+            &workspace_id,
+            &now,
+        ) {
+            Ok(report) => report,
+            Err(message) => {
+                return (
+                    RunOutcome::Failed,
+                    None,
+                    Some(format!("Affinity accumulation failed: {message}")),
+                    None,
+                );
+            }
+        };
+        let materialization =
+            match crate::core::retrieval_affinity::materialize_retrieval_affinity_snapshot(
+                &connection,
+                &workspace_id,
+                0,
+                crate::core::retrieval_affinity::AFFINITY_HALF_LIFE_DAYS_DEFAULT,
+            ) {
+                Ok(outcome) => outcome,
+                Err(message) => {
+                    return (
+                        RunOutcome::Failed,
+                        None,
+                        Some(format!("Affinity materialization failed: {message}")),
+                        None,
+                    );
+                }
+            };
+        let consumed = accumulation.pack_records_consumed + accumulation.search_rows_consumed;
+        let details = match &materialization {
+            crate::core::retrieval_affinity::AffinityMaterialization::Cold => json!({
+                "schema": "ee.steward.retrieval_affinity_refresh.v1",
+                "status": "cold",
+                "degradedCode": crate::core::retrieval_affinity::RETRIEVAL_AFFINITY_COLD_CODE,
+                "packRecordsConsumed": accumulation.pack_records_consumed,
+                "searchRowsConsumed": accumulation.search_rows_consumed,
+                "pairsUpdated": accumulation.pairs_updated,
+                "morePending": accumulation.more_pending,
+            }),
+            crate::core::retrieval_affinity::AffinityMaterialization::Persisted {
+                snapshot_id,
+                snapshot_version,
+                node_count,
+                edge_count,
+                content_hash,
+            } => json!({
+                "schema": "ee.steward.retrieval_affinity_refresh.v1",
+                "status": "refreshed",
+                "snapshotId": snapshot_id,
+                "snapshotVersion": snapshot_version,
+                "nodeCount": node_count,
+                "edgeCount": edge_count,
+                "contentHash": content_hash,
+                "packRecordsConsumed": accumulation.pack_records_consumed,
+                "searchRowsConsumed": accumulation.search_rows_consumed,
+                "pairsUpdated": accumulation.pairs_updated,
+                "morePending": accumulation.more_pending,
+            }),
+        };
+        (RunOutcome::Completed, Some(consumed), None, Some(details))
+    }
+
     fn execute_primer_refresh(
         &self,
         budget: &mut JobBudgetState,
