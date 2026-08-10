@@ -41,10 +41,12 @@ pub fn build_memory_attestation(
     let links = connection.list_memory_links_for_memory(memory_id, None)?;
     let anchors = connection.list_memory_anchors(memory_id)?;
     let audits = memory_attestation_audits(connection, memory_id, &memory.workspace_id)?;
+    let seal = connection.get_memory_seal(memory_id)?;
 
-    Ok(Some(build_memory_attestation_from_parts(
-        &memory, &links, &anchors, &audits,
-    )))
+    Ok(Some(
+        build_memory_attestation_from_parts(&memory, &links, &anchors, &audits)
+            .with_seal(seal.as_ref().map(attestation_seal_from_row)),
+    ))
 }
 
 fn memory_attestation_audits(
@@ -89,9 +91,21 @@ pub fn build_memory_attestation_for_workspace(
     let links = connection.list_memory_links_for_memory(memory_id, None)?;
     let anchors = connection.list_memory_anchors(memory_id)?;
     let audits = memory_attestation_audits(connection, memory_id, workspace_id)?;
-    Ok(Some(build_memory_attestation_from_parts(
-        &memory, &links, &anchors, &audits,
-    )))
+    let seal = connection.get_memory_seal(memory_id)?;
+    Ok(Some(
+        build_memory_attestation_from_parts(&memory, &links, &anchors, &audits)
+            .with_seal(seal.as_ref().map(attestation_seal_from_row)),
+    ))
+}
+
+/// Project a stored seal row into the offline attestation block (bd-2ea4a).
+fn attestation_seal_from_row(seal: &crate::models::MemorySeal) -> crate::models::AttestationSeal {
+    crate::models::AttestationSeal {
+        content_commitment: seal.content_commitment.clone(),
+        sealed_at: seal.sealed_at.clone(),
+        revealed_at: seal.revealed_at.clone(),
+        reveal_verified: seal.reveal_verified,
+    }
 }
 
 fn pack_attestation_audits(
@@ -271,7 +285,7 @@ pub fn public_attestation_bundle(bundle: &AttestationBundle) -> AttestationBundl
     let mut public = bundle.clone();
     let mut omitted_noncanonical_hash = false;
     let mut omitted_provenance_uri = false;
-    public.schema = crate::models::attestation::ATTESTATION_BUNDLE_SCHEMA_V1.to_owned();
+    public.schema = crate::models::attestation::ATTESTATION_BUNDLE_SCHEMA_V2.to_owned();
     public.subject.id = public_attestation_subject_id(public.subject.kind, &public.subject.id);
     public.subject.content_hashes.retain_mut(|entry| {
         entry.label = crate::policy::redact_public_replay_field("hashLabel", &entry.label).content;

@@ -569,7 +569,7 @@
       "properties": {
         "schema": {"const": "ee.attestation.surface_manifest.v1"},
         "status": {"const": "available"},
-        "sourceSchema": {"const": "ee.attestation.bundle.v1"},
+        "sourceSchema": {"const": "ee.attestation.bundle.v2"},
         "bundleHash": {"$ref": "#/$defs/blake3Hash"},
         "subject": {
           "type": "object",

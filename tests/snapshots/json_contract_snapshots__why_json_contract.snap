@@ -67,7 +67,7 @@ expression: why
         ]
       },
       "schema": "ee.attestation.surface_manifest.v1",
-      "sourceSchema": "ee.attestation.bundle.v1",
+      "sourceSchema": "ee.attestation.bundle.v2",
       "status": "available",
       "subject": {
         "contentHashCount": 3,

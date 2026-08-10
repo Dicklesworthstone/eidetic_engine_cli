@@ -17,7 +17,7 @@ use ee::core::attest::{
     ATTESTATION_SURFACE_MANIFEST_SCHEMA_V1, attestation_surface_manifest, build_query_attestation,
     public_attestation_bundle,
 };
-use ee::models::attestation::ATTESTATION_BUNDLE_SCHEMA_V1;
+use ee::models::attestation::ATTESTATION_BUNDLE_SCHEMA_V2;
 
 const ATTEST_RESPONSE_SCHEMA: &str = include_str!("../docs/schemas/ee.attest.v1.json");
 
@@ -30,7 +30,7 @@ fn bundle_hash_is_deterministic_and_subject_sensitive() {
         again.bundle_hash(),
         "the same subject must always produce the same bundle hash"
     );
-    assert_eq!(first.schema, ATTESTATION_BUNDLE_SCHEMA_V1);
+    assert_eq!(first.schema, ATTESTATION_BUNDLE_SCHEMA_V2);
     assert!(
         !first.bundle_hash().is_empty(),
         "bundle hash must be present"
@@ -64,7 +64,7 @@ fn bundle_redacts_raw_subject_text() {
 fn manifest_is_complete_and_schema_tagged() {
     let bundle = build_query_attestation("query for manifest completeness");
     let value = serde_json::to_value(&bundle).expect("attestation bundle to_value");
-    assert_eq!(value["schema"], ATTESTATION_BUNDLE_SCHEMA_V1);
+    assert_eq!(value["schema"], ATTESTATION_BUNDLE_SCHEMA_V2);
     for key in [
         "subject",
         "evidenceManifest",
@@ -86,7 +86,7 @@ fn surface_manifest_is_hash_only_and_reuses_bundle_hash() {
 
     assert_eq!(manifest["schema"], ATTESTATION_SURFACE_MANIFEST_SCHEMA_V1);
     assert_eq!(manifest["status"], "available");
-    assert_eq!(manifest["sourceSchema"], ATTESTATION_BUNDLE_SCHEMA_V1);
+    assert_eq!(manifest["sourceSchema"], ATTESTATION_BUNDLE_SCHEMA_V2);
     assert_eq!(
         manifest["bundleHash"],
         public_attestation_bundle(&bundle).bundle_hash()

@@ -15,7 +15,7 @@ is true."
 
 | Anchor | Role |
 | --- | --- |
-| `src/models/attestation.rs` | The canonical `AttestationBundle` model (schema `ee.attestation.bundle.v1`) + evidence/redaction/hash manifests. |
+| `src/models/attestation.rs` | The canonical `AttestationBundle` model (schema `ee.attestation.bundle.v2`) + evidence/redaction/hash manifests and the optional seal block. |
 | `src/core/attest.rs` | `core::attest` builders for memory / pack / query bundles. |
 | `src/cli/mod.rs` (`ee attest`) | `ee attest memory \| pack \| query --json` surface (schema `ee.attest.v1`). |
 | `docs/schemas/ee.attest.v1.json` | JSON contract for the `ee attest` response. |
@@ -39,7 +39,7 @@ Each emits the `ee.response.v2` envelope around an `ee.attest.v1` payload:
 | `rawTextIncluded` | Whether raw subject text is embedded. Default **false** (hash-only / redaction-safe). |
 | `objectiveTruthAttested` | Always false — custody + hashes only, never truth. |
 | `trustStatement` | The human-readable scope of the claim. |
-| `bundle` | The full `ee.attestation.bundle.v1` manifest (subject, evidence, redaction, hashes, omissions). |
+| `bundle` | The full `ee.attestation.bundle.v2` manifest (subject, evidence, redaction, hashes, omissions; sealed memories additionally carry `seal` = contentCommitment/sealedAt/revealedAt/revealVerified so commit-before-outcome verifies offline). |
 
 ## What an agent can rely on
 

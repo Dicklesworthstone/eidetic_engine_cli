@@ -155,7 +155,7 @@
     "attestationBundle": {
       "schema": "ee.attestation.surface_manifest.v1",
       "status": "available",
-      "sourceSchema": "ee.attestation.bundle.v1",
+      "sourceSchema": "ee.attestation.bundle.v2",
       "bundleHash": "blake3:0000000000000000000000000000000000000000000000000000000000000002",
       "subject": {
         "kind": "memory",

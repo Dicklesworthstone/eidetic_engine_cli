@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const ATTESTATION_BUNDLE_SCHEMA_V1: &str = "ee.attestation.bundle.v1";
+/// v2 (bd-2ea4a): adds the optional `seal` block so a third party can verify
+/// commitment-before-outcome offline. Absent for unsealed subjects, so v1
+/// consumers see byte-identical bundles apart from the schema id.
+pub const ATTESTATION_BUNDLE_SCHEMA_V2: &str = "ee.attestation.bundle.v2";
 pub const ATTESTATION_HASH_ALGORITHM: &str = "blake3";
 pub const ATTESTATION_LOCAL_TRUTH_STATEMENT: &str =
     "Attests local ee evidence custody and hash consistency; does not attest objective truth.";
@@ -466,6 +470,44 @@ pub struct AttestationBundle {
     pub hash_manifest: AttestationHashManifest,
     pub omissions: Vec<AttestationOmission>,
     pub trust_statement: AttestationTrustStatement,
+    /// Present only for sealed subjects (bd-2ea4a): the commit-reveal proof
+    /// material, verifiable without database access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seal: Option<AttestationSeal>,
+}
+
+/// Offline commit-reveal evidence for a sealed memory (v2).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttestationSeal {
+    /// Domain-separated blake3 commitment over the exact content bytes.
+    pub content_commitment: String,
+    pub sealed_at: String,
+    pub revealed_at: Option<String>,
+    /// `Some(true)` only after a reveal matched the commitment; failed
+    /// attempts never set this (they live in the audit log).
+    pub reveal_verified: Option<bool>,
+}
+
+impl AttestationSeal {
+    #[must_use]
+    fn canonical_json_value(&self) -> Value {
+        object([
+            (
+                "contentCommitment",
+                Value::String(self.content_commitment.clone()),
+            ),
+            ("sealedAt", Value::String(self.sealed_at.clone())),
+            (
+                "revealedAt",
+                self.revealed_at.clone().map_or(Value::Null, Value::String),
+            ),
+            (
+                "revealVerified",
+                self.reveal_verified.map_or(Value::Null, Value::Bool),
+            ),
+        ])
+    }
 }
 
 impl AttestationBundle {
@@ -477,14 +519,22 @@ impl AttestationBundle {
         hash_manifest: AttestationHashManifest,
     ) -> Self {
         Self {
-            schema: ATTESTATION_BUNDLE_SCHEMA_V1.to_owned(),
+            schema: ATTESTATION_BUNDLE_SCHEMA_V2.to_owned(),
             subject,
             evidence_manifest,
             redaction_manifest,
             hash_manifest,
             omissions: Vec::new(),
             trust_statement: AttestationTrustStatement::local_ee_custody(),
+            seal: None,
         }
+    }
+
+    /// Attach the commit-reveal seal block (sealed subjects only).
+    #[must_use]
+    pub fn with_seal(mut self, seal: Option<AttestationSeal>) -> Self {
+        self.seal = seal;
+        self
     }
 
     #[must_use]
@@ -504,7 +554,7 @@ impl AttestationBundle {
         let mut omissions = self.omissions.clone();
         omissions.sort();
 
-        object([
+        let mut fields = vec![
             ("schema", Value::String(self.schema.clone())),
             ("subject", self.subject.canonical_json_value()),
             (
@@ -529,7 +579,14 @@ impl AttestationBundle {
                 "trustStatement",
                 self.trust_statement.canonical_json_value(),
             ),
-        ])
+        ];
+        // v2: the seal block participates in the canonical bytes ONLY when
+        // present, so unsealed bundles hash identically to their v1 shape
+        // apart from the schema id.
+        if let Some(seal) = &self.seal {
+            fields.push(("seal", seal.canonical_json_value()));
+        }
+        object(fields)
     }
 
     #[must_use]
@@ -672,7 +729,7 @@ mod tests {
         let bundle = bundle_with_reordered_entries(false);
         let value = bundle.canonical_json_value();
 
-        assert_eq!(value["schema"], ATTESTATION_BUNDLE_SCHEMA_V1);
+        assert_eq!(value["schema"], ATTESTATION_BUNDLE_SCHEMA_V2);
         assert_eq!(value["trustStatement"]["scope"], "local_ee_custody");
         assert!(
             value["trustStatement"]["statement"]
@@ -680,5 +737,43 @@ mod tests {
                 .is_some_and(|statement| statement.contains("does not attest objective truth"))
         );
         assert!(bundle.bundle_hash().starts_with("blake3:"));
+    }
+
+    #[test]
+    fn seal_block_participates_in_canonical_bytes_only_when_present() {
+        let unsealed = bundle_with_reordered_entries(false);
+        let unsealed_value = unsealed.canonical_json_value();
+        assert!(
+            unsealed_value.get("seal").is_none(),
+            "unsealed bundles must not carry a seal key"
+        );
+
+        let sealed = unsealed.clone().with_seal(Some(AttestationSeal {
+            content_commitment: "blake3:seal-commitment".to_owned(),
+            sealed_at: "2026-08-10T00:00:00Z".to_owned(),
+            revealed_at: None,
+            reveal_verified: None,
+        }));
+        let sealed_value = sealed.canonical_json_value();
+        assert_eq!(
+            sealed_value["seal"]["contentCommitment"],
+            "blake3:seal-commitment"
+        );
+        assert_eq!(sealed_value["seal"]["revealedAt"], Value::Null);
+        assert_ne!(
+            unsealed.bundle_hash(),
+            sealed.bundle_hash(),
+            "the seal block must be hash-covered"
+        );
+
+        // Round trip: the serde shape parses back including the seal.
+        let parsed: AttestationBundle =
+            serde_json::from_str(&serde_json::to_string(&sealed).expect("serialize"))
+                .expect("parse");
+        assert_eq!(parsed, sealed);
+        let reparsed_unsealed: AttestationBundle =
+            serde_json::from_str(&serde_json::to_string(&unsealed).expect("serialize"))
+                .expect("parse v1-shaped payload without a seal key");
+        assert_eq!(reparsed_unsealed.seal, None);
     }
 }
