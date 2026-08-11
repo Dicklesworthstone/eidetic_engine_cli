@@ -141,6 +141,111 @@ fn resume_required_fields_and_staleness_contract_are_pinned() -> TestResult {
 }
 
 #[test]
+#[ignore = "real-binary resume script acceptance; run as a focused pinned RCH proof"]
+fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("create E2E temp base: {error}"))?;
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/e2e_resume.sh");
+    let ee_bin = env!("CARGO_BIN_EXE_ee");
+    let output = Command::new(&script)
+        .env("EE_BIN", ee_bin)
+        .env("EE_BINARY", ee_bin)
+        .env("EE_E2E_TMPDIR", temp.path())
+        .output()
+        .map_err(|error| format!("launch {}: {error}", script.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let transcript = format!("stdout:\n{stdout}\nstderr:\n{stderr}");
+
+    let mut passed_labels = BTreeSet::new();
+    let mut failed_events = Vec::new();
+    for line in stdout.lines() {
+        if !line.trim_start().starts_with('{') {
+            continue;
+        }
+        let event = match serde_json::from_str::<Value>(line) {
+            Ok(event) => event,
+            Err(error) => {
+                failed_events.push(serde_json::json!({
+                    "malformedEventLine": line,
+                    "error": error.to_string(),
+                }));
+                continue;
+            }
+        };
+        if event.get("schema").and_then(Value::as_str) != Some("ee.test_event.v1")
+            || event.get("kind").and_then(Value::as_str) != Some("assert_result")
+        {
+            failed_events.push(event);
+            continue;
+        }
+
+        let label = event.pointer("/fields/label").and_then(Value::as_str);
+        let status = event.pointer("/fields/status").and_then(Value::as_str);
+        if let (Some(label), Some("pass")) = (label, status) {
+            passed_labels.insert(label.to_owned());
+        } else {
+            failed_events.push(event);
+        }
+    }
+
+    ensure(
+        failed_events.is_empty(),
+        format!(
+            "resume E2E emitted non-pass or malformed assert_result events: {failed_events:?}\n{transcript}"
+        ),
+    )?;
+    ensure(
+        output.status.success(),
+        format!(
+            "resume E2E exited with {:?}; expected exit 0\n{transcript}",
+            output.status.code()
+        ),
+    )?;
+
+    let required_labels: BTreeSet<String> = [
+        "corpus_seeded",
+        "decisions_recorded",
+        "empty_store_reports_no_evidence",
+        "human_resume_preserves_db_wal_shm",
+        "resume_returns_schema",
+        "three_tagged_sessions_grouped",
+        "revisit_decisions_surfaced",
+        "next_tagged_item_surfaced",
+        "superseded_note_carries_stale_marker",
+        "human_declared_sections_visible",
+        "human_open_loop_and_staleness_visible",
+        "init_ok",
+        "json_resume_preserves_db_wal_shm",
+        "nearby_human_resume_preserves_db_wal_shm",
+        "nearby_human_shows_path_docs_last_write",
+        "nearby_json_resume_preserves_db_wal_shm",
+        "nearby_store_prepends_quoted_resume",
+        "nearby_store_seeded",
+        "scale_10k_seeded",
+        "scale_10k_resume_under_2s_and_bounded",
+        "scale_10k_human_resume_under_2s_and_bounded",
+        "scale_10k_resume_preserves_db_wal_shm",
+        "scale_10k_human_resume_preserves_db_wal_shm",
+        "scale_10k_index_ready_for_fast_orient",
+        "scale_10k_fast_orient_under_1s_with_content",
+        "scale_10k_fast_orient_preserves_db_wal_shm",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let missing: Vec<_> = required_labels
+        .difference(&passed_labels)
+        .cloned()
+        .collect();
+    ensure(
+        missing.is_empty(),
+        format!(
+            "resume E2E omitted required passing assert_result labels: {missing:?}; observed={passed_labels:?}\n{transcript}"
+        ),
+    )
+}
+
+#[test]
 #[ignore = "10k real-store acceptance scale; run as a focused pinned RCH proof"]
 fn resume_real_binary_completes_under_two_seconds_on_10k_store() -> TestResult {
     const CORPUS_SIZE: usize = 10_000;
