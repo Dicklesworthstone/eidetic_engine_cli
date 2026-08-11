@@ -313,6 +313,243 @@ pub fn parse_stored_payload(
     }
 }
 
+/// Verification seam for inbound events: T2.1's key storage (and T3.1's
+/// member/node tables) later resolve `(origin_node_id, generation)` to a real
+/// Ed25519 public key; tests inject deterministic verifiers.
+pub trait OriginSignatureVerifier {
+    fn verify(
+        &self,
+        origin_node_id: &str,
+        signing_key_generation: u64,
+        domain: &str,
+        canonical_bytes: &[u8],
+        signature: &str,
+    ) -> bool;
+}
+
+/// One inbound wire event, exactly the outer draft-schema shape.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InboundOriginEvent {
+    pub schema: String,
+    pub event_id: String,
+    pub team_id: String,
+    pub origin_node_id: String,
+    pub signing_key_generation: u64,
+    pub seq: u64,
+    pub prev_event_hash: Option<String>,
+    pub event_hash: String,
+    pub signature: String,
+    pub payload_schema: String,
+    pub payload: serde_json::Value,
+    pub required_features: Vec<String>,
+    pub produced_at: String,
+}
+
+/// Sparse receiver dispositions (ADR 0086 TC-D4): recorded per `(origin,
+/// seq)` independently of the receipt frontier, so withheld N beside
+/// applied N+1 is truthful state, not an error.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IngestDisposition {
+    Applied,
+    /// Structurally sound but not safely applicable yet (e.g. an unknown
+    /// MANDATORY feature bit); hydration later legally flips it to applied.
+    Withheld {
+        reason: String,
+    },
+    /// Integrity failure: hash/id/signature mismatch or fork evidence.
+    /// Never applied, never silently dropped.
+    Quarantined {
+        reason: String,
+    },
+    /// The receiver does not understand the payload schema at all.
+    Unsupported {
+        reason: String,
+    },
+}
+
+impl IngestDisposition {
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Withheld { .. } => "withheld",
+            Self::Quarantined { .. } => "quarantined",
+            Self::Unsupported { .. } => "unsupported",
+        }
+    }
+
+    fn reason(&self) -> String {
+        match self {
+            Self::Applied => "verified and applied".to_owned(),
+            Self::Withheld { reason }
+            | Self::Quarantined { reason }
+            | Self::Unsupported { reason } => reason.clone(),
+        }
+    }
+}
+
+/// Receiver-side verification and disposition for one inbound origin event
+/// (T2.0 acceptance: eventId / canonical / signature / team / generation /
+/// fork checks; no echo; mandatory-bit omission).
+///
+/// Order matters and is deliberate: identity/no-echo first, then integrity
+/// (canonical bytes → eventHash → eventId → signature), then fork evidence
+/// against the local chain record, then feature gating, then payload
+/// typing. The first failure wins and is durably recorded as the sparse
+/// disposition for `(origin, seq)` — this function never applies material
+/// (materialization into memories belongs to later beads); `Applied` means
+/// "verified safe to apply".
+pub fn ingest_origin_event(
+    connection: &DbConnection,
+    verifier: &dyn OriginSignatureVerifier,
+    own_origin_node_id: &str,
+    supported_features: &std::collections::BTreeSet<String>,
+    event: &InboundOriginEvent,
+    recorded_at: &str,
+) -> Result<IngestDisposition, OriginStreamError> {
+    let disposition = classify_inbound(
+        connection,
+        verifier,
+        own_origin_node_id,
+        supported_features,
+        event,
+    )?;
+    connection
+        .record_mesh_origin_disposition(
+            &event.team_id,
+            &event.origin_node_id,
+            event.seq,
+            disposition.as_str(),
+            &disposition.reason(),
+            recorded_at,
+        )
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    Ok(disposition)
+}
+
+fn classify_inbound(
+    connection: &DbConnection,
+    verifier: &dyn OriginSignatureVerifier,
+    own_origin_node_id: &str,
+    supported_features: &std::collections::BTreeSet<String>,
+    event: &InboundOriginEvent,
+) -> Result<IngestDisposition, OriginStreamError> {
+    if event.schema != ORIGIN_EVENT_SCHEMA_V1 {
+        return Ok(IngestDisposition::Unsupported {
+            reason: format!("unknown outer schema {}", event.schema),
+        });
+    }
+    // No echo: origin-owned material never re-enters through ingest.
+    if event.origin_node_id == own_origin_node_id {
+        return Ok(IngestDisposition::Quarantined {
+            reason: "echo refused: event claims THIS node as origin".to_owned(),
+        });
+    }
+
+    // Integrity: recompute the canonical preimage from the received fields.
+    let mut features = event.required_features.clone();
+    features.sort();
+    features.dedup();
+    let preimage_value = serde_json::json!({
+        "schema": ORIGIN_EVENT_SCHEMA_V1,
+        "teamId": event.team_id,
+        "originNodeId": event.origin_node_id,
+        "signingKeyGeneration": event.signing_key_generation,
+        "seq": event.seq,
+        "prevEventHash": event.prev_event_hash,
+        "payloadSchema": event.payload_schema,
+        "payload": event.payload,
+        "requiredFeatures": features,
+        "producedAt": event.produced_at,
+    });
+    let canonical = canonical_json_string(&preimage_value)?;
+    let expected_hash = format!("blake3:{}", blake3::hash(canonical.as_bytes()).to_hex());
+    if expected_hash != event.event_hash {
+        return Ok(IngestDisposition::Quarantined {
+            reason: "eventHash does not match the canonical bytes".to_owned(),
+        });
+    }
+    let expected_id = format!(
+        "{ORIGIN_EVENT_ID_PREFIX}{}",
+        &blake3::hash(event.event_hash.as_bytes()).to_hex().as_str()[..26]
+    );
+    if expected_id != event.event_id {
+        return Ok(IngestDisposition::Quarantined {
+            reason: "eventId is not derived from eventHash".to_owned(),
+        });
+    }
+    if !verifier.verify(
+        &event.origin_node_id,
+        event.signing_key_generation,
+        ORIGIN_EVENT_SIGNATURE_DOMAIN,
+        canonical.as_bytes(),
+        &event.signature,
+    ) {
+        return Ok(IngestDisposition::Quarantined {
+            reason: format!(
+                "signature failed for origin {} at generation {}",
+                event.origin_node_id, event.signing_key_generation
+            ),
+        });
+    }
+
+    // Fork evidence: a DIFFERENT event already occupies this (origin, seq)
+    // locally (our own record of the origin's chain).
+    let existing = connection
+        .list_mesh_origin_events(&event.team_id, &event.origin_node_id, event.seq, 1)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    if let Some(existing) = existing.first()
+        && existing.seq == event.seq
+        && existing.event_hash != event.event_hash
+    {
+        return Ok(IngestDisposition::Quarantined {
+            reason: format!(
+                "fork evidence: seq {} already recorded with a different eventHash",
+                event.seq
+            ),
+        });
+    }
+
+    // Feature gating: requiredFeatures can ADD checks but never remove them;
+    // an unknown mandatory bit withholds (sparse), it never fails the stream.
+    for feature in &features {
+        if !supported_features.contains(feature) {
+            return Ok(IngestDisposition::Withheld {
+                reason: format!("unknown mandatory feature {feature}"),
+            });
+        }
+    }
+
+    // Payload typing through the closed allowlist.
+    match event.payload_schema.as_str() {
+        MEMORY_EVENT_PAYLOAD_SCHEMA_V1 => {
+            if let Err(error) = serde_json::from_value::<MemoryEventPayload>(event.payload.clone())
+            {
+                return Ok(IngestDisposition::Quarantined {
+                    reason: format!("memory payload failed the closed allowlist: {error}"),
+                });
+            }
+        }
+        MANIFEST_EVENT_PAYLOAD_SCHEMA_V1 => {
+            if let Err(error) =
+                serde_json::from_value::<ManifestEventPayload>(event.payload.clone())
+            {
+                return Ok(IngestDisposition::Quarantined {
+                    reason: format!("manifest payload failed the closed allowlist: {error}"),
+                });
+            }
+        }
+        other => {
+            return Ok(IngestDisposition::Unsupported {
+                reason: format!("unknown payload schema {other}"),
+            });
+        }
+    }
+
+    Ok(IngestDisposition::Applied)
+}
+
 fn hex_lower(bytes: [u8; 32]) -> String {
     let mut out = String::with_capacity(64);
     for byte in bytes {
@@ -582,6 +819,279 @@ mod tests {
             .list_mesh_origin_dispositions(TEAM, ORIGIN, 16)
             .expect("list");
         assert_eq!(rows[0].1, "applied");
+    }
+
+    struct TestVerifier;
+
+    impl OriginSignatureVerifier for TestVerifier {
+        fn verify(
+            &self,
+            _origin_node_id: &str,
+            _signing_key_generation: u64,
+            domain: &str,
+            canonical_bytes: &[u8],
+            signature: &str,
+        ) -> bool {
+            signature
+                == format!(
+                    "testsig:{}",
+                    blake3::hash(&[domain.as_bytes(), canonical_bytes].concat()).to_hex()
+                )
+        }
+    }
+
+    const PEER_ORIGIN: &str = "node_0000000000000000000000peer1";
+    const OWN_NODE: &str = "node_00000000000000000000000self";
+
+    fn make_inbound(
+        seq: u64,
+        prev_event_hash: Option<String>,
+        features: Vec<String>,
+    ) -> InboundOriginEvent {
+        let payload = serde_json::json!({
+            "operation": "create",
+            "logicalMemoryId": "olm_00000000000000000000000009",
+            "revisionId": format!("rev_{seq}"),
+            "bodyCommitment": "blake3:aa",
+        });
+        let mut sorted_features = features.clone();
+        sorted_features.sort();
+        sorted_features.dedup();
+        let preimage = serde_json::json!({
+            "schema": ORIGIN_EVENT_SCHEMA_V1,
+            "teamId": TEAM,
+            "originNodeId": PEER_ORIGIN,
+            "signingKeyGeneration": 1,
+            "seq": seq,
+            "prevEventHash": prev_event_hash,
+            "payloadSchema": MEMORY_EVENT_PAYLOAD_SCHEMA_V1,
+            "payload": payload,
+            "requiredFeatures": sorted_features,
+            "producedAt": "2026-08-11T00:00:00Z",
+        });
+        let canonical = canonical_json_string(&preimage).unwrap();
+        let event_hash = format!("blake3:{}", blake3::hash(canonical.as_bytes()).to_hex());
+        let event_id = format!(
+            "{ORIGIN_EVENT_ID_PREFIX}{}",
+            &blake3::hash(event_hash.as_bytes()).to_hex().as_str()[..26]
+        );
+        let signature = TestSigner.sign(ORIGIN_EVENT_SIGNATURE_DOMAIN, canonical.as_bytes());
+        InboundOriginEvent {
+            schema: ORIGIN_EVENT_SCHEMA_V1.to_owned(),
+            event_id,
+            team_id: TEAM.to_owned(),
+            origin_node_id: PEER_ORIGIN.to_owned(),
+            signing_key_generation: 1,
+            seq,
+            prev_event_hash,
+            event_hash,
+            signature,
+            payload_schema: MEMORY_EVENT_PAYLOAD_SCHEMA_V1.to_owned(),
+            payload,
+            required_features: features,
+            produced_at: "2026-08-11T00:00:00Z".to_owned(),
+        }
+    }
+
+    fn supported() -> std::collections::BTreeSet<String> {
+        ["mesh.origin_stream.v1".to_owned()].into_iter().collect()
+    }
+
+    #[test]
+    fn ingest_applies_a_faithful_event_and_records_the_disposition() {
+        let connection = open_db();
+        let event = make_inbound(0, None, vec!["mesh.origin_stream.v1".to_owned()]);
+        let disposition = ingest_origin_event(
+            &connection,
+            &TestVerifier,
+            OWN_NODE,
+            &supported(),
+            &event,
+            "t1",
+        )
+        .expect("ingest");
+        assert_eq!(disposition, IngestDisposition::Applied);
+        let rows = connection
+            .list_mesh_origin_dispositions(TEAM, PEER_ORIGIN, 4)
+            .expect("list");
+        assert_eq!(rows[0].1, "applied");
+    }
+
+    #[test]
+    fn tampered_payload_and_bad_signature_quarantine() {
+        let connection = open_db();
+        let mut tampered = make_inbound(0, None, Vec::new());
+        tampered.payload["revisionId"] = serde_json::Value::String("rev_tampered".to_owned());
+        let disposition = ingest_origin_event(
+            &connection,
+            &TestVerifier,
+            OWN_NODE,
+            &supported(),
+            &tampered,
+            "t1",
+        )
+        .expect("ingest");
+        assert!(
+            matches!(&disposition, IngestDisposition::Quarantined { reason } if reason.contains("eventHash")),
+            "tampered payload must quarantine on hash: {disposition:?}"
+        );
+
+        let mut forged = make_inbound(1, None, Vec::new());
+        forged.signature = "testsig:forged".to_owned();
+        let disposition = ingest_origin_event(
+            &connection,
+            &TestVerifier,
+            OWN_NODE,
+            &supported(),
+            &forged,
+            "t1",
+        )
+        .expect("ingest");
+        assert!(
+            matches!(&disposition, IngestDisposition::Quarantined { reason } if reason.contains("signature")),
+            "forged signature must quarantine: {disposition:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_mandatory_feature_withholds_sparsely_then_hydrates() {
+        let connection = open_db();
+        let gated = make_inbound(0, None, vec!["mesh.future_feature.v9".to_owned()]);
+        let disposition = ingest_origin_event(
+            &connection,
+            &TestVerifier,
+            OWN_NODE,
+            &supported(),
+            &gated,
+            "t1",
+        )
+        .expect("ingest 0");
+        assert!(matches!(disposition, IngestDisposition::Withheld { .. }));
+
+        // Sparse: N+1 applies while N stays withheld (frontier-independent).
+        let next = make_inbound(1, Some(gated.event_hash.clone()), Vec::new());
+        let disposition = ingest_origin_event(
+            &connection,
+            &TestVerifier,
+            OWN_NODE,
+            &supported(),
+            &next,
+            "t1",
+        )
+        .expect("ingest 1");
+        assert_eq!(disposition, IngestDisposition::Applied);
+        let rows = connection
+            .list_mesh_origin_dispositions(TEAM, PEER_ORIGIN, 4)
+            .expect("list");
+        assert_eq!((rows[0].0, rows[0].1.as_str()), (0_u64, "withheld"));
+        assert_eq!((rows[1].0, rows[1].1.as_str()), (1_u64, "applied"));
+
+        // Hydration: the feature becomes supported; re-ingest flips 0 in place.
+        let mut wider = supported();
+        wider.insert("mesh.future_feature.v9".to_owned());
+        let disposition =
+            ingest_origin_event(&connection, &TestVerifier, OWN_NODE, &wider, &gated, "t2")
+                .expect("re-ingest 0");
+        assert_eq!(disposition, IngestDisposition::Applied);
+        let rows = connection
+            .list_mesh_origin_dispositions(TEAM, PEER_ORIGIN, 4)
+            .expect("list");
+        assert_eq!((rows[0].0, rows[0].1.as_str()), (0_u64, "applied"));
+    }
+
+    #[test]
+    fn fork_echo_and_unknown_schema_are_refused_distinctly() {
+        let connection = open_db();
+        // Seed the local record of the peer's chain at seq 0 via the append
+        // path, then present a DIFFERENT seq-0 event: fork evidence.
+        let commitment = body_commitment(&[4_u8; 32], b"peer body");
+        append_origin_event(
+            &connection,
+            &TestSigner,
+            &OriginAppendRequest {
+                team_id: TEAM,
+                origin_node_id: PEER_ORIGIN,
+                payload: memory_payload("rev_recorded", &commitment),
+                required_features: Vec::new(),
+                produced_at: "2026-08-10T23:59:59Z",
+                body_nonce: None,
+            },
+        )
+        .expect("seed local record");
+        let divergent = make_inbound(0, None, Vec::new());
+        let disposition = ingest_origin_event(
+            &connection,
+            &TestVerifier,
+            OWN_NODE,
+            &supported(),
+            &divergent,
+            "t1",
+        )
+        .expect("ingest divergent");
+        assert!(
+            matches!(&disposition, IngestDisposition::Quarantined { reason } if reason.contains("fork")),
+            "divergent seq-0 must be fork evidence: {disposition:?}"
+        );
+
+        let mut echo = make_inbound(7, None, Vec::new());
+        echo.origin_node_id = OWN_NODE.to_owned();
+        let disposition = ingest_origin_event(
+            &connection,
+            &TestVerifier,
+            OWN_NODE,
+            &supported(),
+            &echo,
+            "t1",
+        )
+        .expect("ingest echo");
+        assert!(
+            matches!(&disposition, IngestDisposition::Quarantined { reason } if reason.contains("echo")),
+            "echo must be refused: {disposition:?}"
+        );
+
+        let mut alien = make_inbound(8, None, Vec::new());
+        alien.payload_schema = "ee.mesh.telepathy_event.v1".to_owned();
+        resign(&mut alien); // consistent hash/id/signature so the SCHEMA check is what fires
+        let disposition = ingest_origin_event(
+            &connection,
+            &TestVerifier,
+            OWN_NODE,
+            &supported(),
+            &alien,
+            "t1",
+        )
+        .expect("ingest alien");
+        assert!(
+            matches!(disposition, IngestDisposition::Unsupported { .. }),
+            "unknown payload schema is unsupported, not quarantined: {disposition:?}"
+        );
+    }
+
+    /// Recompute canonical/hash/id/signature from the event's CURRENT fields
+    /// so negative tests can isolate exactly one failing check.
+    fn resign(event: &mut InboundOriginEvent) {
+        let mut features = event.required_features.clone();
+        features.sort();
+        features.dedup();
+        let preimage = serde_json::json!({
+            "schema": ORIGIN_EVENT_SCHEMA_V1,
+            "teamId": event.team_id,
+            "originNodeId": event.origin_node_id,
+            "signingKeyGeneration": event.signing_key_generation,
+            "seq": event.seq,
+            "prevEventHash": event.prev_event_hash,
+            "payloadSchema": event.payload_schema,
+            "payload": event.payload,
+            "requiredFeatures": features,
+            "producedAt": event.produced_at,
+        });
+        let canonical = canonical_json_string(&preimage).unwrap();
+        event.event_hash = format!("blake3:{}", blake3::hash(canonical.as_bytes()).to_hex());
+        event.event_id = format!(
+            "{ORIGIN_EVENT_ID_PREFIX}{}",
+            &blake3::hash(event.event_hash.as_bytes()).to_hex().as_str()[..26]
+        );
+        event.signature = TestSigner.sign(ORIGIN_EVENT_SIGNATURE_DOMAIN, canonical.as_bytes());
     }
 
     #[test]
