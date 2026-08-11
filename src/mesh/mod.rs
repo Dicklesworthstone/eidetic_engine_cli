@@ -28,6 +28,7 @@ pub mod identity_change_guard;
 pub mod key_store;
 pub mod lane_grant;
 pub mod lane_grant_preview;
+pub mod origin_stream;
 pub mod peer;
 pub mod peer_state;
 pub mod policy;

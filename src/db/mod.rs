@@ -13876,6 +13876,104 @@ pub struct UpsertMeshPeerInput {
     pub last_seen_at: Option<String>,
 }
 
+/// Input for one origin-stream append (T2.0, bd-tc-epic-qzk7o.3.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateMeshOriginEventInput {
+    pub event_id: String,
+    pub team_id: String,
+    pub origin_node_id: String,
+    pub signing_key_generation: u64,
+    pub seq: u64,
+    pub prev_event_hash: Option<String>,
+    pub event_hash: String,
+    pub signature: String,
+    pub payload_schema: String,
+    pub payload_json: String,
+    pub required_features_json: String,
+    pub produced_at: String,
+    /// Body-commitment nonce (64 lowercase hex chars) for memory revisions
+    /// that carry a body commitment; stored in the sidecar table only.
+    pub body_nonce_hex: Option<String>,
+}
+
+/// Stored mesh_origin_events row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMeshOriginEvent {
+    pub event_id: String,
+    pub team_id: String,
+    pub origin_node_id: String,
+    pub signing_key_generation: u64,
+    pub seq: u64,
+    pub prev_event_hash: Option<String>,
+    pub event_hash: String,
+    pub signature: String,
+    pub payload_schema: String,
+    pub payload_json: String,
+    pub required_features_json: String,
+    pub produced_at: String,
+}
+
+/// Append failure: either the chain invariant refused the write (durable
+/// fork/regression evidence for the caller) or the database failed.
+#[derive(Debug)]
+pub enum MeshOriginAppendError {
+    ChainMismatch {
+        expected_seq: u64,
+        expected_prev_event_hash: Option<String>,
+        got_seq: u64,
+        got_prev_event_hash: Option<String>,
+    },
+    Db(DbError),
+}
+
+impl From<DbError> for MeshOriginAppendError {
+    fn from(error: DbError) -> Self {
+        Self::Db(error)
+    }
+}
+
+impl std::fmt::Display for MeshOriginAppendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ChainMismatch {
+                expected_seq,
+                expected_prev_event_hash,
+                got_seq,
+                got_prev_event_hash,
+            } => write!(
+                f,
+                "origin chain mismatch: expected seq {expected_seq} with prev {expected_prev_event_hash:?}, got seq {got_seq} with prev {got_prev_event_hash:?}"
+            ),
+            Self::Db(error) => write!(f, "origin append database error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for MeshOriginAppendError {}
+
+fn stored_mesh_origin_event_from_row(row: &Row) -> Result<StoredMeshOriginEvent> {
+    Ok(StoredMeshOriginEvent {
+        event_id: required_text(row, 0, DbOperation::Query, "event_id")?.to_string(),
+        team_id: required_text(row, 1, DbOperation::Query, "team_id")?.to_string(),
+        origin_node_id: required_text(row, 2, DbOperation::Query, "origin_node_id")?.to_string(),
+        signing_key_generation: required_u64(row, 3, DbOperation::Query, "signing_key_generation")?,
+        seq: required_u64(row, 4, DbOperation::Query, "seq")?,
+        prev_event_hash: optional_text(row, 5)?.map(str::to_string),
+        event_hash: required_text(row, 6, DbOperation::Query, "event_hash")?.to_string(),
+        signature: required_text(row, 7, DbOperation::Query, "signature")?.to_string(),
+        payload_schema: required_text(row, 8, DbOperation::Query, "payload_schema")?.to_string(),
+        payload_json: required_text(row, 9, DbOperation::Query, "payload_json")?.to_string(),
+        required_features_json: required_text(
+            row,
+            10,
+            DbOperation::Query,
+            "required_features_json",
+        )?
+        .to_string(),
+        produced_at: required_text(row, 11, DbOperation::Query, "produced_at")?.to_string(),
+    })
+}
+
 /// Stored mesh_peers row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredMeshPeer {
@@ -15345,6 +15443,189 @@ impl DbConnection {
             ],
         )?;
         rows.first().map(stored_mesh_peer_from_row).transpose()
+    }
+
+    /// Append one origin event to the per-origin chain (T2.0), enforcing
+    /// linearity transactionally: `seq` must be exactly tip+1 (or 0 for the
+    /// valid first event) and `prev_event_hash` must equal the tip's
+    /// `event_hash` (or NULL first). The body-commitment nonce, when present,
+    /// is written to the sidecar table in the same transaction so the event
+    /// row itself never carries it.
+    pub fn append_mesh_origin_event(
+        &self,
+        input: &CreateMeshOriginEventInput,
+    ) -> std::result::Result<(), MeshOriginAppendError> {
+        self.with_transaction_error(|| {
+            let tip = self.mesh_origin_tip_row(&input.team_id, &input.origin_node_id)?;
+            let chain_ok = match &tip {
+                None => input.seq == 0 && input.prev_event_hash.is_none(),
+                Some((tip_seq, tip_hash)) => {
+                    input.seq == tip_seq.saturating_add(1)
+                        && input.prev_event_hash.as_deref() == Some(tip_hash.as_str())
+                }
+            };
+            if !chain_ok {
+                let (expected_seq, expected_prev) = match tip {
+                    None => (0, None),
+                    Some((tip_seq, tip_hash)) => (tip_seq.saturating_add(1), Some(tip_hash)),
+                };
+                return Err(MeshOriginAppendError::ChainMismatch {
+                    expected_seq,
+                    expected_prev_event_hash: expected_prev,
+                    got_seq: input.seq,
+                    got_prev_event_hash: input.prev_event_hash.clone(),
+                });
+            }
+            self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO mesh_origin_events (event_id, team_id, origin_node_id, signing_key_generation, seq, prev_event_hash, event_hash, signature, payload_schema, payload_json, required_features_json, produced_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                &[
+                    Value::Text(input.event_id.clone()),
+                    Value::Text(input.team_id.clone()),
+                    Value::Text(input.origin_node_id.clone()),
+                    Value::from_u64_clamped(input.signing_key_generation),
+                    Value::from_u64_clamped(input.seq),
+                    optional_text_value(input.prev_event_hash.as_deref()),
+                    Value::Text(input.event_hash.clone()),
+                    Value::Text(input.signature.clone()),
+                    Value::Text(input.payload_schema.clone()),
+                    Value::Text(input.payload_json.clone()),
+                    Value::Text(input.required_features_json.clone()),
+                    Value::Text(input.produced_at.clone()),
+                ],
+            )
+            .map_err(MeshOriginAppendError::Db)?;
+            if let Some(nonce_hex) = &input.body_nonce_hex {
+                self.execute_for(
+                    DbOperation::Execute,
+                    "INSERT INTO mesh_origin_event_nonces (event_id, nonce_hex) VALUES (?1, ?2)",
+                    &[
+                        Value::Text(input.event_id.clone()),
+                        Value::Text(nonce_hex.clone()),
+                    ],
+                )
+                .map_err(MeshOriginAppendError::Db)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn mesh_origin_tip_row(
+        &self,
+        team_id: &str,
+        origin_node_id: &str,
+    ) -> Result<Option<(u64, String)>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT seq, event_hash FROM mesh_origin_events WHERE team_id = ?1 AND origin_node_id = ?2 ORDER BY seq DESC LIMIT 1",
+            &[
+                Value::Text(team_id.to_string()),
+                Value::Text(origin_node_id.to_string()),
+            ],
+        )?;
+        rows.first()
+            .map(|row| {
+                Ok((
+                    required_u64(row, 0, DbOperation::Query, "seq")?,
+                    required_text(row, 1, DbOperation::Query, "event_hash")?.to_string(),
+                ))
+            })
+            .transpose()
+    }
+
+    /// Current chain tip `(seq, event_hash)` for one origin, if any.
+    pub fn mesh_origin_tip(
+        &self,
+        team_id: &str,
+        origin_node_id: &str,
+    ) -> Result<Option<(u64, String)>> {
+        self.mesh_origin_tip_row(team_id, origin_node_id)
+    }
+
+    /// List origin events for one origin from `from_seq` (inclusive), ascending.
+    pub fn list_mesh_origin_events(
+        &self,
+        team_id: &str,
+        origin_node_id: &str,
+        from_seq: u64,
+        limit: u32,
+    ) -> Result<Vec<StoredMeshOriginEvent>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT event_id, team_id, origin_node_id, signing_key_generation, seq, prev_event_hash, event_hash, signature, payload_schema, payload_json, required_features_json, produced_at FROM mesh_origin_events WHERE team_id = ?1 AND origin_node_id = ?2 AND seq >= ?3 ORDER BY seq ASC LIMIT ?4",
+            &[
+                Value::Text(team_id.to_string()),
+                Value::Text(origin_node_id.to_string()),
+                Value::from_u64_clamped(from_seq),
+                Value::from_u64_clamped(u64::from(limit)),
+            ],
+        )?;
+        rows.iter().map(stored_mesh_origin_event_from_row).collect()
+    }
+
+    /// Read the body-fetch-only commitment nonce for one local event.
+    pub fn mesh_origin_event_nonce(&self, event_id: &str) -> Result<Option<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT nonce_hex FROM mesh_origin_event_nonces WHERE event_id = ?1",
+            &[Value::Text(event_id.to_string())],
+        )?;
+        rows.first()
+            .map(|row| Ok(required_text(row, 0, DbOperation::Query, "nonce_hex")?.to_string()))
+            .transpose()
+    }
+
+    /// Record (or update — hydration legally flips withheld to applied) one
+    /// sparse receiver disposition.
+    pub fn record_mesh_origin_disposition(
+        &self,
+        team_id: &str,
+        origin_node_id: &str,
+        seq: u64,
+        disposition: &str,
+        reason: &str,
+        recorded_at: &str,
+    ) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO mesh_origin_dispositions (team_id, origin_node_id, seq, disposition, reason, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(team_id, origin_node_id, seq) DO UPDATE SET disposition = excluded.disposition, reason = excluded.reason, recorded_at = excluded.recorded_at",
+            &[
+                Value::Text(team_id.to_string()),
+                Value::Text(origin_node_id.to_string()),
+                Value::from_u64_clamped(seq),
+                Value::Text(disposition.to_string()),
+                Value::Text(reason.to_string()),
+                Value::Text(recorded_at.to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Sparse dispositions for one origin, ascending by seq.
+    pub fn list_mesh_origin_dispositions(
+        &self,
+        team_id: &str,
+        origin_node_id: &str,
+        limit: u32,
+    ) -> Result<Vec<(u64, String, String)>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT seq, disposition, reason FROM mesh_origin_dispositions WHERE team_id = ?1 AND origin_node_id = ?2 ORDER BY seq ASC LIMIT ?3",
+            &[
+                Value::Text(team_id.to_string()),
+                Value::Text(origin_node_id.to_string()),
+                Value::from_u64_clamped(u64::from(limit)),
+            ],
+        )?;
+        rows.iter()
+            .map(|row| {
+                Ok((
+                    required_u64(row, 0, DbOperation::Query, "seq")?,
+                    required_text(row, 1, DbOperation::Query, "disposition")?.to_string(),
+                    required_text(row, 2, DbOperation::Query, "reason")?.to_string(),
+                ))
+            })
+            .collect()
     }
 
     /// List optional mesh peers for one local workspace in deterministic order.
