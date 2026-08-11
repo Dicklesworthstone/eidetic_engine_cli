@@ -160,6 +160,22 @@ fn direct_cargo_clippy_is_denied() -> TestResult {
 }
 
 #[test]
+fn shell_cargo_execution_is_denied_before_spawn() -> TestResult {
+    let (code, report) = classify("/bin/zsh -c 'cargo test --lib foo'")?;
+    if code != 1 || report["allowed"].as_str() != Some("denied") {
+        return Err(format!(
+            "expected a shell that executes Cargo to remain denied; got {report}"
+        ));
+    }
+    if report["subcommand"].as_str() != Some("test") {
+        return Err(format!(
+            "expected shell Cargo execution to classify as test; got {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn bare_rch_exec_wrapper_is_denied_without_remote_required() -> TestResult {
     let (code, report) = classify("rch exec -- env TMPDIR=/tmp cargo test --lib foo")?;
     if code != 1 {
@@ -270,9 +286,9 @@ fn empty_command_is_allowed() -> TestResult {
 #[test]
 fn process_probe_reports_manifest_workspace_and_package_cache_lock() -> TestResult {
     let fixture = "\
- 41311 1 01:12:03 cargo test --lib import_cursor --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
- 7193 1 02:33:44 cargo metadata --format-version=1 --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
- 8 1 00:00:01 cargo metadata --manifest-path /tmp/other/Cargo.toml
+ 41311 1 01:12:03 cargo cargo test --lib import_cursor --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 7193 1 02:33:44 cargo cargo metadata --format-version=1 --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 8 1 00:00:01 cargo cargo metadata --manifest-path /tmp/other/Cargo.toml
 ";
     let (code, report) = probe_with_ps_fixture(fixture, "7193")?;
     if code != 1 {
@@ -318,8 +334,8 @@ fn process_probe_reports_manifest_workspace_and_package_cache_lock() -> TestResu
 #[test]
 fn process_probe_ignores_rch_diagnose_dry_run_payloads() -> TestResult {
     let fixture = "\
- 55381 613 00:02 /Volumes/USBNVME16TB/temp_agent_space/rch-candidate/extracted/rch diagnose --dry-run cargo check --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml --json
- 55382 613 00:02 cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 55381 613 00:02 rch /Volumes/USBNVME16TB/temp_agent_space/rch-candidate/extracted/rch diagnose --dry-run cargo check --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml --json
+ 55382 613 00:02 cargo cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
 ";
     let (code, report) = probe_with_ps_fixture(fixture, "")?;
     if code != 1 {
@@ -339,11 +355,16 @@ fn process_probe_ignores_rch_diagnose_dry_run_payloads() -> TestResult {
 }
 
 #[test]
-fn process_probe_ignores_direct_br_comment_with_shell_like_cargo_prose() -> TestResult {
+fn process_probe_uses_executable_boundary_without_hiding_real_cargo_children() -> TestResult {
     let fixture = "\
- 55380 613 00:02 br comments add bd-088ci --message lock mismatch observed; cargo --locked correctly refused the rewrite --json
- 55382 613 00:02 cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
- 55383 613 00:02 /bin/zsh -c br comments add bd-088ci --message done; cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 55380 613 00:02 br br comments add bd-088ci --message lock mismatch observed; cargo --locked correctly refused the rewrite --json
+ 55381 613 12:07 zsh /bin/zsh -c workspace_rch=/Users/jemanuel/projects/eidetic_engine_cli; exact_cmd_rch='cargo test --locked --release -p rch-common lockfile_planning -- --nocapture'; while true; do rch status --json; sleep 45; done
+ 55382 613 00:02 cargo cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 55383 613 00:02 zsh /bin/zsh -c br comments add bd-088ci --message done; cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 55384 55383 00:01 cargo cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 55385 613 00:01 cargo observer test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 55386 613 00:01 rustc rustc --crate-name ee /Users/jemanuel/projects/eidetic_engine_cli/src/lib.rs
+ 55387 613 00:01 rustdoc rustdoc --test /Users/jemanuel/projects/eidetic_engine_cli/src/lib.rs
 ";
     let (code, report) = probe_with_ps_fixture(fixture, "")?;
     if code != 1 {
@@ -354,21 +375,43 @@ fn process_probe_ignores_direct_br_comment_with_shell_like_cargo_prose() -> Test
     let processes = report["processes"]
         .as_array()
         .ok_or_else(|| format!("missing processes array: {report}"))?;
-    if processes.len() != 2
+    if processes.len() != 5
         || processes[0]["pid"] != "55382"
-        || processes[1]["pid"] != "55383"
-        || processes.iter().any(|process| process["pid"] == "55380")
+        || processes[1]["pid"] != "55384"
+        || processes[2]["pid"] != "55385"
+        || processes[3]["pid"] != "55386"
+        || processes[4]["pid"] != "55387"
+        || processes
+            .iter()
+            .any(|process| matches!(process["pid"].as_str(), Some("55380" | "55381" | "55383")))
     {
         return Err(format!(
-            "direct br comment prose must be ignored without hiding executable Cargo forms: {processes:?}"
+            "only actual Cargo executables should be reported; argv data containers must be ignored: {processes:?}"
         ));
     }
-    if processes
+    if processes[..3]
         .iter()
         .any(|process| process["policyStatus"] != "local_cargo_disallowed")
     {
         return Err(format!(
-            "Cargo executable and shell execution rows must remain fail-closed: {processes:?}"
+            "actual Cargo executables must remain fail-closed: {processes:?}"
+        ));
+    }
+    if processes[2]["command_kind"] != "cargo" || processes[2]["subcommand"] != "" {
+        return Err(format!(
+            "authoritative executable identity must catch argv[0]-spoofed Cargo: {}",
+            processes[2]
+        ));
+    }
+    if processes[3]["command_kind"] != "rustc"
+        || processes[4]["command_kind"] != "rustdoc"
+        || processes[3..]
+            .iter()
+            .any(|process| process["policyStatus"] != "local_rust_tool_disallowed")
+    {
+        return Err(format!(
+            "actual rustc and rustdoc executables must remain fail-closed: {:?}",
+            &processes[3..]
         ));
     }
     Ok(())
@@ -377,8 +420,8 @@ fn process_probe_ignores_direct_br_comment_with_shell_like_cargo_prose() -> Test
 #[test]
 fn process_probe_ignores_stable_rch_verify_shell_without_rch_exec_child() -> TestResult {
     let fixture = "\
- 839 69255 00:00 bash -s -- --summary --no-write --known-blocker-override -- cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml -- --nocapture
- 990 1 00:03 cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 839 69255 00:00 bash bash -s -- --summary --no-write --known-blocker-override -- cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml -- --nocapture
+ 990 1 00:03 cargo cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
 ";
     let (code, report) = probe_with_ps_fixture(fixture, "")?;
     if code != 1 {
@@ -400,8 +443,8 @@ fn process_probe_ignores_stable_rch_verify_shell_without_rch_exec_child() -> Tes
 #[test]
 fn process_probe_ignores_ssh_remote_cargo_payload_launcher() -> TestResult {
     let fixture = "\
- 90391 1694 00:51 ssh -i /Users/jemanuel/.ssh/contabo_vps_ed25519 -o BatchMode=yes ubuntu@212.90.121.76 cd /data/projects/eidetic_engine_cli_manual_turquoise-20260607T152024Z && mkdir -p .manual-target-data && TMPDIR=/tmp CARGO_TARGET_DIR=/data/projects/eidetic_engine_cli_manual_turquoise-20260607T152024Z/.manual-target-data cargo test --lib global_memory_scope -- --nocapture
- 990 1 00:03 cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 90391 1694 00:51 ssh ssh -i /Users/jemanuel/.ssh/contabo_vps_ed25519 -o BatchMode=yes ubuntu@212.90.121.76 cd /data/projects/eidetic_engine_cli_manual_turquoise-20260607T152024Z && mkdir -p .manual-target-data && TMPDIR=/tmp CARGO_TARGET_DIR=/data/projects/eidetic_engine_cli_manual_turquoise-20260607T152024Z/.manual-target-data cargo test --lib global_memory_scope -- --nocapture
+ 990 1 00:03 cargo cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
 ";
     let (code, report) = probe_with_ps_fixture(fixture, "")?;
     if code != 1 {

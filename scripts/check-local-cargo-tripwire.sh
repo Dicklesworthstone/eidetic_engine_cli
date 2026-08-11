@@ -298,8 +298,12 @@ blocking_process_count() {
 probe_processes() {
     # Scan running cargo/rustc processes for ones that target this
     # repo's worktree paths without an `rch exec` ancestor visible in
-    # their command lines. We rely on ps -eo command rather than the
-    # process tree because ps -eo ppid is racy on macOS during fork.
+    # their command lines. A shell, tracker, or watcher process whose argv
+    # merely stores a Cargo command as inert data is not itself a local Rust
+    # build; if that shell actually executes Cargo, the cargo/rustc child is
+    # reported by its own process row. This executable-boundary rule avoids
+    # starving RCH admission on long-lived proof observers while preserving
+    # fail-closed command classification before a shell command is spawned.
     #
     # Output rows:
     # <pid>\t<ppid>\t<elapsed>\t<command-kind>\t<subcommand>\t<cwd>\t<manifest>\t<workspace>\t<package-cache-lock>\t<policy-status>\t<short-command>\t<flagged-reason>\t<tmux-pane-id>\t<tmux-pane-pid>\t<tmux-locator>\t<tmux-current-path>\t<tmux-title>
@@ -322,14 +326,17 @@ probe_processes() {
         local pid
         local ppid
         local elapsed
+        local executable_name
         local cmd
         pid=$(printf '%s' "$line" | awk '{print $1}')
         ppid=$(printf '%s' "$line" | awk '{print $2}')
         elapsed=$(printf '%s' "$line" | awk '{print $3}')
-        cmd=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+//')
+        executable_name=$(printf '%s' "$line" | awk '{print $4}')
+        cmd=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+//')
         [ -n "$pid" ] || continue
+        [ -n "$executable_name" ] || continue
         [ -n "$cmd" ] || continue
-        command_mentions_rust_tool "$cmd" || continue
+        process_executable_is_rust_tool "$executable_name" || continue
         # Skip our own shell + the ps invocation above.
         case "$cmd" in
             *check-local-cargo-tripwire*|*ps[[:space:]]-eo*) continue ;;
@@ -403,7 +410,7 @@ probe_processes() {
         local policy_status
         local reason
         local tmux_attribution
-        command_kind=$(command_kind_from_command "$cmd")
+        command_kind=$(command_kind_from_command "$executable_name")
         subcommand=$(cargo_subcommand_from_command "$cmd")
         manifest_path=$(manifest_path_from_command "$cmd" "$cwd")
         workspace_path=$(workspace_path_from_manifest "$manifest_path" "$cwd")
@@ -542,7 +549,9 @@ process_scan_ps_output() {
         cat "$PS_FIXTURE"
         return
     fi
-    ps -eo pid=,ppid=,etime=,command=
+    # `ucomm` is the kernel-backed executable name. Unlike `command`/argv[0],
+    # it remains `cargo` when a caller spoofs argv[0] with `exec -a`.
+    ps -eo pid=,ppid=,etime=,ucomm=,command=
 }
 
 bounded_lsof() {
@@ -600,7 +609,7 @@ parent_command_from_ps_output() {
     [ -n "$parent_pid" ] || return 0
     printf '%s\n' "$ps_text" | awk -v wanted_pid="$parent_pid" '
         $1 == wanted_pid {
-            sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+/, "")
+            sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+/, "")
             print
             exit
         }
@@ -682,6 +691,15 @@ process_cwd() {
 
 command_mentions_rust_tool() {
     printf '%s' "$1" | grep -Eq "(^|[[:space:]/'\"(;])cargo([[:space:]]|$)|(^|[[:space:]/'\"(;])rustc([[:space:]]|$)|(^|[[:space:]/'\"(;])rustdoc([[:space:]]|$)"
+}
+
+process_executable_is_rust_tool() {
+    local executable="$1"
+    executable=${executable##*/}
+    case "$executable" in
+        cargo|rustc|rustdoc) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 is_stable_rch_verify_wrapper_command() {
@@ -1364,6 +1382,14 @@ run_self_test() {
         denied*) ;;
         *) printf 'self-test FAILED: tracker command followed by cargo execution must be denied; got %s\n' "$result" >&2; exit 1 ;;
     esac
+    # A shell command that directly executes Cargo is still denied before
+    # spawn even though the retrospective process scan reports only actual
+    # cargo/rustc/rustdoc executables.
+    result=$(classify_command "/bin/zsh -c 'cargo test --lib foo'")
+    case "$result" in
+        denied*) ;;
+        *) printf 'self-test FAILED: shell cargo execution must be denied before spawn; got %s\n' "$result" >&2; exit 1 ;;
+    esac
     # Direct rustc → DENIED.
     result=$(classify_command "rustc src/main.rs")
     case "$result" in
@@ -1551,7 +1577,7 @@ EOF
         local old_tmux_panes_text_fixture="$TMUX_PANES_TEXT_FIXTURE"
         local old_process_stat_text_fixture="$PROCESS_STAT_TEXT_FIXTURE"
         PS_FIXTURE="tests/fixtures/rch_local_cargo_tripwire/process_scan_ps_fixture.txt"
-        PACKAGE_CACHE_PIDS_FIXTURE="102"
+        PACKAGE_CACHE_PIDS_FIXTURE="129"
         PROCESS_STAT_TEXT_FIXTURE=$(cat <<'EOF'
 116 U+
 124 U+
@@ -1578,7 +1604,7 @@ EOF
         TMUX_PANES_TEXT_FIXTURE="$old_tmux_panes_text_fixture"
         PROCESS_STAT_TEXT_FIXTURE="$old_process_stat_text_fixture"
         if ! printf '%s' "$fixture_report" | jq -e '
-            .count == 10
+            .count == 11
             and .forbiddenWorktreeCount == 2
             and .localBuildPolicy.status == "blocked"
             and .worktreePolicy.status == "blocked"
@@ -1588,6 +1614,7 @@ EOF
             and any(.detectedLocalBuilds[]; .policyStatus == "local_cargo_read_only_lock_holder" and .subcommand == "metadata" and .packageCacheLockHeld == true and .tmuxPane.paneId == "%22" and .tmuxPane.locator == "eidetic_engine_cli:0.2" and .tmuxPane.title == "eidetic_engine_cli__cc_test")
             and any(.detectedLocalBuilds[]; .policyStatus == "local_cargo_disallowed" and .subcommand == "test" and .manifestPath == "/Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml" and .tmuxPane.paneId == null)
             and any(.detectedLocalBuilds[]; .policyStatus == "local_rust_tool_disallowed" and .commandKind == "rustc")
+            and any(.detectedLocalBuilds[]; .policyStatus == "local_rust_tool_disallowed" and .commandKind == "rustdoc")
             and any(.detectedLocalBuilds[]; .policyStatus == "editor_tooling_informational" and .subcommand == "check")
             and any(.detectedLocalBuilds[]; .policyStatus == "editor_tooling_informational" and .commandKind == "rustc" and .pid == "118")
             and any(.detectedLocalBuilds[]; .policyStatus == "unkillable_stale_informational" and .pid == "116")
@@ -1604,7 +1631,7 @@ EOF
             exit 1
         fi
     fi
-    printf 'self-test PASSED: 29 classifier cases, JSON repair action, stable-wrapper/ssh exclusion, process/tmux fixture, and worktree fixtures produced expected outcomes\n'
+    printf 'self-test PASSED: 30 classifier cases, JSON repair action, stable-wrapper/ssh exclusion, executable-boundary process/tmux fixture, and worktree fixtures produced expected outcomes\n'
     exit 0
 }
 
