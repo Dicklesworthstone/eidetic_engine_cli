@@ -112,6 +112,22 @@ impl MeshCliDegradation {
         }
     }
 
+    /// Emitted when ACTIVE peers are enrolled — an anti-entropy round was
+    /// warranted — but no transport could carry it (bd-tc-epic-qzk7o.2.5
+    /// item e; the real peer transport lands with tc-T2.4).
+    #[must_use]
+    pub fn anti_entropy_transport_unavailable(active_peer_count: usize) -> Self {
+        Self {
+            code: crate::mesh::anti_entropy_protocol::degraded_codes::TRANSPORT_UNAVAILABLE,
+            severity: "low",
+            message: format!(
+                "An anti-entropy round was warranted ({active_peer_count} active peer(s) enrolled) but no peer transport path is available; no round ran."
+            ),
+            repair: "Use `ee mesh export` and `ee mesh import --file mesh-export.json` for a foreground transfer until a real peer transport is configured; `ee mesh peers --json` lists the peers awaiting sync."
+                .to_owned(),
+        }
+    }
+
     #[must_use]
     pub fn sync_supervisor_budget_exhausted(resource: &str, limit: impl std::fmt::Display) -> Self {
         Self {
@@ -1476,6 +1492,14 @@ pub async fn run_mesh_sync_supervisor_supervised_with_transport(
 
     if snapshot.mesh_enabled && !contacted_peers {
         degraded.push(MeshCliDegradation::sync_once_network_deferred());
+        // Active peers were enrolled, so a round was actually warranted:
+        // report the transport gap at the anti-entropy level too, not just
+        // the CLI deferral.
+        if active_peer_count > 0 {
+            degraded.push(MeshCliDegradation::anti_entropy_transport_unavailable(
+                active_peer_count,
+            ));
+        }
     }
 
     Outcome::Ok(MeshSyncSupervisorReport {
@@ -3915,6 +3939,32 @@ max_bytes = 1048576
             !degraded.message.contains("not implemented"),
             "deferred sync diagnostic must not claim closed protocol primitives are missing: {}",
             degraded.message
+        );
+        assert!(
+            !degraded.repair.contains('<') && !degraded.repair.contains('>'),
+            "repair hint must not expose an unresolved metavariable: {}",
+            degraded.repair
+        );
+    }
+
+    #[test]
+    fn anti_entropy_transport_unavailable_names_the_gap_honestly() {
+        let degraded = MeshCliDegradation::anti_entropy_transport_unavailable(3);
+
+        assert_eq!(
+            degraded.code,
+            crate::mesh::anti_entropy_protocol::degraded_codes::TRANSPORT_UNAVAILABLE
+        );
+        assert_eq!(degraded.severity, "low");
+        assert!(
+            degraded.message.contains("3 active peer(s)"),
+            "message must say why a round was warranted: {}",
+            degraded.message
+        );
+        assert!(
+            degraded.repair.contains("mesh-export.json"),
+            "repair must offer the working foreground transfer path: {}",
+            degraded.repair
         );
         assert!(
             !degraded.repair.contains('<') && !degraded.repair.contains('>'),

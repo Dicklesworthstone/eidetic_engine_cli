@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_anti_entropy_transport_unavailable",
+  "introduced_by": {
+    "bead": "bd-tc-epic-qzk7o.2.5"
+  },
+  "surfaces": [
+    "mesh sync"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee mesh sync ran with mesh enabled and at least one ACTIVE peer enrolled — an anti-entropy round was warranted — but no peer transport path exists to carry it (the real transport lands with team-confed T2.4), so no round ran. Reported at the anti-entropy level alongside the CLI-level mesh_sync_once_network_deferred so agents can distinguish 'nothing to sync' from 'peers are waiting and the transport is the gap'.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee mesh enable --workspace ."
+    ],
+    "invocation": "ee mesh sync --once --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "mesh_anti_entropy_transport_unavailable",
+    "severity": "low",
+    "message_contains": [
+      "active peer"
+    ],
+    "repair_contains": "mesh-export.json"
+  }
+}

@@ -729,6 +729,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | Code | Severity | Bead |
 |------|----------|------|
 | `mesh_disabled` | info | bd-2wngl (SRR6.8) |
+| `mesh_anti_entropy_transport_unavailable` | low | bd-tc-epic-qzk7o.2.5 (item e) |
 | `mesh_workspace_uninitialized` | warning | bd-2wngl (SRR6.8) |
 | `mesh_sync_once_network_deferred` | info | bd-36bbk.2 |
 | `mesh_sync_supervisor_backpressure` | info | bd-1ylr3 (SRR6.10) |
