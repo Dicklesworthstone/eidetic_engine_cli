@@ -1097,7 +1097,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         format!("real model fixture failed frozen manifest verification: {error}")
     })?;
 
-    let workspace = E2eWorkspace::create("registered-noncanonical-model2vec-offline")?;
+    let workspace = E2eWorkspace::create("public-canonical-model2vec-offline")?;
     let bootstrap_model_parent = workspace.path.join("explicit-model-override");
     fs::create_dir_all(&bootstrap_model_parent)
         .map_err(|error| format!("create {}: {error}", bootstrap_model_parent.display()))?;
@@ -1134,7 +1134,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         "registry_path_remember",
         &[
             "remember",
-            "A verified noncanonical registry path supports offline semantic retrieval.",
+            "A canonical verified registry path supports offline semantic retrieval.",
             "--workspace",
             workspace.workspace_arg()?,
             "--level",
@@ -1264,7 +1264,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
 
     let mut offline_env = network_tripwire.proxy_env();
     offline_env.push(("EE_EMBED_DOWNLOAD".to_string(), "off".to_string()));
-    let query = "offline noncanonical semantic registry path";
+    let query = "offline canonical semantic registry path";
     let search = run_ee_with_env(
         &workspace,
         "registry_path_search",

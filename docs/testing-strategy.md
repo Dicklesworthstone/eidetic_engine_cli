@@ -558,14 +558,16 @@ model-path overrides, and runs with `EE_EMBED_DOWNLOAD=off`. It therefore proves
 that the verified registered artifact remains neural-local while network model
 downloads and remote embedding providers are forbidden.
 
-A second egress-denied branch bootstraps the same verified artifact, persists
-its content hash with a deliberately noncanonical local `source_uri`, removes
-the explicit model-path override, and requires search, pack, and full orient to
+A second egress-denied branch bootstraps the same verified artifact through
+`EE_EMBED_MODEL_DIR`, runs public `ee index reembed`, and verifies through
+public `ee model list --json` that the writer persisted the canonical verified
+local path with matching hash, dimension, and cosine identity. It then removes
+the explicit model-path override and requires search, pack, and full orient to
 report `neural_local`. It also drives `why-not` candidate retrieval through the
 same workspace-aware embedder, rejects any semantic-unavailable degradation,
 and hashes the database, WAL, and shared-memory artifacts before and after to
-prove the registry lookup remains read-only.
-The same fixture rewrites the registry row through
+prove the registry lookup remains read-only. Only the negative fixture matrix
+rewrites the registry row directly through
 missing, unregistered, unavailable, unverified, mismatched-name, mismatched-hash,
 mismatched-dimension, mismatched-distance, and nonlocal states; each must report
 explicit `hash_fallback` with downloads off while the network tripwire records
