@@ -346,6 +346,34 @@ else
     event scale_10k_resume_preserves_db_wal_shm fail "before=${SCALE_HASH_BEFORE//$'\n'/,}; after=${SCALE_HASH_AFTER//$'\n'/,}"
 fi
 
+# The bead's latency claim covers both machine and human output. Reuse the
+# exact same 10k store so the human renderer cannot pass on a smaller fixture
+# while only JSON carries the scale proof.
+SCALE_HUMAN_HASH_BEFORE="$(store_fingerprint "${SCALE_DATABASE}")"
+SCALE_HUMAN_STARTED_MS="$(now_ms)"
+run_ee resume --workspace "${SCALE_WS}"
+SCALE_HUMAN_ELAPSED_MS=$(( $(now_ms) - SCALE_HUMAN_STARTED_MS ))
+SCALE_HUMAN="${LAST_STDOUT}"
+SCALE_HUMAN_HASH_AFTER="$(store_fingerprint "${SCALE_DATABASE}")"
+SCALE_HUMAN_ITEM_COUNT="$(grep -Ec '^  - mem_[^:]+:' "${SCALE_HUMAN}" 2>/dev/null || true)"
+if [[ "${LAST_EXIT}" -eq 0 && "${SCALE_HUMAN_ELAPSED_MS}" -lt 2000 \
+    && "${SCALE_HUMAN_ITEM_COUNT}" -eq 20 ]] \
+    && grep -Fq "resume: 10000 episodic memories, 1 sessions shown" "${SCALE_HUMAN}" \
+    && grep -Fq "[session-scale-10k] 10000 memories" "${SCALE_HUMAN}" \
+    && grep -Fq "Open loops:" "${SCALE_HUMAN}" \
+    && grep -Fq "Next commands:" "${SCALE_HUMAN}"; then
+    event scale_10k_human_resume_under_2s_and_bounded pass
+else
+    event scale_10k_human_resume_under_2s_and_bounded fail \
+        "exit=${LAST_EXIT}; elapsedMs=${SCALE_HUMAN_ELAPSED_MS}; items=${SCALE_HUMAN_ITEM_COUNT}; $(head -c 300 "${SCALE_HUMAN}")"
+fi
+if [[ "${SCALE_HUMAN_HASH_BEFORE}" == "${SCALE_HUMAN_HASH_AFTER}" ]]; then
+    event scale_10k_human_resume_preserves_db_wal_shm pass
+else
+    event scale_10k_human_resume_preserves_db_wal_shm fail \
+        "before=${SCALE_HUMAN_HASH_BEFORE//$'\n'/,}; after=${SCALE_HUMAN_HASH_AFTER//$'\n'/,}"
+fi
+
 # Reuse the same real 10k corpus for bd-orient-fast-content-iubub's literal
 # latency guard. Index construction is deliberately outside the timed region:
 # --fast promises a bounded read path, not a hidden benchmark of derived-index
