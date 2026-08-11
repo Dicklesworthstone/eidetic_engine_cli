@@ -4986,7 +4986,7 @@ const EE_DOWNLOAD_STATE_FAILED: u8 = 2;
 static DEFAULT_SEARCH_EMBEDDER: OnceLock<DefaultSearchEmbedder> = OnceLock::new();
 static REGISTERED_MODEL2VEC_CACHE: OnceLock<RegisteredModel2VecCache> = OnceLock::new();
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct RegisteredModel2VecIdentity {
     canonical_source: PathBuf,
     content_hash: String,
@@ -4994,9 +4994,14 @@ struct RegisteredModel2VecIdentity {
     distance_metric: &'static str,
 }
 
+struct RegisteredModel2VecCacheEntry {
+    identity: RegisteredModel2VecIdentity,
+    embedder: Arc<dyn crate::search::Embedder>,
+}
+
 #[derive(Default)]
 struct RegisteredModel2VecCache {
-    embedders: Mutex<BTreeMap<RegisteredModel2VecIdentity, Arc<dyn crate::search::Embedder>>>,
+    current: Mutex<Option<RegisteredModel2VecCacheEntry>>,
 }
 
 impl RegisteredModel2VecCache {
@@ -5005,15 +5010,20 @@ impl RegisteredModel2VecCache {
         identity: RegisteredModel2VecIdentity,
         load: impl FnOnce() -> Option<Arc<dyn crate::search::Embedder>>,
     ) -> Option<Arc<dyn crate::search::Embedder>> {
-        let mut embedders = self
-            .embedders
+        let mut current = self
+            .current
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(embedder) = embedders.get(&identity) {
-            return Some(Arc::clone(embedder));
+        if let Some(entry) = current.as_ref()
+            && entry.identity == identity
+        {
+            return Some(Arc::clone(&entry.embedder));
         }
         let embedder = load()?;
-        embedders.insert(identity, Arc::clone(&embedder));
+        *current = Some(RegisteredModel2VecCacheEntry {
+            identity,
+            embedder: Arc::clone(&embedder),
+        });
         Some(embedder)
     }
 }
@@ -7798,6 +7808,13 @@ mod tests {
         }
     }
 
+    fn registered_model2vec_test_embedder(name: &str) -> Arc<dyn crate::search::Embedder> {
+        Arc::new(TestSemanticEmbedder::new(
+            name,
+            usize::try_from(BUNDLED_EMBEDDING_DIMENSION).expect("bundled dimension fits usize"),
+        ))
+    }
+
     #[test]
     fn registered_model2vec_cache_reuses_arc_for_exact_identity() -> TestResult {
         let cache = RegisteredModel2VecCache::default();
@@ -7881,65 +7898,164 @@ mod tests {
     }
 
     #[test]
-    fn registered_model2vec_cache_changes_identity_and_does_not_cache_failures() -> TestResult {
+    fn registered_model2vec_cache_replacement_evicts_old_arc() -> TestResult {
         let cache = RegisteredModel2VecCache::default();
         let first_identity = registered_model2vec_test_identity("blake3:identity-a");
         let changed_identity = registered_model2vec_test_identity("blake3:identity-b");
-        let failed_identity = registered_model2vec_test_identity("blake3:identity-failed");
+        let loads = std::cell::Cell::new(0_u32);
         let first = cache
-            .get_or_try_insert_with(first_identity.clone(), || {
-                Some(Arc::new(TestSemanticEmbedder::new(
-                    "registry-identity-a",
-                    usize::try_from(BUNDLED_EMBEDDING_DIMENSION)
-                        .expect("bundled dimension fits usize"),
-                )) as Arc<dyn crate::search::Embedder>)
+            .get_or_try_insert_with(first_identity, || {
+                loads.set(loads.get().saturating_add(1));
+                Some(registered_model2vec_test_embedder("registry-identity-a"))
             })
             .ok_or_else(|| "first identity load must succeed".to_owned())?;
+        let evicted = Arc::downgrade(&first);
+        drop(first);
+        ensure(
+            evicted.upgrade().is_some(),
+            "cache must retain the current identity before replacement",
+        )?;
+
         let changed = cache
             .get_or_try_insert_with(changed_identity, || {
-                Some(Arc::new(TestSemanticEmbedder::new(
-                    "registry-identity-b",
-                    usize::try_from(BUNDLED_EMBEDDING_DIMENSION)
-                        .expect("bundled dimension fits usize"),
-                )) as Arc<dyn crate::search::Embedder>)
+                loads.set(loads.get().saturating_add(1));
+                Some(registered_model2vec_test_embedder("registry-identity-b"))
             })
             .ok_or_else(|| "changed identity load must succeed".to_owned())?;
         ensure(
-            !Arc::ptr_eq(&first, &changed),
-            "a registry identity change must not reuse the prior embedder",
+            loads.get() == 2,
+            "a successful identity change must load exactly one replacement",
         )?;
+        ensure(
+            evicted.upgrade().is_none(),
+            "successful replacement must drop the cache's strong reference to the old embedder",
+        )?;
+        let current = Arc::downgrade(&changed);
+        drop(changed);
+        ensure(
+            current.upgrade().is_some(),
+            "cache must retain exactly the successful replacement",
+        )
+    }
 
-        let failed_loads = std::cell::Cell::new(0_u32);
+    #[test]
+    fn registered_model2vec_cache_failed_replacement_preserves_current_and_retries() -> TestResult {
+        let cache = RegisteredModel2VecCache::default();
+        let healthy_identity = registered_model2vec_test_identity("blake3:identity-a");
+        let failed_identity = registered_model2vec_test_identity("blake3:identity-failed");
+        let loads = std::cell::Cell::new(0_u32);
+        let healthy = cache
+            .get_or_try_insert_with(healthy_identity.clone(), || {
+                loads.set(loads.get().saturating_add(1));
+                Some(registered_model2vec_test_embedder("registry-identity-a"))
+            })
+            .ok_or_else(|| "healthy identity load must succeed".to_owned())?;
+        let healthy_weak = Arc::downgrade(&healthy);
+        drop(healthy);
+
         ensure(
             cache
                 .get_or_try_insert_with(failed_identity.clone(), || {
-                    failed_loads.set(failed_loads.get().saturating_add(1));
+                    loads.set(loads.get().saturating_add(1));
                     None
                 })
                 .is_none(),
-            "failed initialization must remain a miss",
+            "failed replacement must remain a miss",
         )?;
-        let first_again = cache
-            .get_or_try_insert_with(first_identity, || None)
-            .ok_or_else(|| "failed unrelated identity must not evict a healthy entry".to_owned())?;
         ensure(
-            Arc::ptr_eq(&first, &first_again),
-            "failed unrelated identity must not poison a healthy cached identity",
+            loads.get() == 2,
+            "failed replacement must run its loader once",
         )?;
-        let retried = cache
+        ensure(
+            healthy_weak.upgrade().is_some(),
+            "failed replacement must preserve the healthy cached embedder",
+        )?;
+
+        let preserved = cache
+            .get_or_try_insert_with(healthy_identity, || {
+                loads.set(loads.get().saturating_add(1));
+                Some(registered_model2vec_test_embedder("must-not-reload"))
+            })
+            .ok_or_else(|| {
+                "healthy identity must remain cached after failed replacement".to_owned()
+            })?;
+        let preserved_from_weak = healthy_weak
+            .upgrade()
+            .ok_or_else(|| "preserved healthy embedder must remain live".to_owned())?;
+        ensure(
+            Arc::ptr_eq(&preserved, &preserved_from_weak),
+            "failed replacement must leave the exact healthy Arc current",
+        )?;
+        ensure(
+            loads.get() == 2,
+            "re-reading the preserved identity must not invoke its loader",
+        )?;
+        drop(preserved);
+        drop(preserved_from_weak);
+
+        cache
             .get_or_try_insert_with(failed_identity, || {
-                failed_loads.set(failed_loads.get().saturating_add(1));
-                Some(Arc::new(TestSemanticEmbedder::new(
-                    "registry-retry",
-                    usize::try_from(BUNDLED_EMBEDDING_DIMENSION)
-                        .expect("bundled dimension fits usize"),
-                )) as Arc<dyn crate::search::Embedder>)
+                loads.set(loads.get().saturating_add(1));
+                Some(registered_model2vec_test_embedder("registry-retry"))
             })
             .ok_or_else(|| "failed identity must remain retryable".to_owned())?;
-        ensure(failed_loads.get() == 2, "failed identity must retry once")?;
+        ensure(loads.get() == 3, "failed identity must retry its loader")?;
         ensure(
-            !Arc::ptr_eq(&first, &retried),
-            "retried identity must remain isolated from other cached identities",
+            healthy_weak.upgrade().is_none(),
+            "successful retry must evict the formerly preserved healthy embedder",
+        )
+    }
+
+    #[test]
+    fn registered_model2vec_cache_switch_back_reloads_evicted_identity() -> TestResult {
+        let cache = RegisteredModel2VecCache::default();
+        let first_identity = registered_model2vec_test_identity("blake3:identity-a");
+        let second_identity = registered_model2vec_test_identity("blake3:identity-b");
+        let loads = std::cell::Cell::new(0_u32);
+        let first = cache
+            .get_or_try_insert_with(first_identity.clone(), || {
+                loads.set(loads.get().saturating_add(1));
+                Some(registered_model2vec_test_embedder(
+                    "registry-identity-a-first",
+                ))
+            })
+            .ok_or_else(|| "first identity load must succeed".to_owned())?;
+        let first_weak = Arc::downgrade(&first);
+        drop(first);
+
+        let second = cache
+            .get_or_try_insert_with(second_identity, || {
+                loads.set(loads.get().saturating_add(1));
+                Some(registered_model2vec_test_embedder("registry-identity-b"))
+            })
+            .ok_or_else(|| "second identity load must succeed".to_owned())?;
+        ensure(
+            first_weak.upgrade().is_none(),
+            "switching identities must evict the first embedder",
+        )?;
+        let second_weak = Arc::downgrade(&second);
+        drop(second);
+
+        let reloaded_first = cache
+            .get_or_try_insert_with(first_identity, || {
+                loads.set(loads.get().saturating_add(1));
+                Some(registered_model2vec_test_embedder(
+                    "registry-identity-a-reloaded",
+                ))
+            })
+            .ok_or_else(|| "switching back must reload the first identity".to_owned())?;
+        ensure(loads.get() == 3, "A to B to A must perform three loads")?;
+        ensure(
+            second_weak.upgrade().is_none(),
+            "switching back must evict the second embedder",
+        )?;
+        ensure(
+            first_weak.upgrade().is_none(),
+            "reloading an identity must not resurrect its previously evicted Arc",
+        )?;
+        ensure(
+            reloaded_first.model_name() == "registry-identity-a-reloaded",
+            "switching back must return the newly loaded embedder",
         )
     }
 
