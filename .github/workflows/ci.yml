@@ -40,14 +40,13 @@ concurrency:
 jobs:
   daemon-search-slo:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    name: daemon search 10k SLO (stable runner)
-    runs-on:
-      group: ee-perf
-      labels: [self-hosted, linux, x64]
+    name: daemon search 10k SLO (GitHub runner)
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
       CARGO_INCREMENTAL: "0"
       EE_EMBED_DOWNLOAD: "off"
+      EE_EMBED_MODEL_FIXTURE_DIR: .ci/model-fixture
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -68,7 +67,7 @@ jobs:
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Verify designated performance host
+      - name: Record performance host
         shell: bash
         run: |
           set -euo pipefail
@@ -79,16 +78,36 @@ jobs:
           lscpu
           df -T "$RUNNER_TEMP"
 
+      - name: Restore pinned Model2Vec fixture
+        uses: actions/cache@v4
+        with:
+          path: .ci/model-fixture
+          key: ee-model2vec-${{ runner.os }}-${{ hashFiles('franken-stack.lock') }}
+
+      - name: Provision pinned Model2Vec fixture through ee
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/ee-daemon-search-target
+          EE_EMBED_DOWNLOAD: "auto"
+        run: |
+          set -euo pipefail
+          fixture_workspace="$RUNNER_TEMP/ee-model-fixture-workspace"
+          mkdir -p "$fixture_workspace" "$EE_EMBED_MODEL_FIXTURE_DIR"
+          cargo run --locked -- init --workspace "$fixture_workspace" --json
+          EE_EMBED_MODEL_DIR="$EE_EMBED_MODEL_FIXTURE_DIR" \
+            cargo run --locked -- model fetch embedding-default \
+              --workspace "$fixture_workspace" --json
+          test -f "$EE_EMBED_MODEL_FIXTURE_DIR/potion-multilingual-128M/model.safetensors"
+          test -f "$EE_EMBED_MODEL_FIXTURE_DIR/potion-multilingual-128M/tokenizer.json"
+          test -f "$EE_EMBED_MODEL_FIXTURE_DIR/potion-multilingual-128M/config.json"
+          cargo test --locked --test model_bundled_embedding_cli_e2e --no-run
+
       - name: Prove registered Model2Vec fixture without egress
         shell: bash
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/ee-daemon-search-target
         run: |
           set -euo pipefail
-          if [[ -z "${EE_EMBED_MODEL_FIXTURE_DIR:-}" ]]; then
-            echo "::error::EE_EMBED_MODEL_FIXTURE_DIR is required on the ee-perf runner" >&2
-            exit 1
-          fi
           if [[ ! -d "$EE_EMBED_MODEL_FIXTURE_DIR" ]]; then
             echo "::error::EE_EMBED_MODEL_FIXTURE_DIR is not an accessible directory" >&2
             exit 1
@@ -116,10 +135,10 @@ jobs:
               ip route show >&2
               exit 1
             fi
-            cargo test --locked --test model_bundled_embedding_cli_e2e \
+            cargo test --offline --locked --test model_bundled_embedding_cli_e2e \
               registered_model2vec_fixture_is_neural_without_overrides_or_download_path -- \
               --ignored --exact --nocapture
-            cargo test --locked --test model_bundled_embedding_cli_e2e \
+            cargo test --offline --locked --test model_bundled_embedding_cli_e2e \
               public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neural -- \
               --ignored --exact --nocapture
           EE_UNSHARE

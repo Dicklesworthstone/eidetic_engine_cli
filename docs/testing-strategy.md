@@ -558,6 +558,14 @@ model-path overrides, and runs with `EE_EMBED_DOWNLOAD=off`. It therefore proves
 that the verified registered artifact remains neural-local while network model
 downloads and remote embedding providers are forbidden.
 
+The `workflow_dispatch` daemon-search SLO lane is self-contained on a GitHub
+Linux runner: it restores the pinned fixture from the Actions cache or
+provisions it once through the public `ee model fetch embedding-default`
+command, then compiles the focused test binary before entering a route-free
+network namespace. The acceptance tests rerun there with Cargo offline, while
+the separate 10k-document benchmark records the runner hardware alongside its
+cold and warm latency measurements.
+
 A second egress-denied branch bootstraps the same verified artifact through
 `EE_EMBED_MODEL_DIR`, runs public `ee index reembed`, and verifies through
 public `ee model list --json` that the row is available with matching hash,
