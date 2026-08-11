@@ -2,7 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
+use ee::core::index::{
+    IndexHealth, IndexRebuildOptions, IndexRebuildStatus, IndexStatusOptions, get_index_status,
+    rebuild_index,
+};
 use ee::db::{
     CreateMemoryInput, CreatePackItemInput, CreatePackRecordInput, CreateWorkspaceInput,
     DbConnection,
@@ -277,13 +280,18 @@ fn graph_json_surface_examples_match_snapshots() -> TestResult {
 }
 
 fn build_search_index(workspace: &Path, database: &Path, index_dir: &Path) -> TestResult {
-    let report = rebuild_index(&IndexRebuildOptions {
+    let rebuild_options = IndexRebuildOptions {
         workspace_path: workspace.to_path_buf(),
         database_path: Some(database.to_path_buf()),
         index_dir: Some(index_dir.to_path_buf()),
         dry_run: false,
-    })
-    .map_err(|error| error.to_string())?;
+    };
+    let status_options = IndexStatusOptions {
+        workspace_path: workspace.to_path_buf(),
+        database_path: Some(database.to_path_buf()),
+        index_dir: Some(index_dir.to_path_buf()),
+    };
+    let mut report = rebuild_index(&rebuild_options).map_err(|error| error.to_string())?;
 
     if report.status != IndexRebuildStatus::Success {
         return Err(format!(
@@ -295,6 +303,29 @@ fn build_search_index(workspace: &Path, database: &Path, index_dir: &Path) -> Te
         return Err(format!(
             "expected one indexed document, got {}",
             report.documents_total
+        ));
+    }
+    let mut status = get_index_status(&status_options).map_err(|error| error.to_string())?;
+    if status.health == IndexHealth::Stale
+        && status
+            .db_generation
+            .zip(status.index_generation)
+            .is_some_and(|(database_generation, index_generation)| {
+                database_generation > index_generation
+            })
+    {
+        report = rebuild_index(&rebuild_options).map_err(|error| error.to_string())?;
+        if report.status != IndexRebuildStatus::Success || report.documents_total != 1 {
+            return Err(format!(
+                "index rebuild did not converge after fixture model registration: {report:?}"
+            ));
+        }
+        status = get_index_status(&status_options).map_err(|error| error.to_string())?;
+    }
+    if status.health != IndexHealth::Ready {
+        return Err(format!(
+            "fixture must launch JSON contract commands with a ready index: health={:?}, database_generation={:?}, index_generation={:?}, last_check_error={:?}",
+            status.health, status.db_generation, status.index_generation, status.last_check_error
         ));
     }
     Ok(())

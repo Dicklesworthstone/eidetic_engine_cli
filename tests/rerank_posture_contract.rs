@@ -190,6 +190,12 @@ fn explicit_session_emits_each_distinct_permanent_advisory_once() {
 
 #[test]
 fn transient_reranker_load_failure_remains_a_query_degradation() {
+    let permanent = empty_search_report(vec![SearchDegradation {
+        code: "rerank_model_unavailable".to_string(),
+        severity: "low".to_string(),
+        message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
+        repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+    }]);
     let report = empty_search_report(vec![SearchDegradation {
         code: "rerank_model_unavailable".to_string(),
         severity: "low".to_string(),
@@ -201,9 +207,11 @@ fn transient_reranker_load_failure_remains_a_query_degradation() {
     let mut repeated = report.clone();
     repeated.query = "second transient query".to_string();
     let mut session = SearchAdvisorySession::default();
+    let permanent_json = permanent.data_json_with_advisory_session(&mut session);
     let json = report.data_json_with_advisory_session(&mut session);
     let repeated_json = repeated.data_json_with_advisory_session(&mut session);
 
+    assert_eq!(permanent_json["rerank"]["advisory"]["permanent"], true);
     assert!(json["rerank"].get("permanent").is_none());
     assert_eq!(json["rerank"]["advisory"]["permanent"], false);
     assert_eq!(
@@ -220,6 +228,10 @@ fn transient_reranker_load_failure_remains_a_query_degradation() {
     assert_eq!(
         repeated_json["rerank"]["advisorySummary"]["suppressedCount"],
         0
+    );
+    assert_eq!(
+        repeated_json["rerank"]["advisorySummary"]["sessionSuppressedCount"], 0,
+        "a prior permanent advisory with the same code must not suppress transient query truth"
     );
     assert_eq!(
         repeated_json["degraded"][0]["code"],

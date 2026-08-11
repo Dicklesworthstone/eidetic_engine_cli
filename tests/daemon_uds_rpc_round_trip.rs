@@ -57,6 +57,17 @@ use ee::steward::{
     JobPriority, JobType, ManualRunner, RunnerOptions, ScoreDecayJobOptions, run_score_decay_job,
 };
 
+mod tempfile {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    pub fn tempdir() -> std::io::Result<::tempfile::TempDir> {
+        let temp = ::tempfile::tempdir()?;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))?;
+        Ok(temp)
+    }
+}
+
 type TestResult = Result<(), String>;
 const TEST_AGENT_ID: &str = "agent-daemon-uds-test";
 const TEST_WORKSPACE_ID: &str = "workspace-daemon-uds-test";
@@ -740,6 +751,11 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
         &search_request("req-search-warm-002", &workspace, &database, &index_dir),
     )
     .map_err(|error| format!("second search round-trip: {error}"))?;
+    let third = client_round_trip(
+        handle.socket_path(),
+        &search_request("req-search-warm-003", &workspace, &database, &index_dir),
+    )
+    .map_err(|error| format!("third search round-trip: {error}"))?;
     ensure(
         first.error.is_none(),
         format!("first search failed: {first:?}"),
@@ -748,7 +764,11 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
         second.error.is_none(),
         format!("second search failed: {second:?}"),
     )?;
-    for (ordinal, response) in [("first", &first), ("second", &second)] {
+    ensure(
+        third.error.is_none(),
+        format!("third search failed: {third:?}"),
+    )?;
+    for (ordinal, response) in [("first", &first), ("second", &second), ("third", &third)] {
         ensure(
             !response
                 .degraded_codes
@@ -766,7 +786,10 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
     let second_result = second
         .result
         .ok_or_else(|| "second search result missing".to_owned())?;
-    for result in [&first_result, &second_result] {
+    let third_result = third
+        .result
+        .ok_or_else(|| "third search result missing".to_owned())?;
+    for result in [&first_result, &second_result, &third_result] {
         ensure(
             result
                 .pointer("/schema")
@@ -845,9 +868,11 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
     }
     ensure(
         first_result.pointer("/response/data/results")
-            == second_result.pointer("/response/data/results"),
+            == second_result.pointer("/response/data/results")
+            && second_result.pointer("/response/data/results")
+                == third_result.pointer("/response/data/results"),
         format!(
-            "repeated warm-daemon calls must preserve ranked results; first={first_result}; second={second_result}"
+            "repeated warm-daemon calls must preserve ranked results; first={first_result}; second={second_result}; third={third_result}"
         ),
     )?;
     ensure(
@@ -896,6 +921,28 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
                 .and_then(serde_json::Value::as_u64)
                 == Some(1),
         format!("second daemon query suppression summary drifted: {second_result}"),
+    )?;
+    ensure(
+        third_result
+            .pointer("/response/data/rerank/advisory")
+            .is_some_and(serde_json::Value::is_null)
+            && third_result
+                .pointer("/response/data/rerank/advisorySummary/emittedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(0)
+            && third_result
+                .pointer("/response/data/rerank/advisorySummary/suppressedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1)
+            && third_result
+                .pointer("/response/data/rerank/advisorySummary/sessionOccurrenceCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(3)
+            && third_result
+                .pointer("/response/data/rerank/advisorySummary/sessionSuppressedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(2),
+        format!("third daemon query suppression summary drifted: {third_result}"),
     )?;
     ensure(
         first_result
