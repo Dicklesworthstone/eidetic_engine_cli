@@ -9,8 +9,10 @@ use ee::obs::{LogEnvelope, LogLevel, now_rfc3339_nanos};
 use serde_json::Value;
 use tracing_subscriber::EnvFilter;
 
-#[cfg(windows)]
-const WINDOWS_CLI_STACK_SIZE: usize = 8 * 1024 * 1024;
+// Clap constructs the large top-level command enum on the entry thread. Keep
+// that frame off the platform-defined process main stack so the CLI behaves
+// consistently on hosts with constrained stack limits.
+const CLI_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 fn env_flag_truthy(value: Option<String>) -> bool {
     value.is_some_and(|raw| {
@@ -215,11 +217,10 @@ fn cli_main() -> ExitCode {
     ee::cli::run(args, &mut stdout, &mut stderr).into()
 }
 
-#[cfg(windows)]
 fn main() -> ExitCode {
     match std::thread::Builder::new()
         .name("ee-cli-main".to_owned())
-        .stack_size(WINDOWS_CLI_STACK_SIZE)
+        .stack_size(CLI_STACK_SIZE)
         .spawn(cli_main)
     {
         Ok(handle) => handle.join().unwrap_or_else(|_| ExitCode::from(101)),
@@ -229,11 +230,6 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
-}
-
-#[cfg(not(windows))]
-fn main() -> ExitCode {
-    cli_main()
 }
 
 #[cfg(test)]
