@@ -2131,7 +2131,7 @@ pub(crate) fn process_pending_index_jobs_coalesced(
 }
 
 #[cfg(test)]
-fn process_pending_index_jobs_coalesced_after_snapshot<F>(
+pub(crate) fn process_pending_index_jobs_coalesced_after_snapshot<F>(
     db: &DbConnection,
     workspace_id: &str,
     index_dir: &Path,

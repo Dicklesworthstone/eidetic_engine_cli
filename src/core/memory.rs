@@ -2376,59 +2376,195 @@ fn remember_index_drain_leader_lock(workspace_id: &str) -> AdvisoryLockId {
 const REMEMBER_INDEX_DRAIN_LEADER_TTL_SECS: u64 = 660;
 const REMEMBER_INDEX_DRAIN_MAX_ROUNDS: usize = 2;
 
+/// Bounded retries for the post-release pending probe: an inspection error
+/// is UNKNOWN, never quiescence, so the probe is retried before the loop
+/// concedes that it cannot verify the queue.
+const REMEMBER_INDEX_DRAIN_PROBE_ATTEMPTS: usize = 3;
+
 /// Attempt bounded, non-blocking leadership of a coalesced drain for a
 /// burst whose initial publisher already finished. Exactly one racing
-/// writer wins the election lock; losers defer immediately (their jobs are
-/// owned by the winner's drain). The winner runs at most
-/// [`REMEMBER_INDEX_DRAIN_MAX_ROUNDS`] coalesced rounds — the second pass
-/// catches stragglers enqueued during the first publish — and reports its
-/// own job's real outcome from the drain reports.
+/// writer wins the election lock; losers defer immediately.
+///
+/// Handoff invariant (bd-index-auto-freshness-m5kwf final-round race): a
+/// leader may finish its stint only after RELEASING the election lock and
+/// THEN observing zero pending jobs. Any deferring loser's enqueue is
+/// strictly ordered before its failed election attempt, which is ordered
+/// before the current holder's release, which is ordered before that
+/// holder's post-release pending check — so every deferred job is seen by
+/// a still-running holder, which must either re-elect and drain it or
+/// lose the re-election to a newer holder that inherits the same
+/// obligation. The chain terminates at the first holder that observes an
+/// empty queue after release.
 fn remember_lead_coalesced_index_drain(
     connection: &DbConnection,
     workspace_id: &str,
     index_job_id: &str,
     index_dir: &Path,
 ) -> IndexProcessingJobReport {
+    remember_drain_leadership_cycles(
+        connection,
+        workspace_id,
+        index_job_id,
+        &mut || remember_retry_sleep(Duration::ZERO, "lead coalesced index drain"),
+        &mut || process_pending_index_jobs_coalesced(connection, workspace_id, index_dir, None),
+        &mut || match connection.list_pending_search_index_jobs(workspace_id, Some(1)) {
+            Ok(pending) => Some(!pending.is_empty()),
+            Err(_) => None,
+        },
+    )
+}
+
+/// Leadership cycle loop with injectable drain/pending probes so the
+/// planted-interleaving test can commit a racing writer inside a real
+/// publish-lock hold. See [`remember_lead_coalesced_index_drain`] for the
+/// handoff invariant this loop implements.
+fn remember_drain_leadership_cycles(
+    connection: &DbConnection,
+    workspace_id: &str,
+    index_job_id: &str,
+    checkpoint: &mut dyn FnMut() -> Result<(), DomainError>,
+    drain: &mut dyn FnMut() -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError>,
+    pending_remaining: &mut dyn FnMut() -> Option<bool>,
+) -> IndexProcessingJobReport {
     let lock_id = remember_index_drain_leader_lock(workspace_id);
     let holder_id = format!("remember-drain:{}:{index_job_id}", std::process::id());
-    match connection.acquire_advisory_lock(
-        &lock_id,
-        &holder_id,
-        Some(REMEMBER_INDEX_DRAIN_LEADER_TTL_SECS),
-        Some("remember coalesced index drain leadership"),
-    ) {
-        Ok(crate::db::AcquireLockResult::Acquired(_))
-        | Ok(crate::db::AcquireLockResult::Expired { .. }) => {}
-        Ok(crate::db::AcquireLockResult::AlreadyHeld { .. }) => {
-            // Election lost: the winner's drain owns this pending job.
-            return remember_index_job_queued_for_coalescing(index_job_id);
-        }
-        Err(error) => {
+    let mut own_report: Option<IndexProcessingJobReport> = None;
+    let mut zero_progress_cycles = 0usize;
+
+    // Work-conserving re-election until post-release quiescence. Every
+    // terminal return is one of:
+    //   E1 — the post-release probe VERIFIED an empty queue;
+    //   E2 — successor ownership was observed (the election lock is held
+    //        by a newer holder, or pending jobs are claimed by another
+    //        live drainer, which is why our drain returned zero reports);
+    //   E3 — the ambient Cx deadline/cancellation or a persistently
+    //        failing inspection ended the stint: report our own truthful
+    //        outcome (queued when undecided) and NEVER claim quiescence.
+    // There is deliberately no numeric cycle cap: a cap is not a handoff.
+    loop {
+        // Outer bound: the caller's Cx deadline/cancellation.
+        if let Err(error) = checkpoint() {
             tracing::warn!(
                 target: "ee::memory",
                 workspace_id,
                 index_job_id,
-                error = %error,
-                "deferring coalesced drain leadership because the election lock is unavailable"
+                error = %error.message(),
+                "coalesced drain leadership cancelled by runtime budget; not claiming quiescence"
             );
-            return remember_index_job_queued_for_coalescing(index_job_id);
+            return own_report
+                .unwrap_or_else(|| remember_index_job_queued_for_coalescing(index_job_id));
+        }
+        match connection.acquire_advisory_lock(
+            &lock_id,
+            &holder_id,
+            Some(REMEMBER_INDEX_DRAIN_LEADER_TTL_SECS),
+            Some("remember coalesced index drain leadership"),
+        ) {
+            Ok(crate::db::AcquireLockResult::Acquired(_))
+            | Ok(crate::db::AcquireLockResult::Expired { .. }) => {}
+            Ok(crate::db::AcquireLockResult::AlreadyHeld { .. }) => {
+                // E2: a live holder owns the queue. On the first cycle our
+                // own pending job is owned by that winner's drain; on later
+                // cycles the newer holder inherits the post-release
+                // obligation for the remainder.
+                return own_report
+                    .unwrap_or_else(|| remember_index_job_queued_for_coalescing(index_job_id));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "ee::memory",
+                    workspace_id,
+                    index_job_id,
+                    error = %error,
+                    "coalesced drain election lock unavailable; reporting queued without claiming quiescence"
+                );
+                return own_report
+                    .unwrap_or_else(|| remember_index_job_queued_for_coalescing(index_job_id));
+            }
+        }
+        let drained_this_cycle;
+        {
+            let _leadership = RememberWorkspaceWriteLock {
+                connection,
+                lock_id: lock_id.clone(),
+                holder_id: holder_id.clone(),
+            };
+            let mut cycle_drained = 0usize;
+            let cycle_report = remember_drain_pending_rounds(
+                index_job_id,
+                REMEMBER_INDEX_DRAIN_MAX_ROUNDS,
+                &mut || {
+                    let reports = drain()?;
+                    cycle_drained += reports.len();
+                    Ok(reports)
+                },
+                &mut *pending_remaining,
+                || remember_index_job_report_from_durable_state(connection, index_job_id),
+            );
+            if own_report.is_none() {
+                own_report = Some(cycle_report);
+            }
+            drained_this_cycle = cycle_drained;
+            // `_leadership` drops here: the election lock is RELEASED
+            // before the handoff probe below, so any writer that deferred
+            // against this stint is either already visible in the pending
+            // probe or free to elect itself.
+        }
+        // Post-release quiescence probe. An inspection error is UNKNOWN —
+        // never quiescence — so retry it a bounded number of times.
+        let mut probe = None;
+        for _attempt in 0..REMEMBER_INDEX_DRAIN_PROBE_ATTEMPTS {
+            probe = pending_remaining();
+            if probe.is_some() {
+                break;
+            }
+        }
+        match probe {
+            // E1: verified empty after release.
+            Some(false) => {
+                return own_report
+                    .unwrap_or_else(|| remember_index_job_queued_for_coalescing(index_job_id));
+            }
+            Some(true) => {
+                if drained_this_cycle == 0 {
+                    zero_progress_cycles += 1;
+                    if zero_progress_cycles >= 2 {
+                        // E2: pending rows persist but two whole cycles
+                        // produced no drainable work — the coalesced drain
+                        // skips jobs CLAIMED by another live drainer, so
+                        // the remainder is owned by that concurrent
+                        // process. Handing off to it is the design.
+                        tracing::debug!(
+                            target: "ee::memory",
+                            workspace_id,
+                            index_job_id,
+                            "pending jobs are claimed by a concurrent drainer; handing off"
+                        );
+                        return own_report.unwrap_or_else(|| {
+                            remember_index_job_queued_for_coalescing(index_job_id)
+                        });
+                    }
+                } else {
+                    zero_progress_cycles = 0;
+                }
+                // Work remains and it is drainable: re-elect and continue.
+            }
+            None => {
+                // E3: the pending posture cannot be inspected even after
+                // bounded retries. Nothing can be verified — report our
+                // own truthful outcome and never claim the queue is clean.
+                tracing::error!(
+                    target: "ee::memory",
+                    workspace_id,
+                    index_job_id,
+                    attempts = REMEMBER_INDEX_DRAIN_PROBE_ATTEMPTS,
+                    "post-release pending probe failed repeatedly; ending leadership without claiming quiescence"
+                );
+                return own_report
+                    .unwrap_or_else(|| remember_index_job_queued_for_coalescing(index_job_id));
+            }
         }
     }
-    let _leadership = RememberWorkspaceWriteLock {
-        connection,
-        lock_id,
-        holder_id,
-    };
-    remember_drain_pending_rounds(
-        index_job_id,
-        REMEMBER_INDEX_DRAIN_MAX_ROUNDS,
-        || process_pending_index_jobs_coalesced(connection, workspace_id, index_dir, None),
-        || match connection.list_pending_search_index_jobs(workspace_id, Some(1)) {
-            Ok(pending) => Some(!pending.is_empty()),
-            Err(_) => None,
-        },
-        || remember_index_job_report_from_durable_state(connection, index_job_id),
-    )
 }
 
 /// Pure round driver for the elected leader: drain, pick out our own
@@ -17305,6 +17441,281 @@ mod tests {
             remember_index_status(&missing),
             "queued".to_owned(),
             "a missing row never reports success",
+        )
+    }
+
+    #[test]
+    fn remember_leader_final_snapshot_race_is_drained_by_handoff() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let connection = open_upgrade_test_db(temp.path())?;
+        connection
+            .ensure_advisory_locks_table()
+            .map_err(|error| error.to_string())?;
+        let canonical = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace_id = stable_workspace_id(&canonical);
+        let index_dir = canonical.join(".ee").join(DEFAULT_INDEX_SUBDIR);
+
+        // Burst posture: one deferred job before leadership begins.
+        let seeded = remember_memory_with_index_mode(
+            &upgrade_remember_options(
+                temp.path(),
+                "Handoff seed row about burst posture.",
+                0.8,
+                None,
+                false,
+            ),
+            true,
+            &[],
+            None,
+        )
+        .map_err(|error| error.message())?;
+        ensure(
+            seeded.index_status.clone(),
+            "queued".to_owned(),
+            "seed remember defers its publish",
+        )?;
+        let pending = connection
+            .list_pending_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure(pending.len(), 1, "one pending job before leadership")?;
+        let own_job_id = pending[0].id.clone();
+
+        // The first TWO drain calls commit a racing writer AFTER the drain
+        // snapshot while the publish lock is HELD; each racer's live route
+        // decision at that instant must be Defer. The second racer lands
+        // after the leader's FINAL in-election round snapshot — the exact
+        // stranded-tail interleaving — and no write occurs after
+        // leadership returns, so only the post-release handoff cycle can
+        // drain it.
+        let drains = std::cell::Cell::new(0usize);
+        let racer_routes = std::cell::RefCell::new(Vec::new());
+        let racer_ids = std::cell::RefCell::new(Vec::new());
+        let racer_contents = [
+            "Handoff racer row alpha unique quasar phrase.",
+            "Handoff racer row beta unique quasar phrase.",
+        ];
+        let mut drain = || {
+            drains.set(drains.get() + 1);
+            let call = drains.get();
+            if call <= 2 {
+                crate::core::index::process_pending_index_jobs_coalesced_after_snapshot(
+                    &connection,
+                    &workspace_id,
+                    &index_dir,
+                    None,
+                    || {
+                        let held = connection
+                            .is_lock_held(&AdvisoryLockId::index(&workspace_id))
+                            .map_err(|error| IndexRebuildError::Index(error.to_string()))?;
+                        if held.is_none() {
+                            return Err(IndexRebuildError::Index(
+                                "publish lock was not held at the snapshot hook".to_owned(),
+                            ));
+                        }
+                        let stored = remember_memory_with_index_mode(
+                            &upgrade_remember_options(
+                                temp.path(),
+                                racer_contents[call - 1],
+                                0.8,
+                                None,
+                                false,
+                            ),
+                            true,
+                            &[],
+                            None,
+                        )
+                        .map_err(|error| IndexRebuildError::Index(error.message()))?;
+                        racer_ids.borrow_mut().push(stored.memory_id.to_string());
+                        racer_routes
+                            .borrow_mut()
+                            .push(remember_inline_index_publish_route(
+                                &connection,
+                                &workspace_id,
+                                "sidx_route_probe",
+                            ));
+                        Ok(())
+                    },
+                )
+            } else {
+                process_pending_index_jobs_coalesced(&connection, &workspace_id, &index_dir, None)
+            }
+        };
+        let report = remember_drain_leadership_cycles(
+            &connection,
+            &workspace_id,
+            &own_job_id,
+            &mut || Ok(()),
+            &mut drain,
+            &mut || match connection.list_pending_search_index_jobs(&workspace_id, Some(1)) {
+                Ok(pending) => Some(!pending.is_empty()),
+                Err(_) => None,
+            },
+        );
+
+        ensure(
+            racer_routes.borrow().clone(),
+            vec![
+                RememberIndexPublishRoute::Defer,
+                RememberIndexPublishRoute::Defer,
+            ],
+            "both racers observed an active publisher and deferred",
+        )?;
+        ensure(
+            remember_index_status(&report),
+            "indexed".to_owned(),
+            "the leader's own outcome is reported from the drain",
+        )?;
+        ensure(
+            drains.get() >= 3,
+            true,
+            "the post-release handoff ran an extra cycle for the final-snapshot racer",
+        )?;
+        let pending_after = connection
+            .list_pending_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            pending_after.len(),
+            0,
+            "no stranded tail survives the handoff",
+        )?;
+        let search = crate::core::search::run_search_with_filters(
+            &crate::core::search::SearchOptions {
+                workspace_path: canonical.clone(),
+                database_path: None,
+                index_dir: None,
+                query: "unique quasar phrase".to_owned(),
+                limit: 10,
+                speed: crate::search::SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Workspace,
+                strict_scope: false,
+            },
+            None,
+            &[],
+        )
+        .map_err(|error| format!("handoff search failed: {error:?}"))?;
+        let result_ids = search
+            .results
+            .iter()
+            .map(|hit| hit.doc_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for racer in racer_ids.borrow().iter() {
+            ensure(
+                result_ids.contains(racer),
+                true,
+                "every final-snapshot racer must be searchable with no further writes",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn remember_leadership_probe_failure_never_claims_quiescence() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let connection = open_upgrade_test_db(temp.path())?;
+        connection
+            .ensure_advisory_locks_table()
+            .map_err(|error| error.to_string())?;
+        let probes = std::cell::Cell::new(0usize);
+        let report = remember_drain_leadership_cycles(
+            &connection,
+            "wsp_probe_failure_leadership_0",
+            "sidx_probe_failure_own_000000",
+            &mut || Ok(()),
+            &mut || Ok(Vec::new()),
+            &mut || {
+                probes.set(probes.get() + 1);
+                None
+            },
+        );
+        ensure(
+            remember_index_status(&report),
+            "queued".to_owned(),
+            "a failing pending probe never claims quiescence or success",
+        )?;
+        ensure(
+            probes.get() >= REMEMBER_INDEX_DRAIN_PROBE_ATTEMPTS,
+            true,
+            "the probe is retried before the leader concedes it cannot verify",
+        )
+    }
+
+    #[test]
+    fn remember_leadership_deadline_cancellation_reports_queued() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let connection = open_upgrade_test_db(temp.path())?;
+        connection
+            .ensure_advisory_locks_table()
+            .map_err(|error| error.to_string())?;
+        let drains = std::cell::Cell::new(0usize);
+        let report = remember_drain_leadership_cycles(
+            &connection,
+            "wsp_deadline_leadership_00000",
+            "sidx_deadline_own_0000000000",
+            &mut || {
+                Err(DomainError::Storage {
+                    message: "synthetic runtime cancellation".to_owned(),
+                    repair: None,
+                })
+            },
+            &mut || {
+                drains.set(drains.get() + 1);
+                Ok(Vec::new())
+            },
+            &mut || Some(true),
+        );
+        ensure(
+            remember_index_status(&report),
+            "queued".to_owned(),
+            "outer cancellation reports queued and never claims auto-freshness",
+        )?;
+        ensure(drains.get(), 0, "cancellation preempts any drain work")
+    }
+
+    #[test]
+    fn remember_leadership_unclaimable_pending_hands_off() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let connection = open_upgrade_test_db(temp.path())?;
+        connection
+            .ensure_advisory_locks_table()
+            .map_err(|error| error.to_string())?;
+        let drains = std::cell::Cell::new(0usize);
+        let report = remember_drain_leadership_cycles(
+            &connection,
+            "wsp_claimed_leadership_000000",
+            "sidx_claimed_own_00000000000",
+            &mut || Ok(()),
+            &mut || {
+                drains.set(drains.get() + 1);
+                // Pending rows persist but nothing is drainable: the
+                // coalesced drain skips jobs CLAIMED by a concurrent
+                // drainer, so empty reports here mean a live successor
+                // owns the queue.
+                Ok(Vec::new())
+            },
+            &mut || Some(true),
+        );
+        ensure(
+            remember_index_status(&report),
+            "queued".to_owned(),
+            "handing off to the claiming drainer stays truthful",
+        )?;
+        ensure(
+            drains.get(),
+            4,
+            "two zero-progress cycles (two bounded rounds each) end the stint",
         )
     }
 
