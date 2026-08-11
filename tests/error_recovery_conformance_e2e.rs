@@ -68,6 +68,17 @@ fn array_at<'a>(
         .ok_or_else(|| format!("{context}: missing array at {pointer}"))
 }
 
+fn normalize_storeless_snapshot_text(
+    text: &str,
+    addressed_store: &str,
+    storeless_workspace: &str,
+    nearby_workspace: &str,
+) -> String {
+    text.replace(addressed_store, "<ADDRESSED_STORE>")
+        .replace(storeless_workspace, "<STORELESS_WORKSPACE>")
+        .replace(nearby_workspace, "<NEARBY_WORKSPACE>")
+}
+
 fn storage_error_cases(workspace: &str) -> Vec<ConformanceCase> {
     vec![
         ConformanceCase {
@@ -275,6 +286,8 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
     std::fs::create_dir_all(store_root.join(".git")).map_err(|error| error.to_string())?;
     let store_root_str = store_root.to_string_lossy().to_string();
     let leaf_str = leaf.to_string_lossy().to_string();
+    let addressed_store = leaf.join(".ee").join("ee.db");
+    let addressed_store_str = addressed_store.to_string_lossy().to_string();
 
     let init = run_ee(&[
         "init".to_owned(),
@@ -304,21 +317,28 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
         ),
     )?;
 
-    for verb in [
-        vec![
-            "--workspace".to_owned(),
-            leaf_str.clone(),
-            "remember".to_owned(),
-            "storeless leaf fact".to_owned(),
-            "--json".to_owned(),
-        ],
-        vec![
-            "--workspace".to_owned(),
-            leaf_str.clone(),
-            "search".to_owned(),
-            "storeless leaf".to_owned(),
-            "--json".to_owned(),
-        ],
+    let mut error_snapshots = serde_json::Map::new();
+    for (surface, verb) in [
+        (
+            "remember",
+            vec![
+                "--workspace".to_owned(),
+                leaf_str.clone(),
+                "remember".to_owned(),
+                "storeless leaf fact".to_owned(),
+                "--json".to_owned(),
+            ],
+        ),
+        (
+            "search",
+            vec![
+                "--workspace".to_owned(),
+                leaf_str.clone(),
+                "search".to_owned(),
+                "storeless leaf".to_owned(),
+                "--json".to_owned(),
+            ],
+        ),
     ] {
         let output = run_ee(&verb)?;
         ensure(
@@ -358,28 +378,85 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
                 verb.join(" ")
             ),
         )?;
+        error_snapshots.insert(
+            surface.to_owned(),
+            serde_json::json!({
+                "surface": surface,
+                "exitCode": output.status.code(),
+                "schema": json["schema"],
+                "code": json["error"]["code"],
+                "severity": json["error"]["severity"],
+                "message": normalize_storeless_snapshot_text(
+                    string_at(&json, "/error/message", &verb.join(" "))?,
+                    &addressed_store_str,
+                    &leaf_str,
+                    &store_root_str,
+                ),
+                "repair": normalize_storeless_snapshot_text(
+                    repair,
+                    &addressed_store_str,
+                    &leaf_str,
+                    &store_root_str,
+                ),
+            }),
+        );
     }
+
+    let remember_snapshot = error_snapshots
+        .remove("remember")
+        .ok_or("remember storeless snapshot missing")?;
+    insta::assert_json_snapshot!(remember_snapshot, @r###"
+    {
+      "surface": "remember",
+      "exitCode": 10,
+      "schema": "ee.error.v2",
+      "code": "workspace_store_missing",
+      "severity": "high",
+      "message": "Database not found at <ADDRESSED_STORE>",
+      "repair": "Re-check --workspace addressing (looked for <ADDRESSED_STORE>); a populated store exists at <NEARBY_WORKSPACE> (1 docs) — retarget with --workspace <NEARBY_WORKSPACE>. Only if you intended to create a NEW store here: ee init --workspace ."
+    }
+    "###);
+    let search_snapshot = error_snapshots
+        .remove("search")
+        .ok_or("search storeless snapshot missing")?;
+    insta::assert_json_snapshot!(search_snapshot, @r###"
+    {
+      "surface": "search",
+      "exitCode": 10,
+      "schema": "ee.error.v2",
+      "code": "workspace_store_missing",
+      "severity": "high",
+      "message": "Database not found at <ADDRESSED_STORE>",
+      "repair": "Re-check --workspace addressing (looked for <ADDRESSED_STORE>); a populated store exists at <NEARBY_WORKSPACE> (1 docs) — retarget with --workspace <NEARBY_WORKSPACE>. Only if you intended to create a NEW store here: ee init --workspace ."
+    }
+    "###);
 
     let orient = run_ee(&[
         "--workspace".to_owned(),
         leaf_str.clone(),
         "orient".to_owned(),
+        "storeless orientation snapshot".to_owned(),
         "--fast".to_owned(),
         "--json".to_owned(),
     ])?;
+    ensure(
+        orient.status.success(),
+        format!(
+            "orient storeless leaf must succeed with diagnostic discovery: {}",
+            String::from_utf8_lossy(&orient.stderr)
+        ),
+    )?;
     let orient_json = stdout_json(&orient, "orient storeless leaf")?;
     let discovery = orient_json
         .pointer("/data/storeDiscovery")
         .ok_or("orient storeless leaf: missing storeDiscovery block")?;
-    let addressed_store = leaf.join(".ee").join("ee.db");
-    let addressed_store_str = addressed_store.to_string_lossy();
     ensure(
         discovery["storeEmpty"] == serde_json::json!(true)
             && discovery["scanned"] == serde_json::json!(true),
         format!("orient must scan on a storeless workspace, got: {discovery}"),
     )?;
     ensure(
-        discovery["addressedStorePath"] == serde_json::json!(addressed_store_str.as_ref()),
+        discovery["addressedStorePath"] == serde_json::json!(addressed_store_str),
         format!(
             "orient must report the exact addressed store path {}; got: {discovery}",
             addressed_store.display()
@@ -424,10 +501,69 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
         ),
     )?;
 
+    let orient_snapshot = serde_json::json!({
+        "surface": "orient",
+        "exitCode": orient.status.code(),
+        "schema": orient_json["schema"],
+        "success": orient_json["success"],
+        "storeDiscovery": {
+            "addressedStorePath": normalize_storeless_snapshot_text(
+                string_at(discovery, "/addressedStorePath", "orient store discovery")?,
+                &addressed_store_str,
+                &leaf_str,
+                &store_root_str,
+            ),
+            "storeEmpty": discovery["storeEmpty"],
+            "scanned": discovery["scanned"],
+            "truncatedIsBoolean": discovery["truncated"].is_boolean(),
+            "bestNearbyStore": {
+                "workspaceRoot": normalize_storeless_snapshot_text(
+                    best_path,
+                    &addressed_store_str,
+                    &leaf_str,
+                    &store_root_str,
+                ),
+                "documents": best_documents,
+                "lastWrite": if best_last_write.is_empty() {
+                    "<EMPTY>"
+                } else {
+                    "<NONEMPTY_TIMESTAMP>"
+                },
+            },
+        },
+        "firstNextCommand": normalize_storeless_snapshot_text(
+            first_next_command,
+            &addressed_store_str,
+            &leaf_str,
+            &store_root_str,
+        ),
+    });
+    insta::assert_json_snapshot!(orient_snapshot, @r###"
+    {
+      "surface": "orient",
+      "exitCode": 0,
+      "schema": "ee.response.v2",
+      "success": true,
+      "storeDiscovery": {
+        "addressedStorePath": "<ADDRESSED_STORE>",
+        "storeEmpty": true,
+        "scanned": true,
+        "truncatedIsBoolean": true,
+        "bestNearbyStore": {
+          "workspaceRoot": "<NEARBY_WORKSPACE>",
+          "documents": 1,
+          "lastWrite": "<NONEMPTY_TIMESTAMP>"
+        }
+      },
+      "firstNextCommand": "ee pack --workspace <NEARBY_WORKSPACE> --read-only --source-mode lexical_only --max-tokens 4000 --json -- 'storeless orientation snapshot'"
+    }
+    "###);
+
     let orient_human = run_ee(&[
         "--workspace".to_owned(),
         leaf_str,
         "orient".to_owned(),
+        "storeless orientation snapshot".to_owned(),
         "--fast".to_owned(),
     ])?;
     ensure(
@@ -440,7 +576,7 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
     let human = String::from_utf8(orient_human.stdout)
         .map_err(|error| format!("human orient stdout was not UTF-8: {error}"))?;
     ensure(
-        human.contains(addressed_store_str.as_ref())
+        human.contains(&addressed_store_str)
             && human.contains(best_path)
             && human.contains(&format!("{best_documents} docs"))
             && human.contains(&format!("last write {best_last_write}"))

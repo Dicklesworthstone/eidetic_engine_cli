@@ -600,6 +600,7 @@ Exit code vocabulary:
 | `6` | degraded-required |
 | `7` | policy denied |
 | `8` | migration required |
+| `10` | workspace store missing (the addressed workspace has no initialized store) |
 
 Common red flags:
 
