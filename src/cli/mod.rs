@@ -46076,7 +46076,7 @@ fn daemon_search_unsupported_reason(args: &SearchArgs) -> Option<DaemonSearchFal
 fn validate_daemon_search_capabilities(
     capabilities: &serde_json::Value,
 ) -> Result<(), DaemonSearchFallbackReason> {
-    use crate::daemon::server::{
+    use crate::daemon::protocol::{
         DAEMON_SEARCH_REQUEST_SCHEMA_V1, DAEMON_SEARCH_RESPONSE_SCHEMA_V2, METHOD_SEARCH,
     };
     use crate::daemon::{DAEMON_REQUEST_SCHEMA_V1, DAEMON_RESPONSE_SCHEMA_V1};

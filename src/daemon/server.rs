@@ -53,6 +53,9 @@ use crate::output::{ContextJsonRenderOptions, render_context_response_json_with_
 use crate::pack::{ContextPackProfile, DEFAULT_COORDINATION_STALE_AFTER_MS, PackResourceProfile};
 use crate::search::SpeedMode;
 
+pub use super::protocol::{
+    DAEMON_SEARCH_REQUEST_SCHEMA_V1, DAEMON_SEARCH_RESPONSE_SCHEMA_V2, METHOD_SEARCH,
+};
 use super::protocol::{
     DaemonRequest, DaemonResponse, FrameReadError, read_request, write_response,
 };
@@ -76,15 +79,6 @@ pub const DAEMON_ECHO_DISABLED_CODE: &str = "daemon_echo_disabled";
 
 /// Method dispatch name for the warm-loaded `ee pack` path.
 pub const METHOD_CONTEXT: &str = "ee.daemon.context";
-
-/// Method dispatch name for the warm-loaded `ee search` path.
-pub const METHOD_SEARCH: &str = "ee.daemon.search";
-
-/// Strict method-specific request schema for [`METHOD_SEARCH`].
-pub const DAEMON_SEARCH_REQUEST_SCHEMA_V1: &str = "ee.daemon.search.request.v1";
-
-/// Strict method-specific response schema for [`METHOD_SEARCH`].
-pub const DAEMON_SEARCH_RESPONSE_SCHEMA_V2: &str = "ee.daemon.search.response.v2";
 
 /// Error code returned when `ee.daemon.search` params fail strict decoding.
 pub const DAEMON_SEARCH_PARAMS_INVALID_CODE: &str = "daemon_search_params_invalid";

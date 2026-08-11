@@ -1595,7 +1595,7 @@ mod tests {
         // The bd-3ap2m.4 permutation property: running the per-memory
         // detector battery in any input order and then sorting yields the
         // identical queue.
-        let corpus = vec![
+        let corpus = [
             memory_at("mem_01", "2026-05-01T00:00:00Z", "2026-05-01T00:00:00Z"),
             memory_at("mem_02", "2026-04-01T00:00:00Z", "2026-04-01T00:00:00Z"),
             memory_at("mem_03", "2026-03-01T00:00:00Z", "2026-03-01T00:00:00Z"),

@@ -563,7 +563,6 @@ mod tests {
         assert!(sessions[1].label.starts_with("inferred-"));
         assert_eq!(sessions[1].member_count, 1);
         // The 9h gap exceeds SESSION_GAP_SECONDS so u2 starts session 3.
-        assert!(9 * 3600 > SESSION_GAP_SECONDS);
         assert_eq!(sessions[2].member_count, 1);
     }
 

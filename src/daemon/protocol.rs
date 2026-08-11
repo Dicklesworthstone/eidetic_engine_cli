@@ -27,6 +27,15 @@ use super::{
     DAEMON_RESPONSE_SCHEMA_V1,
 };
 
+/// Method dispatch name for the warm-loaded `ee search` path.
+pub const METHOD_SEARCH: &str = "ee.daemon.search";
+
+/// Strict method-specific request schema for [`METHOD_SEARCH`].
+pub const DAEMON_SEARCH_REQUEST_SCHEMA_V1: &str = "ee.daemon.search.request.v1";
+
+/// Strict method-specific response schema for [`METHOD_SEARCH`].
+pub const DAEMON_SEARCH_RESPONSE_SCHEMA_V2: &str = "ee.daemon.search.response.v2";
+
 fn deserialize_present_json_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
 where
     D: Deserializer<'de>,

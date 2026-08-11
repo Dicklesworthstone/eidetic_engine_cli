@@ -511,22 +511,19 @@ fn run_warm_search_gate() {
     let daemon = RunningDaemon::start_for_workspace(socket_path, &fixture.workspace);
     let daemon_start_ms = daemon_started.elapsed().as_secs_f64() * 1_000.0;
 
-    let mut expected_results = None;
-    for _ in 0..SEARCH_WARMUP_SAMPLES {
+    let baseline_cold = run_search_process(&ee_binary, &fixture, None);
+    let baseline_warm = run_search_process(&ee_binary, &fixture, Some(daemon.socket_path()));
+    assert_eq!(
+        baseline_cold.results, baseline_warm.results,
+        "cold and warm warmup results differ"
+    );
+    let expected_results = baseline_cold.results;
+    for _ in 1..SEARCH_WARMUP_SAMPLES {
         let cold = run_search_process(&ee_binary, &fixture, None);
         let warm = run_search_process(&ee_binary, &fixture, Some(daemon.socket_path()));
-        if let Some(expected) = expected_results.as_ref() {
-            assert_result_parity(expected, &cold, "cold warmup");
-            assert_result_parity(expected, &warm, "daemon warmup");
-        } else {
-            assert_eq!(
-                cold.results, warm.results,
-                "cold and warm warmup results differ"
-            );
-            expected_results = Some(cold.results);
-        }
+        assert_result_parity(&expected_results, &cold, "cold warmup");
+        assert_result_parity(&expected_results, &warm, "daemon warmup");
     }
-    let expected_results = expected_results.expect("warmup establishes result parity baseline");
 
     let mut cold_wall = Vec::with_capacity(SEARCH_MEASURE_SAMPLES);
     let mut cold_core = Vec::with_capacity(SEARCH_MEASURE_SAMPLES);
