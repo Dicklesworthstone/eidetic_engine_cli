@@ -223,6 +223,25 @@ fn doctor_default_json_is_concise_and_full_json_keeps_diagnostics() -> TestResul
             "advisorySummary": concise.pointer("/data/advisorySummary"),
         }),
     )?;
+    let permanent_capability_gaps = concise["data"]["permanentCapabilityGaps"]
+        .as_array()
+        .ok_or_else(|| {
+            format!("default doctor permanentCapabilityGaps must be an array; got {concise}")
+        })?;
+    ensure(
+        permanent_capability_gaps.iter().any(|gap| {
+            gap["name"].as_str() == Some("reranker_posture")
+                && gap["permanent"].as_bool() == Some(true)
+                && gap["repair"].as_str()
+                    == Some(
+                        "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst",
+                    )
+        }),
+        "default doctor lists the permanent reranker capability gap with exact offline repair",
+        json!({
+            "permanentCapabilityGaps": permanent_capability_gaps,
+        }),
+    )?;
     for omitted_key in [
         "checks",
         "advisories",
