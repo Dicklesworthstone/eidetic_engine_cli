@@ -6002,6 +6002,7 @@ fn canonical_verified_potion_model_dir(model_dir: &Path) -> Option<PathBuf> {
     verified_potion_model_dir(&canonical).then_some(canonical)
 }
 
+#[cfg(test)]
 fn active_embedding_registry_input(
     workspace_id: &str,
     fast_embedder: &dyn crate::search::Embedder,

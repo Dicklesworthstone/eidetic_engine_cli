@@ -1248,6 +1248,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
                     && entry.get("purpose").and_then(Value::as_str) == Some("embedding")
             })
         })
+        .and_then(Value::as_object)
         .ok_or_else(|| "public model list omitted the available Model2Vec row".to_string())?;
     ensure_eq_str(
         string_member(list_entry, "status")?,
