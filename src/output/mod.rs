@@ -15319,7 +15319,9 @@ fn domain_error_severity(error: &DomainError) -> &'static str {
         | DomainError::UsageWithDetails { .. }
         | DomainError::UsageCodeWithDetails { .. }
         | DomainError::NotFound { .. } => "low",
-        DomainError::Storage { .. } | DomainError::MigrationDrift { .. } => "high",
+        DomainError::Storage { .. }
+        | DomainError::WorkspaceStoreMissing { .. }
+        | DomainError::MigrationDrift { .. } => "high",
         DomainError::Configuration { .. }
         | DomainError::SearchIndex { .. }
         | DomainError::Graph { .. }

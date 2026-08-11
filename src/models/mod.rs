@@ -601,6 +601,15 @@ pub enum DomainError {
         message: String,
         repair: Option<String>,
     },
+    /// A read or write addressed a workspace whose store does not exist
+    /// (bd-workspace-miss-init-suggestion-sfjvq). Distinct from [`Self::Storage`]
+    /// so the addressing miss keeps a stable machine identity and its own
+    /// process exit code: a lookup miss must never be conflated with a real
+    /// storage failure, and its recovery must never lead with state creation.
+    WorkspaceStoreMissing {
+        message: String,
+        repair: Option<String>,
+    },
     SearchIndex {
         message: String,
         repair: Option<String>,
@@ -659,6 +668,9 @@ impl std::fmt::Display for DomainError {
             | Self::UsageCodeWithDetails { message, .. } => write!(f, "usage error: {message}"),
             Self::Configuration { message, .. } => write!(f, "configuration error: {message}"),
             Self::Storage { message, .. } => write!(f, "storage error: {message}"),
+            Self::WorkspaceStoreMissing { message, .. } => {
+                write!(f, "workspace store missing: {message}")
+            }
             Self::SearchIndex { message, .. } => write!(f, "search index error: {message}"),
             Self::Graph { message, .. } => write!(f, "graph error: {message}"),
             Self::Import { message, .. } | Self::ImportWithDetails { message, .. } => {
@@ -1836,6 +1848,7 @@ impl DomainError {
             Self::UsageCodeWithDetails { code, .. } => code,
             Self::Configuration { .. } => "configuration",
             Self::Storage { .. } => "storage",
+            Self::WorkspaceStoreMissing { .. } => "workspace_store_missing",
             Self::SearchIndex { .. } => "search_index",
             Self::Graph { .. } => "graph",
             Self::Import { .. } | Self::ImportWithDetails { .. } => "import",
@@ -1856,6 +1869,7 @@ impl DomainError {
             | Self::UsageCodeWithDetails { message, .. }
             | Self::Configuration { message, .. }
             | Self::Storage { message, .. }
+            | Self::WorkspaceStoreMissing { message, .. }
             | Self::SearchIndex { message, .. }
             | Self::Graph { message, .. }
             | Self::Import { message, .. }
@@ -1880,6 +1894,7 @@ impl DomainError {
             | Self::UsageCodeWithDetails { repair, .. }
             | Self::Configuration { repair, .. }
             | Self::Storage { repair, .. }
+            | Self::WorkspaceStoreMissing { repair, .. }
             | Self::SearchIndex { repair, .. }
             | Self::Graph { repair, .. }
             | Self::Import { repair, .. }
@@ -2067,7 +2082,10 @@ impl DomainError {
             // intended to create a new one. Agents follow recovery actions
             // mechanically, so point at an existing workspace first and
             // keep state creation last and explicitly conditional.
-            Self::Storage { .. } if message.contains("database not found") => vec![
+            Self::Storage { .. } | Self::WorkspaceStoreMissing { .. }
+                if message.contains("database not found") =>
+            {
+                vec![
                 RecoveryAction::flag(
                     1,
                     "--workspace",
@@ -2094,7 +2112,8 @@ impl DomainError {
                     results_in: None,
                     example: None,
                 },
-            ],
+                ]
+            }
             // Audit render failures are surfaced as storage errors because
             // the requested report could not cross the stable JSON boundary.
             // Keep the prose repair and the structured recovery contract in
@@ -2162,6 +2181,7 @@ impl DomainError {
             | Self::UsageCodeWithDetails { .. } => ProcessExitCode::Usage,
             Self::Configuration { .. } => ProcessExitCode::Configuration,
             Self::Storage { .. } => ProcessExitCode::Storage,
+            Self::WorkspaceStoreMissing { .. } => ProcessExitCode::WorkspaceStoreMissing,
             Self::SearchIndex { .. } => ProcessExitCode::SearchIndex,
             Self::Graph { .. } => ProcessExitCode::SearchIndex,
             Self::Import { .. } | Self::ImportWithDetails { .. } => ProcessExitCode::Import,
@@ -2191,6 +2211,11 @@ pub enum ProcessExitCode {
     PolicyDenied = 7,
     MigrationRequired = 8,
     EvalFailure = 9,
+    /// A read/write addressed a workspace whose store does not exist
+    /// (bd-workspace-miss-init-suggestion-sfjvq). Distinct from `Storage`
+    /// so harnesses can tell an addressing miss from a real storage failure
+    /// without parsing messages.
+    WorkspaceStoreMissing = 10,
     /// Operation was cancelled by the caller, a deadline, or a runtime budget.
     Cancelled = 130,
 }
@@ -2751,6 +2776,38 @@ mod tests {
             Some("ee init --workspace ."),
             "ee init must remain the final, conditional recovery action"
         );
+    }
+
+    #[test]
+    fn workspace_store_missing_has_distinct_identity_and_exit_code() {
+        // bd-workspace-miss-init-suggestion-sfjvq: a storeless-workspace
+        // addressing miss must be machine-distinguishable from a real
+        // storage failure without parsing message text.
+        let error = super::DomainError::WorkspaceStoreMissing {
+            message: "Database not found at /tmp/x/.ee/ee.db".to_owned(),
+            repair: Some("Re-check --workspace addressing".to_owned()),
+        };
+        assert_eq!(error.code(), "workspace_store_missing");
+        assert_eq!(error.exit_code(), ProcessExitCode::WorkspaceStoreMissing);
+        assert_eq!(ProcessExitCode::WorkspaceStoreMissing as u8, 10);
+        assert_ne!(
+            error.exit_code(),
+            super::DomainError::Storage {
+                message: "disk error".to_owned(),
+                repair: None,
+            }
+            .exit_code(),
+            "the miss must not share the ordinary storage exit code"
+        );
+
+        // The safe recovery ordering carries over: addressing corrections
+        // first, `ee init` last and conditional.
+        let actions = error.recovery_actions();
+        assert_eq!(actions.len(), 3, "expected 3 options, got {actions:?}");
+        assert_eq!(actions[0].kind, super::RecoveryKind::Flag);
+        assert_eq!(actions[0].flag_name.as_deref(), Some("--workspace"));
+        assert_eq!(actions[2].kind, super::RecoveryKind::Seed);
+        assert_eq!(actions[2].command.as_deref(), Some("ee init --workspace ."));
     }
 
     #[test]

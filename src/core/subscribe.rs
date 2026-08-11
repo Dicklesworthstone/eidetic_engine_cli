@@ -393,10 +393,7 @@ pub fn poll_memory_deltas(
     let mut degraded = Vec::new();
 
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some("Run `ee init --workspace . --json` first.".to_owned()),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
 
     let connection =

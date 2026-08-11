@@ -2108,10 +2108,9 @@ fn resolved_database_path(
                 "Replace it with an ee database file or run `ee init --workspace .`.".to_string(),
             ),
         }),
-        Err(error) if error.kind() == ErrorKind::NotFound => Err(DomainError::Storage {
-            message: format!("Database not found at {}", path.display()),
-            repair: Some("ee init --workspace .".to_string()),
-        }),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            Err(crate::core::storeless_workspace_error(&path))
+        }
         Err(error) if error.kind() == ErrorKind::NotADirectory => Err(DomainError::Storage {
             message: format!("Database path {} is not reachable: {error}", path.display()),
             repair: Some("ee init --workspace .".to_string()),

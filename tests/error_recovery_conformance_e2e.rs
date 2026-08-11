@@ -120,10 +120,13 @@ fn storage_error_cases(workspace: &str) -> Vec<ConformanceCase> {
 }
 
 fn assert_storage_recovery_contract(case: &ConformanceCase, output: &Output) -> TestResult {
+    // bd-workspace-miss-init-suggestion-sfjvq: a storeless addressing miss
+    // carries its own stable identity and exit code, distinct from ordinary
+    // storage failures (which stay exit 3 / code "storage").
     ensure(
-        output.status.code() == Some(3),
+        output.status.code() == Some(10),
         format!(
-            "{}: expected storage exit code 3, got {:?}\nstdout:\n{}\nstderr:\n{}",
+            "{}: expected workspace-store-missing exit code 10, got {:?}\nstdout:\n{}\nstderr:\n{}",
             case.id,
             output.status.code(),
             String::from_utf8_lossy(&output.stdout),
@@ -141,12 +144,12 @@ fn assert_storage_recovery_contract(case: &ConformanceCase, output: &Output) -> 
         format!("{}: error envelope schema must be ee.error.v2", case.id),
     )?;
     ensure(
-        string_at(&json, "/error/code", case.id)? == "storage",
-        format!("{}: code must be storage", case.id),
+        string_at(&json, "/error/code", case.id)? == "workspace_store_missing",
+        format!("{}: code must be workspace_store_missing", case.id),
     )?;
     ensure(
         string_at(&json, "/error/severity", case.id)? == "high",
-        format!("{}: storage errors must be high severity", case.id),
+        format!("{}: workspace-miss errors must be high severity", case.id),
     )?;
     ensure(
         string_at(&json, "/error/message", case.id)?
@@ -322,7 +325,22 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
             !output.status.success(),
             format!("{}: storeless miss must fail", verb.join(" ")),
         )?;
+        ensure(
+            output.status.code() == Some(10),
+            format!(
+                "{}: storeless miss must exit with the dedicated workspace-store-missing code 10, got {:?}",
+                verb.join(" "),
+                output.status.code()
+            ),
+        )?;
         let json = stdout_json(&output, &verb.join(" "))?;
+        ensure(
+            string_at(&json, "/error/code", &verb.join(" "))? == "workspace_store_missing",
+            format!(
+                "{}: error code must be workspace_store_missing",
+                verb.join(" ")
+            ),
+        )?;
         let repair = string_at(&json, "/error/repair", &verb.join(" "))?;
         ensure(
             repair.contains("a populated store exists at")
@@ -604,4 +622,74 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         ),
     )?;
     Ok(())
+}
+
+/// bd-workspace-miss-init-suggestion-sfjvq negatives: an ORDINARY storage
+/// failure must keep exit 3 / code `storage` — proving the dedicated
+/// workspace-miss exit 10 is a distinction, not a rename — and `ee init`
+/// into a directory with existing AGENTS.md/CLAUDE.md must preserve both
+/// files byte-for-byte (no silent overwrite).
+#[test]
+fn ordinary_storage_failure_keeps_exit_three_and_init_preserves_agent_docs() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+
+    // Phase 1: `.ee/ee.db` exists but is a DIRECTORY — the store is
+    // addressed and present, so this is a genuine storage failure, not an
+    // addressing miss.
+    let broken = tempdir.path().join("broken_store_sfjvq");
+    std::fs::create_dir_all(broken.join(".ee").join("ee.db")).map_err(|error| error.to_string())?;
+    let broken_str = broken.to_string_lossy().to_string();
+    let output = run_ee(&[
+        "--workspace".to_owned(),
+        broken_str,
+        "remember".to_owned(),
+        "ordinary storage failure fact".to_owned(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        output.status.code() == Some(3),
+        format!(
+            "ordinary storage failure must keep exit 3, got {:?}\nstdout:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout)
+        ),
+    )?;
+    let json = stdout_json(&output, "remember against directory-shaped db")?;
+    let code = string_at(&json, "/error/code", "remember against directory-shaped db")?;
+    ensure(
+        code == "storage",
+        format!("ordinary storage failure must keep code storage, got: {code}"),
+    )?;
+
+    // Phase 2: init preservation re-proof — pre-existing AGENTS.md and
+    // CLAUDE.md must survive `ee init` unchanged.
+    let docs_root = tempdir.path().join("init_preserve_sfjvq");
+    std::fs::create_dir_all(&docs_root).map_err(|error| error.to_string())?;
+    let agents_sentinel = "existing AGENTS.md sentinel: ee init must never overwrite me\n";
+    let claude_sentinel = "existing CLAUDE.md sentinel: ee init must never overwrite me\n";
+    std::fs::write(docs_root.join("AGENTS.md"), agents_sentinel)
+        .map_err(|error| error.to_string())?;
+    std::fs::write(docs_root.join("CLAUDE.md"), claude_sentinel)
+        .map_err(|error| error.to_string())?;
+    let init = run_ee(&[
+        "init".to_owned(),
+        "--workspace".to_owned(),
+        docs_root.to_string_lossy().to_string(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        init.status.success(),
+        format!(
+            "init beside existing agent docs must succeed: {}",
+            String::from_utf8_lossy(&init.stdout)
+        ),
+    )?;
+    let agents_after =
+        std::fs::read_to_string(docs_root.join("AGENTS.md")).map_err(|error| error.to_string())?;
+    let claude_after =
+        std::fs::read_to_string(docs_root.join("CLAUDE.md")).map_err(|error| error.to_string())?;
+    ensure(
+        agents_after == agents_sentinel && claude_after == claude_sentinel,
+        "ee init must preserve pre-existing AGENTS.md and CLAUDE.md byte-for-byte".to_owned(),
+    )
 }

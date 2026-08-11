@@ -1061,10 +1061,7 @@ fn resolved_database_path(
     if dry_run || path.exists() {
         Ok(path)
     } else {
-        Err(DomainError::Storage {
-            message: format!("Database not found at {}", path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&path)),
-        })
+        Err(crate::core::storeless_workspace_error(&path))
     }
 }
 

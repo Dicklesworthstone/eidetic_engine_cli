@@ -15585,10 +15585,7 @@ fn prepare_curate_read(
 
 fn open_existing_database(database_path: &Path) -> Result<DbConnection, DomainError> {
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(database_path));
     }
     let connection =
         DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {

@@ -1016,12 +1016,9 @@ fn record_outcome_inner(
     )?;
 
     if !options.database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", options.database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(
-                options.database_path,
-            )),
-        });
+        return Err(crate::core::storeless_workspace_error(
+            options.database_path,
+        ));
     }
 
     let connection =
@@ -2355,10 +2352,7 @@ fn resolve_workspace_path(path: &Path) -> Result<std::path::PathBuf, DomainError
 
 fn open_existing_database(database_path: &Path) -> Result<DbConnection, DomainError> {
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(database_path));
     }
     DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
         message: format!("Failed to open database: {error}"),

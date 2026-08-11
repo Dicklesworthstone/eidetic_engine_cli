@@ -1513,10 +1513,7 @@ fn serve_why_payload_json(request: &ServeHttpRequest) -> Result<JsonValue, Domai
         })?;
     let database_path = workspace_path.join(".ee").join("ee.db");
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_owned()),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
     let report = explain_memory(&WhyOptions {
         database_path: &database_path,

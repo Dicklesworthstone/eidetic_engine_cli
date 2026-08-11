@@ -1077,6 +1077,11 @@ fn duration_millis_u64(duration: std::time::Duration) -> u64 {
 #[derive(Debug)]
 pub enum ContextPackError {
     Storage(String),
+    /// The addressed workspace has no store at the looked-for database path
+    /// (bd-workspace-miss-init-suggestion-sfjvq). Kept distinct from
+    /// [`Self::Storage`] so the CLI can surface the dedicated
+    /// `workspace_store_missing` identity and exit code.
+    WorkspaceStoreMissing(std::path::PathBuf),
     Search(SearchError),
     Pack(String),
     PolicyDenied(String),
@@ -1089,6 +1094,13 @@ impl ContextPackError {
     pub fn repair_hint(&self) -> Option<&str> {
         match self {
             Self::Storage(_) => Some("ee init --workspace ."),
+            // The full dynamic repair (exact looked-for path, nearby stores,
+            // conditional init LAST) is built by the CLI mapping via
+            // `core::storeless_workspace_error`; this static hint only backs
+            // surfaces that cannot carry a computed string.
+            Self::WorkspaceStoreMissing(_) => {
+                Some("Re-check --workspace addressing; only if you intended a NEW store: ee init")
+            }
             Self::Search(error) => error.repair_hint(),
             Self::Pack(_) => Some("ee context --help"),
             Self::PolicyDenied(_) | Self::DeadlineExceeded(_) | Self::Cancelled(_) => None,
@@ -1106,6 +1118,9 @@ impl std::fmt::Display for ContextPackError {
         match self {
             Self::Storage(message) | Self::Pack(message) | Self::PolicyDenied(message) => {
                 formatter.write_str(message)
+            }
+            Self::WorkspaceStoreMissing(path) => {
+                write!(formatter, "Database not found at {}", path.display())
             }
             Self::DeadlineExceeded(reason) | Self::Cancelled(reason) => {
                 formatter.write_str(&crate::core::outcome::cancel_message(reason))
@@ -1174,10 +1189,7 @@ pub(crate) fn admit_recent_context_memories(
         .clone()
         .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
     if !database_path.exists() {
-        return Err(ContextPackError::Storage(format!(
-            "Database not found at {}",
-            database_path.display()
-        )));
+        return Err(ContextPackError::WorkspaceStoreMissing(database_path));
     }
     let connection = DbConnection::open_file_read_only(&database_path)
         .map_err(|error| ContextPackError::Storage(error.to_string()))?;
@@ -1979,10 +1991,7 @@ pub fn explain_why_not(
         .clone()
         .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
     if !database_path.exists() {
-        return Err(ContextPackError::Storage(format!(
-            "Database not found at {}",
-            database_path.display()
-        )));
+        return Err(ContextPackError::WorkspaceStoreMissing(database_path));
     }
 
     let index_dir = options
@@ -2357,10 +2366,7 @@ async fn run_context_pack_with_performance_inner(
         .clone()
         .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
     if !database_path.exists() {
-        return Err(ContextPackError::Storage(format!(
-            "Database not found at {}",
-            database_path.display()
-        )));
+        return Err(ContextPackError::WorkspaceStoreMissing(database_path));
     }
     control.check()?;
 

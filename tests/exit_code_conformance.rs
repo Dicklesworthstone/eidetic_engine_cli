@@ -186,6 +186,7 @@ const EXIT_IMPORT: i32 = 5;
 const EXIT_DEGRADED: i32 = 6;
 const EXIT_POLICY_DENIED: i32 = 7;
 const EXIT_MIGRATION: i32 = 8;
+const EXIT_WORKSPACE_STORE_MISSING: i32 = 10;
 
 // ============================================================================
 // Exit Code 0: Success
@@ -634,6 +635,42 @@ fn exit_2_config_error_on_invalid_workspace() -> TestResult {
         &output.status.code(),
         &Some(EXIT_CONFIG),
         "invalid workspace exit code",
+    )
+}
+
+// ============================================================================
+// Exit Code 10: Workspace Store Missing (bd-workspace-miss-init-suggestion-sfjvq)
+// ============================================================================
+
+#[test]
+fn exit_10_workspace_store_missing_on_storeless_workspace() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    // No init: the workspace directory exists but holds no store. The
+    // addressing miss must carry its dedicated exit code — distinct from
+    // ordinary storage failures (exit 3) — plus the stable error code.
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "storeless workspace exit conformance",
+        "--json",
+    ])?;
+    persist_artifact("exit_10_workspace_store_missing", &output);
+
+    ensure_equal(
+        &output.status.code(),
+        &Some(EXIT_WORKSPACE_STORE_MISSING),
+        "storeless workspace exit code",
+    )?;
+    let json = stdout_json(&output)?;
+    ensure_equal(
+        &json
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
+        &Some("workspace_store_missing"),
+        "storeless workspace error code",
     )
 }
 

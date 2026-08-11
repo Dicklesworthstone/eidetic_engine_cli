@@ -597,6 +597,20 @@ pub fn storeless_workspace_repair(database_path: &std::path::Path) -> String {
     )
 }
 
+/// Canonical storeless-workspace miss error
+/// (bd-workspace-miss-init-suggestion-sfjvq): the stable
+/// `workspace_store_missing` identity with its own process exit code, the
+/// exact looked-for path in the message, and the safe recovery ordering from
+/// [`storeless_workspace_repair`] — re-check addressing first, nearby
+/// populated stores second, `ee init` last and explicitly conditional.
+#[must_use]
+pub fn storeless_workspace_error(database_path: &std::path::Path) -> crate::models::DomainError {
+    crate::models::DomainError::WorkspaceStoreMissing {
+        message: format!("Database not found at {}", database_path.display()),
+        repair: Some(storeless_workspace_repair(database_path)),
+    }
+}
+
 /// Serialize a value to JSON, returning a stable error envelope on failure.
 ///
 /// Use for display-only `to_json()` methods where failure should produce valid JSON

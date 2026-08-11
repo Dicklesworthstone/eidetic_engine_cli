@@ -17220,10 +17220,7 @@ where
         .clone()
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -24656,10 +24653,7 @@ fn open_workspace_database_for_write_at(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
     let connection = crate::db::DbConnection::open_file(&database_path).map_err(|error| {
         DomainError::Storage {
@@ -24759,10 +24753,7 @@ fn open_preflight_memory_database_for_read(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
 
     let connection =
@@ -27879,10 +27870,7 @@ fn open_recorder_database(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
     crate::db::DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
         message: format!("Failed to open database: {error}"),
@@ -28158,10 +28146,7 @@ where
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
@@ -28260,10 +28245,7 @@ where
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -28420,10 +28402,7 @@ where
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -28499,10 +28478,7 @@ where
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -30946,10 +30922,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -31337,10 +31310,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -31462,10 +31432,7 @@ where
         .clone()
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
     if !source_database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", source_database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&source_database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -31685,10 +31652,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -31843,10 +31807,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
     if args.valid_from.is_some() && args.clear_valid_from {
@@ -31987,10 +31948,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
     if !args.model_id.starts_with("mdl_") || args.model_id.len() != 30 {
@@ -32209,10 +32167,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
     if !args.tripwire_id.starts_with("tw_") || args.tripwire_id.trim().len() <= 3 {
@@ -32377,10 +32332,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -32483,10 +32435,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
     if !args.pack_id.starts_with("pack_") || args.pack_id.len() != 31 {
@@ -32748,10 +32697,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
     let candidate_type = match crate::curate::CandidateType::from_str(&args.candidate_type) {
@@ -34531,10 +34477,7 @@ fn graph_database_path(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
     Ok(database_path)
 }
@@ -34850,10 +34793,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -34930,10 +34870,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -35076,10 +35013,7 @@ where
         .clone()
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
     let conn = match crate::db::DbConnection::open_file(&database_path) {
@@ -35262,10 +35196,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -35763,10 +35694,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -36073,10 +36001,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -36250,10 +36175,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -36523,10 +36445,7 @@ fn resolve_memory_store_target(
         .cloned()
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
     Ok(MemoryStoreTarget {
         workspace,
@@ -38131,10 +38050,7 @@ where
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -38734,7 +38650,7 @@ fn context_stream_error_from_context_pack_error(
     domain_error: &DomainError,
 ) -> output::streaming::StreamError {
     let (code, severity) = match error {
-        ContextPackError::Storage(_) => (
+        ContextPackError::Storage(_) | ContextPackError::WorkspaceStoreMissing(_) => (
             "context_stream_storage_error",
             output::streaming::StreamSeverity::High,
         ),
@@ -38801,6 +38717,9 @@ fn context_error_to_domain(error: &ContextPackError) -> DomainError {
             message: message.clone(),
             repair: error.repair_hint().map(str::to_string),
         },
+        ContextPackError::WorkspaceStoreMissing(path) => {
+            crate::core::storeless_workspace_error(path)
+        }
         ContextPackError::Search(search_error) => DomainError::SearchIndex {
             message: search_error.to_string(),
             repair: error.repair_hint().map(str::to_string),
@@ -43595,10 +43514,7 @@ fn open_pack_read_database(
 ) -> Result<crate::db::DbConnection, DomainError> {
     let database_path = pack_database_path(cli, database);
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
 
     let connection =
@@ -47350,10 +47266,7 @@ fn open_agentsmd_workspace(
         Path::to_path_buf,
     );
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
     let connection = crate::db::DbConnection::open_file(&database_path).map_err(|error| {
         DomainError::Storage {
@@ -47549,10 +47462,7 @@ where
         .clone()
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
     if !database_path.exists() {
-        let error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
     let connection = match crate::db::DbConnection::open_file(&database_path) {
@@ -47706,10 +47616,7 @@ where
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
 
@@ -47884,10 +47791,7 @@ where
         .clone()
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
     if !database_path.exists() {
-        let error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
     let connection = match crate::db::DbConnection::open_file(&database_path) {
@@ -49366,10 +49270,7 @@ fn open_verify_provenance_database(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
     let connection =
         DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
@@ -50806,10 +50707,7 @@ fn open_attest_database_for_workspace(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
     let connection =
         crate::db::DbConnection::open_file_read_only(&database_path).map_err(|error| {
@@ -50937,10 +50835,7 @@ where
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -51271,10 +51166,7 @@ where
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        };
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -52828,6 +52720,7 @@ fn context_cancellation_reason(error: &ContextPackError) -> Option<&CancelReason
         }
         ContextPackError::Search(SearchError::Cancelled(reason)) => Some(reason),
         ContextPackError::Storage(_)
+        | ContextPackError::WorkspaceStoreMissing(_)
         | ContextPackError::Search(_)
         | ContextPackError::Pack(_)
         | ContextPackError::PolicyDenied(_) => None,
@@ -54037,10 +53930,7 @@ fn sentinel_check_data(
         .clone()
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
     let connection =
         DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
@@ -56344,10 +56234,7 @@ fn load_rule_provenance_ego(cli: &Cli, args: &RuleProvenanceArgs) -> Result<Stri
         .clone()
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
 
     let workspace_id = workspace_core::stable_workspace_id(&workspace_path);
@@ -57105,10 +56992,7 @@ fn open_situation_read_database(
     database_path: &Path,
 ) -> Result<crate::db::DbConnection, DomainError> {
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
 
     crate::db::DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
@@ -58236,10 +58120,7 @@ fn open_causal_database(cli: &Cli) -> Result<(crate::db::DbConnection, String), 
     let workspace_path = causal_workspace_path(cli)?;
     let database_path = workspace_path.join(".ee").join("ee.db");
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
     let conn = crate::db::DbConnection::open_file(&database_path).map_err(|error| {
         DomainError::Storage {
@@ -58740,10 +58621,7 @@ fn open_demo_database(
     let workspace = demo_workspace_canonical(cli)?;
     let database_path = workspace.join(".ee").join("ee.db");
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
     let conn = crate::db::DbConnection::open_file(&database_path).map_err(|error| {
         DomainError::Storage {
@@ -66418,10 +66296,7 @@ fn revival_sentinel_data(
         .clone()
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
     let connection = DbConnection::open_file_read_only(&database_path).map_err(|error| {
         DomainError::Storage {

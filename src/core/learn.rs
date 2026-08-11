@@ -2357,10 +2357,7 @@ fn ensure_learning_workspace(
         );
     }
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
     let connection =
         DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
@@ -3865,10 +3862,7 @@ fn load_learning_clusters(
 fn load_learning_snapshot(workspace: &Path) -> Result<LearningSnapshot, DomainError> {
     let database_path = learning_database_path(None, workspace);
     if !database_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
 
     let connection =
