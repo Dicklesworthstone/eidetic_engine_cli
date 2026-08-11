@@ -62,6 +62,38 @@
             "redactionManifest": {"type": "object", "description": "What was redacted and why — redaction is recorded, never silent."},
             "hashManifest": {"type": "object", "description": "Per-entry blake3 hashes that compose the bundleHash."},
             "omissions": {"type": "array", "description": "Recorded omissions (no silent loss).", "items": {"type": "object"}},
+            "seal": {
+              "type": "object",
+              "description": "Optional commit-reveal proof for a sealed memory. Contains only the commitment and reveal-state timestamps; raw memory content and filesystem paths are forbidden by the closed property set.",
+              "required": [
+                "contentCommitment",
+                "sealedAt",
+                "revealedAt",
+                "revealVerified"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "contentCommitment": {
+                  "type": "string",
+                  "pattern": "^blake3:[0-9a-f]{64}$",
+                  "description": "Domain-separated blake3 commitment over the exact sealed content bytes; never the raw content."
+                },
+                "sealedAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "RFC 3339 timestamp recording when the commitment was sealed."
+                },
+                "revealedAt": {
+                  "type": ["string", "null"],
+                  "format": "date-time",
+                  "description": "RFC 3339 timestamp for a verified reveal, or null while unrevealed."
+                },
+                "revealVerified": {
+                  "type": ["boolean", "null"],
+                  "description": "True after a reveal matched the commitment, otherwise null while unrevealed."
+                }
+              }
+            },
             "trustStatement": {
               "type": "object",
               "required": ["scope", "statement"],
