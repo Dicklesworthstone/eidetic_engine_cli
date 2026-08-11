@@ -69990,6 +69990,20 @@ mod tests {
     fn orient_fast_renders_live_content_in_json_and_human_output() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = temp.path();
+        let init_report = init_workspace(&InitOptions {
+            workspace_path: workspace.to_path_buf(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        if matches!(init_report.status, crate::core::init::InitStatus::Failed) {
+            return Err(format!(
+                "initialize orient CLI fixture: {:?}",
+                init_report.action_errors
+            ));
+        }
         let remembered =
             crate::core::memory::remember_memory(&crate::core::memory::RememberMemoryOptions {
                 workspace_path: workspace,
