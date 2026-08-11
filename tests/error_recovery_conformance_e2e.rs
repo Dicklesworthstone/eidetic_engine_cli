@@ -738,7 +738,154 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
             addressed_store.display()
         ),
     )?;
+
+    // A lookup miss must never create state: after the failed remember and
+    // search plus both orient renders, the addressed store directory must
+    // still not exist at the storeless leaf.
+    ensure(
+        !leaf.join(".ee").exists() && !addressed_store.exists(),
+        format!(
+            "storeless lookups must not create the addressed store; {} must stay absent",
+            leaf.join(".ee").display()
+        ),
+    )?;
     Ok(())
+}
+
+/// bd-workspace-miss-init-suggestion-sfjvq quoting follow-up: when the
+/// nearby populated store lives at a path with spaces, the storeless repair
+/// hint must shell-quote its retarget argument and orient's retargeted next
+/// command must stay executable end-to-end against the exact store.
+#[test]
+fn storeless_miss_quotes_spaced_nearby_workspace_and_command_executes() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let store_root = tempdir.path().join("nearby store sfjvq");
+    let leaf = store_root.join("sub").join("storeless leaf sfjvq");
+    std::fs::create_dir_all(&leaf).map_err(|error| error.to_string())?;
+    // Pin the parent walk: discovery stops at the first .git it sees.
+    std::fs::create_dir_all(store_root.join(".git")).map_err(|error| error.to_string())?;
+    let store_root_str = store_root.to_string_lossy().to_string();
+    let leaf_str = leaf.to_string_lossy().to_string();
+
+    let init = run_ee(&[
+        "init".to_owned(),
+        "--workspace".to_owned(),
+        store_root_str.clone(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        init.status.success(),
+        format!(
+            "init of the spaced nearby store failed: {}",
+            String::from_utf8_lossy(&init.stdout)
+        ),
+    )?;
+    let seed_content = "spaced quoting seed fact for retarget execution";
+    let seeded = run_ee(&[
+        "--workspace".to_owned(),
+        store_root_str.clone(),
+        "remember".to_owned(),
+        seed_content.to_owned(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        seeded.status.success(),
+        format!(
+            "seeding the spaced nearby store failed: {}",
+            String::from_utf8_lossy(&seeded.stdout)
+        ),
+    )?;
+    let canonical_root = store_root
+        .canonicalize()
+        .map_err(|error| format!("canonicalize spaced store root: {error}"))?;
+    let quoted_root = format!("'{}'", canonical_root.to_string_lossy());
+
+    let miss = run_ee(&[
+        "--workspace".to_owned(),
+        leaf_str.clone(),
+        "remember".to_owned(),
+        "spaced storeless leaf fact".to_owned(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        miss.status.code() == Some(10),
+        format!(
+            "spaced storeless remember must exit 10, got {:?}",
+            miss.status.code()
+        ),
+    )?;
+    let miss_json = stdout_json(&miss, "spaced storeless remember")?;
+    ensure(
+        string_at(&miss_json, "/error/code", "spaced storeless remember")?
+            == "workspace_store_missing",
+        "spaced storeless remember must carry the workspace_store_missing code".to_owned(),
+    )?;
+    let repair = string_at(&miss_json, "/error/repair", "spaced storeless remember")?;
+    ensure(
+        repair.contains(&format!("retarget with --workspace {quoted_root}")),
+        format!(
+            "repair must shell-quote the spaced nearby workspace so the hint is executable, got: {repair}"
+        ),
+    )?;
+
+    let orient = run_ee(&[
+        "--workspace".to_owned(),
+        leaf_str.clone(),
+        "orient".to_owned(),
+        seed_content.to_owned(),
+        "--fast".to_owned(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        orient.status.success(),
+        format!(
+            "spaced storeless orient failed: {}",
+            String::from_utf8_lossy(&orient.stderr)
+        ),
+    )?;
+    let orient_json = stdout_json(&orient, "spaced storeless orient")?;
+    let first_next_command = string_at(
+        &orient_json,
+        "/data/nextCommands/0",
+        "spaced orient retargeted next command",
+    )?;
+    ensure(
+        first_next_command.contains(&quoted_root),
+        format!("orient must quote the spaced retarget workspace, got: {first_next_command:?}"),
+    )?;
+    let emitted = run_emitted_ee_command_with_registry(
+        first_next_command,
+        &tempdir.path().join("emitted-spaced-registry.db"),
+    )?;
+    ensure(
+        emitted.status.success(),
+        format!(
+            "quoted spaced retarget command must execute: stdout={} stderr={}",
+            String::from_utf8_lossy(&emitted.stdout),
+            String::from_utf8_lossy(&emitted.stderr)
+        ),
+    )?;
+    let emitted_json = stdout_json(&emitted, "spaced emitted pack command")?;
+    let emitted_items = array_at(
+        &emitted_json,
+        "/data/pack/items",
+        "spaced emitted pack command",
+    )?;
+    ensure(
+        emitted_items.iter().any(|item| {
+            item.pointer("/content").and_then(serde_json::Value::as_str) == Some(seed_content)
+        }),
+        format!(
+            "executing the quoted retarget must return content from the spaced store: {emitted_items:?}"
+        ),
+    )?;
+    ensure(
+        !leaf.join(".ee").exists(),
+        format!(
+            "spaced storeless lookups must not create the addressed store; {} must stay absent",
+            leaf.join(".ee").display()
+        ),
+    )
 }
 
 /// bd-orient-store-discovery-ft1z5 literal acceptance, empty-root flavor: an

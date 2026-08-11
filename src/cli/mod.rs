@@ -38768,10 +38768,12 @@ where
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found: {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
-        };
+        // A lookup miss is an addressing failure, never a mandate to create
+        // state: use the canonical storeless identity (exact looked-for
+        // path, nearby stores first, `ee init` last and conditional, exit
+        // code 10) instead of a bare init-first storage error
+        // (bd-workspace-miss-init-suggestion-sfjvq).
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -42090,10 +42092,12 @@ where
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found: {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
-        };
+        // A lookup miss is an addressing failure, never a mandate to create
+        // state: use the canonical storeless identity (exact looked-for
+        // path, nearby stores first, `ee init` last and conditional, exit
+        // code 10) instead of a bare init-first storage error
+        // (bd-workspace-miss-init-suggestion-sfjvq).
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
@@ -42589,10 +42593,12 @@ where
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found: {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
-        };
+        // A lookup miss is an addressing failure, never a mandate to create
+        // state: use the canonical storeless identity (exact looked-for
+        // path, nearby stores first, `ee init` last and conditional, exit
+        // code 10) instead of a bare init-first storage error
+        // (bd-workspace-miss-init-suggestion-sfjvq).
+        let domain_error = crate::core::storeless_workspace_error(&database_path);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 

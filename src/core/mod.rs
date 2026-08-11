@@ -564,6 +564,24 @@ where
     }))
 }
 
+/// Single-quote a repair-hint argument whenever it contains
+/// shell-significant characters, so the copy-pasteable retarget command
+/// stays executable for workspace paths with spaces or quotes. Same rules
+/// as the CLI's `shell_quote_cli_arg`.
+#[must_use]
+fn shell_quote_repair_arg(value: &str) -> String {
+    if value.is_empty() {
+        "''".to_owned()
+    } else if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
 /// Repair guidance for a storeless-workspace miss with safe ordering
 /// (bd-workspace-miss-init-suggestion-sfjvq): re-check the addressing
 /// first, point at nearby populated stores when any exist, and mention
@@ -589,7 +607,9 @@ pub fn storeless_workspace_repair(database_path: &std::path::Path) -> String {
     {
         return format!(
             "Re-check --workspace addressing (looked for {looked_for}); a populated store exists at {} ({} docs) — retarget with --workspace {}. Only if you intended to create a NEW store here: ee init --workspace .",
-            best.workspace_root, best.documents, best.workspace_root,
+            best.workspace_root,
+            best.documents,
+            shell_quote_repair_arg(&best.workspace_root),
         );
     }
     format!(
@@ -658,7 +678,7 @@ mod tests {
         BUILD_TIMESTAMP_POLICY, RuntimeProfile, VERSION_PROVENANCE_SCHEMA_V1, VersionReport,
         build_features, build_info, clean_build_metadata, db_migration_range,
         duration_millis_saturating, parse_build_bool, run_cli_future, runtime_status,
-        serialize_or_error, serialize_pretty_or_error, supported_schemas,
+        serialize_or_error, serialize_pretty_or_error, shell_quote_repair_arg, supported_schemas,
     };
 
     type TestResult = Result<(), String>;
@@ -702,6 +722,30 @@ mod tests {
         ensure(
             info.min_db_migration <= info.max_db_migration,
             "database migration range must be ordered",
+        )
+    }
+
+    #[test]
+    fn storeless_repair_arg_quoting_keeps_retarget_commands_executable() -> TestResult {
+        ensure_equal(
+            &shell_quote_repair_arg("/plain/path-1.2:x"),
+            &"/plain/path-1.2:x".to_owned(),
+            "plain paths stay unquoted",
+        )?;
+        ensure_equal(
+            &shell_quote_repair_arg("/tmp/nearby store root"),
+            &"'/tmp/nearby store root'".to_owned(),
+            "a spaced path must be single-quoted",
+        )?;
+        ensure_equal(
+            &shell_quote_repair_arg("/tmp/it's here"),
+            &"'/tmp/it'\\''s here'".to_owned(),
+            "an embedded single quote must be escaped",
+        )?;
+        ensure_equal(
+            &shell_quote_repair_arg(""),
+            &"''".to_owned(),
+            "an empty value must stay a visible empty argument",
         )
     }
 
