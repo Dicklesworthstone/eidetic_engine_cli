@@ -428,7 +428,7 @@ pub fn discover_nearby_stores(
     // (a) children, breadth-first, bounded depth.
     let mut frontier = vec![(workspace_path.to_path_buf(), 0_usize)];
     while let Some((dir, depth)) = frontier.pop() {
-        if started.elapsed() > budget {
+        if started.elapsed() >= budget {
             scan.truncated = true;
             break;
         }
@@ -446,7 +446,7 @@ pub fn discover_nearby_stores(
             // wall-clock bound while we enumerate it. Checking only between
             // directories lets one directory with millions of entries turn
             // this read-only recovery hint into an unbounded walk.
-            if started.elapsed() > budget {
+            if started.elapsed() >= budget {
                 scan.truncated = true;
                 frontier.clear();
                 break;
@@ -472,9 +472,13 @@ pub fn discover_nearby_stores(
     }
 
     // (b) parents up to (and including) the git root.
-    let mut parent = workspace_path.parent();
+    let mut parent = if workspace_path.join(".git").exists() {
+        None
+    } else {
+        workspace_path.parent()
+    };
     while let Some(dir) = parent {
-        if started.elapsed() > budget {
+        if started.elapsed() >= budget {
             scan.truncated = true;
             break;
         }
@@ -486,7 +490,7 @@ pub fn discover_nearby_stores(
     }
 
     for candidate in candidates {
-        if started.elapsed() > budget {
+        if started.elapsed() >= budget {
             scan.truncated = true;
             break;
         }
@@ -1008,6 +1012,7 @@ mod tests {
     #[test]
     fn discovery_finds_populated_child_store() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(temp.path().join(".git")).map_err(|error| error.to_string())?;
         let child = temp.path().join("campaign");
         std::fs::create_dir_all(&child).map_err(|error| error.to_string())?;
         remember_fixture(&child, "Nearby store rule one.", "nearby", None)?;
@@ -1079,31 +1084,161 @@ mod tests {
     }
 
     #[test]
-    fn discovery_ranks_candidates_by_document_count() -> TestResult {
+    fn discovery_respects_depth_skip_markers_and_ranks_candidates() -> TestResult {
+        let expected_skip_dirs: &[&str] = &[
+            ".git",
+            ".hg",
+            ".svn",
+            ".venv",
+            "venv",
+            "node_modules",
+            "target",
+            "dist",
+            "build",
+            ".cache",
+            ".rch-tmp",
+            ".doctor",
+        ];
+        ensure_equal(
+            &NEARBY_STORE_SKIP_DIRS,
+            &expected_skip_dirs,
+            "bounded discovery skip list",
+        )?;
+
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(temp.path().join(".git")).map_err(|error| error.to_string())?;
         let small = temp.path().join("small");
-        let large = temp.path().join("large");
-        std::fs::create_dir_all(&small).map_err(|error| error.to_string())?;
-        std::fs::create_dir_all(&large).map_err(|error| error.to_string())?;
+        let campaign = temp.path().join("campaign-marker");
+        let depth_three = temp
+            .path()
+            .join("nested")
+            .join("level-two")
+            .join("depth-three");
+        let depth_four = depth_three.join("depth-four");
+        let skipped = temp.path().join("target").join("skipped-store");
+        for workspace in [&small, &campaign, &depth_three, &depth_four, &skipped] {
+            std::fs::create_dir_all(workspace).map_err(|error| error.to_string())?;
+        }
+
         remember_fixture(&small, "Small store single rule.", "nearby", None)?;
-        remember_fixture(&large, "Large store rule one.", "nearby", None)?;
-        remember_fixture(&large, "Large store rule two.", "nearby", None)?;
+        for index in 1..=2 {
+            remember_fixture(
+                &campaign,
+                &format!("Campaign-marker store rule {index}."),
+                "nearby",
+                None,
+            )?;
+        }
+        std::fs::rename(campaign.join(".ee"), campaign.join(".ee-campaign"))
+            .map_err(|error| error.to_string())?;
+        for index in 1..=3 {
+            remember_fixture(
+                &depth_three,
+                &format!("Depth-three store rule {index}."),
+                "nearby",
+                None,
+            )?;
+        }
+        for index in 1..=4 {
+            remember_fixture(
+                &depth_four,
+                &format!("Depth-four store rule {index}."),
+                "nearby",
+                None,
+            )?;
+        }
+        for index in 1..=5 {
+            remember_fixture(
+                &skipped,
+                &format!("Skipped target store rule {index}."),
+                "nearby",
+                None,
+            )?;
+        }
 
         let scan = discover_nearby_stores(temp.path(), scan_budget());
-        ensure_equal(&scan.stores.len(), &2_usize, "two nearby stores")?;
+        ensure_equal(&scan.stores.len(), &3_usize, "three eligible stores")?;
         ensure(
-            scan.stores[0].workspace_root.ends_with("large"),
-            format!("largest store must rank first: {:?}", scan.stores),
+            scan.stores[0].workspace_root.ends_with("depth-three")
+                && scan.stores[0].documents == 3
+                && scan.stores[1].workspace_root.ends_with("campaign-marker")
+                && scan.stores[1].documents == 2
+                && scan.stores[1].store_dir.ends_with(".ee-campaign")
+                && scan.stores[2].workspace_root.ends_with("small")
+                && scan.stores[2].documents == 1,
+            format!(
+                "eligible stores must rank by document count and include .ee-campaign: {:?}",
+                scan.stores
+            ),
         )?;
         ensure(
-            scan.stores[0].documents > scan.stores[1].documents,
-            format!("ranking must be by document count: {:?}", scan.stores),
+            scan.stores.iter().all(|store| {
+                !store.workspace_root.ends_with("depth-four")
+                    && !store.workspace_root.ends_with("skipped-store")
+            }),
+            format!(
+                "depth-four and target-contained stores must be excluded: {:?}",
+                scan.stores
+            ),
+        )
+    }
+
+    #[test]
+    fn discovery_parent_scan_stops_at_nearest_git_root_and_not_above_workspace_git_root()
+    -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let git_root = temp.path().join("nearest-git-root");
+        let workspace = git_root.join("subdir").join("workspace");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        remember_fixture(temp.path(), "Store above Git root.", "nearby", None)?;
+        remember_fixture(&git_root, "Store at nearest Git root.", "nearby", None)?;
+        std::fs::create_dir_all(git_root.join(".git")).map_err(|error| error.to_string())?;
+
+        let ancestor_scan = discover_nearby_stores(&workspace, scan_budget());
+        ensure_equal(
+            &ancestor_scan.stores.len(),
+            &1_usize,
+            "only nearest Git-root store",
+        )?;
+        ensure(
+            ancestor_scan.stores[0]
+                .workspace_root
+                .ends_with("nearest-git-root"),
+            format!(
+                "nearest Git root must be included and ancestors excluded: {:?}",
+                ancestor_scan.stores
+            ),
+        )?;
+
+        std::fs::create_dir_all(workspace.join(".git")).map_err(|error| error.to_string())?;
+        let workspace_root_scan = discover_nearby_stores(&workspace, scan_budget());
+        ensure_equal(
+            &workspace_root_scan.stores.len(),
+            &0_usize,
+            "workspace Git root must not scan parents",
+        )
+    }
+
+    #[test]
+    fn discovery_zero_budget_truncates_before_scanning() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let child = temp.path().join("populated-child");
+        std::fs::create_dir_all(&child).map_err(|error| error.to_string())?;
+        remember_fixture(&child, "Unscanned store rule.", "nearby", None)?;
+
+        let scan = discover_nearby_stores(temp.path(), std::time::Duration::ZERO);
+        ensure(scan.truncated, "zero-budget scan must truncate".to_owned())?;
+        ensure_equal(
+            &scan.stores.len(),
+            &0_usize,
+            "zero-budget scan must not inspect candidates",
         )
     }
 
     #[test]
     fn discovery_excludes_own_store_and_empty_dirs() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(temp.path().join(".git")).map_err(|error| error.to_string())?;
         // The addressed workspace has its own populated store: it must not
         // report itself, and an empty sibling dir contributes nothing.
         remember_fixture(temp.path(), "Own store rule.", "own", None)?;
@@ -1120,6 +1255,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(temp.path().join(".git")).map_err(|error| error.to_string())?;
         let open_child = temp.path().join("open");
         let locked = temp.path().join("locked");
         std::fs::create_dir_all(&open_child).map_err(|error| error.to_string())?;
@@ -1145,6 +1281,8 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(workspace.path().join(".git"))
+            .map_err(|error| error.to_string())?;
         let outside = tempfile::tempdir().map_err(|error| error.to_string())?;
         remember_fixture(
             outside.path(),

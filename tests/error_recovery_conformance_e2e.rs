@@ -443,10 +443,11 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
         human.contains(addressed_store_str.as_ref())
             && human.contains(best_path)
             && human.contains(&format!("{best_documents} docs"))
-            && human.contains(&format!("last write {best_last_write}")),
+            && human.contains(&format!("last write {best_last_write}"))
+            && human.contains(first_next_command),
         format!(
-            "human orient must print the addressed store plus nearby path/documents/last-write; \
-             addressed={}, path={best_path:?}, documents={best_documents}, lastWrite={best_last_write:?}\n{human}",
+            "human orient must print the addressed store, nearby path/documents/last-write, and exact retargeted command; \
+             addressed={}, path={best_path:?}, documents={best_documents}, lastWrite={best_last_write:?}, command={first_next_command:?}\n{human}",
             addressed_store.display()
         ),
     )?;
@@ -458,8 +459,8 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
 /// store below it, surface it in `--json` `data.storeDiscovery`
 /// (workspaceRoot/documents/lastWrite plus the bounded-scan `truncated` flag)
 /// and in the human render, and retarget `nextCommands[0]` at the best
-/// candidate — while a populated root must skip discovery entirely
-/// (`storeEmpty=false`, `scanned=false`, no nearbyStores, no retarget).
+/// candidate — while a populated root must omit `storeDiscovery` entirely and
+/// keep its Next commands addressed to itself.
 #[test]
 fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -578,15 +579,50 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
     ensure(
         human.contains("copulattice_ft1z5")
             && human.contains(&format!("{best_documents} docs"))
-            && human.contains(&format!("last write {best_last_write}")),
+            && human.contains(&format!("last write {best_last_write}"))
+            && human.contains(first_next_command),
         format!(
-            "human orient at the empty root must print the child path/documents/last-write; \
-             documents={best_documents}, lastWrite={best_last_write:?}\n{human}"
+            "human orient at the empty root must print the child path/documents/last-write and exact retargeted command; \
+             documents={best_documents}, lastWrite={best_last_write:?}, command={first_next_command:?}\n{human}"
         ),
     )?;
 
-    // A populated root must skip discovery entirely: no scan, no candidate
-    // list, no retargeted next command pointing away from the root.
+    // Full mode must expose the same discovery contract and retargeting as
+    // fast mode when the addressed store is empty.
+    let orient_full = run_ee(&[
+        "--workspace".to_owned(),
+        root_str.clone(),
+        "orient".to_owned(),
+        "--json".to_owned(),
+    ])?;
+    let orient_full_json = stdout_json(&orient_full, "full orient empty initialized root")?;
+    let full_discovery = orient_full_json
+        .pointer("/data/storeDiscovery")
+        .ok_or("full orient empty root: missing storeDiscovery block")?;
+    let full_best = full_discovery
+        .pointer("/nearbyStores/0")
+        .ok_or("full orient empty root: missing best nearby store")?;
+    let full_next_command = string_at(
+        &orient_full_json,
+        "/data/nextCommands/0",
+        "full orient retargeted next command",
+    )?;
+    ensure(
+        full_discovery["storeEmpty"] == serde_json::json!(true)
+            && full_discovery["scanned"] == serde_json::json!(true)
+            && string_at(full_best, "/workspaceRoot", "full orient best nearby child")?
+                == best_path
+            && full_best["documents"].as_u64() == Some(best_documents)
+            && string_at(full_best, "/lastWrite", "full orient best nearby child")?
+                == best_last_write
+            && full_next_command == first_next_command,
+        format!(
+            "full orient must match fast-mode discovery and retargeting; fast={discovery}, full={full_discovery}, fastCommand={first_next_command:?}, fullCommand={full_next_command:?}"
+        ),
+    )?;
+
+    // A populated root must omit discovery entirely and must not retarget a
+    // next command away from the root.
     let root_seed = run_ee(&[
         "--workspace".to_owned(),
         root_str.clone(),
@@ -609,17 +645,12 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         "--json".to_owned(),
     ])?;
     let populated_json = stdout_json(&populated, "orient populated root")?;
-    let populated_discovery = populated_json
-        .pointer("/data/storeDiscovery")
-        .ok_or("orient populated root: missing storeDiscovery block")?;
     ensure(
-        populated_discovery["storeEmpty"] == serde_json::json!(false)
-            && populated_discovery["scanned"] == serde_json::json!(false),
-        format!("a populated root must not scan for nearby stores, got: {populated_discovery}"),
-    )?;
-    ensure(
-        populated_discovery.get("nearbyStores").is_none(),
-        format!("a populated root must not list nearby stores, got: {populated_discovery}"),
+        populated_json.pointer("/data/storeDiscovery").is_none(),
+        format!(
+            "a populated root must omit storeDiscovery entirely, got: {}",
+            populated_json["data"]
+        ),
     )?;
     let populated_first_next = string_at(
         &populated_json,

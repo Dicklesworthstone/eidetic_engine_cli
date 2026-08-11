@@ -39193,7 +39193,7 @@ where
         );
     }
 
-    let data = serde_json::json!({
+    let mut data = serde_json::json!({
         "schema": "ee.orient.v1",
         "command": "orient",
         "mode": if args.fast { "fast" } else { "full" },
@@ -39213,9 +39213,13 @@ where
         "decisions": decisions,
         "learnGaps": learn_gaps,
         "revivals": revivals,
-        "storeDiscovery": store_discovery,
         "nextCommands": next_commands,
     });
+    if let Some(store_discovery) = store_discovery
+        && let Some(data) = data.as_object_mut()
+    {
+        data.insert("storeDiscovery".to_owned(), store_discovery);
+    }
 
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
@@ -39464,24 +39468,18 @@ fn orient_store_looks_empty(
 }
 
 /// Scan for nearby populated stores when orientation came back empty
-/// (bd-orient-store-discovery-ft1z5). Returns the JSON block plus the best
-/// candidate workspace for a retargeted next command.
+/// (bd-orient-store-discovery-ft1z5). Returns an optional JSON block plus the
+/// best candidate workspace for a retargeted next command. Populated content
+/// omits `storeDiscovery` entirely.
 fn orient_store_discovery(
     workspace: &Path,
     fast: bool,
     pack: &serde_json::Value,
     fast_content: Option<&serde_json::Value>,
-) -> (serde_json::Value, Option<String>) {
+) -> (Option<serde_json::Value>, Option<String>) {
     let addressed_store_path = workspace.join(".ee").join("ee.db");
     if !orient_store_looks_empty(fast, pack, fast_content) {
-        return (
-            serde_json::json!({
-                "addressedStorePath": addressed_store_path,
-                "storeEmpty": false,
-                "scanned": false,
-            }),
-            None,
-        );
+        return (None, None);
     }
     let scan = crate::core::orient::discover_nearby_stores(
         workspace,
@@ -39498,7 +39496,7 @@ fn orient_store_discovery(
         "truncated": scan.truncated,
         "nearbyStores": scan.stores,
     });
-    (value, best)
+    (Some(value), best)
 }
 
 fn orient_pack_command(workspace: &Path, task: &str, max_tokens: u32) -> String {
@@ -66936,6 +66934,41 @@ mod tests {
             ensure_contains(&orient, expected, "orient revival human posture")?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn orient_populated_content_omits_store_discovery_in_both_modes() -> TestResult {
+        let populated_pack = serde_json::json!({
+            "pack": {
+                "items": [{"id": "mem_full"}]
+            }
+        });
+        let populated_fast = serde_json::json!({
+            "recent": [{"id": "mem_fast"}],
+            "relevant": []
+        });
+
+        let (full_discovery, full_best) = super::orient_store_discovery(
+            std::path::Path::new("/fixture/populated"),
+            false,
+            &populated_pack,
+            None,
+        );
+        ensure(
+            full_discovery.is_none() && full_best.is_none(),
+            "populated full-mode content must omit storeDiscovery",
+        )?;
+
+        let (fast_discovery, fast_best) = super::orient_store_discovery(
+            std::path::Path::new("/fixture/populated"),
+            true,
+            &serde_json::Value::Null,
+            Some(&populated_fast),
+        );
+        ensure(
+            fast_discovery.is_none() && fast_best.is_none(),
+            "populated fast-mode content must omit storeDiscovery",
+        )
     }
 
     #[test]
