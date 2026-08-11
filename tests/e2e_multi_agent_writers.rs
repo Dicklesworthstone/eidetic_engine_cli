@@ -113,7 +113,8 @@ fn single_shot_write_contention_script_real_binary_acceptance_bridge() -> TestRe
         "journal_rows_persisted",
         "remembered_ids_are_complete_and_unique",
         "every_remember_response_is_durably_readable",
-        "remembered_facts_searchable",
+        "search_index_fresh_before_search",
+        "search_doc_ids_equal_remember_response_ids",
     ]
     .into_iter()
     .map(str::to_owned)

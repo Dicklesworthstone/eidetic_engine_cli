@@ -46,6 +46,8 @@ LOG_DIR="${ROOT}/logs"
 EVENT_LOG="${LOG_DIR}/events.jsonl"
 mkdir -p "${WS}" "${LOG_DIR}"
 : >"${EVENT_LOG}"
+RUN_TOKEN="$(basename "${ROOT}" | tr -cd '[:alnum:]')"
+CONTENT_MARKER="contentionfact${RUN_TOKEN}"
 
 event() {
     local label="$1" status="$2" diagnosis="${3:-}"
@@ -84,7 +86,7 @@ worker() {
         else
             kind="remember"
             out="$("${REAL_EE}" --workspace "${WS}" remember \
-                "contention fact w${worker_id}-${j}" --json 2>>"${results}.stderr")"
+                "${CONTENT_MARKER} w${worker_id}-${j}" --json 2>>"${results}.stderr")"
             rc=$?
         fi
         local success schema persisted memory_id label
@@ -174,7 +176,7 @@ while read -r _ label memory_id; do
     show_stderr="${LOG_DIR}/memory-show-${label}.stderr"
     show_json="$("${REAL_EE}" --workspace "${WS}" memory show "${memory_id}" --json 2>"${show_stderr}")"
     show_rc=$?
-    expected_content="contention fact ${label}"
+    expected_content="${CONTENT_MARKER} ${label}"
     if [[ "${show_rc}" -ne 0 ]] || ! jq -e --arg memory_id "${memory_id}" --arg content "${expected_content}" '
         .schema == "ee.response.v2"
         and .success == true
@@ -194,16 +196,76 @@ else
     event every_remember_response_is_durably_readable fail "showFailures=${show_failures}; first=${show_diagnosis:-missing response IDs}"
 fi
 
+# The writer path must converge the derived index before any search can
+# trigger read repair. Numeric/non-null generations plus exact corpus counts
+# rule out null-equality and partial-index false positives.
+index_stderr="${LOG_DIR}/index-status.stderr"
+index_json="$("${REAL_EE}" --workspace "${WS}" index status --json 2>"${index_stderr}")"
+index_rc=$?
+if [[ "${index_rc}" -eq 0 ]] && jq -e --argjson expected_memories "${expected_memories}" '
+    .schema == "ee.response.v2"
+    and .success == true
+    and .data.health == "ready"
+    and .data.indexExists == true
+    and (.data.dbGeneration | type) == "number"
+    and (.data.indexGeneration | type) == "number"
+    and .data.indexGeneration == .data.dbGeneration
+    and .data.dbMemoryCount == $expected_memories
+    and .data.indexDocumentCount == $expected_memories
+    and .data.indexDocumentCounts.memories == $expected_memories
+    and (.data.actualCorpusRevision | type) == "string"
+    and (.data.expectedCorpusRevision | type) == "string"
+    and .data.actualCorpusRevision == .data.expectedCorpusRevision
+    and .data.degradationCode == null
+    and .data.degraded == []
+    and .data.repairHint == null
+    and .data.lastCheckError == null
+' <<<"${index_json}" >/dev/null; then
+    event search_index_fresh_before_search pass
+else
+    event search_index_fresh_before_search fail \
+        "expected ready generation-matched ${expected_memories}-memory index before search, rc=${index_rc}; stderr=$(head -c 240 "${index_stderr}"); stdout=$(head -c 400 <<<"${index_json}")"
+fi
+
 search_stderr="${LOG_DIR}/search.stderr"
-memory_json="$("${REAL_EE}" --workspace "${WS}" search "contention fact" --limit 100 \
+memory_json="$("${REAL_EE}" --workspace "${WS}" search "${CONTENT_MARKER}" --limit "${expected_memories}" \
     --source-mode lexical_only --strict-source-mode --json 2>"${search_stderr}")"
 search_rc=$?
 memory_count="$(jq -r '.data.resultCount // (.data.results | length) // -1' <<<"${memory_json}" 2>/dev/null || echo -1)"
-if [[ "${search_rc}" -eq 0 && "${memory_count}" == "${expected_memories}" ]]; then
-    event remembered_facts_searchable pass
+expected_ids="${LOG_DIR}/expected-memory-ids.sorted"
+actual_ids="${LOG_DIR}/actual-search-doc-ids.sorted"
+awk '{print $3}' "${memory_rows}" | LC_ALL=C sort >"${expected_ids}"
+search_shape_ok=false
+if jq -e '
+    .schema == "ee.response.v2"
+    and .success == true
+    and (.data.results | type) == "array"
+    and all(.data.results[]; (.docId | type) == "string" and (.docId | length) > 0)
+    and all((.degraded // [])[];
+        .code as $code
+        | (["search_index_stale", "index_stale", "stale_index", "search_index_large_gap"]
+            | index($code) | not))
+    and all((.data.degraded // [])[];
+        .code as $code
+        | (["search_index_stale", "index_stale", "stale_index", "search_index_large_gap"]
+            | index($code) | not))
+' <<<"${memory_json}" >/dev/null 2>&1; then
+    search_shape_ok=true
+    jq -r '.data.results[].docId' <<<"${memory_json}" | LC_ALL=C sort >"${actual_ids}"
 else
-    event remembered_facts_searchable fail \
-        "expected ${expected_memories} searchable facts, rc=${search_rc}, resultCount=${memory_count}; stderr=$(head -c 240 "${search_stderr}"); stdout=$(head -c 240 <<<"${memory_json}")"
+    : >"${actual_ids}"
+fi
+actual_id_count="$(wc -l <"${actual_ids}" | tr -d ' ')"
+if [[ "${search_rc}" -eq 0 \
+    && "${search_shape_ok}" == "true" \
+    && "${memory_count}" == "${expected_memories}" \
+    && "${actual_id_count}" == "${expected_memories}" ]] \
+    && cmp -s "${expected_ids}" "${actual_ids}"; then
+    event search_doc_ids_equal_remember_response_ids pass
+else
+    id_diff="$(diff -u "${expected_ids}" "${actual_ids}" 2>/dev/null | head -c 400 || true)"
+    event search_doc_ids_equal_remember_response_ids fail \
+        "expected exact ${expected_memories}-ID search set, rc=${search_rc}, shape=${search_shape_ok}, resultCount=${memory_count}, actualIds=${actual_id_count}; diff=${id_diff}; stderr=$(head -c 240 "${search_stderr}"); stdout=$(head -c 240 <<<"${memory_json}")"
 fi
 
 echo
