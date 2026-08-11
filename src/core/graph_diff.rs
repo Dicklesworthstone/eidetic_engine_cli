@@ -666,8 +666,8 @@ mod tests {
             1,
             &[
                 ("m1", Some(0.10)),
-                ("m2", Some(0.30)),
-                ("m3", Some(0.20)),
+                ("m2", Some(0.75)),
+                ("m3", Some(0.25)),
                 ("m4", None),
                 ("m5", Some(0.20)),
             ],
@@ -678,8 +678,8 @@ mod tests {
             2,
             &[
                 ("m1", Some(0.40)), // |Δ| = 0.30
-                ("m2", Some(0.10)), // |Δ| = 0.20
-                ("m3", Some(0.40)), // |Δ| = 0.20 — ties with m2, id breaks
+                ("m2", Some(0.50)), // |Δ| = 0.25 exactly (dyadic — ties in f64)
+                ("m3", Some(0.50)), // |Δ| = 0.25 exactly — ties with m2, id breaks
                 ("m4", Some(0.50)), // omitted: no persisted from-side value
                 ("m5", Some(0.20)), // zero delta: not a mover
             ],
