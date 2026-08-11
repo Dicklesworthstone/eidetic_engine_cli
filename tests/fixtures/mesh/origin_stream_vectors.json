@@ -1,0 +1,17 @@
+{
+  "schema": "ee.test_vectors.origin_stream.v1",
+  "comment": "Known-answer vectors pinning the T2.0 preimage encodings (bd-tc-epic-qzk7o.3.1). Regenerate ONLY with a deliberate encoding break + version bump.",
+  "bodyCommitment": {
+    "domain": "ee.mesh.body_commitment.v1",
+    "nonceHexA": "0101010101010101010101010101010101010101010101010101010101010101",
+    "nonceHexB": "0202020202020202020202020202020202020202020202020202020202020202",
+    "bodyUtf8": "identical body bytes across two revisions",
+    "commitmentA": "blake3:538fa5a6139a51fc97e315dcd91fc1e87c76c32deb868be2d397232e8ef5afff",
+    "commitmentB": "blake3:be5c5e8480066d858df28f82d5cf7e54a8bc630505c76703f0cdab2c50ed68e3"
+  },
+  "eventEncoding": {
+    "canonicalPreimage": "{\"originNodeId\":\"node_0000000000000000000000001\",\"payload\":{\"bodyCommitment\":\"blake3:538fa5a6139a51fc97e315dcd91fc1e87c76c32deb868be2d397232e8ef5afff\",\"logicalMemoryId\":\"olm_00000000000000000000000001\",\"operation\":\"create\",\"revisionId\":\"rev_vector\"},\"payloadSchema\":\"ee.mesh.memory_event.v1\",\"prevEventHash\":null,\"producedAt\":\"2026-08-11T00:00:00Z\",\"requiredFeatures\":[\"mesh.origin_stream.v1\"],\"schema\":\"ee.mesh.origin_event.v1\",\"seq\":0,\"signingKeyGeneration\":1,\"teamId\":\"team_0000000000000000000000001\"}",
+    "eventHash": "blake3:7c5649b5843d549792ffa21dab4f8cfb739d44c681158cb898e15a1dc10fa5d2",
+    "eventId": "mesh_oevt_e5f41bd97d5117185c590f8af4"
+  }
+}

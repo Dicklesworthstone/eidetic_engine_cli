@@ -1095,6 +1095,77 @@ mod tests {
     }
 
     #[test]
+    fn known_answer_vectors_pin_the_preimage_encodings() {
+        // tests/fixtures/mesh/origin_stream_vectors.json was generated with
+        // an INDEPENDENT implementation (python struct + b3sum), so this
+        // test cross-checks the Rust canonicalization, the commitment
+        // preimage layout, and the id derivation against fixed constants.
+        // A failure here means the WIRE ENCODING changed — that is a
+        // deliberate versioned break or a bug, never a golden refresh.
+        let raw = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/mesh/origin_stream_vectors.json"),
+        )
+        .expect("read vectors");
+        let vectors: serde_json::Value = serde_json::from_str(&raw).expect("parse vectors");
+
+        let body_vec = &vectors["bodyCommitment"];
+        assert_eq!(body_vec["domain"], BODY_COMMITMENT_DOMAIN);
+        let nonce_a: [u8; 32] = hex_to_32(body_vec["nonceHexA"].as_str().unwrap());
+        let nonce_b: [u8; 32] = hex_to_32(body_vec["nonceHexB"].as_str().unwrap());
+        let body = body_vec["bodyUtf8"].as_str().unwrap().as_bytes();
+        assert_eq!(
+            body_commitment(&nonce_a, body),
+            body_vec["commitmentA"].as_str().unwrap()
+        );
+        assert_eq!(
+            body_commitment(&nonce_b, body),
+            body_vec["commitmentB"].as_str().unwrap()
+        );
+
+        let encoding = &vectors["eventEncoding"];
+        let commitment_a = body_vec["commitmentA"].as_str().unwrap();
+        let preimage = serde_json::json!({
+            "schema": ORIGIN_EVENT_SCHEMA_V1,
+            "teamId": TEAM,
+            "originNodeId": ORIGIN,
+            "signingKeyGeneration": 1,
+            "seq": 0,
+            "prevEventHash": serde_json::Value::Null,
+            "payloadSchema": MEMORY_EVENT_PAYLOAD_SCHEMA_V1,
+            "payload": {
+                "operation": "create",
+                "logicalMemoryId": "olm_00000000000000000000000001",
+                "revisionId": "rev_vector",
+                "bodyCommitment": commitment_a,
+            },
+            "requiredFeatures": ["mesh.origin_stream.v1"],
+            "producedAt": "2026-08-11T00:00:00Z",
+        });
+        let canonical = canonical_json_string(&preimage).unwrap();
+        assert_eq!(
+            canonical,
+            encoding["canonicalPreimage"].as_str().unwrap(),
+            "Rust canonicalization diverged from the independent implementation"
+        );
+        let event_hash = format!("blake3:{}", blake3::hash(canonical.as_bytes()).to_hex());
+        assert_eq!(event_hash, encoding["eventHash"].as_str().unwrap());
+        let event_id = format!(
+            "{ORIGIN_EVENT_ID_PREFIX}{}",
+            &blake3::hash(event_hash.as_bytes()).to_hex().as_str()[..26]
+        );
+        assert_eq!(event_id, encoding["eventId"].as_str().unwrap());
+    }
+
+    fn hex_to_32(hex: &str) -> [u8; 32] {
+        let mut out = [0_u8; 32];
+        for (index, chunk) in hex.as_bytes().chunks(2).enumerate() {
+            out[index] = u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
+        }
+        out
+    }
+
+    #[test]
     fn canonical_encoding_is_key_order_independent() {
         let scrambled: serde_json::Value =
             serde_json::from_str(r#"{"b":1,"a":{"z":true,"m":[{"k":2,"a":1}]}}"#).unwrap();
