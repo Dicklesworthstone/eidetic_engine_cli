@@ -409,8 +409,8 @@ fn storage_database_not_found_recovery_contract() -> TestResult {
 }
 
 /// bd-sfjvq: a storeless miss next to a populated store must point the
-/// caller at that store (remember/search via the freetext repair, orient
-/// via the storeDiscovery block) instead of leading with `ee init`.
+/// caller at that store through the canonical workspace-miss error instead
+/// of leading with `ee init`, including `orient` in JSON and human modes.
 #[test]
 fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -421,7 +421,14 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
     std::fs::create_dir_all(store_root.join(".git")).map_err(|error| error.to_string())?;
     let store_root_str = store_root.to_string_lossy().to_string();
     let leaf_str = leaf.to_string_lossy().to_string();
-    let addressed_store = leaf.join(".ee").join("ee.db");
+    let canonical_store_root = store_root
+        .canonicalize()
+        .map_err(|error| format!("canonicalize nearby store root: {error}"))?;
+    let addressed_store = leaf
+        .canonicalize()
+        .map_err(|error| format!("canonicalize storeless leaf: {error}"))?
+        .join(".ee")
+        .join("ee.db");
     let addressed_store_str = addressed_store.to_string_lossy().to_string();
 
     let init = run_ee(&[
@@ -474,6 +481,17 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
                 "--json".to_owned(),
             ],
         ),
+        (
+            "orient",
+            vec![
+                "--workspace".to_owned(),
+                leaf_str.clone(),
+                "orient".to_owned(),
+                "storeless orientation snapshot".to_owned(),
+                "--fast".to_owned(),
+                "--json".to_owned(),
+            ],
+        ),
     ] {
         let output = run_ee(&verb)?;
         ensure(
@@ -510,6 +528,15 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
             repair.contains("storeless_leaf_sfjvq") && repair.contains("looked for"),
             format!(
                 "{}: repair must print the exact looked-for path, got: {repair}",
+                verb.join(" ")
+            ),
+        )?;
+        ensure(
+            repair.ends_with(
+                "Only if you intended to create a NEW store here: ee init --workspace .",
+            ),
+            format!(
+                "{}: conditional init guidance must be last, got: {repair}",
                 verb.join(" ")
             ),
         )?;
@@ -565,179 +592,87 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
       "repair": "Re-check --workspace addressing (looked for <ADDRESSED_STORE>); a populated store exists at <NEARBY_WORKSPACE> (1 docs) — retarget with --workspace <NEARBY_WORKSPACE>. Only if you intended to create a NEW store here: ee init --workspace ."
     }
     "###);
-
-    let orient = run_ee(&[
-        "--workspace".to_owned(),
-        leaf_str.clone(),
-        "orient".to_owned(),
-        "storeless orientation snapshot".to_owned(),
-        "--fast".to_owned(),
-        "--json".to_owned(),
-    ])?;
-    ensure(
-        orient.status.success(),
-        format!(
-            "orient storeless leaf must succeed with diagnostic discovery: {}",
-            String::from_utf8_lossy(&orient.stderr)
-        ),
-    )?;
-    let orient_json = stdout_json(&orient, "orient storeless leaf")?;
-    let discovery = orient_json
-        .pointer("/data/storeDiscovery")
-        .ok_or("orient storeless leaf: missing storeDiscovery block")?;
-    ensure(
-        discovery["storeEmpty"] == serde_json::json!(true)
-            && discovery["scanned"] == serde_json::json!(true),
-        format!("orient must scan on a storeless workspace, got: {discovery}"),
-    )?;
-    ensure(
-        discovery["addressedStorePath"] == serde_json::json!(addressed_store_str),
-        format!(
-            "orient must report the exact addressed store path {}; got: {discovery}",
-            addressed_store.display()
-        ),
-    )?;
-    let nearby = discovery["nearbyStores"]
-        .as_array()
-        .ok_or("orient storeless leaf: nearbyStores missing")?;
-    let best = nearby
-        .first()
-        .ok_or("orient nearbyStores must include the populated store")?;
-    let best_path = string_at(best, "/workspaceRoot", "orient best nearby store")?;
-    let best_documents = best["documents"]
-        .as_u64()
-        .ok_or("orient best nearby store: documents must be an integer")?;
-    let best_last_write = string_at(best, "/lastWrite", "orient best nearby store")?;
-    ensure(
-        best_path.contains("nearby_store_root_sfjvq"),
-        format!("orient best nearby store must be the populated store, got: {best:?}"),
-    )?;
-    ensure(
-        best_documents > 0,
-        format!("orient best nearby store must report documents > 0, got: {best:?}"),
-    )?;
-    ensure(
-        !best_last_write.is_empty(),
-        format!("orient best nearby store must report lastWrite, got: {best:?}"),
-    )?;
-
-    let first_next_command = string_at(
-        &orient_json,
-        "/data/nextCommands/0",
-        "orient retargeted next command",
-    )?;
-    ensure(
-        first_next_command.starts_with("ee pack ")
-            && first_next_command.contains("--workspace")
-            && first_next_command.contains(best_path),
-        format!(
-            "orient nextCommands[0] must retarget the pack command to the best candidate; \
-             best={best_path:?}, command={first_next_command:?}"
-        ),
-    )?;
-    let next_commands = array_at(
-        &orient_json,
-        "/data/nextCommands",
-        "orient storeless next commands",
-    )?;
-    ensure(
-        next_commands.iter().all(|command| {
-            command
-                .as_str()
-                .is_some_and(|command| !command.contains("ee init"))
-        }),
-        format!(
-            "wrong-cwd orient must retarget toward discovered content without suggesting init: {next_commands:?}"
-        ),
-    )?;
-
-    let orient_snapshot = serde_json::json!({
-        "surface": "orient",
-        "exitCode": orient.status.code(),
-        "schema": orient_json["schema"],
-        "success": orient_json["success"],
-        "storeDiscovery": {
-            "addressedStorePath": normalize_storeless_snapshot_text(
-                string_at(discovery, "/addressedStorePath", "orient store discovery")?,
-                &addressed_store_str,
-                &leaf_str,
-                &store_root_str,
-            ),
-            "storeEmpty": discovery["storeEmpty"],
-            "scanned": discovery["scanned"],
-            "truncatedIsBoolean": discovery["truncated"].is_boolean(),
-            "bestNearbyStore": {
-                "workspaceRoot": normalize_storeless_snapshot_text(
-                    best_path,
-                    &addressed_store_str,
-                    &leaf_str,
-                    &store_root_str,
-                ),
-                "documents": best_documents,
-                "lastWrite": if best_last_write.is_empty() {
-                    "<EMPTY>"
-                } else {
-                    "<NONEMPTY_TIMESTAMP>"
-                },
-            },
-        },
-        "firstNextCommand": normalize_storeless_snapshot_text(
-            first_next_command,
-            &addressed_store_str,
-            &leaf_str,
-            &store_root_str,
-        ),
-    });
+    let orient_snapshot = error_snapshots
+        .remove("orient")
+        .ok_or("orient storeless snapshot missing")?;
     insta::assert_json_snapshot!(orient_snapshot, @r###"
     {
       "surface": "orient",
-      "exitCode": 0,
-      "schema": "ee.response.v2",
-      "success": true,
-      "storeDiscovery": {
-        "addressedStorePath": "<ADDRESSED_STORE>",
-        "storeEmpty": true,
-        "scanned": true,
-        "truncatedIsBoolean": true,
-        "bestNearbyStore": {
-          "workspaceRoot": "<NEARBY_WORKSPACE>",
-          "documents": 1,
-          "lastWrite": "<NONEMPTY_TIMESTAMP>"
-        }
-      },
-      "firstNextCommand": "ee pack --workspace <NEARBY_WORKSPACE> --database <NEARBY_WORKSPACE>/.ee/ee.db --index-dir <NEARBY_WORKSPACE>/.ee/index --read-only --source-mode lexical_only --max-tokens 4000 --json -- 'storeless orientation snapshot'"
+      "exitCode": 10,
+      "schema": "ee.error.v2",
+      "code": "workspace_store_missing",
+      "severity": "high",
+      "message": "Database not found at <ADDRESSED_STORE>",
+      "repair": "Re-check --workspace addressing (looked for <ADDRESSED_STORE>); a populated store exists at <NEARBY_WORKSPACE> (1 docs) — retarget with --workspace <NEARBY_WORKSPACE>. Only if you intended to create a NEW store here: ee init --workspace ."
     }
     "###);
 
-    let orient_human = run_ee(&[
-        "--workspace".to_owned(),
-        leaf_str.clone(),
-        "orient".to_owned(),
-        "storeless orientation snapshot".to_owned(),
-        "--fast".to_owned(),
-    ])?;
-    ensure(
-        orient_human.status.success(),
-        format!(
-            "human orient failed: {}",
-            String::from_utf8_lossy(&orient_human.stderr)
+    for (surface, argv) in [
+        (
+            "remember",
+            vec![
+                "--workspace".to_owned(),
+                leaf_str.clone(),
+                "remember".to_owned(),
+                "human storeless leaf fact".to_owned(),
+            ],
         ),
-    )?;
-    let human = String::from_utf8(orient_human.stdout)
-        .map_err(|error| format!("human orient stdout was not UTF-8: {error}"))?;
-    ensure(
-        human.contains(&addressed_store_str)
-            && human.contains(best_path)
-            && human.contains(&format!("{best_documents} docs"))
-            && human.contains(&format!("last write {best_last_write}"))
-            && human.contains(first_next_command)
-            && !human.contains("ee init"),
-        format!(
-            "human orient must print the addressed store, nearby path/documents/last-write, and exact retargeted command without suggesting init; \
-             addressed={}, path={best_path:?}, documents={best_documents}, lastWrite={best_last_write:?}, command={first_next_command:?}\n{human}",
-            addressed_store.display()
+        (
+            "search",
+            vec![
+                "--workspace".to_owned(),
+                leaf_str.clone(),
+                "search".to_owned(),
+                "human storeless leaf".to_owned(),
+            ],
         ),
-    )?;
+        (
+            "orient",
+            vec![
+                "--workspace".to_owned(),
+                leaf_str.clone(),
+                "orient".to_owned(),
+                "human storeless orientation".to_owned(),
+                "--fast".to_owned(),
+            ],
+        ),
+    ] {
+        let output = run_ee(&argv)?;
+        ensure(
+            output.status.code() == Some(10),
+            format!(
+                "human {surface}: storeless miss must exit 10, got {:?}",
+                output.status.code()
+            ),
+        )?;
+        ensure(
+            output.stdout.is_empty(),
+            format!(
+                "human {surface}: workspace miss must reserve stdout, got {}",
+                String::from_utf8_lossy(&output.stdout)
+            ),
+        )?;
+        let human = String::from_utf8(output.stderr)
+            .map_err(|error| format!("human {surface} stderr was not UTF-8: {error}"))?;
+        let addressing = human
+            .find("Re-check --workspace addressing")
+            .ok_or_else(|| format!("human {surface}: addressing recovery missing: {human}"))?;
+        let nearby = human
+            .find("a populated store exists at")
+            .ok_or_else(|| format!("human {surface}: nearby recovery missing: {human}"))?;
+        let conditional_init = human
+            .find("Only if you intended to create a NEW store here: ee init --workspace .")
+            .ok_or_else(|| format!("human {surface}: conditional init missing: {human}"))?;
+        ensure(
+            human.contains(&addressed_store_str)
+                && human.contains(canonical_store_root.to_string_lossy().as_ref())
+                && addressing < nearby
+                && nearby < conditional_init,
+            format!(
+                "human {surface}: exact addressed path and nearby-first/conditional-init-last recovery drifted: {human}"
+            ),
+        )?;
+    }
 
     // Same-class converted branches (bd-workspace-miss-init-suggestion-sfjvq
     // follow-up): diag quarantine show, economy report, and maintenance
@@ -826,8 +761,8 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
 /// bd-workspace-miss-init-suggestion-sfjvq quoting follow-up: when the
 /// nearby populated store lives at a path with spaces AND an apostrophe,
 /// the storeless repair hint must shell-quote (and escape) its retarget
-/// argument and orient's retargeted next command must stay executable
-/// end-to-end against the exact store.
+/// argument. After the leaf is explicitly initialized, empty-store orient's
+/// retargeted next command must stay executable against the exact store.
 #[test]
 fn storeless_miss_quotes_spaced_nearby_workspace_and_command_executes() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -904,6 +839,24 @@ fn storeless_miss_quotes_spaced_nearby_workspace_and_command_executes() -> TestR
             "repair must shell-quote the spaced nearby workspace so the hint is executable, got: {repair}"
         ),
     )?;
+    ensure(
+        !leaf.join(".ee").exists(),
+        "the storeless miss must not initialize the leaf before explicit init".to_owned(),
+    )?;
+
+    let leaf_init = run_ee(&[
+        "init".to_owned(),
+        "--workspace".to_owned(),
+        leaf_str.clone(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        leaf_init.status.success(),
+        format!(
+            "explicit init of the spaced leaf failed: {}",
+            String::from_utf8_lossy(&leaf_init.stdout)
+        ),
+    )?;
 
     let orient = run_ee(&[
         "--workspace".to_owned(),
@@ -957,10 +910,10 @@ fn storeless_miss_quotes_spaced_nearby_workspace_and_command_executes() -> TestR
         ),
     )?;
     ensure(
-        !leaf.join(".ee").exists(),
+        leaf.join(".ee").join("ee.db").is_file(),
         format!(
-            "spaced storeless lookups must not create the addressed store; {} must stay absent",
-            leaf.join(".ee").display()
+            "initialized-empty orient must preserve the explicitly created store; {} must exist",
+            leaf.join(".ee").join("ee.db").display()
         ),
     )
 }

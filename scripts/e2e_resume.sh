@@ -267,6 +267,29 @@ else
         "exit=${LAST_EXIT}; $(head -c 400 "${LAST_STDOUT}")"
 fi
 
+CAMPAIGN_HUMAN_HASH_BEFORE="$(store_fingerprint "${CAMPAIGN_DATABASE}")"
+CAMPAIGN_HUMAN_STARTED_MS="$(now_ms)"
+run_ee resume --workspace "${NEARBY_WS}"
+CAMPAIGN_HUMAN_ELAPSED_MS=$(( $(now_ms) - CAMPAIGN_HUMAN_STARTED_MS ))
+CAMPAIGN_HUMAN="${LAST_STDOUT}"
+CAMPAIGN_HUMAN_HASH_AFTER="$(store_fingerprint "${CAMPAIGN_DATABASE}")"
+if [[ "${LAST_EXIT}" -eq 0 && "${CAMPAIGN_HUMAN_ELAPSED_MS}" -lt 2000 ]] \
+    && grep -Fq "Recent end-state:" "${CAMPAIGN_HUMAN}" \
+    && grep -Fq "Nearby campaign evidence survives the cold-root retarget." \
+        "${CAMPAIGN_HUMAN}" \
+    && [[ ! -e "${NEARBY_WS}/.ee" ]]; then
+    event implicit_human_resume_resolves_campaign_store_under_2s pass
+else
+    event implicit_human_resume_resolves_campaign_store_under_2s fail \
+        "exit=${LAST_EXIT}; elapsedMs=${CAMPAIGN_HUMAN_ELAPSED_MS}; $(head -c 400 "${CAMPAIGN_HUMAN}")"
+fi
+if [[ "${CAMPAIGN_HUMAN_HASH_BEFORE}" == "${CAMPAIGN_HUMAN_HASH_AFTER}" ]]; then
+    event implicit_human_campaign_resume_preserves_db_wal_shm pass
+else
+    event implicit_human_campaign_resume_preserves_db_wal_shm fail \
+        "before=${CAMPAIGN_HUMAN_HASH_BEFORE//$'\n'/,}; after=${CAMPAIGN_HUMAN_HASH_AFTER//$'\n'/,}"
+fi
+
 COLD_DATABASE="${COLD_WS}/.ee/ee.db"
 COLD_JSON_HASH_BEFORE="$(store_fingerprint "${COLD_DATABASE}")"
 run_ee resume --workspace "${COLD_WS}" --json
@@ -456,6 +479,8 @@ if [[ "${LAST_EXIT}" -eq 0 && "${SCALE_FAST_ELAPSED_MS}" -lt 1000 ]] \
         and (.data.fastContent.relevant | length) >= 1
         and all(.data.fastContent.recent[]; (.id | length) > 0 and (.snippet | length) > 0)
         and all(.data.fastContent.relevant[]; (.id | length) > 0 and (.snippet | length) > 0)
+        and ([.data.fastContent.relevant[]?.snippet
+              | select(contains("Resume scale row 09999."))] | length) >= 1
         and ([.degraded[]? | select(.code == "orient_doctor_skipped")] | length) == 1
         and ([.degraded[]? | select(.code == "orient_pack_skipped")] | length) == 0
     ' "${SCALE_FAST_JSON}" >/dev/null 2>&1; then
@@ -469,6 +494,35 @@ if [[ "${SCALE_FAST_HASH_BEFORE}" == "${SCALE_FAST_HASH_AFTER}" ]]; then
 else
     event scale_10k_fast_orient_preserves_db_wal_shm fail \
         "before=${SCALE_FAST_HASH_BEFORE//$'\n'/,}; after=${SCALE_FAST_HASH_AFTER//$'\n'/,}"
+fi
+
+SCALE_FAST_HUMAN_HASH_BEFORE="$(store_fingerprint "${SCALE_DATABASE}")"
+SCALE_FAST_HUMAN_STARTED_MS="$(now_ms)"
+run_ee --workspace "${SCALE_WS}" orient --fast "Resume scale row 09999"
+SCALE_FAST_HUMAN_ELAPSED_MS=$(( $(now_ms) - SCALE_FAST_HUMAN_STARTED_MS ))
+SCALE_FAST_HUMAN="${LAST_STDOUT}"
+SCALE_FAST_HUMAN_HASH_AFTER="$(store_fingerprint "${SCALE_DATABASE}")"
+SCALE_FAST_HUMAN_RELEVANT="$(awk '
+    /^Task-relevant memories:$/ { capture = 1; next }
+    capture && /^(Degraded|Next commands):$/ { exit }
+    capture { print }
+' "${SCALE_FAST_HUMAN}")"
+if [[ "${LAST_EXIT}" -eq 0 && "${SCALE_FAST_HUMAN_ELAPSED_MS}" -lt 1000 ]] \
+    && grep -Fq "Recent memories:" "${SCALE_FAST_HUMAN}" \
+    && grep -Fq "Task-relevant memories:" "${SCALE_FAST_HUMAN}" \
+    && grep -Fq "Resume scale row 09999." <<<"${SCALE_FAST_HUMAN_RELEVANT}" \
+    && grep -Fq "orient_doctor_skipped" "${SCALE_FAST_HUMAN}" \
+    && ! grep -Fq "orient_pack_skipped" "${SCALE_FAST_HUMAN}"; then
+    event scale_10k_fast_human_orient_under_1s_with_queried_content pass
+else
+    event scale_10k_fast_human_orient_under_1s_with_queried_content fail \
+        "exit=${LAST_EXIT}; elapsedMs=${SCALE_FAST_HUMAN_ELAPSED_MS}; relevant=$(head -c 300 <<<"${SCALE_FAST_HUMAN_RELEVANT}")"
+fi
+if [[ "${SCALE_FAST_HUMAN_HASH_BEFORE}" == "${SCALE_FAST_HUMAN_HASH_AFTER}" ]]; then
+    event scale_10k_fast_human_orient_preserves_db_wal_shm pass
+else
+    event scale_10k_fast_human_orient_preserves_db_wal_shm fail \
+        "before=${SCALE_FAST_HUMAN_HASH_BEFORE//$'\n'/,}; after=${SCALE_FAST_HUMAN_HASH_AFTER//$'\n'/,}"
 fi
 
 echo

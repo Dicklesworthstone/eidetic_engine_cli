@@ -38959,6 +38959,13 @@ where
     let workspace_path = cli.resolve_workspace();
     let addressed_database_path =
         crate::core::orient::resolved_addressed_database_path(&workspace_path);
+    if matches!(
+        std::fs::symlink_metadata(&addressed_database_path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    ) {
+        let domain_error = crate::core::storeless_workspace_error(&addressed_database_path);
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
     let addressed_index_dir = addressed_database_path.parent().map_or_else(
         || workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR),
         |store_dir| store_dir.join(DEFAULT_INDEX_SUBDIR),

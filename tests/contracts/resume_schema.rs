@@ -215,6 +215,8 @@ fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
         "human_declared_sections_visible",
         "human_open_loop_and_staleness_visible",
         "implicit_resume_resolves_campaign_store",
+        "implicit_human_resume_resolves_campaign_store_under_2s",
+        "implicit_human_campaign_resume_preserves_db_wal_shm",
         "init_ok",
         "json_resume_preserves_db_wal_shm",
         "cold_root_starts_uninitialized",
@@ -231,6 +233,8 @@ fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
         "scale_10k_index_ready_for_fast_orient",
         "scale_10k_fast_orient_under_1s_with_content",
         "scale_10k_fast_orient_preserves_db_wal_shm",
+        "scale_10k_fast_human_orient_under_1s_with_queried_content",
+        "scale_10k_fast_human_orient_preserves_db_wal_shm",
     ]
     .into_iter()
     .map(str::to_owned)

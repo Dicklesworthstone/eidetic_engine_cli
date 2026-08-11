@@ -518,6 +518,71 @@ fn discover_nearby_stores_with_registry(
     budget: std::time::Duration,
     registry_path: Option<&Path>,
 ) -> NearbyStoreScan {
+    let workspace_path = workspace_path.to_path_buf();
+    let addressed_database = addressed_database.to_path_buf();
+    let registry_path = registry_path.map(Path::to_path_buf);
+    run_nearby_store_scan_bounded(budget, move || {
+        scan_nearby_stores_with_registry(
+            &workspace_path,
+            &addressed_database,
+            budget,
+            registry_path.as_deref(),
+        )
+    })
+}
+
+/// Keep the caller's discovery latency bounded even when one filesystem or
+/// read-only database operation blocks past the cooperative deadline checks.
+/// The worker owns only read-only paths and its late result is discarded.
+fn run_nearby_store_scan_bounded(
+    budget: std::time::Duration,
+    scan: impl FnOnce() -> NearbyStoreScan + Send + 'static,
+) -> NearbyStoreScan {
+    if budget.is_zero() {
+        return NearbyStoreScan {
+            stores: Vec::new(),
+            truncated: true,
+        };
+    }
+
+    let started = std::time::Instant::now();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let spawned = std::thread::Builder::new()
+        .name("ee-nearby-store-scan".to_owned())
+        .spawn(move || {
+            let _ = sender.try_send(scan());
+        });
+    if spawned.is_err() {
+        return NearbyStoreScan {
+            stores: Vec::new(),
+            truncated: true,
+        };
+    }
+
+    let remaining = budget.saturating_sub(started.elapsed());
+    match receiver.recv_timeout(remaining) {
+        Ok(mut result) => {
+            if started.elapsed() >= budget {
+                result.truncated = true;
+            }
+            result
+        }
+        Err(
+            std::sync::mpsc::RecvTimeoutError::Timeout
+            | std::sync::mpsc::RecvTimeoutError::Disconnected,
+        ) => NearbyStoreScan {
+            stores: Vec::new(),
+            truncated: true,
+        },
+    }
+}
+
+fn scan_nearby_stores_with_registry(
+    workspace_path: &Path,
+    addressed_database: &Path,
+    budget: std::time::Duration,
+    registry_path: Option<&Path>,
+) -> NearbyStoreScan {
     let started = std::time::Instant::now();
     let mut scan = NearbyStoreScan::default();
     let scan_root = workspace_path
@@ -1472,23 +1537,37 @@ mod tests {
     }
 
     #[test]
-    fn discovery_post_operation_budget_overrun_is_truncated_not_preempted() -> TestResult {
+    fn discovery_deadline_bounds_a_blocking_operation_for_the_caller() -> TestResult {
         let started = std::time::Instant::now();
         let budget = std::time::Duration::from_millis(20);
-        let mut scan = NearbyStoreScan::default();
+        let scan = run_nearby_store_scan_bounded(budget, || {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            NearbyStoreScan {
+                stores: vec![NearbyStore {
+                    workspace_root: "late".to_owned(),
+                    store_dir: "late/.ee".to_owned(),
+                    documents: 1,
+                    last_write: None,
+                }],
+                truncated: false,
+            }
+        });
+        let elapsed = started.elapsed();
 
         ensure(
-            !nearby_store_budget_exhausted(started, budget, &mut scan),
-            "an operation started inside the budget must not be preemptively cancelled".to_owned(),
-        )?;
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        ensure(
-            nearby_store_budget_exhausted(started, budget, &mut scan),
-            "an operation completing after the budget must mark the scan truncated".to_owned(),
+            elapsed < std::time::Duration::from_millis(200),
+            format!(
+                "a blocking operation must not hold the caller past the hard deadline; elapsed={elapsed:?}"
+            ),
         )?;
         ensure(
             scan.truncated,
-            "post-operation budget overrun must persist truncated=true".to_owned(),
+            "a timed-out blocking operation must report truncated=true".to_owned(),
+        )?;
+        ensure_equal(
+            &scan.stores,
+            &Vec::new(),
+            "a result produced after the deadline must be discarded",
         )
     }
 
