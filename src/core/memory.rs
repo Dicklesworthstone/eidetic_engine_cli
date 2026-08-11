@@ -2429,18 +2429,22 @@ fn remember_drain_leadership_cycles(
     let lock_id = remember_index_drain_leader_lock(workspace_id);
     let holder_id = format!("remember-drain:{}:{index_job_id}", std::process::id());
     let mut own_report: Option<IndexProcessingJobReport> = None;
-    let mut zero_progress_cycles = 0usize;
 
     // Work-conserving re-election until post-release quiescence. Every
     // terminal return is one of:
     //   E1 — the post-release probe VERIFIED an empty queue;
-    //   E2 — successor ownership was observed (the election lock is held
-    //        by a newer holder, or pending jobs are claimed by another
-    //        live drainer, which is why our drain returned zero reports);
+    //   E2 — a successor holds the election lock: AlreadyHeld on
+    //        (re-)election is the only mechanically proven successor,
+    //        and that holder inherits the post-release obligation;
     //   E3 — the ambient Cx deadline/cancellation or a persistently
     //        failing inspection ended the stint: report our own truthful
     //        outcome (queued when undecided) and NEVER claim quiescence.
-    // There is deliberately no numeric cycle cap: a cap is not a handoff.
+    // There is deliberately no numeric cycle cap and no drain-progress
+    // heuristic: the coalesced drain snapshots pending rows before
+    // processing, so an empty report can mean "a writer enqueued after
+    // the snapshot" (not quiescence), and a nonempty report can be all
+    // `skipped` rows from a claim race (not progress). Neither proves a
+    // successor; while the probe says pending work remains, re-elect.
     loop {
         // Outer bound: the caller's Cx deadline/cancellation.
         if let Err(error) = checkpoint() {
@@ -2482,29 +2486,36 @@ fn remember_drain_leadership_cycles(
                     .unwrap_or_else(|| remember_index_job_queued_for_coalescing(index_job_id));
             }
         }
-        let drained_this_cycle;
         {
             let _leadership = RememberWorkspaceWriteLock {
                 connection,
                 lock_id: lock_id.clone(),
                 holder_id: holder_id.clone(),
             };
-            let mut cycle_drained = 0usize;
             let cycle_report = remember_drain_pending_rounds(
                 index_job_id,
                 REMEMBER_INDEX_DRAIN_MAX_ROUNDS,
-                &mut || {
-                    let reports = drain()?;
-                    cycle_drained += reports.len();
-                    Ok(reports)
-                },
+                &mut *drain,
                 &mut *pending_remaining,
                 || remember_index_job_report_from_durable_state(connection, index_job_id),
             );
-            if own_report.is_none() {
+            // First cycle pins the report; a later cycle may only upgrade
+            // an undecided (queued) posture to an observed terminal
+            // outcome — our own job can be drained by a later stint after
+            // earlier rounds saw an empty snapshot.
+            let adopt_cycle_report = match own_report.as_ref() {
+                None => true,
+                Some(existing) => {
+                    existing.outcome == "skipped"
+                        && matches!(
+                            cycle_report.outcome.as_str(),
+                            "completed" | "completed_no_documents" | "failed"
+                        )
+                }
+            };
+            if adopt_cycle_report {
                 own_report = Some(cycle_report);
             }
-            drained_this_cycle = cycle_drained;
             // `_leadership` drops here: the election lock is RELEASED
             // before the handoff probe below, so any writer that deferred
             // against this stint is either already visible in the pending
@@ -2526,28 +2537,18 @@ fn remember_drain_leadership_cycles(
                     .unwrap_or_else(|| remember_index_job_queued_for_coalescing(index_job_id));
             }
             Some(true) => {
-                if drained_this_cycle == 0 {
-                    zero_progress_cycles += 1;
-                    if zero_progress_cycles >= 2 {
-                        // E2: pending rows persist but two whole cycles
-                        // produced no drainable work — the coalesced drain
-                        // skips jobs CLAIMED by another live drainer, so
-                        // the remainder is owned by that concurrent
-                        // process. Handing off to it is the design.
-                        tracing::debug!(
-                            target: "ee::memory",
-                            workspace_id,
-                            index_job_id,
-                            "pending jobs are claimed by a concurrent drainer; handing off"
-                        );
-                        return own_report.unwrap_or_else(|| {
-                            remember_index_job_queued_for_coalescing(index_job_id)
-                        });
-                    }
-                } else {
-                    zero_progress_cycles = 0;
-                }
-                // Work remains and it is drainable: re-elect and continue.
+                // Pending work survived this stint. That is never a
+                // handoff by itself: an empty drain snapshot only proves
+                // the queue was empty at snapshot time, and a writer can
+                // enqueue between that snapshot and this probe. Re-elect
+                // and keep draining; if a rival won meanwhile, the next
+                // acquire observes AlreadyHeld and hands off (E2).
+                tracing::debug!(
+                    target: "ee::memory",
+                    workspace_id,
+                    index_job_id,
+                    "pending jobs remain after release; re-electing to continue the drain"
+                );
             }
             None => {
                 // E3: the pending posture cannot be inspected even after
@@ -17685,37 +17686,56 @@ mod tests {
     }
 
     #[test]
-    fn remember_leadership_unclaimable_pending_hands_off() -> TestResult {
+    fn remember_leadership_empty_snapshot_races_never_strand_pending_work() -> TestResult {
+        // Planted counterexample for the removed zero-progress heuristic:
+        // the coalesced drain snapshots pending rows BEFORE processing, so
+        // it can return an empty report while a writer enqueues right
+        // after the snapshot — the pending probe then truthfully says
+        // work remains. Four such interleavings in a row (two whole
+        // cycles) must NOT end the stint: no successor exists, so
+        // returning would strand the pending job. The loop may only
+        // return once it actually drains the job and the post-release
+        // probe verifies an empty queue.
         let temp = upgrade_test_workspace()?;
         let connection = open_upgrade_test_db(temp.path())?;
         connection
             .ensure_advisory_locks_table()
             .map_err(|error| error.to_string())?;
+        let own_job_id = "sidx_snapshot_race_own_00000";
         let drains = std::cell::Cell::new(0usize);
+        let drained = std::cell::Cell::new(false);
         let report = remember_drain_leadership_cycles(
             &connection,
-            "wsp_claimed_leadership_000000",
-            "sidx_claimed_own_00000000000",
+            "wsp_snapshot_race_leadership0",
+            own_job_id,
             &mut || Ok(()),
             &mut || {
                 drains.set(drains.get() + 1);
-                // Pending rows persist but nothing is drainable: the
-                // coalesced drain skips jobs CLAIMED by a concurrent
-                // drainer, so empty reports here mean a live successor
-                // owns the queue.
-                Ok(Vec::new())
+                if drains.get() < 5 {
+                    // Snapshot raced: selected was empty, then the writer
+                    // enqueued before the pending probe runs.
+                    Ok(Vec::new())
+                } else {
+                    drained.set(true);
+                    Ok(vec![drained_test_report(own_job_id)])
+                }
             },
-            &mut || Some(true),
+            &mut || Some(!drained.get()),
         );
         ensure(
-            remember_index_status(&report),
-            "queued".to_owned(),
-            "handing off to the claiming drainer stays truthful",
+            drains.get(),
+            5,
+            "the loop keeps re-electing past repeated empty snapshots until the job is drained",
         )?;
         ensure(
-            drains.get(),
-            4,
-            "two zero-progress cycles (two bounded rounds each) end the stint",
+            remember_index_status(&report),
+            "indexed".to_owned(),
+            "the eventually-drained own job reports its true terminal outcome",
+        )?;
+        ensure(
+            drained.get(),
+            true,
+            "the loop returned only after the drain actually happened and pending went false",
         )
     }
 
