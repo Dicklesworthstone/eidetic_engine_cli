@@ -17190,7 +17190,7 @@ where
 /// Arguments for `ee resume` (bd-resume-verb-v0f57).
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct ResumeArgs {
-    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    /// Database path. Defaults to the resolved .ee/.ee-campaign store.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
@@ -17218,11 +17218,7 @@ where
     let database_path = args
         .database
         .clone()
-        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
-    if !database_path.exists() {
-        let domain_error = crate::core::storeless_workspace_error(&database_path);
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-    }
+        .unwrap_or_else(|| crate::core::orient::resolved_addressed_database_path(&workspace));
 
     let report = match build_resume_report(&ResumeOptions {
         workspace_path: &workspace,
@@ -67047,7 +67043,10 @@ mod tests {
                 }],
                 truncated: true,
             }),
-            next_commands: vec!["ee resume --workspace '/fixture/best campaign' --json".to_owned()],
+            next_commands: vec![
+                "ee resume --workspace '/fixture/best campaign' --database '/fixture/best campaign/.ee-campaign/ee.db' --json"
+                    .to_owned(),
+            ],
         };
 
         let human = super::render_resume_human(&report);
@@ -67056,7 +67055,7 @@ mod tests {
             "17 documents",
             "last write 2026-08-10T14:15:16Z",
             "Nearby-store scan hit its 250 ms time budget; the candidate list may be incomplete.",
-            "ee resume --workspace '/fixture/best campaign' --json",
+            "ee resume --workspace '/fixture/best campaign' --database '/fixture/best campaign/.ee-campaign/ee.db' --json",
         ] {
             ensure_contains(&human, expected, "resume nearby-store human posture")?;
         }

@@ -23,7 +23,10 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::core::orient::{NearbyStoreScan, discover_nearby_stores};
+use crate::core::orient::{
+    AddressedStoreState, NearbyStoreScan, addressed_store_state,
+    discover_nearby_stores_for_database,
+};
 use crate::db::{DbConnection, StoredMemory};
 use crate::models::DomainError;
 
@@ -280,6 +283,34 @@ pub struct ResumeOptions<'a> {
 
 /// Assemble the resume bundle. Read-only.
 pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, DomainError> {
+    match std::fs::symlink_metadata(options.database_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(empty_resume_report(options));
+        }
+        Err(error) => {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Failed to inspect addressed workspace database {}: {error}",
+                    options.database_path.display()
+                ),
+                repair: Some("ee doctor --workspace . --json".to_owned()),
+            });
+        }
+        Ok(_) => {}
+    }
+    if addressed_store_state(options.database_path) == AddressedStoreState::Unavailable {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Addressed workspace database {} exists but is unsafe, unreadable, or incompatible.",
+                options.database_path.display()
+            ),
+            repair: Some(
+                "Run `ee doctor --workspace . --json`, repair the addressed store, then retry `ee resume`."
+                    .to_owned(),
+            ),
+        });
+    }
+
     let connection = DbConnection::open_file_read_only(options.database_path).map_err(|error| {
         DomainError::Storage {
             message: format!("Failed to open workspace database: {error}"),
@@ -393,8 +424,9 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
     }
 
     let nearby_stores = if episodic_total == 0 {
-        Some(discover_nearby_stores(
+        Some(discover_nearby_stores_for_database(
             options.workspace_path,
+            options.database_path,
             std::time::Duration::from_millis(RESUME_NEARBY_SCAN_BUDGET_MS),
         ))
     } else {
@@ -418,6 +450,30 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
     })
 }
 
+fn empty_resume_report(options: &ResumeOptions<'_>) -> ResumeReport {
+    let canonical_workspace = options
+        .workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| options.workspace_path.to_path_buf());
+    let nearby_stores = Some(discover_nearby_stores_for_database(
+        options.workspace_path,
+        options.database_path,
+        std::time::Duration::from_millis(RESUME_NEARBY_SCAN_BUDGET_MS),
+    ));
+    let next_commands = resume_next_commands(nearby_stores.as_ref());
+
+    ResumeReport {
+        schema: RESUME_SCHEMA_V1,
+        workspace_id: crate::core::workspace::stable_workspace_id(&canonical_workspace),
+        episodic_total: 0,
+        sessions: Vec::new(),
+        open_loops: OpenLoops::default(),
+        stale_count: 0,
+        nearby_stores,
+        next_commands,
+    }
+}
+
 fn resume_next_commands(nearby_stores: Option<&NearbyStoreScan>) -> Vec<String> {
     let mut commands = vec![
         "ee decide list --json  # open decisions incl. revisit conditions".to_owned(),
@@ -427,7 +483,12 @@ fn resume_next_commands(nearby_stores: Option<&NearbyStoreScan>) -> Vec<String> 
     ];
     if let Some(best) = nearby_stores.and_then(|scan| scan.stores.first()) {
         let workspace = shell_quote_cli_arg(&best.workspace_root);
-        commands.insert(0, format!("ee resume --workspace {workspace} --json"));
+        let database =
+            shell_quote_cli_arg(&Path::new(&best.store_dir).join("ee.db").to_string_lossy());
+        commands.insert(
+            0,
+            format!("ee resume --workspace {workspace} --database {database} --json"),
+        );
     }
     commands
 }
@@ -686,6 +747,56 @@ mod tests {
     }
 
     #[test]
+    fn genuinely_missing_database_returns_empty_resume_without_initializing_store()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("cold workspace");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let database = workspace.join(".ee").join("ee.db");
+
+        let report = build_resume_report(&ResumeOptions {
+            workspace_path: &workspace,
+            database_path: &database,
+            sessions: 3,
+        })
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.schema, super::RESUME_SCHEMA_V1);
+        assert_eq!(report.episodic_total, 0);
+        assert!(report.sessions.is_empty());
+        assert!(report.open_loops.revisit_decisions.is_empty());
+        assert!(report.open_loops.tagged_items.is_empty());
+        assert!(report.nearby_stores.is_some());
+        assert!(
+            !workspace.join(".ee").exists(),
+            "read-only resume must leave a genuinely cold workspace uninitialized"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unsafe_existing_database_is_an_error_not_an_empty_resume() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("unsafe workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        std::fs::create_dir_all(&database).map_err(|error| error.to_string())?;
+
+        match build_resume_report(&ResumeOptions {
+            workspace_path: &workspace,
+            database_path: &database,
+            sessions: 3,
+        }) {
+            Err(DomainError::Storage { message, .. }) => {
+                assert!(message.contains("unsafe, unreadable, or incompatible"));
+                Ok(())
+            }
+            other => Err(format!(
+                "expected unsafe addressed store to remain an error, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
     fn nearby_resume_command_is_prepended_and_shell_quoted() {
         let scan = NearbyStoreScan {
             stores: vec![NearbyStore {
@@ -700,7 +811,9 @@ mod tests {
         let commands = resume_next_commands(Some(&scan));
         assert_eq!(
             commands.first().map(String::as_str),
-            Some("ee resume --workspace '/tmp/campaign'\\''s best root' --json")
+            Some(
+                "ee resume --workspace '/tmp/campaign'\\''s best root' --database '/tmp/campaign'\\''s best root/.ee-campaign/ee.db' --json"
+            )
         );
     }
 }

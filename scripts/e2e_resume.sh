@@ -40,7 +40,8 @@ ROOT="$(mktemp -d "${ROOT_BASE%/}/ee-resume-e2e.XXXXXX")"
 WS="${ROOT}/ws"
 LOG_DIR="${ROOT}/logs"
 EVENT_LOG="${LOG_DIR}/events.jsonl"
-mkdir -p "${WS}" "${LOG_DIR}"
+export XDG_DATA_HOME="${ROOT}/xdg"
+mkdir -p "${WS}" "${LOG_DIR}" "${XDG_DATA_HOME}"
 : >"${EVENT_LOG}"
 
 event() {
@@ -218,21 +219,52 @@ else
     event human_open_loop_and_staleness_visible fail "$(head -c 500 "${H}")"
 fi
 
-# --- cold workspace: nearby populated child retargets resume safely -------
+# --- genuinely cold workspace: discovery + executable database retarget ---
 COLD_WS="${ROOT}/cold start"
 NEARBY_WS="${COLD_WS}/nearby campaign root"
+export XDG_DATA_HOME="${ROOT}/xdg-cold"
+mkdir -p "${XDG_DATA_HOME}"
 mkdir -p "${COLD_WS}" "${NEARBY_WS}"
-run_ee init --workspace "${COLD_WS}" --json
-COLD_INIT_EXIT=$LAST_EXIT
+if [[ ! -e "${COLD_WS}/.ee" ]]; then
+    event cold_root_starts_uninitialized pass
+else
+    event cold_root_starts_uninitialized fail "unexpected ${COLD_WS}/.ee before resume"
+fi
+
 run_ee init --workspace "${NEARBY_WS}" --json
 NEARBY_INIT_EXIT=$LAST_EXIT
-run_ee remember "Nearby campaign has durable state." --workspace "${NEARBY_WS}" \
-    --level semantic --kind note --json
+run_ee remember "Nearby campaign evidence survives the cold-root retarget." \
+    --workspace "${NEARBY_WS}" --level episodic --kind note \
+    --tags "session-nearby-campaign" --json
 NEARBY_SEED_EXIT=$LAST_EXIT
-if [[ "${COLD_INIT_EXIT}" -eq 0 && "${NEARBY_INIT_EXIT}" -eq 0 && "${NEARBY_SEED_EXIT}" -eq 0 ]]; then
+CAMPAIGN_STORE="${NEARBY_WS}/.ee-campaign"
+if [[ "${NEARBY_INIT_EXIT}" -eq 0 && "${NEARBY_SEED_EXIT}" -eq 0 \
+    && ! -e "${CAMPAIGN_STORE}" ]]; then
+    mv "${NEARBY_WS}/.ee" "${CAMPAIGN_STORE}"
+    CAMPAIGN_MOVE_EXIT=$?
+else
+    CAMPAIGN_MOVE_EXIT=1
+fi
+CAMPAIGN_DATABASE="${CAMPAIGN_STORE}/ee.db"
+if [[ "${CAMPAIGN_MOVE_EXIT}" -eq 0 && -f "${CAMPAIGN_DATABASE}" \
+    && ! -e "${COLD_WS}/.ee" ]]; then
     event nearby_store_seeded pass
 else
-    event nearby_store_seeded fail "init/seed exits ${COLD_INIT_EXIT}/${NEARBY_INIT_EXIT}/${NEARBY_SEED_EXIT}"
+    event nearby_store_seeded fail \
+        "init/seed/move exits ${NEARBY_INIT_EXIT}/${NEARBY_SEED_EXIT}/${CAMPAIGN_MOVE_EXIT}; cold .ee exists=$([[ -e "${COLD_WS}/.ee" ]] && printf yes || printf no)"
+fi
+
+run_ee resume --workspace "${NEARBY_WS}" --json
+if [[ "${LAST_EXIT}" -eq 0 ]] \
+    && jq -e '.data.report.episodicTotal >= 1
+        and ([.data.report.sessions[]?.items[]?.content
+              | select(contains("Nearby campaign evidence survives"))] | length) >= 1' \
+        "${LAST_STDOUT}" >/dev/null 2>&1 \
+    && [[ ! -e "${NEARBY_WS}/.ee" ]]; then
+    event implicit_resume_resolves_campaign_store pass
+else
+    event implicit_resume_resolves_campaign_store fail \
+        "exit=${LAST_EXIT}; $(head -c 400 "${LAST_STDOUT}")"
 fi
 
 COLD_DATABASE="${COLD_WS}/.ee/ee.db"
@@ -240,40 +272,57 @@ COLD_JSON_HASH_BEFORE="$(store_fingerprint "${COLD_DATABASE}")"
 run_ee resume --workspace "${COLD_WS}" --json
 COLD_JSON="${LAST_STDOUT}"
 COLD_JSON_HASH_AFTER="$(store_fingerprint "${COLD_DATABASE}")"
-BEST_ROOT="$(jq -r '.data.report.nearbyStores.stores[0].workspaceRoot // empty' "${COLD_JSON}" 2>/dev/null)"
-BEST_DOCS="$(jq -r '.data.report.nearbyStores.stores[0].documents // 0' "${COLD_JSON}" 2>/dev/null)"
-BEST_LAST_WRITE="$(jq -r '.data.report.nearbyStores.stores[0].lastWrite // empty' "${COLD_JSON}" 2>/dev/null)"
+BEST_ROOT="$(jq -r '.data.report.nearbyStores.stores[0].workspaceRoot // empty' \
+    "${COLD_JSON}" 2>/dev/null)"
+BEST_STORE="$(jq -r '.data.report.nearbyStores.stores[0].storeDir // empty' \
+    "${COLD_JSON}" 2>/dev/null)"
+BEST_DOCS="$(jq -r '.data.report.nearbyStores.stores[0].documents // 0' \
+    "${COLD_JSON}" 2>/dev/null)"
+BEST_LAST_WRITE="$(jq -r '.data.report.nearbyStores.stores[0].lastWrite // empty' \
+    "${COLD_JSON}" 2>/dev/null)"
 FIRST_COMMAND="$(jq -r '.data.report.nextCommands[0] // empty' "${COLD_JSON}" 2>/dev/null)"
-EXPECTED_COMMAND="ee resume --workspace '${NEARBY_WS}' --json"
+EXPECTED_COMMAND="ee resume --workspace '${NEARBY_WS}' --database '${CAMPAIGN_DATABASE}' --json"
 if [[ "${LAST_EXIT}" -eq 0 && "${BEST_ROOT}" == "${NEARBY_WS}" \
-    && "${BEST_DOCS}" -gt 0 && -n "${BEST_LAST_WRITE}" \
+    && "${BEST_STORE}" == "${CAMPAIGN_STORE}" && "${BEST_DOCS}" -gt 0 \
+    && -n "${BEST_LAST_WRITE}" \
     && "${FIRST_COMMAND}" == "${EXPECTED_COMMAND}" ]]; then
-    event nearby_store_prepends_quoted_resume pass
+    event nearby_store_prepends_quoted_database_resume pass
 else
-    event nearby_store_prepends_quoted_resume fail "exit=${LAST_EXIT}; root=${BEST_ROOT}; docs=${BEST_DOCS}; lastWrite=${BEST_LAST_WRITE}; command=${FIRST_COMMAND}"
+    event nearby_store_prepends_quoted_database_resume fail \
+        "exit=${LAST_EXIT}; root=${BEST_ROOT}; store=${BEST_STORE}; docs=${BEST_DOCS}; lastWrite=${BEST_LAST_WRITE}; command=${FIRST_COMMAND}"
 fi
-if [[ "${COLD_JSON_HASH_BEFORE}" == "${COLD_JSON_HASH_AFTER}" ]]; then
-    event nearby_json_resume_preserves_db_wal_shm pass
+if [[ "${LAST_EXIT}" -eq 0 \
+    && "$(jq -r '.data.report.schema // empty' "${COLD_JSON}" 2>/dev/null)" == "ee.resume.v1" \
+    && "$(jq -r '.data.report.episodicTotal // -1' "${COLD_JSON}" 2>/dev/null)" -eq 0 \
+    && "${COLD_JSON_HASH_BEFORE}" == "${COLD_JSON_HASH_AFTER}" \
+    && ! -e "${COLD_WS}/.ee" ]]; then
+    event missing_db_returns_empty_resume_without_initializing pass
 else
-    event nearby_json_resume_preserves_db_wal_shm fail "before=${COLD_JSON_HASH_BEFORE//$'\n'/,}; after=${COLD_JSON_HASH_AFTER//$'\n'/,}"
+    event missing_db_returns_empty_resume_without_initializing fail \
+        "exit=${LAST_EXIT}; before=${COLD_JSON_HASH_BEFORE//$'\n'/,}; after=${COLD_JSON_HASH_AFTER//$'\n'/,}; cold .ee exists=$([[ -e "${COLD_WS}/.ee" ]] && printf yes || printf no)"
 fi
 
-COLD_HUMAN_HASH_BEFORE="$(store_fingerprint "${COLD_DATABASE}")"
-run_ee resume --workspace "${COLD_WS}"
-COLD_HUMAN="${LAST_STDOUT}"
-COLD_HUMAN_HASH_AFTER="$(store_fingerprint "${COLD_DATABASE}")"
-if [[ "${LAST_EXIT}" -eq 0 ]] \
-    && grep -Fq "${NEARBY_WS}/.ee" "${COLD_HUMAN}" \
-    && grep -Fq "${BEST_DOCS} documents" "${COLD_HUMAN}" \
-    && grep -Fq "last write ${BEST_LAST_WRITE}" "${COLD_HUMAN}"; then
-    event nearby_human_shows_path_docs_last_write pass
+STEP=$((STEP + 1))
+EMITTED_STDOUT="${LOG_DIR}/step${STEP}.stdout"
+EMITTED_STDERR="${LOG_DIR}/step${STEP}.stderr"
+PATH="$(dirname "${REAL_EE}"):${PATH}" bash -c "${FIRST_COMMAND}" \
+    >"${EMITTED_STDOUT}" 2>"${EMITTED_STDERR}"
+EMITTED_EXIT=$?
+if [[ "${EMITTED_EXIT}" -eq 0 ]] \
+    && jq -e '.data.report.episodicTotal >= 1
+        and ([.data.report.sessions[]?.items[]?.content
+              | select(contains("Nearby campaign evidence survives"))] | length) >= 1' \
+        "${EMITTED_STDOUT}" >/dev/null 2>&1; then
+    event emitted_database_resume_executes_campaign_evidence pass
 else
-    event nearby_human_shows_path_docs_last_write fail "exit ${LAST_EXIT}; $(head -c 500 "${COLD_HUMAN}")"
+    event emitted_database_resume_executes_campaign_evidence fail \
+        "exit=${EMITTED_EXIT}; command=${FIRST_COMMAND}; $(head -c 400 "${EMITTED_STDOUT}")"
 fi
-if [[ "${COLD_HUMAN_HASH_BEFORE}" == "${COLD_HUMAN_HASH_AFTER}" ]]; then
-    event nearby_human_resume_preserves_db_wal_shm pass
+if [[ ! -e "${COLD_WS}/.ee" ]]; then
+    event emitted_resume_leaves_cold_root_uninitialized pass
 else
-    event nearby_human_resume_preserves_db_wal_shm fail "before=${COLD_HUMAN_HASH_BEFORE//$'\n'/,}; after=${COLD_HUMAN_HASH_AFTER//$'\n'/,}"
+    event emitted_resume_leaves_cold_root_uninitialized fail \
+        "unexpected ${COLD_WS}/.ee after executing ${FIRST_COMMAND}"
 fi
 
 # --- bounded 10k corpus: real store, bounded output, <2s command ----------
