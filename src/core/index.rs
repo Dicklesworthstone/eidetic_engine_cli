@@ -1773,6 +1773,7 @@ async fn reembed_index_with_cx_and_stack(
 
     let _recovery_action = recover_interrupted_publish(&index_dir)?;
     ensure_active_embedding_registry_record(&db, &workspace_id, &stack)?;
+    let embedding = reembed_embedding_summary(&db, &workspace_id, &stack, current_vector_coverage)?;
     let build_result = publish_full_index_generation_with_stack(
         cx,
         &index_dir,
@@ -10984,6 +10985,72 @@ mod tests {
                 && status.index_document_count == Some(4)
                 && status.index_document_counts == IndexDocumentCounts::checked(1, 1, 0, 1, 1).ok(),
             format!("status must report exact complete-corpus counts: {status:?}"),
+        )
+    }
+
+    #[test]
+    fn index_reembed_report_refreshes_posture_after_registry_write() -> TestResult {
+        let root = unique_test_dir("reembed-refreshes-registry-posture");
+        let workspace = root.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        seed_reembed_database(&workspace, &database)?;
+
+        let options = IndexReembedOptions {
+            workspace_path: workspace,
+            database_path: Some(database),
+            index_dir: Some(index_dir),
+            dry_run: false,
+        };
+        let stack = EmbedderStack::from_parts(
+            Arc::new(TestSemanticEmbedder::new(POTION_MODEL_NAME, 256))
+                as Arc<dyn crate::search::Embedder>,
+            None,
+        );
+        let report = crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+            reembed_index_with_cx_and_stack(&cx, &options, stack).await
+        })
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+
+        ensure(
+            report.status == IndexReembedStatus::Success,
+            format!("unexpected semantic reembed status: {:?}", report.status),
+        )?;
+        ensure(
+            report.embedding.semantic,
+            "semantic reembed must report semantic=true",
+        )?;
+        ensure(
+            report.embedding.source == "registry_observed",
+            format!(
+                "semantic reembed must report the registry source written by the same operation: {}",
+                report.embedding.source
+            ),
+        )?;
+        ensure(
+            report.embedding.registered_model_count == 1
+                && report.embedding.available_model_count == 1,
+            format!(
+                "semantic reembed must report one available registry model: {:?}",
+                report.embedding
+            ),
+        )?;
+        ensure(
+            report
+                .embedding
+                .selected_registry_model
+                .as_ref()
+                .is_some_and(|model| model.model_name == POTION_MODEL_NAME),
+            "semantic reembed must identify the selected registry model",
+        )?;
+        ensure(
+            report.embedding.posture.mode == EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
+            "semantic reembed must retain the neural_local posture mode",
+        )?;
+        ensure(
+            report.embedding.posture.vector_coverage == EmbeddingVectorCoverage::new(4, 4),
+            "semantic reembed must report published vector coverage",
         )
     }
 
