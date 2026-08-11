@@ -2544,12 +2544,16 @@ fn fetch_bundled_embedding_model(
                 repair: Some(format!("ee model fetch {DEFAULT_EMBEDDING_MODEL_ALIAS}")),
             }
         })?;
-    ensure_loaded_embedding_registry_record(&connection, &workspace_id, &loaded).map_err(
-        |error| DomainError::Storage {
-            message: format!("Failed to register downloaded bundled embedding model: {error}"),
-            repair: Some("ee model status --workspace . --json".to_string()),
-        },
-    )?;
+    ensure_loaded_embedding_registry_record(
+        &connection,
+        &workspace_id,
+        &loaded,
+        Some(&stored_path),
+    )
+    .map_err(|error| DomainError::Storage {
+        message: format!("Failed to register downloaded bundled embedding model: {error}"),
+        repair: Some("ee model status --workspace . --json".to_string()),
+    })?;
 
     let registry_entry = connection
         .find_model_registry_entry(

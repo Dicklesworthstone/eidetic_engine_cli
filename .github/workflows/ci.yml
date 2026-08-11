@@ -120,7 +120,7 @@ jobs:
               registered_model2vec_fixture_is_neural_without_overrides_or_download_path -- \
               --ignored --exact --nocapture
             cargo test --locked --test model_bundled_embedding_cli_e2e \
-              registered_noncanonical_model2vec_source_is_neural_without_egress -- \
+              public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neural -- \
               --ignored --exact --nocapture
           EE_UNSHARE
 

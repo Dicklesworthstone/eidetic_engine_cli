@@ -5907,13 +5907,15 @@ fn ensure_active_embedding_registry_record(
     workspace_id: &str,
     stack: &EmbedderStack,
 ) -> Result<(), IndexRebuildError> {
-    ensure_loaded_embedding_registry_record(db, workspace_id, stack.fast())
+    let source_dir = active_embedding_model_source_dir(db, workspace_id, stack.fast())?;
+    ensure_loaded_embedding_registry_record(db, workspace_id, stack.fast(), source_dir.as_deref())
 }
 
 pub(crate) fn ensure_loaded_embedding_registry_record(
     db: &DbConnection,
     workspace_id: &str,
     fast_embedder: &dyn crate::search::Embedder,
+    source_dir: Option<&Path>,
 ) -> Result<(), IndexRebuildError> {
     if !fast_embedder.is_semantic() {
         return Ok(());
@@ -5929,22 +5931,11 @@ pub(crate) fn ensure_loaded_embedding_registry_record(
         return Ok(());
     }
 
-    let Some(mut input) = active_embedding_registry_input(workspace_id, fast_embedder)? else {
+    let Some(input) =
+        active_embedding_registry_input_with_source(workspace_id, fast_embedder, source_dir)?
+    else {
         return Ok(());
     };
-    if let Some(existing) = db.find_model_registry_entry(
-        workspace_id,
-        input.provider,
-        &input.model_name,
-        ModelPurpose::Embedding,
-    )? && existing.content_hash == input.content_hash
-        && existing
-            .source_uri
-            .as_deref()
-            .is_some_and(registry_source_is_local)
-    {
-        input.source_uri = existing.source_uri;
-    }
 
     match db.upsert_embedding_metadata_record(&generate_model_registry_id(), &input)? {
         ModelRegistryUpsertOutcome::Inserted => {
@@ -5972,9 +5963,56 @@ pub(crate) fn ensure_loaded_embedding_registry_record(
     Ok(())
 }
 
+fn active_embedding_model_source_dir(
+    db: &DbConnection,
+    workspace_id: &str,
+    fast_embedder: &dyn crate::search::Embedder,
+) -> Result<Option<PathBuf>, DbError> {
+    if provider_for_embedder(fast_embedder) != ModelProvider::Model2Vec
+        || fast_embedder.id() != POTION_MODEL_NAME
+    {
+        return Ok(None);
+    }
+
+    if let Some(model_root) = configured_embedder_model_root()
+        && let Some(canonical) =
+            canonical_verified_potion_model_dir(&potion_model_destination_dir(&model_root))
+    {
+        return Ok(Some(canonical));
+    }
+
+    if let Some(existing) = db.find_model_registry_entry(
+        workspace_id,
+        ModelProvider::Model2Vec,
+        POTION_MODEL_NAME,
+        ModelPurpose::Embedding,
+    )? && let Some(existing_path) = registered_model2vec_source_path(db, &existing)?
+        && let Some(canonical) = canonical_verified_potion_model_dir(&existing_path)
+    {
+        return Ok(Some(canonical));
+    }
+
+    Ok(canonical_verified_potion_model_dir(
+        &potion_model_destination_dir(&default_embedder_model_root()),
+    ))
+}
+
+fn canonical_verified_potion_model_dir(model_dir: &Path) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(model_dir).ok()?;
+    verified_potion_model_dir(&canonical).then_some(canonical)
+}
+
 fn active_embedding_registry_input(
     workspace_id: &str,
     fast_embedder: &dyn crate::search::Embedder,
+) -> Result<Option<crate::db::CreateEmbeddingMetadataInput>, IndexRebuildError> {
+    active_embedding_registry_input_with_source(workspace_id, fast_embedder, None)
+}
+
+fn active_embedding_registry_input_with_source(
+    workspace_id: &str,
+    fast_embedder: &dyn crate::search::Embedder,
+    source_dir: Option<&Path>,
 ) -> Result<Option<crate::db::CreateEmbeddingMetadataInput>, IndexRebuildError> {
     if !fast_embedder.is_semantic() || !fast_embedder.is_ready() {
         return Ok(None);
@@ -5993,6 +6031,30 @@ fn active_embedding_registry_input(
     metadata.tokenizer = Some("tokenizer.json".to_owned());
     metadata.model_revision = Some(fingerprint.revision.clone());
     metadata.deterministic = true;
+    let source_uri = if provider == ModelProvider::Model2Vec
+        && fast_embedder.id() == POTION_MODEL_NAME
+        && let Some(source_dir) = source_dir
+    {
+        let canonical = std::fs::canonicalize(source_dir).map_err(|error| {
+            IndexRebuildError::Index(format!(
+                "failed to canonicalize loaded Model2Vec directory {}: {error}",
+                source_dir.display()
+            ))
+        })?;
+        if !verified_potion_model_dir(&canonical) {
+            return Err(IndexRebuildError::Index(format!(
+                "loaded Model2Vec directory {} failed pinned manifest verification",
+                canonical.display()
+            )));
+        }
+        Some(canonical.to_string_lossy().into_owned())
+    } else {
+        Some(format!(
+            "frankensearch://{provider}/{model}",
+            provider = provider.as_str(),
+            model = fast_embedder.id()
+        ))
+    };
 
     Ok(Some(crate::db::CreateEmbeddingMetadataInput {
         workspace_id: workspace_id.to_owned(),
@@ -6002,11 +6064,7 @@ fn active_embedding_registry_input(
         distance_metric: ModelDistanceMetric::Cosine,
         status: ModelRegistryStatus::Available,
         version: metadata.model_revision.clone(),
-        source_uri: Some(format!(
-            "frankensearch://{provider}/{model}",
-            provider = provider.as_str(),
-            model = fast_embedder.id()
-        )),
+        source_uri,
         content_hash: Some(fingerprint.content_hash),
         metadata,
         last_checked_at: None,
@@ -12892,7 +12950,7 @@ mod tests {
                 Some("pre-claim cancellation fixture"),
             )
             .map_err(|e| e.to_string())?;
-        ensure(held.is_acquired(), true, "fixture holds publish lock")?;
+        ensure(held.is_acquired(), "fixture holds publish lock")?;
 
         let ordinary = connection
             .get_search_index_job(ORDINARY_JOB_ID)
@@ -12924,8 +12982,7 @@ mod tests {
         let ordinary_retry = process_one_index_job(&connection, &ordinary, &index_dir)
             .map_err(|e| format!("ordinary direct retry failed: {e}"))?;
         ensure(
-            ordinary_retry.outcome,
-            "completed".to_owned(),
+            ordinary_retry.outcome == "completed",
             "ordinary direct retry completes the original logical job",
         )?;
         let ordinary_completed = connection
@@ -12941,7 +12998,7 @@ mod tests {
         let selected = connection
             .list_pending_search_index_jobs(WORKSPACE_ID, None)
             .map_err(|e| e.to_string())?;
-        ensure(selected.len(), 1, "coalesced pre-claim selected set")?;
+        ensure(selected.len() == 1, "coalesced pre-claim selected set")?;
         let held = connection
             .acquire_advisory_lock(
                 &publish_lock,
@@ -12950,7 +13007,7 @@ mod tests {
                 Some("coalesced pre-claim contention fixture"),
             )
             .map_err(|e| e.to_string())?;
-        ensure(held.is_acquired(), true, "fixture re-holds publish lock")?;
+        ensure(held.is_acquired(), "fixture re-holds publish lock")?;
         let coalesced_result = process_selected_index_jobs_coalesced(
             &connection,
             WORKSPACE_ID,
@@ -12999,15 +13056,14 @@ mod tests {
                 .list_pending_search_index_jobs(WORKSPACE_ID, None)
                 .map_err(|e| e.to_string())?
                 .is_empty(),
-            true,
             "direct retries leave no pending tail",
         )?;
         ensure(
             connection
                 .list_search_index_jobs(WORKSPACE_ID, None)
                 .map_err(|e| e.to_string())?
-                .len(),
-            2,
+                .len()
+                == 2,
             "direct retries create no duplicate logical jobs",
         )?;
         INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS_OVERRIDE.with(|slot| slot.set(None));

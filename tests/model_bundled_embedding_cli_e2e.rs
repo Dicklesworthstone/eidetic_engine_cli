@@ -1088,7 +1088,7 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
 #[cfg(unix)]
 #[test]
 #[ignore = "requires the real potion-multilingual-128M fixture"]
-fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestResult {
+fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neural() -> TestResult {
     let fixture_root = std::env::var_os("EE_EMBED_MODEL_FIXTURE_DIR")
         .map(PathBuf::from)
         .ok_or_else(|| "EE_EMBED_MODEL_FIXTURE_DIR must name the real model fixture".to_string())?;
@@ -1109,17 +1109,9 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
             bootstrap_model_dir.display()
         )
     })?;
-    let noncanonical_parent = workspace.path.join("private-model-store");
-    fs::create_dir_all(&noncanonical_parent)
-        .map_err(|error| format!("create {}: {error}", noncanonical_parent.display()))?;
-    let noncanonical_model_dir = noncanonical_parent.join("verified-artifact");
-    std::os::unix::fs::symlink(&fixture_model_dir, &noncanonical_model_dir).map_err(|error| {
-        format!(
-            "link real model fixture {} at noncanonical path {}: {error}",
-            fixture_model_dir.display(),
-            noncanonical_model_dir.display()
-        )
-    })?;
+    let corruption_parent = workspace.path.join("corrupt-model-registry-fixtures");
+    fs::create_dir_all(&corruption_parent)
+        .map_err(|error| format!("create {}: {error}", corruption_parent.display()))?;
 
     let network_tripwire = NetworkTripwire::start()?;
     let mut bootstrap_env = network_tripwire.proxy_env();
@@ -1178,25 +1170,97 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
     )?;
     ensure_success(&reembed, "registry-path ee index reembed")?;
 
-    let initial_entry = model2vec_registry_entry(&workspace)?;
-    let verified_hash = initial_entry
+    let list = run_ee_with_env(
+        &workspace,
+        "registry_path_model_list",
+        &[
+            "model",
+            "list",
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--json",
+        ],
+        &bootstrap_env,
+    )?;
+    ensure_success(&list, "registry-path ee model list")?;
+    let list_json = stdout_json(&list, "registry-path ee model list")?;
+    let list_entry = list_json
+        .pointer("/data/entries")
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries.iter().find(|entry| {
+                entry.get("provider").and_then(Value::as_str) == Some("model2vec")
+                    && entry.get("modelName").and_then(Value::as_str)
+                        == Some(BUNDLED_EMBEDDING_MODEL_ID)
+                    && entry.get("purpose").and_then(Value::as_str) == Some("embedding")
+            })
+        })
+        .ok_or_else(|| "public model list omitted the available Model2Vec row".to_string())?;
+    ensure_eq_str(
+        string_member(list_entry, "status")?,
+        "available",
+        "public Model2Vec registry status",
+    )?;
+    ensure_eq_u64(
+        u64_member(list_entry, "dimension")?,
+        u64::from(BUNDLED_EMBEDDING_DIMENSION),
+        "public Model2Vec dimension",
+    )?;
+    ensure_eq_str(
+        string_member(list_entry, "distanceMetric")?,
+        ModelDistanceMetric::Cosine.as_str(),
+        "public Model2Vec distance metric",
+    )?;
+    let public_hash = string_member(list_entry, "contentHash")?.to_string();
+    if !public_hash.starts_with("blake3:") || public_hash.len() != "blake3:".len() + 64 {
+        return Err(format!(
+            "public Model2Vec content hash is not a pinned blake3 identity: {public_hash}"
+        ));
+    }
+    ensure_eq_str(
+        string_member(list_entry, "sourceUri")?,
+        "[REDACTED_PATH]",
+        "public Model2Vec source path redaction",
+    )?;
+    ensure_degraded_code_count(
+        &list,
+        "public Model2Vec availability degradation",
+        "model_registry_no_available_entry",
+        0,
+    )?;
+
+    let canonical_fixture_model_dir = fs::canonicalize(&fixture_model_dir).map_err(|error| {
+        format!(
+            "canonicalize real model fixture {}: {error}",
+            fixture_model_dir.display()
+        )
+    })?;
+    let registered_entry = model2vec_registry_entry(&workspace)?;
+    let verified_hash = registered_entry
         .content_hash
         .clone()
         .ok_or_else(|| "available Model2Vec registry row missing content hash".to_string())?;
-    let registered_entry = update_model2vec_registry_entry(
-        &workspace,
-        BUNDLED_EMBEDDING_MODEL_ID,
-        ModelRegistryStatus::Available,
-        Some(path_string(&noncanonical_model_dir)),
-        Some(verified_hash.clone()),
-        Some(BUNDLED_EMBEDDING_DIMENSION),
-        Some(ModelDistanceMetric::Cosine),
-    )?;
     ensure_eq_str(
         registered_entry.source_uri.as_deref().unwrap_or_default(),
-        path_string(&noncanonical_model_dir).as_str(),
-        "persisted noncanonical Model2Vec source URI",
+        path_string(&canonical_fixture_model_dir).as_str(),
+        "persisted canonical Model2Vec source URI",
     )?;
+    ensure_eq_str(
+        &verified_hash,
+        &public_hash,
+        "public and persisted Model2Vec content hash",
+    )?;
+    ensure_eq_u64(
+        u64::from(registered_entry.dimension.unwrap_or_default()),
+        u64::from(BUNDLED_EMBEDDING_DIMENSION),
+        "persisted Model2Vec dimension",
+    )?;
+    if registered_entry.distance_metric != Some(ModelDistanceMetric::Cosine) {
+        return Err(format!(
+            "persisted Model2Vec distance identity drifted: {:?}",
+            registered_entry.distance_metric
+        ));
+    }
 
     let mut offline_env = network_tripwire.proxy_env();
     offline_env.push(("EE_EMBED_DOWNLOAD".to_string(), "off".to_string()));
@@ -1247,7 +1311,7 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
             .source_uri
             .as_deref()
             .ok_or_else(|| "registered source missing before daemon search".to_string())?,
-        &path_string(&noncanonical_model_dir),
+        &path_string(&canonical_fixture_model_dir),
         "registered source before daemon search",
     )?;
     let index_manifest_path = workspace.path.join(".ee/index/meta.json");
@@ -1419,6 +1483,12 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
     )?;
     ensure_success(&pack, "registry-path ee pack")?;
     ensure_response_embed_backend(&pack, "registry-path ee pack", "neural_local")?;
+    ensure_degraded_code_count(
+        &pack,
+        "registry-path neural pack degradation",
+        "embed_model_unavailable",
+        0,
+    )?;
 
     let orient = run_ee_with_env(
         &workspace,
@@ -1434,6 +1504,12 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
     )?;
     ensure_success(&orient, "registry-path full ee orient")?;
     ensure_response_embed_backend(&orient, "registry-path full ee orient", "neural_local")?;
+    ensure_degraded_code_count(
+        &orient,
+        "registry-path neural orient degradation",
+        "embed_model_unavailable",
+        0,
+    )?;
 
     let database_state_before_why_not = database_artifact_state(&workspace)?;
     let why_not = run_ee_with_env(
@@ -1501,7 +1577,7 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         &workspace,
         BUNDLED_EMBEDDING_MODEL_ID,
         ModelRegistryStatus::Unavailable,
-        Some(path_string(&noncanonical_model_dir)),
+        Some(path_string(&canonical_fixture_model_dir)),
         Some(verified_hash.clone()),
         Some(BUNDLED_EMBEDDING_DIMENSION),
         Some(ModelDistanceMetric::Cosine),
@@ -1513,7 +1589,7 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         &offline_env,
     )?;
 
-    let unverified_model_dir = noncanonical_parent.join("unverified-artifact");
+    let unverified_model_dir = corruption_parent.join("unverified-artifact");
     fs::create_dir_all(&unverified_model_dir)
         .map_err(|error| format!("create {}: {error}", unverified_model_dir.display()))?;
     update_model2vec_registry_entry(
@@ -1536,7 +1612,7 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         &workspace,
         "wrong-model-name",
         ModelRegistryStatus::Available,
-        Some(path_string(&noncanonical_model_dir)),
+        Some(path_string(&canonical_fixture_model_dir)),
         Some(verified_hash.clone()),
         Some(BUNDLED_EMBEDDING_DIMENSION),
         Some(ModelDistanceMetric::Cosine),
@@ -1552,7 +1628,7 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         &workspace,
         BUNDLED_EMBEDDING_MODEL_ID,
         ModelRegistryStatus::Available,
-        Some(path_string(&noncanonical_model_dir)),
+        Some(path_string(&canonical_fixture_model_dir)),
         Some(format!("blake3:{}", "0".repeat(64))),
         Some(BUNDLED_EMBEDDING_DIMENSION),
         Some(ModelDistanceMetric::Cosine),
@@ -1568,7 +1644,7 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         &workspace,
         BUNDLED_EMBEDDING_MODEL_ID,
         ModelRegistryStatus::Available,
-        Some(path_string(&noncanonical_model_dir)),
+        Some(path_string(&canonical_fixture_model_dir)),
         Some(verified_hash.clone()),
         Some(BUNDLED_EMBEDDING_DIMENSION.saturating_add(1)),
         Some(ModelDistanceMetric::Cosine),
@@ -1584,7 +1660,7 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         &workspace,
         BUNDLED_EMBEDDING_MODEL_ID,
         ModelRegistryStatus::Available,
-        Some(path_string(&noncanonical_model_dir)),
+        Some(path_string(&canonical_fixture_model_dir)),
         Some(verified_hash.clone()),
         Some(BUNDLED_EMBEDDING_DIMENSION),
         Some(ModelDistanceMetric::Dot),
@@ -1613,16 +1689,26 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         &offline_env,
     )?;
 
-    // Restore the verified registered row and prove that the settled public
-    // search returns to the neural backend after each fallback posture above.
-    update_model2vec_registry_entry(
+    // Restore exclusively through the public writer after the negative DB
+    // corruption cases, then prove the override-free offline resolver uses it.
+    let restore = run_ee_with_env(
         &workspace,
-        BUNDLED_EMBEDDING_MODEL_ID,
-        ModelRegistryStatus::Available,
-        Some(path_string(&noncanonical_model_dir)),
-        Some(verified_hash.clone()),
-        Some(BUNDLED_EMBEDDING_DIMENSION),
-        Some(ModelDistanceMetric::Cosine),
+        "registry_path_restore_reembed",
+        &[
+            "index",
+            "reembed",
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--json",
+        ],
+        &bootstrap_env,
+    )?;
+    ensure_success(&restore, "registry-path restore reembed")?;
+    let restored_entry = model2vec_registry_entry(&workspace)?;
+    ensure_eq_str(
+        restored_entry.source_uri.as_deref().unwrap_or_default(),
+        path_string(&canonical_fixture_model_dir).as_str(),
+        "restored canonical Model2Vec source URI",
     )?;
     let settled = run_ee_with_env(
         &workspace,
@@ -1650,6 +1736,7 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         ("init", &init),
         ("remember", &remember),
         ("reembed", &reembed),
+        ("model_list", &list),
         ("search", &search),
         ("daemon_search_first", &daemon_search_first),
         ("daemon_search_second", &daemon_search_second),
@@ -1666,6 +1753,7 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         ("mismatched_dimension", &mismatched_dimension),
         ("mismatched_distance", &mismatched_distance),
         ("nonlocal", &nonlocal),
+        ("restore", &restore),
     ] {
         ensure_text_absent(
             &output.stderr,
@@ -1676,14 +1764,15 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
 
     let model_source_tokens = [
         path_string(&fixture_model_dir),
+        path_string(&canonical_fixture_model_dir),
         path_string(&bootstrap_model_dir),
-        path_string(&noncanonical_model_dir),
         path_string(&missing_source),
         path_string(&unverified_model_dir),
         nonlocal_source.to_string(),
     ];
     for (name, output) in [
         ("search", &search),
+        ("model_list", &list),
         ("daemon_search_first", &daemon_search_first),
         ("daemon_search_second", &daemon_search_second),
         ("daemon_search_third", &daemon_search_third),
@@ -1699,6 +1788,7 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         ("mismatched_dimension", &mismatched_dimension),
         ("mismatched_distance", &mismatched_distance),
         ("nonlocal", &nonlocal),
+        ("restore", &restore),
         ("settled", &settled),
     ] {
         ensure_model_sources_absent(
@@ -1729,7 +1819,7 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
 #[cfg(unix)]
 fn model2vec_registry_entry(workspace: &E2eWorkspace) -> TestResult<StoredModelRegistryEntry> {
     let database_path = workspace.path.join(".ee").join("ee.db");
-    let connection = DbConnection::open_file(&database_path)
+    let connection = DbConnection::open_file_read_only(&database_path)
         .map_err(|error| format!("open {}: {error}", database_path.display()))?;
     let stored_workspace = connection
         .get_workspace_by_path(workspace.workspace_arg()?)
