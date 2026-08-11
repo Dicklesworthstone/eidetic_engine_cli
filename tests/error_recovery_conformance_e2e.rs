@@ -423,3 +423,185 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
     )?;
     Ok(())
 }
+
+/// bd-orient-store-discovery-ft1z5 literal acceptance, empty-root flavor: an
+/// INITIALIZED root store with zero documents must discover a populated child
+/// store below it, surface it in `--json` `data.storeDiscovery`
+/// (workspaceRoot/documents/lastWrite plus the bounded-scan `truncated` flag)
+/// and in the human render, and retarget `nextCommands[0]` at the best
+/// candidate — while a populated root must skip discovery entirely
+/// (`storeEmpty=false`, `scanned=false`, no nearbyStores, no retarget).
+#[test]
+fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let root = tempdir.path().join("empty_root_ft1z5");
+    let child = root.join("campaign").join("copulattice_ft1z5");
+    std::fs::create_dir_all(&child).map_err(|error| error.to_string())?;
+    // Bound the parent walk so discovery never escapes the fixture.
+    std::fs::create_dir_all(root.join(".git")).map_err(|error| error.to_string())?;
+    let root_str = root.to_string_lossy().to_string();
+    let child_str = child.to_string_lossy().to_string();
+
+    for workspace in [&root_str, &child_str] {
+        let init = run_ee(&[
+            "init".to_owned(),
+            "--workspace".to_owned(),
+            workspace.clone(),
+            "--json".to_owned(),
+        ])?;
+        ensure(
+            init.status.success(),
+            format!(
+                "init of {workspace} failed: {}",
+                String::from_utf8_lossy(&init.stdout)
+            ),
+        )?;
+    }
+    let seeded = run_ee(&[
+        "--workspace".to_owned(),
+        child_str.clone(),
+        "remember".to_owned(),
+        "campaign seed fact for nearby discovery".to_owned(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        seeded.status.success(),
+        format!(
+            "seeding the child store failed: {}",
+            String::from_utf8_lossy(&seeded.stdout)
+        ),
+    )?;
+
+    let orient = run_ee(&[
+        "--workspace".to_owned(),
+        root_str.clone(),
+        "orient".to_owned(),
+        "--fast".to_owned(),
+        "--json".to_owned(),
+    ])?;
+    let orient_json = stdout_json(&orient, "orient empty initialized root")?;
+    let discovery = orient_json
+        .pointer("/data/storeDiscovery")
+        .ok_or("orient empty root: missing storeDiscovery block")?;
+    ensure(
+        discovery["storeEmpty"] == serde_json::json!(true)
+            && discovery["scanned"] == serde_json::json!(true),
+        format!("orient must scan on an initialized empty root, got: {discovery}"),
+    )?;
+    ensure(
+        discovery["truncated"].as_bool().is_some(),
+        format!(
+            "orient storeDiscovery must report the bounded-scan truncated flag, got: {discovery}"
+        ),
+    )?;
+    let nearby = discovery["nearbyStores"]
+        .as_array()
+        .ok_or("orient empty root: nearbyStores missing")?;
+    let best = nearby
+        .first()
+        .ok_or("orient nearbyStores must include the populated child store")?;
+    let best_path = string_at(best, "/workspaceRoot", "orient best nearby child")?;
+    let best_documents = best["documents"]
+        .as_u64()
+        .ok_or("orient best nearby child: documents must be an integer")?;
+    let best_last_write = string_at(best, "/lastWrite", "orient best nearby child")?;
+    ensure(
+        best_path.contains("copulattice_ft1z5"),
+        format!("orient best nearby store must be the populated child, got: {best:?}"),
+    )?;
+    ensure(
+        best_documents == 1,
+        format!("orient best nearby child must report the one seeded document, got: {best:?}"),
+    )?;
+    ensure(
+        !best_last_write.is_empty(),
+        format!("orient best nearby child must report lastWrite, got: {best:?}"),
+    )?;
+    let first_next_command = string_at(
+        &orient_json,
+        "/data/nextCommands/0",
+        "orient retargeted next command",
+    )?;
+    ensure(
+        first_next_command.starts_with("ee pack ")
+            && first_next_command.contains("--workspace")
+            && first_next_command.contains("copulattice_ft1z5"),
+        format!(
+            "orient nextCommands[0] must retarget pack at the populated child, got: {first_next_command:?}"
+        ),
+    )?;
+
+    let orient_human = run_ee(&[
+        "--workspace".to_owned(),
+        root_str.clone(),
+        "orient".to_owned(),
+        "--fast".to_owned(),
+    ])?;
+    ensure(
+        orient_human.status.success(),
+        format!(
+            "human orient at empty root failed: {}",
+            String::from_utf8_lossy(&orient_human.stderr)
+        ),
+    )?;
+    let human = String::from_utf8(orient_human.stdout)
+        .map_err(|error| format!("human orient stdout was not UTF-8: {error}"))?;
+    ensure(
+        human.contains("copulattice_ft1z5")
+            && human.contains(&format!("{best_documents} docs"))
+            && human.contains(&format!("last write {best_last_write}")),
+        format!(
+            "human orient at the empty root must print the child path/documents/last-write; \
+             documents={best_documents}, lastWrite={best_last_write:?}\n{human}"
+        ),
+    )?;
+
+    // A populated root must skip discovery entirely: no scan, no candidate
+    // list, no retargeted next command pointing away from the root.
+    let root_seed = run_ee(&[
+        "--workspace".to_owned(),
+        root_str.clone(),
+        "remember".to_owned(),
+        "root store resume fact".to_owned(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        root_seed.status.success(),
+        format!(
+            "seeding the root store failed: {}",
+            String::from_utf8_lossy(&root_seed.stdout)
+        ),
+    )?;
+    let populated = run_ee(&[
+        "--workspace".to_owned(),
+        root_str,
+        "orient".to_owned(),
+        "--fast".to_owned(),
+        "--json".to_owned(),
+    ])?;
+    let populated_json = stdout_json(&populated, "orient populated root")?;
+    let populated_discovery = populated_json
+        .pointer("/data/storeDiscovery")
+        .ok_or("orient populated root: missing storeDiscovery block")?;
+    ensure(
+        populated_discovery["storeEmpty"] == serde_json::json!(false)
+            && populated_discovery["scanned"] == serde_json::json!(false),
+        format!("a populated root must not scan for nearby stores, got: {populated_discovery}"),
+    )?;
+    ensure(
+        populated_discovery.get("nearbyStores").is_none(),
+        format!("a populated root must not list nearby stores, got: {populated_discovery}"),
+    )?;
+    let populated_first_next = string_at(
+        &populated_json,
+        "/data/nextCommands/0",
+        "orient populated-root next command",
+    )?;
+    ensure(
+        !populated_first_next.contains("copulattice_ft1z5"),
+        format!(
+            "a populated root's next commands must stay on the root workspace, got: {populated_first_next:?}"
+        ),
+    )?;
+    Ok(())
+}
