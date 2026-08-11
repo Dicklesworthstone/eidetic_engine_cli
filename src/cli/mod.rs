@@ -19925,7 +19925,7 @@ where
                 from_file: args.from_file.as_deref(),
                 model_store_root: None,
             };
-            match crate::core::model::fetch_rerank_model(&options) {
+            match crate::core::model::fetch_model(&options) {
                 Ok(report) => render_model_fetch(cli, &report, stdout),
                 Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
             }

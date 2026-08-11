@@ -30,7 +30,9 @@ use ee::daemon::protocol::{DAEMON_SEARCH_REQUEST_SCHEMA_V1, DaemonRequest, METHO
 use ee::daemon::server::{METHOD_SHUTDOWN, client_round_trip, client_round_trip_before};
 #[cfg(unix)]
 use ee::db::{CreateModelRegistryInput, DbConnection, StoredModelRegistryEntry};
-use ee::models::{MODEL_LIST_SCHEMA_V1, MODEL_STATUS_SCHEMA_V2, RESPONSE_SCHEMA_V2};
+use ee::models::{
+    ERROR_SCHEMA_V2, MODEL_LIST_SCHEMA_V1, MODEL_STATUS_SCHEMA_V2, RESPONSE_SCHEMA_V2,
+};
 #[cfg(unix)]
 use ee::models::{ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus};
 #[cfg(unix)]
@@ -163,6 +165,57 @@ fn network_tripwire_detects_a_proxied_connection() -> TestResult {
         return Ok(());
     }
     Err(format!("unexpected network tripwire error: {error}"))
+}
+
+#[test]
+fn model_fetch_embedding_default_uses_public_embedding_dispatcher() -> TestResult {
+    let workspace = E2eWorkspace::create("fetch-embedding-default-dispatch")?;
+    let rerank_only_artifact = workspace.path.join("rerank-only-artifact.tar.zst");
+    let rerank_only_artifact_arg = path_string(&rerank_only_artifact);
+    let output = run_ee(
+        &workspace,
+        "model_fetch_embedding_default_dispatch",
+        &[
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--json",
+            "model",
+            "fetch",
+            "embedding-default",
+            "--from-file",
+            &rerank_only_artifact_arg,
+        ],
+    )?;
+
+    if output.status.success() {
+        return Err("embedding-default --from-file unexpectedly succeeded".to_string());
+    }
+    ensure_empty_stderr(&output, "ee model fetch embedding-default --from-file")?;
+    let value = stdout_json(&output, "ee model fetch embedding-default --from-file")?;
+    ensure_eq_str(
+        string_value(&value, "schema")?,
+        ERROR_SCHEMA_V2,
+        "embedding fetch error schema",
+    )?;
+    let error = value
+        .get("error")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "embedding fetch error object missing".to_string())?;
+    ensure_eq_str(
+        string_member(error, "code")?,
+        "usage",
+        "embedding fetch error code",
+    )?;
+    ensure_eq_str(
+        string_member(error, "message")?,
+        "embedding-default is fetched from the pinned frankensearch manifest; --from-file is only supported for rerank artifacts",
+        "embedding fetch dispatcher message",
+    )?;
+    ensure_eq_str(
+        string_member(error, "repair")?,
+        "ee model fetch embedding-default",
+        "embedding fetch dispatcher repair",
+    )
 }
 
 struct E2eWorkspace {
