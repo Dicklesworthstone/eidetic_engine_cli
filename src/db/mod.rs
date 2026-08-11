@@ -9265,6 +9265,100 @@ CREATE INDEX idx_curation_candidates_v103_merged_into
     "blake3:v103_suggest_link_candidate_types_2026_08_10",
 );
 
+/// bd-tc-epic-qzk7o.3.1 (T2.0): the immutable outbound origin stream plus
+/// truthful sparse inbound dispositions (ADR 0086 TC-D3/D4/D12).
+///
+/// `mesh_origin_events` is the per-origin append-only chain: one row per
+/// authenticated outer event carrying exactly one typed payload
+/// (`ee.mesh.memory_event.v1` | `ee.team.manifest_event.v1`). The
+/// `(team_id, origin_node_id, seq)` uniqueness plus the chain check in the
+/// append API make divergent successors of one predecessor durable fork
+/// evidence rather than silent overwrites.
+///
+/// `mesh_origin_event_nonces` keeps the fresh 32-byte body-commitment nonce
+/// OUT of the event row entirely: the nonce is body-fetch-only, so no event
+/// serialization path can leak it (content-identical revisions stay
+/// unlinkable to metadata-only peers).
+///
+/// `mesh_origin_dispositions` is the receiver-side sparse state: applied /
+/// withheld / quarantined / unsupported per `(team, origin, seq)`, kept
+/// independent of the receipt frontier so withheld N with applied N+1 (and
+/// later hydration) is representable truthfully.
+pub const V104_MESH_ORIGIN_EVENTS: Migration = Migration::new(
+    104,
+    "mesh_origin_events",
+    r#"
+CREATE TABLE mesh_origin_events (
+    event_id TEXT PRIMARY KEY CHECK (
+        event_id GLOB 'mesh_oevt_*'
+        AND length(event_id) = 36
+        AND event_id NOT GLOB '*[^A-Za-z0-9_]*'
+    ),
+    team_id TEXT NOT NULL CHECK (
+        team_id GLOB 'team_*'
+        AND length(trim(team_id)) > 5
+        AND team_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    origin_node_id TEXT NOT NULL CHECK (
+        origin_node_id GLOB 'node_*'
+        AND length(trim(origin_node_id)) > 5
+        AND origin_node_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    signing_key_generation INTEGER NOT NULL CHECK (signing_key_generation >= 0),
+    seq INTEGER NOT NULL CHECK (seq >= 0),
+    prev_event_hash TEXT CHECK (
+        prev_event_hash IS NULL
+        OR (prev_event_hash GLOB 'blake3:*' AND length(prev_event_hash) = 71)
+    ),
+    event_hash TEXT NOT NULL CHECK (
+        event_hash GLOB 'blake3:*' AND length(event_hash) = 71
+    ),
+    signature TEXT NOT NULL CHECK (length(trim(signature)) > 0),
+    payload_schema TEXT NOT NULL CHECK (
+        payload_schema IN ('ee.mesh.memory_event.v1', 'ee.team.manifest_event.v1')
+    ),
+    payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+    required_features_json TEXT NOT NULL CHECK (json_valid(required_features_json)),
+    produced_at TEXT NOT NULL CHECK (length(trim(produced_at)) > 0),
+    UNIQUE (team_id, origin_node_id, seq)
+);
+
+CREATE INDEX idx_mesh_origin_events_chain
+    ON mesh_origin_events(team_id, origin_node_id, seq);
+CREATE INDEX idx_mesh_origin_events_prev
+    ON mesh_origin_events(prev_event_hash)
+    WHERE prev_event_hash IS NOT NULL;
+
+CREATE TABLE mesh_origin_event_nonces (
+    event_id TEXT PRIMARY KEY REFERENCES mesh_origin_events(event_id) ON DELETE CASCADE,
+    nonce_hex TEXT NOT NULL CHECK (
+        length(nonce_hex) = 64 AND nonce_hex NOT GLOB '*[^0-9a-f]*'
+    )
+);
+
+CREATE TABLE mesh_origin_dispositions (
+    team_id TEXT NOT NULL CHECK (
+        team_id GLOB 'team_*'
+        AND length(trim(team_id)) > 5
+        AND team_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    origin_node_id TEXT NOT NULL CHECK (
+        origin_node_id GLOB 'node_*'
+        AND length(trim(origin_node_id)) > 5
+        AND origin_node_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    seq INTEGER NOT NULL CHECK (seq >= 0),
+    disposition TEXT NOT NULL CHECK (
+        disposition IN ('applied', 'withheld', 'quarantined', 'unsupported')
+    ),
+    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+    recorded_at TEXT NOT NULL CHECK (length(trim(recorded_at)) > 0),
+    PRIMARY KEY (team_id, origin_node_id, seq)
+);
+"#,
+    "blake3:v104_mesh_origin_events_2026_08_11",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -9370,6 +9464,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V101_ATTEMPT_FAMILY_IMMUTABILITY_REPAIR,
     V102_RETRIEVAL_AFFINITY_PROJECTION,
     V103_SUGGEST_LINK_CANDIDATE_TYPES,
+    V104_MESH_ORIGIN_EVENTS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {

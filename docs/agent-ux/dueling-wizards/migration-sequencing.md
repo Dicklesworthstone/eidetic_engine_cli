@@ -5,8 +5,8 @@ This registry is the human-facing companion to
 owned by `bd-1n0np.23.1` and enforced by
 `tests/contracts/dueling_wizards_migration_registry.rs`.
 
-The current compiled migration tail in `src/db/mod.rs` is `V101`. The next
-planned allocation starts at `V102`. `V094_MEMORY_ATTEMPT_FAMILY` and
+The current compiled migration tail in `src/db/mod.rs` is `V104`. The next
+planned allocation starts at `V105`. `V094_MEMORY_ATTEMPT_FAMILY` and
 `V095_ATTEMPT_FAMILY_LEDGER` are non-initiative attempt-family migrations
 (bd-multiplicity-aware-trust-p0u7g), and `V096_MEMORY_SENTINEL_POLARITY` is the
 shipped inverse-sentinel migration (bd-wake-on-condition-inverse-sentinel-65uci).
@@ -17,7 +17,13 @@ from bd-sealed-preregistration-memory-b67be,
 LocalAPI observations, `V100_PACK_EVIDENCE_ITEMS` preserves native
 imported-evidence identity in pack provenance, and
 `V101_ATTEMPT_FAMILY_IMMUTABILITY_REPAIR` closes the shipped ledger's delete
-and pointer-rewrite gaps without modifying V095 history. All eight remain visible under
+and pointer-rewrite gaps without modifying V095 history.
+`V102_RETRIEVAL_AFFINITY_PROJECTION` and `V103_SUGGEST_LINK_CANDIDATE_TYPES`
+are the bd-3a1op graph-intelligence projections (retrieval-affinity cursor +
+edges; link-proposal/contradiction-review candidate types), and
+`V104_MESH_ORIGIN_EVENTS` is the team-confed T2.0 origin stream
+(bd-tc-epic-qzk7o.3.1: per-origin append-only chain, body-fetch-only nonce
+sidecar, sparse receiver dispositions). All eleven remain visible under
 `nonInitiativeCompiledMigrations`. Every
 dueling-wizards schema task must
 allocate from the registry before adding a runtime migration, then keep the
@@ -30,7 +36,9 @@ needed the actual next compiled slot, then moved together again to
 `V099`-`V101` when the memory-seal sidecar compiled as `V098`, then to
 `V101`-`V103` when the mesh transport binding and pack-evidence migrations
 compiled as `V099` and `V100`, then to `V102`-`V104` when the forward-only
-attempt-family immutability repair compiled as `V101`. This preserves
+attempt-family immutability repair compiled as `V101`, then to `V105`-`V107`
+when the graph-intelligence projections and the T2.0 origin stream compiled
+as `V102`-`V104`. This preserves
 their order and ownership without inserting placeholder migrations. Runtime
 migration versions cannot skip a reservation: the schema-version watermark
 would advance past the hole and make a later migration at that version

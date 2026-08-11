@@ -4,8 +4,8 @@
  "gateBead": "bd-1n0np.23.1",
  "manifestOwner": "tests/contracts/dueling_wizards_migration_registry.rs",
  "sourceOfTruth": "src/db/mod.rs::MIGRATIONS",
- "currentLastCompiledMigration": 101,
- "nextPlannedMigration": 102,
+ "currentLastCompiledMigration": 104,
+ "nextPlannedMigration": 105,
  "boundaryMigrationE2e": "scripts/e2e_boundary_migration.sh",
  "backupCoverageBead": "bd-1n0np.23.2",
  "policy": {
@@ -44,7 +44,10 @@
     "V098": "V098_MEMORY_SEALS (bd-sealed-preregistration-memory-b67be commit-reveal seal sidecar: per-memory content commitment, reveal timestamp/verification; failed reveals are audit-only)",
     "V099": "V099_MESH_PEER_TRANSPORT_IDENTITY (bd-tc-epic-qzk7o.3.3 authoritative LocalAPI tailnet/stable-node/current-key binding with monotonic observation generation)",
     "V100": "V100_PACK_EVIDENCE_ITEMS (bd-16imy native imported-evidence pack identity and provenance rows)",
-    "V101": "V101_ATTEMPT_FAMILY_IMMUTABILITY_REPAIR (bd-multiplicity-aware-trust-p0u7g forward-only DELETE and pointer-rewrite guards for the shipped V095 ledger)"
+    "V101": "V101_ATTEMPT_FAMILY_IMMUTABILITY_REPAIR (bd-multiplicity-aware-trust-p0u7g forward-only DELETE and pointer-rewrite guards for the shipped V095 ledger)",
+    "V102": "V102_RETRIEVAL_AFFINITY_PROJECTION (bd-3a1op.2 retrieval-affinity graph projection: cursor + edge tables for the steward-refreshed co-selection snapshot)",
+    "V103": "V103_SUGGEST_LINK_CANDIDATE_TYPES (bd-3a1op.3 curation_candidates rebuild adding link_proposal/contradiction_review candidate types)",
+    "V104": "V104_MESH_ORIGIN_EVENTS (bd-tc-epic-qzk7o.3.1 T2.0 origin stream: per-origin append-only chain, body-fetch-only nonce sidecar, sparse receiver dispositions)"
    }
   }
  },
@@ -131,7 +134,7 @@
   },
   {
    "id": "attestation_bundles",
-   "version": 102,
+   "version": 105,
    "status": "planned",
    "runtimeRule": "planned_allocation_only",
    "migrationConstant": "required_before_implemented",
@@ -141,7 +144,7 @@
   },
   {
    "id": "query_miss_ledger",
-   "version": 103,
+   "version": 106,
    "status": "planned",
    "runtimeRule": "planned_allocation_only",
    "migrationConstant": "required_before_implemented",
@@ -151,7 +154,7 @@
   },
   {
    "id": "source_write_stats",
-   "version": 104,
+   "version": 107,
    "status": "planned",
    "runtimeRule": "planned_allocation_only",
    "migrationConstant": "required_before_implemented",
@@ -302,7 +305,7 @@
   },
   {
    "id": "attestation_bundles",
-   "version": 102,
+   "version": 105,
    "migrationName": "V101_ATTESTATION_BUNDLES",
    "ownerBead": "bd-1n0np.22.1",
    "ownerSurface": "attestation_bundles",
@@ -317,7 +320,7 @@
   },
   {
    "id": "query_miss_ledger",
-   "version": 103,
+   "version": 106,
    "migrationName": "V102_QUERY_MISS_LEDGER",
    "ownerBead": "bd-1n0np.6.3",
    "ownerSurface": "gap_honesty",
@@ -331,7 +334,7 @@
   },
   {
    "id": "source_write_stats",
-   "version": 104,
+   "version": 107,
    "migrationName": "V103_SOURCE_WRITE_STATS",
    "ownerBead": "bd-1n0np.8.5",
    "ownerSurface": "read_fence",
