@@ -245,7 +245,10 @@ fn cache_hotset_manifest_real_binary_streams_large_tracker_privately() -> TestRe
     )?;
     let response: JsonValue = serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("public hotset stdout was not JSON: {error}"))?;
-    ensure(response["schema"] == "ee.response.v2", "response schema drift")?;
+    ensure(
+        response["schema"] == "ee.response.v2",
+        "response schema drift",
+    )?;
     ensure(
         response["data"]["schema"] == "ee.cache.hotset_collect.v1",
         "collector schema drift",
@@ -258,7 +261,10 @@ fn cache_hotset_manifest_real_binary_streams_large_tracker_privately() -> TestRe
                 .find(|source| source["source"] == "beads_tracker")
         })
         .ok_or_else(|| "public response omitted the Beads source".to_owned())?;
-    ensure(beads["status"] == "fresh", "large Beads source was not fresh")?;
+    ensure(
+        beads["status"] == "fresh",
+        "large Beads source was not fresh",
+    )?;
     ensure(
         beads["signalCount"] == 32,
         "large Beads source did not retain the deterministic 32-signal cap",
@@ -290,12 +296,7 @@ fn cache_hotset_manifest_real_binary_missing_authority_abstains() -> TestResult 
     .map_err(|error| format!("write {}: {error}", tracker.display()))?;
     let missing_authority = workspace.path().join("missing-authority.json");
 
-    let output = run_public_hotset_cli(
-        workspace.path(),
-        &git_stub,
-        &bv_stub,
-        &missing_authority,
-    )?;
+    let output = run_public_hotset_cli(workspace.path(), &git_stub, &bv_stub, &missing_authority)?;
     ensure(
         output.status.success(),
         format!(
