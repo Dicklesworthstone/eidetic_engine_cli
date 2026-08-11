@@ -155,7 +155,8 @@ proptest! {
                 "2026-08-11T00:00:02Z",
             );
             if let Ok(disposition) = outcome {
-                prop_assert!(matches!(disposition, IngestDisposition::Unsupported { .. }));
+                let unsupported = matches!(disposition, IngestDisposition::Unsupported { .. });
+                prop_assert!(unsupported);
             }
         }
     }

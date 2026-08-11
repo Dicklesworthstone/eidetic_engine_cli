@@ -450,8 +450,8 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        OPEN_LOOP_TAGS, ResumeItem, ResumeOptions, SESSION_GAP_SECONDS, STALE_SHARED_TAG_MIN,
-        StaleFlag, apply_staleness, build_resume_report, group_sessions, resume_next_commands,
+        OPEN_LOOP_TAGS, ResumeItem, ResumeOptions, STALE_SHARED_TAG_MIN, StaleFlag,
+        apply_staleness, build_resume_report, group_sessions, resume_next_commands,
     };
     use crate::core::orient::{NearbyStore, NearbyStoreScan};
     use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection, StoredMemory};
