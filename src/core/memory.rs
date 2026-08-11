@@ -17851,7 +17851,8 @@ mod tests {
             pending.len() == 1
                 && pending[0].id == own_job_id
                 && pending[0].status_enum() == Some(SearchIndexJobStatus::Pending),
-            format!("release failure leaves the real job retryable: {pending:?}"),
+            true,
+            "release failure leaves the real job retryable",
         )?;
 
         connection
