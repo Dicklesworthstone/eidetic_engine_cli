@@ -1,17 +1,17 @@
 # ee.franken-stack.lock.v1
 #
 # Full commit IDs are mandatory. This set pins the newest sibling revisions
-# proven coherent with ee's Cargo.lock closure. FrankenSQLite stays at the
-# synchronous 0.1.19 API revision consumed by Frankensearch and SQLModel;
-# later commits on main kept the 0.1.19 package version while migrating the
-# VFS/pager stack (a7e67f66..) and Connection API (d4c5b9a9..) to async, so
-# version matching alone is not sufficient. 85f5c488 is the newest commit
-# below the async cluster; it carries the REPLACE-victim, DROP COLUMN,
-# WAL-durability, and #291/#292 engine fixes (bd-022z1).
+# proven coherent with ee's Cargo.lock closure. FrankenSQLite is pinned at
+# the 0.2.1 line (1471829d = published 0.2.1 + the ExpressionTooDeep fix):
+# the [patch.crates-io] entry therefore satisfies sqlmodel-frankensqlite's
+# `fsqlite 0.2` requirement, so ee's primary DB engine runs the patched
+# sibling. Frankensearch's storage crates still request the 0.1 line and
+# fall back to registry fsqlite 0.1.x until that project migrates — the
+# closure intentionally carries both lines (2026-08-11, UPGRADE_LOG.md).
 asupersync	7ecb98499715b18f24ce48f5022ec187fe03afb6
 franken_agent_detection	5b0d64988b48ec4a8f20cac9413ab8588176dd7d
 franken_networkx	7faf0a1b5d0ff808202194c6b68ef738678a9077
 frankensearch	83ef0195e4f364bb6b150d788c4e236db8a3b767
-frankensqlite	85f5c48832677309514ef775b694cfc08c1ea2c9
-sqlmodel_rust	f034a97be341e9a5daee550975f9aa96cff724eb
+frankensqlite	1471829db657f81ba678b001a228ef025aeb52e8
+sqlmodel_rust	4b355f05d1f5e488ccd24e06c1b1077dc478e7d5
 toon_rust	e46b71957fad5397d4bae9eef9d428c8ac8b52aa
