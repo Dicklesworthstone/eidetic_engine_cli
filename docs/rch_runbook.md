@@ -648,6 +648,28 @@ is `cargo test --locked --lib --no-run` — it compiles the full lib-test
 target in a fraction of a battery's time and names every born-red site
 before you spend a 3-hour attempt window.
 
+### hz workers cannot faithfully run the ee lib suite (2026-08-11)
+
+A COMPLETED full-suite run on hz1 produced 398 reds of which the
+overwhelming majority were worker-path artifacts, two mechanisms:
+
+1. On hz hosts `/Users/jemanuel/projects` is a path-mapping SYMLINK, so
+   every ee security guard that refuses symlinked path components (backup
+   roots, task-frame stores, diagnostic outputs, config canonicalization)
+   fires inside test workspaces. The reds read as `traverses symbolic
+   link`, `Refusing to read/write ... symlinked`, or cascade into
+   `expected Success, got Storage` asserts.
+2. The long pinned-staging prefix pushes Unix-domain socket paths past
+   SUN_LEN (~104 bytes), failing every daemon socket test with
+   `path must be shorter than SUN_LEN`.
+
+Neither is a source verdict. Use hz for builds, compile gates, and
+non-path-sensitive integration targets; run the FULL LIB SUITE on vmi
+workers, whose /tmp/rch-sync roots are short and symlink-free. When an
+hz suite run must be interpreted anyway, classify by those two
+signatures first — on 2026-08-11 they accounted for the bulk of 398
+reds, while the honest overlap with the prior vmi baseline was 33.
+
 ### Local Cargo bypass detected
 
 ```text
