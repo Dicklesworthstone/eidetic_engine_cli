@@ -5955,6 +5955,9 @@ pub fn render_doctor_concise_human(report: &DoctorReport) -> String {
         output.push_str("permanent capability gaps:\n");
         for check in permanent_capability_gaps {
             let _ = writeln!(output, "  - {}: {}", check.name, check.message);
+            if let Some(repair) = check.repair {
+                let _ = writeln!(output, "    repair: {repair}");
+            }
         }
     }
     output.push_str("full: ee doctor --full --json\n");
@@ -24165,13 +24168,16 @@ mod tests {
                 severity: CheckSeverity::Warning,
                 message: "Permanent capability gap: fusion-only ranking.".to_owned(),
                 error_code: None,
-                repair: None,
+                repair: Some(
+                    "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst",
+                ),
                 tier: CheckTier::Advisory,
             },
             CheckResult::ok("rch_worker_pressure", "worker pressure ok").advisory(),
         ];
 
         let concise = render_doctor_concise_json(&report);
+        let concise_human = render_doctor_concise_human(&report);
         let full = render_doctor_json_filtered(&report, FieldProfile::Full);
         let value = serde_json::from_str::<serde_json::Value>(&concise)
             .map_err(|error| format!("doctor concise JSON should parse: {error}"))?;
@@ -24258,6 +24264,18 @@ mod tests {
             &data["permanentCapabilityGaps"][0]["permanent"],
             &serde_json::json!(true),
             "concise permanent marker",
+        )?;
+        ensure_equal(
+            &data["permanentCapabilityGaps"][0]["repair"],
+            &serde_json::json!(
+                "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst"
+            ),
+            "concise permanent capability gap repair",
+        )?;
+        ensure_contains(
+            &concise_human,
+            "    repair: ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst",
+            "concise human doctor prints exact permanent capability gap repair",
         )?;
         ensure_equal(
             &full_value["data"]["advisories"][0].get("permanent"),

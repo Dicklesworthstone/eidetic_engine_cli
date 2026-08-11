@@ -543,9 +543,14 @@ run_degradation_lane() {
         and .data.rerank.degradedCode == "rerank_model_unavailable"
         and .data.rerank.rerankScoreCount == 0
         and all(.data.results[]; .scoreKind != "reranked" and (has("rerankScore") | not))
-        and .data.rerank.advisory.permanent == true
-        and .data.rerank.advisory.repair == null
-        and .data.rerank.advisory.resolution == "operator_supplied_artifact_required"
+        and .data.rerank.advisory == {
+            "code": "rerank_model_unavailable",
+            "severity": "low",
+            "permanent": true,
+            "message": "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.",
+            "repair": "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst",
+            "resolution": "verified_offline_import_available"
+        }
         and all(.data.degraded[]; .code != "rerank_model_unavailable")
     ' "missing model degrades explicitly to fusion-only"
     initial_order="$(jq -c '[.data.results[].memoryId]' "${LAST_STDOUT_FILE}" 2>/dev/null || printf '[]')"
@@ -567,8 +572,14 @@ run_degradation_lane() {
         .success == true
         and .data.rerank.mode == "fusion_only_degraded"
         and .data.rerank.degradedCode == "rerank_model_unavailable"
-        and .data.rerank.advisory.permanent == true
-        and .data.rerank.advisory.repair == null
+        and .data.rerank.advisory == {
+            "code": "rerank_model_unavailable",
+            "severity": "low",
+            "permanent": true,
+            "message": "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.",
+            "repair": "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst",
+            "resolution": "verified_offline_import_available"
+        }
         and .data.rerank.rerankScoreCount == 0
         and all(.data.results[]; (has("rerankScore") | not))
     ' "rejected corrupt artifact preserves successful fusion-only fallback"

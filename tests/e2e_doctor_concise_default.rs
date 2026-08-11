@@ -242,6 +242,37 @@ fn doctor_default_json_is_concise_and_full_json_keeps_diagnostics() -> TestResul
             "permanentCapabilityGaps": permanent_capability_gaps,
         }),
     )?;
+
+    let concise_human_output = run_ee(
+        "doctor_concise_human",
+        &["--workspace", workspace_arg, "doctor"],
+    )?;
+    ensure(
+        concise_human_output.status.success(),
+        "default human doctor succeeds",
+        json!({
+            "stdout": preview(&concise_human_output.stdout),
+            "stderr": preview(&concise_human_output.stderr),
+        }),
+    )?;
+    ensure(
+        concise_human_output.stderr.is_empty(),
+        "default human doctor keeps stderr empty",
+        json!({
+            "stderr": preview(&concise_human_output.stderr),
+        }),
+    )?;
+    let concise_human = String::from_utf8(concise_human_output.stdout)
+        .map_err(|error| format!("default human doctor stdout must be UTF-8: {error}"))?;
+    const EXACT_RERANK_REPAIR_LINE: &str = "    repair: ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst";
+    ensure(
+        concise_human.matches(EXACT_RERANK_REPAIR_LINE).count() == 1,
+        "default human doctor prints the exact offline reranker repair once",
+        json!({
+            "expectedRepairLine": EXACT_RERANK_REPAIR_LINE,
+            "stdout": concise_human,
+        }),
+    )?;
     for omitted_key in [
         "checks",
         "advisories",
