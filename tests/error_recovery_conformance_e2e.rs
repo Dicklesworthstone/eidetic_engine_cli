@@ -711,7 +711,7 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
 
     let orient_human = run_ee(&[
         "--workspace".to_owned(),
-        leaf_str,
+        leaf_str.clone(),
         "orient".to_owned(),
         "storeless orientation snapshot".to_owned(),
         "--fast".to_owned(),
@@ -739,9 +739,80 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
         ),
     )?;
 
+    // Same-class converted branches (bd-workspace-miss-init-suggestion-sfjvq
+    // follow-up): diag quarantine show, economy report, and maintenance
+    // wal-checkpoint must carry the identical canonical storeless identity —
+    // exit 10, exact looked-for path, nearby-first retarget, init last.
+    for (surface, argv) in [
+        (
+            "diag quarantine show",
+            vec![
+                "--workspace".to_owned(),
+                leaf_str.clone(),
+                "diag".to_owned(),
+                "quarantine".to_owned(),
+                "show".to_owned(),
+                "cass://storeless/leaf.jsonl".to_owned(),
+                "--json".to_owned(),
+            ],
+        ),
+        (
+            "economy report",
+            vec![
+                "--workspace".to_owned(),
+                leaf_str.clone(),
+                "economy".to_owned(),
+                "report".to_owned(),
+                "--json".to_owned(),
+            ],
+        ),
+        (
+            "maintenance wal-checkpoint",
+            vec![
+                "--workspace".to_owned(),
+                leaf_str.clone(),
+                "maintenance".to_owned(),
+                "wal-checkpoint".to_owned(),
+                "--dry-run".to_owned(),
+                "--json".to_owned(),
+            ],
+        ),
+    ] {
+        let output = run_ee(&argv)?;
+        ensure(
+            output.status.code() == Some(10),
+            format!(
+                "{surface}: storeless miss must exit 10, got {:?}",
+                output.status.code()
+            ),
+        )?;
+        let json = stdout_json(&output, surface)?;
+        ensure(
+            string_at(&json, "/error/code", surface)? == "workspace_store_missing",
+            format!("{surface}: error code must be workspace_store_missing"),
+        )?;
+        ensure(
+            string_at(&json, "/error/message", surface)?.contains("storeless_leaf_sfjvq"),
+            format!("{surface}: message must name the exact looked-for path"),
+        )?;
+        let repair = string_at(&json, "/error/repair", surface)?;
+        ensure(
+            repair.contains("looked for")
+                && repair.contains("a populated store exists at")
+                && repair.contains("retarget with --workspace")
+                && repair.ends_with(
+                    "Only if you intended to create a NEW store here: ee init --workspace .",
+                ),
+            format!(
+                "{surface}: repair must be nearby-first with conditional init last, got: {repair}"
+            ),
+        )?;
+    }
+
     // A lookup miss must never create state: after the failed remember and
-    // search plus both orient renders, the addressed store directory must
-    // still not exist at the storeless leaf.
+    // search, both orient renders, and the converted same-class surfaces,
+    // the addressed store directory must still not exist at the storeless
+    // leaf.
     ensure(
         !leaf.join(".ee").exists() && !addressed_store.exists(),
         format!(
@@ -753,14 +824,15 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
 }
 
 /// bd-workspace-miss-init-suggestion-sfjvq quoting follow-up: when the
-/// nearby populated store lives at a path with spaces, the storeless repair
-/// hint must shell-quote its retarget argument and orient's retargeted next
-/// command must stay executable end-to-end against the exact store.
+/// nearby populated store lives at a path with spaces AND an apostrophe,
+/// the storeless repair hint must shell-quote (and escape) its retarget
+/// argument and orient's retargeted next command must stay executable
+/// end-to-end against the exact store.
 #[test]
 fn storeless_miss_quotes_spaced_nearby_workspace_and_command_executes() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let store_root = tempdir.path().join("nearby store sfjvq");
-    let leaf = store_root.join("sub").join("storeless leaf sfjvq");
+    let store_root = tempdir.path().join("nearby store's sfjvq");
+    let leaf = store_root.join("sub").join("storeless leaf's sfjvq");
     std::fs::create_dir_all(&leaf).map_err(|error| error.to_string())?;
     // Pin the parent walk: discovery stops at the first .git it sees.
     std::fs::create_dir_all(store_root.join(".git")).map_err(|error| error.to_string())?;
@@ -798,7 +870,12 @@ fn storeless_miss_quotes_spaced_nearby_workspace_and_command_executes() -> TestR
     let canonical_root = store_root
         .canonicalize()
         .map_err(|error| format!("canonicalize spaced store root: {error}"))?;
-    let quoted_root = format!("'{}'", canonical_root.to_string_lossy());
+    // Mirror the production quoting rules: single-quote wrap with the
+    // POSIX `'\''` escape for the embedded apostrophe.
+    let quoted_root = format!(
+        "'{}'",
+        canonical_root.to_string_lossy().replace('\'', "'\\''")
+    );
 
     let miss = run_ee(&[
         "--workspace".to_owned(),

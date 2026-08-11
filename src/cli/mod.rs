@@ -13061,7 +13061,7 @@ where
         Some(Command::Maintenance(ref maintenance_cmd)) => match maintenance_cmd {
             MaintenanceCommand::Run(args) => handle_maintenance_run(&cli, args, stdout),
             MaintenanceCommand::WalCheckpoint(args) => {
-                handle_maintenance_wal_checkpoint(&cli, args, stdout)
+                handle_maintenance_wal_checkpoint(&cli, args, stdout, stderr)
             }
             MaintenanceCommand::GraphSnapshotPrune(args) => {
                 handle_maintenance_graph_snapshot_prune(&cli, args, stdout)
@@ -33125,11 +33125,28 @@ where
         }
     };
     let database_path = canonical_path.join(".ee").join("ee.db");
-    if !database_path.is_file() {
+    if !database_path.exists() {
+        // A lookup miss is an addressing failure, never a mandate to create
+        // state: canonical storeless identity (exact looked-for path, nearby
+        // stores first, conditional `ee init` last, exit code 10)
+        // (bd-workspace-miss-init-suggestion-sfjvq).
         return write_domain_error(
-            &DomainError::Configuration {
-                message: format!("No ee database was found at {}.", database_path.display()),
-                repair: Some("ee init --workspace .".to_owned()),
+            &crate::core::storeless_workspace_error(&database_path),
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
+    if !database_path.is_file() {
+        // Present but not a regular file is a genuine storage-shape
+        // failure, not an addressing miss — never suggest init for it.
+        return write_domain_error(
+            &DomainError::Storage {
+                message: format!(
+                    "Database path {} exists but is not a regular file.",
+                    database_path.display()
+                ),
+                repair: Some("ee doctor --json".to_owned()),
             },
             cli.wants_json(),
             stdout,
@@ -61027,13 +61044,15 @@ where
     )
 }
 
-fn handle_maintenance_wal_checkpoint<W>(
+fn handle_maintenance_wal_checkpoint<W, E>(
     cli: &Cli,
     args: &MaintenanceWalCheckpointArgs,
     stdout: &mut W,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
+    E: Write,
 {
     let (workspace_path, workspace_source) = resolve_workspace_for_cli(cli.workspace.as_deref());
     let selected_workspace = selected_maintenance_workspace_path(
@@ -61050,29 +61069,17 @@ where
     });
     let threshold = wal_checkpoint_bytes_threshold();
     if !database_path.exists() {
-        let data = serde_json::json!({
-            "schema": MAINTENANCE_RUN_SCHEMA_V1,
-            "command": "maintenance wal-checkpoint",
-            "requestedJob": "wal_checkpoint",
-            "workspace": selected_workspace
-                .as_deref()
-                .map(|workspace_path| workspace_path.display().to_string()),
-            "databasePath": database_path.display().to_string(),
-            "dryRun": args.dry_run,
-            "mode": args.mode.as_str(),
-            "durableMutation": false,
-            "summary": {
-                "total": 1,
-                "succeeded": 0,
-                "skipped": 0,
-                "failed": 1,
-            },
-            "code": "wal_checkpoint_database_missing",
-            "severity": "medium",
-            "message": format!("Database not found at {}", database_path.display()),
-            "repair": "Run ee init --workspace . before checkpointing the WAL.",
-        });
-        return write_maintenance_response(cli, stdout, false, data);
+        // A missing addressed store is an addressing failure, not a
+        // maintenance outcome: canonical storeless identity (exact
+        // looked-for path, nearby stores first, conditional `ee init`
+        // last, exit code 10) instead of an init-first run report
+        // (bd-workspace-miss-init-suggestion-sfjvq).
+        return write_domain_error(
+            &crate::core::storeless_workspace_error(&database_path),
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
     }
 
     let lock_holder = format!(
@@ -64653,13 +64660,10 @@ fn economy_paths(cli: &Cli, database: Option<&Path>) -> Result<(PathBuf, PathBuf
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
 
     if !database_path.exists() {
-        return Err(DomainError::UnsatisfiedDegradedMode {
-            message: format!(
-                "Memory economy metrics are unavailable because no database exists at {}.",
-                database_path.display()
-            ),
-            repair: Some("ee init --workspace .".to_owned()),
-        });
+        // Canonical storeless identity: exact looked-for path, nearby
+        // stores first, conditional `ee init` last, exit code 10
+        // (bd-workspace-miss-init-suggestion-sfjvq).
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
 
     Ok((workspace_path, database_path))
@@ -74468,9 +74472,9 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_wal_checkpoint_missing_database_returns_json_error() -> TestResult {
-        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let workspace = workspace
+    fn maintenance_wal_checkpoint_missing_database_is_a_storeless_miss() -> TestResult {
+        let workspace_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = workspace_dir
             .path()
             .to_str()
             .ok_or_else(|| "workspace path was not valid UTF-8".to_string())?;
@@ -74486,22 +74490,36 @@ mod tests {
 
         ensure_equal(
             &exit,
-            &ProcessExitCode::UnsatisfiedDegradedMode,
-            "missing database exit",
+            &ProcessExitCode::WorkspaceStoreMissing,
+            "missing database must use the dedicated workspace-store-missing exit",
         )?;
         ensure(stderr.is_empty(), "missing database stderr clean")?;
         let value: serde_json::Value =
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(&value["success"], &serde_json::json!(false), "success flag")?;
         ensure_equal(
-            &value["data"]["command"],
-            &serde_json::json!("maintenance wal-checkpoint"),
-            "command",
-        )?;
-        ensure_equal(
-            &value["data"]["code"],
-            &serde_json::json!("wal_checkpoint_database_missing"),
+            &value["error"]["code"],
+            &serde_json::json!("workspace_store_missing"),
             "missing database code",
+        )?;
+        let message = value["error"]["message"].as_str().unwrap_or_default();
+        ensure(
+            message.starts_with("Database not found at") && message.contains(".ee"),
+            &format!("message must name the exact looked-for path: {message:?}"),
+        )?;
+        let repair = value["error"]["repair"].as_str().unwrap_or_default();
+        ensure(
+            repair.contains("looked for")
+                && repair.ends_with(
+                    "Only if you intended to create a NEW store here: ee init --workspace .",
+                ),
+            &format!(
+                "repair must re-check addressing first and keep init last and conditional: {repair:?}"
+            ),
+        )?;
+        ensure(
+            !workspace_dir.path().join(".ee").exists(),
+            "the storeless miss must not create the addressed store",
         )
     }
 

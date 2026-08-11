@@ -288,25 +288,47 @@ fn economy_report_with_seeded_memories_counts_artifacts() -> TestResult {
 }
 
 #[test]
-fn economy_report_without_init_returns_degraded_mode_error() -> TestResult {
+fn economy_report_without_init_is_a_storeless_miss() -> TestResult {
     let ws_dir = unique_workspace("report-no-init")?;
     let ws = ws_str(&ws_dir)?;
     // Deliberately skip ee init so no database exists
 
     let (out, parsed) = run_economy_report(&ws, &[])?;
     ensure(
-        !out.status.success(),
-        format!("economy report without init must exit non-zero; stdout={parsed}"),
+        out.status.code() == Some(10),
+        format!(
+            "economy report without init must exit with the workspace-store-missing code 10; got {:?}; stdout={parsed}",
+            out.status.code()
+        ),
     )?;
 
     assert_error_envelope(&parsed)?;
 
-    let message = parsed["error"]["message"].as_str().unwrap_or_default();
-    // DomainError::UnsatisfiedDegradedMode from economy_paths:
-    // "Memory economy metrics are unavailable because no database exists at ..."
+    // Canonical storeless identity (bd-workspace-miss-init-suggestion-sfjvq):
+    // exact looked-for path, addressing correction first, init last and
+    // conditional — never a bare init-first hint for a lookup miss.
     ensure(
-        message.contains("unavailable") || message.contains("database") || message.contains("init"),
-        format!("error must explain missing database; got {message:?}"),
+        parsed["error"]["code"] == serde_json::json!("workspace_store_missing"),
+        format!("error code must be workspace_store_missing; got {parsed}"),
+    )?;
+    let message = parsed["error"]["message"].as_str().unwrap_or_default();
+    ensure(
+        message.starts_with("Database not found at") && message.contains(".ee"),
+        format!("error must name the exact looked-for path; got {message:?}"),
+    )?;
+    let repair = parsed["error"]["repair"].as_str().unwrap_or_default();
+    ensure(
+        repair.contains("looked for")
+            && repair.ends_with(
+                "Only if you intended to create a NEW store here: ee init --workspace .",
+            ),
+        format!(
+            "repair must re-check addressing first and keep init conditional and last; got {repair:?}"
+        ),
+    )?;
+    ensure(
+        !ws_dir.join(".ee").exists(),
+        "the storeless miss must not create the addressed store".to_string(),
     )?;
     Ok(())
 }
