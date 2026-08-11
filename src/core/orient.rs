@@ -532,12 +532,20 @@ pub fn discover_nearby_stores(
     scan
 }
 
+/// Read the source-of-truth memory row count from a store without opening it
+/// for writes. `None` means the count could not be established and must never
+/// be interpreted as an empty store.
+#[must_use]
+pub(crate) fn store_memory_row_count(database: &Path) -> Option<u64> {
+    let connection = DbConnection::open_file_read_only(database).ok()?;
+    let documents = connection.count_table_rows("memories").ok()?;
+    u64::try_from(documents).ok()
+}
+
 /// Read `(memory rows, newest db/WAL mtime)` from a candidate store, skipping
 /// quietly on any failure.
 fn nearby_store_profile(database: &Path) -> Option<(u64, Option<String>)> {
-    let connection = DbConnection::open_file_read_only(database).ok()?;
-    let documents = connection.count_table_rows("memories").ok()?;
-    let documents = u64::try_from(documents).unwrap_or(0);
+    let documents = store_memory_row_count(database)?;
     let last_write = nearby_store_last_write(database);
     Some((documents, last_write))
 }

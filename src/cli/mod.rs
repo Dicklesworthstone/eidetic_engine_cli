@@ -39183,8 +39183,7 @@ where
     // populated stores (bd-orient-store-discovery-ft1z5): agents get
     // dropped into arbitrary cwds and rationally stop using ee when the
     // first orient reports nothing.
-    let (store_discovery, nearby_best) =
-        orient_store_discovery(&workspace_path, args.fast, &pack, fast_content.as_ref());
+    let (store_discovery, nearby_best) = orient_store_discovery(&workspace_path);
     let mut next_commands = orient_next_commands(&workspace_path, &args.task, args.max_tokens);
     if let Some(best_workspace) = &nearby_best {
         next_commands.insert(
@@ -39446,39 +39445,22 @@ fn orient_next_commands(workspace: &Path, task: &str, max_tokens: u32) -> Vec<St
     ]
 }
 
-/// True when the mode-relevant orientation content came back empty.
-fn orient_store_looks_empty(
-    fast: bool,
-    pack: &serde_json::Value,
-    fast_content: Option<&serde_json::Value>,
-) -> bool {
-    let items_empty = |value: Option<&serde_json::Value>| {
-        value
-            .and_then(serde_json::Value::as_array)
-            .is_none_or(|items| items.is_empty())
-    };
-    if fast {
-        let Some(content) = fast_content else {
-            return true;
-        };
-        items_empty(content.get("recent")) && items_empty(content.get("relevant"))
-    } else {
-        items_empty(pack.pointer("/pack/items"))
-    }
-}
-
-/// Scan for nearby populated stores when orientation came back empty
-/// (bd-orient-store-discovery-ft1z5). Returns an optional JSON block plus the
-/// best candidate workspace for a retargeted next command. Populated content
-/// omits `storeDiscovery` entirely.
-fn orient_store_discovery(
-    workspace: &Path,
-    fast: bool,
-    pack: &serde_json::Value,
-    fast_content: Option<&serde_json::Value>,
-) -> (Option<serde_json::Value>, Option<String>) {
+/// Scan for nearby populated stores only when the addressed source-of-truth
+/// store is missing or has zero memory rows (bd-orient-store-discovery-ft1z5).
+/// Retrieval content is deliberately irrelevant: a populated store with no
+/// match for this task is not empty. If the row count cannot be established,
+/// omit discovery rather than claim `storeEmpty: true`.
+fn orient_store_discovery(workspace: &Path) -> (Option<serde_json::Value>, Option<String>) {
     let addressed_store_path = workspace.join(".ee").join("ee.db");
-    if !orient_store_looks_empty(fast, pack, fast_content) {
+    let addressed_store_is_empty = match addressed_store_path.try_exists() {
+        Ok(false) => true,
+        Ok(true) => matches!(
+            crate::core::orient::store_memory_row_count(&addressed_store_path),
+            Some(0)
+        ),
+        Err(_) => false,
+    };
+    if !addressed_store_is_empty {
         return (None, None);
     }
     let scan = crate::core::orient::discover_nearby_stores(
@@ -66937,37 +66919,16 @@ mod tests {
     }
 
     #[test]
-    fn orient_populated_content_omits_store_discovery_in_both_modes() -> TestResult {
-        let populated_pack = serde_json::json!({
-            "pack": {
-                "items": [{"id": "mem_full"}]
-            }
-        });
-        let populated_fast = serde_json::json!({
-            "recent": [{"id": "mem_fast"}],
-            "relevant": []
-        });
+    fn orient_unavailable_store_count_does_not_claim_empty() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("unreadable_count");
+        std::fs::create_dir_all(workspace.join(".ee").join("ee.db"))
+            .map_err(|error| error.to_string())?;
 
-        let (full_discovery, full_best) = super::orient_store_discovery(
-            std::path::Path::new("/fixture/populated"),
-            false,
-            &populated_pack,
-            None,
-        );
+        let (discovery, best) = super::orient_store_discovery(&workspace);
         ensure(
-            full_discovery.is_none() && full_best.is_none(),
-            "populated full-mode content must omit storeDiscovery",
-        )?;
-
-        let (fast_discovery, fast_best) = super::orient_store_discovery(
-            std::path::Path::new("/fixture/populated"),
-            true,
-            &serde_json::Value::Null,
-            Some(&populated_fast),
-        );
-        ensure(
-            fast_discovery.is_none() && fast_best.is_none(),
-            "populated fast-mode content must omit storeDiscovery",
+            discovery.is_none() && best.is_none(),
+            "an unavailable source-of-truth count must not emit storeEmpty=true",
         )
     }
 

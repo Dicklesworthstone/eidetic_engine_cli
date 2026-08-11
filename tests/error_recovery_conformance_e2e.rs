@@ -757,8 +757,10 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         ),
     )?;
 
-    // A populated root must omit discovery entirely and must not retarget a
-    // next command away from the root.
+    // A populated root must omit discovery entirely even when the task has no
+    // matching orient content, and must not retarget a next command away from
+    // the root. This is the planted negative for the source-of-truth count:
+    // retrieval emptiness must never be mistaken for store emptiness.
     let root_seed = run_ee(&[
         "--workspace".to_owned(),
         root_str.clone(),
@@ -773,14 +775,25 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
             String::from_utf8_lossy(&root_seed.stdout)
         ),
     )?;
+    let nonmatching_task = "zzzz_ft1z5_no_matching_orient_content_zzzz";
     let populated = run_ee(&[
         "--workspace".to_owned(),
         root_str,
         "orient".to_owned(),
-        "--fast".to_owned(),
+        nonmatching_task.to_owned(),
         "--json".to_owned(),
     ])?;
-    let populated_json = stdout_json(&populated, "orient populated root")?;
+    let populated_json = stdout_json(&populated, "nonmatching orient against populated root")?;
+    let populated_items = populated_json
+        .pointer("/data/pack/pack/items")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("populated nonmatching orient: missing pack items")?;
+    ensure(
+        populated_items.is_empty(),
+        format!(
+            "planted negative requires empty/nonmatching orient content, got: {populated_items:?}"
+        ),
+    )?;
     ensure(
         populated_json.pointer("/data/storeDiscovery").is_none(),
         format!(
