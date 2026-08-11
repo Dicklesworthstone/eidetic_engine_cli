@@ -1696,7 +1696,6 @@ mod tests {
         assert_eq!(report.original_size_bytes, 1300);
     }
 
-    #[cfg(unix)]
     fn temp_root(prefix: &str) -> Result<PathBuf, String> {
         let root = tempfile::Builder::new()
             .prefix(prefix)
@@ -1709,7 +1708,6 @@ mod tests {
         fs::canonicalize(&root).map_err(|e| e.to_string())
     }
 
-    #[cfg(unix)]
     fn write_minimal_manifest(pack: &Path) -> Result<(), String> {
         fs::write(
             pack.join("manifest.json"),

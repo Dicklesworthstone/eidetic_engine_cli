@@ -789,14 +789,12 @@ impl Default for CassClient {
 #[cfg(test)]
 mod tests {
     use std::ffi::{OsStr, OsString};
-    #[cfg(unix)]
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
-    #[cfg(unix)]
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
@@ -808,7 +806,6 @@ mod tests {
 
     type TestResult = Result<(), String>;
 
-    #[cfg(unix)]
     fn unique_test_dir(prefix: &str) -> TestResultWith<PathBuf> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -825,7 +822,6 @@ mod tests {
             .join(format!("{prefix}-{}-{now}", std::process::id())))
     }
 
-    #[cfg(unix)]
     type TestResultWith<T> = Result<T, String>;
 
     #[cfg(unix)]
