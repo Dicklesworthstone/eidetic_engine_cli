@@ -14611,6 +14611,151 @@ mod tests {
     }
 
     #[test]
+    fn live_large_gap_search_emits_repair_once_without_hiding_stale_truth() -> TestResult {
+        let workspace = unique_test_dir("live-large-index-gap");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let database_path = workspace.join("ee.db");
+        let index_dir = workspace.join("index");
+        let workspace_id = "wsp_live_large_gap_0000000000";
+        let seed_id = "mem_live_large_gap_seed_000000";
+        let seed_content = "Live large-gap seed remains in the old lexical index.";
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("live large index gap".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(seed_id, &test_memory_input(workspace_id, seed_content))
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let build_index_dir = index_dir.clone();
+        let seed_id_for_index = seed_id.to_owned();
+        let seed_content_for_index = seed_content.to_owned();
+        crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            let stack = EmbedderStack::from_parts(
+                Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>,
+                None,
+            );
+            let documents = vec![IndexableDocument::new(
+                seed_id_for_index,
+                seed_content_for_index,
+            )];
+            let lexical_documents = documents.clone();
+            IndexBuilder::new(&build_index_dir)
+                .with_embedder_stack(stack)
+                .add_documents(documents)
+                .build(&cx)
+                .await
+                .map_err(|error| error.to_string())?;
+            crate::core::index::build_lexical_tier(&cx, &build_index_dir, &lexical_documents)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        })
+        .map_err(|error| error.to_string())??;
+        write_current_index_metadata(&index_dir, 1)?;
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        for offset in 0..=SEARCH_INDEX_LARGE_GAP_THRESHOLD {
+            let memory_id = format!("mem_live_large_gap_{offset:08}");
+            let content = format!("Unindexed live large-gap memory number {offset}.");
+            connection
+                .insert_memory(&memory_id, &test_memory_input(workspace_id, &content))
+                .map_err(|error| error.to_string())?;
+        }
+        connection.close().map_err(|error| error.to_string())?;
+
+        let status =
+            crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database_path.clone()),
+                index_dir: Some(index_dir.clone()),
+            })
+            .map_err(|error| error.to_string())?;
+        let (db_generation, index_generation) =
+            status
+                .db_generation
+                .zip(status.index_generation)
+                .ok_or_else(|| format!("large-gap status omitted generations: {status:?}"))?;
+        ensure(
+            db_generation.saturating_sub(index_generation) > SEARCH_INDEX_LARGE_GAP_THRESHOLD,
+            format!(
+                "fixture must create a real generation gap above {}: db={db_generation}, index={index_generation}",
+                SEARCH_INDEX_LARGE_GAP_THRESHOLD
+            ),
+        )?;
+
+        let report = run_search(&SearchOptions {
+            workspace_path: workspace,
+            database_path: Some(database_path),
+            index_dir: Some(index_dir),
+            query: "live large-gap seed".to_owned(),
+            limit: 10,
+            speed: SpeedMode::Instant,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::LexicalOnly,
+            strict_source_mode: true,
+            memory_scope: MemoryScope::Workspace,
+            strict_scope: false,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(
+            report.results.iter().any(|hit| hit.doc_id == seed_id),
+            "the real stale-index search must still execute against the old lexical index",
+        )?;
+
+        let mut session = SearchAdvisorySession::default();
+        let first = report.data_json_with_advisory_session(&mut session);
+        let repeated = report.data_json_with_advisory_session(&mut session);
+        let first_codes = first["degraded"]
+            .as_array()
+            .ok_or_else(|| format!("first large-gap response omitted degraded[]: {first}"))?
+            .iter()
+            .filter_map(|entry| entry["code"].as_str())
+            .collect::<Vec<_>>();
+        ensure(
+            first_codes.contains(&"search_index_stale")
+                && first_codes.contains(&"search_index_large_gap"),
+            format!("first real large-gap response omitted required truth: {first}"),
+        )?;
+        ensure(
+            first["degraded"].as_array().is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry["code"] == "search_index_large_gap"
+                        && entry["repair"] == "ee index rebuild --workspace ."
+                })
+            }),
+            format!("large-gap response omitted explicit rebuild repair: {first}"),
+        )?;
+        ensure(
+            repeated["degraded"].as_array().is_some_and(|entries| {
+                entries.len() == 1 && entries[0]["code"] == "search_index_stale"
+            }),
+            format!(
+                "repeat rendering must suppress only the repair advisory and retain stale truth: {repeated}"
+            ),
+        )
+    }
+
+    #[test]
     fn search_data_json_redacts_public_content_metadata() {
         let raw_value = concat!("sk", "_", "search", "_", "secret", "_", "123");
         let report = SearchReport {
