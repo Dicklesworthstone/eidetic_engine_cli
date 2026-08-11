@@ -378,6 +378,11 @@ pub const EXIT_CODES: &[ExitCodeEntry] = &[
         description: "Evaluation completed and found regressions",
     },
     ExitCodeEntry {
+        code: 10,
+        name: "workspace_store_missing",
+        description: "The addressed workspace has no initialized ee store",
+    },
+    ExitCodeEntry {
         code: 130,
         name: "cancelled",
         description: "Operation was cancelled by the caller, deadline, or runtime budget",
@@ -1579,6 +1584,10 @@ mod tests {
             ("policy", ProcessExitCode::PolicyDenied),
             ("migration", ProcessExitCode::MigrationRequired),
             ("eval_failure", ProcessExitCode::EvalFailure),
+            (
+                "workspace_store_missing",
+                ProcessExitCode::WorkspaceStoreMissing,
+            ),
             ("cancelled", ProcessExitCode::Cancelled),
         ];
         ensure_equal(&EXIT_CODES.len(), &expected.len(), "exit code count")?;
