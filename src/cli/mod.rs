@@ -38942,6 +38942,12 @@ where
     };
 
     let workspace_path = cli.resolve_workspace();
+    let addressed_database_path =
+        crate::core::orient::resolved_addressed_database_path(&workspace_path);
+    let addressed_index_dir = addressed_database_path.parent().map_or_else(
+        || workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR),
+        |store_dir| store_dir.join(DEFAULT_INDEX_SUBDIR),
+    );
     let orient_start_backend = crate::core::index::active_embed_backend();
     let mut degraded = Vec::new();
 
@@ -39044,8 +39050,8 @@ where
     let fast_content = args.fast.then(|| {
         orient_fast_content(&OrientFastContentOptions {
             workspace_path: &workspace_path,
-            database_path: None,
-            index_dir: None,
+            database_path: Some(&addressed_database_path),
+            index_dir: Some(&addressed_index_dir),
             task: &args.task,
             max_tokens: args.max_tokens,
             candidate_pool: args.candidate_pool,
@@ -39062,8 +39068,8 @@ where
                 .with_resource_profile(PackResourceProfile::Standard);
         let pack_options = ContextPackOptions {
             workspace_path: workspace_path.clone(),
-            database_path: None,
-            index_dir: None,
+            database_path: Some(addressed_database_path.clone()),
+            index_dir: Some(addressed_index_dir.clone()),
             query: args.task.clone(),
             speed: crate::search::SpeedMode::Default,
             source_mode: SearchSourceMode::Hybrid,
@@ -39129,7 +39135,7 @@ where
 
     let decisions = match orient_decisions(&OrientDecisionOptions {
         workspace_path: &workspace_path,
-        database_path: None,
+        database_path: Some(&addressed_database_path),
         warning_days: None,
         limit: 12,
         now: None,
@@ -39183,12 +39189,13 @@ where
     // populated stores (bd-orient-store-discovery-ft1z5): agents get
     // dropped into arbitrary cwds and rationally stop using ee when the
     // first orient reports nothing.
-    let (store_discovery, nearby_best) = orient_store_discovery(&workspace_path);
+    let (store_discovery, nearby_best) =
+        orient_store_discovery(&workspace_path, &addressed_database_path);
     let mut next_commands = orient_next_commands(&workspace_path, &args.task, args.max_tokens);
-    if let Some(best_workspace) = &nearby_best {
+    if let Some(best_store) = &nearby_best {
         next_commands.insert(
             0,
-            orient_pack_command(Path::new(best_workspace), &args.task, args.max_tokens),
+            orient_pack_command_for_store(best_store, &args.task, args.max_tokens),
         );
     }
 
@@ -39450,27 +39457,25 @@ fn orient_next_commands(workspace: &Path, task: &str, max_tokens: u32) -> Vec<St
 /// Retrieval content is deliberately irrelevant: a populated store with no
 /// match for this task is not empty. If the row count cannot be established,
 /// omit discovery rather than claim `storeEmpty: true`.
-fn orient_store_discovery(workspace: &Path) -> (Option<serde_json::Value>, Option<String>) {
-    let addressed_store_path = workspace.join(".ee").join("ee.db");
-    let addressed_store_is_empty = match addressed_store_path.try_exists() {
-        Ok(false) => true,
-        Ok(true) => matches!(
-            crate::core::orient::store_memory_row_count(&addressed_store_path),
-            Some(0)
-        ),
-        Err(_) => false,
+fn orient_store_discovery(
+    workspace: &Path,
+    addressed_database: &Path,
+) -> (
+    Option<serde_json::Value>,
+    Option<crate::core::orient::NearbyStore>,
+) {
+    let addressed_store_path = match crate::core::orient::addressed_store_state(addressed_database)
+    {
+        crate::core::orient::AddressedStoreState::Empty { database } => database,
+        crate::core::orient::AddressedStoreState::Populated
+        | crate::core::orient::AddressedStoreState::Unavailable => return (None, None),
     };
-    if !addressed_store_is_empty {
-        return (None, None);
-    }
-    let scan = crate::core::orient::discover_nearby_stores(
+    let scan = crate::core::orient::discover_nearby_stores_for_database(
         workspace,
+        addressed_database,
         std::time::Duration::from_millis(crate::core::orient::NEARBY_STORE_SCAN_BUDGET_MS),
     );
-    let best = scan
-        .stores
-        .first()
-        .map(|store| store.workspace_root.clone());
+    let best = scan.stores.first().cloned();
     let value = serde_json::json!({
         "addressedStorePath": addressed_store_path,
         "storeEmpty": true,
@@ -39486,6 +39491,21 @@ fn orient_pack_command(workspace: &Path, task: &str, max_tokens: u32) -> String 
     let task = shell_quote_cli_arg(task);
     format!(
         "ee pack --workspace {workspace} --read-only --source-mode lexical_only --max-tokens {max_tokens} --json -- {task}"
+    )
+}
+
+fn orient_pack_command_for_store(
+    store: &crate::core::orient::NearbyStore,
+    task: &str,
+    max_tokens: u32,
+) -> String {
+    let workspace = shell_quote_cli_arg(&store.workspace_root);
+    let store_dir = Path::new(&store.store_dir);
+    let database = shell_quote_cli_arg(&store_dir.join("ee.db").display().to_string());
+    let index_dir = shell_quote_cli_arg(&store_dir.join("index").display().to_string());
+    let task = shell_quote_cli_arg(task);
+    format!(
+        "ee pack --workspace {workspace} --database {database} --index-dir {index_dir} --read-only --source-mode lexical_only --max-tokens {max_tokens} --json -- {task}"
     )
 }
 
@@ -66925,7 +66945,8 @@ mod tests {
         std::fs::create_dir_all(workspace.join(".ee").join("ee.db"))
             .map_err(|error| error.to_string())?;
 
-        let (discovery, best) = super::orient_store_discovery(&workspace);
+        let addressed_database = crate::core::orient::resolved_addressed_database_path(&workspace);
+        let (discovery, best) = super::orient_store_discovery(&workspace, &addressed_database);
         ensure(
             discovery.is_none() && best.is_none(),
             "an unavailable source-of-truth count must not emit storeEmpty=true",

@@ -408,29 +408,126 @@ pub struct NearbyStoreScan {
     pub truncated: bool,
 }
 
+/// Source-of-truth population state for one resolved addressed database.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AddressedStoreState {
+    /// The resolved store is missing or has zero memory rows. The path
+    /// identifies the exact empty store agents addressed.
+    Empty { database: PathBuf },
+    /// The resolved store has durable memory rows.
+    Populated,
+    /// A present store could not be inspected safely. Discovery must not call
+    /// it empty because an unreadable store is not evidence of zero rows.
+    Unavailable,
+}
+
+/// Resolve the database addressed by an orientation request.
+///
+/// The normal `.ee/ee.db` store remains authoritative whenever that path has
+/// any filesystem entry, including an unsafe or unreadable one. Falling back
+/// in that case would hide a broken addressed store. When the normal database
+/// is genuinely absent, an existing `.ee-campaign/ee.db` is the supported
+/// campaign-store fallback.
+#[must_use]
+pub fn resolved_addressed_database_path(workspace_path: &Path) -> PathBuf {
+    // Discovery candidates are canonicalized before they are reported. Use
+    // the same canonical workspace root for the addressed store so provider
+    // reads, discovery suppression, and retarget commands cannot describe
+    // different spellings of the same on-disk store (notably `/var` versus
+    // `/private/var` on macOS). Marker/database symlinks remain visible in
+    // the resulting path and are rejected by `addressed_store_state`.
+    let workspace_root = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let default_database = workspace_root.join(".ee").join("ee.db");
+    let campaign_database = workspace_root.join(".ee-campaign").join("ee.db");
+
+    match std::fs::symlink_metadata(&default_database) {
+        Ok(_) => default_database,
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => default_database,
+        Err(_) => match std::fs::symlink_metadata(&campaign_database) {
+            Ok(_) => campaign_database,
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => campaign_database,
+            Err(_) => default_database,
+        },
+    }
+}
+
+/// Inspect exactly the resolved database addressed by the request.
+///
+/// `None` from the row-count probe is deliberately unavailable, never empty:
+/// unreadable, symlinked, broken, or schema-incompatible stores cannot justify
+/// scanning and retargeting away from the caller's selected store.
+#[must_use]
+pub fn addressed_store_state(database: &Path) -> AddressedStoreState {
+    match std::fs::symlink_metadata(database) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => AddressedStoreState::Empty {
+            database: database.to_path_buf(),
+        },
+        Err(_) => AddressedStoreState::Unavailable,
+        Ok(_) if !nearby_store_database_is_safe_regular_file(database) => {
+            AddressedStoreState::Unavailable
+        }
+        Ok(_) => match store_memory_row_count(database) {
+            Some(0) => AddressedStoreState::Empty {
+                database: database.to_path_buf(),
+            },
+            Some(_) => AddressedStoreState::Populated,
+            None => AddressedStoreState::Unavailable,
+        },
+    }
+}
+
 /// Scan for populated stores near `workspace_path`.
 ///
 /// Read-only and loud about nothing: unreadable directories and stores that
 /// fail to open are skipped (permission-denied children must not fail
-/// orientation). The addressed workspace's own store is excluded.
+/// orientation). Only the exact addressed database is excluded; an alternate
+/// `.ee`/`.ee-campaign` store at the same workspace root remains discoverable.
 #[must_use]
 pub fn discover_nearby_stores(
     workspace_path: &Path,
     budget: std::time::Duration,
 ) -> NearbyStoreScan {
-    discover_nearby_stores_with_registry(workspace_path, budget, None)
+    // Generic callers still address the conventional `.ee` store. Orient is
+    // the one surface that resolves `.ee-campaign` as a provider fallback and
+    // therefore calls `discover_nearby_stores_for_database` explicitly.
+    let workspace_root = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let addressed_database = workspace_root.join(".ee").join("ee.db");
+    discover_nearby_stores_with_registry(workspace_path, &addressed_database, budget, None)
+}
+
+/// Scan while preserving the exact database already resolved by the caller.
+///
+/// `ee orient` uses this form so the provider database, the discovery
+/// suppression decision, and the excluded candidate are one identity.
+#[must_use]
+pub fn discover_nearby_stores_for_database(
+    workspace_path: &Path,
+    addressed_database: &Path,
+    budget: std::time::Duration,
+) -> NearbyStoreScan {
+    discover_nearby_stores_with_registry(workspace_path, addressed_database, budget, None)
 }
 
 fn discover_nearby_stores_with_registry(
     workspace_path: &Path,
+    addressed_database: &Path,
     budget: std::time::Duration,
     registry_path: Option<&Path>,
 ) -> NearbyStoreScan {
     let started = std::time::Instant::now();
     let mut scan = NearbyStoreScan::default();
-    let own_root = workspace_path.canonicalize().ok();
+    let scan_root = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let addressed_database_canonical = addressed_database.canonicalize().ok();
     let mut candidates = Vec::new();
     let mut seen_candidates = BTreeSet::new();
+
+    add_nearby_store_candidate(scan_root.clone(), &mut seen_candidates, &mut candidates);
 
     // (a) registered workspaces. Registry failures are deliberately quiet:
     // discovery is a best-effort recovery hint, and inability to inspect one
@@ -441,37 +538,36 @@ fn discover_nearby_stores_with_registry(
                 registry_path: registry_path.map(Path::to_path_buf),
             },
         ) {
+            if nearby_store_budget_exhausted(started, budget, &mut scan) {
+                return scan;
+            }
             for workspace in registry.workspaces {
-                if started.elapsed() >= budget {
-                    scan.truncated = true;
+                if nearby_store_budget_exhausted(started, budget, &mut scan) {
                     break;
                 }
                 add_nearby_store_candidate(
                     PathBuf::from(workspace.path),
-                    workspace_path,
-                    own_root.as_deref(),
                     &mut seen_candidates,
                     &mut candidates,
                 );
+                if nearby_store_budget_exhausted(started, budget, &mut scan) {
+                    break;
+                }
             }
         }
     }
 
     // (b) children, breadth-first, bounded depth.
-    let mut frontier = vec![(workspace_path.to_path_buf(), 0_usize)];
+    let mut frontier = vec![(scan_root.clone(), 0_usize)];
     while let Some((dir, depth)) = frontier.pop() {
-        if started.elapsed() >= budget {
-            scan.truncated = true;
+        if nearby_store_budget_exhausted(started, budget, &mut scan) {
             break;
         }
         if depth > 0 {
-            add_nearby_store_candidate(
-                dir.clone(),
-                workspace_path,
-                own_root.as_deref(),
-                &mut seen_candidates,
-                &mut candidates,
-            );
+            add_nearby_store_candidate(dir.clone(), &mut seen_candidates, &mut candidates);
+            if nearby_store_budget_exhausted(started, budget, &mut scan) {
+                break;
+            }
         }
         if depth >= NEARBY_STORE_CHILD_DEPTH {
             continue;
@@ -479,13 +575,15 @@ fn discover_nearby_stores_with_registry(
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
+        if nearby_store_budget_exhausted(started, budget, &mut scan) {
+            break;
+        }
         for entry in entries.flatten() {
             // A single very wide directory must not bypass the advertised
             // wall-clock bound while we enumerate it. Checking only between
             // directories lets one directory with millions of entries turn
             // this read-only recovery hint into an unbounded walk.
-            if started.elapsed() >= budget {
-                scan.truncated = true;
+            if nearby_store_budget_exhausted(started, budget, &mut scan) {
                 frontier.clear();
                 break;
             }
@@ -496,6 +594,10 @@ fn discover_nearby_stores_with_registry(
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
+            if nearby_store_budget_exhausted(started, budget, &mut scan) {
+                frontier.clear();
+                break;
+            }
             if !file_type.is_dir() {
                 continue;
             }
@@ -510,41 +612,58 @@ fn discover_nearby_stores_with_registry(
     }
 
     // (c) parents up to (and including) the git root.
-    let mut parent = if workspace_path.join(".git").exists() {
+    let mut parent = if scan_root.join(".git").exists() {
         None
     } else {
-        workspace_path.parent()
+        scan_root.parent()
     };
     while let Some(dir) = parent {
-        if started.elapsed() >= budget {
-            scan.truncated = true;
+        if nearby_store_budget_exhausted(started, budget, &mut scan) {
             break;
         }
-        add_nearby_store_candidate(
-            dir.to_path_buf(),
-            workspace_path,
-            own_root.as_deref(),
-            &mut seen_candidates,
-            &mut candidates,
-        );
+        add_nearby_store_candidate(dir.to_path_buf(), &mut seen_candidates, &mut candidates);
+        if nearby_store_budget_exhausted(started, budget, &mut scan) {
+            break;
+        }
         if dir.join(".git").exists() {
             break;
         }
         parent = dir.parent();
     }
 
-    for candidate in candidates {
-        if started.elapsed() >= budget {
-            scan.truncated = true;
+    'candidates: for candidate in candidates {
+        if nearby_store_budget_exhausted(started, budget, &mut scan) {
             break;
         }
         for marker in NEARBY_STORE_MARKERS {
+            if nearby_store_budget_exhausted(started, budget, &mut scan) {
+                break 'candidates;
+            }
             let store_dir = candidate.join(marker);
             let database = store_dir.join("ee.db");
-            if !nearby_store_database_is_safe_regular_file(&database) {
+            let is_addressed_database = nearby_store_is_addressed_database(
+                &database,
+                addressed_database,
+                addressed_database_canonical.as_deref(),
+            );
+            if nearby_store_budget_exhausted(started, budget, &mut scan) {
+                break 'candidates;
+            }
+            if is_addressed_database {
                 continue;
             }
-            let Some(profile) = nearby_store_profile(&database) else {
+            let database_is_safe = nearby_store_database_is_safe_regular_file(&database);
+            if nearby_store_budget_exhausted(started, budget, &mut scan) {
+                break 'candidates;
+            }
+            if !database_is_safe {
+                continue;
+            }
+            let profile = nearby_store_profile(&database);
+            if nearby_store_budget_exhausted(started, budget, &mut scan) {
+                break 'candidates;
+            }
+            let Some(profile) = profile else {
                 continue;
             };
             let (documents, last_write) = profile;
@@ -567,28 +686,55 @@ fn discover_nearby_stores_with_registry(
             .then_with(|| left.workspace_root.cmp(&right.workspace_root))
     });
     scan.stores.truncate(NEARBY_STORE_REPORT_LIMIT);
+    // Account for the final completed operation too. Without this terminal
+    // check, the last candidate comparison or result sort could cross the
+    // deadline after the final in-loop check and still report `truncated`
+    // as false.
+    nearby_store_budget_exhausted(started, budget, &mut scan);
     scan
+}
+
+fn nearby_store_budget_exhausted(
+    started: std::time::Instant,
+    budget: std::time::Duration,
+    scan: &mut NearbyStoreScan,
+) -> bool {
+    if started.elapsed() < budget {
+        false
+    } else {
+        scan.truncated = true;
+        true
+    }
 }
 
 fn add_nearby_store_candidate(
     candidate: PathBuf,
-    addressed_workspace: &Path,
-    addressed_canonical: Option<&Path>,
     seen: &mut BTreeSet<PathBuf>,
     candidates: &mut Vec<PathBuf>,
 ) {
-    if candidate == addressed_workspace
-        || crate::core::path_safety::path_has_symlink_component(&candidate).unwrap_or(true)
-    {
+    if crate::core::path_safety::path_has_symlink_component(&candidate).unwrap_or(true) {
         return;
     }
     let Ok(canonical) = candidate.canonicalize() else {
         return;
     };
-    if addressed_canonical == Some(canonical.as_path()) || !seen.insert(canonical.clone()) {
+    if !seen.insert(canonical.clone()) {
         return;
     }
     candidates.push(canonical);
+}
+
+fn nearby_store_is_addressed_database(
+    candidate: &Path,
+    addressed: &Path,
+    addressed_canonical: Option<&Path>,
+) -> bool {
+    candidate == addressed
+        || addressed_canonical.is_some_and(|addressed_canonical| {
+            candidate
+                .canonicalize()
+                .is_ok_and(|candidate_canonical| candidate_canonical == addressed_canonical)
+        })
 }
 
 fn nearby_store_database_is_safe_regular_file(database: &Path) -> bool {
@@ -1087,7 +1233,16 @@ mod tests {
 
     fn discover_local_stores(workspace: &Path, budget: std::time::Duration) -> NearbyStoreScan {
         let absent_registry = workspace.join("registry-not-present-for-local-scan.db");
-        discover_nearby_stores_with_registry(workspace, budget, Some(&absent_registry))
+        let workspace_root = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.to_path_buf());
+        let addressed_database = workspace_root.join(".ee").join("ee.db");
+        discover_nearby_stores_with_registry(
+            workspace,
+            &addressed_database,
+            budget,
+            Some(&absent_registry),
+        )
     }
 
     #[test]
@@ -1317,6 +1472,27 @@ mod tests {
     }
 
     #[test]
+    fn discovery_post_operation_budget_overrun_is_truncated_not_preempted() -> TestResult {
+        let started = std::time::Instant::now();
+        let budget = std::time::Duration::from_millis(20);
+        let mut scan = NearbyStoreScan::default();
+
+        ensure(
+            !nearby_store_budget_exhausted(started, budget, &mut scan),
+            "an operation started inside the budget must not be preemptively cancelled".to_owned(),
+        )?;
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        ensure(
+            nearby_store_budget_exhausted(started, budget, &mut scan),
+            "an operation completing after the budget must mark the scan truncated".to_owned(),
+        )?;
+        ensure(
+            scan.truncated,
+            "post-operation budget overrun must persist truncated=true".to_owned(),
+        )
+    }
+
+    #[test]
     fn discovery_excludes_own_store_and_empty_dirs() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         std::fs::create_dir_all(temp.path().join(".git")).map_err(|error| error.to_string())?;
@@ -1328,6 +1504,90 @@ mod tests {
 
         let scan = discover_local_stores(temp.path(), scan_budget());
         ensure_equal(&scan.stores.len(), &0_usize, "no nearby stores reported")
+    }
+
+    #[test]
+    fn addressed_campaign_store_with_rows_is_not_empty() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        remember_fixture(
+            temp.path(),
+            "Addressed campaign store has durable content.",
+            "campaign",
+            None,
+        )?;
+        std::fs::rename(temp.path().join(".ee"), temp.path().join(".ee-campaign"))
+            .map_err(|error| error.to_string())?;
+
+        let database = resolved_addressed_database_path(temp.path());
+        let expected = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            .join(".ee-campaign")
+            .join("ee.db");
+        ensure_equal(&database, &expected, "resolved addressed campaign database")?;
+        ensure_equal(
+            &addressed_store_state(&database),
+            &AddressedStoreState::Populated,
+            "populated addressed .ee-campaign store",
+        )
+    }
+
+    #[test]
+    fn addressed_store_state_inspects_only_the_resolved_database() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        remember_fixture(
+            temp.path(),
+            "Alternate campaign content must not mask an empty addressed default store.",
+            "campaign",
+            None,
+        )?;
+        std::fs::rename(temp.path().join(".ee"), temp.path().join(".ee-campaign"))
+            .map_err(|error| error.to_string())?;
+
+        let init_report = init_workspace(&InitOptions {
+            workspace_path: temp.path().to_path_buf(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        ensure(
+            init_report.status.is_success(),
+            format!(
+                "initialize empty addressed default store failed: {:?}",
+                init_report.action_errors
+            ),
+        )?;
+
+        let database = resolved_addressed_database_path(temp.path());
+        let expected = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            .join(".ee")
+            .join("ee.db");
+        ensure_equal(&database, &expected, "resolved addressed default database")?;
+        ensure_equal(
+            &addressed_store_state(&database),
+            &AddressedStoreState::Empty { database: expected },
+            "only the resolved addressed database determines emptiness",
+        )?;
+
+        let scan = discover_local_stores(temp.path(), scan_budget());
+        ensure_equal(
+            &scan.stores.len(),
+            &1_usize,
+            "alternate campaign store at the addressed root remains discoverable",
+        )?;
+        ensure(
+            scan.stores[0].store_dir.ends_with(".ee-campaign") && scan.stores[0].documents == 1,
+            format!(
+                "empty addressed .ee must report the populated sibling .ee-campaign: {:?}",
+                scan.stores
+            ),
+        )
     }
 
     #[cfg(unix)]

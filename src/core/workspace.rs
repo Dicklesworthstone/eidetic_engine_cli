@@ -2435,7 +2435,7 @@ fn open_registry_read_only(registry_path: &Path) -> Result<DbConnection, DomainE
             ),
         });
     }
-    let conn = DbConnection::open(DatabaseConfig::file(registry_path))
+    let conn = DbConnection::open_file_read_only(registry_path)
         .map_err(|error| storage_error("failed to open workspace registry", error))?;
     if conn
         .needs_migration()

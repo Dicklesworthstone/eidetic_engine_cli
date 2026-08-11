@@ -33,6 +33,100 @@ fn run_ee_with_registry(args: &[String], registry: &Path) -> Result<Output, Stri
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
+fn split_emitted_command(command: &str) -> Result<Vec<String>, String> {
+    #[derive(Copy, Clone, Eq, PartialEq)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+    }
+
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote = Quote::None;
+    let mut chars = command.chars();
+    while let Some(ch) = chars.next() {
+        match quote {
+            Quote::None => match ch {
+                '\'' => quote = Quote::Single,
+                '"' => quote = Quote::Double,
+                '\\' => {
+                    let next = chars.next().ok_or("emitted command ends with an escape")?;
+                    current.push(next);
+                }
+                ch if ch.is_whitespace() => {
+                    if !current.is_empty() {
+                        args.push(std::mem::take(&mut current));
+                    }
+                }
+                _ => current.push(ch),
+            },
+            Quote::Single => {
+                if ch == '\'' {
+                    quote = Quote::None;
+                } else {
+                    current.push(ch);
+                }
+            }
+            Quote::Double => match ch {
+                '"' => quote = Quote::None,
+                '\\' => {
+                    let next = chars
+                        .next()
+                        .ok_or("emitted double-quoted command ends with an escape")?;
+                    current.push(next);
+                }
+                _ => current.push(ch),
+            },
+        }
+    }
+    if quote != Quote::None {
+        return Err("emitted command has an unterminated quote".to_owned());
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    Ok(args)
+}
+
+fn run_emitted_ee_command_with_registry(command: &str, registry: &Path) -> Result<Output, String> {
+    let args = split_emitted_command(command)?;
+    if args.first().map(String::as_str) != Some("ee") {
+        return Err(format!("emitted command must start with ee: {command:?}"));
+    }
+    run_ee_with_registry(&args[1..], registry)
+}
+
+fn sqlite_sidecar_path(database: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut path = database.as_os_str().to_os_string();
+    path.push(suffix);
+    path.into()
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct FileSnapshot {
+    bytes: Vec<u8>,
+    modified: std::time::SystemTime,
+    readonly: bool,
+}
+
+fn snapshot_file(path: &Path) -> Result<Option<FileSnapshot>, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("failed to snapshot {}: {error}", path.display())),
+    };
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("failed to stat snapshot {}: {error}", path.display()))?;
+    Ok(Some(FileSnapshot {
+        bytes,
+        modified: metadata
+            .modified()
+            .map_err(|error| format!("failed to read mtime for {}: {error}", path.display()))?,
+        readonly: metadata.permissions().readonly(),
+    }))
+}
+
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
         Ok(())
@@ -91,9 +185,33 @@ fn normalize_storeless_snapshot_text(
     storeless_workspace: &str,
     nearby_workspace: &str,
 ) -> String {
-    text.replace(addressed_store, "<ADDRESSED_STORE>")
+    let mut normalized = text
+        .replace(addressed_store, "<ADDRESSED_STORE>")
         .replace(storeless_workspace, "<STORELESS_WORKSPACE>")
-        .replace(nearby_workspace, "<NEARBY_WORKSPACE>")
+        .replace(nearby_workspace, "<NEARBY_WORKSPACE>");
+
+    if let Ok(canonical_storeless) = Path::new(storeless_workspace).canonicalize() {
+        normalized = normalized
+            .replace(
+                canonical_storeless
+                    .join(".ee")
+                    .join("ee.db")
+                    .to_string_lossy()
+                    .as_ref(),
+                "<ADDRESSED_STORE>",
+            )
+            .replace(
+                canonical_storeless.to_string_lossy().as_ref(),
+                "<STORELESS_WORKSPACE>",
+            );
+    }
+    if let Ok(canonical_nearby) = Path::new(nearby_workspace).canonicalize() {
+        normalized = normalized.replace(
+            canonical_nearby.to_string_lossy().as_ref(),
+            "<NEARBY_WORKSPACE>",
+        );
+    }
+    normalized
 }
 
 fn storage_error_cases(workspace: &str) -> Vec<ConformanceCase> {
@@ -517,6 +635,21 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
              best={best_path:?}, command={first_next_command:?}"
         ),
     )?;
+    let next_commands = array_at(
+        &orient_json,
+        "/data/nextCommands",
+        "orient storeless next commands",
+    )?;
+    ensure(
+        next_commands.iter().all(|command| {
+            command
+                .as_str()
+                .is_some_and(|command| !command.contains("ee init"))
+        }),
+        format!(
+            "wrong-cwd orient must retarget toward discovered content without suggesting init: {next_commands:?}"
+        ),
+    )?;
 
     let orient_snapshot = serde_json::json!({
         "surface": "orient",
@@ -572,7 +705,7 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
           "lastWrite": "<NONEMPTY_TIMESTAMP>"
         }
       },
-      "firstNextCommand": "ee pack --workspace <NEARBY_WORKSPACE> --read-only --source-mode lexical_only --max-tokens 4000 --json -- 'storeless orientation snapshot'"
+      "firstNextCommand": "ee pack --workspace <NEARBY_WORKSPACE> --database <NEARBY_WORKSPACE>/.ee/ee.db --index-dir <NEARBY_WORKSPACE>/.ee/index --read-only --source-mode lexical_only --max-tokens 4000 --json -- 'storeless orientation snapshot'"
     }
     "###);
 
@@ -597,9 +730,10 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
             && human.contains(best_path)
             && human.contains(&format!("{best_documents} docs"))
             && human.contains(&format!("last write {best_last_write}"))
-            && human.contains(first_next_command),
+            && human.contains(first_next_command)
+            && !human.contains("ee init"),
         format!(
-            "human orient must print the addressed store, nearby path/documents/last-write, and exact retargeted command; \
+            "human orient must print the addressed store, nearby path/documents/last-write, and exact retargeted command without suggesting init; \
              addressed={}, path={best_path:?}, documents={best_documents}, lastWrite={best_last_write:?}, command={first_next_command:?}\n{human}",
             addressed_store.display()
         ),
@@ -624,6 +758,8 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
     std::fs::create_dir_all(root.join(".git")).map_err(|error| error.to_string())?;
     let root_str = root.to_string_lossy().to_string();
     let child_str = child.to_string_lossy().to_string();
+    let candidate_content = "campaign seed fact for nearby discovery";
+    let candidate_query = "campaign seed nearby discovery";
 
     for workspace in [&root_str, &child_str] {
         let init = run_ee(&[
@@ -644,7 +780,7 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         "--workspace".to_owned(),
         child_str.clone(),
         "remember".to_owned(),
-        "campaign seed fact for nearby discovery".to_owned(),
+        candidate_content.to_owned(),
         "--json".to_owned(),
     ])?;
     ensure(
@@ -654,11 +790,51 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
             String::from_utf8_lossy(&seeded.stdout)
         ),
     )?;
+    std::fs::rename(child.join(".ee"), child.join(".ee-campaign"))
+        .map_err(|error| error.to_string())?;
+    let campaign_store = child
+        .join(".ee-campaign")
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let campaign_database = campaign_store.join("ee.db");
+    let campaign_index = campaign_store.join("index");
+    let campaign_workspace = campaign_store
+        .parent()
+        .ok_or("campaign store must have a workspace parent")?
+        .to_path_buf();
+
+    // Exercise the macOS `/var` -> `/private/var` class of identity mismatch
+    // deterministically on every Unix host: the CLI receives a workspace
+    // through a symlinked prefix, while the store and emitted command must use
+    // the one canonical resolved path.
+    #[cfg(unix)]
+    let addressed_campaign_workspace = {
+        use std::os::unix::fs::symlink;
+
+        let system_prefix = tempdir.path().join("system-prefix-ft1z5");
+        symlink(
+            root.canonicalize().map_err(|error| error.to_string())?,
+            &system_prefix,
+        )
+        .map_err(|error| error.to_string())?;
+        let aliased = system_prefix.join("campaign").join("copulattice_ft1z5");
+        ensure(
+            aliased.canonicalize().map_err(|error| error.to_string())?
+                == child.canonicalize().map_err(|error| error.to_string())?,
+            "symlinked system-prefix workspace must resolve to the campaign workspace",
+        )?;
+        aliased
+    };
+    #[cfg(not(unix))]
+    let addressed_campaign_workspace = child.clone();
+    let addressed_campaign_workspace_str =
+        addressed_campaign_workspace.to_string_lossy().to_string();
 
     let orient = run_ee(&[
         "--workspace".to_owned(),
         root_str.clone(),
         "orient".to_owned(),
+        candidate_query.to_owned(),
         "--fast".to_owned(),
         "--json".to_owned(),
     ])?;
@@ -689,8 +865,15 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         .ok_or("orient best nearby child: documents must be an integer")?;
     let best_last_write = string_at(best, "/lastWrite", "orient best nearby child")?;
     ensure(
-        best_path.contains("copulattice_ft1z5"),
-        format!("orient best nearby store must be the populated child, got: {best:?}"),
+        best_path == campaign_workspace.to_string_lossy(),
+        format!(
+            "orient best nearby workspace must be the exact canonical campaign workspace: {best:?}"
+        ),
+    )?;
+    ensure(
+        string_at(best, "/storeDir", "orient best nearby store directory")?
+            == campaign_store.to_string_lossy(),
+        format!("orient must preserve the exact .ee-campaign store directory: {best:?}"),
     )?;
     ensure(
         best_documents == 1,
@@ -708,9 +891,159 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
     ensure(
         first_next_command.starts_with("ee pack ")
             && first_next_command.contains("--workspace")
-            && first_next_command.contains("copulattice_ft1z5"),
+            && first_next_command.contains("copulattice_ft1z5")
+            && first_next_command.contains("--database")
+            && first_next_command.contains(&campaign_database.to_string_lossy().to_string())
+            && first_next_command.contains("--index-dir")
+            && first_next_command.contains(&campaign_index.to_string_lossy().to_string()),
         format!(
-            "orient nextCommands[0] must retarget pack at the populated child, got: {first_next_command:?}"
+            "orient nextCommands[0] must retarget pack at the exact populated .ee-campaign database and index, got: {first_next_command:?}"
+        ),
+    )?;
+    let emitted = run_emitted_ee_command_with_registry(
+        first_next_command,
+        &tempdir.path().join("emitted-command-registry.db"),
+    )?;
+    ensure(
+        emitted.status.success(),
+        format!(
+            "emitted .ee-campaign pack command failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&emitted.stdout),
+            String::from_utf8_lossy(&emitted.stderr)
+        ),
+    )?;
+    let emitted_json = stdout_json(&emitted, "emitted .ee-campaign pack command")?;
+    let emitted_items = array_at(
+        &emitted_json,
+        "/data/pack/items",
+        "emitted .ee-campaign pack command",
+    )?;
+    ensure(
+        emitted_items.iter().any(|item| {
+            item.pointer("/content").and_then(serde_json::Value::as_str) == Some(candidate_content)
+        }),
+        format!(
+            "executing the emitted command must return content from the exact .ee-campaign store: {emitted_items:?}"
+        ),
+    )?;
+    let addressed_campaign = run_ee(&[
+        "--workspace".to_owned(),
+        addressed_campaign_workspace_str.clone(),
+        "orient".to_owned(),
+        candidate_query.to_owned(),
+        "--fast".to_owned(),
+        "--json".to_owned(),
+    ])?;
+    let addressed_campaign_json =
+        stdout_json(&addressed_campaign, "orient addressed .ee-campaign store")?;
+    let addressed_recent = array_at(
+        &addressed_campaign_json,
+        "/data/fastContent/recent",
+        "orient addressed .ee-campaign recent content",
+    )?;
+    let addressed_relevant = array_at(
+        &addressed_campaign_json,
+        "/data/fastContent/relevant",
+        "orient addressed .ee-campaign relevant content",
+    )?;
+    ensure(
+        addressed_campaign_json
+            .pointer("/data/storeDiscovery")
+            .is_none()
+            && addressed_recent.iter().any(|item| {
+                item.pointer("/snippet").and_then(serde_json::Value::as_str)
+                    == Some(candidate_content)
+            })
+            && addressed_relevant.iter().any(|item| {
+                item.pointer("/snippet").and_then(serde_json::Value::as_str)
+                    == Some(candidate_content)
+            }),
+        format!(
+            "a populated addressed .ee-campaign store may suppress discovery only when fast recent and relevant providers read its content: {}",
+            addressed_campaign_json["data"]
+        ),
+    )?;
+
+    let addressed_campaign_full = run_ee(&[
+        "--workspace".to_owned(),
+        addressed_campaign_workspace_str,
+        "orient".to_owned(),
+        candidate_query.to_owned(),
+        "--json".to_owned(),
+    ])?;
+    let addressed_campaign_full_json = stdout_json(
+        &addressed_campaign_full,
+        "full orient addressed .ee-campaign store",
+    )?;
+    let addressed_full_items = array_at(
+        &addressed_campaign_full_json,
+        "/data/pack/pack/items",
+        "full orient addressed .ee-campaign pack content",
+    )?;
+    ensure(
+        addressed_campaign_full_json
+            .pointer("/data/storeDiscovery")
+            .is_none()
+            && addressed_full_items.iter().any(|item| {
+                item.pointer("/content").and_then(serde_json::Value::as_str)
+                    == Some(candidate_content)
+            }),
+        format!(
+            "a populated addressed .ee-campaign store may suppress discovery only when the full pack provider reads its content: {}",
+            addressed_campaign_full_json["data"]
+        ),
+    )?;
+
+    // Once an explicit default store exists, it is the addressed source of
+    // truth. The populated campaign store at the same workspace root must no
+    // longer suppress discovery; it must be reported as the retarget option.
+    let default_init = run_ee(&[
+        "init".to_owned(),
+        "--workspace".to_owned(),
+        child_str.clone(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        default_init.status.success(),
+        format!(
+            "initializing the explicit empty default child store failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&default_init.stdout),
+            String::from_utf8_lossy(&default_init.stderr)
+        ),
+    )?;
+    let child_default_database = child
+        .canonicalize()
+        .map_err(|error| error.to_string())?
+        .join(".ee")
+        .join("ee.db");
+    let addressed_default = run_ee(&[
+        "--workspace".to_owned(),
+        child_str.clone(),
+        "orient".to_owned(),
+        candidate_query.to_owned(),
+        "--fast".to_owned(),
+        "--json".to_owned(),
+    ])?;
+    let addressed_default_json = stdout_json(
+        &addressed_default,
+        "orient empty default beside populated .ee-campaign",
+    )?;
+    let addressed_default_discovery = addressed_default_json
+        .pointer("/data/storeDiscovery")
+        .ok_or("empty addressed default must discover its populated sibling campaign store")?;
+    ensure(
+        string_at(
+            addressed_default_discovery,
+            "/addressedStorePath",
+            "same-root addressed default database",
+        )? == child_default_database.to_string_lossy()
+            && string_at(
+                addressed_default_discovery,
+                "/nearbyStores/0/storeDir",
+                "same-root campaign discovery",
+            )? == campaign_store.to_string_lossy(),
+        format!(
+            "the exact empty .ee database must remain addressed while .ee-campaign is reported separately: {addressed_default_discovery}"
         ),
     )?;
 
@@ -718,6 +1051,7 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         "--workspace".to_owned(),
         root_str.clone(),
         "orient".to_owned(),
+        candidate_query.to_owned(),
         "--fast".to_owned(),
     ])?;
     ensure(
@@ -746,6 +1080,7 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         "--workspace".to_owned(),
         root_str.clone(),
         "orient".to_owned(),
+        candidate_query.to_owned(),
         "--json".to_owned(),
     ])?;
     let orient_full_json = stdout_json(&orient_full, "full orient empty initialized root")?;
@@ -963,17 +1298,16 @@ fn empty_workspace_discovers_registered_remote_store_and_skips_bad_rows() -> Tes
         .map_err(|error| error.to_string())?;
     }
 
-    let registered_canonical = registered
+    let registered_canonical_path = registered
         .canonicalize()
-        .map_err(|error| error.to_string())?
-        .to_string_lossy()
-        .to_string();
+        .map_err(|error| error.to_string())?;
+    let registered_canonical = registered_canonical_path.to_string_lossy().to_string();
     let local_canonical = local_duplicate
         .canonicalize()
         .map_err(|error| error.to_string())?
         .to_string_lossy()
         .to_string();
-    let database = registered.join(".ee").join("ee.db");
+    let database = registered_canonical_path.join(".ee").join("ee.db");
     let mut wal = database.as_os_str().to_os_string();
     wal.push("-wal");
     let expected_last_write = [database.as_path(), Path::new(&wal)]
@@ -988,6 +1322,11 @@ fn empty_workspace_discovers_registered_remote_store_and_skips_bad_rows() -> Tes
         .max()
         .map(|modified| chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339())
         .ok_or("registered store must have a durable database mtime")?;
+    let registry_wal = sqlite_sidecar_path(&registry, "-wal");
+    let registry_shm = sqlite_sidecar_path(&registry, "-shm");
+    let registry_before = snapshot_file(&registry)?.ok_or("workspace registry must exist")?;
+    let registry_wal_before = snapshot_file(&registry_wal)?;
+    let registry_shm_before = snapshot_file(&registry_shm)?;
 
     let orient = run_ee_with_registry(
         &[
@@ -1006,6 +1345,20 @@ fn empty_workspace_discovers_registered_remote_store_and_skips_bad_rows() -> Tes
             "orient with workspace registry failed: stdout={} stderr={}",
             String::from_utf8_lossy(&orient.stdout),
             String::from_utf8_lossy(&orient.stderr)
+        ),
+    )?;
+    let registry_after = snapshot_file(&registry)?.ok_or("workspace registry disappeared")?;
+    let registry_wal_after = snapshot_file(&registry_wal)?;
+    let registry_shm_after = snapshot_file(&registry_shm)?;
+    ensure(
+        registry_after == registry_before
+            && registry_wal_after == registry_wal_before
+            && registry_shm_after == registry_shm_before,
+        format!(
+            "registry discovery must preserve registry/WAL/SHM presence, bytes, mtime, and permissions: registryEqual={} walEqual={} shmEqual={}",
+            registry_after == registry_before,
+            registry_wal_after == registry_wal_before,
+            registry_shm_after == registry_shm_before,
         ),
     )?;
     let json = stdout_json(&orient, "orient registered remote store")?;
@@ -1044,11 +1397,60 @@ fn empty_workspace_discovers_registered_remote_store_and_skips_bad_rows() -> Tes
                 == 1,
         format!("the local/registry overlap must appear exactly once with one row: {nearby:?}"),
     )?;
-    let next_command = string_at(&json, "/data/nextCommands/0", "registered retarget command")?;
     ensure(
-        next_command.starts_with("ee pack ") && next_command.contains(&registered_canonical),
+        nearby.iter().all(|store| {
+            store
+                .pointer("/workspaceRoot")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|path| {
+                    !path.contains("remote-empty-ft1z5")
+                        && !path.contains("remote-broken-ft1z5")
+                        && !path.contains("remote-linked-db-ft1z5")
+                })
+        }),
         format!(
-            "orient must retarget the first next command to the registered best store: {next_command:?}"
+            "empty, broken, and symlinked registry candidates must all stay excluded: {nearby:?}"
+        ),
+    )?;
+    let next_command = string_at(&json, "/data/nextCommands/0", "registered retarget command")?;
+    let registered_index = registered_canonical_path.join(".ee").join("index");
+    ensure(
+        next_command.starts_with("ee pack ")
+            && next_command.contains(&registered_canonical)
+            && next_command.contains("--database")
+            && next_command.contains(&database.to_string_lossy().to_string())
+            && next_command.contains("--index-dir")
+            && next_command.contains(&registered_index.to_string_lossy().to_string()),
+        format!(
+            "orient must retarget the first next command to the registered best store's exact database and index: {next_command:?}"
+        ),
+    )?;
+    let emitted = run_emitted_ee_command_with_registry(
+        next_command,
+        &tempdir.path().join("emitted-registered-registry.db"),
+    )?;
+    ensure(
+        emitted.status.success(),
+        format!(
+            "registered-store emitted pack command failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&emitted.stdout),
+            String::from_utf8_lossy(&emitted.stderr)
+        ),
+    )?;
+    let emitted_json = stdout_json(&emitted, "registered-store emitted pack command")?;
+    let emitted_items = array_at(
+        &emitted_json,
+        "/data/pack/items",
+        "registered-store emitted pack command",
+    )?;
+    ensure(
+        emitted_items.iter().any(|item| {
+            item.pointer("/content")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|content| content.starts_with("registered remote discovery fact"))
+        }),
+        format!(
+            "executing the registered-store command must read content from its exact database/index: {emitted_items:?}"
         ),
     )?;
     Ok(())
