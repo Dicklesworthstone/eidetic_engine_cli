@@ -37,8 +37,9 @@ use crate::db::{
     CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateMemoryInput,
     CreateMemoryLinkInput, CreateRememberIdempotencyKeyInput, CreateSearchIndexJobInput,
     CreateSessionInput, CreateWorkspaceInput, DbConnection, DbOperation, EvidenceProducerKind,
-    MemoryContentSimHash, MemoryLinkRelation, MemoryLinkSource, SearchIndexJobType, StoredMemory,
-    StoredMemoryLink, audit_actions, generate_audit_id, generate_audit_id_seeded,
+    MemoryContentSimHash, MemoryLinkRelation, MemoryLinkSource, SearchIndexJobStatus,
+    SearchIndexJobType, StoredMemory, StoredMemoryLink, audit_actions, generate_audit_id,
+    generate_audit_id_seeded,
 };
 use crate::models::{
     DomainError, GLOBAL_MEMORY_SCOPE_TAG, KNOWN_MEMORY_KINDS, KNOWN_MEMORY_LEVELS, MAX_TAG_BYTES,
@@ -1761,14 +1762,32 @@ fn remember_memory_inner_with_store(
             error: None,
             fallback_to_full: None,
         }
-    } else if remember_inline_index_publish_should_defer(
-        &connection,
-        &prepared.workspace_id,
-        &index_job_id,
-    ) {
-        remember_index_job_queued_for_coalescing(&index_job_id)
     } else {
-        process_remember_index_job_with_retry(&connection, &index_job_id, &index_dir)?
+        match remember_inline_index_publish_route(
+            &connection,
+            &prepared.workspace_id,
+            &index_job_id,
+        ) {
+            RememberIndexPublishRoute::Defer => {
+                remember_index_job_queued_for_coalescing(&index_job_id)
+            }
+            RememberIndexPublishRoute::LeadCoalescedDrain => remember_lead_coalesced_index_drain(
+                &connection,
+                &prepared.workspace_id,
+                &index_job_id,
+                &index_dir,
+            ),
+            RememberIndexPublishRoute::Inline => {
+                let report =
+                    process_remember_index_job_with_retry(&connection, &index_job_id, &index_dir)?;
+                remember_drain_peer_tail_after_publish(
+                    &connection,
+                    &prepared.workspace_id,
+                    &index_dir,
+                );
+                report
+            }
+        }
     };
     let index_status = remember_index_status(&index_report);
 
@@ -2279,11 +2298,29 @@ fn process_remember_index_job_with_retry(
     })
 }
 
-fn remember_inline_index_publish_should_defer(
+/// How an inline remember should treat its freshly committed index job
+/// (bd-index-auto-freshness-m5kwf).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RememberIndexPublishRoute {
+    /// No active publisher and no peer pending jobs: publish the single
+    /// document inline (the common singleton fast path).
+    Inline,
+    /// Another process holds the index publish lock: defer — that
+    /// publisher's coalesced drain owns every pending job including ours.
+    Defer,
+    /// No active publisher, but peer jobs are pending. The burst's initial
+    /// publisher has already finished, so with no elected drainer these
+    /// jobs would sit pending until an unrelated rebuild — the liveness
+    /// hole behind 30/30-durable-but-1/30-searchable. One writer must
+    /// attempt bounded, non-blocking leadership of a coalesced drain.
+    LeadCoalescedDrain,
+}
+
+fn remember_inline_index_publish_route(
     connection: &DbConnection,
     workspace_id: &str,
     index_job_id: &str,
-) -> bool {
+) -> RememberIndexPublishRoute {
     let active_publish = match connection.is_lock_held(&AdvisoryLockId::index(workspace_id)) {
         Ok(lock) => lock.is_some(),
         Err(error) => {
@@ -2294,7 +2331,7 @@ fn remember_inline_index_publish_should_defer(
                 error = %error,
                 "deferring inline remember indexing because publish-lock posture is unavailable"
             );
-            return true;
+            return RememberIndexPublishRoute::Defer;
         }
     };
     let pending_job_ids = match connection.list_pending_search_index_jobs(workspace_id, Some(2)) {
@@ -2307,18 +2344,229 @@ fn remember_inline_index_publish_should_defer(
                 error = %error,
                 "deferring inline remember indexing because pending-job posture is unavailable"
             );
-            return true;
+            return RememberIndexPublishRoute::Defer;
         }
     };
-    remember_index_publish_is_contended(active_publish, &pending_job_ids, index_job_id)
+    remember_index_publish_route(active_publish, &pending_job_ids, index_job_id)
 }
 
-fn remember_index_publish_is_contended(
+fn remember_index_publish_route(
     active_publish: bool,
     pending_job_ids: &[String],
     index_job_id: &str,
-) -> bool {
-    active_publish || pending_job_ids.iter().any(|job_id| job_id != index_job_id)
+) -> RememberIndexPublishRoute {
+    if active_publish {
+        return RememberIndexPublishRoute::Defer;
+    }
+    if pending_job_ids.iter().any(|job_id| job_id != index_job_id) {
+        return RememberIndexPublishRoute::LeadCoalescedDrain;
+    }
+    RememberIndexPublishRoute::Inline
+}
+
+/// Election lock for the burst-drain leader. Distinct from
+/// `AdvisoryLockId::index` on purpose: the coalesced drain acquires the
+/// publish lock internally, so the leader must not pre-hold it.
+fn remember_index_drain_leader_lock(workspace_id: &str) -> AdvisoryLockId {
+    AdvisoryLockId::new("index_drain_leader", workspace_id)
+}
+
+/// Leadership TTL covers both bounded drain rounds (each capped by the
+/// 300s index runtime budget) so a killed leader cannot wedge elections.
+const REMEMBER_INDEX_DRAIN_LEADER_TTL_SECS: u64 = 660;
+const REMEMBER_INDEX_DRAIN_MAX_ROUNDS: usize = 2;
+
+/// Attempt bounded, non-blocking leadership of a coalesced drain for a
+/// burst whose initial publisher already finished. Exactly one racing
+/// writer wins the election lock; losers defer immediately (their jobs are
+/// owned by the winner's drain). The winner runs at most
+/// [`REMEMBER_INDEX_DRAIN_MAX_ROUNDS`] coalesced rounds — the second pass
+/// catches stragglers enqueued during the first publish — and reports its
+/// own job's real outcome from the drain reports.
+fn remember_lead_coalesced_index_drain(
+    connection: &DbConnection,
+    workspace_id: &str,
+    index_job_id: &str,
+    index_dir: &Path,
+) -> IndexProcessingJobReport {
+    let lock_id = remember_index_drain_leader_lock(workspace_id);
+    let holder_id = format!("remember-drain:{}:{index_job_id}", std::process::id());
+    match connection.acquire_advisory_lock(
+        &lock_id,
+        &holder_id,
+        Some(REMEMBER_INDEX_DRAIN_LEADER_TTL_SECS),
+        Some("remember coalesced index drain leadership"),
+    ) {
+        Ok(crate::db::AcquireLockResult::Acquired(_))
+        | Ok(crate::db::AcquireLockResult::Expired { .. }) => {}
+        Ok(crate::db::AcquireLockResult::AlreadyHeld { .. }) => {
+            // Election lost: the winner's drain owns this pending job.
+            return remember_index_job_queued_for_coalescing(index_job_id);
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::memory",
+                workspace_id,
+                index_job_id,
+                error = %error,
+                "deferring coalesced drain leadership because the election lock is unavailable"
+            );
+            return remember_index_job_queued_for_coalescing(index_job_id);
+        }
+    }
+    let _leadership = RememberWorkspaceWriteLock {
+        connection,
+        lock_id,
+        holder_id,
+    };
+    remember_drain_pending_rounds(
+        index_job_id,
+        REMEMBER_INDEX_DRAIN_MAX_ROUNDS,
+        || process_pending_index_jobs_coalesced(connection, workspace_id, index_dir, None),
+        || match connection.list_pending_search_index_jobs(workspace_id, Some(1)) {
+            Ok(pending) => Some(!pending.is_empty()),
+            Err(_) => None,
+        },
+        || remember_index_job_report_from_durable_state(connection, index_job_id),
+    )
+}
+
+/// Pure round driver for the elected leader: drain, pick out our own
+/// job's report, and run at most one bounded straggler pass when jobs
+/// remain pending after a round. Never claims success for work that did
+/// not happen: on drain failure with our job still pending we report the
+/// queued posture (the next writer's election owns it) while the failed
+/// attempt stays in the log, and when the rounds never listed our job the
+/// caller-supplied resolver derives the report from durable truth instead
+/// of assuming a concurrent rebuild completed it.
+fn remember_drain_pending_rounds<D, P, A>(
+    index_job_id: &str,
+    max_rounds: usize,
+    mut drain: D,
+    mut pending_remaining: P,
+    resolve_absent: A,
+) -> IndexProcessingJobReport
+where
+    D: FnMut() -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError>,
+    P: FnMut() -> Option<bool>,
+    A: FnOnce() -> IndexProcessingJobReport,
+{
+    let mut own_report: Option<IndexProcessingJobReport> = None;
+    for _round in 0..max_rounds.max(1) {
+        match drain() {
+            Ok(reports) => {
+                if own_report.is_none() {
+                    own_report = reports
+                        .into_iter()
+                        .find(|report| report.job_id == index_job_id);
+                }
+            }
+            Err(error) if remember_index_failure_is_deferable(&error) => {
+                return own_report.unwrap_or_else(|| {
+                    remember_index_job_queued_after_transient_failure(index_job_id, &error)
+                });
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "ee::memory",
+                    index_job_id,
+                    error = %error,
+                    "coalesced drain leadership round failed; leaving remaining jobs for the next election"
+                );
+                return own_report
+                    .unwrap_or_else(|| remember_index_job_queued_for_coalescing(index_job_id));
+            }
+        }
+        match pending_remaining() {
+            Some(true) => {}
+            Some(false) | None => break,
+        }
+    }
+    own_report.unwrap_or_else(resolve_absent)
+}
+
+/// Resolve this writer's report when the leader's own drain rounds never
+/// listed its job. Absence is NOT proof of success — the job may have been
+/// claimed by a concurrent drain, failed, cancelled, or left pending — so
+/// the report derives from the durable job row: only an actually-Completed
+/// row reports the indexed posture; everything else stays truthful.
+fn remember_index_job_report_from_durable_state(
+    connection: &DbConnection,
+    index_job_id: &str,
+) -> IndexProcessingJobReport {
+    match connection.get_search_index_job(index_job_id) {
+        Ok(Some(job)) if job.status == SearchIndexJobStatus::Completed.as_str() => {
+            IndexProcessingJobReport {
+                job_id: index_job_id.to_owned(),
+                job_type: job.job_type,
+                document_source: job.document_source,
+                document_id: job.document_id,
+                outcome: "completed".to_owned(),
+                processing_mode: "drained_by_concurrent_coalesced_rebuild".to_owned(),
+                documents_total: job.documents_total,
+                documents_indexed: job.documents_indexed,
+                error: None,
+                fallback_to_full: None,
+            }
+        }
+        Ok(Some(job)) if job.status == SearchIndexJobStatus::Failed.as_str() => {
+            IndexProcessingJobReport {
+                job_id: index_job_id.to_owned(),
+                job_type: job.job_type,
+                document_source: job.document_source,
+                document_id: job.document_id,
+                outcome: "failed".to_owned(),
+                processing_mode: "concurrent_drain_reported_failure".to_owned(),
+                documents_total: job.documents_total,
+                documents_indexed: job.documents_indexed,
+                error: job.error_message,
+                fallback_to_full: None,
+            }
+        }
+        // Pending, running, cancelled, missing, or unreadable: the publish
+        // is unproven, so report the queued posture — a later election or
+        // explicit rebuild owns the job. Never hard-code success.
+        _ => remember_index_job_queued_for_coalescing(index_job_id),
+    }
+}
+
+/// Post-publish tail sweep (bd-index-auto-freshness-m5kwf reachability):
+/// when every concurrent writer deferred against this writer's publish
+/// lock, this writer is the burst's LAST completed writer and nobody later
+/// will observe the orphaned tail. The finishing publisher therefore makes
+/// one bounded, non-blocking election attempt over any peer jobs that
+/// landed while it published. Peers that land after this sweep saw a free
+/// publish lock at their own route decision and elect for themselves.
+fn remember_drain_peer_tail_after_publish(
+    connection: &DbConnection,
+    workspace_id: &str,
+    index_dir: &Path,
+) {
+    let pending = match connection.list_pending_search_index_jobs(workspace_id, Some(1)) {
+        Ok(pending) => pending,
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::memory",
+                workspace_id,
+                error = %error,
+                "skipping post-publish tail sweep because pending-job posture is unavailable"
+            );
+            return;
+        }
+    };
+    let Some(first) = pending.first() else {
+        return;
+    };
+    let report =
+        remember_lead_coalesced_index_drain(connection, workspace_id, &first.id, index_dir);
+    tracing::debug!(
+        target: "ee::memory",
+        workspace_id,
+        tail_job_id = first.id.as_str(),
+        outcome = report.outcome.as_str(),
+        processing_mode = report.processing_mode.as_str(),
+        "post-publish tail sweep finished"
+    );
 }
 
 fn remember_index_job_queued_for_coalescing(index_job_id: &str) -> IndexProcessingJobReport {
@@ -4349,14 +4597,29 @@ fn finish_remember_memory_after_primary_commit(
             error: None,
             fallback_to_full: None,
         }
-    } else if remember_inline_index_publish_should_defer(
-        connection,
-        &prepared.workspace_id,
-        &index_job_id,
-    ) {
-        remember_index_job_queued_for_coalescing(&index_job_id)
     } else {
-        process_remember_index_job_with_retry(connection, &index_job_id, &index_dir)?
+        match remember_inline_index_publish_route(connection, &prepared.workspace_id, &index_job_id)
+        {
+            RememberIndexPublishRoute::Defer => {
+                remember_index_job_queued_for_coalescing(&index_job_id)
+            }
+            RememberIndexPublishRoute::LeadCoalescedDrain => remember_lead_coalesced_index_drain(
+                connection,
+                &prepared.workspace_id,
+                &index_job_id,
+                &index_dir,
+            ),
+            RememberIndexPublishRoute::Inline => {
+                let report =
+                    process_remember_index_job_with_retry(connection, &index_job_id, &index_dir)?;
+                remember_drain_peer_tail_after_publish(
+                    connection,
+                    &prepared.workspace_id,
+                    &index_dir,
+                );
+                report
+            }
+        }
     };
     let index_status = remember_index_status(&index_report);
 
@@ -16593,26 +16856,38 @@ mod tests {
     }
 
     #[test]
-    fn remember_index_burst_defers_to_one_coalesced_reconcile() -> TestResult {
+    fn remember_index_burst_routes_defer_inline_and_leadership() -> TestResult {
         let own_job = "sidx_own";
         ensure(
-            remember_index_publish_is_contended(false, &[own_job.to_owned()], own_job),
-            false,
+            remember_index_publish_route(false, &[own_job.to_owned()], own_job),
+            RememberIndexPublishRoute::Inline,
             "a solitary remember retains the immediate-index fast path",
         )?;
         ensure(
-            remember_index_publish_is_contended(true, &[own_job.to_owned()], own_job),
-            true,
+            remember_index_publish_route(true, &[own_job.to_owned()], own_job),
+            RememberIndexPublishRoute::Defer,
             "an active publisher defers the new durable job",
         )?;
+        // bd-index-auto-freshness-m5kwf liveness: with the initial publisher
+        // finished, a pending peer job must elect a drainer instead of
+        // deferring unowned (30/30-durable-but-1/30-searchable hole).
         ensure(
-            remember_index_publish_is_contended(
+            remember_index_publish_route(
                 false,
                 &[own_job.to_owned(), "sidx_peer".to_owned()],
                 own_job,
             ),
-            true,
-            "a pending peer job defers the burst for coalesced reconciliation",
+            RememberIndexPublishRoute::LeadCoalescedDrain,
+            "peer pending without an active publisher must attempt drain leadership",
+        )?;
+        ensure(
+            remember_index_publish_route(
+                true,
+                &[own_job.to_owned(), "sidx_peer".to_owned()],
+                own_job,
+            ),
+            RememberIndexPublishRoute::Defer,
+            "an active publisher always wins over leadership",
         )?;
 
         let report = remember_index_job_queued_for_coalescing(own_job);
@@ -16630,6 +16905,406 @@ mod tests {
             remember_index_status(&report),
             "queued".to_owned(),
             "public burst index posture",
+        )
+    }
+
+    fn drained_test_report(job_id: &str) -> IndexProcessingJobReport {
+        IndexProcessingJobReport {
+            job_id: job_id.to_owned(),
+            job_type: SearchIndexJobType::SingleDocument.as_str().to_owned(),
+            document_source: Some("memory".to_owned()),
+            document_id: None,
+            outcome: "completed".to_owned(),
+            processing_mode: "coalesced".to_owned(),
+            documents_total: 1,
+            documents_indexed: 1,
+            error: None,
+            fallback_to_full: None,
+        }
+    }
+
+    #[test]
+    fn remember_drain_leadership_elects_one_winner_and_losers_defer() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let connection = open_upgrade_test_db(temp.path())?;
+        connection
+            .ensure_advisory_locks_table()
+            .map_err(|error| error.to_string())?;
+        let canonical = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace_id = stable_workspace_id(&canonical);
+        let index_dir = canonical.join(".ee").join(DEFAULT_INDEX_SUBDIR);
+
+        // A peer job is pending and no publisher is active, so the next
+        // PUBLIC remember must route to drain leadership.
+        let deferred = remember_memory_with_index_mode(
+            &upgrade_remember_options(
+                temp.path(),
+                "Leadership burst peer row about pending drains.",
+                0.8,
+                None,
+                false,
+            ),
+            true,
+            &[],
+            None,
+        )
+        .map_err(|error| error.message())?;
+        ensure(
+            deferred.index_status.clone(),
+            "queued".to_owned(),
+            "deferred remember reports the truthful queued posture",
+        )?;
+
+        // A rival process holds the election lock: the public remember must
+        // LOSE without blocking and report the deferred queued posture.
+        let lock_id = remember_index_drain_leader_lock(&workspace_id);
+        let rival = "remember-drain:rival:sidx_rival";
+        let acquired = connection
+            .acquire_advisory_lock(&lock_id, rival, Some(60), Some("test rival leader"))
+            .map_err(|error| error.to_string())?;
+        ensure(acquired.is_acquired(), true, "rival takes election lock")?;
+        let loser = remember_memory(&upgrade_remember_options(
+            temp.path(),
+            "Public loser row must defer without blocking.",
+            0.8,
+            None,
+            false,
+        ))
+        .map_err(|error| error.message())?;
+        ensure(
+            loser.index_status.clone(),
+            "queued".to_owned(),
+            "public election loser defers instead of blocking",
+        )?;
+        assert!(
+            connection
+                .release_advisory_lock(&lock_id, rival)
+                .map_err(|error| error.to_string())?,
+            "release rival election lock"
+        );
+
+        // Lock free, peers pending: the next PUBLIC remember wins the
+        // election, drains everything coalesced, and reports its own
+        // document as indexed.
+        let winner = remember_memory(&upgrade_remember_options(
+            temp.path(),
+            "Public winner row drains the whole burst.",
+            0.8,
+            None,
+            false,
+        ))
+        .map_err(|error| error.message())?;
+        ensure(
+            winner.index_status.clone(),
+            "indexed".to_owned(),
+            "public election winner publishes its own document",
+        )?;
+        let pending_after = connection
+            .list_pending_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            pending_after.len(),
+            0,
+            "the winner's coalesced drain leaves no unowned pending jobs",
+        )?;
+        ensure(index_dir.exists(), true, "winner published an index")?;
+        // The election lock must be released for the next burst.
+        let reacquired = connection
+            .acquire_advisory_lock(&lock_id, "post-test-probe", Some(5), None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            reacquired.is_acquired(),
+            true,
+            "leadership lock is released after the drain",
+        )
+    }
+
+    #[test]
+    fn remember_publish_barrier_tail_is_drained_and_searchable() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let connection = open_upgrade_test_db(temp.path())?;
+        connection
+            .ensure_advisory_locks_table()
+            .map_err(|error| error.to_string())?;
+        let canonical = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace_id = stable_workspace_id(&canonical);
+        let index_dir = canonical.join(".ee").join(DEFAULT_INDEX_SUBDIR);
+
+        // Barrier: an active publisher holds the index publish lock while
+        // every other writer commits. The PUBLIC remembers must defer.
+        let publish_lock = AdvisoryLockId::index(&workspace_id);
+        let publisher = "remember:publisher:barrier";
+        let held = connection
+            .acquire_advisory_lock(
+                &publish_lock,
+                publisher,
+                Some(60),
+                Some("barrier publisher"),
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(held.is_acquired(), true, "barrier publisher takes lock")?;
+
+        let mut loser_ids = Vec::new();
+        for content in [
+            "Barrier loser row one about stranded tails.",
+            "Barrier loser row two about final drains.",
+        ] {
+            let report = remember_memory(&upgrade_remember_options(
+                temp.path(),
+                content,
+                0.8,
+                None,
+                false,
+            ))
+            .map_err(|error| error.message())?;
+            ensure(
+                report.index_status.clone(),
+                "queued".to_owned(),
+                "losers defer while the publisher is active",
+            )?;
+            loser_ids.push(report.memory_id.to_string());
+        }
+        let pending_during = connection
+            .list_pending_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            pending_during.len(),
+            2,
+            "both losers enqueued during the active publisher",
+        )?;
+
+        // Publisher finishes LAST: it releases the lock and, as its final
+        // production act, sweeps the tail. No subsequent write occurs.
+        assert!(
+            connection
+                .release_advisory_lock(&publish_lock, publisher)
+                .map_err(|error| error.to_string())?,
+            "publisher releases the publish lock"
+        );
+        remember_drain_peer_tail_after_publish(&connection, &workspace_id, &index_dir);
+
+        let pending_after = connection
+            .list_pending_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            pending_after.len(),
+            0,
+            "the post-publish sweep leaves no unowned pending jobs",
+        )?;
+        ensure(index_dir.exists(), true, "tail sweep published an index")?;
+
+        // Searchable: the losers' documents are retrievable lexically.
+        let report = crate::core::search::run_search_with_filters(
+            &crate::core::search::SearchOptions {
+                workspace_path: canonical.clone(),
+                database_path: None,
+                index_dir: None,
+                query: "barrier loser row".to_owned(),
+                limit: 10,
+                speed: crate::search::SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Workspace,
+                strict_scope: false,
+            },
+            None,
+            &[],
+        )
+        .map_err(|error| format!("barrier search failed: {error:?}"))?;
+        let result_ids = report
+            .results
+            .iter()
+            .map(|hit| hit.doc_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for memory_id in &loser_ids {
+            ensure(
+                result_ids.contains(memory_id),
+                true,
+                "every barrier loser must be searchable after the tail sweep",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn remember_drain_rounds_second_pass_catches_stragglers() -> TestResult {
+        let own = "sidx_round_own";
+        let straggler_drained = std::cell::Cell::new(false);
+        let rounds = std::cell::Cell::new(0usize);
+        let report = remember_drain_pending_rounds(
+            own,
+            2,
+            || {
+                rounds.set(rounds.get() + 1);
+                if rounds.get() == 1 {
+                    // First round drains our job while a straggler lands.
+                    Ok(vec![drained_test_report(own)])
+                } else {
+                    straggler_drained.set(true);
+                    Ok(vec![drained_test_report("sidx_straggler")])
+                }
+            },
+            || Some(rounds.get() == 1),
+            || unreachable!("own report was drained; the absent resolver must not run"),
+        );
+        ensure(rounds.get(), 2, "leader runs the bounded second pass")?;
+        ensure(
+            straggler_drained.get(),
+            true,
+            "the second pass drains the straggler",
+        )?;
+        ensure(report.job_id.clone(), own.to_owned(), "own report kept")?;
+        ensure(
+            remember_index_status(&report),
+            "indexed".to_owned(),
+            "own outcome reported from the first round",
+        )?;
+
+        // Planted negative: a failing drain with our job still pending must
+        // NOT claim success — it reports the queued posture so the next
+        // writer's election owns the remainder.
+        let failed = remember_drain_pending_rounds(
+            own,
+            2,
+            || {
+                Err(IndexRebuildError::Index(
+                    "synthetic drain failure".to_owned(),
+                ))
+            },
+            || Some(true),
+            || unreachable!("a failed round resolves before the absent resolver"),
+        );
+        ensure(
+            remember_index_status(&failed),
+            "queued".to_owned(),
+            "drain failure with pending work never reports success",
+        )?;
+
+        // Planted negative: rounds that never list our job must resolve
+        // through durable truth, never through an assumed success.
+        let resolver_ran = std::cell::Cell::new(false);
+        let absent = remember_drain_pending_rounds(
+            own,
+            2,
+            || Ok(vec![drained_test_report("sidx_only_peers")]),
+            || Some(false),
+            || {
+                resolver_ran.set(true);
+                remember_index_job_queued_for_coalescing(own)
+            },
+        );
+        ensure(
+            resolver_ran.get(),
+            true,
+            "an absent own report consults the durable-state resolver",
+        )?;
+        ensure(
+            remember_index_status(&absent),
+            "queued".to_owned(),
+            "absence never hard-codes success",
+        )
+    }
+
+    #[test]
+    fn remember_absent_drain_report_resolves_from_durable_state() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let connection = open_upgrade_test_db(temp.path())?;
+        let canonical = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace_id = stable_workspace_id(&canonical);
+        let job_input = |total: u32| crate::db::CreateSearchIndexJobInput {
+            workspace_id: workspace_id.clone(),
+            job_type: SearchIndexJobType::SingleDocument,
+            document_source: Some("memory".to_owned()),
+            document_id: None,
+            documents_total: total,
+        };
+
+        // Pending: publish unproven, so the posture stays queued.
+        connection
+            .insert_search_index_job("sidx_durable_pending_000000000", &job_input(1))
+            .map_err(|error| error.to_string())?;
+        let pending = remember_index_job_report_from_durable_state(
+            &connection,
+            "sidx_durable_pending_000000000",
+        );
+        ensure(
+            remember_index_status(&pending),
+            "queued".to_owned(),
+            "a pending row never reports success",
+        )?;
+
+        // Completed: report indexed with the durable counts, not invented ones.
+        connection
+            .insert_search_index_job("sidx_durable_done_00000000000", &job_input(1))
+            .map_err(|error| error.to_string())?;
+        connection
+            .start_search_index_job("sidx_durable_done_00000000000")
+            .map_err(|error| error.to_string())?;
+        connection
+            .complete_search_index_job("sidx_durable_done_00000000000", 1)
+            .map_err(|error| error.to_string())?;
+        let done = remember_index_job_report_from_durable_state(
+            &connection,
+            "sidx_durable_done_00000000000",
+        );
+        ensure(
+            remember_index_status(&done),
+            "indexed".to_owned(),
+            "a completed row reports the indexed posture",
+        )?;
+        ensure(done.documents_indexed, 1, "durable indexed count kept")?;
+
+        // Failed: stay truthful and keep the durable error message.
+        connection
+            .insert_search_index_job("sidx_durable_failed_000000000", &job_input(1))
+            .map_err(|error| error.to_string())?;
+        connection
+            .start_search_index_job("sidx_durable_failed_000000000")
+            .map_err(|error| error.to_string())?;
+        connection
+            .fail_search_index_job("sidx_durable_failed_000000000", "synthetic durable failure")
+            .map_err(|error| error.to_string())?;
+        let failed = remember_index_job_report_from_durable_state(
+            &connection,
+            "sidx_durable_failed_000000000",
+        );
+        ensure(
+            remember_index_status(&failed),
+            "failed".to_owned(),
+            "a failed row reports failure",
+        )?;
+        ensure(
+            failed.error.as_deref().unwrap_or_default().to_owned(),
+            "synthetic durable failure".to_owned(),
+            "the durable error message is preserved",
+        )?;
+
+        // Missing: absence of the row is not proof of anything but pending.
+        let missing = remember_index_job_report_from_durable_state(
+            &connection,
+            "sidx_durable_missing_00000000",
+        );
+        ensure(
+            remember_index_status(&missing),
+            "queued".to_owned(),
+            "a missing row never reports success",
         )
     }
 
