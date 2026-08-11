@@ -4105,6 +4105,13 @@ max_bytes = 1048576
                 .iter()
                 .any(|item| item.code == MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE)
         );
+        assert!(
+            report.degraded.iter().any(|item| {
+                item.code
+                    == crate::mesh::anti_entropy_protocol::degraded_codes::TRANSPORT_UNAVAILABLE
+            }),
+            "an enrolled active peer with no contacted transport must expose the anti-entropy gap"
+        );
         Ok(())
     }
 
@@ -4131,6 +4138,13 @@ max_bytes = 1048576
                 .iter()
                 .all(|item| item.code != MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE),
             "successful fake transport contact should not retain deferred fallback"
+        );
+        assert!(
+            report.degraded.iter().all(|item| {
+                item.code
+                    != crate::mesh::anti_entropy_protocol::degraded_codes::TRANSPORT_UNAVAILABLE
+            }),
+            "successful peer contact must not report the anti-entropy transport as unavailable"
         );
         Ok(())
     }
