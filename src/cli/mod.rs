@@ -66676,6 +66676,7 @@ mod tests {
     use fs4::fs_std::FileExt as Fs4FileExt;
 
     use crate::core::agent_docs::{AGENT_CORE_COMMANDS, AgentDocsTopic};
+    use crate::core::init::{InitOptions, init_workspace};
 
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, AttestCommand, AuditCommand, BackupCommand,
