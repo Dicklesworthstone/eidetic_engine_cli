@@ -5151,21 +5151,54 @@ pub fn graph_snapshot_centrality_report(
     let explicit_betweenness_status =
         centrality_algorithm_status_from_metrics(&value, "betweenness")?;
     let explicit_hits_status = centrality_algorithm_status_from_metrics(&value, "hits")?;
-    if should_compute_snapshot_topology(
-        &parsed_nodes,
-        explicit_pagerank_status,
-        explicit_betweenness_status,
-        explicit_hits_status,
-    ) {
-        return compute_centrality_from_snapshot_topology(snapshot);
-    }
-
-    let pagerank_status = explicit_pagerank_status
+    let mut pagerank_status = explicit_pagerank_status
         .unwrap_or_else(|| infer_single_metric_status(&parsed_nodes, |node| node.pagerank));
-    let betweenness_status = explicit_betweenness_status
+    let mut betweenness_status = explicit_betweenness_status
         .unwrap_or_else(|| infer_single_metric_status(&parsed_nodes, |node| node.betweenness));
-    let hits_status =
+    let mut hits_status =
         explicit_hits_status.unwrap_or_else(|| infer_hits_metric_status(&parsed_nodes));
+
+    let compute_pagerank =
+        explicit_pagerank_status.is_none() && pagerank_status == CentralityAlgorithmStatus::Skipped;
+    let compute_betweenness = explicit_betweenness_status.is_none()
+        && betweenness_status == CentralityAlgorithmStatus::Skipped;
+    let compute_hits =
+        explicit_hits_status.is_none() && hits_status == CentralityAlgorithmStatus::Skipped;
+    if compute_pagerank || compute_betweenness || compute_hits {
+        let computed = compute_centrality_from_snapshot_topology(snapshot)?;
+        let computed_by_memory: BTreeMap<_, _> = computed
+            .scores
+            .into_iter()
+            .map(|score| (score.memory_id.clone(), score))
+            .collect();
+        for node in &mut parsed_nodes {
+            let computed_score = computed_by_memory.get(&node.memory_id).ok_or_else(|| {
+                GraphError::invalid_snapshot_metrics(format!(
+                    "topology centrality omitted memory {}",
+                    node.memory_id
+                ))
+            })?;
+            if compute_pagerank {
+                node.pagerank = Some(computed_score.pagerank);
+            }
+            if compute_betweenness {
+                node.betweenness = Some(computed_score.betweenness);
+            }
+            if compute_hits {
+                node.hub = Some(computed_score.hub);
+                node.authority = Some(computed_score.authority);
+            }
+        }
+        if compute_pagerank {
+            pagerank_status = computed.pagerank_status;
+        }
+        if compute_betweenness {
+            betweenness_status = computed.betweenness_status;
+        }
+        if compute_hits {
+            hits_status = computed.hits_status;
+        }
+    }
 
     if pagerank_status != CentralityAlgorithmStatus::Computed
         && betweenness_status != CentralityAlgorithmStatus::Computed
@@ -5286,20 +5319,6 @@ struct SnapshotCentralityNode {
     betweenness: Option<f64>,
     hub: Option<f64>,
     authority: Option<f64>,
-}
-
-fn should_compute_snapshot_topology(
-    nodes: &[SnapshotCentralityNode],
-    pagerank_status: Option<CentralityAlgorithmStatus>,
-    betweenness_status: Option<CentralityAlgorithmStatus>,
-    hits_status: Option<CentralityAlgorithmStatus>,
-) -> bool {
-    (pagerank_status.is_none() && nodes.iter().any(|node| node.pagerank.is_none()))
-        || (betweenness_status.is_none() && nodes.iter().any(|node| node.betweenness.is_none()))
-        || (hits_status.is_none()
-            && nodes
-                .iter()
-                .any(|node| node.hub.is_none() || node.authority.is_none()))
 }
 
 fn compute_centrality_from_snapshot_topology(
@@ -9867,6 +9886,15 @@ mod tests {
             report.hits_status,
             super::CentralityAlgorithmStatus::Computed
         );
+        let scores_by_id: std::collections::BTreeMap<_, _> = report
+            .scores
+            .iter()
+            .map(|score| (score.memory_id.as_str(), score))
+            .collect();
+        assert_eq!(scores_by_id[MEMORY_A].pagerank, 0.7);
+        assert_eq!(scores_by_id[MEMORY_A].betweenness, 0.2);
+        assert_eq!(scores_by_id[MEMORY_B].pagerank, 0.3);
+        assert_eq!(scores_by_id[MEMORY_B].betweenness, 0.8);
         assert!(!report.top_hubs.is_empty());
         assert!(!report.top_authorities.is_empty());
         assert!(report.scores.iter().any(|score| score.hub > 0.0));
