@@ -2878,7 +2878,7 @@ async fn run_context_pack_with_performance_inner(
     trace.record_elapsed("memoryTierAdmission", tier_admission_start);
 
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-    annotate_attempt_family_multiplicity(read_connection, &mut candidates)?;
+    annotate_attempt_family_multiplicity_in_current_snapshot(read_connection, &mut candidates)?;
 
     let sentinel_omissions = if options.require_fresh_sentinels {
         let reference_time =
@@ -4606,6 +4606,31 @@ fn annotate_attempt_family_multiplicity(
         .collect::<Vec<_>>();
     let batch = connection
         .get_attempt_family_membership_snapshots_for_memory_ids(&memory_ids)
+        .map_err(|error| {
+            ContextPackError::Pack(format!(
+                "failed to batch-resolve authoritative attempt-family membership: {error}"
+            ))
+        })?;
+    for candidate in candidates {
+        let memory_id = candidate.memory_id.to_string();
+        candidate.attempt_family_multiplicity = batch
+            .by_memory_id
+            .get(&memory_id)
+            .and_then(pack_attempt_family_multiplicity_snapshot);
+    }
+    Ok(())
+}
+
+fn annotate_attempt_family_multiplicity_in_current_snapshot(
+    connection: &DbConnection,
+    candidates: &mut [PackCandidate],
+) -> Result<(), ContextPackError> {
+    let memory_ids = candidates
+        .iter()
+        .map(|candidate| candidate.memory_id.to_string())
+        .collect::<Vec<_>>();
+    let batch = connection
+        .get_attempt_family_membership_snapshots_for_memory_ids_in_current_snapshot(&memory_ids)
         .map_err(|error| {
             ContextPackError::Pack(format!(
                 "failed to batch-resolve authoritative attempt-family membership: {error}"
@@ -17962,8 +17987,14 @@ pub fn unrelated_context() -> u64 {{
             .map_err(|error| error.to_string())
         };
         let mut candidates = vec![candidate(selected_id)?, candidate(rejected_id)?];
-        super::annotate_attempt_family_multiplicity(&connection, &mut candidates)
+        connection
+            .begin_read_snapshot()
             .map_err(|error| error.to_string())?;
+        super::annotate_attempt_family_multiplicity_in_current_snapshot(
+            &connection,
+            &mut candidates,
+        )
+        .map_err(|error| error.to_string())?;
         super::apply_attempt_family_multiplicity_discount(&mut candidates)
             .map_err(|error| error.to_string())?;
 
@@ -18012,6 +18043,9 @@ pub fn unrelated_context() -> u64 {{
             public_snapshot["memberships"][0]["familyAlias"],
             serde_json::json!(crate::models::public_attempt_family_alias(RAW_FAMILY_ID))
         );
+        connection
+            .rollback_read_snapshot()
+            .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())
     }
 

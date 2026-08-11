@@ -21395,7 +21395,7 @@ impl DbConnection {
         }
     }
 
-    fn get_attempt_family_membership_snapshots_for_memory_ids_in_current_snapshot(
+    pub(crate) fn get_attempt_family_membership_snapshots_for_memory_ids_in_current_snapshot(
         &self,
         memory_ids: &[String],
     ) -> Result<AttemptFamilyMembershipSnapshotBatch> {
@@ -37501,6 +37501,86 @@ mod tests {
                 .and_then(|details| details.family.disposition.as_deref()),
             &Some("rejected"),
             "backup batch preserves rejected sibling disposition",
+        )
+    }
+
+    #[test]
+    fn attempt_family_batch_reuses_caller_snapshot_and_preserves_rollback_error_truth() -> TestResult
+    {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_id = "wsp_00000000000000000000001106";
+        let memory_id = "mem_00000000000000000000120106";
+        insert_attempt_family_test_workspace(&connection, workspace_id, "/tmp/afbatch-owned")?;
+        connection.insert_memory(
+            memory_id,
+            &test_memory_input(workspace_id, "caller-owned attempt-family snapshot"),
+        )?;
+        connection.set_memory_attempt_family(
+            memory_id,
+            &super::MemoryAttemptFamily {
+                family_id: "fam-caller-owned".to_owned(),
+                declared_size: Some(1),
+                attempt_index: Some(1),
+                disposition: Some("selected".to_owned()),
+            },
+        )?;
+        let memory_ids = vec![memory_id.to_owned()];
+
+        connection.begin_read_snapshot()?;
+        let batch = connection
+            .get_attempt_family_membership_snapshots_for_memory_ids_in_current_snapshot(
+                &memory_ids,
+            )?;
+        let family = batch
+            .by_memory_id
+            .get(memory_id)
+            .and_then(|snapshot| snapshot.family("fam-caller-owned"))
+            .ok_or_else(|| "caller-owned batch omitted the authoritative family".to_owned())?;
+        ensure_equal(
+            &family.multiplicity().promotion_posture(),
+            &AttemptFamilyPromotionPosture::Eligible,
+            "caller-owned snapshot preserves authoritative family semantics",
+        )?;
+        connection.rollback_read_snapshot()?;
+
+        connection.begin()?;
+        connection.execute_raw(
+            "ALTER TABLE attempt_family_members RENAME TO attempt_family_members_hidden",
+        )?;
+        let error = connection
+            .get_attempt_family_membership_snapshots_for_memory_ids_in_current_snapshot(&memory_ids)
+            .expect_err("missing attempt-family table must remain a query error");
+        ensure(
+            matches!(
+                &error,
+                DbError::SqlModel {
+                    operation: DbOperation::Query,
+                    ..
+                }
+            ),
+            format!("batch resolver changed the underlying query error: {error}"),
+        )?;
+        connection.rollback()?;
+
+        let hidden_table = connection.query(
+            "SELECT name FROM sqlite_master WHERE name = ?1",
+            &[Value::Text("attempt_family_members_hidden".to_owned())],
+        )?;
+        ensure(
+            hidden_table.is_empty(),
+            "caller rollback must leave no renamed attempt-family table behind",
+        )?;
+        let recovered =
+            connection.get_attempt_family_membership_snapshots_for_memory_ids(&memory_ids)?;
+        ensure_equal(
+            &recovered
+                .by_memory_id
+                .get(memory_id)
+                .and_then(|snapshot| snapshot.family("fam-caller-owned"))
+                .map(|family| family.ledger_members.len()),
+            &Some(1_usize),
+            "caller rollback preserves the committed authoritative family ledger",
         )
     }
 
