@@ -1413,6 +1413,7 @@ jobs:
     timeout-minutes: 35
     env:
       EE_TEST_SEED: bd-3usjw.68-windows-msvc-cli-smoke
+      EE_EMBED_DOWNLOAD: "off"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
