@@ -2371,6 +2371,15 @@ fn remember_index_drain_leader_lock(workspace_id: &str) -> AdvisoryLockId {
     AdvisoryLockId::new("index_drain_leader", workspace_id)
 }
 
+/// Election holder id in the canonical `remember:<pid>:<suffix>` form that
+/// `db::advisory_lock_holder_pid` parses, so same-host PID liveness probing
+/// covers the drain leader: a crashed leader's lock is auto-reclaimed on the
+/// next acquire instead of failing closed (AlreadyHeld) until TTL expiry —
+/// which the leadership loop would otherwise misread as a live successor.
+fn remember_index_drain_leader_holder(index_job_id: &str) -> String {
+    format!("remember:{}:index-drain-{index_job_id}", std::process::id())
+}
+
 /// Leadership TTL covers both bounded drain rounds (each capped by the
 /// 300s index runtime budget) so a killed leader cannot wedge elections.
 const REMEMBER_INDEX_DRAIN_LEADER_TTL_SECS: u64 = 660;
@@ -2427,7 +2436,7 @@ fn remember_drain_leadership_cycles(
     pending_remaining: &mut dyn FnMut() -> Option<bool>,
 ) -> IndexProcessingJobReport {
     let lock_id = remember_index_drain_leader_lock(workspace_id);
-    let holder_id = format!("remember-drain:{}:{index_job_id}", std::process::id());
+    let holder_id = remember_index_drain_leader_holder(index_job_id);
     let mut own_report: Option<IndexProcessingJobReport> = None;
 
     // Work-conserving re-election until post-release quiescence. Every
@@ -2435,7 +2444,12 @@ fn remember_drain_leadership_cycles(
     //   E1 — the post-release probe VERIFIED an empty queue;
     //   E2 — a successor holds the election lock: AlreadyHeld on
     //        (re-)election is the only mechanically proven successor,
-    //        and that holder inherits the post-release obligation;
+    //        and that holder inherits the post-release obligation. The
+    //        holder id uses the canonical `remember:<pid>:…` form, so
+    //        acquire auto-reclaims a crashed same-host leader instead of
+    //        reporting it AlreadyHeld; AlreadyHeld therefore means an
+    //        alive same-host holder or an unprobeable (remote/foreign)
+    //        holder that deliberately fails closed;
     //   E3 — the ambient Cx deadline/cancellation or a persistently
     //        failing inspection ended the stint: report our own truthful
     //        outcome (queued when undecided) and NEVER claim quiescence.
@@ -2467,10 +2481,12 @@ fn remember_drain_leadership_cycles(
             Ok(crate::db::AcquireLockResult::Acquired(_))
             | Ok(crate::db::AcquireLockResult::Expired { .. }) => {}
             Ok(crate::db::AcquireLockResult::AlreadyHeld { .. }) => {
-                // E2: a live holder owns the queue. On the first cycle our
-                // own pending job is owned by that winner's drain; on later
-                // cycles the newer holder inherits the post-release
-                // obligation for the remainder.
+                // E2: a live same-host holder (or an unprobeable holder,
+                // which fails closed) owns the queue — dead same-host
+                // holders were already reclaimed by acquire. On the first
+                // cycle our own pending job is owned by that winner's
+                // drain; on later cycles the newer holder inherits the
+                // post-release obligation for the remainder.
                 return own_report
                     .unwrap_or_else(|| remember_index_job_queued_for_coalescing(index_job_id));
             }
@@ -17736,6 +17752,126 @@ mod tests {
             drained.get(),
             true,
             "the loop returned only after the drain actually happened and pending went false",
+        )
+    }
+
+    #[test]
+    fn remember_leadership_dead_leader_lock_is_reclaimed_and_drained() -> TestResult {
+        // A crashed drain leader must not strand the queue until TTL
+        // expiry: the holder id uses the canonical `remember:<pid>:…`
+        // form, so acquire probes same-host liveness, reclaims the dead
+        // holder's lock, and the next writer elects itself and drains.
+        // A LIVE same-host holder still fails the election (true E2
+        // handoff), as does an unprobeable foreign holder (fail closed,
+        // covered by the rival in the winner/loser test).
+        let temp = upgrade_test_workspace()?;
+        let connection = open_upgrade_test_db(temp.path())?;
+        connection
+            .ensure_advisory_locks_table()
+            .map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_dead_leader_reclaim_0000";
+        let own_job_id = "sidx_dead_leader_own_0000000";
+        let lock_id = remember_index_drain_leader_lock(workspace_id);
+
+        // Live same-host holder: election must lose without draining.
+        let live_holder = format!(
+            "remember:{}:index-drain-sidx_live_peer0",
+            std::process::id()
+        );
+        let acquired = connection
+            .acquire_advisory_lock(&lock_id, &live_holder, Some(60), Some("live peer leader"))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            acquired.is_acquired(),
+            true,
+            "live peer takes election lock",
+        )?;
+        let live_drains = std::cell::Cell::new(0usize);
+        let report = remember_drain_leadership_cycles(
+            &connection,
+            workspace_id,
+            own_job_id,
+            &mut || Ok(()),
+            &mut || {
+                live_drains.set(live_drains.get() + 1);
+                Ok(Vec::new())
+            },
+            &mut || Some(true),
+        );
+        ensure(
+            remember_index_status(&report),
+            "queued".to_owned(),
+            "a live same-host leader forces a truthful deferred handoff",
+        )?;
+        ensure(
+            live_drains.get(),
+            0,
+            "the loser never drains under a live leader's lock",
+        )?;
+        assert!(
+            connection
+                .release_advisory_lock(&lock_id, &live_holder)
+                .map_err(|error| error.to_string())?,
+            "release live peer election lock"
+        );
+
+        // The loop's own holder form MUST be mechanically covered by
+        // same-host PID liveness probing — this is the invariant whose
+        // regression (an unparseable holder) made a crashed leader look
+        // AlreadyHeld until TTL and strand the queue.
+        ensure(
+            crate::db::advisory_lock_holder_pid(&remember_index_drain_leader_holder(own_job_id)),
+            Some(std::process::id()),
+            "the drain-leader holder id must encode a probeable same-host PID",
+        )?;
+
+        // Plant exactly the residue a crashed leader leaves: the
+        // production holder string with only the PID swapped for the
+        // guaranteed-dead i32::MAX (same convention as the db liveness
+        // tests). Acquire must reclaim it and the leadership loop must
+        // drain instead of handing off.
+        let mut holder_parts = remember_index_drain_leader_holder(own_job_id)
+            .splitn(3, ':')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        ensure(
+            holder_parts.len(),
+            3,
+            "holder id has the canonical 3-part form",
+        )?;
+        holder_parts[1] = "2147483647".to_owned();
+        let dead_holder = holder_parts.join(":");
+        let acquired = connection
+            .acquire_advisory_lock(&lock_id, &dead_holder, Some(600), Some("crashed leader"))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            acquired.is_acquired(),
+            true,
+            "dead leader fixture lock planted",
+        )?;
+        let drains = std::cell::Cell::new(0usize);
+        let drained = std::cell::Cell::new(false);
+        let report = remember_drain_leadership_cycles(
+            &connection,
+            workspace_id,
+            own_job_id,
+            &mut || Ok(()),
+            &mut || {
+                drains.set(drains.get() + 1);
+                drained.set(true);
+                Ok(vec![drained_test_report(own_job_id)])
+            },
+            &mut || Some(!drained.get()),
+        );
+        ensure(
+            remember_index_status(&report),
+            "indexed".to_owned(),
+            "the dead leader's lock is reclaimed and the pending work is drained, not handed off",
+        )?;
+        ensure(
+            drains.get() >= 1,
+            true,
+            "the new leader actually drained after reclaiming the dead holder's lock",
         )
     }
 
