@@ -34,6 +34,13 @@ observed_hash = "blake3:1276ce069f06fcc068f86047817c26fd42ef93c9b24d7781d5f9d33f
 reason = "GitHub Actions run 25986819474 job 76385639652 observed this deterministic personalized PageRank ACL-push hash on aarch64 macOS after the reviewed PPR drift allowance landed. The entry is exact-hash-scoped so future aarch64 macOS drift still fails."
 
 [[divergences]]
+target_triple = "x86_64-apple-darwin"
+algorithm = "personalized_pagerank"
+seed = "weighted-cycle-v1"
+observed_hash = "blake3:1276ce069f06fcc068f86047817c26fd42ef93c9b24d7781d5f9d33fb0f06365"
+reason = "GitHub Actions run 31457724052 job 93674895920 observed the same reviewed deterministic personalized PageRank ACL-push hash on x86_64 macOS. The entry is exact-target, exact-algorithm, exact-seed, and exact-hash scoped so any future x86_64 macOS drift still fails."
+
+[[divergences]]
 target_triple = "x86_64-pc-windows-msvc"
 algorithm = "personalized_pagerank"
 seed = "weighted-cycle-v1"

@@ -83403,14 +83403,14 @@ mod tests {
             "protocol": "ee.daemon",
             "request_schemas": [crate::daemon::DAEMON_REQUEST_SCHEMA_V1],
             "response_schemas": [crate::daemon::DAEMON_RESPONSE_SCHEMA_V1],
-            "methods": [crate::daemon::server::METHOD_SEARCH],
+            "methods": [crate::daemon::protocol::METHOD_SEARCH],
             "authorization": {
                 "ee.daemon.search": "same_uid_workspace"
             },
             "method_schemas": {
                 "ee.daemon.search": {
-                    "request": crate::daemon::server::DAEMON_SEARCH_REQUEST_SCHEMA_V1,
-                    "response": crate::daemon::server::DAEMON_SEARCH_RESPONSE_SCHEMA_V2
+                    "request": crate::daemon::protocol::DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+                    "response": crate::daemon::protocol::DAEMON_SEARCH_RESPONSE_SCHEMA_V2
                 }
             }
         })
