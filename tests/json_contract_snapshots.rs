@@ -2,10 +2,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use ee::core::index::{
-    IndexHealth, IndexRebuildOptions, IndexRebuildStatus, IndexStatusOptions, get_index_status,
-    rebuild_index,
-};
 use ee::db::{
     CreateMemoryInput, CreatePackItemInput, CreatePackRecordInput, CreateWorkspaceInput,
     DbConnection,
@@ -53,7 +49,10 @@ impl JsonContractFixture {
         let canonical_workspace = canonical_fixture_path(&workspace, "workspace")?;
         let canonical_database = canonical_fixture_path(&database, "database")?;
         let canonical_index_dir_input = canonical_workspace.join(".ee").join("index");
+        let binary = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
+        let canonical_binary = canonical_fixture_path(&binary, "ee binary")?;
         build_search_index(
+            &binary,
             &canonical_workspace,
             &canonical_database,
             &canonical_index_dir_input,
@@ -62,8 +61,6 @@ impl JsonContractFixture {
             canonical_fixture_path(&canonical_index_dir_input, "index directory")?;
         let canonical_repo =
             canonical_fixture_path(Path::new(env!("CARGO_MANIFEST_DIR")), "repository")?;
-        let binary = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
-        let canonical_binary = canonical_fixture_path(&binary, "ee binary")?;
 
         Ok(Self {
             workspace,
@@ -279,80 +276,109 @@ fn graph_json_surface_examples_match_snapshots() -> TestResult {
     Ok(())
 }
 
-fn build_search_index(workspace: &Path, database: &Path, index_dir: &Path) -> TestResult {
-    let rebuild_options = IndexRebuildOptions {
-        workspace_path: workspace.to_path_buf(),
-        database_path: Some(database.to_path_buf()),
-        index_dir: Some(index_dir.to_path_buf()),
-        dry_run: false,
-    };
-    let status_options = IndexStatusOptions {
-        workspace_path: workspace.to_path_buf(),
-        database_path: Some(database.to_path_buf()),
-        index_dir: Some(index_dir.to_path_buf()),
-    };
-    let mut report = rebuild_index(&rebuild_options).map_err(|error| error.to_string())?;
-
-    if report.status != IndexRebuildStatus::Success {
-        return Err(format!(
-            "index rebuild failed with status {:?}",
-            report.status
-        ));
+fn build_search_index(
+    binary: &Path,
+    workspace: &Path,
+    database: &Path,
+    index_dir: &Path,
+) -> TestResult {
+    let rebuild_args = vec![
+        "--json".to_string(),
+        "--workspace".to_string(),
+        workspace.to_string_lossy().into_owned(),
+        "index".to_string(),
+        "rebuild".to_string(),
+        "--database".to_string(),
+        database.to_string_lossy().into_owned(),
+        "--index-dir".to_string(),
+        index_dir.to_string_lossy().into_owned(),
+    ];
+    let report = parse_ee_json_output(run_ee_at(binary, workspace, &rebuild_args)?, &rebuild_args)?;
+    if report["data"]["status"] != "success" {
+        return Err(format!("index rebuild failed: {report}"));
     }
-    if report.documents_total != 1 {
+    if report["data"]["documents_total"] != 1 {
         return Err(format!(
             "expected one indexed document, got {}",
-            report.documents_total
+            report["data"]["documents_total"]
         ));
     }
-    let mut status = get_index_status(&status_options).map_err(|error| error.to_string())?;
-    if status.health == IndexHealth::Stale
-        && status
-            .db_generation
-            .zip(status.index_generation)
-            .is_some_and(|(database_generation, index_generation)| {
-                database_generation > index_generation
-            })
-    {
-        report = rebuild_index(&rebuild_options).map_err(|error| error.to_string())?;
-        if report.status != IndexRebuildStatus::Success || report.documents_total != 1 {
-            return Err(format!(
-                "index rebuild did not converge after fixture model registration: {report:?}"
-            ));
-        }
-        status = get_index_status(&status_options).map_err(|error| error.to_string())?;
-    }
-    if status.health != IndexHealth::Ready {
+
+    let status_args = vec![
+        "--json".to_string(),
+        "--workspace".to_string(),
+        workspace.to_string_lossy().into_owned(),
+        "index".to_string(),
+        "status".to_string(),
+        "--database".to_string(),
+        database.to_string_lossy().into_owned(),
+        "--index-dir".to_string(),
+        index_dir.to_string_lossy().into_owned(),
+    ];
+    let status = parse_ee_json_output(run_ee_at(binary, workspace, &status_args)?, &status_args)?;
+    if status["data"]["health"] != "ready" {
         return Err(format!(
-            "fixture must launch JSON contract commands with a ready index: health={:?}, database_generation={:?}, index_generation={:?}, last_check_error={:?}",
-            status.health, status.db_generation, status.index_generation, status.last_check_error
+            "fixture must launch JSON contract commands with a ready index: {status}"
+        ));
+    }
+
+    let metadata_path = index_dir.join("meta.json");
+    let metadata_text = fs::read_to_string(&metadata_path)
+        .map_err(|error| format!("failed to read {}: {error}", metadata_path.display()))?;
+    let metadata: Value = serde_json::from_str(&metadata_text)
+        .map_err(|error| format!("failed to parse {}: {error}", metadata_path.display()))?;
+    let has_semantic_fingerprint = [
+        "storedModelId",
+        "storedModelRevision",
+        "storedModelHash",
+        "storedDimension",
+        "storedDistanceMetric",
+        "storedVectorDtype",
+    ]
+    .into_iter()
+    .any(|field| metadata.get(field).is_some());
+    let manifest_backend = if has_semantic_fingerprint {
+        "semantic"
+    } else {
+        "frankensearch_hash_fallback"
+    };
+    let subprocess_backend = status["data"]["embedding"]["source"]
+        .as_str()
+        .ok_or_else(|| format!("index status omitted embedding.source: {status}"))?;
+    if manifest_backend != subprocess_backend
+        || status["data"]["embedding"]["mode"] != "deterministic_hash"
+        || status["data"]["embedding"]["fast_model_id"] != "fnv1a-256"
+    {
+        return Err(format!(
+            "pre-command index backend mismatch: manifest={manifest_backend}, subprocess={subprocess_backend}, embedding={}",
+            status["data"]["embedding"]
         ));
     }
     Ok(())
 }
 
-fn run_ee(fixture: &JsonContractFixture, args: &[String]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
+fn run_ee_at(binary: &Path, workspace: &Path, args: &[String]) -> Result<Output, String> {
+    Command::new(binary)
         .args(args)
         .env("EE_EMBED_DOWNLOAD", "off")
         .env(
             "EE_EMBED_MODEL_DIR",
-            fixture.canonical_workspace.join(".ee/empty-model-cache"),
+            workspace.join(".ee/empty-model-cache"),
         )
         .env_remove("EE_EMBED_MODEL_PATH")
         .env_remove("EE_PROFILE")
         .env_remove("EE_WORKSPACE")
         .env("PATH", "/usr/bin:/bin")
-        .env(
-            "XDG_RUNTIME_DIR",
-            fixture.canonical_workspace.join(".runtime"),
-        )
+        .env("XDG_RUNTIME_DIR", workspace.join(".runtime"))
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
-fn run_json_command(fixture: &JsonContractFixture, args: Vec<String>) -> Result<Value, String> {
-    let output = run_ee(fixture, &args)?;
+fn run_ee(fixture: &JsonContractFixture, args: &[String]) -> Result<Output, String> {
+    run_ee_at(&fixture.binary, &fixture.canonical_workspace, args)
+}
+
+fn parse_ee_json_output(output: Output, args: &[String]) -> Result<Value, String> {
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("stdout was not UTF-8 for ee {}: {error}", args.join(" ")))?;
     let stderr = String::from_utf8(output.stderr)
@@ -378,8 +404,12 @@ fn run_json_command(fixture: &JsonContractFixture, args: Vec<String>) -> Result<
         ));
     }
 
-    let mut value: Value = serde_json::from_str(&stdout)
-        .map_err(|error| format!("ee {} stdout must be JSON: {error}", args.join(" ")))?;
+    serde_json::from_str(&stdout)
+        .map_err(|error| format!("ee {} stdout must be JSON: {error}", args.join(" ")))
+}
+
+fn run_json_command(fixture: &JsonContractFixture, args: Vec<String>) -> Result<Value, String> {
+    let mut value = parse_ee_json_output(run_ee(fixture, &args)?, &args)?;
     scrub_json_contract(&mut value, fixture);
     Ok(value)
 }
