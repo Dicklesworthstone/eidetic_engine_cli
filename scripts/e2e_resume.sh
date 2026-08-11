@@ -346,6 +346,54 @@ else
     event scale_10k_resume_preserves_db_wal_shm fail "before=${SCALE_HASH_BEFORE//$'\n'/,}; after=${SCALE_HASH_AFTER//$'\n'/,}"
 fi
 
+# Reuse the same real 10k corpus for bd-orient-fast-content-iubub's literal
+# latency guard. Index construction is deliberately outside the timed region:
+# --fast promises a bounded read path, not a hidden benchmark of derived-index
+# creation. The timed command must still return both useful content sections,
+# keep only the honest doctor-skip degradation, and leave the source-of-truth
+# store byte-identical.
+run_ee --workspace "${SCALE_WS}" index rebuild --json
+SCALE_INDEX_JSON="${LAST_STDOUT}"
+if [[ "${LAST_EXIT}" -eq 0 ]] \
+    && jq -e '.schema == "ee.response.v2" and .success == true' \
+        "${SCALE_INDEX_JSON}" >/dev/null 2>&1; then
+    event scale_10k_index_ready_for_fast_orient pass
+else
+    event scale_10k_index_ready_for_fast_orient fail \
+        "exit=${LAST_EXIT}; $(head -c 300 "${SCALE_INDEX_JSON}")"
+fi
+
+SCALE_FAST_HASH_BEFORE="$(store_fingerprint "${SCALE_DATABASE}")"
+SCALE_FAST_STARTED_MS="$(now_ms)"
+run_ee --workspace "${SCALE_WS}" orient --fast "Resume scale row 09999" --json
+SCALE_FAST_ELAPSED_MS=$(( $(now_ms) - SCALE_FAST_STARTED_MS ))
+SCALE_FAST_JSON="${LAST_STDOUT}"
+SCALE_FAST_HASH_AFTER="$(store_fingerprint "${SCALE_DATABASE}")"
+if [[ "${LAST_EXIT}" -eq 0 && "${SCALE_FAST_ELAPSED_MS}" -lt 1000 ]] \
+    && jq -e '
+        .schema == "ee.response.v2"
+        and .success == true
+        and .data.mode == "fast"
+        and .data.pack == null
+        and (.data.fastContent.recent | length) >= 1
+        and (.data.fastContent.relevant | length) >= 1
+        and all(.data.fastContent.recent[]; (.id | length) > 0 and (.snippet | length) > 0)
+        and all(.data.fastContent.relevant[]; (.id | length) > 0 and (.snippet | length) > 0)
+        and ([.degraded[]? | select(.code == "orient_doctor_skipped")] | length) == 1
+        and ([.degraded[]? | select(.code == "orient_pack_skipped")] | length) == 0
+    ' "${SCALE_FAST_JSON}" >/dev/null 2>&1; then
+    event scale_10k_fast_orient_under_1s_with_content pass
+else
+    event scale_10k_fast_orient_under_1s_with_content fail \
+        "exit=${LAST_EXIT}; elapsedMs=${SCALE_FAST_ELAPSED_MS}; $(head -c 400 "${SCALE_FAST_JSON}")"
+fi
+if [[ "${SCALE_FAST_HASH_BEFORE}" == "${SCALE_FAST_HASH_AFTER}" ]]; then
+    event scale_10k_fast_orient_preserves_db_wal_shm pass
+else
+    event scale_10k_fast_orient_preserves_db_wal_shm fail \
+        "before=${SCALE_FAST_HASH_BEFORE//$'\n'/,}; after=${SCALE_FAST_HASH_AFTER//$'\n'/,}"
+fi
+
 echo
 echo "resume e2e: ${STEP} steps, ${FAILURES} failures; root ${ROOT}"
 if [[ "${FAILURES}" -gt 0 ]]; then
