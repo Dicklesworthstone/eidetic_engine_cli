@@ -39472,9 +39472,14 @@ fn orient_store_discovery(
     pack: &serde_json::Value,
     fast_content: Option<&serde_json::Value>,
 ) -> (serde_json::Value, Option<String>) {
+    let addressed_store_path = workspace.join(".ee").join("ee.db");
     if !orient_store_looks_empty(fast, pack, fast_content) {
         return (
-            serde_json::json!({ "storeEmpty": false, "scanned": false }),
+            serde_json::json!({
+                "addressedStorePath": addressed_store_path,
+                "storeEmpty": false,
+                "scanned": false,
+            }),
             None,
         );
     }
@@ -39487,6 +39492,7 @@ fn orient_store_discovery(
         .first()
         .map(|store| store.workspace_root.clone());
     let value = serde_json::json!({
+        "addressedStorePath": addressed_store_path,
         "storeEmpty": true,
         "scanned": true,
         "truncated": scan.truncated,
@@ -39598,6 +39604,14 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
         .and_then(serde_json::Value::as_bool)
         == Some(true)
     {
+        if let Some(addressed_store_path) = data
+            .pointer("/storeDiscovery/addressedStorePath")
+            .and_then(serde_json::Value::as_str)
+        {
+            out.push_str(&format!(
+                "\nAddressed store: {addressed_store_path} (empty or missing).\n"
+            ));
+        }
         let nearby = data
             .pointer("/storeDiscovery/nearbyStores")
             .and_then(serde_json::Value::as_array);

@@ -371,10 +371,19 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
     let discovery = orient_json
         .pointer("/data/storeDiscovery")
         .ok_or("orient storeless leaf: missing storeDiscovery block")?;
+    let addressed_store = leaf.join(".ee").join("ee.db");
+    let addressed_store_str = addressed_store.to_string_lossy();
     ensure(
         discovery["storeEmpty"] == serde_json::json!(true)
             && discovery["scanned"] == serde_json::json!(true),
         format!("orient must scan on a storeless workspace, got: {discovery}"),
+    )?;
+    ensure(
+        discovery["addressedStorePath"] == serde_json::json!(addressed_store_str.as_ref()),
+        format!(
+            "orient must report the exact addressed store path {}; got: {discovery}",
+            addressed_store.display()
+        ),
     )?;
     let nearby = discovery["nearbyStores"]
         .as_array()
@@ -431,12 +440,14 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
     let human = String::from_utf8(orient_human.stdout)
         .map_err(|error| format!("human orient stdout was not UTF-8: {error}"))?;
     ensure(
-        human.contains(best_path)
+        human.contains(addressed_store_str.as_ref())
+            && human.contains(best_path)
             && human.contains(&format!("{best_documents} docs"))
             && human.contains(&format!("last write {best_last_write}")),
         format!(
-            "human orient must print nearby path/documents/last-write; \
-             path={best_path:?}, documents={best_documents}, lastWrite={best_last_write:?}\n{human}"
+            "human orient must print the addressed store plus nearby path/documents/last-write; \
+             addressed={}, path={best_path:?}, documents={best_documents}, lastWrite={best_last_write:?}\n{human}",
+            addressed_store.display()
         ),
     )?;
     Ok(())
