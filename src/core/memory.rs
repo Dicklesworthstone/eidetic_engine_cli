@@ -1780,11 +1780,18 @@ fn remember_memory_inner_with_store(
             RememberIndexPublishRoute::Inline => {
                 let report =
                     process_remember_index_job_with_retry(&connection, &index_job_id, &index_dir)?;
-                remember_drain_peer_tail_after_publish(
+                if let Err(error) = remember_drain_peer_tail_after_publish(
                     &connection,
                     &prepared.workspace_id,
                     &index_dir,
-                );
+                ) {
+                    tracing::warn!(
+                        target: "ee::memory",
+                        workspace_id = prepared.workspace_id.as_str(),
+                        error = %error,
+                        "remember indexed its own row but could not inspect or drain the peer tail"
+                    );
+                }
                 report
             }
         }
@@ -2043,10 +2050,33 @@ struct RememberWorkspaceWriteLock<'a> {
     connection: &'a DbConnection,
     lock_id: AdvisoryLockId,
     holder_id: String,
+    release_complete: bool,
+}
+
+impl RememberWorkspaceWriteLock<'_> {
+    /// Release the owned lease and return whether the durable row matched.
+    ///
+    /// Leadership handoff must observe this result before it probes the
+    /// queue. A best-effort `Drop` alone cannot distinguish a real release
+    /// from an I/O error or a row that no longer belongs to this holder.
+    fn release(mut self) -> Result<bool, crate::db::DbError> {
+        let result = self
+            .connection
+            .release_advisory_lock(&self.lock_id, &self.holder_id);
+        if result.is_ok() {
+            // `false` means this guard no longer owns a durable row; retrying
+            // the same holder delete in Drop cannot improve that fact.
+            self.release_complete = true;
+        }
+        result
+    }
 }
 
 impl Drop for RememberWorkspaceWriteLock<'_> {
     fn drop(&mut self) {
+        if self.release_complete {
+            return;
+        }
         if let Err(error) = self
             .connection
             .release_advisory_lock(&self.lock_id, &self.holder_id)
@@ -2147,6 +2177,7 @@ fn acquire_remember_workspace_lock_with_retry_and_elapsed<'a>(
                     connection,
                     lock_id,
                     holder_id,
+                    release_complete: false,
                 });
             }
             Ok(crate::db::AcquireLockResult::AlreadyHeld {
@@ -2423,6 +2454,30 @@ fn remember_lead_coalesced_index_drain(
     )
 }
 
+/// Reconcile the currently pending remember-index tail through the same
+/// non-blocking election used by single writes.
+///
+/// `Ok(None)` means the pending queue was observed empty. `Ok(Some(_))`
+/// carries the elected or deferred posture for the first pending job. An
+/// inspection error stays typed so callers that already committed source
+/// rows can report `queued` without rewriting those durable writes as failed.
+pub(crate) fn reconcile_pending_remember_index_jobs(
+    connection: &DbConnection,
+    workspace_id: &str,
+    index_dir: &Path,
+) -> Result<Option<IndexProcessingJobReport>, IndexRebuildError> {
+    let pending = connection.list_pending_search_index_jobs(workspace_id, Some(1))?;
+    let Some(first) = pending.first() else {
+        return Ok(None);
+    };
+    Ok(Some(remember_lead_coalesced_index_drain(
+        connection,
+        workspace_id,
+        &first.id,
+        index_dir,
+    )))
+}
+
 /// Leadership cycle loop with injectable drain/pending probes so the
 /// planted-interleaving test can commit a racing writer inside a real
 /// publish-lock hold. See [`remember_lead_coalesced_index_drain`] for the
@@ -2502,11 +2557,12 @@ fn remember_drain_leadership_cycles(
                     .unwrap_or_else(|| remember_index_job_queued_for_coalescing(index_job_id));
             }
         }
-        {
-            let _leadership = RememberWorkspaceWriteLock {
+        let release_result = {
+            let leadership = RememberWorkspaceWriteLock {
                 connection,
                 lock_id: lock_id.clone(),
                 holder_id: holder_id.clone(),
+                release_complete: false,
             };
             let cycle_report = remember_drain_pending_rounds(
                 index_job_id,
@@ -2532,11 +2588,34 @@ fn remember_drain_leadership_cycles(
             if adopt_cycle_report {
                 own_report = Some(cycle_report);
             }
-            // `_leadership` drops here: the election lock is RELEASED
-            // before the handoff probe below, so any writer that deferred
-            // against this stint is either already visible in the pending
-            // probe or free to elect itself.
+            leadership.release()
+        };
+        match release_result {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::error!(
+                    target: "ee::memory",
+                    workspace_id,
+                    index_job_id,
+                    "coalesced drain election lease no longer belonged to this holder; reporting queued without claiming handoff"
+                );
+                return remember_index_job_queued_for_coalescing(index_job_id);
+            }
+            Err(error) => {
+                tracing::error!(
+                    target: "ee::memory",
+                    workspace_id,
+                    index_job_id,
+                    error = %error,
+                    "coalesced drain election lease release failed; reporting queued without claiming handoff"
+                );
+                return remember_index_job_queued_for_coalescing(index_job_id);
+            }
         }
+        // The election lock is now observably RELEASED before the handoff
+        // probe below, so any writer that deferred against this stint is
+        // either already visible in the pending probe or free to elect
+        // itself.
         // Post-release quiescence probe. An inspection error is UNKNOWN —
         // never quiescence — so retry it a bounded number of times.
         let mut probe = None;
@@ -2694,32 +2773,19 @@ fn remember_drain_peer_tail_after_publish(
     connection: &DbConnection,
     workspace_id: &str,
     index_dir: &Path,
-) {
-    let pending = match connection.list_pending_search_index_jobs(workspace_id, Some(1)) {
-        Ok(pending) => pending,
-        Err(error) => {
-            tracing::warn!(
-                target: "ee::memory",
-                workspace_id,
-                error = %error,
-                "skipping post-publish tail sweep because pending-job posture is unavailable"
-            );
-            return;
-        }
-    };
-    let Some(first) = pending.first() else {
-        return;
-    };
-    let report =
-        remember_lead_coalesced_index_drain(connection, workspace_id, &first.id, index_dir);
-    tracing::debug!(
-        target: "ee::memory",
-        workspace_id,
-        tail_job_id = first.id.as_str(),
-        outcome = report.outcome.as_str(),
-        processing_mode = report.processing_mode.as_str(),
-        "post-publish tail sweep finished"
-    );
+) -> Result<Option<IndexProcessingJobReport>, IndexRebuildError> {
+    let report = reconcile_pending_remember_index_jobs(connection, workspace_id, index_dir)?;
+    if let Some(report) = &report {
+        tracing::debug!(
+            target: "ee::memory",
+            workspace_id,
+            tail_job_id = report.job_id.as_str(),
+            outcome = report.outcome.as_str(),
+            processing_mode = report.processing_mode.as_str(),
+            "post-publish tail sweep finished"
+        );
+    }
+    Ok(report)
 }
 
 fn remember_index_job_queued_for_coalescing(index_job_id: &str) -> IndexProcessingJobReport {
@@ -4765,11 +4831,18 @@ fn finish_remember_memory_after_primary_commit(
             RememberIndexPublishRoute::Inline => {
                 let report =
                     process_remember_index_job_with_retry(connection, &index_job_id, &index_dir)?;
-                remember_drain_peer_tail_after_publish(
+                if let Err(error) = remember_drain_peer_tail_after_publish(
                     connection,
                     &prepared.workspace_id,
                     &index_dir,
-                );
+                ) {
+                    tracing::warn!(
+                        target: "ee::memory",
+                        workspace_id = prepared.workspace_id.as_str(),
+                        error = %error,
+                        "daemon remember indexed its own row but could not inspect or drain the peer tail"
+                    );
+                }
                 report
             }
         }
@@ -7825,6 +7898,9 @@ pub struct RememberBatchReport {
     pub reinforced_count: usize,
     pub already_recorded_count: usize,
     pub failed_count: usize,
+    /// Derived-index posture after the batch: `indexed`, `queued`,
+    /// `failed`, or `not_applicable` for dry/no-op batches.
+    pub index_status: String,
     pub results: Vec<RememberBatchLineResult>,
 }
 
@@ -7859,6 +7935,7 @@ impl RememberBatchReport {
             "reinforcedCount": self.reinforced_count,
             "alreadyRecordedCount": self.already_recorded_count,
             "failedCount": self.failed_count,
+            "indexStatus": self.index_status,
             "results": self.results_json(),
         })
     }
@@ -7866,13 +7943,14 @@ impl RememberBatchReport {
     #[must_use]
     pub fn human_summary(&self) -> String {
         let mut output = format!(
-            "Remember batch: {} stored, {} reinforced, {} already recorded, {} failed ({} lines{})\n",
+            "Remember batch: {} stored, {} reinforced, {} already recorded, {} failed ({} lines{}, index: {})\n",
             self.stored_count,
             self.reinforced_count,
             self.already_recorded_count,
             self.failed_count,
             self.line_count,
-            if self.dry_run { ", dry run" } else { "" }
+            if self.dry_run { ", dry run" } else { "" },
+            self.index_status,
         );
         for result in &self.results {
             match result.status {
@@ -8376,6 +8454,7 @@ pub fn remember_memory_batch_stdin(
     // bd-2efx1: one coalesced index rebuild for the whole batch. Every
     // stored line enqueued its job transactionally; draining here replaces
     // the per-line full rebuild that made batch ingest O(n²).
+    let mut index_status = "not_applicable".to_owned();
     if !options.dry_run && (stored_count > 0 || reinforced_count > 0) {
         let workspace_path = resolve_workspace_path(options.workspace_path, false)?;
         let database_path = options
@@ -8385,8 +8464,23 @@ pub fn remember_memory_batch_stdin(
         let workspace_id = stable_workspace_id(&workspace_path);
         let index_dir = workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR);
         let connection = open_remember_database_with_retry(&database_path)?;
-        process_pending_index_jobs_coalesced(&connection, &workspace_id, &index_dir, None)
-            .map_err(remember_search_index_error)?;
+        index_status = match reconcile_pending_remember_index_jobs(
+            &connection,
+            &workspace_id,
+            &index_dir,
+        ) {
+            Ok(None) => "indexed".to_owned(),
+            Ok(Some(report)) => remember_index_status(&report),
+            Err(error) => {
+                tracing::warn!(
+                    target: "ee::memory",
+                    workspace_id,
+                    error = %error,
+                    "remember batch committed source rows but could not reconcile the derived index; reporting queued"
+                );
+                "queued".to_owned()
+            }
+        };
     }
 
     Ok(RememberBatchReport {
@@ -8398,6 +8492,7 @@ pub fn remember_memory_batch_stdin(
         reinforced_count,
         already_recorded_count,
         failed_count,
+        index_status,
         results,
     })
 }
@@ -17240,7 +17335,8 @@ mod tests {
                 .map_err(|error| error.to_string())?,
             "publisher releases the publish lock"
         );
-        remember_drain_peer_tail_after_publish(&connection, &workspace_id, &index_dir);
+        remember_drain_peer_tail_after_publish(&connection, &workspace_id, &index_dir)
+            .map_err(|error| error.to_string())?;
 
         let pending_after = connection
             .list_pending_search_index_jobs(&workspace_id, None)
@@ -17667,6 +17763,107 @@ mod tests {
             true,
             "the probe is retried before the leader concedes it cannot verify",
         )
+    }
+
+    #[test]
+    fn remember_leadership_release_failure_stops_before_post_release_probe() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let connection = open_upgrade_test_db(temp.path())?;
+        connection
+            .ensure_advisory_locks_table()
+            .map_err(|error| error.to_string())?;
+        let canonical = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace_id = stable_workspace_id(&canonical);
+        let own_job_id = "sidx_release_failure_own_00000";
+        connection
+            .insert_search_index_job(
+                own_job_id,
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: workspace_id.clone(),
+                    job_type: SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_owned()),
+                    document_id: None,
+                    documents_total: 1,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        // Plant a real storage failure at the exact ownership transition.
+        // The elected leader may not inspect the queue after an unproven
+        // release and then mislabel that observation as post-release
+        // quiescence or handoff.
+        connection
+            .execute_raw(&format!(
+                "CREATE TRIGGER test_remember_leadership_release_failure \
+                 BEFORE DELETE ON ee_advisory_locks \
+                 WHEN OLD.resource_type = 'index_drain_leader' \
+                  AND OLD.resource_id = '{}' \
+                 BEGIN \
+                   SELECT RAISE(ABORT, 'intentional leadership release failure'); \
+                 END",
+                workspace_id
+            ))
+            .map_err(|error| error.to_string())?;
+
+        let probes = std::cell::Cell::new(0usize);
+        let report = remember_drain_leadership_cycles(
+            &connection,
+            &workspace_id,
+            own_job_id,
+            &mut || Ok(()),
+            &mut || Ok(Vec::new()),
+            &mut || {
+                probes.set(probes.get() + 1);
+                connection
+                    .list_pending_search_index_jobs(&workspace_id, Some(1))
+                    .ok()
+                    .map(|pending| !pending.is_empty())
+            },
+        );
+        ensure(
+            remember_index_status(&report),
+            "queued".to_owned(),
+            "a failed leadership release cannot claim quiescence or handoff",
+        )?;
+        ensure(
+            probes.get(),
+            REMEMBER_INDEX_DRAIN_MAX_ROUNDS,
+            "only in-round probes run before the failed release",
+        )?;
+
+        let lock_id = remember_index_drain_leader_lock(&workspace_id);
+        let held = connection
+            .is_lock_held(&lock_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "failed release must leave the real leadership row held".to_owned())?;
+        ensure(
+            held.holder_id,
+            remember_index_drain_leader_holder(own_job_id),
+            "failed release preserves the elected holder identity",
+        )?;
+        let pending = connection
+            .list_pending_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            pending.len() == 1
+                && pending[0].id == own_job_id
+                && pending[0].status_enum() == Some(SearchIndexJobStatus::Pending),
+            format!("release failure leaves the real job retryable: {pending:?}"),
+        )?;
+
+        connection
+            .execute_raw("DROP TRIGGER test_remember_leadership_release_failure")
+            .map_err(|error| error.to_string())?;
+        assert!(
+            connection
+                .release_advisory_lock(&lock_id, &remember_index_drain_leader_holder(own_job_id),)
+                .map_err(|error| error.to_string())?,
+            "cleanup releases the planted leadership row"
+        );
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]
@@ -18229,6 +18426,17 @@ mod tests {
         let report = remember_memory_batch_stdin(&upgrade_batch_options(temp.path(), false), input)
             .map_err(|error| error.message())?;
         ensure(report.stored_count, 3, "stored count")?;
+        ensure(
+            report.index_status.clone(),
+            "indexed".to_owned(),
+            "batch index posture",
+        )?;
+        let expected_ids = report
+            .results
+            .iter()
+            .filter_map(|result| result.memory_id.clone())
+            .collect::<BTreeSet<_>>();
+        ensure(expected_ids.len(), 3, "batch response memory ids")?;
 
         let canonical = temp
             .path()
@@ -18243,6 +18451,67 @@ mod tests {
             canonical.join(".ee").join(DEFAULT_INDEX_SUBDIR).exists(),
             true,
             "coalesced rebuild published an index directory",
+        )?;
+        let status =
+            crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                workspace_path: canonical.clone(),
+                database_path: None,
+                index_dir: None,
+            })
+            .map_err(|error| error.to_string())?;
+        ensure(
+            status.health == crate::core::index::IndexHealth::Ready,
+            true,
+            "batch index health is ready",
+        )?;
+        ensure(
+            status.db_generation,
+            status.index_generation,
+            "batch db and index generations match",
+        )?;
+        ensure(
+            status
+                .index_document_counts
+                .as_ref()
+                .map(|counts| counts.memories),
+            Some(3),
+            "batch exact indexed memory count",
+        )?;
+
+        let search = crate::core::search::run_search_with_filters(
+            &crate::core::search::SearchOptions {
+                workspace_path: canonical,
+                database_path: None,
+                index_dir: None,
+                query: "Coalesced batch row".to_owned(),
+                limit: 10,
+                speed: crate::search::SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Workspace,
+                strict_scope: false,
+            },
+            None,
+            &[],
+        )
+        .map_err(|error| format!("batch search failed: {error:?}"))?;
+        let actual_ids = search
+            .results
+            .into_iter()
+            .map(|hit| hit.doc_id)
+            .collect::<BTreeSet<_>>();
+        ensure(
+            actual_ids,
+            expected_ids,
+            "every batch response memory is searchable without a manual rebuild",
         )
     }
 

@@ -3510,25 +3510,39 @@ fn execute_daemon_txn_batch(
         }
     }
     for (_, (workspace_id, index_dir)) in index_drains {
-        if let Err(error) = crate::core::index::process_pending_index_jobs_coalesced(
+        match crate::core::memory::reconcile_pending_remember_index_jobs(
             &connection,
             &workspace_id,
             &index_dir,
-            None,
         ) {
-            for result in &mut results {
-                if matches!(result, WriteResult::Success { .. }) {
-                    *result = WriteResult::Failed {
-                        error: crate::models::DomainError::SearchIndex {
-                            message: format!(
-                                "daemon remember batch committed, but coalesced index drain failed: {error}"
-                            ),
-                            repair: Some(
-                                "Run `ee index rebuild --workspace . --json`.".to_string(),
-                            ),
-                        },
-                    };
-                }
+            Ok(None) => {}
+            Ok(Some(report))
+                if matches!(
+                    report.outcome.as_str(),
+                    "completed" | "completed_no_documents"
+                ) => {}
+            Ok(Some(report)) => {
+                tracing::warn!(
+                    target: "ee::daemon::write_owner",
+                    workspace_id,
+                    job_id = report.job_id.as_str(),
+                    outcome = report.outcome.as_str(),
+                    processing_mode = report.processing_mode.as_str(),
+                    "daemon remember batch committed source rows while derived index reconciliation remained nonterminal"
+                );
+            }
+            Err(error) => {
+                // The transaction above is already durable. Rewriting every
+                // successful journal/outcome/remember result as failed would
+                // invite duplicate source writes on retry and falsely blame
+                // unrelated operations for a derived-index problem. The
+                // pending index jobs remain the recovery mechanism.
+                tracing::warn!(
+                    target: "ee::daemon::write_owner",
+                    workspace_id,
+                    error = %error,
+                    "daemon remember batch committed source rows but could not reconcile the derived index; preserving durable write success"
+                );
             }
         }
     }
@@ -5546,12 +5560,64 @@ mod tests {
                 .expect("memory exists");
             workspace_id = Some(memory.workspace_id);
         }
+        let workspace_id = workspace_id.expect("workspace id");
         let pending = connection
-            .list_pending_search_index_jobs(&workspace_id.expect("workspace id"), None)
+            .list_pending_search_index_jobs(&workspace_id, None)
             .expect("pending jobs");
         assert!(
             pending.is_empty(),
             "daemon remember batch should drain deferred memory index jobs"
+        );
+        let status =
+            crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                workspace_path: workspace_path.clone(),
+                database_path: Some(database_path.clone()),
+                index_dir: None,
+            })
+            .expect("daemon batch index status");
+        assert_eq!(status.health, crate::core::index::IndexHealth::Ready);
+        assert_eq!(status.db_generation, status.index_generation);
+        assert_eq!(
+            status
+                .index_document_counts
+                .as_ref()
+                .map(|counts| counts.memories),
+            Some(2)
+        );
+        let search = crate::core::search::run_search_with_filters(
+            &crate::core::search::SearchOptions {
+                workspace_path,
+                database_path: Some(database_path),
+                index_dir: None,
+                query: "Daemon remember batch row".to_owned(),
+                limit: 10,
+                speed: crate::search::SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Workspace,
+                strict_scope: false,
+            },
+            None,
+            &[],
+        )
+        .expect("daemon batch search");
+        let actual_ids = search
+            .results
+            .into_iter()
+            .map(|hit| hit.doc_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            actual_ids,
+            memory_ids.into_iter().collect(),
+            "daemon batch response IDs must be exactly searchable without a manual rebuild"
         );
     }
 

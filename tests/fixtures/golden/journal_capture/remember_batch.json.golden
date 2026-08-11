@@ -13,6 +13,7 @@
     "reinforcedCount": 0,
     "alreadyRecordedCount": 1,
     "failedCount": 1,
+    "indexStatus": "indexed",
     "results": [
       {
         "line": 1,

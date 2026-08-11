@@ -211,6 +211,7 @@ fn remember_batch_golden() -> Value {
         reinforced_count: 0,
         already_recorded_count: 1,
         failed_count: 1,
+        index_status: "indexed".to_owned(),
         results: vec![
             RememberBatchLineResult {
                 line: 1,

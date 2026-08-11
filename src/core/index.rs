@@ -113,6 +113,8 @@ type BeforeIndexPublishHook = Box<dyn FnOnce(&asupersync::Cx)>;
 std::thread_local! {
     static BEFORE_INDEX_PUBLISH_HOOK: RefCell<Option<BeforeIndexPublishHook>> =
         const { RefCell::new(None) };
+    static INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -192,6 +194,11 @@ fn acquire_index_publish_lock(
 }
 
 fn index_publish_lock_retry_attempts() -> usize {
+    #[cfg(test)]
+    if let Some(attempts) = INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS_OVERRIDE.with(std::cell::Cell::get) {
+        return attempts.max(1);
+    }
+
     crate::config::env_registry::read(
         crate::config::env_registry::EnvVar::IndexPublishLockRetryAttempts,
     )
@@ -2298,6 +2305,17 @@ where
     let mut claimed = Vec::new();
     let mut job_finalizers = Vec::new();
     let mut reports = Vec::new();
+    if selected.is_empty() {
+        return Ok(reports);
+    }
+
+    // Acquire the publication lease before changing any selected job from
+    // `pending` to `running`. Publication-lock contention is a transient
+    // scheduling condition, not a terminal job failure: claiming first made
+    // `RunningIndexJobFinalizer` mark every selected row failed when another
+    // process legitimately held the publish lock, leaving no pending work for
+    // the next remember-side drain election to recover.
+    let _publish_lock = IndexPublishLockOwner::acquire(cx, db, workspace_id)?;
     for job in selected {
         if db.start_search_index_job(&job.id)? {
             job_finalizers.push(RunningIndexJobFinalizer {
@@ -2325,7 +2343,6 @@ where
     if claimed.is_empty() {
         return Ok(reports);
     }
-    let _publish_lock = IndexPublishLockOwner::acquire(cx, db, workspace_id)?;
 
     let WorkspaceIndexSourceSnapshot {
         generation: published_generation,
@@ -2547,6 +2564,12 @@ where
 {
     index_checkpoint(cx)?;
     let mut processing_mode = processing_mode_for_job(job).to_owned();
+
+    // Keep a job retryable until this worker owns the publication lease. A
+    // lock wait that is cancelled or exhausts its bounded retry budget must
+    // leave the row `pending`; only failures after admission to the publish
+    // critical section are terminalized by `RunningIndexJobFinalizer`.
+    let _publish_lock = IndexPublishLockOwner::acquire(cx, db, &job.workspace_id)?;
     if !db.start_search_index_job(&job.id)? {
         return Ok(IndexProcessingJobReport {
             job_id: job.id.clone(),
@@ -2567,7 +2590,6 @@ where
         job_id: job.id.clone(),
         explicitly_cancelled: false,
     };
-    let _publish_lock = IndexPublishLockOwner::acquire(cx, db, &job.workspace_id)?;
 
     let WorkspaceIndexSourceSnapshot {
         generation: published_generation,
@@ -12843,6 +12865,152 @@ mod tests {
             status == IndexProcessingStatus::PartialFailure,
             "claim-race summary must not report success",
         )?;
+        connection.close().map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn publish_lock_contention_leaves_ordinary_and_coalesced_jobs_directly_retryable() -> TestResult
+    {
+        let root = unique_test_dir("publish-lock-preclaim-contention");
+        let workspace = root.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        const WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
+        const ORDINARY_JOB_ID: &str = "sidx_preclaimordinary000000000";
+        const COALESCED_JOB_ID: &str = "sidx_preclaimcoalesced0000000";
+        seed_reembed_database(&workspace, &database)?;
+        queue_pending_index_job(&database, ORDINARY_JOB_ID)?;
+
+        let connection = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        let publish_lock = AdvisoryLockId::index(WORKSPACE_ID);
+        let fixture_holder = "fixture-held-publish-lock";
+        let held = connection
+            .acquire_advisory_lock(
+                &publish_lock,
+                fixture_holder,
+                Some(60),
+                Some("pre-claim cancellation fixture"),
+            )
+            .map_err(|e| e.to_string())?;
+        ensure(held.is_acquired(), true, "fixture holds publish lock")?;
+
+        let ordinary = connection
+            .get_search_index_job(ORDINARY_JOB_ID)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "ordinary pre-claim job missing".to_owned())?;
+        INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS_OVERRIDE.with(|slot| slot.set(Some(1)));
+        let ordinary_result = process_one_index_job(&connection, &ordinary, &index_dir);
+        ensure(
+            matches!(ordinary_result, Err(IndexRebuildError::LockContention(_))),
+            format!("ordinary lock contention must remain typed: {ordinary_result:?}"),
+        )?;
+        let ordinary_after = connection
+            .get_search_index_job(ORDINARY_JOB_ID)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "ordinary pre-claim job disappeared".to_owned())?;
+        ensure(
+            ordinary_after.status_enum() == Some(SearchIndexJobStatus::Pending),
+            format!(
+                "ordinary publish-lock contention must leave the job retryable: {ordinary_after:?}"
+            ),
+        )?;
+
+        assert!(
+            connection
+                .release_advisory_lock(&publish_lock, fixture_holder)
+                .map_err(|e| e.to_string())?,
+            "release ordinary publish-lock fixture"
+        );
+        let ordinary_retry = process_one_index_job(&connection, &ordinary, &index_dir)
+            .map_err(|e| format!("ordinary direct retry failed: {e}"))?;
+        ensure(
+            ordinary_retry.outcome,
+            "completed".to_owned(),
+            "ordinary direct retry completes the original logical job",
+        )?;
+        let ordinary_completed = connection
+            .get_search_index_job(ORDINARY_JOB_ID)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "ordinary retried job disappeared".to_owned())?;
+        ensure(
+            ordinary_completed.status_enum() == Some(SearchIndexJobStatus::Completed),
+            format!("ordinary direct retry must complete the same row: {ordinary_completed:?}"),
+        )?;
+
+        queue_pending_index_job(&database, COALESCED_JOB_ID)?;
+        let selected = connection
+            .list_pending_search_index_jobs(WORKSPACE_ID, None)
+            .map_err(|e| e.to_string())?;
+        ensure(selected.len(), 1, "coalesced pre-claim selected set")?;
+        let held = connection
+            .acquire_advisory_lock(
+                &publish_lock,
+                fixture_holder,
+                Some(60),
+                Some("coalesced pre-claim contention fixture"),
+            )
+            .map_err(|e| e.to_string())?;
+        ensure(held.is_acquired(), true, "fixture re-holds publish lock")?;
+        let coalesced_result = process_selected_index_jobs_coalesced(
+            &connection,
+            WORKSPACE_ID,
+            &index_dir,
+            selected.clone(),
+        );
+        ensure(
+            matches!(coalesced_result, Err(IndexRebuildError::LockContention(_))),
+            format!("coalesced lock contention must remain typed: {coalesced_result:?}"),
+        )?;
+        let coalesced_after = connection
+            .get_search_index_job(COALESCED_JOB_ID)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "coalesced pre-claim job disappeared".to_owned())?;
+        ensure(
+            coalesced_after.status_enum() == Some(SearchIndexJobStatus::Pending),
+            format!(
+                "coalesced publish-lock contention must leave the job retryable: {coalesced_after:?}"
+            ),
+        )?;
+        assert!(
+            connection
+                .release_advisory_lock(&publish_lock, fixture_holder)
+                .map_err(|e| e.to_string())?,
+            "release coalesced publish-lock fixture"
+        );
+        let coalesced_retry =
+            process_selected_index_jobs_coalesced(&connection, WORKSPACE_ID, &index_dir, selected)
+                .map_err(|e| format!("coalesced direct retry failed: {e}"))?;
+        ensure(
+            coalesced_retry.len() == 1 && coalesced_retry[0].outcome == "completed",
+            format!(
+                "coalesced direct retry completes the original logical job: {coalesced_retry:?}"
+            ),
+        )?;
+        let coalesced_completed = connection
+            .get_search_index_job(COALESCED_JOB_ID)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "coalesced retried job disappeared".to_owned())?;
+        ensure(
+            coalesced_completed.status_enum() == Some(SearchIndexJobStatus::Completed),
+            format!("coalesced direct retry must complete the same row: {coalesced_completed:?}"),
+        )?;
+        ensure(
+            connection
+                .list_pending_search_index_jobs(WORKSPACE_ID, None)
+                .map_err(|e| e.to_string())?
+                .is_empty(),
+            true,
+            "direct retries leave no pending tail",
+        )?;
+        ensure(
+            connection
+                .list_search_index_jobs(WORKSPACE_ID, None)
+                .map_err(|e| e.to_string())?
+                .len(),
+            2,
+            "direct retries create no duplicate logical jobs",
+        )?;
+        INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS_OVERRIDE.with(|slot| slot.set(None));
         connection.close().map_err(|e| e.to_string())
     }
 
