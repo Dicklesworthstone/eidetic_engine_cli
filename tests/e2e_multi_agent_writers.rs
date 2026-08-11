@@ -40,6 +40,97 @@ const AUDIT_LANE_EXPECTED_EVENTS: usize =
 const AUDIT_LANE_P99_BUDGET: Duration = Duration::from_millis(2);
 const GOLDEN_TRACE: &str = include_str!("golden/logs/e2e_multi_agent_writers.log");
 
+#[test]
+#[ignore = "real-binary strict contention acceptance; run as a focused pinned RCH proof"]
+fn single_shot_write_contention_script_real_binary_acceptance_bridge() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("create E2E temp base: {error}"))?;
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts/e2e_single_shot_write_contention.sh");
+    let ee_bin = env!("CARGO_BIN_EXE_ee");
+    let output = Command::new(&script)
+        .env("EE_BIN", ee_bin)
+        .env("EE_BINARY", ee_bin)
+        .env("EE_E2E_TMPDIR", temp.path())
+        .env("EE_E2E_WRITERS", "6")
+        .env("EE_E2E_WRITES", "10")
+        .output()
+        .map_err(|error| format!("launch {}: {error}", script.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let transcript = format!("stdout:\n{stdout}\nstderr:\n{stderr}");
+
+    let mut passed_labels = BTreeSet::new();
+    let mut failed_events = Vec::new();
+    for line in stdout.lines() {
+        if !line.trim_start().starts_with('{') {
+            continue;
+        }
+        let event = match serde_json::from_str::<Value>(line) {
+            Ok(event) => event,
+            Err(error) => {
+                failed_events.push(json!({
+                    "malformedEventLine": line,
+                    "error": error.to_string(),
+                }));
+                continue;
+            }
+        };
+        if event.get("schema").and_then(Value::as_str) != Some("ee.test_event.v1")
+            || event.get("kind").and_then(Value::as_str) != Some("assert_result")
+        {
+            failed_events.push(event);
+            continue;
+        }
+
+        let label = event.pointer("/fields/label").and_then(Value::as_str);
+        let status = event.pointer("/fields/status").and_then(Value::as_str);
+        if let (Some(label), Some("pass")) = (label, status) {
+            passed_labels.insert(label.to_owned());
+        } else {
+            failed_events.push(event);
+        }
+    }
+
+    ensure(
+        failed_events.is_empty(),
+        format!(
+            "strict contention E2E emitted non-pass or malformed assert_result events: \
+             {failed_events:?}\n{transcript}"
+        ),
+    )?;
+    ensure(
+        output.status.success(),
+        format!(
+            "strict contention E2E exited with {:?}; expected exit 0\n{transcript}",
+            output.status.code()
+        ),
+    )?;
+
+    let required_labels: BTreeSet<String> = [
+        "init_ok",
+        "zero_dropped_journal_appends",
+        "zero_dropped_remembers",
+        "journal_rows_persisted",
+        "remembered_ids_are_complete_and_unique",
+        "every_remember_response_is_durably_readable",
+        "remembered_facts_searchable",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let missing: Vec<_> = required_labels
+        .difference(&passed_labels)
+        .cloned()
+        .collect();
+    ensure(
+        missing.is_empty(),
+        format!(
+            "strict contention E2E omitted required acceptance events {missing:?}; observed \
+             {passed_labels:?}\n{transcript}"
+        ),
+    )
+}
+
 struct EeOutput {
     exit_code: Option<i32>,
     stdout: String,
