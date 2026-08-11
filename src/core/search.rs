@@ -6606,6 +6606,17 @@ pub async fn run_similar_with_cx(
     cx: &asupersync::Cx,
     options: &SimilarOptions,
 ) -> Result<SimilarReport, SimilarError> {
+    // Production always resolves the live workspace posture. The optional
+    // posture below is a narrow diagnostic seam for hermetic hash-only tests;
+    // it must never change the neural-by-default production path.
+    run_similar_with_cx_and_posture(cx, options, None).await
+}
+
+async fn run_similar_with_cx_and_posture(
+    cx: &asupersync::Cx,
+    options: &SimilarOptions,
+    embedding_posture_override: Option<EmbeddingPosture>,
+) -> Result<SimilarReport, SimilarError> {
     search_checkpoint(cx)?;
     let database_path = options.resolve_database_path();
     let connection = DbConnection::open_file_read_only(&database_path)?;
@@ -6626,8 +6637,11 @@ pub async fn run_similar_with_cx(
     );
     let target = resolve_similar_seed_memory(&connection, options, &workspace_id, &scope_context)?;
     let index_dir = options.resolve_index_dir();
-    let mut embedding_posture =
-        current_embedding_posture(&connection, &target.workspace_id, &index_dir)?;
+    let posture_is_overridden = embedding_posture_override.is_some();
+    let mut embedding_posture = match embedding_posture_override {
+        Some(posture) => posture,
+        None => current_embedding_posture(&connection, &target.workspace_id, &index_dir)?,
+    };
     let initial_semantic_request_capable = similar_semantic_request_capable(&embedding_posture);
     let lexical_fallback = !initial_semantic_request_capable;
     let requested_limit = options.limit;
@@ -6670,7 +6684,8 @@ pub async fn run_similar_with_cx(
         None,
     )
     .await?;
-    if initial_semantic_request_capable
+    if !posture_is_overridden
+        && initial_semantic_request_capable
         && !embedding_posture.semantic
         && let Ok(updated) =
             current_embedding_posture(&connection, &target.workspace_id, &index_dir)
@@ -7737,9 +7752,29 @@ pub async fn run_diag_search_with_cx(
     cx: &asupersync::Cx,
     options: &SearchOptions,
 ) -> Result<SearchDiagnosticReport, SearchError> {
+    // Production retains the default neural resolver. Tests that build an
+    // index with an explicit embedder can pass that same backend through the
+    // private seam below instead of consulting process-global model state.
+    run_diag_search_with_cx_and_embedder(cx, options, None).await
+}
+
+async fn run_diag_search_with_cx_and_embedder(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
+) -> Result<SearchDiagnosticReport, SearchError> {
     search_checkpoint(cx)?;
     let start = Instant::now();
-    let embed_backend = crate::core::index::active_embed_backend();
+    let embed_backend = fast_embedder_override.as_ref().map_or_else(
+        crate::core::index::active_embed_backend,
+        |embedder| {
+            if embedder.is_semantic() {
+                EmbedBackend::NeuralLocal
+            } else {
+                EmbedBackend::HashFallback
+            }
+        },
+    );
     let index_dir = options.resolve_index_dir();
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
     let (effective_limit, limit_capped) = runtime_profile.cap_search_limit(options.limit);
@@ -7772,6 +7807,7 @@ pub async fn run_diag_search_with_cx(
         options.explain,
         options.source_mode,
         fusion_weights,
+        fast_embedder_override,
     )
     .await?;
     apply_live_evidence_visibility_to_diag(options, &mut diag_result, &mut degraded);
@@ -8616,7 +8652,7 @@ struct DiagSearchSyncResult {
     errors: Vec<String>,
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn diag_search_sync(
     cx: &asupersync::Cx,
     index_dir: &Path,
@@ -8626,6 +8662,7 @@ async fn diag_search_sync(
     explain: bool,
     source_mode: SearchSourceMode,
     fusion_weights: SearchFusionWeights,
+    fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
 ) -> Result<DiagSearchSyncResult, SearchError> {
     search_checkpoint(cx)?;
     let index_dir_owned = index_dir.to_path_buf();
@@ -8661,7 +8698,8 @@ async fn diag_search_sync(
         let candidate_limit = limit
             .max(1)
             .saturating_mul(config.candidate_multiplier.max(1));
-        let fast_embedder = crate::core::index::default_search_embedder_stack().fast_arc();
+        let fast_embedder = fast_embedder_override
+            .unwrap_or_else(|| crate::core::index::default_search_embedder_stack().fast_arc());
         let lexical = match open_lexical_searcher_for_diag(&index_dir_owned) {
             Ok(lexical) => lexical,
             Err(error) => {
@@ -9786,6 +9824,7 @@ pub(crate) fn map_frankensearch_error(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn search_sync(
     index_dir: &Path,
     query: &str,
@@ -9794,6 +9833,7 @@ fn search_sync(
     explain: bool,
     source_mode: SearchSourceMode,
     determinism: &Deterministic<Seed>,
+    fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
 ) -> Result<(Vec<SearchHit>, Vec<String>), String> {
     let mut trace = SearchPerformanceTrace::default();
     crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
@@ -9808,7 +9848,7 @@ fn search_sync(
             determinism.shared_child("search.rerank"),
             SearchRerankRuntime::disabled(),
             SearchFusionWeights::default(),
-            None,
+            fast_embedder_override,
             &mut trace,
         )
         .await
@@ -11169,6 +11209,34 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
+    fn run_similar_with_posture(
+        options: &SimilarOptions,
+        posture: EmbeddingPosture,
+    ) -> Result<SimilarReport, SimilarError> {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            run_similar_with_cx_and_posture(&cx, options, Some(posture)).await
+        })
+        .map_err(|error| {
+            SimilarError::Search(SearchError::Index(format!(
+                "Failed to start isolated similar-search runtime: {error}"
+            )))
+        })?
+    }
+
+    fn run_diag_search_with_embedder(
+        options: &SearchOptions,
+        fast_embedder: Arc<dyn Embedder>,
+    ) -> Result<SearchDiagnosticReport, SearchError> {
+        crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+            run_diag_search_with_cx_and_embedder(&cx, options, Some(fast_embedder)).await
+        })
+        .map_err(|error| {
+            SearchError::Index(format!(
+                "Failed to start isolated diagnostic-search runtime: {error}"
+            ))
+        })?
+    }
+
     fn collection_cancellation_index(label: &str) -> Result<PathBuf, String> {
         let index_dir = unique_test_dir(label);
         let build_index_dir = index_dir.clone();
@@ -11838,23 +11906,26 @@ mod tests {
         .map_err(|error| error.to_string())??;
         write_current_index_metadata(&index_dir, 3)?;
 
-        let similar = run_similar(&SimilarOptions {
-            workspace_path: workspace.clone(),
-            database_path: Some(database_path),
-            index_dir: Some(index_dir),
-            memory_id: "mem_00000000000000000000000001".to_string(),
-            limit: 2,
-            min_score: Some(0.0),
-            speed: SpeedMode::Default,
-            explain: true,
-            as_of: None,
-            include_tombstoned: false,
-            include_expired: false,
-            include_future: false,
-            include_stale: false,
-            memory_scope: MemoryScope::Swarm,
-            strict_scope: false,
-        })
+        let similar = run_similar_with_posture(
+            &SimilarOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database_path),
+                index_dir: Some(index_dir),
+                memory_id: "mem_00000000000000000000000001".to_string(),
+                limit: 2,
+                min_score: Some(0.0),
+                speed: SpeedMode::Default,
+                explain: true,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                memory_scope: MemoryScope::Swarm,
+                strict_scope: false,
+            },
+            fixture_hash_embedding_posture_for_search(),
+        )
         .map_err(|error| error.to_string())?;
 
         assert!(!similar.semantic_available);
@@ -14988,6 +15059,7 @@ mod tests {
             true,
             SearchSourceMode::Hybrid,
             &Deterministic::from_seed(123),
+            None,
         )?;
 
         assert!(errors.is_empty(), "search returned errors: {errors:?}");
@@ -15264,31 +15336,37 @@ mod tests {
         .map_err(|error| error.to_string())??;
         write_current_index_metadata(&index_dir, 3)?;
 
-        let report = run_diag_search(&SearchOptions {
-            workspace_path: workspace.clone(),
-            database_path: Some(workspace.join("ee.db")),
-            index_dir: Some(index_dir),
-            query: "forbidden dependencies".to_string(),
-            limit: 5,
-            speed: SpeedMode::Default,
-            explain: true,
-            as_of: None,
-            include_tombstoned: false,
-            include_expired: false,
-            include_future: false,
-            include_stale: false,
-            relevance_floor: Some(0.0),
-            dedup_mode: SearchDedupMode::DocId,
-            source_mode: SearchSourceMode::Hybrid,
-            strict_source_mode: false,
-            memory_scope: MemoryScope::Swarm,
-            strict_scope: false,
-        })
+        let hash_embedder =
+            Arc::new(HashEmbedder::default_256()) as Arc<dyn crate::search::Embedder>;
+        let report = run_diag_search_with_embedder(
+            &SearchOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(workspace.join("ee.db")),
+                index_dir: Some(index_dir),
+                query: "forbidden dependencies".to_string(),
+                limit: 5,
+                speed: SpeedMode::Default,
+                explain: true,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: SearchDedupMode::DocId,
+                source_mode: SearchSourceMode::Hybrid,
+                strict_source_mode: false,
+                memory_scope: MemoryScope::Swarm,
+                strict_scope: false,
+            },
+            Arc::clone(&hash_embedder),
+        )
         .map_err(|error| error.to_string())?;
         let json = report.data_json();
 
         assert_eq!(json["schema"], DIAG_SEARCH_SCHEMA_V1);
         assert_eq!(json["command"], "diag search");
+        assert_eq!(json["final"]["embed_backend"], "hash_fallback");
         assert_eq!(json["preFusion"]["lexical"]["available"], true);
         assert_eq!(json["preFusion"]["lexical"]["scoreScale"], "bm25_tfidf");
         assert_eq!(
@@ -15370,6 +15448,7 @@ mod tests {
             true,
             SearchSourceMode::Hybrid,
             &Deterministic::from_seed(123),
+            Some(hash_embedder),
         )?;
         assert!(
             direct_errors.is_empty(),
