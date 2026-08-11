@@ -5,6 +5,8 @@ use std::io::Write;
 #[cfg(unix)]
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::{Child, Stdio};
 use std::process::{Command, Output};
 #[cfg(unix)]
 use std::sync::Arc;
@@ -851,6 +853,19 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
         )?;
     }
 
+    for (name, output) in [
+        ("search", &search),
+        ("pack", &pack),
+        ("orient", &orient),
+        ("search_download_off", &search_download_off),
+    ] {
+        ensure_model_paths_absent(
+            output,
+            &format!("registered {name} model-path leak"),
+            &[fixture_model_dir.as_path(), registered_model_dir.as_path()],
+        )?;
+    }
+
     let legacy_download_destination = workspace
         .xdg_data
         .join("ee")
@@ -1224,7 +1239,7 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         BUNDLED_EMBEDDING_MODEL_ID,
         ModelRegistryStatus::Available,
         Some("https://models.invalid/potion-multilingual-128M".to_string()),
-        Some(verified_hash),
+        Some(verified_hash.clone()),
         Some(BUNDLED_EMBEDDING_DIMENSION),
         Some(ModelDistanceMetric::Cosine),
     )?;
@@ -1233,6 +1248,109 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         "registry_path_nonlocal_source",
         query,
         &offline_env,
+    )?;
+
+    // Restore the verified registered row, then race bounded committed
+    // registry rewrites against live public searches. A reader may observe
+    // either row version — the invariant is that every response stays
+    // successful, truthful about its embed_backend token, download-free,
+    // and free of model filesystem paths, and that the settled state
+    // serves neural again.
+    update_model2vec_registry_entry(
+        &workspace,
+        BUNDLED_EMBEDDING_MODEL_ID,
+        ModelRegistryStatus::Available,
+        Some(path_string(&noncanonical_model_dir)),
+        Some(verified_hash.clone()),
+        Some(BUNDLED_EMBEDDING_DIMENSION),
+        Some(ModelDistanceMetric::Cosine),
+    )?;
+    let mut concurrent_outputs = Vec::new();
+    for (mutation_name, status, source_uri, content_hash) in [
+        (
+            "wrong_hash",
+            ModelRegistryStatus::Available,
+            path_string(&noncanonical_model_dir),
+            format!("blake3:{}", "1".repeat(64)),
+        ),
+        (
+            "unavailable_row",
+            ModelRegistryStatus::Unavailable,
+            path_string(&noncanonical_model_dir),
+            verified_hash.clone(),
+        ),
+        (
+            "missing_source",
+            ModelRegistryStatus::Available,
+            path_string(&missing_source),
+            verified_hash.clone(),
+        ),
+    ] {
+        let phase = format!("registry_path_concurrent_{mutation_name}");
+        let child = spawn_ee_with_env(
+            &workspace,
+            &phase,
+            &[
+                "search",
+                query,
+                "--workspace",
+                workspace.workspace_arg()?,
+                "--relevance-floor",
+                "0",
+                "--json",
+            ],
+            &offline_env,
+        )?;
+        // Two committed rewrites while the reader runs: break the row,
+        // then restore the verified registered state.
+        update_model2vec_registry_entry(
+            &workspace,
+            BUNDLED_EMBEDDING_MODEL_ID,
+            status,
+            Some(source_uri),
+            Some(content_hash),
+            Some(BUNDLED_EMBEDDING_DIMENSION),
+            Some(ModelDistanceMetric::Cosine),
+        )?;
+        update_model2vec_registry_entry(
+            &workspace,
+            BUNDLED_EMBEDDING_MODEL_ID,
+            ModelRegistryStatus::Available,
+            Some(path_string(&noncanonical_model_dir)),
+            Some(verified_hash.clone()),
+            Some(BUNDLED_EMBEDDING_DIMENSION),
+            Some(ModelDistanceMetric::Cosine),
+        )?;
+        let output = wait_ee_child(&workspace, &phase, child)?;
+        ensure_backend_token_is_truthful(&output, &phase)?;
+        ensure_text_absent(
+            &output.stderr,
+            "downloading the local embedding model",
+            &format!("{phase} download notice"),
+        )?;
+        concurrent_outputs.push((mutation_name, output));
+    }
+
+    let settled = run_ee_with_env(
+        &workspace,
+        "registry_path_settled_search",
+        &[
+            "search",
+            query,
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--relevance-floor",
+            "0",
+            "--json",
+        ],
+        &offline_env,
+    )?;
+    ensure_success(&settled, "registry-path settled search")?;
+    ensure_response_embed_backend(&settled, "registry-path settled search", "neural_local")?;
+    ensure_text_absent(
+        &settled.stderr,
+        "downloading the local embedding model",
+        "settled search download notice",
     )?;
 
     for (name, output) in [
@@ -1257,6 +1375,41 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
             &output.stderr,
             "downloading the local embedding model",
             &format!("{name} download notice"),
+        )?;
+    }
+
+    let model_source_paths = [
+        fixture_model_dir.as_path(),
+        bootstrap_model_dir.as_path(),
+        noncanonical_model_dir.as_path(),
+    ];
+    for (name, output) in [
+        ("search", &search),
+        ("pack", &pack),
+        ("orient", &orient),
+        ("why_not", &why_not),
+        ("missing", &missing),
+        ("unregistered", &unregistered),
+        ("unavailable", &unavailable),
+        ("unverified", &unverified),
+        ("mismatched_name", &mismatched_name),
+        ("mismatched_hash", &mismatched_hash),
+        ("mismatched_dimension", &mismatched_dimension),
+        ("mismatched_distance", &mismatched_distance),
+        ("nonlocal", &nonlocal),
+        ("settled", &settled),
+    ] {
+        ensure_model_paths_absent(
+            output,
+            &format!("registry-path {name} model-path leak"),
+            &model_source_paths,
+        )?;
+    }
+    for (name, output) in &concurrent_outputs {
+        ensure_model_paths_absent(
+            output,
+            &format!("registry-path concurrent {name} model-path leak"),
+            &model_source_paths,
         )?;
     }
 
@@ -1444,20 +1597,15 @@ fn run_ee(workspace: &E2eWorkspace, phase: &str, args: &[&str]) -> TestResult<Ou
     run_ee_with_env(workspace, phase, args, &[])
 }
 
-fn run_ee_with_env(
+/// Base `ee` invocation with the suite's hermetic environment: HOME and
+/// XDG_DATA_HOME pinned inside the workspace and every ambient model,
+/// download, proxy, and provider variable scrubbed before the caller's
+/// explicit env entries are applied.
+fn ee_command_with_env(
     workspace: &E2eWorkspace,
-    phase: &str,
     args: &[&str],
     env: &[(String, String)],
-) -> TestResult<Output> {
-    workspace.log(
-        phase,
-        json!({
-            "event": "command_start",
-            "argv": args,
-        }),
-    )?;
-    let started = Instant::now();
+) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
     command
         .args(args)
@@ -1489,7 +1637,24 @@ fn run_ee_with_env(
     for (name, value) in env {
         command.env(name, value);
     }
-    let output = command
+    command
+}
+
+fn run_ee_with_env(
+    workspace: &E2eWorkspace,
+    phase: &str,
+    args: &[&str],
+    env: &[(String, String)],
+) -> TestResult<Output> {
+    workspace.log(
+        phase,
+        json!({
+            "event": "command_start",
+            "argv": args,
+        }),
+    )?;
+    let started = Instant::now();
+    let output = ee_command_with_env(workspace, args, env)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))?;
     workspace.log(
@@ -1507,11 +1672,91 @@ fn run_ee_with_env(
     Ok(output)
 }
 
+/// Spawn `ee` without waiting so registry rewrites can be committed while
+/// the reader is live. Pair with [`wait_ee_child`].
+#[cfg(unix)]
+fn spawn_ee_with_env(
+    workspace: &E2eWorkspace,
+    phase: &str,
+    args: &[&str],
+    env: &[(String, String)],
+) -> TestResult<Child> {
+    workspace.log(
+        phase,
+        json!({
+            "event": "command_spawn",
+            "argv": args,
+        }),
+    )?;
+    ee_command_with_env(workspace, args, env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("failed to spawn ee {}: {error}", args.join(" ")))
+}
+
+#[cfg(unix)]
+fn wait_ee_child(workspace: &E2eWorkspace, phase: &str, child: Child) -> TestResult<Output> {
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("{phase}: failed to collect spawned ee output: {error}"))?;
+    workspace.log(
+        phase,
+        json!({
+            "event": "command_finish",
+            "status": output.status.code(),
+            "success": output.status.success(),
+            "stdoutBytes": output.stdout.len(),
+            "stderrBytes": output.stderr.len(),
+        }),
+    )?;
+    Ok(output)
+}
+
 #[cfg(unix)]
 fn ensure_response_embed_backend(output: &Output, context: &str, expected: &str) -> TestResult {
     let value = stdout_json(output, context)?;
     let data = response_data(&value, context)?;
     ensure_eq_str(string_member(data, "embed_backend")?, expected, context)
+}
+
+/// Public retrieval responses must never expose where the model artifact
+/// lives on disk — neither the shared fixture root nor any registered or
+/// override source directory — on stdout or stderr.
+#[cfg(unix)]
+fn ensure_model_paths_absent(output: &Output, context: &str, model_paths: &[&Path]) -> TestResult {
+    for model_path in model_paths {
+        let needle = path_string(model_path);
+        ensure_text_absent(&output.stdout, &needle, &format!("{context} stdout"))?;
+        ensure_text_absent(&output.stderr, &needle, &format!("{context} stderr"))?;
+    }
+    Ok(())
+}
+
+/// Whichever registry row version a concurrent reader observed, its
+/// response must be internally truthful: `neural_local` forbids the
+/// `embed_model_unavailable` degradation token and `hash_fallback`
+/// requires it. No third posture exists.
+#[cfg(unix)]
+fn ensure_backend_token_is_truthful(output: &Output, context: &str) -> TestResult {
+    ensure_success(output, context)?;
+    let value = stdout_json(output, context)?;
+    let data = response_data(&value, context)?;
+    let backend = string_member(data, "embed_backend")?;
+    let degraded = String::from_utf8_lossy(&output.stdout).contains("embed_model_unavailable");
+    match (backend, degraded) {
+        ("neural_local", false) | ("hash_fallback", true) => Ok(()),
+        ("neural_local", true) => Err(format!(
+            "{context} claimed neural_local while emitting embed_model_unavailable"
+        )),
+        ("hash_fallback", false) => Err(format!(
+            "{context} degraded to hash_fallback without the explicit embed_model_unavailable token"
+        )),
+        (other, _) => Err(format!(
+            "{context} reported unknown embed_backend `{other}`"
+        )),
+    }
 }
 
 #[cfg(unix)]
