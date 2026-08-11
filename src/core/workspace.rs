@@ -2650,7 +2650,10 @@ fn normalize_lexical(path: &Path) -> PathBuf {
     out
 }
 
-pub(crate) fn stable_workspace_id(path: &Path) -> String {
+/// Deterministic workspace identity: blake3 over the canonical path string.
+/// Public so integration tests (e.g. the resume contract's perf bridge) can
+/// derive the same id a real workspace would get; pure, no state.
+pub fn stable_workspace_id(path: &Path) -> String {
     let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
     let mut bytes = [0_u8; 16];
     for (target, source) in bytes.iter_mut().zip(hash.as_bytes().iter().copied()) {
