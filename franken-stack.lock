@@ -8,9 +8,9 @@
 # sibling. Frankensearch's storage crates still request the 0.1 line and
 # fall back to registry fsqlite 0.1.x until that project migrates — the
 # closure intentionally carries both lines (2026-08-11, UPGRADE_LOG.md).
-asupersync	7ecb98499715b18f24ce48f5022ec187fe03afb6
+asupersync	3b34c9b0a14c55eb814cf4aaeceeba3be0c0a72e
 franken_agent_detection	5b0d64988b48ec4a8f20cac9413ab8588176dd7d
-franken_networkx	7faf0a1b5d0ff808202194c6b68ef738678a9077
+franken_networkx	58fe5d194e82572165cd66ff74c040d1aa194c4b
 frankensearch	83ef0195e4f364bb6b150d788c4e236db8a3b767
 frankensqlite	1471829db657f81ba678b001a228ef025aeb52e8
 sqlmodel_rust	4b355f05d1f5e488ccd24e06c1b1077dc478e7d5

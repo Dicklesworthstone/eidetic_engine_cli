@@ -98,7 +98,7 @@ serve = []
 science-analytics = []
 
 [dependencies]
-asupersync = { version = "=0.3.10", default-features = false, features = ["tracing-integration"] }
+asupersync = { version = "=0.4.3", default-features = false, features = ["tracing-integration"] }
 arc-swap = { version = "=1.9.2" }
 base64 = { version = "0.22.1" }
 blake3 = { version = "1.5" }
@@ -160,7 +160,7 @@ tar = { version = "0.4", default-features = false }
 # rely on those constructors, so we opt in here: as a dev-dependency the feature
 # is unified into test/bench/`--all-targets` builds only and stays OUT of the
 # release binary (which uses the detached, capability-less production Cx path).
-asupersync = { version = "=0.3.10", default-features = false, features = ["tracing-integration", "test-internals"] }
+asupersync = { version = "=0.4.3", default-features = false, features = ["tracing-integration", "test-internals"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 insta = { version = "1.48.0", features = ["json"] }
 proptest = { version = "1.9.0", default-features = false, features = ["std"] }
