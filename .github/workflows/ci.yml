@@ -131,8 +131,13 @@ jobs:
           EE_BENCH_ARTIFACT_DIR: ${{ runner.temp }}/ee-daemon-search-artifacts
         run: |
           set -euo pipefail
+          if [[ -z "${EE_EMBED_MODEL_FIXTURE_DIR:-}" || ! -d "$EE_EMBED_MODEL_FIXTURE_DIR" ]]; then
+            echo "::error::EE_EMBED_MODEL_FIXTURE_DIR is required by daemon-search-slo" >&2
+            exit 1
+          fi
           mkdir -p "$RUNNER_TEMP/ee-daemon-search-artifacts"
-          ./scripts/bench.sh --profile daemon-search-slo --json \
+          EE_EMBED_MODEL_FIXTURE_DIR="$EE_EMBED_MODEL_FIXTURE_DIR" \
+            ./scripts/bench.sh --profile daemon-search-slo --json \
             | tee "$RUNNER_TEMP/ee-daemon-search-artifacts/ee-perf.v1.json"
 
       - name: Upload daemon search SLO evidence

@@ -21,6 +21,9 @@ set -eu
 #                          CARGO_TARGET_DIR=/Volumes/USBNVME16TB/temp_agent_space/cargo-target
 #   EE_BENCH_ARTIFACT_DIR  Directory for JSON artifacts.
 #   EE_BENCH_OUTPUT        Output path for JSON artifact.
+#   EE_EMBED_MODEL_FIXTURE_DIR
+#                          Verified potion-multilingual-128M fixture required
+#                          by the daemon-search-slo profile.
 
 PROFILE="nightly"
 JSON_OUTPUT=false
@@ -543,7 +546,16 @@ run_daemon_search_slo() {
     echo "    fixture: 10000 documents, prebuilt before measurement" >&2
     echo "    backend: neural_local required; downloads disabled" >&2
 
-    if output=$(EE_EMBED_DOWNLOAD=off cargo bench --bench daemon_round_trip -- --warm-search-gate 2>&1); then
+    if [ -z "${EE_EMBED_MODEL_FIXTURE_DIR:-}" ] || [ ! -d "$EE_EMBED_MODEL_FIXTURE_DIR" ]; then
+        printf '%s\n' "EE_EMBED_MODEL_FIXTURE_DIR must name an accessible real model fixture" >"$markers_file"
+        cat "$markers_file" >&2
+        append_result "ee_search_cli_cold_10k" "failed" null null null null null "model_fixture_missing"
+        append_result "ee_search_daemon_warm_10k" "failed" null null null null null "model_fixture_missing"
+        FAILED=true
+        return
+    fi
+
+    if output=$(EE_EMBED_DOWNLOAD=off EE_EMBED_MODEL_FIXTURE_DIR="$EE_EMBED_MODEL_FIXTURE_DIR" cargo bench --bench daemon_round_trip -- --warm-search-gate 2>&1); then
         status=0
     else
         status=$?
@@ -566,25 +578,60 @@ run_daemon_search_slo() {
 
     cold_p50_ms=$(marker_number "ee_search_cli_cold_10k_p50_ms")
     warm_p50_ms=$(marker_number "ee_search_daemon_warm_10k_p50_ms")
+    daemon_total_p50_ms=$(marker_number "ee_search_daemon_warm_10k_daemon_total_p50_ms")
+    embedder_preparation_p50_ms=$(marker_number "ee_search_daemon_warm_10k_embedder_preparation_p50_ms")
+    index_open_p50_ms=$(marker_number "ee_search_daemon_warm_10k_index_open_p50_ms")
+    query_p50_ms=$(marker_number "ee_search_daemon_warm_10k_query_p50_ms")
+    initial_embedder_preparation_ms=$(marker_number "ee_search_daemon_10k_initial_embedder_preparation_ms")
     sample_count=$(marker_number "ee_search_daemon_10k_samples")
     backend=$(marker_text "ee_search_daemon_10k_backend")
     parity=$(marker_text "ee_search_daemon_10k_result_parity")
+    model_id=$(marker_text "ee_search_daemon_10k_model_id")
+    model_revision=$(marker_text "ee_search_daemon_10k_model_revision")
+    model_hash=$(marker_text "ee_search_daemon_10k_model_hash")
+    model_dimension=$(marker_number "ee_search_daemon_10k_model_dimension")
+    model_distance_metric=$(marker_text "ee_search_daemon_10k_model_distance_metric")
+    model_vector_dtype=$(marker_text "ee_search_daemon_10k_model_vector_dtype")
+    model_hash_digest=${model_hash#blake3:}
+    model_hash_valid=no
+    case "$model_hash_digest" in
+        *[!0-9a-f]*) ;;
+        *)
+            if [ "$model_hash" != "$model_hash_digest" ] && [ "${#model_hash_digest}" -eq 64 ]; then
+                model_hash_valid=yes
+            fi
+            ;;
+    esac
     cold_within_budget=$(awk -v value="${cold_p50_ms:-999999}" 'BEGIN { print (value < 1500.0) ? "yes" : "no" }')
     warm_within_budget=$(awk -v value="${warm_p50_ms:-999999}" 'BEGIN { print (value < 500.0) ? "yes" : "no" }')
 
     if [ "$status" -eq 0 ] \
         && [ -n "$cold_p50_ms" ] \
         && [ -n "$warm_p50_ms" ] \
+        && [ -n "$daemon_total_p50_ms" ] \
+        && [ -n "$embedder_preparation_p50_ms" ] \
+        && [ -n "$index_open_p50_ms" ] \
+        && [ -n "$query_p50_ms" ] \
+        && [ -n "$initial_embedder_preparation_ms" ] \
         && [ "$cold_within_budget" = "yes" ] \
         && [ "$warm_within_budget" = "yes" ] \
         && [ "$sample_count" = "21" ] \
         && [ "$backend" = "neural_local" ] \
-        && [ "$parity" = "exact_results_array" ]; then
+        && [ "$parity" = "exact_results_array" ] \
+        && [ "$model_id" = "potion-multilingual-128M" ] \
+        && [ "$model_revision" = "a28f4eebecd4dc585034f605e52d414878a0417c" ] \
+        && [ "$model_hash_valid" = "yes" ] \
+        && [ "$model_dimension" = "256" ] \
+        && [ "$model_distance_metric" = "cosine" ] \
+        && [ "$model_vector_dtype" = "float32" ]; then
         append_result "ee_search_cli_cold_10k" "measured" "$cold_p50_ms" null null null null "within_budget"
         append_result "ee_search_daemon_warm_10k" "measured" "$warm_p50_ms" null null null null "within_budget"
         echo "[+] cold fresh-process search: p50=${cold_p50_ms}ms (<1500ms)" >&2
         echo "[+] warm daemon search: p50=${warm_p50_ms}ms (<500ms)" >&2
         echo "[+] backend=${backend} samples=${sample_count} parity=${parity}" >&2
+        echo "[+] fingerprint=${model_id}@${model_revision} ${model_hash} ${model_dimension}d/${model_distance_metric}/${model_vector_dtype}" >&2
+        echo "[+] daemon timing p50: total=${daemon_total_p50_ms}ms embedder=${embedder_preparation_p50_ms}ms index_open=${index_open_p50_ms}ms query=${query_p50_ms}ms" >&2
+        echo "[+] daemon initial embedder preparation: ${initial_embedder_preparation_ms}ms" >&2
         echo "[+] stage markers: $markers_file" >&2
         return
     fi
@@ -593,7 +640,7 @@ run_daemon_search_slo() {
     [ -n "$warm_p50_ms" ] || warm_p50_ms=null
     append_result "ee_search_cli_cold_10k" "failed" "$cold_p50_ms" null null null null "hard_gate_failed"
     append_result "ee_search_daemon_warm_10k" "failed" "$warm_p50_ms" null null null null "hard_gate_failed"
-    echo "[-] daemon-search-slo failed: exit=${status} backend=${backend:-missing} samples=${sample_count:-missing} parity=${parity:-missing}" >&2
+    echo "[-] daemon-search-slo failed: exit=${status} backend=${backend:-missing} samples=${sample_count:-missing} parity=${parity:-missing} model_id=${model_id:-missing} model_hash=${model_hash:-missing}" >&2
     echo "[-] retained markers: $markers_file" >&2
     FAILED=true
 }

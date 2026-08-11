@@ -4,10 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::sync::Mutex;
 use std::sync::{
-    Arc, OnceLock,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicU8, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -4986,6 +4984,39 @@ const EE_DOWNLOAD_STATE_PENDING: u8 = 0;
 const EE_DOWNLOAD_STATE_READY: u8 = 1;
 const EE_DOWNLOAD_STATE_FAILED: u8 = 2;
 static DEFAULT_SEARCH_EMBEDDER: OnceLock<DefaultSearchEmbedder> = OnceLock::new();
+static REGISTERED_MODEL2VEC_CACHE: OnceLock<RegisteredModel2VecCache> = OnceLock::new();
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RegisteredModel2VecIdentity {
+    canonical_source: PathBuf,
+    content_hash: String,
+    dimension: u32,
+    distance_metric: &'static str,
+}
+
+#[derive(Default)]
+struct RegisteredModel2VecCache {
+    embedders: Mutex<BTreeMap<RegisteredModel2VecIdentity, Arc<dyn crate::search::Embedder>>>,
+}
+
+impl RegisteredModel2VecCache {
+    fn get_or_try_insert_with(
+        &self,
+        identity: RegisteredModel2VecIdentity,
+        load: impl FnOnce() -> Option<Arc<dyn crate::search::Embedder>>,
+    ) -> Option<Arc<dyn crate::search::Embedder>> {
+        let mut embedders = self
+            .embedders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(embedder) = embedders.get(&identity) {
+            return Some(Arc::clone(embedder));
+        }
+        let embedder = load()?;
+        embedders.insert(identity, Arc::clone(&embedder));
+        Some(embedder)
+    }
+}
 
 struct DefaultSearchEmbedder {
     stack: EmbedderStack,
@@ -5224,7 +5255,16 @@ fn registered_model2vec_stack(
         );
         return Ok(None);
     };
-    if !verified_potion_model_dir(&model_dir) {
+    let Ok(canonical_source) = std::fs::canonicalize(&model_dir) else {
+        tracing::warn!(
+            target: "ee::index::embedder",
+            registry_id = entry.id,
+            reason = "source_canonicalization_failed",
+            "skipping unusable registered Model2Vec entry"
+        );
+        return Ok(None);
+    };
+    if !verified_potion_model_dir(&canonical_source) {
         tracing::warn!(
             target: "ee::index::embedder",
             registry_id = entry.id,
@@ -5233,23 +5273,22 @@ fn registered_model2vec_stack(
         );
         return Ok(None);
     }
-    let Ok(embedder) = Model2VecEmbedder::load_with_name(&model_dir, POTION_MODEL_NAME) else {
-        tracing::warn!(
-            target: "ee::index::embedder",
-            registry_id = entry.id,
-            reason = "model_load_failed",
-            "skipping unusable registered Model2Vec entry"
-        );
-        return Ok(None);
-    };
-    let fingerprint = active_embedder_fingerprint(&embedder, ModelProvider::Model2Vec);
-    let hash_matches = entry
+    let Some(content_hash) = entry
         .content_hash
         .as_deref()
-        .is_some_and(|hash| hash.eq_ignore_ascii_case(&fingerprint.content_hash));
-    let dimension_matches = entry.dimension == u32::try_from(embedder.dimension()).ok();
-    let distance_matches = entry.distance_metric == Some(ModelDistanceMetric::Cosine);
-    if !hash_matches || !dimension_matches || !distance_matches {
+        .map(str::trim)
+        .filter(|hash| !hash.is_empty())
+        .map(str::to_ascii_lowercase)
+    else {
+        return Ok(None);
+    };
+    let Some(dimension) = entry.dimension else {
+        return Ok(None);
+    };
+    let Some(distance_metric) = entry.distance_metric else {
+        return Ok(None);
+    };
+    if distance_metric != ModelDistanceMetric::Cosine {
         tracing::warn!(
             target: "ee::index::embedder",
             registry_id = entry.id,
@@ -5258,8 +5297,43 @@ fn registered_model2vec_stack(
         );
         return Ok(None);
     }
-
-    let fast = Arc::new(embedder) as Arc<dyn crate::search::Embedder>;
+    let identity = RegisteredModel2VecIdentity {
+        canonical_source: canonical_source.clone(),
+        content_hash: content_hash.clone(),
+        dimension,
+        distance_metric: distance_metric.as_str(),
+    };
+    let fast = REGISTERED_MODEL2VEC_CACHE
+        .get_or_init(RegisteredModel2VecCache::default)
+        .get_or_try_insert_with(identity, || {
+            let Ok(embedder) =
+                Model2VecEmbedder::load_with_name(&canonical_source, POTION_MODEL_NAME)
+            else {
+                tracing::warn!(
+                    target: "ee::index::embedder",
+                    registry_id = entry.id,
+                    reason = "model_load_failed",
+                    "skipping unusable registered Model2Vec entry"
+                );
+                return None;
+            };
+            let fingerprint = active_embedder_fingerprint(&embedder, ModelProvider::Model2Vec);
+            let hash_matches = content_hash.eq_ignore_ascii_case(&fingerprint.content_hash);
+            let dimension_matches = Some(dimension) == u32::try_from(embedder.dimension()).ok();
+            if !hash_matches || !dimension_matches {
+                tracing::warn!(
+                    target: "ee::index::embedder",
+                    registry_id = entry.id,
+                    reason = "registry_identity_or_hash_mismatch",
+                    "skipping unusable registered Model2Vec entry"
+                );
+                return None;
+            }
+            Some(Arc::new(embedder) as Arc<dyn crate::search::Embedder>)
+        });
+    let Some(fast) = fast else {
+        return Ok(None);
+    };
     Ok(Some(stack_with_hash_quality_fallback(
         EmbedderStack::from_parts(fast, None),
     )))
@@ -7712,6 +7786,160 @@ mod tests {
         ensure(
             Arc::ptr_eq(&first.fast_arc(), &second.fast_arc()),
             "default search embedder stack should reuse the same fast Arc within one process",
+        )
+    }
+
+    fn registered_model2vec_test_identity(content_hash: &str) -> RegisteredModel2VecIdentity {
+        RegisteredModel2VecIdentity {
+            canonical_source: PathBuf::from("/verified/models/potion-multilingual-128M"),
+            content_hash: content_hash.to_owned(),
+            dimension: BUNDLED_EMBEDDING_DIMENSION,
+            distance_metric: ModelDistanceMetric::Cosine.as_str(),
+        }
+    }
+
+    #[test]
+    fn registered_model2vec_cache_reuses_arc_for_exact_identity() -> TestResult {
+        let cache = RegisteredModel2VecCache::default();
+        let identity = registered_model2vec_test_identity("blake3:identity-a");
+        let loads = std::cell::Cell::new(0_u32);
+        let first = cache
+            .get_or_try_insert_with(identity.clone(), || {
+                loads.set(loads.get().saturating_add(1));
+                Some(Arc::new(TestSemanticEmbedder::new(
+                    POTION_MODEL_NAME,
+                    usize::try_from(BUNDLED_EMBEDDING_DIMENSION)
+                        .expect("bundled dimension fits usize"),
+                )) as Arc<dyn crate::search::Embedder>)
+            })
+            .ok_or_else(|| "first registered embedder load must succeed".to_owned())?;
+        let second = cache
+            .get_or_try_insert_with(identity, || {
+                loads.set(loads.get().saturating_add(1));
+                Some(Arc::new(TestSemanticEmbedder::new(
+                    "must-not-load",
+                    usize::try_from(BUNDLED_EMBEDDING_DIMENSION)
+                        .expect("bundled dimension fits usize"),
+                )) as Arc<dyn crate::search::Embedder>)
+            })
+            .ok_or_else(|| "cached registered embedder lookup must succeed".to_owned())?;
+
+        ensure(loads.get() == 1, "exact identity must load only once")?;
+        ensure(
+            Arc::ptr_eq(&first, &second),
+            "exact registry identity must reuse the same embedder Arc",
+        )
+    }
+
+    #[test]
+    fn registered_model2vec_cache_keys_every_immutable_identity_field() -> TestResult {
+        let cache = RegisteredModel2VecCache::default();
+        let base = registered_model2vec_test_identity("blake3:identity-a");
+        let mut changed_source = base.clone();
+        changed_source.canonical_source = PathBuf::from("/verified/models/alternate-potion");
+        let mut changed_hash = base.clone();
+        changed_hash.content_hash = "blake3:identity-b".to_owned();
+        let mut changed_dimension = base.clone();
+        changed_dimension.dimension = changed_dimension.dimension.saturating_add(1);
+        let mut changed_metric = base.clone();
+        changed_metric.distance_metric = ModelDistanceMetric::Dot.as_str();
+        let loads = std::cell::Cell::new(0_u32);
+        let mut selected = Vec::new();
+        for identity in [
+            base,
+            changed_source,
+            changed_hash,
+            changed_dimension,
+            changed_metric,
+        ] {
+            let ordinal = loads.get().saturating_add(1);
+            let embedder = cache
+                .get_or_try_insert_with(identity, || {
+                    loads.set(ordinal);
+                    Some(Arc::new(TestSemanticEmbedder::new(
+                        &format!("registry-identity-{ordinal}"),
+                        usize::try_from(BUNDLED_EMBEDDING_DIMENSION)
+                            .expect("bundled dimension fits usize"),
+                    )) as Arc<dyn crate::search::Embedder>)
+                })
+                .ok_or_else(|| format!("identity variant {ordinal} must load"))?;
+            selected.push(embedder);
+        }
+        ensure(
+            loads.get() == 5,
+            "source, hash, dimension, and metric changes must each select a new embedder",
+        )?;
+        for (left_index, left) in selected.iter().enumerate() {
+            for right in &selected[(left_index + 1)..] {
+                ensure(
+                    !Arc::ptr_eq(left, right),
+                    "distinct immutable identities must not share an embedder Arc",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn registered_model2vec_cache_changes_identity_and_does_not_cache_failures() -> TestResult {
+        let cache = RegisteredModel2VecCache::default();
+        let first_identity = registered_model2vec_test_identity("blake3:identity-a");
+        let changed_identity = registered_model2vec_test_identity("blake3:identity-b");
+        let failed_identity = registered_model2vec_test_identity("blake3:identity-failed");
+        let first = cache
+            .get_or_try_insert_with(first_identity.clone(), || {
+                Some(Arc::new(TestSemanticEmbedder::new(
+                    "registry-identity-a",
+                    usize::try_from(BUNDLED_EMBEDDING_DIMENSION)
+                        .expect("bundled dimension fits usize"),
+                )) as Arc<dyn crate::search::Embedder>)
+            })
+            .ok_or_else(|| "first identity load must succeed".to_owned())?;
+        let changed = cache
+            .get_or_try_insert_with(changed_identity, || {
+                Some(Arc::new(TestSemanticEmbedder::new(
+                    "registry-identity-b",
+                    usize::try_from(BUNDLED_EMBEDDING_DIMENSION)
+                        .expect("bundled dimension fits usize"),
+                )) as Arc<dyn crate::search::Embedder>)
+            })
+            .ok_or_else(|| "changed identity load must succeed".to_owned())?;
+        ensure(
+            !Arc::ptr_eq(&first, &changed),
+            "a registry identity change must not reuse the prior embedder",
+        )?;
+
+        let failed_loads = std::cell::Cell::new(0_u32);
+        ensure(
+            cache
+                .get_or_try_insert_with(failed_identity.clone(), || {
+                    failed_loads.set(failed_loads.get().saturating_add(1));
+                    None
+                })
+                .is_none(),
+            "failed initialization must remain a miss",
+        )?;
+        let first_again = cache
+            .get_or_try_insert_with(first_identity, || None)
+            .ok_or_else(|| "failed unrelated identity must not evict a healthy entry".to_owned())?;
+        ensure(
+            Arc::ptr_eq(&first, &first_again),
+            "failed unrelated identity must not poison a healthy cached identity",
+        )?;
+        let retried = cache
+            .get_or_try_insert_with(failed_identity, || {
+                failed_loads.set(failed_loads.get().saturating_add(1));
+                Some(Arc::new(TestSemanticEmbedder::new(
+                    "registry-retry",
+                    usize::try_from(BUNDLED_EMBEDDING_DIMENSION)
+                        .expect("bundled dimension fits usize"),
+                )) as Arc<dyn crate::search::Embedder>)
+            })
+            .ok_or_else(|| "failed identity must remain retryable".to_owned())?;
+        ensure(failed_loads.get() == 2, "failed identity must retry once")?;
+        ensure(
+            !Arc::ptr_eq(&first, &retried),
+            "retried identity must remain isolated from other cached identities",
         )
     }
 

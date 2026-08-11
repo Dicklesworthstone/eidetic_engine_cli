@@ -1,10 +1,16 @@
 //! Real-binary e2e pin for bundled embedding model registration.
 
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::net::{SocketAddr, TcpListener, TcpStream};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::{Child, Stdio};
 use std::process::{Command, Output};
 #[cfg(unix)]
 use std::sync::Arc;
@@ -13,9 +19,15 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(unix)]
 use std::thread::{self, JoinHandle};
+#[cfg(unix)]
+use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ee::core::model::{BUNDLED_EMBEDDING_DIMENSION, BUNDLED_EMBEDDING_MODEL_ID};
+#[cfg(unix)]
+use ee::daemon::protocol::{DAEMON_SEARCH_REQUEST_SCHEMA_V1, DaemonRequest, METHOD_SEARCH};
+#[cfg(unix)]
+use ee::daemon::server::{METHOD_SHUTDOWN, client_round_trip, client_round_trip_before};
 #[cfg(unix)]
 use ee::db::{CreateModelRegistryInput, DbConnection, StoredModelRegistryEntry};
 use ee::models::{MODEL_LIST_SCHEMA_V1, MODEL_STATUS_SCHEMA_V2, RESPONSE_SCHEMA_V2};
@@ -213,6 +225,187 @@ impl E2eWorkspace {
             .map_err(|error| format!("open {}: {error}", self.log_path.display()))?;
         writeln!(file, "{entry}")
             .map_err(|error| format!("write {}: {error}", self.log_path.display()))
+    }
+}
+
+#[cfg(unix)]
+struct RunningE2eDaemon {
+    socket_path: PathBuf,
+    workspace_id: String,
+    child: Child,
+}
+
+#[cfg(unix)]
+impl RunningE2eDaemon {
+    fn start(workspace: &E2eWorkspace, env: &[(String, String)]) -> TestResult<Self> {
+        let socket_parent = workspace.path.join("daemon-sockets");
+        fs::create_dir_all(&socket_parent)
+            .map_err(|error| format!("create {}: {error}", socket_parent.display()))?;
+        fs::set_permissions(&socket_parent, fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                format!(
+                    "secure daemon socket parent {}: {error}",
+                    socket_parent.display()
+                )
+            },
+        )?;
+        let socket_path = socket_parent.join("registry-path-e2e.sock");
+        let socket_arg = path_string(&socket_path);
+        let mut command = ee_command_with_env(
+            workspace,
+            &[
+                "--workspace",
+                workspace.workspace_arg()?,
+                "--json",
+                "daemon",
+                "start",
+                "--foreground",
+                "--socket",
+                &socket_arg,
+            ],
+            env,
+        );
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        let child = command
+            .spawn()
+            .map_err(|error| format!("spawn public foreground ee daemon: {error}"))?;
+        let mut running = Self {
+            socket_path,
+            workspace_id: workspace.workspace_arg()?.to_owned(),
+            child,
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if UnixStream::connect(&running.socket_path).is_ok() {
+                break;
+            }
+            if let Some(status) = running
+                .child
+                .try_wait()
+                .map_err(|error| format!("poll public foreground ee daemon: {error}"))?
+            {
+                return Err(format!(
+                    "public foreground ee daemon exited before readiness: {status}"
+                ));
+            }
+            if Instant::now() >= deadline {
+                return Err(
+                    "public foreground ee daemon did not publish its socket within 10s".to_string(),
+                );
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        let stdout = running
+            .child
+            .stdout
+            .take()
+            .ok_or_else(|| "public foreground ee daemon stdout was not piped".to_string())?;
+        let mut reader = BufReader::new(stdout);
+        let mut startup_line = String::new();
+        reader
+            .read_line(&mut startup_line)
+            .map_err(|error| format!("read public daemon startup envelope: {error}"))?;
+        let startup: Value = serde_json::from_str(&startup_line).map_err(|error| {
+            format!("public daemon startup emitted invalid JSON: {error}; stdout={startup_line}")
+        })?;
+        ensure_eq_str(
+            startup
+                .get("schema")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "public daemon startup schema missing".to_string())?,
+            RESPONSE_SCHEMA_V2,
+            "public daemon startup schema",
+        )?;
+        ensure_eq_bool(
+            startup
+                .get("success")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| "public daemon startup success missing".to_string())?,
+            true,
+            "public daemon startup success",
+        )?;
+        ensure_eq_str(
+            startup
+                .pointer("/data/socketPath")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "public daemon startup socketPath missing".to_string())?,
+            &path_string(&running.socket_path),
+            "public daemon startup socketPath",
+        )?;
+        Ok(running)
+    }
+
+    fn socket_arg(&self) -> String {
+        path_string(&self.socket_path)
+    }
+
+    fn prewarm_search(&self, workspace: &E2eWorkspace, query: &str) -> TestResult {
+        let mut request = DaemonRequest::new(
+            format!("registry-path-prewarm-{}", std::process::id()),
+            "model-bundled-embedding-cli-e2e",
+            METHOD_SEARCH,
+            json!({
+                "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+                "query": query,
+                "workspacePath": workspace.workspace_arg()?,
+                "databasePath": path_string(&workspace.path.join(".ee/ee.db")),
+                "indexDir": path_string(&workspace.path.join(".ee/index")),
+                "limit": 10,
+                "speed": "default",
+                "relevanceFloor": 0.0,
+                "sourceMode": "hybrid",
+                "strictSourceMode": true,
+                "memoryScope": "swarm"
+            }),
+        );
+        request.workspace_id = Some(workspace.workspace_arg()?.to_owned());
+        let response = client_round_trip_before(
+            &self.socket_path,
+            &request,
+            Instant::now() + Duration::from_secs(120),
+        )
+        .map_err(|error| format!("prewarm public daemon search: {error}"))?;
+        if let Some(error) = response.error {
+            return Err(format!("prewarm public daemon search failed: {error:?}"));
+        }
+        let result = response
+            .result
+            .ok_or_else(|| "prewarm public daemon search result missing".to_string())?;
+        ensure_eq_str(
+            result
+                .pointer("/response/data/embed_backend")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "prewarm public daemon embed_backend missing".to_string())?,
+            "neural_local",
+            "prewarm public daemon embed_backend",
+        )
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RunningE2eDaemon {
+    fn drop(&mut self) {
+        let mut request = DaemonRequest::new(
+            format!("registry-path-shutdown-{}", std::process::id()),
+            "model-bundled-embedding-cli-e2e",
+            METHOD_SHUTDOWN,
+            json!({}),
+        );
+        request.workspace_id = Some(self.workspace_id.clone());
+        let _ = client_round_trip(&self.socket_path, &request);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => thread::sleep(Duration::from_millis(25)),
+                Err(_) => break,
+            }
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -1048,6 +1241,168 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         0,
     )?;
 
+    let registry_before_daemon = model2vec_registry_entry(&workspace)?;
+    ensure_eq_str(
+        registry_before_daemon
+            .source_uri
+            .as_deref()
+            .ok_or_else(|| "registered source missing before daemon search".to_string())?,
+        &path_string(&noncanonical_model_dir),
+        "registered source before daemon search",
+    )?;
+    let index_manifest_path = workspace.path.join(".ee/index/meta.json");
+    let index_manifest_before = fs::read(&index_manifest_path).map_err(|error| {
+        format!(
+            "read registry-path index manifest {}: {error}",
+            index_manifest_path.display()
+        )
+    })?;
+    let index_manifest_json: Value = serde_json::from_slice(&index_manifest_before)
+        .map_err(|error| format!("parse registry-path index manifest: {error}"))?;
+    ensure_eq_str(
+        index_manifest_json
+            .get("storedModelId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "index manifest storedModelId missing".to_string())?,
+        &registry_before_daemon.model_name,
+        "index manifest storedModelId",
+    )?;
+    ensure_eq_str(
+        index_manifest_json
+            .get("storedModelRevision")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "index manifest storedModelRevision missing".to_string())?,
+        registry_before_daemon
+            .version
+            .as_deref()
+            .ok_or_else(|| "registered model revision missing".to_string())?,
+        "index manifest storedModelRevision",
+    )?;
+    ensure_eq_str(
+        index_manifest_json
+            .get("storedModelHash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "index manifest storedModelHash missing".to_string())?,
+        registry_before_daemon
+            .content_hash
+            .as_deref()
+            .ok_or_else(|| "registered model hash missing".to_string())?,
+        "index manifest storedModelHash",
+    )?;
+    ensure_eq_u64(
+        index_manifest_json
+            .get("storedDimension")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "index manifest storedDimension missing".to_string())?,
+        u64::from(BUNDLED_EMBEDDING_DIMENSION),
+        "index manifest storedDimension",
+    )?;
+    ensure_eq_str(
+        index_manifest_json
+            .get("storedDistanceMetric")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "index manifest storedDistanceMetric missing".to_string())?,
+        ModelDistanceMetric::Cosine.as_str(),
+        "index manifest storedDistanceMetric",
+    )?;
+
+    let (daemon_search_first, daemon_search_second, daemon_search_third) = {
+        let daemon = RunningE2eDaemon::start(&workspace, &offline_env)?;
+        daemon.prewarm_search(&workspace, query)?;
+        let socket_arg = daemon.socket_arg();
+        let run_daemon_search = |phase: &str| {
+            run_ee_with_env(
+                &workspace,
+                phase,
+                &[
+                    "search",
+                    query,
+                    "--workspace",
+                    workspace.workspace_arg()?,
+                    "--relevance-floor",
+                    "0",
+                    "--use-daemon",
+                    "--daemon-socket",
+                    &socket_arg,
+                    "--json",
+                ],
+                &offline_env,
+            )
+        };
+        let first = run_daemon_search("registry_path_daemon_search_first")?;
+        let second = run_daemon_search("registry_path_daemon_search_second")?;
+        let third = run_daemon_search("registry_path_daemon_search_third")?;
+        let mut stable_results = None;
+        for (ordinal, output) in [("first", &first), ("second", &second), ("third", &third)] {
+            ensure_success(output, &format!("registry-path {ordinal} daemon search"))?;
+            ensure_response_embed_backend(
+                output,
+                &format!("registry-path {ordinal} daemon search"),
+                "neural_local",
+            )?;
+            ensure_degraded_code_count(
+                output,
+                &format!("registry-path {ordinal} daemon search"),
+                "embed_model_unavailable",
+                0,
+            )?;
+            ensure_degraded_code_count(
+                output,
+                &format!("registry-path {ordinal} daemon search"),
+                "daemon_search_fallback",
+                0,
+            )?;
+            let payload = stdout_json(output, &format!("registry-path {ordinal} daemon search"))?;
+            let results = payload
+                .pointer("/data/results")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("registry-path {ordinal} daemon search results missing"))?;
+            let remembered_hit = results
+                .iter()
+                .find(|result| {
+                    result.get("memoryId").and_then(Value::as_str) == Some(memory_id.as_str())
+                })
+                .ok_or_else(|| {
+                    format!("registry-path {ordinal} daemon search omitted memory {memory_id}")
+                })?;
+            if remembered_hit
+                .get("fastScore")
+                .and_then(Value::as_f64)
+                .is_none()
+            {
+                return Err(format!(
+                    "registry-path {ordinal} daemon search did not execute a semantic fastScore"
+                ));
+            }
+            let current_results = Value::Array(results.clone());
+            if let Some(expected) = &stable_results {
+                if &current_results != expected {
+                    return Err(format!(
+                        "registry-path {ordinal} daemon search results drifted: expected={expected} actual={current_results}"
+                    ));
+                }
+            } else {
+                stable_results = Some(current_results);
+            }
+        }
+        (first, second, third)
+    };
+    let registry_after_daemon = model2vec_registry_entry(&workspace)?;
+    if registry_after_daemon != registry_before_daemon {
+        return Err(format!(
+            "repeated public daemon search mutated the model registry: before={registry_before_daemon:?} after={registry_after_daemon:?}"
+        ));
+    }
+    let index_manifest_after = fs::read(&index_manifest_path).map_err(|error| {
+        format!(
+            "reread registry-path index manifest {}: {error}",
+            index_manifest_path.display()
+        )
+    })?;
+    if index_manifest_after != index_manifest_before {
+        return Err("repeated public daemon search mutated the index manifest".to_string());
+    }
+
     let pack = run_ee_with_env(
         &workspace,
         "registry_path_pack",
@@ -1296,6 +1651,9 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
         ("remember", &remember),
         ("reembed", &reembed),
         ("search", &search),
+        ("daemon_search_first", &daemon_search_first),
+        ("daemon_search_second", &daemon_search_second),
+        ("daemon_search_third", &daemon_search_third),
         ("pack", &pack),
         ("orient", &orient),
         ("why_not", &why_not),
@@ -1326,6 +1684,9 @@ fn registered_noncanonical_model2vec_source_is_neural_without_egress() -> TestRe
     ];
     for (name, output) in [
         ("search", &search),
+        ("daemon_search_first", &daemon_search_first),
+        ("daemon_search_second", &daemon_search_second),
+        ("daemon_search_third", &daemon_search_third),
         ("pack", &pack),
         ("orient", &orient),
         ("why_not", &why_not),
