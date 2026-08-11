@@ -9,9 +9,10 @@ matter only where a requirement falls outside the patched version line.
 Verification is remote-only (RCH pinned bundles) per repo policy.
 
 ## Summary
-- **Updated:** unit 1 in flight (frankensqlite + sqlmodel_rust pins)
-- **Skipped:** franken_networkx, toon_rust, franken_agent_detection (no consumer-visible movement required by this unit; revisit after unit 1 lands)
-- **Needs attention:** 2 (frankensearch fsqlite-0.1 line, asupersync 0.4 major)
+- **Updated:** 5 pins (frankensqlite 0.2.1, sqlmodel_rust 0.3.2, franken_networkx, frankensearch, franken_agent_detection)
+- **Unchanged:** toon_rust (pin == tip)
+- **Rolled back:** asupersync 0.4.3 (transitively blocked — see below)
+- **Registry-wide bumps:** deliberately skipped — local cargo resolves for an older toolchain and rewrites the shared lock with downgrades (observed windows-sys/hashbrown regressions); registry churn belongs to a session on the current toolchain.
 
 ## Unit 1 — FrankenSQLite 0.2.1 closure (frankensqlite + sqlmodel_rust)
 
@@ -56,3 +57,31 @@ Verification is remote-only (RCH pinned bundles) per repo policy.
   (`request_cx_with_budget` went private). Bumping under them would collide
   with in-flight peer WIP. Needs its own migration pass with the transport
   owners; not attempted here.
+
+## Unit 2 — asupersync =0.3.10 → =0.4.3: ROLLED BACK (transitive wall)
+
+- 0.4.0 is a semver re-anchor of the 0.3.10 API (near-drop-in for ee), and
+  the `request_cx_with_budget` privacy diagnostics were stale-analyzer noise
+  (public at tip). The wall is transitive, not API-shaped:
+  frankensearch requires the fsqlite 0.1 line, and **fsqlite-core 0.1.x
+  itself requires asupersync <0.4**. ee cannot hold asupersync =0.4.3 while
+  frankensearch (and through it the 0.1 engine) sits in the closure.
+- **Unblock path:** frankensearch migrates fsfs/durability/ops to fsqlite
+  0.2 (its own porting project) → then asupersync 0.4 clears stack-wide.
+- **Forward-prep landed:** fnx-runtime accepts asupersync `>=0.3.4, <0.5`
+  (franken_networkx 58fe5d19); frankensearch's ceiling raised to `<0.5`
+  with its lock unchanged (f65efa25). Both are no-ops today and remove two
+  of the three walls in advance.
+- A peer sweep committed the mid-flight 0.4.3 manifest (b7ed4ee6) before
+  the wall surfaced; c066cbaa restored the resolvable closure.
+
+## Unit 3 — remaining pins
+
+- **franken_networkx** 7faf0a1b → 58fe5d19: the asupersync-range widening.
+- **frankensearch** 83ef0195 → f65efa25: tip + the ceiling widening; ee
+  consumes the 0.3.x API either way.
+- **franken_agent_detection** 5b0d6498 → 88fc6783: includes its fsqlite-0.2
+  async-engine bridge — coherent with unit 1.
+- **toon_rust**: pin already at tip; untouched.
+- **Verification:** remote pinned-bundle compile gate at the final pin set;
+  the standing bd-022z1 full-suite measure covers behavior.
