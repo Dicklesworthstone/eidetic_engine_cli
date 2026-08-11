@@ -4,7 +4,8 @@
 //! it composes several public commands. This module holds reusable read-only
 //! data providers that should not be duplicated by the CLI renderer.
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -376,7 +377,8 @@ pub fn orient_decisions(
 // with no pointer reads as "ee has nothing for you", silently destroying
 // ee's value for the session. Discovery scans child directories (bounded
 // depth, skip-listed, time-capped) and parents up to the git root for
-// populated stores, so the orientation output can point at them.
+// populated stores, and consults the machine workspace registry for stores
+// outside that local walk, so the orientation output can point at them.
 
 /// One discovered populated store near the addressed workspace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -416,16 +418,46 @@ pub fn discover_nearby_stores(
     workspace_path: &Path,
     budget: std::time::Duration,
 ) -> NearbyStoreScan {
+    discover_nearby_stores_with_registry(workspace_path, budget, None)
+}
+
+fn discover_nearby_stores_with_registry(
+    workspace_path: &Path,
+    budget: std::time::Duration,
+    registry_path: Option<&Path>,
+) -> NearbyStoreScan {
     let started = std::time::Instant::now();
     let mut scan = NearbyStoreScan::default();
-    let own_roots: Vec<std::path::PathBuf> = workspace_path
-        .canonicalize()
-        .map(|canonical| vec![canonical])
-        .unwrap_or_else(|_| vec![workspace_path.to_path_buf()]);
+    let own_root = workspace_path.canonicalize().ok();
+    let mut candidates = Vec::new();
+    let mut seen_candidates = BTreeSet::new();
 
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    // (a) registered workspaces. Registry failures are deliberately quiet:
+    // discovery is a best-effort recovery hint, and inability to inspect one
+    // candidate must never be reported as evidence that its store is empty.
+    if started.elapsed() < budget {
+        if let Ok(registry) = crate::core::workspace::list_workspace_registry(
+            &crate::core::workspace::WorkspaceListOptions {
+                registry_path: registry_path.map(Path::to_path_buf),
+            },
+        ) {
+            for workspace in registry.workspaces {
+                if started.elapsed() >= budget {
+                    scan.truncated = true;
+                    break;
+                }
+                add_nearby_store_candidate(
+                    PathBuf::from(workspace.path),
+                    workspace_path,
+                    own_root.as_deref(),
+                    &mut seen_candidates,
+                    &mut candidates,
+                );
+            }
+        }
+    }
 
-    // (a) children, breadth-first, bounded depth.
+    // (b) children, breadth-first, bounded depth.
     let mut frontier = vec![(workspace_path.to_path_buf(), 0_usize)];
     while let Some((dir, depth)) = frontier.pop() {
         if started.elapsed() >= budget {
@@ -433,7 +465,13 @@ pub fn discover_nearby_stores(
             break;
         }
         if depth > 0 {
-            candidates.push(dir.clone());
+            add_nearby_store_candidate(
+                dir.clone(),
+                workspace_path,
+                own_root.as_deref(),
+                &mut seen_candidates,
+                &mut candidates,
+            );
         }
         if depth >= NEARBY_STORE_CHILD_DEPTH {
             continue;
@@ -471,7 +509,7 @@ pub fn discover_nearby_stores(
         }
     }
 
-    // (b) parents up to (and including) the git root.
+    // (c) parents up to (and including) the git root.
     let mut parent = if workspace_path.join(".git").exists() {
         None
     } else {
@@ -482,7 +520,13 @@ pub fn discover_nearby_stores(
             scan.truncated = true;
             break;
         }
-        candidates.push(dir.to_path_buf());
+        add_nearby_store_candidate(
+            dir.to_path_buf(),
+            workspace_path,
+            own_root.as_deref(),
+            &mut seen_candidates,
+            &mut candidates,
+        );
         if dir.join(".git").exists() {
             break;
         }
@@ -494,16 +538,10 @@ pub fn discover_nearby_stores(
             scan.truncated = true;
             break;
         }
-        let canonical = candidate
-            .canonicalize()
-            .unwrap_or_else(|_| candidate.clone());
-        if own_roots.contains(&canonical) {
-            continue;
-        }
         for marker in NEARBY_STORE_MARKERS {
             let store_dir = candidate.join(marker);
             let database = store_dir.join("ee.db");
-            if !database.is_file() {
+            if !nearby_store_database_is_safe_regular_file(&database) {
                 continue;
             }
             let Some(profile) = nearby_store_profile(&database) else {
@@ -530,6 +568,36 @@ pub fn discover_nearby_stores(
     });
     scan.stores.truncate(NEARBY_STORE_REPORT_LIMIT);
     scan
+}
+
+fn add_nearby_store_candidate(
+    candidate: PathBuf,
+    addressed_workspace: &Path,
+    addressed_canonical: Option<&Path>,
+    seen: &mut BTreeSet<PathBuf>,
+    candidates: &mut Vec<PathBuf>,
+) {
+    if candidate == addressed_workspace
+        || crate::core::path_safety::path_has_symlink_component(&candidate).unwrap_or(true)
+    {
+        return;
+    }
+    let Ok(canonical) = candidate.canonicalize() else {
+        return;
+    };
+    if addressed_canonical == Some(canonical.as_path()) || !seen.insert(canonical.clone()) {
+        return;
+    }
+    candidates.push(canonical);
+}
+
+fn nearby_store_database_is_safe_regular_file(database: &Path) -> bool {
+    if crate::core::path_safety::path_has_symlink_component(database).unwrap_or(true) {
+        return false;
+    }
+    std::fs::symlink_metadata(database)
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false)
 }
 
 /// Read the source-of-truth memory row count from a store without opening it
@@ -1017,6 +1085,11 @@ mod tests {
         std::time::Duration::from_secs(10)
     }
 
+    fn discover_local_stores(workspace: &Path, budget: std::time::Duration) -> NearbyStoreScan {
+        let absent_registry = workspace.join("registry-not-present-for-local-scan.db");
+        discover_nearby_stores_with_registry(workspace, budget, Some(&absent_registry))
+    }
+
     #[test]
     fn discovery_finds_populated_child_store() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -1025,7 +1098,7 @@ mod tests {
         std::fs::create_dir_all(&child).map_err(|error| error.to_string())?;
         remember_fixture(&child, "Nearby store rule one.", "nearby", None)?;
 
-        let scan = discover_nearby_stores(temp.path(), scan_budget());
+        let scan = discover_local_stores(temp.path(), scan_budget());
         ensure_equal(&scan.stores.len(), &1_usize, "one nearby store")?;
         ensure(
             scan.stores[0].workspace_root.ends_with("campaign"),
@@ -1164,7 +1237,7 @@ mod tests {
             )?;
         }
 
-        let scan = discover_nearby_stores(temp.path(), scan_budget());
+        let scan = discover_local_stores(temp.path(), scan_budget());
         ensure_equal(&scan.stores.len(), &3_usize, "three eligible stores")?;
         ensure(
             scan.stores[0].workspace_root.ends_with("depth-three")
@@ -1202,7 +1275,7 @@ mod tests {
         remember_fixture(&git_root, "Store at nearest Git root.", "nearby", None)?;
         std::fs::create_dir_all(git_root.join(".git")).map_err(|error| error.to_string())?;
 
-        let ancestor_scan = discover_nearby_stores(&workspace, scan_budget());
+        let ancestor_scan = discover_local_stores(&workspace, scan_budget());
         ensure_equal(
             &ancestor_scan.stores.len(),
             &1_usize,
@@ -1219,7 +1292,7 @@ mod tests {
         )?;
 
         std::fs::create_dir_all(workspace.join(".git")).map_err(|error| error.to_string())?;
-        let workspace_root_scan = discover_nearby_stores(&workspace, scan_budget());
+        let workspace_root_scan = discover_local_stores(&workspace, scan_budget());
         ensure_equal(
             &workspace_root_scan.stores.len(),
             &0_usize,
@@ -1234,7 +1307,7 @@ mod tests {
         std::fs::create_dir_all(&child).map_err(|error| error.to_string())?;
         remember_fixture(&child, "Unscanned store rule.", "nearby", None)?;
 
-        let scan = discover_nearby_stores(temp.path(), std::time::Duration::ZERO);
+        let scan = discover_local_stores(temp.path(), std::time::Duration::ZERO);
         ensure(scan.truncated, "zero-budget scan must truncate".to_owned())?;
         ensure_equal(
             &scan.stores.len(),
@@ -1253,7 +1326,7 @@ mod tests {
         std::fs::create_dir_all(temp.path().join("empty_child"))
             .map_err(|error| error.to_string())?;
 
-        let scan = discover_nearby_stores(temp.path(), scan_budget());
+        let scan = discover_local_stores(temp.path(), scan_budget());
         ensure_equal(&scan.stores.len(), &0_usize, "no nearby stores reported")
     }
 
@@ -1272,7 +1345,7 @@ mod tests {
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
             .map_err(|error| error.to_string())?;
 
-        let scan = discover_nearby_stores(temp.path(), scan_budget());
+        let scan = discover_local_stores(temp.path(), scan_budget());
         // Restore permissions so tempdir cleanup succeeds.
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
             .map_err(|error| error.to_string())?;
@@ -1301,7 +1374,7 @@ mod tests {
         symlink(outside.path(), workspace.path().join("linked-outside"))
             .map_err(|error| error.to_string())?;
 
-        let scan = discover_nearby_stores(workspace.path(), scan_budget());
+        let scan = discover_local_stores(workspace.path(), scan_budget());
         ensure_equal(
             &scan.stores.len(),
             &0_usize,

@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
@@ -10,7 +11,23 @@ struct ConformanceCase {
 }
 
 fn run_ee(args: &[String]) -> Result<Output, String> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    command.env(
+        "EE_WORKSPACE_REGISTRY",
+        std::env::temp_dir().join(format!(
+            "ee-error-recovery-no-registry-{}.db",
+            std::process::id()
+        )),
+    );
+    command
+        .args(args)
+        .output()
+        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
+fn run_ee_with_registry(args: &[String], registry: &Path) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
+        .env("EE_WORKSPACE_REGISTRY", registry)
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
@@ -810,6 +827,228 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         !populated_first_next.contains("copulattice_ft1z5"),
         format!(
             "a populated root's next commands must stay on the root workspace, got: {populated_first_next:?}"
+        ),
+    )?;
+    Ok(())
+}
+
+/// bd-orient-store-discovery-ft1z5 registry acceptance: a populated workspace
+/// outside the bounded parent/child walk is still discoverable through the
+/// real machine registry. Empty, broken, addressed, and duplicate local rows
+/// must not create false or repeated candidates.
+#[test]
+fn empty_workspace_discovers_registered_remote_store_and_skips_bad_rows() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let registry = tempdir.path().join("registry").join("workspaces.db");
+    let addressed = tempdir.path().join("addressed-empty-ft1z5");
+    let registered = tempdir.path().join("remote-populated-ft1z5");
+    let local_duplicate = addressed.join("local-registered-duplicate-ft1z5");
+    let empty_registered = tempdir.path().join("remote-empty-ft1z5");
+    let broken_registered = tempdir.path().join("remote-broken-ft1z5");
+
+    std::fs::create_dir_all(addressed.join(".git")).map_err(|error| error.to_string())?;
+    for workspace in [&addressed, &registered, &local_duplicate, &empty_registered] {
+        let workspace_text = workspace.to_string_lossy().to_string();
+        let init = run_ee(&[
+            "init".to_owned(),
+            "--workspace".to_owned(),
+            workspace_text.clone(),
+            "--json".to_owned(),
+        ])?;
+        ensure(
+            init.status.success(),
+            format!(
+                "init of {workspace_text} failed: {}",
+                String::from_utf8_lossy(&init.stdout)
+            ),
+        )?;
+    }
+
+    for index in 1..=3 {
+        let seeded = run_ee(&[
+            "--workspace".to_owned(),
+            registered.to_string_lossy().to_string(),
+            "remember".to_owned(),
+            format!("registered remote discovery fact {index}"),
+            "--json".to_owned(),
+        ])?;
+        ensure(
+            seeded.status.success(),
+            format!(
+                "seeding registered remote store failed: {}",
+                String::from_utf8_lossy(&seeded.stdout)
+            ),
+        )?;
+    }
+    let local_seed = run_ee(&[
+        "--workspace".to_owned(),
+        local_duplicate.to_string_lossy().to_string(),
+        "remember".to_owned(),
+        "local duplicate discovery fact".to_owned(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        local_seed.status.success(),
+        format!(
+            "seeding local duplicate store failed: {}",
+            String::from_utf8_lossy(&local_seed.stdout)
+        ),
+    )?;
+
+    // A registry row can legitimately outlive its store. Create that row via
+    // the public alias surface with a directory-shaped database so discovery
+    // proves it skips the broken source rather than treating it as empty.
+    std::fs::create_dir_all(broken_registered.join(".ee").join("ee.db"))
+        .map_err(|error| error.to_string())?;
+
+    for (workspace, alias) in [
+        (&addressed, "addressed-empty-ft1z5"),
+        (&registered, "remote-populated-ft1z5"),
+        (&local_duplicate, "local-duplicate-ft1z5"),
+        (&empty_registered, "remote-empty-ft1z5"),
+        (&broken_registered, "remote-broken-ft1z5"),
+    ] {
+        let alias_output = run_ee_with_registry(
+            &[
+                "--workspace".to_owned(),
+                workspace.to_string_lossy().to_string(),
+                "workspace".to_owned(),
+                "alias".to_owned(),
+                "--as".to_owned(),
+                alias.to_owned(),
+                "--json".to_owned(),
+            ],
+            &registry,
+        )?;
+        ensure(
+            alias_output.status.success(),
+            format!(
+                "registering {alias} through workspace alias failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&alias_output.stdout),
+                String::from_utf8_lossy(&alias_output.stderr)
+            ),
+        )?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let linked_registered = tempdir.path().join("remote-linked-db-ft1z5");
+        std::fs::create_dir_all(linked_registered.join(".ee"))
+            .map_err(|error| error.to_string())?;
+        let alias_output = run_ee_with_registry(
+            &[
+                "--workspace".to_owned(),
+                linked_registered.to_string_lossy().to_string(),
+                "workspace".to_owned(),
+                "alias".to_owned(),
+                "--as".to_owned(),
+                "remote-linked-db-ft1z5".to_owned(),
+                "--json".to_owned(),
+            ],
+            &registry,
+        )?;
+        ensure(
+            alias_output.status.success(),
+            format!(
+                "registering symlink negative failed: {}",
+                String::from_utf8_lossy(&alias_output.stdout)
+            ),
+        )?;
+        symlink(
+            registered.join(".ee").join("ee.db"),
+            linked_registered.join(".ee").join("ee.db"),
+        )
+        .map_err(|error| error.to_string())?;
+    }
+
+    let registered_canonical = registered
+        .canonicalize()
+        .map_err(|error| error.to_string())?
+        .to_string_lossy()
+        .to_string();
+    let local_canonical = local_duplicate
+        .canonicalize()
+        .map_err(|error| error.to_string())?
+        .to_string_lossy()
+        .to_string();
+    let database = registered.join(".ee").join("ee.db");
+    let mut wal = database.as_os_str().to_os_string();
+    wal.push("-wal");
+    let expected_last_write = [database.as_path(), Path::new(&wal)]
+        .into_iter()
+        .filter_map(|path| {
+            let metadata = std::fs::symlink_metadata(path).ok()?;
+            if !metadata.file_type().is_file() {
+                return None;
+            }
+            metadata.modified().ok()
+        })
+        .max()
+        .map(|modified| chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339())
+        .ok_or("registered store must have a durable database mtime")?;
+
+    let orient = run_ee_with_registry(
+        &[
+            "--workspace".to_owned(),
+            addressed.to_string_lossy().to_string(),
+            "orient".to_owned(),
+            "registered store discovery".to_owned(),
+            "--fast".to_owned(),
+            "--json".to_owned(),
+        ],
+        &registry,
+    )?;
+    ensure(
+        orient.status.success(),
+        format!(
+            "orient with workspace registry failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&orient.stdout),
+            String::from_utf8_lossy(&orient.stderr)
+        ),
+    )?;
+    let json = stdout_json(&orient, "orient registered remote store")?;
+    let nearby = array_at(
+        &json,
+        "/data/storeDiscovery/nearbyStores",
+        "orient registered remote store",
+    )?;
+    ensure(
+        nearby.len() == 2,
+        format!(
+            "only the remote populated store and deduped local populated store may surface: {nearby:?}"
+        ),
+    )?;
+    let best = &nearby[0];
+    ensure(
+        string_at(best, "/workspaceRoot", "registered best workspace")? == registered_canonical
+            && best["documents"].as_u64() == Some(3)
+            && string_at(best, "/lastWrite", "registered best last write")? == expected_last_write,
+        format!(
+            "registered best store must expose its exact canonical path, three rows, and durable last-write; expectedPath={registered_canonical:?}, expectedLastWrite={expected_last_write:?}, best={best:?}"
+        ),
+    )?;
+    ensure(
+        string_at(&nearby[1], "/workspaceRoot", "deduped local workspace")? == local_canonical
+            && nearby[1]["documents"].as_u64() == Some(1)
+            && nearby
+                .iter()
+                .filter(|store| {
+                    store
+                        .pointer("/workspaceRoot")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(local_canonical.as_str())
+                })
+                .count()
+                == 1,
+        format!("the local/registry overlap must appear exactly once with one row: {nearby:?}"),
+    )?;
+    let next_command = string_at(&json, "/data/nextCommands/0", "registered retarget command")?;
+    ensure(
+        next_command.starts_with("ee pack ") && next_command.contains(&registered_canonical),
+        format!(
+            "orient must retarget the first next command to the registered best store: {next_command:?}"
         ),
     )?;
     Ok(())
