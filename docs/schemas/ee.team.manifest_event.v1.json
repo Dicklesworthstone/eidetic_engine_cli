@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.team.manifest_event.v1.json",
+  "title": "ee.team.manifest_event.v1",
+  "$comment": "DRAFT — pre-implementation artifact for bd-tc-epic-qzk7o.3.1 (T2.0), encoding the AUTHORITATIVE 2026-07-30 override: manifests are NOT ee.mesh.event.v1 create/revise records, there are NO mem_team logical IDs, and requiredFeatures is not used to smuggle a closed memory schema. Manifest operations have their own typed vocabulary and travel INLINE in the metadata lane within the payload budget — never via body_fetch, otherwise the default-deny body lane would block manifest replication. Operation vocabulary is finalized by T4.1 (the materializer); NOT registered, NOT emitted yet.",
+  "description": "Typed team-manifest payload of an origin event: membership, node bindings, project records, and lane-profile documents. Member removal is a typed operation at this level (memory tombstone keeps its memory semantics). The T4.1 materializer projects these deterministically with conflict and removal-cutoff rules; T2.8 rematerialization replays them after fork rollback.",
+  "type": "object",
+  "required": ["operation", "documentId", "documentPayload"],
+  "additionalProperties": false,
+  "properties": {
+    "operation": {
+      "type": "string",
+      "enum": [
+        "memberRecordUpsert",
+        "memberRemoval",
+        "nodeBindingUpsert",
+        "nodeBindingRevocation",
+        "projectRecordUpsert",
+        "laneProfileUpsert"
+      ],
+      "$comment": "TBD final vocabulary (T4.1 owns the materializer); one logical document per member record, node binding, project record, and lane-profile document."
+    },
+    "documentId": {
+      "type": "string",
+      "description": "Random opaque document identity (one per logical manifest document); never derived from names, emails, hostnames, or paths.",
+      "minLength": 8
+    },
+    "predecessorRevisionId": {
+      "type": ["string", "null"]
+    },
+    "documentPayload": {
+      "type": "object",
+      "description": "Inline metadata-lane manifest content, bounded by the payload budget. Pending invite/join state carries hashes and non-secret phases only — no clear bearer secret ever appears here (T3.1)."
+    }
+  }
+}

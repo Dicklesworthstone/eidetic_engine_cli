@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.memory_event.v1.json",
+  "title": "ee.mesh.memory_event.v1",
+  "$comment": "DRAFT — pre-implementation artifact for bd-tc-epic-qzk7o.3.1 (T2.0). NOT registered, NOT emitted yet. The additionalProperties:false closed allowlist IS the contract the bead pins: everything not listed here is structurally excluded, which is how the non-leak goldens get their teeth. Field spellings marked TBD are the implementer's to finalize.",
+  "description": "Typed memory payload of an origin event. Operations are create | revise | tombstone | shareWithdraw (the schema has NO update kind — the revision kind is REVISE; trust/validity/bodyAvailable events are explicitly deferred post-v1 per amended ADR 0086 TC-D3/D12: body-fetch eligibility is computed serve-side at fetch time). The closed metadata allowlist EXCLUDES: body text, title/first-line/preview, tags, provenance URIs, raw paths, evidence bodies, and the commitment nonce. Bodies move out-of-band via authorized body fetch and verify against the salted bodyCommitment; an immutable ledger body would contradict shareWithdraw purge semantics.",
+  "type": "object",
+  "required": [
+    "operation",
+    "logicalMemoryId",
+    "revisionId",
+    "bodyCommitment"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "operation": {
+      "type": "string",
+      "enum": ["create", "revise", "tombstone", "shareWithdraw"]
+    },
+    "logicalMemoryId": {
+      "type": "string",
+      "description": "Provenance-safe opaque logical identity; stable across revisions.",
+      "minLength": 8
+    },
+    "revisionId": {
+      "type": "string",
+      "description": "Provenance-safe opaque revision identity; fresh per revision.",
+      "minLength": 8
+    },
+    "predecessorRevisionId": {
+      "type": ["string", "null"],
+      "description": "Prior revision for revise/tombstone/shareWithdraw; null for create."
+    },
+    "level": {
+      "type": "string",
+      "$comment": "TBD: whether to reuse the workspace level vocabulary verbatim."
+    },
+    "memoryKind": {
+      "type": "string",
+      "$comment": "TBD: spelled memoryKind to avoid colliding with the operation field."
+    },
+    "validFrom": { "type": ["string", "null"] },
+    "validUntil": { "type": ["string", "null"] },
+    "projectBinding": {
+      "type": ["string", "null"],
+      "description": "Opaque project identity (T3.5 cross-machine equivalence); never a path."
+    },
+    "originTrustClaim": {
+      "type": "string",
+      "description": "Bounded origin trust claim; receivers derive effective trust themselves (T5.2/T5.3) — this is a claim, not an instruction."
+    },
+    "provenanceRefs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Provenance-safe opaque IDs only — never URIs, paths, or evidence bodies."
+    },
+    "bodyRepresentation": {
+      "type": "string",
+      "$comment": "TBD vocabulary: how the (withheld) body is represented/encoded for fetch."
+    },
+    "redactionProvenance": {
+      "type": "string",
+      "description": "Which redaction policy produced the shareable form."
+    },
+    "bodyCommitment": {
+      "type": "string",
+      "description": "Salted commitment: blake3, domain-separated, over a fresh 32-byte nonce plus the exact body bytes. The nonce is body-fetch-only and NEVER appears in metadata; equal bodies across revisions are unlinkable to metadata-only peers. Metadata-only search may filter allowed fields and must render a missing-body placeholder — never claim full-text recall."
+    }
+  }
+}

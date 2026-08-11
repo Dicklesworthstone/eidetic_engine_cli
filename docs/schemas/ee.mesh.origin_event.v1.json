@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.origin_event.v1.json",
+  "title": "ee.mesh.origin_event.v1",
+  "$comment": "DRAFT — pre-implementation artifact for bd-tc-epic-qzk7o.3.1 (T2.0), capturing the bead's pinned design after the 2026-07-30 encoding override + audit override. NOT registered in public_schemas and NOT emitted by any surface yet; the T2.0 implementer owns final field spellings (marked TBD where the bead does not pin them) and registers it alongside the emitter. ee.mesh.event.v1 remains non-origin-authoritative file replay evidence — this stream does not reinterpret it.",
+  "description": "One immutable outbound origin-stream event: an authenticated generic outer operation carrying exactly one typed payload (ee.mesh.memory_event.v1 or ee.team.manifest_event.v1). Origin-owned local mutations append in the same transaction as the local write; inbound material never re-emits. Every content revision signs blake3 domain-separated over a fresh 32-byte nonce plus the exact body bytes; the nonce is stored atomically with the local event and released only via authorized body fetch — content-identical revisions are unlinkable to metadata-only peers.",
+  "type": "object",
+  "required": [
+    "schema",
+    "eventId",
+    "teamId",
+    "originNodeId",
+    "signingKeyGeneration",
+    "seq",
+    "prevEventHash",
+    "eventHash",
+    "signature",
+    "payloadSchema",
+    "payload",
+    "requiredFeatures",
+    "producedAt"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "type": "string", "const": "ee.mesh.origin_event.v1" },
+    "eventId": {
+      "type": "string",
+      "$comment": "TBD prefix (implementer): derived from eventHash and excluded from the eventHash preimage, mirroring the ee.mesh.event.v1 idiom.",
+      "minLength": 8
+    },
+    "teamId": {
+      "type": "string",
+      "description": "Random team identity; never derived from names, paths, or hostnames.",
+      "minLength": 8
+    },
+    "originNodeId": {
+      "type": "string",
+      "description": "Random ee node identity (T3.1); never derived from tailnet names, emails, hostnames, IPs, or current keys.",
+      "minLength": 8
+    },
+    "signingKeyGeneration": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Ed25519 signing-lineage generation at emission time (T3.6 owns lifecycle)."
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Per-origin nondecreasing append position; receivers track receipt and disposition-scan frontiers independently."
+    },
+    "prevEventHash": {
+      "type": ["string", "null"],
+      "description": "Append-only chain link; null only for the valid first event of an origin. Divergent successors of one predecessor are fork evidence."
+    },
+    "eventHash": {
+      "type": "string",
+      "description": "blake3 over the canonical event bytes (excluding eventId and signature)."
+    },
+    "signature": {
+      "type": "string",
+      "description": "Ed25519 over the domain-separated canonical bytes (operator-ratified in v1, bd-tc-epic-qzk7o.9)."
+    },
+    "payloadSchema": {
+      "type": "string",
+      "enum": ["ee.mesh.memory_event.v1", "ee.team.manifest_event.v1"],
+      "description": "Receiver dispatch derives mandatory features and authorization from schema plus operation; requiredFeatures can ADD checks but never remove them."
+    },
+    "payload": { "type": "object" },
+    "requiredFeatures": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^mesh\\.[a-z0-9_.-]+$" },
+      "description": "Forward-compatibility gates (mesh.* namespace only). Base features are registered but not advertised until T4.1 installs the active-member/node/key authorizer. Unknown mandatory bits structurally quarantine the event (withheld N with applied N+1 and later hydration stays legal)."
+    },
+    "producedAt": { "type": "string" }
+  }
+}
