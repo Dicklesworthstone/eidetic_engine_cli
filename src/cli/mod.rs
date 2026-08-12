@@ -39667,6 +39667,14 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
         .pointer("/fastContent/relevant")
         .and_then(serde_json::Value::as_array)
         .map_or(0, Vec::len);
+    let fast_recent_limit = data
+        .pointer("/fastContent/strategy/recentLimit")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(fast_recent_items as u64);
+    let fast_relevant_limit = data
+        .pointer("/fastContent/strategy/relevantLimit")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(fast_relevant_items as u64);
     let decision_revisits = data
         .pointer("/decisions/dueCount")
         .and_then(serde_json::Value::as_u64)
@@ -39675,8 +39683,15 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
         .pointer("/revivals/revivalCount")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
+    let fast_strategy_summary = if mode == "fast" {
+        format!(
+            "Fast pack: up to {fast_recent_limit} recent + {fast_relevant_limit} relevant, lexical\n"
+        )
+    } else {
+        String::new()
+    };
     let mut out = format!(
-        "Orientation: {task}\nWorkspace: {workspace}\nMode: {mode}\nembed_backend: {embed_backend}\nDoctor posture: {posture}\nDirty paths: {dirty_paths}\nPack items: {pack_items}\nFast recent items: {fast_recent_items}\nFast relevant items: {fast_relevant_items}\nDecision revisits: {decision_revisits}\nRevivable dead routes: {revivable_routes}\n"
+        "Orientation: {task}\nWorkspace: {workspace}\nMode: {mode}\nembed_backend: {embed_backend}\nDoctor posture: {posture}\nDirty paths: {dirty_paths}\nPack items: {pack_items}\nFast recent items: {fast_recent_items}\nFast relevant items: {fast_relevant_items}\n{fast_strategy_summary}Decision revisits: {decision_revisits}\nRevivable dead routes: {revivable_routes}\n"
     );
     if let Some(fast_content) = data.get("fastContent").filter(|value| value.is_object()) {
         render_orient_fast_content_human(&mut out, fast_content);
@@ -70301,6 +70316,16 @@ mod tests {
             &serde_json::json!("context_pack_lexical_only_v1"),
             "fast relevant strategy",
         )?;
+        ensure_equal(
+            &envelope["data"]["fastContent"]["strategy"]["recentLimit"],
+            &serde_json::json!(5),
+            "fast recent strategy limit",
+        )?;
+        ensure_equal(
+            &envelope["data"]["fastContent"]["strategy"]["relevantLimit"],
+            &serde_json::json!(5),
+            "fast relevant strategy limit",
+        )?;
         let memory_id = remembered.memory_id.to_string();
         for section in ["recent", "relevant"] {
             let item = envelope["data"]["fastContent"][section]
@@ -70368,6 +70393,9 @@ mod tests {
         ensure_equal(&human_exit, &ProcessExitCode::Success, "orient human exit")?;
         let human_output = String::from_utf8(human_stdout).map_err(|error| error.to_string())?;
         for expected in [
+            "Fast pack: up to 5 recent + 5 relevant, lexical",
+            "Fast recent items: 1",
+            "Fast relevant items: 1",
             "Recent memories:",
             "Task-relevant memories:",
             "Verify release checksums",
