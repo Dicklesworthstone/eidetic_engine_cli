@@ -1228,6 +1228,7 @@ impl SearchAdvisorySession {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn tracked_workspace_count(&self) -> usize {
         self.workspaces.len()
     }

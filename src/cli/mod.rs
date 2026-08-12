@@ -47246,10 +47246,12 @@ fn format_search_json(report: &SearchReport) -> String {
     format_search_json_with_mesh(report, MeshCommandMode::Off)
 }
 
+#[cfg(test)]
 fn format_search_json_with_mesh(report: &SearchReport, mesh_mode: MeshCommandMode) -> String {
     format_search_json_with_mesh_and_recalibration(report, mesh_mode, None, None)
 }
 
+#[cfg(test)]
 fn format_search_json_with_mesh_and_recalibration(
     report: &SearchReport,
     mesh_mode: MeshCommandMode,
@@ -47322,6 +47324,7 @@ fn format_search_toon(report: &SearchReport) -> String {
     format_search_toon_with_mesh(report, MeshCommandMode::Off)
 }
 
+#[cfg(test)]
 fn format_search_toon_with_mesh(report: &SearchReport, mesh_mode: MeshCommandMode) -> String {
     output::render_toon_from_json(&format_search_json_with_mesh(report, mesh_mode))
 }
