@@ -189,6 +189,20 @@ fn search_content_preview(content: &str, max_chars: usize) -> String {
 
 static SEARCH_INDEX_STATUS_CACHE: OnceLock<Mutex<HashMap<IndexStatusCacheKey, CachedIndexStatus>>> =
     OnceLock::new();
+#[cfg(feature = "lexical-bm25")]
+static PROCESS_LEXICAL_SEARCHER_CACHE: OnceLock<Mutex<Option<CachedLexicalSearcher>>> =
+    OnceLock::new();
+#[cfg(feature = "lexical-bm25")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LexicalSearcherCacheKey {
+    index_dir: PathBuf,
+    index_manifest_version: u64,
+}
+#[cfg(feature = "lexical-bm25")]
+struct CachedLexicalSearcher {
+    key: LexicalSearcherCacheKey,
+    searcher: Arc<dyn LexicalRead>,
+}
 #[cfg(test)]
 type BeforeSearchCollectHook = Box<dyn FnOnce(&asupersync::Cx)>;
 #[cfg(test)]
@@ -11740,8 +11754,50 @@ fn open_lexical_searcher(index_dir: &Path) -> Result<Option<Arc<dyn LexicalRead>
         return Ok(None);
     }
 
-    TantivyIndex::open(&lexical_dir)
-        .map(|lexical| Some(Arc::new(lexical) as Arc<dyn LexicalRead>))
+    let key = LexicalSearcherCacheKey {
+        index_dir: index_dir.to_path_buf(),
+        index_manifest_version: index_manifest_version_for_plan_cache(index_dir),
+    };
+    let cache = PROCESS_LEXICAL_SEARCHER_CACHE.get_or_init(|| Mutex::new(None));
+    let Ok(mut cached) = cache.lock() else {
+        return open_lexical_searcher_uncached(&lexical_dir).map(Some);
+    };
+    if let Some(entry) = cached.as_ref()
+        && entry.key == key
+    {
+        tracing::debug!(
+            target: "ee::search::index_cache",
+            index_dir = %index_dir.display(),
+            index_manifest_version = key.index_manifest_version,
+            cache_decision = "hit",
+            "reused process-scoped lexical searcher"
+        );
+        return Ok(Some(Arc::clone(&entry.searcher)));
+    }
+
+    // Index publication swaps the complete generation atomically. Drop the
+    // cached handle before opening the replacement so Tantivy's writer lock
+    // remains attached only to the published generation being served.
+    cached.take();
+    let searcher = open_lexical_searcher_uncached(&lexical_dir)?;
+    tracing::debug!(
+        target: "ee::search::index_cache",
+        index_dir = %index_dir.display(),
+        index_manifest_version = key.index_manifest_version,
+        cache_decision = "miss",
+        "opened and cached process-scoped lexical searcher"
+    );
+    *cached = Some(CachedLexicalSearcher {
+        key,
+        searcher: Arc::clone(&searcher),
+    });
+    Ok(Some(searcher))
+}
+
+#[cfg(feature = "lexical-bm25")]
+fn open_lexical_searcher_uncached(lexical_dir: &Path) -> Result<Arc<dyn LexicalRead>, String> {
+    TantivyIndex::open(lexical_dir)
+        .map(|lexical| Arc::new(lexical) as Arc<dyn LexicalRead>)
         .map_err(|error| {
             format!(
                 "Failed to open lexical index at {}: {error}",
@@ -15865,7 +15921,42 @@ mod tests {
         })
         .map_err(|error| error.to_string())??;
 
-        assert!(open_lexical_searcher(&index_dir)?.is_some());
+        let first_lexical = open_lexical_searcher(&index_dir)?
+            .ok_or_else(|| "rebuilt lexical index did not open".to_owned())?;
+        let second_lexical = open_lexical_searcher(&index_dir)?
+            .ok_or_else(|| "rebuilt lexical index disappeared".to_owned())?;
+        assert!(
+            Arc::ptr_eq(&first_lexical, &second_lexical),
+            "same published generation must reuse its process-scoped lexical reader"
+        );
+
+        let first_key = LexicalSearcherCacheKey {
+            index_dir: index_dir.clone(),
+            index_manifest_version: index_manifest_version_for_plan_cache(&index_dir),
+        };
+        std::fs::write(
+            index_dir.join("meta.json"),
+            r#"{"schema":"ee.index_metadata.v1","generation":2,"sourceGeneration":2}"#,
+        )
+        .map_err(|error| error.to_string())?;
+        let next_key = LexicalSearcherCacheKey {
+            index_dir: index_dir.clone(),
+            index_manifest_version: index_manifest_version_for_plan_cache(&index_dir),
+        };
+        assert_ne!(
+            first_key, next_key,
+            "a published-generation change must invalidate lexical reader reuse"
+        );
+        let stale_lexical = Arc::downgrade(&first_lexical);
+        drop(first_lexical);
+        drop(second_lexical);
+        let refreshed_lexical = open_lexical_searcher(&index_dir)?
+            .ok_or_else(|| "refreshed lexical generation did not open".to_owned())?;
+        assert!(
+            stale_lexical.upgrade().is_none(),
+            "the cache must release the prior published generation before reopening"
+        );
+        drop(refreshed_lexical);
 
         let config = TwoTierConfig {
             explain: true,

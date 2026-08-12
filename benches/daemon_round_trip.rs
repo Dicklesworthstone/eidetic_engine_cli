@@ -44,14 +44,10 @@ use ee::core::model::{
 };
 #[cfg(unix)]
 use ee::daemon::protocol::DaemonRequest;
-#[cfg(any(target_os = "linux", target_vendor = "apple"))]
-use ee::daemon::protocol::{DAEMON_SEARCH_REQUEST_SCHEMA_V2, METHOD_SEARCH};
-#[cfg(any(target_os = "linux", target_vendor = "apple"))]
-use ee::daemon::server::{
-    DaemonSearchResult, METHOD_SHUTDOWN, client_round_trip, client_round_trip_before,
-};
 #[cfg(unix)]
 use ee::daemon::server::{METHOD_CONTEXT, METHOD_ECHO, dispatch};
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+use ee::daemon::server::{METHOD_SHUTDOWN, client_round_trip};
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 use ee::db::{CreateMemoryInput, CreateModelRegistryInput, CreateWorkspaceInput, DbConnection};
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
@@ -726,87 +722,99 @@ struct DaemonDeepTimingObservation {
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-fn required_daemon_timing_ms(result: &JsonValue, field: &str) -> f64 {
-    result
-        .pointer(&format!("/timing/{field}/elapsedMs"))
+fn required_public_daemon_timing_ms(payload: &JsonValue, field: &str) -> f64 {
+    payload
+        .pointer(&format!("/data/daemonTiming/{field}/elapsedMs"))
         .and_then(JsonValue::as_f64)
         .filter(|elapsed| elapsed.is_finite() && *elapsed >= 0.0)
-        .unwrap_or_else(|| panic!("daemon timing field {field} missing or invalid: {result}"))
+        .unwrap_or_else(|| {
+            panic!("public daemon timing field {field} missing or invalid: {payload}")
+        })
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 fn run_daemon_deep_timing_probe(
+    ee_binary: &Path,
     fixture: &PrebuiltSearchFixture,
     daemon_socket: &Path,
     sequence: usize,
 ) -> DaemonDeepTimingObservation {
-    let workspace_id = fixture.workspace.display().to_string();
-    let mut request = DaemonRequest::new(
-        format!("bench-search-timing-{sequence:03}"),
-        BENCH_AGENT_ID,
-        METHOD_SEARCH,
-        json!({
-            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-            "query": SEARCH_QUERY,
-            "workspacePath": workspace_id,
-            "databasePath": fixture.database.display().to_string(),
-            "indexDir": fixture.index.display().to_string(),
-            "limit": 20,
-            "speed": "default",
-            "relevanceFloor": 0.0,
-            "sourceMode": "hybrid",
-            "strictSourceMode": true,
-            "memoryScope": "swarm"
-        }),
-    );
-    request.workspace_id = Some(fixture.workspace.display().to_string());
-    let response = client_round_trip_before(
-        daemon_socket,
-        &request,
-        Instant::now() + Duration::from_secs(120),
-    )
-    .unwrap_or_else(|error| panic!("daemon deep-timing round trip failed: {error}"));
+    let output = command_for_search(ee_binary, fixture, Some(daemon_socket))
+        .arg("--explain-performance")
+        .output()
+        .unwrap_or_else(|error| {
+            panic!("spawn public daemon deep-timing search {sequence}: {error}")
+        });
     assert!(
-        response.error.is_none(),
-        "daemon deep-timing search returned an error: {response:?}"
+        output.status.success(),
+        "public daemon deep-timing search {sequence} failed with {:?}: stdout={} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    let result = response
-        .result
-        .unwrap_or_else(|| panic!("daemon deep-timing search omitted its result"));
-    DaemonSearchResult::from_value(result.clone())
-        .unwrap_or_else(|error| panic!("daemon deep-timing response contract drifted: {error}"));
+    let payload: JsonValue = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "public daemon deep-timing search {sequence} emitted invalid JSON: {error}; stdout={}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
     assert_eq!(
-        result
-            .pointer("/response/data/embed_backend")
+        payload.pointer("/schema").and_then(JsonValue::as_str),
+        Some("ee.explain.performance.v1")
+    );
+    assert_eq!(
+        payload.pointer("/success").and_then(JsonValue::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        payload
+            .pointer("/data/executionPath")
+            .and_then(JsonValue::as_str),
+        Some("daemon")
+    );
+    assert_eq!(
+        payload
+            .pointer("/data/embedBackend")
             .and_then(JsonValue::as_str),
         Some("neural_local")
     );
-    assert!(!degradation_present(
-        result
-            .pointer("/response")
-            .unwrap_or_else(|| panic!("daemon deep-timing response missing canonical response")),
-        "embed_model_unavailable"
-    ));
-    let results = result
-        .pointer("/response/data/results")
+    let fallbacks = payload
+        .pointer("/data/fallbacks")
         .and_then(JsonValue::as_array)
-        .unwrap_or_else(|| panic!("daemon deep-timing response missing results"));
+        .unwrap_or_else(|| panic!("public daemon deep-timing response missing fallbacks"));
     assert!(
-        results.iter().any(|search_result| {
-            search_result.get("docId").and_then(JsonValue::as_str) == Some(SEARCH_TARGET_MEMORY_ID)
-                && search_result
-                    .get("fastScore")
-                    .and_then(JsonValue::as_f64)
-                    .is_some()
-        }),
-        "daemon deep-timing response omitted the semantic target result"
+        !fallbacks
+            .iter()
+            .any(|fallback| fallback.get("code").and_then(JsonValue::as_str)
+                == Some("daemon_search_fallback")),
+        "public daemon deep-timing search fell back in-process: {payload}"
+    );
+    let returned_hits = payload
+        .pointer("/data/search/returnedHits")
+        .and_then(JsonValue::as_u64)
+        .unwrap_or_else(|| panic!("public daemon deep-timing response omitted returnedHits"));
+    assert!(
+        returned_hits > 0,
+        "public daemon timing probe returned no hits"
+    );
+    // The performance envelope is deliberately content-redacted. Exercise the
+    // same public CLI path once more without the diagnostic projection so the
+    // benchmark keeps its exact result-array parity assertion.
+    let rendered = run_search_process(ee_binary, fixture, Some(daemon_socket));
+    assert_eq!(
+        returned_hits,
+        rendered
+            .results
+            .as_array()
+            .map_or(0, |results| results.len() as u64),
+        "public daemon timing hit count drifted from its canonical rendering"
     );
     DaemonDeepTimingObservation {
-        daemon_total_ms: required_daemon_timing_ms(&result, "daemonTotal"),
-        embedder_preparation_ms: required_daemon_timing_ms(&result, "embedderPreparation"),
-        index_open_ms: required_daemon_timing_ms(&result, "indexOpen"),
-        query_ms: required_daemon_timing_ms(&result, "query"),
-        results: JsonValue::Array(results.clone()),
+        daemon_total_ms: required_public_daemon_timing_ms(&payload, "daemonTotal"),
+        embedder_preparation_ms: required_public_daemon_timing_ms(&payload, "embedderPreparation"),
+        index_open_ms: required_public_daemon_timing_ms(&payload, "indexOpen"),
+        query_ms: required_public_daemon_timing_ms(&payload, "query"),
+        results: rendered.results,
     }
 }
 
@@ -971,7 +979,7 @@ fn run_warm_search_measurement(enforce_budgets: bool) {
     let daemon = RunningPublicDaemon::start(&ee_binary, &fixture);
     let daemon_start_ms = daemon_started.elapsed().as_secs_f64() * 1_000.0;
     let daemon_initialization =
-        run_daemon_deep_timing_probe(&fixture, daemon.socket_path(), usize::MAX);
+        run_daemon_deep_timing_probe(&ee_binary, &fixture, daemon.socket_path(), usize::MAX);
 
     let baseline_cold = run_search_process(&ee_binary, &fixture, None);
     let baseline_warm = run_search_process(&ee_binary, &fixture, Some(daemon.socket_path()));
@@ -1010,10 +1018,11 @@ fn run_warm_search_measurement(enforce_budgets: bool) {
         warm_core.push(warm.core_search_ms);
         warm_overhead.push((warm.wall_ms - warm.core_search_ms).max(0.0));
 
-        let timing = run_daemon_deep_timing_probe(&fixture, daemon.socket_path(), sequence);
+        let timing =
+            run_daemon_deep_timing_probe(&ee_binary, &fixture, daemon.socket_path(), sequence);
         assert_eq!(
             timing.results, expected_results,
-            "daemon deep-timing probe results drifted from the shared fixture baseline"
+            "public daemon timing probe results drifted from the shared fixture baseline"
         );
         daemon_total.push(timing.daemon_total_ms);
         embedder_preparation.push(timing.embedder_preparation_ms);
