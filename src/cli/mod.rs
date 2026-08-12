@@ -39230,26 +39230,8 @@ where
                 );
                 orient_component_data_from_envelope(&raw)
             }
-            Err(error) if context_cancellation_reason(&error).is_some() => {
-                return write_context_pack_error(&error, cli.wants_json(), stdout, stderr);
-            }
             Err(error) => {
-                degraded.push(orient_degradation_value(
-                    "orient_pack_unavailable",
-                    "warning",
-                    format!("Read-only context pack could not be assembled: {error}"),
-                    Some(format!(
-                        "Run `{}` to isolate lexical retrieval posture.",
-                        orient_pack_command(
-                            &workspace_path,
-                            &addressed_database_path,
-                            &addressed_index_dir,
-                            &args.task,
-                            args.max_tokens,
-                        )
-                    )),
-                ));
-                serde_json::Value::Null
+                return write_context_pack_error(&error, cli.wants_json(), stdout, stderr);
             }
         }
     };
@@ -70407,6 +70389,63 @@ mod tests {
             Some(Command::Orient(args)) => ensure_equal(&args.fast, &true, "orient fast alias"),
             other => Err(format!("expected orient command, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn orient_full_pack_failure_is_error_not_schema_invalid_success() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(&database_path).map_err(|error| error.to_string())?;
+
+        let workspace_arg = temp.path().display().to_string();
+        let database_arg = database_path.display().to_string();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run(
+            [
+                "ee",
+                "orient",
+                "schema-conformant full failure",
+                "--workspace",
+                workspace_arg.as_str(),
+                "--database",
+                database_arg.as_str(),
+                "--command-timeout-ms",
+                "1",
+                "--json",
+            ]
+            .iter()
+            .map(OsString::from),
+            &mut stdout,
+            &mut stderr,
+        );
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Storage,
+            "full orient pack failure exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "JSON full orient pack failure must not write human stderr",
+        )?;
+        let output = String::from_utf8(stdout).map_err(|error| error.to_string())?;
+        let envelope: serde_json::Value =
+            serde_json::from_str(&output).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &envelope["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "full orient pack failure schema",
+        )?;
+        ensure_equal(
+            &envelope["error"]["code"],
+            &serde_json::json!("storage"),
+            "full orient pack failure code",
+        )?;
+        ensure(
+            envelope.get("data").is_none(),
+            "full orient pack failure must not emit a successful data payload",
+        )
     }
 
     #[test]
