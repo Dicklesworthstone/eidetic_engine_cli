@@ -34,8 +34,10 @@ through to another cache or download.
 `EE_EMBED_DOWNLOAD=off` disables only the network step; it does not disable a
 verified local neural model. Search, pack, and full orient expose the actually
 executed `embed_backend` token as either `neural_local` or `hash_fallback`;
-fast orient is explicitly lexical-only and therefore does not claim neural
-execution.
+an invalid present registration also emits `embed_model_unavailable` on those
+full retrieval surfaces. Fast orient is explicitly lexical-only and therefore
+reports `hash_fallback` without claiming neural execution, even when a valid
+registered model is available for a later full retrieval.
 
 ## Runtime variables
 

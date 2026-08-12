@@ -867,6 +867,9 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
             query,
             "--workspace",
             workspace.workspace_arg()?,
+            "--source-mode",
+            "semantic_only",
+            "--strict-source-mode",
             "--relevance-floor",
             "0",
             "--json",
@@ -881,6 +884,14 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
         string_member(search_data, "status")?,
         "success",
         "registered search status",
+    )?;
+    ensure_eq_str(
+        search_data
+            .pointer("/metrics/sourceModeApplied")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "registered search sourceModeApplied missing".to_string())?,
+        "semantic_only",
+        "registered search applied source mode",
     )?;
     let search_results = search_data
         .get("results")
@@ -1031,6 +1042,9 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
             query,
             "--workspace",
             workspace.workspace_arg()?,
+            "--source-mode",
+            "semantic_only",
+            "--strict-source-mode",
             "--relevance-floor",
             "0",
             "--json",
@@ -1054,6 +1068,16 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
         .pointer("/data/results")
         .and_then(Value::as_array)
         .ok_or_else(|| "download-off registered search missing results".to_string())?;
+    ensure_eq_str(
+        download_off_json
+            .pointer("/data/metrics/sourceModeApplied")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                "download-off registered search sourceModeApplied missing".to_string()
+            })?,
+        "semantic_only",
+        "download-off registered search applied source mode",
+    )?;
     let download_off_result = download_off_results
         .iter()
         .find(|result| result.get("memoryId").and_then(Value::as_str) == Some(memory_id.as_str()));
@@ -1312,9 +1336,6 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         .xdg_data
         .join("ee/models/potion-multilingual-128M");
     materialize_regular_model_fixture(&fixture_model_dir, &fallback_cache_model_dir, &manifest)?;
-    let fallback_cache_before =
-        model_installation_metadata_state(&fallback_cache_model_dir, &manifest)?;
-
     let mut offline_env = network_tripwire.proxy_env();
     offline_env.push(("EE_EMBED_DOWNLOAD".to_string(), "off".to_string()));
     let query = "offline canonical semantic registry path";
@@ -1326,6 +1347,9 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
             query,
             "--workspace",
             workspace.workspace_arg()?,
+            "--source-mode",
+            "semantic_only",
+            "--strict-source-mode",
             "--relevance-floor",
             "0",
             "--json",
@@ -1335,6 +1359,14 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
     ensure_success(&search, "registry-path ee search")?;
     ensure_response_embed_backend(&search, "registry-path ee search", "neural_local")?;
     let search_json = stdout_json(&search, "registry-path ee search")?;
+    ensure_eq_str(
+        search_json
+            .pointer("/data/metrics/sourceModeApplied")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "registry-path sourceModeApplied missing".to_string())?,
+        "semantic_only",
+        "registry-path applied source mode",
+    )?;
     let remembered_hit = search_json
         .pointer("/data/results")
         .and_then(Value::as_array)
@@ -1725,6 +1757,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         "registry_path_missing_source",
         query,
         &offline_env,
+        &network_tripwire,
     )?;
 
     update_model2vec_registry_entry(
@@ -1741,6 +1774,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         "registry_path_unregistered_source",
         query,
         &offline_env,
+        &network_tripwire,
     )?;
 
     update_model2vec_registry_entry(
@@ -1757,6 +1791,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         "registry_path_unavailable_row",
         query,
         &offline_env,
+        &network_tripwire,
     )?;
 
     let unverified_model_dir = corruption_parent.join("unverified-artifact");
@@ -1776,6 +1811,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         "registry_path_unverified_source",
         query,
         &offline_env,
+        &network_tripwire,
     )?;
 
     update_model2vec_registry_entry(
@@ -1792,7 +1828,56 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         "registry_path_mismatched_name",
         query,
         &offline_env,
+        &network_tripwire,
     )?;
+
+    update_model2vec_registry_entry(
+        &workspace,
+        BUNDLED_EMBEDDING_MODEL_ID,
+        ModelRegistryStatus::Available,
+        Some(path_string(&canonical_registered_model_dir)),
+        Some(verified_hash.clone()),
+        Some(BUNDLED_EMBEDDING_DIMENSION),
+        Some(ModelDistanceMetric::Cosine),
+    )?;
+    let valid_metadata_json = model2vec_registry_entry(&workspace)?.metadata_json;
+    update_model2vec_registry_metadata_json(&workspace, Some("{not-json".to_string()))?;
+    let malformed_metadata = run_offline_registry_fallback_search(
+        &workspace,
+        "registry_path_malformed_metadata",
+        query,
+        &offline_env,
+        &network_tripwire,
+    )?;
+    let malformed_metadata_pack = run_offline_registry_fallback_surface(
+        &workspace,
+        "registry_path_malformed_metadata_pack",
+        &[
+            "pack",
+            query,
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--max-tokens",
+            "800",
+            "--json",
+        ],
+        &offline_env,
+        &network_tripwire,
+    )?;
+    let malformed_metadata_orient = run_offline_registry_fallback_surface(
+        &workspace,
+        "registry_path_malformed_metadata_orient",
+        &[
+            "orient",
+            query,
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--json",
+        ],
+        &offline_env,
+        &network_tripwire,
+    )?;
+    update_model2vec_registry_metadata_json(&workspace, valid_metadata_json)?;
 
     update_model2vec_registry_entry(
         &workspace,
@@ -1808,6 +1893,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         "registry_path_malformed_hash",
         query,
         &offline_env,
+        &network_tripwire,
     )?;
 
     update_model2vec_registry_entry(
@@ -1824,6 +1910,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         "registry_path_mismatched_hash",
         query,
         &offline_env,
+        &network_tripwire,
     )?;
 
     update_model2vec_registry_entry(
@@ -1840,6 +1927,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         "registry_path_mismatched_dimension",
         query,
         &offline_env,
+        &network_tripwire,
     )?;
 
     update_model2vec_registry_entry(
@@ -1856,6 +1944,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         "registry_path_mismatched_distance",
         query,
         &offline_env,
+        &network_tripwire,
     )?;
 
     let nonlocal_source = "https://models.invalid/potion-multilingual-128M";
@@ -1873,6 +1962,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         "registry_path_nonlocal_source",
         query,
         &offline_env,
+        &network_tripwire,
     )?;
 
     let symlinked_model_dir = corruption_parent.join("symlinked-model-source");
@@ -1896,6 +1986,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         "registry_path_symlinked_source",
         query,
         &offline_env,
+        &network_tripwire,
     )?;
 
     let original_permissions = fs::metadata(&canonical_registered_model_dir)
@@ -1919,6 +2010,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         "registry_path_permission_denied_source",
         query,
         &offline_env,
+        &network_tripwire,
     );
     fs::set_permissions(&canonical_registered_model_dir, original_permissions)
         .map_err(|error| format!("restore registered-model permissions: {error}"))?;
@@ -1986,6 +2078,9 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         ("unavailable", &unavailable),
         ("unverified", &unverified),
         ("mismatched_name", &mismatched_name),
+        ("malformed_metadata", &malformed_metadata),
+        ("malformed_metadata_pack", &malformed_metadata_pack),
+        ("malformed_metadata_orient", &malformed_metadata_orient),
         ("malformed_hash", &malformed_hash),
         ("mismatched_hash", &mismatched_hash),
         ("mismatched_dimension", &mismatched_dimension),
@@ -2027,6 +2122,9 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         ("unavailable", &unavailable),
         ("unverified", &unverified),
         ("mismatched_name", &mismatched_name),
+        ("malformed_metadata", &malformed_metadata),
+        ("malformed_metadata_pack", &malformed_metadata_pack),
+        ("malformed_metadata_orient", &malformed_metadata_orient),
         ("malformed_hash", &malformed_hash),
         ("mismatched_hash", &mismatched_hash),
         ("mismatched_dimension", &mismatched_dimension),
@@ -2051,13 +2149,6 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         return Err(format!(
             "offline registry resolution created cache path {}",
             unexpected_registry_cache.display()
-        ));
-    }
-    let fallback_cache_after =
-        model_installation_metadata_state(&fallback_cache_model_dir, &manifest)?;
-    if fallback_cache_after != fallback_cache_before {
-        return Err(format!(
-            "invalid registry resolution mutated the fallback cache: before={fallback_cache_before:?} after={fallback_cache_after:?}"
         ));
     }
     network_tripwire.assert_unused()
@@ -2128,13 +2219,54 @@ fn update_model2vec_registry_entry(
 }
 
 #[cfg(unix)]
+fn update_model2vec_registry_metadata_json(
+    workspace: &E2eWorkspace,
+    metadata_json: Option<String>,
+) -> TestResult<StoredModelRegistryEntry> {
+    let entry = model2vec_registry_entry(workspace)?;
+    let database_path = workspace.path.join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("open {}: {error}", database_path.display()))?;
+    let updated = connection
+        .update_model_registry_entry(
+            &entry.id,
+            &CreateModelRegistryInput {
+                workspace_id: entry.workspace_id.clone(),
+                provider: entry.provider,
+                model_name: entry.model_name.clone(),
+                purpose: entry.purpose,
+                dimension: entry.dimension,
+                distance_metric: entry.distance_metric,
+                status: entry.status,
+                version: entry.version.clone(),
+                source_uri: entry.source_uri.clone(),
+                content_hash: entry.content_hash.clone(),
+                metadata_json,
+                last_checked_at: entry.last_checked_at.clone(),
+            },
+        )
+        .map_err(|error| format!("update Model2Vec registry metadata: {error}"))?;
+    if !updated {
+        return Err(format!(
+            "Model2Vec registry row {} metadata was not updated",
+            entry.id
+        ));
+    }
+    connection
+        .get_model_registry_entry(&entry.id)
+        .map_err(|error| format!("read updated Model2Vec registry metadata: {error}"))?
+        .ok_or_else(|| format!("updated Model2Vec registry row {} missing", entry.id))
+}
+
+#[cfg(unix)]
 fn run_offline_registry_fallback_search(
     workspace: &E2eWorkspace,
     phase: &str,
     query: &str,
     env: &[(String, String)],
+    network_tripwire: &NetworkTripwire,
 ) -> TestResult<Output> {
-    let output = run_ee_with_env(
+    let output = run_offline_registry_fallback_surface(
         workspace,
         phase,
         &[
@@ -2147,10 +2279,57 @@ fn run_offline_registry_fallback_search(
             "--json",
         ],
         env,
+        network_tripwire,
     )?;
+    let response = stdout_json(&output, phase)?;
+    ensure_eq_str(
+        response
+            .pointer("/data/metrics/sourceModeApplied")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{phase} sourceModeApplied missing"))?,
+        "lexical_only",
+        &format!("{phase} applied source mode"),
+    )?;
+    ensure_eq_bool(
+        response
+            .pointer("/data/metrics/fallbackApplied")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| format!("{phase} fallbackApplied missing"))?,
+        true,
+        &format!("{phase} source-mode fallback"),
+    )?;
+    ensure_eq_u64(
+        response
+            .pointer("/data/metrics/fastScoreCount")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("{phase} fastScoreCount missing"))?,
+        0,
+        &format!("{phase} neural fast-score count"),
+    )?;
+    Ok(output)
+}
+
+#[cfg(unix)]
+fn run_offline_registry_fallback_surface(
+    workspace: &E2eWorkspace,
+    phase: &str,
+    args: &[&str],
+    env: &[(String, String)],
+    network_tripwire: &NetworkTripwire,
+) -> TestResult<Output> {
+    let model_cache_root = workspace.xdg_data.join("ee/models");
+    let cache_before = model_cache_artifact_state(&model_cache_root)?;
+    let output = run_ee_with_env(workspace, phase, args, env)?;
     ensure_success(&output, phase)?;
     ensure_response_embed_backend(&output, phase, "hash_fallback")?;
     ensure_degraded_code_count(&output, phase, "embed_model_unavailable", 1)?;
+    network_tripwire.assert_unused()?;
+    let cache_after = model_cache_artifact_state(&model_cache_root)?;
+    if cache_after != cache_before {
+        return Err(format!(
+            "{phase} mutated the model cache after rejecting the registry row: before={cache_before:?} after={cache_after:?}"
+        ));
+    }
     Ok(output)
 }
 
@@ -2185,26 +2364,75 @@ fn database_artifact_state(workspace: &E2eWorkspace) -> TestResult<Vec<(String, 
 }
 
 #[cfg(unix)]
-fn model_installation_metadata_state(
-    model_dir: &Path,
-    manifest: &ModelManifest,
-) -> TestResult<Vec<(String, u64, u32)>> {
-    let mut relative_paths = manifest
-        .files
-        .iter()
-        .map(|file| file.name.clone())
-        .collect::<Vec<_>>();
-    relative_paths.push(".verified".to_string());
-    relative_paths.sort_unstable();
-    relative_paths
-        .into_iter()
-        .map(|relative_path| {
-            let path = model_dir.join(&relative_path);
-            let metadata = fs::symlink_metadata(&path)
-                .map_err(|error| format!("inspect model cache {}: {error}", path.display()))?;
-            Ok((relative_path, metadata.len(), metadata.permissions().mode()))
-        })
-        .collect()
+#[derive(Debug, Eq, PartialEq)]
+struct ModelCacheArtifactState {
+    relative_path: String,
+    kind: &'static str,
+    length: u64,
+    mode: u32,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    inode: u64,
+    symlink_target: Option<String>,
+}
+
+#[cfg(unix)]
+fn model_cache_artifact_state(root: &Path) -> TestResult<Vec<ModelCacheArtifactState>> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+
+    fn collect(root: &Path, path: &Path, state: &mut Vec<ModelCacheArtifactState>) -> TestResult {
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| format!("inspect model cache {}: {error}", path.display()))?;
+        let file_type = metadata.file_type();
+        let kind = if file_type.is_dir() {
+            "directory"
+        } else if file_type.is_file() {
+            "file"
+        } else if file_type.is_symlink() {
+            "symlink"
+        } else {
+            "other"
+        };
+        let relative_path = path
+            .strip_prefix(root)
+            .map_err(|error| format!("relativize model cache {}: {error}", path.display()))?;
+        state.push(ModelCacheArtifactState {
+            relative_path: if relative_path.as_os_str().is_empty() {
+                ".".to_string()
+            } else {
+                path_string(relative_path)
+            },
+            kind,
+            length: metadata.len(),
+            mode: metadata.mode(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            inode: metadata.ino(),
+            symlink_target: file_type
+                .is_symlink()
+                .then(|| fs::read_link(path).map(|target| path_string(&target)))
+                .transpose()
+                .map_err(|error| format!("read model-cache symlink {}: {error}", path.display()))?,
+        });
+
+        if file_type.is_dir() {
+            let mut children = fs::read_dir(path)
+                .map_err(|error| format!("read model cache {}: {error}", path.display()))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("enumerate model cache {}: {error}", path.display()))?;
+            children.sort_by_key(|entry| entry.file_name());
+            for child in children {
+                collect(root, &child.path(), state)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut state = Vec::new();
+    collect(root, root, &mut state)?;
+    Ok(state)
 }
 
 #[cfg(unix)]

@@ -5071,15 +5071,15 @@ impl RegisteredModel2VecCache {
 struct DefaultSearchEmbedder {
     stack: EmbedderStack,
     lazy_model2vec: Option<Arc<EeLazyModel2VecEmbedder>>,
-    source: EmbedModelSource,
+    model_resolution: EmbedModelResolution,
 }
 
 impl DefaultSearchEmbedder {
-    fn ready(stack: EmbedderStack, source: EmbedModelSource) -> Self {
+    fn ready(stack: EmbedderStack, model_resolution: EmbedModelResolution) -> Self {
         Self {
             stack,
             lazy_model2vec: None,
-            source,
+            model_resolution,
         }
     }
 }
@@ -5184,7 +5184,7 @@ fn default_search_embedder_for_settings(settings: &EeEmbedderSettings) -> Defaul
                     );
                     return DefaultSearchEmbedder::ready(
                         stack_with_hash_quality_fallback(stack),
-                        settings.local_source,
+                        EmbedModelResolution::ready(settings.local_source),
                     );
                 }
                 Err(_) => {
@@ -5203,14 +5203,14 @@ fn default_search_embedder_for_settings(settings: &EeEmbedderSettings) -> Defaul
         }
         return DefaultSearchEmbedder::ready(
             hash_fallback_embedder_stack(),
-            EmbedModelSource::DeterministicHash,
+            EmbedModelResolution::deterministic_hash(),
         );
     }
 
     match EmbedderStack::auto_detect_with(Some(&settings.model_root)) {
         Ok(stack) if stack.fast().is_semantic() => DefaultSearchEmbedder::ready(
             stack_with_hash_quality_fallback(stack),
-            settings.local_source,
+            EmbedModelResolution::ready(settings.local_source),
         ),
         Ok(stack) => {
             tracing::info!(
@@ -5258,7 +5258,7 @@ fn ee_auto_download_embedder(model_root: PathBuf) -> DefaultSearchEmbedder {
     DefaultSearchEmbedder {
         stack: EmbedderStack::from_parts(fast_embedder, None),
         lazy_model2vec: Some(lazy_model2vec),
-        source: EmbedModelSource::Downloaded,
+        model_resolution: EmbedModelResolution::ready(EmbedModelSource::Downloaded),
     }
 }
 
@@ -5792,6 +5792,19 @@ impl EeLazyModel2VecEmbedder {
     }
 }
 
+fn executed_model_resolution(
+    selected: &EmbedModelResolution,
+    backend: EmbedBackend,
+) -> EmbedModelResolution {
+    if backend == EmbedBackend::NeuralLocal {
+        EmbedModelResolution::ready(selected.source)
+    } else if selected.source == EmbedModelSource::RegistryRejected {
+        selected.clone()
+    } else {
+        EmbedModelResolution::deterministic_hash()
+    }
+}
+
 /// Resolve and initialize the process-default semantic embedder before a
 /// caller acquires a database read snapshot.
 ///
@@ -5830,11 +5843,7 @@ pub(crate) async fn prepare_default_search_embedder(
     } else {
         EmbedBackend::HashFallback
     };
-    let model_resolution = if backend == EmbedBackend::NeuralLocal {
-        EmbedModelResolution::ready(selection.source)
-    } else {
-        EmbedModelResolution::deterministic_hash()
-    };
+    let model_resolution = executed_model_resolution(&selection.model_resolution, backend);
     Ok(EmbedderPreparation::new(
         backend,
         model_resolution,
@@ -5888,10 +5897,7 @@ pub(crate) async fn prepare_search_embedder_for_workspace(
                     // a valid machine cache cannot contradict the workspace
                     // rejection and make hash execution look neural.
                     let _ = DEFAULT_SEARCH_EMBEDDER.get_or_init(|| {
-                        DefaultSearchEmbedder::ready(
-                            stack.clone(),
-                            EmbedModelSource::RegistryRejected,
-                        )
+                        DefaultSearchEmbedder::ready(stack.clone(), model_resolution.clone())
                     });
                     return Ok(EmbedderPreparation::new(
                         EmbedBackend::HashFallback,
@@ -8075,12 +8081,18 @@ mod tests {
     #[test]
     fn registry_rejection_preparation_is_explicit_hash_truth() -> TestResult {
         let stack = hash_fallback_embedder_stack();
+        let rejected = EmbedModelResolution::registry_rejected(
+            "mdl_rejected_fixture",
+            EmbedRegistryRejectionReason::SourceSymlink,
+        );
+        let executed = executed_model_resolution(&rejected, EmbedBackend::HashFallback);
+        ensure(
+            executed == rejected,
+            "executed hash resolution must retain the exact registry rejection",
+        )?;
         let preparation = EmbedderPreparation::new(
             EmbedBackend::HashFallback,
-            EmbedModelResolution::registry_rejected(
-                "mdl_rejected_fixture",
-                EmbedRegistryRejectionReason::SourceSymlink,
-            ),
+            executed,
             Duration::ZERO,
             stack.fast_arc(),
         );

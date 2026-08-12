@@ -256,7 +256,7 @@ impl EmbedModelResolution {
     }
 
     #[must_use]
-    pub const fn is_valid_for_backend(&self, backend: EmbedBackend) -> bool {
+    pub fn is_valid_for_backend(&self, backend: EmbedBackend) -> bool {
         self.source.is_valid_for_backend(backend)
             && matches!(
                 (backend, self.outcome),
@@ -271,6 +271,16 @@ impl EmbedModelResolution {
                     EmbedModelResolutionOutcome::Rejected
                 )
             )
+            && match (&self.registry_rejection, self.outcome) {
+                (
+                    None,
+                    EmbedModelResolutionOutcome::Ready | EmbedModelResolutionOutcome::Fallback,
+                ) => true,
+                (Some(rejection), EmbedModelResolutionOutcome::Rejected) => {
+                    !rejection.registry_id.is_empty()
+                }
+                _ => false,
+            }
     }
 }
 
@@ -1823,6 +1833,19 @@ mod tests {
                 }
             })
         );
+
+        let missing_rejection = EmbedModelResolution {
+            outcome: EmbedModelResolutionOutcome::Rejected,
+            source: EmbedModelSource::RegistryRejected,
+            registry_rejection: None,
+        };
+        assert!(!missing_rejection.is_valid_for_backend(EmbedBackend::HashFallback));
+        let unexpected_rejection = EmbedModelResolution {
+            outcome: EmbedModelResolutionOutcome::Fallback,
+            source: EmbedModelSource::DeterministicHash,
+            registry_rejection: rejected.registry_rejection,
+        };
+        assert!(!unexpected_rejection.is_valid_for_backend(EmbedBackend::HashFallback));
         Ok(())
     }
 
