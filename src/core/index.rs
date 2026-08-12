@@ -5885,7 +5885,7 @@ pub(crate) async fn prepare_search_embedder_for_workspace(
     database_path: &Path,
 ) -> Result<EmbedderPreparation, SearchError> {
     let started = Instant::now();
-    if database_path.exists() {
+    if configured_embedder_model_root().is_none() && database_path.exists() {
         let db = DbConnection::open_file_read_only(database_path).map_err(|error| {
             SearchError::SubsystemError {
                 subsystem: "model registry",

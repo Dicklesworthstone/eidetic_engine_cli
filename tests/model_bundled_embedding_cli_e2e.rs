@@ -1552,6 +1552,62 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         Some("{registry-order-invalid".to_string()),
     )?;
 
+    // An explicit verified model directory is the operator's highest-priority
+    // selection. A malformed workspace registry row must not shadow it or
+    // force a hash/lexical fallback.
+    let explicit_override = run_ee_with_env(
+        &rejected_workspace,
+        "registry_order_explicit_override_beats_rejected_registry",
+        &[
+            "search",
+            query,
+            "--workspace",
+            rejected_workspace.workspace_arg()?,
+            "--source-mode",
+            "semantic_only",
+            "--strict-source-mode",
+            "--relevance-floor",
+            "0",
+            "--json",
+        ],
+        &bootstrap_env,
+    )?;
+    ensure_success(
+        &explicit_override,
+        "explicit model override over rejected registry",
+    )?;
+    ensure_response_embed_backend(
+        &explicit_override,
+        "explicit model override over rejected registry",
+        "neural_local",
+    )?;
+    let explicit_override_json = stdout_json(
+        &explicit_override,
+        "explicit model override over rejected registry",
+    )?;
+    ensure_eq_str(
+        explicit_override_json
+            .pointer("/data/metrics/sourceModeApplied")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "explicit override sourceModeApplied missing".to_string())?,
+        "semantic_only",
+        "explicit override applied source mode",
+    )?;
+    ensure_u64_at_least(
+        explicit_override_json
+            .pointer("/data/metrics/fastScoreCount")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "explicit override fastScoreCount missing".to_string())?,
+        1,
+        "explicit override neural score count",
+    )?;
+    ensure_degraded_code_count(
+        &explicit_override,
+        "explicit model override degradation",
+        "embed_model_unavailable",
+        0,
+    )?;
+
     let registry_before_daemon = model2vec_registry_entry(&workspace)?;
     ensure_eq_str(
         registry_before_daemon
