@@ -104,6 +104,7 @@ pub struct JsonlImportIssue {
     pub code: String,
     pub severity: JsonlImportIssueSeverity,
     pub message: String,
+    pub repair: Option<String>,
 }
 
 impl JsonlImportIssue {
@@ -113,6 +114,7 @@ impl JsonlImportIssue {
             code: code.to_owned(),
             severity: JsonlImportIssueSeverity::Info,
             message: message.into(),
+            repair: None,
         }
     }
 
@@ -122,6 +124,7 @@ impl JsonlImportIssue {
             code: code.to_owned(),
             severity: JsonlImportIssueSeverity::Error,
             message: message.into(),
+            repair: None,
         }
     }
 
@@ -131,6 +134,7 @@ impl JsonlImportIssue {
             code: code.to_owned(),
             severity: JsonlImportIssueSeverity::Warning,
             message: message.into(),
+            repair: None,
         }
     }
 }
@@ -254,22 +258,59 @@ impl JsonlImportReport {
                     "code": issue.code,
                     "severity": issue.severity.as_str(),
                     "message": issue.message,
+                    "repair": issue.repair,
                 })
             }).collect::<Vec<_>>(),
         })
     }
 
+    /// Response-level degradations caused by a completed import whose derived
+    /// search-index publication did not converge. Validation and conflict
+    /// diagnostics remain in `data.issues[]`; they are not silently promoted
+    /// into unrelated response degradations.
+    #[must_use]
+    pub fn degraded_json(&self) -> Vec<JsonValue> {
+        self.issues
+            .iter()
+            .filter(|issue| issue.code == "import_index_publish_failed")
+            .map(|issue| {
+                json!({
+                    "code": issue.code,
+                    "severity": issue.severity.as_str(),
+                    "message": issue.message,
+                    "repair": issue.repair,
+                })
+            })
+            .collect()
+    }
+
     #[must_use]
     pub fn human_summary(&self) -> String {
         let mode = if self.dry_run { "DRY RUN: " } else { "" };
-        format!(
+        let mut summary = format!(
             "{mode}JSONL import {status}: {imported} imported, {skipped} duplicates, {issues} issue(s) from {memories} memory record(s)\n",
             status = self.status,
             imported = self.memories_imported,
             skipped = self.memories_skipped_duplicate,
             issues = self.issues.len(),
             memories = self.memory_records,
-        )
+        );
+        for issue in self
+            .issues
+            .iter()
+            .filter(|issue| issue.code == "import_index_publish_failed")
+        {
+            summary.push_str(&format!(
+                "  [{}] {}: {}\n",
+                issue.severity.as_str(),
+                issue.code,
+                issue.message
+            ));
+            if let Some(repair) = issue.repair.as_deref() {
+                summary.push_str(&format!("    Repair: {repair}\n"));
+            }
+        }
+        summary
     }
 }
 
@@ -601,8 +642,10 @@ pub fn import_jsonl_records(
     // untouched with an explicit conflict signal — never overwritten or
     // resurrected (ADR 0086 TC-D14).
     let mut to_insert = Vec::new();
+    let mut publication_memory_ids = Vec::new();
     let mut skipped_duplicate = 0_u32;
     for memory in prepared.memories {
+        publication_memory_ids.push(memory.id.clone());
         match connection.get_memory(&memory.id)? {
             Some(existing) => {
                 skipped_duplicate = skipped_duplicate.saturating_add(1);
@@ -674,20 +717,25 @@ pub fn import_jsonl_records(
                     details: Some(memory.details.clone()),
                 },
             )?;
-            // bd-index-auto-freshness-m5kwf: an import is a real write path.
-            // Publish the same durable single-document index work remember
-            // publishes, so the post-commit drain converges the derived index
-            // instead of stranding generations behind a manual rebuild.
-            connection.insert_search_index_job(
-                &import_search_index_job_id(&memory.id),
-                &CreateSearchIndexJobInput {
-                    workspace_id: memory.input.workspace_id.clone(),
-                    job_type: SearchIndexJobType::SingleDocument,
-                    document_source: Some("memory".to_owned()),
-                    document_id: Some(memory.id.clone()),
-                    documents_total: 1,
-                },
-            )?;
+        }
+        // bd-index-auto-freshness-m5kwf: every valid imported identity needs
+        // durable publication work. Reimports preserve an existing logical
+        // job, while legacy duplicates that predate this lane receive their
+        // missing deterministic job before the post-commit drain.
+        for memory_id in &publication_memory_ids {
+            let job_id = import_search_index_job_id(memory_id);
+            if connection.get_search_index_job(&job_id)?.is_none() {
+                connection.insert_search_index_job(
+                    &job_id,
+                    &CreateSearchIndexJobInput {
+                        workspace_id: workspace_id.clone(),
+                        job_type: SearchIndexJobType::SingleDocument,
+                        document_source: Some("memory".to_owned()),
+                        document_id: Some(memory_id.clone()),
+                        documents_total: 1,
+                    },
+                )?;
+            }
         }
         Ok(())
     })?;
@@ -700,11 +748,12 @@ pub fn import_jsonl_records(
         total.saturating_add(memory.tag_count)
     });
     report.imported_memory_ids = to_insert.into_iter().map(|memory| memory.id).collect();
-    if !report.imported_memory_ids.is_empty() {
+    if !publication_memory_ids.is_empty() {
         // The rows above are durable; converge the derived index the same way
-        // remember and batch remember do. A drain failure downgrades to a
-        // truthful non-fatal issue while the durable jobs stay pending and
-        // retryable by the next writer (bd-index-auto-freshness-m5kwf).
+        // remember and batch remember do. Identical reimports also enter this
+        // path so a prior failed deterministic job is requeued and retried.
+        // A drain failure downgrades to a truthful non-fatal issue while the
+        // durable jobs remain retryable (bd-index-auto-freshness-m5kwf).
         let index_dir = workspace_path
             .join(".ee")
             .join(crate::core::index::DEFAULT_INDEX_SUBDIR);
@@ -763,8 +812,9 @@ pub fn import_jsonl_records(
                 code: "import_index_publish_failed".to_owned(),
                 severity: JsonlImportIssueSeverity::Warning,
                 message: format!(
-                    "Imported memories are durable, but automatic publication of durable search-index jobs did not complete: {failure}. Search may omit imported memories until the durable jobs are retried. Run `{repair}`."
+                    "Imported memories are durable, but automatic publication of durable search-index jobs did not complete: {failure}. Search may omit imported memories until the durable jobs are retried."
                 ),
+                repair: Some(repair),
             });
         }
     }
@@ -2898,7 +2948,7 @@ mod tests {
         let report = import_jsonl_records(&JsonlImportOptions {
             workspace_path: workspace.clone(),
             database_path: None,
-            source_path: source,
+            source_path: source.clone(),
             dry_run: false,
         })
         .map_err(|error| error.to_string())?;
@@ -2926,9 +2976,40 @@ mod tests {
                 .message
                 .contains("automatic publication of durable search-index jobs did not complete")
                 && issue.message.contains("Search may omit imported memories")
-                && issue.message.contains(&format!("Run `{expected_repair}`")),
+                && issue.repair.as_deref() == Some(expected_repair.as_str()),
             true,
             "publication issue carries exact failure truth and shell-safe repair",
+        )?;
+        ensure(
+            report.degraded_json(),
+            vec![json!({
+                "code": "import_index_publish_failed",
+                "severity": "warning",
+                "message": issue.message,
+                "repair": expected_repair,
+            })],
+            "publication failure is a response-level degradation",
+        )?;
+        let data = report.data_json();
+        let issue_json = data["issues"]
+            .as_array()
+            .and_then(|issues| {
+                issues.iter().find(|candidate| {
+                    candidate["code"].as_str() == Some("import_index_publish_failed")
+                })
+            })
+            .ok_or("machine report omitted publication failure issue")?;
+        ensure(
+            issue_json["repair"].as_str(),
+            Some(expected_repair.as_str()),
+            "machine issue carries structured repair",
+        )?;
+        let human = report.human_summary();
+        ensure(
+            human.contains("[warning] import_index_publish_failed")
+                && human.contains(&format!("Repair: {expected_repair}")),
+            true,
+            "human output surfaces the publication failure and repair",
         )?;
 
         let connection = DbConnection::open(DatabaseConfig::file(workspace.join(".ee/ee.db")))
@@ -2958,6 +3039,91 @@ mod tests {
             }),
             true,
             "noncompleted publication leaves durable retryable index work",
+        )?;
+
+        // Preserve the failed symlink as evidence while making the canonical
+        // index path available. An identical reimport must requeue the SAME
+        // deterministic failed job even though it inserts no new memory row.
+        fs::rename(&index_dir, workspace.join(".ee/index-publish-blocker-link"))
+            .map_err(|error| error.to_string())?;
+        let retry = import_jsonl_records(&JsonlImportOptions {
+            workspace_path: workspace.clone(),
+            database_path: None,
+            source_path: source,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(retry.memories_imported, 0, "reimport inserts no duplicate")?;
+        ensure(
+            retry.memories_skipped_duplicate,
+            1,
+            "reimport recognizes the durable memory",
+        )?;
+        ensure(
+            retry
+                .issues
+                .iter()
+                .any(|issue| issue.code == "import_index_publish_failed"),
+            false,
+            "reimport retries and completes prior failed publication",
+        )?;
+        let retried_job = connection
+            .get_search_index_job(&import_search_index_job_id(
+                "mem_01234567890123456789012345",
+            ))
+            .map_err(|error| error.to_string())?
+            .ok_or("deterministic import index job disappeared")?;
+        ensure(
+            retried_job.status_enum(),
+            Some(crate::db::SearchIndexJobStatus::Completed),
+            "same deterministic job completed after retry",
+        )?;
+        let status =
+            crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                workspace_path: workspace.clone(),
+                database_path: None,
+                index_dir: None,
+            })
+            .map_err(|error| format!("index status after retry: {error:?}"))?;
+        ensure(
+            status.health == crate::core::index::IndexHealth::Ready
+                && status.db_generation.is_some()
+                && status.db_generation == status.index_generation,
+            true,
+            "retry converges the index to the committed database generation",
+        )?;
+        let search = crate::core::search::run_search_with_filters(
+            &crate::core::search::SearchOptions {
+                workspace_path: workspace,
+                database_path: None,
+                index_dir: None,
+                query: "cargo fmt release".to_owned(),
+                limit: 5,
+                speed: crate::search::SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Workspace,
+                strict_scope: false,
+            },
+            None,
+            &[],
+        )
+        .map_err(|error| format!("post-retry search: {error:?}"))?;
+        ensure(
+            search
+                .results
+                .iter()
+                .any(|hit| hit.doc_id == "mem_01234567890123456789012345"),
+            true,
+            "retried import memory is immediately searchable",
         )
     }
 

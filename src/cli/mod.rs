@@ -151,7 +151,7 @@ use crate::core::install::{
     InstallCheckOptions, InstallExecutionResult, InstallPlanOptions, check_install,
     execute_install_plan, plan_install,
 };
-use crate::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
+use crate::core::jsonl_import::{JsonlImportOptions, JsonlImportReport, import_jsonl_records};
 use crate::core::lab::{
     AgentWorkloadReplayOptions as LabAgentWorkloadReplayOptions,
     CaptureOptions as LabCaptureOptions, CounterfactualOptions as LabCounterfactualOptions,
@@ -22917,26 +22917,15 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &report.human_summary())
             }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &format!(
-                    "IMPORT_JSONL|{}|{}|{}|{}\n",
-                    report.status,
-                    report.memory_records,
-                    report.memories_imported,
-                    report.memories_skipped_duplicate
-                ),
-            ),
+            output::Renderer::Toon => {
+                let json = jsonl_import_response_v2(&report);
+                write_stdout(stdout, &output::render_toon_from_json(&json.to_string()))
+            }
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => {
-                let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V2,
-                    "success": true,
-                    "data": report.data_json(),
-                    "degraded": [],
-                });
+                let json = jsonl_import_response_v2(&report);
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
         },
@@ -22948,6 +22937,15 @@ where
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
     }
+}
+
+fn jsonl_import_response_v2(report: &JsonlImportReport) -> serde_json::Value {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": report.data_json(),
+        "degraded": report.degraded_json(),
+    })
 }
 
 fn handle_import_eidetic_legacy<W, E>(

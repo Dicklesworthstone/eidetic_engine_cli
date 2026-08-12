@@ -16,7 +16,7 @@
       "ee init --workspace .",
       "# Replace the active index directory with a symlink so the real publisher claims the durable job and then refuses publication."
     ],
-    "invocation": "ee import jsonl --workspace . --source-path export.jsonl --json"
+    "invocation": "ee import jsonl --workspace . --source export.jsonl --json"
   },
   "expected_emission": {
     "code": "import_index_publish_failed",

@@ -147,6 +147,17 @@ fn write_jsonl_with_blank_content(path: &Path) -> TestResult {
     fs::write(path, jsonl).map_err(|e| format!("write jsonl: {e}"))
 }
 
+fn write_valid_jsonl(path: &Path) -> TestResult {
+    let jsonl = [
+        r#"{"schema":"ee.export.header.v1","format_version":1,"created_at":"2026-04-30T00:00:00Z","workspace_id":"wsp_01234567890123456789012345","workspace_path":"/source","export_scope":"memories","redaction_level":"none","record_count":3,"ee_version":"0.1.0","hostname":null,"export_id":"exp-001","import_source":"native","trust_level":"validated","checksum":null,"signature":null,"source_schema_version":null}"#,
+        r#"{"schema":"ee.export.memory.v1","memory_id":"mem_01234567890123456789012345","workspace_id":"wsp_01234567890123456789012345","level":"procedural","kind":"rule","content":"Run cargo fmt --check before release.","importance":0.8,"confidence":0.9,"utility":0.7,"created_at":"2026-04-30T00:00:00Z","updated_at":null,"expires_at":null,"source_agent":"MistySalmon","provenance_uri":"ee-export://fixture","superseded_by":null,"supersedes":null,"redacted":false,"redaction_reason":null}"#,
+        r#"{"schema":"ee.export.tag.v1","memory_id":"mem_01234567890123456789012345","tag":"Release","created_at":"2026-04-30T00:00:00Z"}"#,
+        r#"{"schema":"ee.export.footer.v1","export_id":"exp-001","completed_at":"2026-04-30T00:01:00Z","total_records":4,"memory_count":1,"link_count":0,"tag_count":1,"audit_count":0,"checksum":null,"success":true,"error_message":null}"#,
+    ]
+    .join("\n");
+    fs::write(path, jsonl).map_err(|error| format!("write valid JSONL: {error}"))
+}
+
 #[test]
 fn import_jsonl_rejects_blank_memory_id_with_issue_code() -> TestResult {
     let root = unique_artifact_dir("blank-memory-id")?;
@@ -268,4 +279,169 @@ fn import_jsonl_rejects_blank_content_with_issue_code() -> TestResult {
     )?;
 
     Ok(())
+}
+
+#[test]
+fn import_jsonl_public_response_exposes_and_retries_index_publication_failure() -> TestResult {
+    let root = unique_artifact_dir("publication-retry")?;
+    let workspace = root.join("workspace with spaces");
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+
+    let (exit_code, parsed, _stderr) = run_ee(&workspace, &["init"])?;
+    ensure_equal(&exit_code, &EXIT_SUCCESS, "init exit code")?;
+    ensure(
+        parsed.pointer("/success") == Some(&json!(true)),
+        format!("init must succeed: {parsed}"),
+    )?;
+
+    let index_dir = workspace.join(".ee/index");
+    if index_dir.exists() {
+        fs::rename(&index_dir, workspace.join(".ee/index-before-import"))
+            .map_err(|error| format!("preserve initialized index: {error}"))?;
+    }
+    let blocked_target = workspace.join(".ee/index-publish-blocker");
+    fs::create_dir_all(&blocked_target).map_err(|error| error.to_string())?;
+    std::os::unix::fs::symlink(&blocked_target, &index_dir)
+        .map_err(|error| format!("install index publication blocker: {error}"))?;
+
+    let source = root.join("source.jsonl");
+    write_valid_jsonl(&source)?;
+    let (exit_code, failed, stderr) = run_ee(
+        &workspace,
+        &["import", "jsonl", "--source", path_arg(&source)?],
+    )?;
+    ensure_equal(
+        &exit_code,
+        &EXIT_SUCCESS,
+        "durable import with derived publication failure exit code",
+    )?;
+    ensure(
+        stderr.is_empty(),
+        format!("JSON import must keep stderr empty: {stderr}"),
+    )?;
+    ensure_equal(
+        &failed.pointer("/data/memoriesImported"),
+        &Some(&json!(1)),
+        "source memory remains durable",
+    )?;
+    let degradation = failed
+        .pointer("/degraded")
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries.iter().find(|entry| {
+                entry.get("code").and_then(Value::as_str) == Some("import_index_publish_failed")
+            })
+        })
+        .ok_or_else(|| format!("response omitted publication degradation: {failed}"))?;
+    let workspace_text = path_arg(&workspace)?;
+    let expected_repair = format!(
+        "ee index rebuild --workspace '{}'",
+        workspace_text.replace('\'', "'\\''")
+    );
+    ensure_equal(
+        &degradation.get("severity"),
+        &Some(&json!("warning")),
+        "publication degradation severity",
+    )?;
+    ensure_equal(
+        &degradation.get("repair"),
+        &Some(&json!(expected_repair)),
+        "publication degradation exact repair",
+    )?;
+    let issue = failed
+        .pointer("/data/issues")
+        .and_then(Value::as_array)
+        .and_then(|issues| {
+            issues.iter().find(|issue| {
+                issue.get("code").and_then(Value::as_str) == Some("import_index_publish_failed")
+            })
+        })
+        .ok_or_else(|| format!("data.issues omitted publication failure: {failed}"))?;
+    ensure_equal(
+        &issue.get("repair"),
+        &degradation.get("repair"),
+        "data issue and response degradation share one repair",
+    )?;
+
+    // Keep the failed symlink as evidence. Once the canonical path is free,
+    // the same public import must retry its existing deterministic job.
+    fs::rename(&index_dir, workspace.join(".ee/index-failed-link"))
+        .map_err(|error| format!("preserve failed index symlink: {error}"))?;
+    let (exit_code, retried, stderr) = run_ee(
+        &workspace,
+        &["import", "jsonl", "--source", path_arg(&source)?],
+    )?;
+    ensure_equal(&exit_code, &EXIT_SUCCESS, "reimport retry exit code")?;
+    ensure(
+        stderr.is_empty(),
+        format!("reimport retry must keep stderr empty: {stderr}"),
+    )?;
+    ensure_equal(
+        &retried.pointer("/data/memoriesImported"),
+        &Some(&json!(0)),
+        "retry does not duplicate the source memory",
+    )?;
+    ensure_equal(
+        &retried.pointer("/data/memoriesSkippedDuplicate"),
+        &Some(&json!(1)),
+        "retry recognizes the durable source memory",
+    )?;
+    ensure_equal(
+        &retried.pointer("/degraded"),
+        &Some(&json!([])),
+        "successful retry clears publication degradation",
+    )?;
+
+    let (exit_code, status, stderr) = run_ee(&workspace, &["index", "status"])?;
+    ensure_equal(&exit_code, &EXIT_SUCCESS, "index status exit code")?;
+    ensure(
+        stderr.is_empty(),
+        format!("index status must keep stderr empty: {stderr}"),
+    )?;
+    ensure_equal(
+        &status.pointer("/data/health"),
+        &Some(&json!("ready")),
+        "retry makes the index ready",
+    )?;
+    let db_generation = status
+        .pointer("/data/dbGeneration")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("ready status omitted database generation: {status}"))?;
+    let index_generation = status
+        .pointer("/data/indexGeneration")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("ready status omitted index generation: {status}"))?;
+    ensure_equal(
+        &index_generation,
+        &db_generation,
+        "retry publishes the committed database generation",
+    )?;
+
+    let (exit_code, search, stderr) = run_ee(
+        &workspace,
+        &[
+            "search",
+            "cargo fmt release",
+            "--source-mode",
+            "lexical-only",
+            "--strict-source-mode",
+            "--relevance-floor",
+            "0",
+        ],
+    )?;
+    ensure_equal(&exit_code, &EXIT_SUCCESS, "post-retry search exit code")?;
+    ensure(
+        stderr.is_empty(),
+        format!("post-retry search must keep stderr empty: {stderr}"),
+    )?;
+    let results = search
+        .pointer("/data/results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("search response omitted results: {search}"))?;
+    ensure(
+        results.iter().any(|result| {
+            result.get("docId").and_then(Value::as_str) == Some("mem_01234567890123456789012345")
+        }),
+        format!("retried imported memory is not searchable: {search}"),
+    )
 }
