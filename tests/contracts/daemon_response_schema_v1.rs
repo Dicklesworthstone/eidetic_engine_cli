@@ -970,12 +970,46 @@ fn daemon_search_response_v3_uint64_boundaries_match_rust_validation() -> TestRe
         return Err(format!("Rust did not preserve u64::MAX at {COUNTER_PATH}"));
     }
 
+    let mut maximum_decimal = valid.clone();
+    maximum_decimal["response"]["data"]["rerank"]["advisorySummary"]["sessionOccurrenceCount"] =
+        serde_json::from_str("18446744073709551615.0")
+            .map_err(|error| format!("parse u64::MAX decimal fixture: {error}"))?;
+    let maximum_decimal_wire = serde_json::to_string(&maximum_decimal)
+        .map_err(|error| format!("serialize u64::MAX decimal wire fixture: {error}"))?;
+    if !maximum_decimal_wire.contains("\"sessionOccurrenceCount\":18446744073709551615.0") {
+        return Err("u64::MAX decimal wire fixture lost its exact token".to_owned());
+    }
+    let maximum_decimal_wire: Value = serde_json::from_str(&maximum_decimal_wire)
+        .map_err(|error| format!("parse u64::MAX decimal wire response: {error}"))?;
+    validate_json_schema(&maximum_decimal_wire, &schema, "$")
+        .map_err(|error| format!("schema rejected u64::MAX decimal at {COUNTER_PATH}: {error}"))?;
+    let maximum_decimal_renderings = DaemonSearchResult::from_value(maximum_decimal_wire)
+        .map_err(|error| format!("Rust rejected u64::MAX decimal at {COUNTER_PATH}: {error}"))?
+        .into_renderings()
+        .map_err(|error| format!("render u64::MAX decimal at {COUNTER_PATH}: {error}"))?;
+    if maximum_decimal_renderings
+        .response
+        .pointer("/data/rerank/advisorySummary/sessionOccurrenceCount")
+        .and_then(Value::as_u64)
+        != Some(u64::MAX)
+    {
+        return Err(format!(
+            "Rust did not canonicalize u64::MAX decimal at {COUNTER_PATH}"
+        ));
+    }
+
     let over_u64: Value = serde_json::from_str("18446744073709551616")
         .map_err(|error| format!("parse over-u64 fixture: {error}"))?;
+    let over_u64_decimal: Value = serde_json::from_str("18446744073709551616.0")
+        .map_err(|error| format!("parse over-u64 decimal fixture: {error}"))?;
+    let near_boundary_fraction: Value = serde_json::from_str("18446744073709551614.5")
+        .map_err(|error| format!("parse near-boundary fractional fixture: {error}"))?;
     for (case, invalid_number) in [
         ("fractional", serde_json::json!(1.5)),
         ("negative", serde_json::json!(-1)),
         ("over-u64 integer", over_u64),
+        ("over-u64 decimal", over_u64_decimal),
+        ("near-boundary fractional", near_boundary_fraction),
         ("non-number", serde_json::json!("1")),
     ] {
         for pointer in SEARCH_RESPONSE_UINT64_INSTANCE_POINTERS {

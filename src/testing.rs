@@ -392,6 +392,26 @@ struct NormalizedJsonDecimal {
     exponent: i64,
 }
 
+fn parse_json_decimal_exponent(raw: &str) -> Option<i64> {
+    let (negative, digits) = raw
+        .strip_prefix('-')
+        .map_or((false, raw), |digits| (true, digits));
+    let digits = digits.strip_prefix('+').unwrap_or(digits);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let magnitude = digits.bytes().fold(0_i64, |value, byte| {
+        value
+            .saturating_mul(10)
+            .saturating_add(i64::from(byte - b'0'))
+    });
+    Some(if negative {
+        magnitude.saturating_neg()
+    } else {
+        magnitude
+    })
+}
+
 // Compare the decimal rendering exactly so a u64::MAX schema boundary is not
 // rounded to 2^64 through f64 before applying minimum/maximum keywords.
 fn normalize_json_number(number: &serde_json::Number) -> Option<NormalizedJsonDecimal> {
@@ -399,13 +419,10 @@ fn normalize_json_number(number: &serde_json::Number) -> Option<NormalizedJsonDe
     let (mantissa, explicit_exponent) =
         rendered
             .find(['e', 'E'])
-            .map_or((rendered.as_str(), 0_i64), |index| {
-                rendered[index + 1..]
-                    .parse::<i64>()
-                    .ok()
+            .map_or(Some((rendered.as_str(), 0_i64)), |index| {
+                parse_json_decimal_exponent(&rendered[index + 1..])
                     .map(|exponent| (&rendered[..index], exponent))
-                    .unwrap_or(("", 0))
-            });
+            })?;
     if mantissa.is_empty() {
         return None;
     }
@@ -908,11 +925,17 @@ mod tests {
             "minimum": 0,
             "maximum": 18446744073709551615_u64
         });
+        let maximum_decimal: Value = serde_json::from_str("18446744073709551615.0")
+            .map_err(|error| format!("parse u64::MAX decimal fixture: {error}"))?;
+        let maximum_exponent: Value = serde_json::from_str("184467440737095516150e-1")
+            .map_err(|error| format!("parse u64::MAX exponent fixture: {error}"))?;
         for value in [
             serde_json::json!(0.0),
             serde_json::json!(1.0),
             serde_json::json!(1e3),
             serde_json::json!(u64::MAX),
+            maximum_decimal,
+            maximum_exponent,
         ] {
             validate_json_schema_instance(&value, &schema).map_err(|error| {
                 format!("schema rejected integral JSON number {value}: {error}")
@@ -931,7 +954,17 @@ mod tests {
         });
         let over_u64: Value = serde_json::from_str("18446744073709551616")
             .map_err(|error| format!("parse over-u64 fixture: {error}"))?;
-        for value in [serde_json::json!(-1), serde_json::json!(1.5), over_u64] {
+        let over_u64_decimal: Value = serde_json::from_str("18446744073709551616.0")
+            .map_err(|error| format!("parse over-u64 decimal fixture: {error}"))?;
+        let near_boundary_fraction: Value = serde_json::from_str("18446744073709551614.5")
+            .map_err(|error| format!("parse near-boundary fractional fixture: {error}"))?;
+        for value in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            over_u64,
+            over_u64_decimal,
+            near_boundary_fraction,
+        ] {
             if validate_json_schema_instance(&value, &schema).is_ok() {
                 return Err(format!(
                     "uint64 schema accepted out-of-domain JSON number {value}"

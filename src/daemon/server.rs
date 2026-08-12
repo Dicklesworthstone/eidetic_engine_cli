@@ -2528,23 +2528,94 @@ const DAEMON_SEARCH_UINT64_INSTANCE_POINTERS: &[&str] = &[
     "/performance/data/search/fieldCoverage/explanationCount",
 ];
 
-const U64_EXCLUSIVE_UPPER_BOUND_AS_F64: f64 = 18_446_744_073_709_551_616.0;
+fn parse_json_decimal_exponent(raw: &str) -> Option<i64> {
+    let (negative, digits) = raw
+        .strip_prefix('-')
+        .map_or((false, raw), |digits| (true, digits));
+    let digits = digits.strip_prefix('+').unwrap_or(digits);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let magnitude = digits.bytes().fold(0_i64, |value, byte| {
+        value
+            .saturating_mul(10)
+            .saturating_add(i64::from(byte - b'0'))
+    });
+    Some(if negative {
+        magnitude.saturating_neg()
+    } else {
+        magnitude
+    })
+}
+
+fn rendered_json_number_to_u64(rendered: &str) -> Option<u64> {
+    let (negative, rendered) = rendered
+        .strip_prefix('-')
+        .map_or((false, rendered), |unsigned| (true, unsigned));
+    let (mantissa, exponent) =
+        rendered
+            .find(['e', 'E'])
+            .map_or(Some((rendered, 0_i64)), |index| {
+                parse_json_decimal_exponent(&rendered[index + 1..])
+                    .map(|exponent| (&rendered[..index], exponent))
+            })?;
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let digits = whole.bytes().chain(fraction.bytes()).collect::<Vec<_>>();
+    if digits.iter().all(|byte| *byte == b'0') {
+        return Some(0);
+    }
+    if negative {
+        return None;
+    }
+
+    let fraction_len = i64::try_from(fraction.len()).ok()?;
+    let scale = exponent.saturating_sub(fraction_len);
+    let integer_digits = if scale < 0 {
+        let fractional_digits = usize::try_from(scale.saturating_neg()).ok()?;
+        if fractional_digits >= digits.len() {
+            return None;
+        }
+        let integer_len = digits.len() - fractional_digits;
+        if digits[integer_len..].iter().any(|byte| *byte != b'0') {
+            return None;
+        }
+        &digits[..integer_len]
+    } else {
+        &digits[..]
+    };
+    let mut value = 0_u64;
+    for byte in integer_digits.iter().skip_while(|byte| **byte == b'0') {
+        value = value
+            .checked_mul(10)?
+            .checked_add(u64::from(*byte - b'0'))?;
+    }
+    if scale > 0 {
+        let trailing_zeros = usize::try_from(scale).ok()?;
+        if trailing_zeros > 20 {
+            return None;
+        }
+        for _ in 0..trailing_zeros {
+            value = value.checked_mul(10)?;
+        }
+    }
+    Some(value)
+}
 
 // Draft 2020-12's `integer` type is mathematical, not lexical: `1.0` is an
-// integer. The exclusive 2^64 bound avoids the rounded `u64::MAX as f64` trap.
+// integer. Serde's arbitrary-precision number representation preserves the raw
+// decimal token so values near u64::MAX never pass through f64 rounding.
 fn json_number_to_u64(value: &serde_json::Value) -> Option<u64> {
-    if let Some(unsigned) = value.as_u64() {
-        return Some(unsigned);
-    }
-    if let Some(signed) = value.as_i64() {
-        return u64::try_from(signed).ok();
-    }
-    let float = value.as_f64()?;
-    (float.is_finite()
-        && float >= 0.0
-        && float.fract() == 0.0
-        && float < U64_EXCLUSIVE_UPPER_BOUND_AS_F64)
-        .then(|| float as u64)
+    let number = value.as_number()?;
+    number
+        .as_u64()
+        .or_else(|| rendered_json_number_to_u64(&number.to_string()))
 }
 
 fn canonicalize_daemon_search_uint64s(value: &mut serde_json::Value) -> Result<(), String> {
@@ -6342,12 +6413,29 @@ mod tests {
             assert_eq!(json_number_to_u64(&value), Some(expected), "{value}");
         }
 
+        for (raw, expected) in [
+            ("18446744073709551615.0", u64::MAX),
+            ("18446744073709551614.0", u64::MAX - 1),
+            ("184467440737095516150e-1", u64::MAX),
+        ] {
+            let value: serde_json::Value =
+                serde_json::from_str(raw).expect("exact decimal fixture must parse");
+            assert_eq!(json_number_to_u64(&value), Some(expected), "{raw}");
+        }
+
         let over_u64: serde_json::Value = serde_json::from_str("18446744073709551616")
             .expect("over-u64 JSON number must parse for contract validation");
+        let over_u64_decimal: serde_json::Value = serde_json::from_str("18446744073709551616.0")
+            .expect("over-u64 decimal fixture must parse");
+        let near_boundary_fraction: serde_json::Value =
+            serde_json::from_str("18446744073709551614.5")
+                .expect("near-boundary fractional fixture must parse");
         for value in [
             serde_json::json!(-1),
             serde_json::json!(1.5),
             over_u64,
+            over_u64_decimal,
+            near_boundary_fraction,
             serde_json::json!("1"),
         ] {
             assert_eq!(json_number_to_u64(&value), None, "{value}");
