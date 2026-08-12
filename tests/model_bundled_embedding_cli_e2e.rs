@@ -729,9 +729,7 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
         .map(PathBuf::from)
         .ok_or_else(|| "EE_EMBED_MODEL_FIXTURE_DIR must name the real model fixture".to_string())?;
     let fixture_model_dir = resolve_fixture_model_dir(&fixture_root)?;
-    verify_dir_cached(&ModelManifest::potion_128m(), &fixture_model_dir).map_err(|error| {
-        format!("real model fixture failed frozen manifest verification: {error}")
-    })?;
+    let manifest = ModelManifest::potion_128m();
     let workspace = E2eWorkspace::create("registered-model2vec-offline")?;
     let registered_parent = workspace
         .xdg_data
@@ -741,13 +739,7 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
     fs::create_dir_all(&registered_parent)
         .map_err(|error| format!("create {}: {error}", registered_parent.display()))?;
     let registered_model_dir = registered_parent.join("potion-multilingual-128M");
-    std::os::unix::fs::symlink(&fixture_model_dir, &registered_model_dir).map_err(|error| {
-        format!(
-            "link real model fixture {} at {}: {error}",
-            fixture_model_dir.display(),
-            registered_model_dir.display()
-        )
-    })?;
+    materialize_regular_model_fixture(&fixture_model_dir, &registered_model_dir, &manifest)?;
     let registered_entries_before = sorted_directory_entry_names(&registered_parent)?;
     if registered_entries_before != ["potion-multilingual-128M"] {
         return Err(format!(
@@ -823,16 +815,18 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
         1,
         "registered reembed document count",
     )?;
-    ensure_eq_bool(
-        reembed_data
-            .get("embedding")
-            .and_then(Value::as_object)
-            .and_then(|embedding| embedding.get("semantic"))
-            .and_then(Value::as_bool)
-            .ok_or_else(|| "missing reembed embedding.semantic".to_string())?,
-        true,
-        "registered reembed semantic",
-    )?;
+    let reembed_semantic = reembed_data
+        .get("embedding")
+        .and_then(Value::as_object)
+        .and_then(|embedding| embedding.get("semantic"))
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "missing reembed embedding.semantic".to_string())?;
+    if !reembed_semantic {
+        return Err(format!(
+            "registered reembed semantic mismatch: expected true, got false; diagnostic={}",
+            model_resolution_diagnostic(&reembed_json, None)
+        ));
+    }
     ensure_eq_str(
         reembed_data
             .get("embedding")
@@ -1145,22 +1139,14 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         .map(PathBuf::from)
         .ok_or_else(|| "EE_EMBED_MODEL_FIXTURE_DIR must name the real model fixture".to_string())?;
     let fixture_model_dir = resolve_fixture_model_dir(&fixture_root)?;
-    verify_dir_cached(&ModelManifest::potion_128m(), &fixture_model_dir).map_err(|error| {
-        format!("real model fixture failed frozen manifest verification: {error}")
-    })?;
+    let manifest = ModelManifest::potion_128m();
 
     let workspace = E2eWorkspace::create("public-canonical-model2vec-offline")?;
     let bootstrap_model_parent = workspace.path.join("explicit-model-override");
     fs::create_dir_all(&bootstrap_model_parent)
         .map_err(|error| format!("create {}: {error}", bootstrap_model_parent.display()))?;
     let bootstrap_model_dir = bootstrap_model_parent.join(BUNDLED_EMBEDDING_MODEL_ID);
-    std::os::unix::fs::symlink(&fixture_model_dir, &bootstrap_model_dir).map_err(|error| {
-        format!(
-            "link real model fixture {} for explicit bootstrap at {}: {error}",
-            fixture_model_dir.display(),
-            bootstrap_model_dir.display()
-        )
-    })?;
+    materialize_regular_model_fixture(&fixture_model_dir, &bootstrap_model_dir, &manifest)?;
     let corruption_parent = workspace.path.join("corrupt-model-registry-fixtures");
     fs::create_dir_all(&corruption_parent)
         .map_err(|error| format!("create {}: {error}", corruption_parent.display()))?;
@@ -1221,6 +1207,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         &bootstrap_env,
     )?;
     ensure_success(&reembed, "registry-path ee index reembed")?;
+    let reembed_json = stdout_json(&reembed, "registry-path ee index reembed")?;
 
     let list = run_ee_with_env(
         &workspace,
@@ -1248,12 +1235,19 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
             })
         })
         .and_then(Value::as_object)
-        .ok_or_else(|| "public model list omitted the available Model2Vec row".to_string())?;
-    ensure_eq_str(
-        string_member(list_entry, "status")?,
-        "available",
-        "public Model2Vec registry status",
-    )?;
+        .ok_or_else(|| {
+            format!(
+                "public model list omitted the Model2Vec row; diagnostic={}",
+                model_resolution_diagnostic(&reembed_json, Some(&list_json))
+            )
+        })?;
+    let public_status = string_member(list_entry, "status")?;
+    if public_status != "available" {
+        return Err(format!(
+            "public Model2Vec registry status mismatch: expected available, got {public_status}; diagnostic={}",
+            model_resolution_diagnostic(&reembed_json, Some(&list_json))
+        ));
+    }
     ensure_eq_u64(
         u64_member(list_entry, "dimension")?,
         u64::from(BUNDLED_EMBEDDING_DIMENSION),
@@ -1282,12 +1276,8 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         0,
     )?;
 
-    let canonical_fixture_model_dir = fs::canonicalize(&fixture_model_dir).map_err(|error| {
-        format!(
-            "canonicalize real model fixture {}: {error}",
-            fixture_model_dir.display()
-        )
-    })?;
+    let canonical_registered_model_dir = fs::canonicalize(&bootstrap_model_dir)
+        .map_err(|error| format!("canonicalize materialized registered model: {error}"))?;
     let registered_entry = model2vec_registry_entry(&workspace)?;
     let verified_hash = registered_entry
         .content_hash
@@ -1295,7 +1285,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         .ok_or_else(|| "available Model2Vec registry row missing content hash".to_string())?;
     ensure_eq_str(
         registered_entry.source_uri.as_deref().unwrap_or_default(),
-        path_string(&canonical_fixture_model_dir).as_str(),
+        path_string(&canonical_registered_model_dir).as_str(),
         "persisted canonical Model2Vec source URI",
     )?;
     ensure_eq_str(
@@ -1364,7 +1354,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
             .source_uri
             .as_deref()
             .ok_or_else(|| "registered source missing before daemon search".to_string())?,
-        &path_string(&canonical_fixture_model_dir),
+        &path_string(&canonical_registered_model_dir),
         "registered source before daemon search",
     )?;
     let index_manifest_path = workspace.path.join(".ee/index/meta.json");
@@ -1727,7 +1717,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         &workspace,
         BUNDLED_EMBEDDING_MODEL_ID,
         ModelRegistryStatus::Unavailable,
-        Some(path_string(&canonical_fixture_model_dir)),
+        Some(path_string(&canonical_registered_model_dir)),
         Some(verified_hash.clone()),
         Some(BUNDLED_EMBEDDING_DIMENSION),
         Some(ModelDistanceMetric::Cosine),
@@ -1762,7 +1752,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         &workspace,
         "wrong-model-name",
         ModelRegistryStatus::Available,
-        Some(path_string(&canonical_fixture_model_dir)),
+        Some(path_string(&canonical_registered_model_dir)),
         Some(verified_hash.clone()),
         Some(BUNDLED_EMBEDDING_DIMENSION),
         Some(ModelDistanceMetric::Cosine),
@@ -1778,7 +1768,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         &workspace,
         BUNDLED_EMBEDDING_MODEL_ID,
         ModelRegistryStatus::Available,
-        Some(path_string(&canonical_fixture_model_dir)),
+        Some(path_string(&canonical_registered_model_dir)),
         Some(format!("blake3:{}", "0".repeat(64))),
         Some(BUNDLED_EMBEDDING_DIMENSION),
         Some(ModelDistanceMetric::Cosine),
@@ -1794,7 +1784,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         &workspace,
         BUNDLED_EMBEDDING_MODEL_ID,
         ModelRegistryStatus::Available,
-        Some(path_string(&canonical_fixture_model_dir)),
+        Some(path_string(&canonical_registered_model_dir)),
         Some(verified_hash.clone()),
         Some(BUNDLED_EMBEDDING_DIMENSION.saturating_add(1)),
         Some(ModelDistanceMetric::Cosine),
@@ -1810,7 +1800,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         &workspace,
         BUNDLED_EMBEDDING_MODEL_ID,
         ModelRegistryStatus::Available,
-        Some(path_string(&canonical_fixture_model_dir)),
+        Some(path_string(&canonical_registered_model_dir)),
         Some(verified_hash.clone()),
         Some(BUNDLED_EMBEDDING_DIMENSION),
         Some(ModelDistanceMetric::Dot),
@@ -1857,7 +1847,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
     let restored_entry = model2vec_registry_entry(&workspace)?;
     ensure_eq_str(
         restored_entry.source_uri.as_deref().unwrap_or_default(),
-        path_string(&canonical_fixture_model_dir).as_str(),
+        path_string(&canonical_registered_model_dir).as_str(),
         "restored canonical Model2Vec source URI",
     )?;
     let settled = run_ee_with_env(
@@ -1915,7 +1905,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
 
     let model_source_tokens = [
         path_string(&fixture_model_dir),
-        path_string(&canonical_fixture_model_dir),
+        path_string(&canonical_registered_model_dir),
         path_string(&bootstrap_model_dir),
         path_string(&missing_source),
         path_string(&unverified_model_dir),
@@ -2112,6 +2102,76 @@ fn resolve_fixture_model_dir(root: &Path) -> TestResult<PathBuf> {
 }
 
 #[cfg(unix)]
+fn materialize_regular_model_fixture(
+    source_model_dir: &Path,
+    destination_model_dir: &Path,
+    manifest: &ModelManifest,
+) -> TestResult {
+    let canonical_source = fs::canonicalize(source_model_dir)
+        .map_err(|error| format!("canonicalize model fixture source: {error}"))?;
+    fs::create_dir_all(destination_model_dir)
+        .map_err(|error| format!("create regular model fixture directory: {error}"))?;
+    let destination_metadata = fs::symlink_metadata(destination_model_dir)
+        .map_err(|error| format!("inspect regular model fixture directory: {error}"))?;
+    if !destination_metadata.file_type().is_dir() {
+        return Err(
+            "materialized model fixture destination is not a regular directory".to_string(),
+        );
+    }
+
+    for file in &manifest.files {
+        materialize_regular_fixture_file(&canonical_source, destination_model_dir, &file.name)?;
+    }
+    if canonical_source.join(".verified").is_file() {
+        materialize_regular_fixture_file(&canonical_source, destination_model_dir, ".verified")?;
+    }
+
+    verify_dir_cached(manifest, destination_model_dir).map_err(|_| {
+        "materialized regular model fixture failed frozen manifest verification".to_string()
+    })
+}
+
+#[cfg(unix)]
+fn materialize_regular_fixture_file(
+    source_model_dir: &Path,
+    destination_model_dir: &Path,
+    relative_name: &str,
+) -> TestResult {
+    let source = fs::canonicalize(source_model_dir.join(relative_name))
+        .map_err(|error| format!("resolve model fixture artifact {relative_name}: {error}"))?;
+    let source_metadata = fs::symlink_metadata(&source)
+        .map_err(|error| format!("inspect model fixture artifact {relative_name}: {error}"))?;
+    if !source_metadata.file_type().is_file() {
+        return Err(format!(
+            "model fixture artifact {relative_name} is not a regular file"
+        ));
+    }
+
+    let destination = destination_model_dir.join(relative_name);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!("create parent for model fixture artifact {relative_name}: {error}")
+        })?;
+    }
+    if let Err(hard_link_error) = fs::hard_link(&source, &destination) {
+        fs::copy(&source, &destination).map_err(|copy_error| {
+            format!(
+                "materialize model fixture artifact {relative_name}: hard link failed ({hard_link_error}); copy failed ({copy_error})"
+            )
+        })?;
+    }
+    let destination_metadata = fs::symlink_metadata(&destination).map_err(|error| {
+        format!("inspect materialized model fixture artifact {relative_name}: {error}")
+    })?;
+    if !destination_metadata.file_type().is_file() {
+        return Err(format!(
+            "materialized model fixture artifact {relative_name} is not a regular file"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn sorted_directory_entry_names(path: &Path) -> TestResult<Vec<String>> {
     let mut names = fs::read_dir(path)
         .map_err(|error| format!("read {}: {error}", path.display()))?
@@ -2209,6 +2269,90 @@ fn ensure_response_embed_backend(output: &Output, context: &str, expected: &str)
     let value = stdout_json(output, context)?;
     let data = response_data(&value, context)?;
     ensure_eq_str(string_member(data, "embed_backend")?, expected, context)
+}
+
+#[cfg(unix)]
+fn model_resolution_diagnostic(reembed: &Value, model_list: Option<&Value>) -> Value {
+    let embedding = reembed.pointer("/data/embedding");
+    let reembed_payload = json!({
+        "schema": reembed.get("schema"),
+        "success": reembed.get("success"),
+        "status": reembed.pointer("/data/status"),
+        "jobStatus": reembed.pointer("/data/job_status"),
+        "documentsTotal": reembed.pointer("/data/documents_total"),
+        "documentsIndexed": reembed.pointer("/data/documents_indexed"),
+        "embedding": {
+            "semantic": embedding.and_then(|value| value.get("semantic")),
+            "source": embedding.and_then(|value| value.get("source")),
+            "fastModelId": embedding.and_then(|value| value.get("fast_model_id")),
+            "fastDimension": embedding.and_then(|value| value.get("fast_dimension")),
+            "deterministic": embedding.and_then(|value| value.get("deterministic")),
+            "registeredModelCount": embedding
+                .and_then(|value| value.get("registered_model_count")),
+            "availableModelCount": embedding
+                .and_then(|value| value.get("available_model_count")),
+            "selectedRegistryModel": embedding
+                .and_then(|value| value.get("selected_registry_model")),
+        },
+        "degraded": degraded_code_diagnostic(reembed),
+    });
+    let model_list_payload = model_list.map_or(Value::Null, |list| {
+        let entry = list
+            .pointer("/data/entries")
+            .and_then(Value::as_array)
+            .and_then(|entries| {
+                entries.iter().find(|entry| {
+                    entry.get("provider").and_then(Value::as_str) == Some("model2vec")
+                        && entry.get("modelName").and_then(Value::as_str)
+                            == Some(BUNDLED_EMBEDDING_MODEL_ID)
+                        && entry.get("purpose").and_then(Value::as_str) == Some("embedding")
+                })
+            });
+        json!({
+            "schema": list.get("schema"),
+            "success": list.get("success"),
+            "entry": {
+                "provider": entry.and_then(|value| value.get("provider")),
+                "modelName": entry.and_then(|value| value.get("modelName")),
+                "purpose": entry.and_then(|value| value.get("purpose")),
+                "status": entry.and_then(|value| value.get("status")),
+                "dimension": entry.and_then(|value| value.get("dimension")),
+                "distanceMetric": entry.and_then(|value| value.get("distanceMetric")),
+                "contentHash": entry.and_then(|value| value.get("contentHash")),
+                "sourceRedaction": entry
+                    .and_then(|value| value.get("sourceUri"))
+                    .and_then(Value::as_str)
+                    .map(|source| if source == "[REDACTED_PATH]" {
+                        "redacted"
+                    } else {
+                        "unexpected_unredacted_source"
+                    }),
+            },
+            "degraded": degraded_code_diagnostic(list),
+        })
+    });
+    json!({
+        "reembed": reembed_payload,
+        "modelList": model_list_payload,
+    })
+}
+
+#[cfg(unix)]
+fn degraded_code_diagnostic(response: &Value) -> Value {
+    Value::Array(
+        response
+            .get("degraded")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|entry| {
+                json!({
+                    "code": entry.get("code"),
+                    "severity": entry.get("severity"),
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Public retrieval responses must never expose model source paths or URIs
