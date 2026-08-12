@@ -11,14 +11,14 @@
 //! 2. OPEN LOOPS — decisions carrying revisit conditions (the `ee decide`
 //!    surface) plus memories tagged next/queue/blocking/pending/todo.
 //! 3. STALENESS — surfaced items superseded by newer writes on the same
-//!    subject (same kind, ≥ [`STALE_SHARED_TAG_MIN`] shared tags, newer
-//!    timestamp) are flagged rather than silently ranked down: a stale
-//!    next-step note actively misleads a resuming agent.
+//!    subject (same kind, strictly newer timestamp, and at least one shared
+//!    subject tag) are flagged rather than silently ranked down. Session tags
+//!    and open-loop tags are control tags, not subject identity.
 //! 4. Resume-flavored next commands, and nearby populated stores (reusing
 //!    the bd-orient-store-discovery-ft1z5 scan) when the addressed store
 //!    has nothing episodic to resume from.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -39,8 +39,6 @@ pub const SESSION_GAP_SECONDS: i64 = 4 * 3600;
 pub const SESSION_ITEM_CAP: usize = 20;
 /// Open-loop tag vocabulary.
 pub const OPEN_LOOP_TAGS: [&str; 5] = ["next", "queue", "blocking", "pending", "todo"];
-/// Minimum shared tags for the staleness heuristic.
-pub const STALE_SHARED_TAG_MIN: usize = 2;
 /// Wall-clock budget for the nearby-store scan.
 pub const RESUME_NEARBY_SCAN_BUDGET_MS: u64 = 250;
 /// Cap on open-loop tagged items and staleness flags.
@@ -90,6 +88,7 @@ pub struct StaleFlag {
     /// The newer memory on the same subject.
     pub superseded_by: String,
     pub superseded_by_created_at: String,
+    /// Shared non-control subject tags that establish identity.
     pub shared_tags: Vec<String>,
 }
 
@@ -140,6 +139,7 @@ pub struct ResumeReport {
     pub episodic_total: usize,
     pub sessions: Vec<ResumeSession>,
     pub open_loops: OpenLoops,
+    /// Unique stale memory IDs across every rendered projection.
     pub stale_count: usize,
     /// Populated when the store has nothing episodic to resume from.
     pub nearby_stores: Option<NearbyStoreScan>,
@@ -306,15 +306,19 @@ fn group_sessions(
     grouped
 }
 
+fn is_control_tag(tag: &str) -> bool {
+    tag.starts_with("session-") || OPEN_LOOP_TAGS.contains(&tag)
+}
+
 /// Flag surfaced items superseded by a newer live memory on the same
-/// subject (same kind, ≥ [`STALE_SHARED_TAG_MIN`] shared tags, strictly
-/// newer `created_at`). Returns the number of flags applied.
+/// subject (same kind, at least one shared non-control subject tag, strictly
+/// newer `created_at`). Returns the unique IDs flagged in this projection.
 fn apply_staleness(
     items: &mut [ResumeItem],
     all_live: &[StoredMemory],
     tags: &BTreeMap<String, Vec<String>>,
-) -> usize {
-    let mut flagged = 0usize;
+) -> BTreeSet<String> {
+    let mut flagged_ids = BTreeSet::new();
     for surfaced in items.iter_mut() {
         let surfaced_tags = tags
             .get(&surfaced.memory_id)
@@ -323,12 +327,18 @@ fn apply_staleness(
         if surfaced_tags.is_empty() {
             continue;
         }
-        let mut best: Option<StaleFlag> = None;
+        let Some(surfaced_created_at) = parse_ts(&surfaced.created_at) else {
+            continue;
+        };
+        let mut best: Option<(DateTime<Utc>, StaleFlag)> = None;
         for candidate in all_live {
-            if candidate.id == surfaced.memory_id
-                || candidate.kind != surfaced.kind
-                || candidate.created_at <= surfaced.created_at
-            {
+            if candidate.id == surfaced.memory_id || candidate.kind != surfaced.kind {
+                continue;
+            }
+            let Some(candidate_created_at) = parse_ts(&candidate.created_at) else {
+                continue;
+            };
+            if candidate_created_at <= surfaced_created_at {
                 continue;
             }
             let candidate_tags = tags.get(&candidate.id);
@@ -337,25 +347,34 @@ fn apply_staleness(
             };
             let shared: Vec<String> = surfaced_tags
                 .iter()
-                .filter(|tag| !tag.starts_with("session-") && candidate_tags.contains(tag))
+                .filter(|tag| !is_control_tag(tag) && candidate_tags.contains(tag))
                 .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect();
-            if shared.len() < STALE_SHARED_TAG_MIN {
+            if shared.is_empty() {
                 continue;
             }
             let replace = match &best {
                 None => true,
-                Some(existing) => candidate.created_at > existing.superseded_by_created_at,
+                Some((existing_created_at, existing)) => {
+                    candidate_created_at > *existing_created_at
+                        || (candidate_created_at == *existing_created_at
+                            && candidate.id < existing.superseded_by)
+                }
             };
             if replace {
-                best = Some(StaleFlag {
-                    superseded_by: candidate.id.clone(),
-                    superseded_by_created_at: candidate.created_at.clone(),
-                    shared_tags: shared,
-                });
+                best = Some((
+                    candidate_created_at,
+                    StaleFlag {
+                        superseded_by: candidate.id.clone(),
+                        superseded_by_created_at: candidate.created_at.clone(),
+                        shared_tags: shared,
+                    },
+                ));
             }
         }
-        if let Some(mut flag) = best {
+        if let Some((_, mut flag)) = best {
             flag.shared_tags = flag
                 .shared_tags
                 .iter()
@@ -367,10 +386,25 @@ fn apply_staleness(
             surfaced.redaction.reasons.dedup();
             surfaced.redaction.applied = !surfaced.redaction.reasons.is_empty();
             surfaced.stale = Some(flag);
-            flagged += 1;
+            flagged_ids.insert(surfaced.memory_id.clone());
         }
     }
-    flagged
+    flagged_ids
+}
+
+/// Apply staleness to every report projection while counting each memory ID
+/// once even when it appears in both open loops and a recent session.
+fn apply_report_staleness(
+    tagged_items: &mut [ResumeItem],
+    sessions: &mut [ResumeSession],
+    all_live: &[StoredMemory],
+    tags: &BTreeMap<String, Vec<String>>,
+) -> usize {
+    let mut stale_memory_ids = apply_staleness(tagged_items, all_live, tags);
+    for session in sessions {
+        stale_memory_ids.extend(apply_staleness(&mut session.items, all_live, tags));
+    }
+    stale_memory_ids.len()
 }
 
 fn decision_line(content: &str, prefix: &str) -> Option<String> {
@@ -569,11 +603,9 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
         .map(|memory| item(memory, &tags, "open_loop_tag"))
         .collect();
 
-    // Staleness pass over everything surfaced.
-    let mut stale_count = apply_staleness(&mut tagged_items, &all_live, &tags);
-    for session in &mut sessions {
-        stale_count += apply_staleness(&mut session.items, &all_live, &tags);
-    }
+    // Staleness pass over everything surfaced. Count unique memories rather
+    // than rendered projections because an episodic open loop appears twice.
+    let stale_count = apply_report_staleness(&mut tagged_items, &mut sessions, &all_live, &tags);
 
     let nearby_stores = if episodic_total == 0 {
         Some(discover_nearby_stores_for_database(
@@ -668,14 +700,14 @@ mod tests {
 
     use super::{
         OPEN_LOOP_CAP, OPEN_LOOP_TAGS, ResumeItem, ResumeOptions, ResumeProvenance,
-        ResumeRedactionPosture, STALE_SHARED_TAG_MIN, StaleFlag, apply_staleness,
+        ResumeRedactionPosture, ResumeSession, StaleFlag, apply_report_staleness, apply_staleness,
         build_resume_report, collect_revisit_decisions, group_sessions, item, parse_ts,
         resume_next_commands,
     };
     use crate::core::orient::{NearbyStore, NearbyStoreScan};
     use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection, StoredMemory};
     use crate::models::{DomainError, MemoryId};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
 
     fn memory(id: &str, level: &str, kind: &str, created_at: &str) -> StoredMemory {
@@ -884,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn staleness_flags_newer_same_subject_write() {
+    fn staleness_flags_next_plus_arc4_and_excludes_all_control_tags() {
         let mut items = vec![ResumeItem {
             memory_id: "mem_old".to_owned(),
             level: "episodic".to_owned(),
@@ -908,21 +940,40 @@ mod tests {
         let unrelated = memory("mem_x", "episodic", "note", "2026-08-09T00:00:00Z");
         let mut tags = BTreeMap::new();
         tags.insert(
+            "mem_old".to_owned(),
+            vec![
+                "session-arc4".to_owned(),
+                "next".to_owned(),
+                "queue".to_owned(),
+                "blocking".to_owned(),
+                "pending".to_owned(),
+                "todo".to_owned(),
+                "arc4".to_owned(),
+            ],
+        );
+        tags.insert(
             "mem_new".to_owned(),
-            vec!["next".to_owned(), "arc4".to_owned()],
+            vec![
+                "session-arc4".to_owned(),
+                "next".to_owned(),
+                "queue".to_owned(),
+                "blocking".to_owned(),
+                "pending".to_owned(),
+                "todo".to_owned(),
+                "arc4".to_owned(),
+            ],
         );
         tags.insert("mem_x".to_owned(), vec!["other".to_owned()]);
         let all = vec![newer, unrelated];
         let flagged = apply_staleness(&mut items, &all, &tags);
-        assert_eq!(flagged, 1);
+        assert_eq!(flagged, BTreeSet::from(["mem_old".to_owned()]));
         let flag: &StaleFlag = items[0].stale.as_ref().unwrap();
         assert_eq!(flag.superseded_by, "mem_new");
-        assert_eq!(flag.shared_tags.len(), 2);
-        assert!(flag.shared_tags.len() >= STALE_SHARED_TAG_MIN);
+        assert_eq!(flag.shared_tags, vec!["arc4".to_owned()]);
     }
 
     #[test]
-    fn staleness_ignores_single_shared_tag_and_older_writes() {
+    fn staleness_requires_same_kind_strictly_newer_and_a_shared_subject_tag() {
         let mut items = vec![ResumeItem {
             memory_id: "mem_old".to_owned(),
             level: "episodic".to_owned(),
@@ -942,18 +993,80 @@ mod tests {
             },
             stale: None,
         }];
-        let single_overlap = memory("mem_s", "episodic", "note", "2026-08-09T00:00:00Z");
+        let next_only = memory("mem_next_only", "episodic", "note", "2026-08-09T00:00:00Z");
+        let different_kind = memory(
+            "mem_different_kind",
+            "episodic",
+            "fact",
+            "2026-08-09T00:00:00Z",
+        );
+        let equal_time = memory("mem_equal", "episodic", "note", "2026-08-05T00:00:00Z");
         let older = memory("mem_older", "episodic", "note", "2026-08-01T00:00:00Z");
         let mut tags = BTreeMap::new();
-        tags.insert("mem_s".to_owned(), vec!["next".to_owned()]);
+        tags.insert(
+            "mem_old".to_owned(),
+            vec!["next".to_owned(), "arc4".to_owned()],
+        );
+        tags.insert("mem_next_only".to_owned(), vec!["next".to_owned()]);
+        tags.insert("mem_different_kind".to_owned(), vec!["arc4".to_owned()]);
+        tags.insert("mem_equal".to_owned(), vec!["arc4".to_owned()]);
         tags.insert(
             "mem_older".to_owned(),
             vec!["next".to_owned(), "arc4".to_owned()],
         );
-        let all = vec![single_overlap, older];
-        assert_eq!(apply_staleness(&mut items, &all, &tags), 0);
+        let all = vec![next_only, different_kind, equal_time, older];
+        assert!(apply_staleness(&mut items, &all, &tags).is_empty());
         assert!(items[0].stale.is_none());
         assert!(OPEN_LOOP_TAGS.contains(&"next"));
+    }
+
+    #[test]
+    fn report_stale_count_deduplicates_open_loop_and_session_projection() {
+        let old = memory("mem_old", "episodic", "note", "2026-08-01T00:00:00Z");
+        let newer = memory("mem_new", "episodic", "note", "2026-08-09T00:00:00Z");
+        let mut tags = BTreeMap::new();
+        tags.insert(
+            old.id.clone(),
+            vec![
+                "session-arc4".to_owned(),
+                "next".to_owned(),
+                "arc4".to_owned(),
+            ],
+        );
+        tags.insert(
+            newer.id.clone(),
+            vec![
+                "session-arc4".to_owned(),
+                "next".to_owned(),
+                "arc4".to_owned(),
+            ],
+        );
+
+        let projected = item(&old, &tags, "open_loop_tag");
+        let mut tagged_items = vec![projected.clone()];
+        let mut sessions = vec![ResumeSession {
+            label: "session-arc4".to_owned(),
+            member_count: 1,
+            newest_at: old.created_at.clone(),
+            oldest_at: old.created_at.clone(),
+            items: vec![ResumeItem {
+                selection_reason: "recent_session_member",
+                ..projected
+            }],
+        }];
+
+        assert_eq!(
+            apply_report_staleness(&mut tagged_items, &mut sessions, &[newer], &tags),
+            1
+        );
+        assert_eq!(
+            tagged_items[0].stale.as_ref().unwrap().shared_tags,
+            vec!["arc4".to_owned()]
+        );
+        assert_eq!(
+            sessions[0].items[0].stale.as_ref().unwrap().shared_tags,
+            vec!["arc4".to_owned()]
+        );
     }
 
     #[test]

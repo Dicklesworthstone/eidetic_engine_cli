@@ -136,15 +136,29 @@ run_ee remember "Session B finished the lexer and started codegen." \
 run_ee remember "Session C prepared the resume handoff." \
     --workspace "${WS}" --level episodic --kind note --tags "session-20260809" --json
 run_ee remember "Next: wire codegen into the driver." \
-    --workspace "${WS}" --level semantic --kind note --tags "queue,codegen" --json
+    --workspace "${WS}" --level episodic --kind note --tags "session-20260809,next,arc4" --json
 STALE_OLD_EXIT=$LAST_EXIT
+STALE_OLD_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
 run_ee remember "Next: codegen driver wiring landed; next is optimization passes." \
-    --workspace "${WS}" --level semantic --kind note --tags "next,queue,codegen" --json
+    --workspace "${WS}" --level semantic --kind note --tags "session-20260809,next,arc4" --json
 STALE_NEW_EXIT=$LAST_EXIT
-if [[ "${STALE_OLD_EXIT}" -eq 0 && "${STALE_NEW_EXIT}" -eq 0 ]]; then
+STALE_NEW_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
+run_ee remember "Next-only older control-tag candidate." \
+    --workspace "${WS}" --level semantic --kind note --tags "next" --json
+NEXT_ONLY_OLD_EXIT=$LAST_EXIT
+NEXT_ONLY_OLD_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
+run_ee remember "Next-only newer control-tag candidate." \
+    --workspace "${WS}" --level semantic --kind note --tags "next" --json
+NEXT_ONLY_NEW_EXIT=$LAST_EXIT
+NEXT_ONLY_NEW_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
+if [[ "${STALE_OLD_EXIT}" -eq 0 && "${STALE_NEW_EXIT}" -eq 0 \
+    && "${NEXT_ONLY_OLD_EXIT}" -eq 0 && "${NEXT_ONLY_NEW_EXIT}" -eq 0 \
+    && -n "${STALE_OLD_ID}" && -n "${STALE_NEW_ID}" \
+    && -n "${NEXT_ONLY_OLD_ID}" && -n "${NEXT_ONLY_NEW_ID}" ]]; then
     event corpus_seeded pass
 else
-    event corpus_seeded fail "remember exits ${STALE_OLD_EXIT}/${STALE_NEW_EXIT}"
+    event corpus_seeded fail \
+        "remember exits ${STALE_OLD_EXIT}/${STALE_NEW_EXIT}/${NEXT_ONLY_OLD_EXIT}/${NEXT_ONLY_NEW_EXIT}; ids=${STALE_OLD_ID}/${STALE_NEW_ID}/${NEXT_ONLY_OLD_ID}/${NEXT_ONLY_NEW_ID}"
 fi
 
 run_ee decide record "resume e2e revisit decision" --chosen "ship now" \
@@ -214,7 +228,7 @@ fi
 
 if jq -e '.data.report.openLoops.revisitDecisionsTotal == 2
         and .data.report.openLoops.revisitDecisionsTruncated == false
-        and .data.report.openLoops.taggedItemsTotal == 2
+        and .data.report.openLoops.taggedItemsTotal == 4
         and .data.report.openLoops.taggedItemsTruncated == false' \
     "${R}" >/dev/null 2>&1; then
     event open_loop_totals_are_exact pass
@@ -222,24 +236,43 @@ else
     event open_loop_totals_are_exact fail "$(jq -c '.data.report.openLoops' "${R}" 2>/dev/null | head -c 350)"
 fi
 
-if jq -e '[.data.report.openLoops.taggedItems[]?
-              | select(.tags | index("next"))]
-          | length == 1
-            and .[0].content == "Next: codegen driver wiring landed; next is optimization passes."' \
+if jq -e --arg stale_old "${STALE_OLD_ID}" --arg stale_new "${STALE_NEW_ID}" \
+    --arg next_only_old "${NEXT_ONLY_OLD_ID}" --arg next_only_new "${NEXT_ONLY_NEW_ID}" \
+    '[.data.report.openLoops.taggedItems[]? | select(.tags | index("next")) | .memoryId]
+     | sort == ([$stale_old, $stale_new, $next_only_old, $next_only_new] | sort)' \
     "${R}" >/dev/null 2>&1; then
     event next_tagged_item_surfaced pass
 else
     event next_tagged_item_surfaced fail "$(jq -c '.data.report.openLoops.taggedItems' "${R}" 2>/dev/null | head -c 250)"
 fi
 
-# The older next-note shares kind + 2 tags with the newer one -> stale flag.
-if jq -e '.data.report.staleCount >= 1
-          and ([.. | objects | select(has("stale")) | select(.stale != null)
-                | select(.content | contains("wire codegen into the driver"))] | length >= 1)' \
+# The older note shares subject tag arc4 with the newer one. Its next and
+# session tags are control tags. It appears in both report projections but
+# staleCount counts its memory ID exactly once.
+if jq -e --arg stale_old "${STALE_OLD_ID}" --arg stale_new "${STALE_NEW_ID}" \
+    '.data.report.staleCount == 1
+     and ([.. | objects | select(.memoryId? == $stale_old and .stale? != null)]
+          | length == 2
+            and all(.[];
+                .stale.supersededBy == $stale_new
+                and .stale.sharedTags == ["arc4"]))' \
     "${R}" >/dev/null 2>&1; then
     event superseded_note_carries_stale_marker pass
 else
     event superseded_note_carries_stale_marker fail "staleCount=$(jq -r '.data.report.staleCount' "${R}" 2>/dev/null); $(head -c 250 "${R}")"
+fi
+
+# Sharing only the open-loop control tag `next` never establishes subject
+# identity, even when the candidate is same-kind and strictly newer.
+if jq -e --arg next_only_old "${NEXT_ONLY_OLD_ID}" --arg next_only_new "${NEXT_ONLY_NEW_ID}" \
+    '([.. | objects | select(.memoryId? == $next_only_old)]
+      | length == 1 and all(.[]; .stale == null))
+     and ([.. | objects | select(.stale?.supersededBy? == $next_only_new)] | length == 0)' \
+    "${R}" >/dev/null 2>&1; then
+    event next_only_overlap_does_not_mark_stale pass
+else
+    event next_only_overlap_does_not_mark_stale fail \
+        "$(jq -c --arg id "${NEXT_ONLY_OLD_ID}" '[.. | objects | select(.memoryId? == $id)]' "${R}" 2>/dev/null | head -c 350)"
 fi
 
 # --- human contract: every declared section remains visible ---------------
