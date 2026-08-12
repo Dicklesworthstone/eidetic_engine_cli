@@ -9,8 +9,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use ee::core::resume::{ResumeOptions, build_resume_report};
@@ -49,6 +49,37 @@ fn resume_test_tempdir(prefix: &str) -> Result<tempfile::TempDir, String> {
         .prefix(prefix)
         .tempdir_in(canonical_temp_root)
         .map_err(|error| format!("create test temp directory: {error}"))
+}
+
+fn run_real_ee_with_registry(args: &[String], registry: &Path) -> Result<Output, String> {
+    Command::new(env!("CARGO_BIN_EXE_ee"))
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env("EE_WORKSPACE_REGISTRY", registry)
+        .args(args)
+        .output()
+        .map_err(|error| format!("launch real ee {}: {error}", args.join(" ")))
+}
+
+fn real_ee_stdout_json(output: &Output, label: &str) -> Result<Value, String> {
+    serde_json::from_slice(&output.stdout).map_err(|error| {
+        format!(
+            "parse {label} stdout as JSON: {error}; stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+fn ensure_real_ee_success(output: &Output, label: &str) -> TestResult {
+    ensure(
+        output.status.success(),
+        format!(
+            "{label} failed with {:?}; stdout={} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
 }
 
 fn string_set(value: &Value, pointer: &str) -> Result<BTreeSet<String>, String> {
@@ -418,6 +449,218 @@ fn real_core_resume_report_validates_against_public_schema() -> TestResult {
     validate_json_schema_instance(&emitted, &load_schema()?).map_err(|error| {
         format!("real core ee.resume.v1 report failed public schema validation: {error}; {emitted}")
     })
+}
+
+#[test]
+fn real_binary_resume_retains_locally_proved_candidate_when_registry_is_unavailable() -> TestResult
+{
+    let temp = resume_test_tempdir("ee-resume-registry-partial.")?;
+    let cold_workspace = temp.path().join("cold-workspace");
+    let candidate_workspace = cold_workspace.join("proved-candidate");
+    std::fs::create_dir_all(cold_workspace.join(".git"))
+        .map_err(|error| format!("create cold workspace: {error}"))?;
+    std::fs::create_dir_all(&candidate_workspace)
+        .map_err(|error| format!("create candidate workspace: {error}"))?;
+
+    let seed_registry = temp.path().join("seed-registry.db");
+    let candidate_text = candidate_workspace.display().to_string();
+    for (label, args) in [
+        (
+            "real ee init for resume candidate",
+            vec![
+                "init".to_owned(),
+                "--workspace".to_owned(),
+                candidate_text.clone(),
+                "--json".to_owned(),
+            ],
+        ),
+        (
+            "real ee remember for resume candidate",
+            vec![
+                "remember".to_owned(),
+                "Locally proved resume candidate.".to_owned(),
+                "--workspace".to_owned(),
+                candidate_text,
+                "--level".to_owned(),
+                "episodic".to_owned(),
+                "--kind".to_owned(),
+                "note".to_owned(),
+                "--json".to_owned(),
+            ],
+        ),
+    ] {
+        let output = run_real_ee_with_registry(&args, &seed_registry)?;
+        ensure_real_ee_success(&output, label)?;
+    }
+
+    let invalid_registry = temp.path().join("invalid-registry.db");
+    let invalid_registry_bytes = b"not a sqlite registry";
+    std::fs::write(&invalid_registry, invalid_registry_bytes)
+        .map_err(|error| format!("write invalid registry fixture: {error}"))?;
+    let canonical_candidate = candidate_workspace
+        .canonicalize()
+        .map_err(|error| format!("canonicalize candidate workspace: {error}"))?;
+    let candidate_database = canonical_candidate.join(".ee").join("ee.db");
+    let canonical_candidate_text = canonical_candidate.display().to_string();
+    let candidate_store_text = canonical_candidate.join(".ee").display().to_string();
+    let expected_retarget = format!(
+        "ee resume --workspace {} --database {} --json",
+        canonical_candidate_text,
+        candidate_database.display()
+    );
+    let cold_text = cold_workspace.display().to_string();
+    let json_args = vec![
+        "resume".to_owned(),
+        "--workspace".to_owned(),
+        cold_text.clone(),
+        "--json".to_owned(),
+    ];
+    let json_output = run_real_ee_with_registry(&json_args, &invalid_registry)?;
+    ensure_real_ee_success(&json_output, "real JSON ee resume with partial registry")?;
+    let response = real_ee_stdout_json(&json_output, "partial-registry resume")?;
+    let report = response
+        .pointer("/data/report")
+        .ok_or_else(|| format!("partial-registry resume omitted data.report: {response}"))?;
+    let nearby_stores = report
+        .pointer("/nearbyStores/stores")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("partial-registry resume omitted nearby stores: {report}"))?;
+    let next_commands = report
+        .pointer("/nextCommands")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("partial-registry resume omitted nextCommands: {report}"))?;
+    ensure(
+        report
+            .pointer("/nearbyStores/outcome")
+            .and_then(Value::as_str)
+            == Some("truncated_registry_unavailable")
+            && nearby_stores.len() == 1
+            && nearby_stores[0]
+                .pointer("/workspaceRoot")
+                .and_then(Value::as_str)
+                == Some(canonical_candidate_text.as_str())
+            && nearby_stores[0]
+                .pointer("/storeDir")
+                .and_then(Value::as_str)
+                == Some(candidate_store_text.as_str())
+            && nearby_stores[0]
+                .pointer("/documents")
+                .and_then(Value::as_u64)
+                == Some(1)
+            && nearby_stores[0]
+                .pointer("/provenance")
+                .and_then(Value::as_str)
+                == Some("child_scan")
+            && next_commands.len() == 5
+            && next_commands[0].as_str() == Some(expected_retarget.as_str())
+            && next_commands[1].as_str()
+                == Some(
+                    "ee doctor --workspace . --json  # optional workspace registry unavailable; local nearby stores remain actionable",
+                ),
+        format!("partial registry resume must retain its exact proved retarget: {report}"),
+    )?;
+
+    let human_args = vec!["resume".to_owned(), "--workspace".to_owned(), cold_text];
+    let human_output = run_real_ee_with_registry(&human_args, &invalid_registry)?;
+    ensure_real_ee_success(&human_output, "real human ee resume with partial registry")?;
+    let human = String::from_utf8(human_output.stdout)
+        .map_err(|error| format!("partial-registry resume stdout was not UTF-8: {error}"))?;
+    ensure(
+        human.contains(
+            "Nearby-store discovery outcome: truncated because the optional workspace registry was unavailable; locally proved candidates remain actionable.",
+        ) && human.contains("Nearby populated stores:")
+            && human.contains(&candidate_store_text)
+            && human.contains(&expected_retarget)
+            && !human.contains(
+                "Nearby-store discovery outcome: unavailable; an empty candidate list is not evidence that no populated store exists.",
+            ),
+        format!("human partial-registry resume suppressed or mislabelled its retarget: {human}"),
+    )?;
+    ensure(
+        !cold_workspace.join(".ee").exists()
+            && std::fs::read(&invalid_registry)
+                .map_err(|error| format!("read invalid registry after resume: {error}"))?
+                == invalid_registry_bytes,
+        "partial-registry resume must not initialize the cold store or mutate the registry",
+    )
+}
+
+#[test]
+fn real_binary_resume_suppresses_retarget_when_discovery_is_globally_unavailable() -> TestResult {
+    let temp = resume_test_tempdir("ee-resume-registry-unavailable.")?;
+    let cold_workspace = temp.path().join("cold-workspace");
+    std::fs::create_dir_all(cold_workspace.join(".git"))
+        .map_err(|error| format!("create globally unavailable workspace: {error}"))?;
+    let invalid_registry = temp.path().join("invalid-registry.db");
+    let invalid_registry_bytes = b"not a sqlite registry";
+    std::fs::write(&invalid_registry, invalid_registry_bytes)
+        .map_err(|error| format!("write invalid registry fixture: {error}"))?;
+    let cold_text = cold_workspace.display().to_string();
+
+    let json_args = vec![
+        "resume".to_owned(),
+        "--workspace".to_owned(),
+        cold_text.clone(),
+        "--json".to_owned(),
+    ];
+    let json_output = run_real_ee_with_registry(&json_args, &invalid_registry)?;
+    ensure_real_ee_success(
+        &json_output,
+        "real JSON ee resume with globally unavailable discovery",
+    )?;
+    let response = real_ee_stdout_json(&json_output, "globally unavailable resume")?;
+    let report = response
+        .pointer("/data/report")
+        .ok_or_else(|| format!("globally unavailable resume omitted data.report: {response}"))?;
+    let next_commands = report
+        .pointer("/nextCommands")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("globally unavailable resume omitted nextCommands: {report}"))?;
+    ensure(
+        report
+            .pointer("/nearbyStores/outcome")
+            .and_then(Value::as_str)
+            == Some("unavailable")
+            && report
+                .pointer("/nearbyStores/stores")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+            && next_commands.len() == 4
+            && next_commands.first().and_then(Value::as_str)
+                == Some(
+                    "ee doctor --workspace . --json  # diagnose unavailable nearby-store discovery",
+                )
+            && next_commands.iter().all(|command| {
+                command
+                    .as_str()
+                    .is_some_and(|command| !command.starts_with("ee resume --workspace "))
+            }),
+        format!("globally unavailable resume must suppress unproved retargets: {report}"),
+    )?;
+
+    let human_args = vec!["resume".to_owned(), "--workspace".to_owned(), cold_text];
+    let human_output = run_real_ee_with_registry(&human_args, &invalid_registry)?;
+    ensure_real_ee_success(
+        &human_output,
+        "real human ee resume with globally unavailable discovery",
+    )?;
+    let human = String::from_utf8(human_output.stdout)
+        .map_err(|error| format!("globally unavailable resume stdout was not UTF-8: {error}"))?;
+    ensure(
+        human.contains(
+            "Nearby-store discovery outcome: unavailable; an empty candidate list is not evidence that no populated store exists.",
+        ) && !human.contains("Nearby populated stores:")
+            && !human.contains("ee resume --workspace ")
+            && !human.contains("locally proved candidates remain actionable"),
+        format!("human globally unavailable resume invented a retarget: {human}"),
+    )?;
+    ensure(
+        !cold_workspace.join(".ee").exists()
+            && std::fs::read(&invalid_registry)
+                .map_err(|error| format!("read invalid registry after resume: {error}"))?
+                == invalid_registry_bytes,
+        "globally unavailable resume must not initialize the cold store or mutate the registry",
+    )
 }
 
 #[test]

@@ -726,7 +726,11 @@ impl NearbyStoreScanAssessment {
     }
 
     fn mark_registry_unavailable(&mut self) {
-        self.outcome = NearbyStoreScanOutcome::TruncatedRegistryUnavailable;
+        self.outcome = if self.stores.is_empty() {
+            NearbyStoreScanOutcome::Unavailable
+        } else {
+            NearbyStoreScanOutcome::TruncatedRegistryUnavailable
+        };
     }
 }
 
@@ -1206,9 +1210,11 @@ fn scan_nearby_stores_with_registry(
         parent = dir.parent();
     }
 
-    // (c) registered workspaces. A registry failure does not fail the caller
-    // or invalidate candidates proved by the local scans. Preserve both that
-    // usable subset and the optional-source degradation in the typed outcome.
+    // (c) registered workspaces. A registry failure does not invalidate
+    // candidates proved by the local scans. Preserve both that usable subset
+    // and the optional-source degradation in the typed partial outcome. With
+    // no local proof, discovery is globally unavailable and must not imply an
+    // actionable candidate or a complete no-store conclusion.
     if !nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
         match crate::core::workspace::list_workspace_registry(
             &crate::core::workspace::WorkspaceListOptions {

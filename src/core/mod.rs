@@ -1348,8 +1348,7 @@ mod tests {
     }
 
     #[test]
-    fn storeless_assessment_reports_partial_registry_failure_without_creating_state() -> TestResult
-    {
+    fn storeless_assessment_reports_global_registry_failure_without_creating_state() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = temp.path().join("unavailable workspace");
         std::fs::create_dir_all(workspace.join(".git")).map_err(|error| error.to_string())?;
@@ -1369,15 +1368,19 @@ mod tests {
 
         ensure_equal(
             &details.pointer("/storeDiscovery/outcome"),
-            &Some(&serde_json::json!("truncated_registry_unavailable")),
-            "partial registry-unavailable store-discovery outcome",
+            &Some(&serde_json::json!("unavailable")),
+            "global registry-unavailable store-discovery outcome",
         )?;
         ensure(
-            repair.contains("discovery was truncated")
-                && repair.contains("optional workspace registry was unavailable")
-                && repair.contains("locally proved results remain actionable")
+            repair.contains("discovery was unavailable")
+                && repair.contains("no complete nearby-store conclusion is available")
+                && !repair.contains("locally proved results remain actionable")
                 && !repair.contains("discovery completed and found no populated stores"),
-            format!("partial recovery must retain the registry degradation: {repair}"),
+            format!("globally unavailable recovery must suppress unproved retargets: {repair}"),
+        )?;
+        ensure(
+            assessment.candidate_retargets.is_empty(),
+            "globally unavailable discovery must not create retarget authority",
         )?;
         ensure(
             !workspace.join(".ee").exists()
@@ -1386,7 +1389,7 @@ mod tests {
                     .map_err(|error| error.to_string())?
                     .as_slice()
                     == registry_bytes,
-            "partial read-only assessment must not create a store or mutate its registry",
+            "unavailable read-only assessment must not create a store or mutate its registry",
         )
     }
 
