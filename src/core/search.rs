@@ -120,6 +120,20 @@ const DEFAULT_SEARCH_RERANK_TOP_K: usize = 50;
 pub const RERANK_MODEL_UNAVAILABLE_ADVISORY: &str = "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.";
 pub const RERANK_MODEL_UNAVAILABLE_REPAIR: &str =
     "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst";
+/// Leading warning prose of the stale-index advisory. The episode-suppressed
+/// compact form strips exactly this prefix, so the builder and the transform
+/// must stay in lockstep through these constants.
+const SEARCH_INDEX_STALE_WARNING_PREFIX: &str =
+    "Search index is stale; returning lexical fallback results from the current index.";
+/// Trailing advice prose of the stale-index advisory (see prefix above).
+const SEARCH_INDEX_STALE_WARNING_SUFFIX: &str =
+    " Newer memories may be omitted until the index is rebuilt.";
+/// Compact per-response stale marker used once a large-gap episode has already
+/// delivered the full warning: authoritative generation numbers and the
+/// rebuild repair stay per-response while the repeated warning prose dedupes
+/// (bd-index-auto-freshness-m5kwf).
+const SEARCH_INDEX_STALE_EPISODE_COMPACT_PREFIX: &str =
+    "Search index remains stale in an already-reported episode.";
 /// Stable wire token for permanent advisories emitted at most once during the
 /// lifetime of one process. Transient degradations retain their own response-
 /// or episode-scoped contracts.
@@ -1768,7 +1782,7 @@ impl SearchDegradation {
             code: "search_index_stale".to_string(),
             severity: "medium".to_string(),
             message: format!(
-                "Search index is stale; returning lexical fallback results from the current index.{generation_detail} Newer memories may be omitted until the index is rebuilt."
+                "{SEARCH_INDEX_STALE_WARNING_PREFIX}{generation_detail}{SEARCH_INDEX_STALE_WARNING_SUFFIX}"
             ),
             repair: Some("ee index rebuild --workspace .".to_string()),
         }
@@ -3075,6 +3089,31 @@ fn search_degraded_data_json_with_advisory_session_inner(
         };
         code != "search_index_large_gap" || emit_large_gap
     });
+    // Within an already-reported large-gap episode, the stale advisory keeps
+    // its code, severity, authoritative generation numbers, and rebuild
+    // repair on every response, while the repeated warning prose dedupes to a
+    // compact episode marker. Small-gap and episode-first responses keep the
+    // full warning; any unexpected message shape fails open to the full
+    // prose rather than hiding truth (bd-index-auto-freshness-m5kwf).
+    if has_large_gap && !emit_large_gap {
+        for entry in &mut aggregated {
+            if entry.get("code").and_then(serde_json::Value::as_str) != Some("search_index_stale") {
+                continue;
+            }
+            let Some(generation_detail) = entry
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|message| message.strip_prefix(SEARCH_INDEX_STALE_WARNING_PREFIX))
+                .and_then(|rest| rest.strip_suffix(SEARCH_INDEX_STALE_WARNING_SUFFIX))
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            entry["message"] = serde_json::Value::String(format!(
+                "{SEARCH_INDEX_STALE_EPISODE_COMPACT_PREFIX}{generation_detail}"
+            ));
+        }
+    }
     aggregated
 }
 
@@ -18187,6 +18226,101 @@ mod tests {
         );
         assert_eq!(repeated_json["degraded"].as_array().map(Vec::len), Some(1));
         assert_eq!(repeated_json["degraded"][0]["code"], "search_index_stale");
+    }
+
+    #[test]
+    fn large_gap_episode_dedupes_stale_prose_but_keeps_generation_truth() {
+        let full_message = |db: u64, index: u64| {
+            format!(
+                "{SEARCH_INDEX_STALE_WARNING_PREFIX} Database generation is {db}; index generation is {index}.{SEARCH_INDEX_STALE_WARNING_SUFFIX}"
+            )
+        };
+        let stale_report = |db: u64, index: u64, with_gap: bool| {
+            let mut degraded = vec![SearchDegradation::stale_index(Some(db), Some(index))];
+            if with_gap {
+                degraded.push(SearchDegradation::large_index_gap(db, index));
+            }
+            let mut report = rerank_test_report(Vec::new(), degraded, false);
+            report.rerank_configured_mode = crate::config::SearchRerankMode::Off;
+            report
+        };
+        let stale_entry = |json: &serde_json::Value| -> serde_json::Value {
+            json["degraded"]
+                .as_array()
+                .expect("degraded array")
+                .iter()
+                .find(|entry| entry["code"] == "search_index_stale")
+                .cloned()
+                .expect("stale entry present")
+        };
+        let has_large_gap = |json: &serde_json::Value| {
+            json["degraded"]
+                .as_array()
+                .expect("degraded array")
+                .iter()
+                .any(|entry| entry["code"] == "search_index_large_gap")
+        };
+
+        let mut session = SearchAdvisorySession::default();
+
+        // Episode-first response: full warning prose, rebuild repair, and the
+        // large-gap notice all emit.
+        let first = stale_report(12, 4, true)
+            .data_json_with_advisory_session_for_workspace(&mut session, "wsp-a");
+        let first_stale = stale_entry(&first);
+        assert_eq!(first_stale["message"], full_message(12, 4).as_str());
+        assert_eq!(first_stale["repair"], "ee index rebuild --workspace .");
+        assert!(has_large_gap(&first));
+
+        // Same-episode repeat: the warning prose dedupes to the compact
+        // marker while code, severity, per-response generation truth, and the
+        // rebuild repair all remain.
+        let second = stale_report(13, 4, true)
+            .data_json_with_advisory_session_for_workspace(&mut session, "wsp-a");
+        let second_stale = stale_entry(&second);
+        let second_message = second_stale["message"].as_str().expect("stale message");
+        assert!(second_message.starts_with(SEARCH_INDEX_STALE_EPISODE_COMPACT_PREFIX));
+        assert!(second_message.contains("Database generation is 13; index generation is 4."));
+        assert!(!second_message.contains(SEARCH_INDEX_STALE_WARNING_SUFFIX));
+        assert_eq!(second_stale["severity"], "medium");
+        assert_eq!(second_stale["repair"], "ee index rebuild --workspace .");
+        assert!(!has_large_gap(&second));
+
+        // A different workspace cannot be suppressed by wsp-a's episode.
+        let other = stale_report(9, 2, true)
+            .data_json_with_advisory_session_for_workspace(&mut session, "wsp-b");
+        assert_eq!(stale_entry(&other)["message"], full_message(9, 2).as_str());
+        assert!(has_large_gap(&other));
+
+        // Small-gap staleness keeps the canonical full warning per response
+        // and ends wsp-a's large-gap episode.
+        let small = stale_report(14, 13, false)
+            .data_json_with_advisory_session_for_workspace(&mut session, "wsp-a");
+        assert_eq!(
+            stale_entry(&small)["message"],
+            full_message(14, 13).as_str()
+        );
+        assert!(!has_large_gap(&small));
+
+        // A new large gap after recovery rearms the full warning and notice.
+        let rearmed = stale_report(40, 2, true)
+            .data_json_with_advisory_session_for_workspace(&mut session, "wsp-a");
+        assert_eq!(
+            stale_entry(&rearmed)["message"],
+            full_message(40, 2).as_str()
+        );
+        assert!(has_large_gap(&rearmed));
+
+        // Ordinary one-shot renders stay invocation-scoped: a fresh session
+        // per call always emits the full warning, never a falsely
+        // process-scoped suppression.
+        for _ in 0..2 {
+            let one_shot = stale_report(12, 4, true).data_json();
+            assert_eq!(
+                stale_entry(&one_shot)["message"],
+                full_message(12, 4).as_str()
+            );
+        }
     }
 
     #[test]
