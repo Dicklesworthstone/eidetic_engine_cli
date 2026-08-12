@@ -1752,8 +1752,17 @@ fn handle_connection(
         schema_mismatch,
         unknown_method,
     );
-    let delivered = write_response(&mut stream, &response).is_ok();
-    settle_daemon_response_delivery(dispatch_policy.as_ref(), &mut response, delivered);
+    write_and_settle_daemon_response(&mut stream, dispatch_policy.as_ref(), &mut response);
+}
+
+fn write_and_settle_daemon_response(
+    stream: &mut UnixStream,
+    dispatch_policy: &DaemonDispatchPolicy,
+    response: &mut DaemonResponse,
+) -> bool {
+    let delivered = write_response(stream, response).is_ok();
+    settle_daemon_response_delivery(dispatch_policy, response, delivered);
+    delivered
 }
 
 fn settle_daemon_response_delivery(
@@ -5361,22 +5370,9 @@ mod tests {
     }
 
     #[test]
-    fn failed_search_response_delivery_does_not_consume_permanent_advisory() {
+    fn successful_socket_delivery_consumes_permanent_advisory() {
         let report = permanent_reranker_advisory_report();
         let policy = DaemonDispatchPolicy::for_workspace(TEST_WORKSPACE_ID);
-
-        let (mut failed_response, failed_result) =
-            advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
-        assert_eq!(
-            failed_result
-                .pointer("/response/data/rerank/advisory/code")
-                .and_then(serde_json::Value::as_str),
-            Some("rerank_model_unavailable")
-        );
-        assert!(failed_response.delivery.is_some());
-        settle_daemon_response_delivery(&policy, &mut failed_response, false);
-        assert!(failed_response.delivery.is_none());
-
         let (mut delivered_response, delivered_result) =
             advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
         assert_eq!(
@@ -5385,8 +5381,16 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("rerank_model_unavailable")
         );
-        assert!(delivered_response.delivery.is_some());
-        settle_daemon_response_delivery(&policy, &mut delivered_response, true);
+        let (mut server_side, mut client_side) = UnixStream::pair().expect("socketpair");
+        let reader = thread::spawn(move || read_framed_daemon_response(&mut client_side));
+        assert!(write_and_settle_daemon_response(
+            &mut server_side,
+            &policy,
+            &mut delivered_response,
+        ));
+        assert!(delivered_response.delivery.is_none());
+        let wire_response = reader.join().expect("socket reader must not panic");
+        assert_eq!(wire_response.result, Some(delivered_result));
 
         let (repeated_response, repeated_result) =
             advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
@@ -5405,30 +5409,147 @@ mod tests {
     }
 
     #[test]
-    fn unbound_daemon_concurrent_workspace_reservations_do_not_cross_suppress() {
+    fn disconnected_socket_does_not_consume_permanent_advisory() {
         let report = permanent_reranker_advisory_report();
-        let policy = DaemonDispatchPolicy::default();
-        assert!(policy.bound_workspace_id().is_none());
-        let (mut response_a, first_a) =
-            advisory_delivery_candidate(&report, &policy, "workspace-a");
-        let (mut response_b, first_b) =
-            advisory_delivery_candidate(&report, &policy, "workspace-b");
-
+        let policy = DaemonDispatchPolicy::for_workspace(TEST_WORKSPACE_ID);
+        let (mut failed_response, failed_result) =
+            advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
+        assert!(failed_response.error.is_none());
         assert_eq!(
-            first_a
+            failed_result
                 .pointer("/response/data/rerank/advisory/code")
                 .and_then(serde_json::Value::as_str),
             Some("rerank_model_unavailable")
         );
+        let (mut server_side, client_side) = UnixStream::pair().expect("socketpair");
+        drop(client_side);
+        assert!(!write_and_settle_daemon_response(
+            &mut server_side,
+            &policy,
+            &mut failed_response,
+        ));
+        assert!(failed_response.delivery.is_none());
+
+        let (retry_response, retry_result) =
+            advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
+        assert!(retry_response.delivery.is_some());
         assert_eq!(
-            first_b
+            retry_result
                 .pointer("/response/data/rerank/advisory/code")
                 .and_then(serde_json::Value::as_str),
-            Some("rerank_model_unavailable"),
-            "workspace-a must not suppress the first active episode in workspace-b"
+            Some("rerank_model_unavailable")
         );
-        settle_daemon_response_delivery(&policy, &mut response_a, true);
-        settle_daemon_response_delivery(&policy, &mut response_b, true);
+    }
+
+    #[test]
+    fn partial_socket_delivery_does_not_consume_permanent_advisory() {
+        use std::io::Read;
+        use std::net::Shutdown;
+
+        let report = permanent_reranker_advisory_report();
+        let policy = DaemonDispatchPolicy::for_workspace(TEST_WORKSPACE_ID);
+        let (mut partial_response, _) =
+            advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
+        assert!(partial_response.error.is_none());
+        partial_response.result = Some(serde_json::json!({
+            "payload": "x".repeat(3 * 1024 * 1024),
+        }));
+        let (mut server_side, mut client_side) = UnixStream::pair().expect("socketpair");
+        server_side
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .expect("server write timeout");
+        let reader = thread::spawn(move || {
+            let mut prefix = [0_u8; 4];
+            client_side
+                .read_exact(&mut prefix)
+                .expect("length prefix must arrive");
+            let announced = u32::from_be_bytes(prefix) as usize;
+            let mut partial = [0_u8; 16 * 1024];
+            client_side
+                .read_exact(&mut partial)
+                .expect("partial body must arrive");
+            client_side
+                .shutdown(Shutdown::Both)
+                .expect("disconnect partial reader");
+            (announced, partial.len())
+        });
+
+        assert!(!write_and_settle_daemon_response(
+            &mut server_side,
+            &policy,
+            &mut partial_response,
+        ));
+        let (announced, observed) = reader.join().expect("partial reader must not panic");
+        assert!(announced > observed, "fixture must disconnect mid-frame");
+        assert!(partial_response.delivery.is_none());
+
+        let (retry_response, retry_result) =
+            advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
+        assert!(retry_response.delivery.is_some());
+        assert_eq!(
+            retry_result
+                .pointer("/response/data/rerank/advisory/code")
+                .and_then(serde_json::Value::as_str),
+            Some("rerank_model_unavailable")
+        );
+    }
+
+    #[test]
+    fn unbound_daemon_concurrent_workspace_reservations_do_not_cross_suppress() {
+        const THREADS_PER_WORKSPACE: usize = 8;
+
+        let report = permanent_reranker_advisory_report();
+        let policy = DaemonDispatchPolicy::default();
+        assert!(policy.bound_workspace_id().is_none());
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS_PER_WORKSPACE * 2 + 1));
+        let mut workers = Vec::new();
+        for workspace_id in ["workspace-a", "workspace-b"] {
+            for _ in 0..THREADS_PER_WORKSPACE {
+                let report = report.clone();
+                let policy = policy.clone();
+                let barrier = Arc::clone(&barrier);
+                workers.push(thread::spawn(move || {
+                    barrier.wait();
+                    let (response, result) =
+                        advisory_delivery_candidate(&report, &policy, workspace_id);
+                    (workspace_id, response, result)
+                }));
+            }
+        }
+        barrier.wait();
+        let mut outcomes = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("reservation worker must not panic"))
+            .collect::<Vec<_>>();
+
+        for workspace_id in ["workspace-a", "workspace-b"] {
+            let workspace_outcomes = outcomes
+                .iter()
+                .filter(|(actual, _, _)| *actual == workspace_id)
+                .collect::<Vec<_>>();
+            assert_eq!(workspace_outcomes.len(), THREADS_PER_WORKSPACE);
+            assert_eq!(
+                workspace_outcomes
+                    .iter()
+                    .filter(|(_, _, result)| {
+                        result
+                            .pointer("/response/data/rerank/advisory/code")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("rerank_model_unavailable")
+                    })
+                    .count(),
+                1,
+                "each workspace must reserve its own first advisory"
+            );
+            assert!(
+                workspace_outcomes
+                    .iter()
+                    .all(|(_, response, _)| response.error.is_none())
+            );
+        }
+        for (_, response, _) in &mut outcomes {
+            settle_daemon_response_delivery(&policy, response, true);
+        }
 
         let (_, repeated_a) = advisory_delivery_candidate(&report, &policy, "workspace-a");
         let (_, repeated_b) = advisory_delivery_candidate(&report, &policy, "workspace-b");
@@ -5443,29 +5564,63 @@ mod tests {
 
     #[test]
     fn same_workspace_concurrent_reservations_suppress_duplicates_without_errors() {
+        const THREADS: usize = 16;
+
         let report = permanent_reranker_advisory_report();
         let policy = DaemonDispatchPolicy::for_workspace(TEST_WORKSPACE_ID);
-        let (mut first_response, first_result) =
-            advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
-        let (competing_response, competing_result) =
-            advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
-        assert!(first_response.error.is_none());
-        assert_eq!(
-            first_result
-                .pointer("/response/data/rerank/advisory/code")
-                .and_then(serde_json::Value::as_str),
-            Some("rerank_model_unavailable")
-        );
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS + 1));
+        let workers = (0..THREADS)
+            .map(|_| {
+                let report = report.clone();
+                let policy = policy.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let mut outcomes = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("reservation worker must not panic"))
+            .collect::<Vec<_>>();
         assert!(
-            competing_result
-                .pointer("/response/data/rerank/advisory")
-                .is_some_and(serde_json::Value::is_null),
-            "an in-flight reservation must suppress a duplicate without failing search"
+            outcomes
+                .iter()
+                .all(|(response, _)| response.error.is_none())
         );
-        assert!(competing_response.error.is_none());
-        assert!(competing_response.delivery.is_none());
-
-        settle_daemon_response_delivery(&policy, &mut first_response, false);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|(_, result)| {
+                    result
+                        .pointer("/response/data/rerank/advisory/code")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("rerank_model_unavailable")
+                })
+                .count(),
+            1,
+            "only one thread may own the same-workspace delivery reservation"
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|(response, _)| response.delivery.is_some())
+                .count(),
+            1
+        );
+        let first_response = outcomes
+            .iter_mut()
+            .find_map(|(response, _)| {
+                if response.delivery.is_some() {
+                    Some(response)
+                } else {
+                    None
+                }
+            })
+            .expect("one response must carry the reservation");
+        settle_daemon_response_delivery(&policy, first_response, false);
         let (mut retry_response, retry_result) =
             advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
         assert_eq!(

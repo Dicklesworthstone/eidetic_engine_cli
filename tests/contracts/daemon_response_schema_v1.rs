@@ -356,6 +356,81 @@ fn daemon_search_method_schemas_pin_paths_timings_and_nested_strictness() -> Tes
         ),
         (
             &response,
+            "/$defs/performanceRuntimeProfile/additionalProperties",
+            "performance runtime profile",
+        ),
+        (
+            &response,
+            "/$defs/performanceRuntimeProfile/properties/budgets/additionalProperties",
+            "performance runtime budgets",
+        ),
+        (
+            &response,
+            "/$defs/performanceRuntimeProfile/properties/budgets/properties/search/additionalProperties",
+            "performance runtime search budget",
+        ),
+        (
+            &response,
+            "/$defs/performanceRuntimeProfile/properties/budgets/properties/pack/additionalProperties",
+            "performance runtime pack budget",
+        ),
+        (
+            &response,
+            "/$defs/performanceRuntimeProfile/properties/budgets/properties/cache/additionalProperties",
+            "performance runtime cache budget",
+        ),
+        (
+            &response,
+            "/$defs/performanceRuntimeProfile/properties/budgets/properties/writeSpool/additionalProperties",
+            "performance runtime write-spool budget",
+        ),
+        (
+            &response,
+            "/$defs/performanceRuntimeProfile/properties/budgets/properties/steward/additionalProperties",
+            "performance runtime steward budget",
+        ),
+        (
+            &response,
+            "/$defs/performanceRuntimeProfile/properties/budgets/properties/verification/additionalProperties",
+            "performance runtime verification budget",
+        ),
+        (
+            &response,
+            "/$defs/performanceRuntimeProfile/properties/budgets/properties/diagnostics/additionalProperties",
+            "performance runtime diagnostics budget",
+        ),
+        (
+            &response,
+            "/$defs/performanceSearch/additionalProperties",
+            "performance search report",
+        ),
+        (
+            &response,
+            "/$defs/performanceSearch/properties/sourceCounts/additionalProperties",
+            "performance search source counts",
+        ),
+        (
+            &response,
+            "/$defs/performanceSearch/properties/scoreDistribution/additionalProperties",
+            "performance search score distribution",
+        ),
+        (
+            &response,
+            "/$defs/performanceSearch/properties/fieldCoverage/additionalProperties",
+            "performance search field coverage",
+        ),
+        (
+            &response,
+            "/$defs/performanceNamedTiming/additionalProperties",
+            "named performance timing",
+        ),
+        (
+            &response,
+            "/$defs/performance/properties/data/properties/redaction/additionalProperties",
+            "performance redaction",
+        ),
+        (
+            &response,
             "/$defs/performanceFallback/additionalProperties",
             "redacted performance fallback",
         ),
@@ -553,6 +628,160 @@ fn real_daemon_search_response_v3_validates_and_redacts_performance_fallbacks() 
         serde_json::json!(SECRET_QUERY);
     if validate_json_schema(&leaked_fallback, &schema, "$").is_ok() {
         return Err("response schema accepted a query-bearing performance fallback".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn daemon_search_response_v3_schema_rejects_rust_validator_drift_matrix() -> TestResult {
+    let schema = read_schema(SEARCH_RESPONSE_SCHEMA_PATH)?;
+    let valid = actual_daemon_search_result("schema drift matrix")?;
+    validate_json_schema(&valid, &schema, "$")?;
+
+    let mut invalid_cases = Vec::new();
+
+    let mut profile_unknown = valid.clone();
+    profile_unknown["performance"]["data"]["profileRuntime"]["budgets"]["search"]["unexpected"] =
+        serde_json::json!(1);
+    invalid_cases.push(("profileRuntime nested unknown field", profile_unknown));
+
+    let mut profile_enum = valid.clone();
+    profile_enum["performance"]["data"]["profileRuntime"]["budgets"]["verification"]["heavyStrategy"] =
+        serde_json::json!("remote_magic");
+    invalid_cases.push(("profileRuntime nested enum drift", profile_enum));
+
+    let mut profile_source = valid.clone();
+    profile_source["performance"]["data"]["profileRuntime"]["source"] = serde_json::json!("");
+    invalid_cases.push(("profileRuntime empty source", profile_source));
+
+    let mut profile_missing = valid.clone();
+    profile_missing["performance"]["data"]["profileRuntime"]["budgets"]
+        .as_object_mut()
+        .ok_or_else(|| "runtime budgets fixture must be an object".to_owned())?
+        .remove("diagnostics");
+    invalid_cases.push(("profileRuntime missing required budget", profile_missing));
+
+    for (case, budget, field, invalid_value) in [
+        (
+            "profileRuntime pack enum drift",
+            "pack",
+            "explanationVerbosity",
+            serde_json::json!("brief"),
+        ),
+        (
+            "profileRuntime cache negative value",
+            "cache",
+            "entryCap",
+            serde_json::json!(-1),
+        ),
+        (
+            "profileRuntime writeSpool type drift",
+            "writeSpool",
+            "retryBudget",
+            serde_json::json!("3"),
+        ),
+        (
+            "profileRuntime steward type drift",
+            "steward",
+            "daemonPrewarm",
+            serde_json::json!(1),
+        ),
+        (
+            "profileRuntime diagnostics enum drift",
+            "diagnostics",
+            "redaction",
+            serde_json::json!("none"),
+        ),
+    ] {
+        let mut invalid = valid.clone();
+        invalid["performance"]["data"]["profileRuntime"]["budgets"][budget][field] = invalid_value;
+        invalid_cases.push((case, invalid));
+    }
+
+    let mut search_status = valid.clone();
+    search_status["performance"]["data"]["search"]["status"] = serde_json::json!("partial");
+    invalid_cases.push(("search status vocabulary drift", search_status));
+
+    let mut search_type = valid.clone();
+    search_type["performance"]["data"]["search"]["returnedHits"] = serde_json::json!("0");
+    invalid_cases.push(("search unsigned type drift", search_type));
+
+    let mut source_counts_unknown = valid.clone();
+    source_counts_unknown["performance"]["data"]["search"]["sourceCounts"]["other"] =
+        serde_json::json!(0);
+    invalid_cases.push(("search sourceCounts unknown field", source_counts_unknown));
+
+    let mut score_distribution_type = valid.clone();
+    score_distribution_type["performance"]["data"]["search"]["scoreDistribution"]["top"] =
+        serde_json::json!("none");
+    invalid_cases.push((
+        "search scoreDistribution type drift",
+        score_distribution_type,
+    ));
+
+    let mut field_coverage_negative = valid.clone();
+    field_coverage_negative["performance"]["data"]["search"]["fieldCoverage"]["metadataCount"] =
+        serde_json::json!(-1);
+    invalid_cases.push((
+        "search fieldCoverage negative value",
+        field_coverage_negative,
+    ));
+
+    let mut errors_type = valid.clone();
+    errors_type["performance"]["data"]["search"]["errors"] = serde_json::json!([7]);
+    invalid_cases.push(("search errors item type drift", errors_type));
+
+    let mut elapsed_value = valid.clone();
+    elapsed_value["performance"]["data"]["search"]["elapsed"]["nondeterministic"] =
+        serde_json::json!(false);
+    invalid_cases.push(("search elapsed value drift", elapsed_value));
+
+    let invalid_named_timing = serde_json::json!({
+        "elapsedMs": 1.0,
+        "elapsedMsBucket": "1_9ms",
+        "nondeterministic": true
+    });
+    let mut search_timing = valid.clone();
+    search_timing["performance"]["data"]["search"]["timings"] =
+        serde_json::json!([invalid_named_timing.clone()]);
+    invalid_cases.push(("search timing missing name", search_timing));
+
+    let mut aggregate_timing = valid.clone();
+    aggregate_timing["performance"]["data"]["timings"] = serde_json::json!([invalid_named_timing]);
+    invalid_cases.push(("aggregate timing missing name", aggregate_timing));
+
+    let mut aggregate_timing_extra = valid.clone();
+    aggregate_timing_extra["performance"]["data"]["timings"] = serde_json::json!([{
+        "elapsedMs": 1.0,
+        "elapsedMsBucket": "1_9ms",
+        "nondeterministic": true,
+        "name": "query",
+        "unexpected": true
+    }]);
+    invalid_cases.push(("aggregate timing unknown field", aggregate_timing_extra));
+
+    let mut safe_fields_order = valid.clone();
+    safe_fields_order["performance"]["data"]["redaction"]["safeFields"] = serde_json::json!([
+        "elapsedMs",
+        "counts",
+        "elapsedMsBucket",
+        "status",
+        "fingerprints",
+        "degradationCodes"
+    ]);
+    invalid_cases.push(("redaction safeFields order drift", safe_fields_order));
+
+    let mut fallback_sources = valid;
+    fallback_sources["performance"]["data"]["fallbacks"][0]["sources"] =
+        serde_json::json!(["search", "reranker"]);
+    invalid_cases.push(("fallback source drift", fallback_sources));
+
+    for (case, invalid) in invalid_cases {
+        if validate_json_schema(&invalid, &schema, "$").is_ok() {
+            return Err(format!(
+                "daemon search response v3 schema accepted invalid {case}"
+            ));
+        }
     }
     Ok(())
 }

@@ -109,7 +109,7 @@
                 "strictScope": {"type": "boolean"}
               }
             },
-            "profileRuntime": {"type": "object"},
+            "profileRuntime": {"$ref": "#/$defs/performanceRuntimeProfile"},
             "dbReads": {
               "type": "object",
               "required": ["indexStatusChecks", "memoryReads", "tagReads", "artifactLinkReads"],
@@ -121,8 +121,8 @@
                 "artifactLinkReads": {"type": "integer", "minimum": 0}
               }
             },
-            "search": {"type": "object"},
-            "timings": {"type": "array"},
+            "search": {"$ref": "#/$defs/performanceSearch"},
+            "timings": {"type": "array", "items": {"$ref": "#/$defs/performanceNamedTiming"}},
             "pack": {"$ref": "#/$defs/notUsed"},
             "cache": {"$ref": "#/$defs/notUsed"},
             "graph": {"$ref": "#/$defs/notUsed"},
@@ -134,11 +134,160 @@
               "properties": {
                 "memoryContentIncluded": {"type": "boolean", "const": false},
                 "queryTextIncluded": {"type": "boolean", "const": false},
-                "safeFields": {"type": "array", "items": {"type": "string"}}
+                "safeFields": {
+                  "type": "array",
+                  "const": ["counts", "elapsedMs", "elapsedMsBucket", "status", "fingerprints", "degradationCodes"]
+                }
               }
             }
           }
         }
+      }
+    },
+    "performanceRuntimeProfile": {
+      "type": "object",
+      "required": ["schema", "activeProfile", "source", "budgets"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.profile.runtime.v1"},
+        "activeProfile": {"type": "string", "enum": ["constrained", "portable", "workstation", "swarm"]},
+        "source": {"type": "string", "minLength": 1},
+        "budgets": {
+          "type": "object",
+          "required": ["search", "pack", "cache", "writeSpool", "steward", "verification", "diagnostics"],
+          "additionalProperties": false,
+          "properties": {
+            "search": {
+              "type": "object",
+              "required": ["candidateLimit", "concurrentIndexReaders", "staleIndexTolerance"],
+              "additionalProperties": false,
+              "properties": {
+                "candidateLimit": {"type": "integer", "minimum": 0},
+                "concurrentIndexReaders": {"type": "integer", "minimum": 0},
+                "staleIndexTolerance": {"type": "string", "enum": ["strict", "repair_hint"]}
+              }
+            },
+            "pack": {
+              "type": "object",
+              "required": ["maxTokens", "maxCandidateMemories", "explanationVerbosity"],
+              "additionalProperties": false,
+              "properties": {
+                "maxTokens": {"type": "integer", "minimum": 0},
+                "maxCandidateMemories": {"type": "integer", "minimum": 0},
+                "explanationVerbosity": {"type": "string", "enum": ["standard", "full"]}
+              }
+            },
+            "cache": {
+              "type": "object",
+              "required": ["memoryCapMb", "entryCap", "hotsetPrewarmLimit"],
+              "additionalProperties": false,
+              "properties": {
+                "memoryCapMb": {"type": "integer", "minimum": 0},
+                "entryCap": {"type": "integer", "minimum": 0},
+                "hotsetPrewarmLimit": {"type": "integer", "minimum": 0}
+              }
+            },
+            "writeSpool": {
+              "type": "object",
+              "required": ["queueCap", "batchCap", "retryBudget"],
+              "additionalProperties": false,
+              "properties": {
+                "queueCap": {"type": "integer", "minimum": 0},
+                "batchCap": {"type": "integer", "minimum": 0},
+                "retryBudget": {"type": "integer", "minimum": 0}
+              }
+            },
+            "steward": {
+              "type": "object",
+              "required": ["maintenanceWindowMs", "graphRefreshBudget", "daemonPrewarm"],
+              "additionalProperties": false,
+              "properties": {
+                "maintenanceWindowMs": {"type": "integer", "minimum": 0},
+                "graphRefreshBudget": {"type": "integer", "minimum": 0},
+                "daemonPrewarm": {"type": "boolean"}
+              }
+            },
+            "verification": {
+              "type": "object",
+              "required": ["recipe", "targetDirPosture", "timeoutClass", "heavyStrategy"],
+              "additionalProperties": false,
+              "properties": {
+                "recipe": {"type": "string", "enum": ["quick", "workspace", "full"]},
+                "targetDirPosture": {"type": "string", "enum": ["shared", "isolated"]},
+                "timeoutClass": {"type": "string", "enum": ["short", "standard", "extended"]},
+                "heavyStrategy": {"type": "string", "enum": ["manual", "rch_preferred", "rch_default"]}
+              }
+            },
+            "diagnostics": {
+              "type": "object",
+              "required": ["supportBundleProfile", "redaction"],
+              "additionalProperties": false,
+              "properties": {
+                "supportBundleProfile": {"type": "string", "enum": ["minimal", "standard", "full"]},
+                "redaction": {"type": "string", "enum": ["strict", "policy_applied"]}
+              }
+            }
+          }
+        }
+      }
+    },
+    "performanceSearch": {
+      "type": "object",
+      "required": ["status", "returnedHits", "sourceCounts", "scoreDistribution", "fieldCoverage", "errors", "elapsed", "timings"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"type": "string", "enum": ["success", "no_results", "index_not_found", "index_error"]},
+        "returnedHits": {"type": "integer", "minimum": 0},
+        "sourceCounts": {
+          "type": "object",
+          "required": ["lexical", "semanticFast", "semanticQuality", "hybrid", "reranked"],
+          "additionalProperties": false,
+          "properties": {
+            "lexical": {"type": "integer", "minimum": 0},
+            "semanticFast": {"type": "integer", "minimum": 0},
+            "semanticQuality": {"type": "integer", "minimum": 0},
+            "hybrid": {"type": "integer", "minimum": 0},
+            "reranked": {"type": "integer", "minimum": 0}
+          }
+        },
+        "scoreDistribution": {
+          "type": "object",
+          "required": ["top", "min", "max", "mean"],
+          "additionalProperties": false,
+          "properties": {
+            "top": {"type": ["number", "null"]},
+            "min": {"type": ["number", "null"]},
+            "max": {"type": ["number", "null"]},
+            "mean": {"type": ["number", "null"]}
+          }
+        },
+        "fieldCoverage": {
+          "type": "object",
+          "required": ["fastScoreCount", "qualityScoreCount", "lexicalScoreCount", "rerankScoreCount", "metadataCount", "explanationCount"],
+          "additionalProperties": false,
+          "properties": {
+            "fastScoreCount": {"type": "integer", "minimum": 0},
+            "qualityScoreCount": {"type": "integer", "minimum": 0},
+            "lexicalScoreCount": {"type": "integer", "minimum": 0},
+            "rerankScoreCount": {"type": "integer", "minimum": 0},
+            "metadataCount": {"type": "integer", "minimum": 0},
+            "explanationCount": {"type": "integer", "minimum": 0}
+          }
+        },
+        "errors": {"type": "array", "items": {"type": "string"}},
+        "elapsed": {"$ref": "#/$defs/timing"},
+        "timings": {"type": "array", "items": {"$ref": "#/$defs/performanceNamedTiming"}}
+      }
+    },
+    "performanceNamedTiming": {
+      "type": "object",
+      "required": ["elapsedMs", "elapsedMsBucket", "nondeterministic", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "elapsedMs": {"type": "number", "minimum": 0},
+        "elapsedMsBucket": {"type": "string", "enum": ["lt_1ms", "1_9ms", "10_49ms", "50_99ms", "100_499ms", "500_999ms", "gte_1000ms"]},
+        "nondeterministic": {"type": "boolean", "const": true},
+        "name": {"type": "string", "minLength": 1}
       }
     },
     "notUsed": {
@@ -158,7 +307,7 @@
         "code": {"type": "string", "minLength": 1},
         "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
         "message": {"type": "string", "const": "Fallback details are redacted; inspect the degradation code and canonical response."},
-        "sources": {"type": "array", "items": {"type": "string", "minLength": 1}}
+        "sources": {"type": "array", "const": ["search"]}
       }
     },
     "degradation": {
