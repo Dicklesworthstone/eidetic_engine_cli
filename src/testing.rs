@@ -424,13 +424,11 @@ impl SignedDecimalInteger {
     }
 
     fn parse(raw: &str) -> Option<Self> {
-        let (negative, digits) = if let Some(digits) = raw.strip_prefix('-') {
-            (true, digits)
-        } else if let Some(digits) = raw.strip_prefix('+') {
-            (false, digits)
-        } else {
-            (false, raw)
-        };
+        let negative = raw.starts_with('-');
+        let digits = raw
+            .strip_prefix('-')
+            .or_else(|| raw.strip_prefix('+'))
+            .unwrap_or(raw);
         if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
             return None;
         }
@@ -499,14 +497,14 @@ impl SignedDecimalInteger {
         let mut output = Vec::with_capacity(larger.len());
         let mut smaller_index = smaller.len();
         let mut borrow = 0_i8;
-        for larger_index in (0..larger.len()).rev() {
+        for larger_digit in larger.iter().rev() {
             let smaller_digit = if smaller_index > 0 {
                 smaller_index -= 1;
                 smaller[smaller_index] as i8
             } else {
                 0
             };
-            let mut difference = larger[larger_index] as i8 - borrow - smaller_digit;
+            let mut difference = *larger_digit as i8 - borrow - smaller_digit;
             if difference < 0 {
                 difference += 10;
                 borrow = 1;
