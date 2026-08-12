@@ -33,8 +33,12 @@ use ee::core::context::{
     run_context_pack_with_performance_controlled,
 };
 use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
+use ee::core::model::{ModelFetchOptions, fetch_rerank_model};
 use ee::core::outcome::cancel_message;
-use ee::core::search::SearchSourceMode;
+use ee::core::search::{
+    SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED, SEARCH_INDEX_LARGE_GAP_THRESHOLD,
+    SearchSourceMode,
+};
 use ee::daemon::{
     DAEMON_METHOD_UNAUTHORIZED_CODE, DAEMON_REQUEST_MAX_BYTES, DAEMON_REQUEST_SCHEMA_V1,
     DAEMON_RESPONSE_MAX_BYTES, DAEMON_RESPONSE_SCHEMA_V1, DAEMON_SHUTTING_DOWN_CODE,
@@ -49,8 +53,9 @@ use ee::daemon::{
         start_server_for_workspace,
     },
 };
-use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
-use ee::models::{MemoryScope, QueryFilters, RedactionLevel};
+use ee::db::{CreateMemoryInput, CreateModelRegistryInput, CreateWorkspaceInput, DbConnection};
+use ee::models::model_registry::{ModelPurpose, ModelRegistryStatus};
+use ee::models::{MemoryScope, QueryFilters, RedactionLevel, WorkspaceId};
 use ee::pack::{ContextPackProfile, DEFAULT_COORDINATION_STALE_AFTER_MS, PackResourceProfile};
 use ee::search::SpeedMode;
 use ee::steward::{
@@ -71,7 +76,6 @@ mod tempfile {
 type TestResult = Result<(), String>;
 const TEST_AGENT_ID: &str = "agent-daemon-uds-test";
 const TEST_WORKSPACE_ID: &str = "workspace-daemon-uds-test";
-const SEEDED_DB_WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
@@ -98,6 +102,16 @@ fn secure_socket_path(root: &Path, file_name: &str) -> Result<PathBuf, String> {
     fs::set_permissions(&socket_dir, fs::Permissions::from_mode(0o700))
         .map_err(|error| format!("secure socket dir permissions: {error}"))?;
     Ok(socket_dir.join(file_name))
+}
+
+fn stable_test_workspace_id(workspace: &Path) -> Result<String, String> {
+    let canonical = workspace
+        .canonicalize()
+        .map_err(|error| format!("canonicalize workspace {}: {error}", workspace.display()))?;
+    let hash = blake3::hash(format!("workspace:{}", canonical.to_string_lossy()).as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    Ok(WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string())
 }
 
 fn context_request(
@@ -162,11 +176,12 @@ fn seed_context_workspace(root: &Path) -> Result<(std::path::PathBuf, std::path:
     let ee_dir = workspace.join(".ee");
     fs::create_dir_all(&ee_dir).map_err(|error| format!("create .ee dir: {error}"))?;
     let database = ee_dir.join("ee.db");
+    let workspace_id = stable_test_workspace_id(&workspace)?;
     let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
     connection.migrate().map_err(|error| error.to_string())?;
     connection
         .insert_workspace(
-            SEEDED_DB_WORKSPACE_ID,
+            &workspace_id,
             &CreateWorkspaceInput {
                 path: workspace.to_string_lossy().into_owned(),
                 name: Some("daemon-uds-context".to_string()),
@@ -177,7 +192,7 @@ fn seed_context_workspace(root: &Path) -> Result<(std::path::PathBuf, std::path:
         .insert_memory(
             "mem_00000000000000000000005001",
             &CreateMemoryInput {
-                workspace_id: SEEDED_DB_WORKSPACE_ID.to_string(),
+                workspace_id,
                 level: "procedural".to_string(),
                 kind: "rule".to_string(),
                 content: "Daemon context canonical pack must preserve release provenance."
@@ -196,6 +211,161 @@ fn seed_context_workspace(root: &Path) -> Result<(std::path::PathBuf, std::path:
         )
         .map_err(|error| error.to_string())?;
     Ok((workspace, database))
+}
+
+fn rebuild_test_index(workspace: &Path, database: &Path, index_dir: &Path) -> TestResult {
+    let rebuild = rebuild_index(&IndexRebuildOptions {
+        workspace_path: workspace.to_path_buf(),
+        database_path: Some(database.to_path_buf()),
+        index_dir: Some(index_dir.to_path_buf()),
+        dry_run: false,
+    })
+    .map_err(|error| format!("rebuild search index: {error}"))?;
+    ensure(
+        rebuild.status == IndexRebuildStatus::Success,
+        format!(
+            "search index rebuild must succeed; got {:?}",
+            rebuild.status
+        ),
+    )
+}
+
+fn plant_large_index_gap(database: &Path, id_base: u64, label: &str) -> TestResult {
+    let workspace = database
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| format!("database has no workspace parent: {}", database.display()))?;
+    let workspace_id = stable_test_workspace_id(workspace)?;
+    let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
+    for offset in 0..=SEARCH_INDEX_LARGE_GAP_THRESHOLD {
+        let memory_id = format!("mem_{:026}", id_base.saturating_add(offset));
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "working".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: format!("Unindexed {label} generation {offset}."),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: Some(format!("test://daemon-advisory/{label}/{offset}")),
+                    trust_class: "agent_validated".to_owned(),
+                    trust_subclass: Some("daemon-uds-advisory".to_owned()),
+                    tags: vec!["daemon".to_owned(), "advisory".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    connection.close().map_err(|error| error.to_string())
+}
+
+fn seed_rerank_candidates(workspace: &Path, database: &Path) -> TestResult {
+    let workspace_id = stable_test_workspace_id(workspace)?;
+    let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
+    for offset in 0..6_u64 {
+        connection
+            .insert_memory(
+                &format!("mem_{:026}", 70_000_u64 + offset),
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: format!(
+                        "Release provenance daemon search evidence context rule {offset}."
+                    ),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: Some(format!("test://daemon-reranker/{offset}")),
+                    trust_class: "agent_validated".to_owned(),
+                    trust_subclass: Some("verified-archive-uds-reranker".to_owned()),
+                    tags: vec!["daemon".to_owned(), "reranker".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    connection.close().map_err(|error| error.to_string())
+}
+
+fn context_request_for_workspace(
+    request_id: &'static str,
+    workspace: &Path,
+    database: &Path,
+    task: &str,
+) -> DaemonRequest {
+    let mut params = context_pack_params(workspace, database, task);
+    params["includeNonAffectingDegradations"] = serde_json::json!(true);
+    let mut request = DaemonRequest::new(request_id, TEST_AGENT_ID, METHOD_CONTEXT, params);
+    request.workspace_id = Some(workspace.display().to_string());
+    request
+}
+
+fn successful_result(response: DaemonResponse, label: &str) -> Result<serde_json::Value, String> {
+    ensure(
+        response.error.is_none(),
+        format!("{label} returned a daemon error: {response:?}"),
+    )?;
+    response
+        .result
+        .ok_or_else(|| format!("{label} omitted its result"))
+}
+
+fn degraded_codes_at<'a>(
+    result: &'a serde_json::Value,
+    pointer: &str,
+    label: &str,
+) -> Result<Vec<&'a str>, String> {
+    result
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("{label} omitted {pointer}: {result}"))
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("code").and_then(serde_json::Value::as_str))
+                .collect()
+        })
+}
+
+fn assert_stale_episode(
+    result: &serde_json::Value,
+    degraded_pointer: &str,
+    expect_stale: bool,
+    expect_large_gap: bool,
+    label: &str,
+) -> TestResult {
+    let codes = degraded_codes_at(result, degraded_pointer, label)?;
+    ensure(
+        codes.contains(&"search_index_stale") == expect_stale,
+        format!("{label} stale truth drifted; codes={codes:?}; result={result}"),
+    )?;
+    ensure(
+        codes.contains(&"search_index_large_gap") == expect_large_gap,
+        format!("{label} large-gap episode drifted; codes={codes:?}; result={result}"),
+    )?;
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "schema": "ee.test_event.v1",
+            "test": "daemon_advisory_active_episode_lifecycle",
+            "phase": label,
+            "event": "assertion",
+            "data": {
+                "degradedCodes": codes,
+                "expectedStale": expect_stale,
+                "expectedLargeGap": expect_large_gap,
+            }
+        })
+    );
+    Ok(())
 }
 
 fn context_pack_params(workspace: &Path, database: &Path, task: &str) -> serde_json::Value {
@@ -948,6 +1118,13 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
     )?;
     ensure(
         first_result
+            .pointer("/response/data/rerank/advisorySummary/scope")
+            .and_then(serde_json::Value::as_str)
+            == Some(SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED),
+        format!("daemon advisory scope must describe bounded workspace episodes: {first_result}"),
+    )?;
+    ensure(
+        first_result
             .pointer("/response/data/rerank/advisorySummary/emittedCount")
             .and_then(serde_json::Value::as_u64)
             == Some(1)
@@ -1014,6 +1191,498 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
             .and_then(serde_json::Value::as_str)
             == Some("mem_00000000000000000000005001"),
         format!("seeded memory missing from daemon search: {first_result}"),
+    )?;
+
+    handle
+        .shutdown()
+        .map_err(|error| format!("shutdown: {error}"))?;
+    Ok(())
+}
+
+#[test]
+fn daemon_advisory_active_episode_lifecycle_is_real_and_workspace_partitioned() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-advisory-episodes.sock")?;
+    let (workspace_a, database_a) = seed_context_workspace(&temp.path().join("workspace-a"))?;
+    let (workspace_b, database_b) = seed_context_workspace(&temp.path().join("workspace-b"))?;
+    let index_a = workspace_a.join(".ee").join("index");
+    let index_b = workspace_b.join(".ee").join("index");
+    rebuild_test_index(&workspace_a, &database_a, &index_a)?;
+    rebuild_test_index(&workspace_b, &database_b, &index_b)?;
+
+    let mut handle =
+        start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
+
+    plant_large_index_gap(&database_a, 100_000, "workspace-a-search-first")?;
+    let search_first = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &search_request(
+                "req-advisory-search-first",
+                &workspace_a,
+                &database_a,
+                &index_a,
+            ),
+        )
+        .map_err(|error| format!("search first round-trip: {error}"))?,
+        "workspace A first stale search",
+    )?;
+    let search_repeated = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &search_request(
+                "req-advisory-search-repeated",
+                &workspace_a,
+                &database_a,
+                &index_a,
+            ),
+        )
+        .map_err(|error| format!("search repeated round-trip: {error}"))?,
+        "workspace A repeated stale search",
+    )?;
+    assert_stale_episode(
+        &search_first,
+        "/response/data/degraded",
+        true,
+        true,
+        "search_first_stale",
+    )?;
+    assert_stale_episode(
+        &search_repeated,
+        "/response/data/degraded",
+        true,
+        false,
+        "search_repeated_stale",
+    )?;
+    ensure(
+        search_first
+            .pointer("/response/data/rerank/advisory/code")
+            .and_then(serde_json::Value::as_str)
+            == Some("rerank_model_unavailable")
+            && search_first
+                .pointer("/response/data/rerank/advisorySummary/scope")
+                .and_then(serde_json::Value::as_str)
+                == Some(SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED)
+            && search_first
+                .pointer("/response/data/rerank/advisorySummary/emittedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1),
+        format!("first permanent advisory contract drifted: {search_first}"),
+    )?;
+    ensure(
+        search_repeated
+            .pointer("/response/data/rerank/advisory")
+            .is_some_and(serde_json::Value::is_null)
+            && search_repeated
+                .pointer("/response/data/rerank/advisorySummary/emittedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(0)
+            && search_repeated
+                .pointer("/response/data/rerank/advisorySummary/suppressedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1),
+        format!("repeated permanent advisory was not suppressed: {search_repeated}"),
+    )?;
+
+    rebuild_test_index(&workspace_a, &database_a, &index_a)?;
+    let search_ready = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &search_request(
+                "req-advisory-search-ready",
+                &workspace_a,
+                &database_a,
+                &index_a,
+            ),
+        )
+        .map_err(|error| format!("search ready round-trip: {error}"))?,
+        "workspace A ready search",
+    )?;
+    assert_stale_episode(
+        &search_ready,
+        "/response/data/degraded",
+        false,
+        false,
+        "search_ready",
+    )?;
+    plant_large_index_gap(&database_a, 200_000, "workspace-a-search-new")?;
+    let search_new_stale = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &search_request(
+                "req-advisory-search-new-stale",
+                &workspace_a,
+                &database_a,
+                &index_a,
+            ),
+        )
+        .map_err(|error| format!("search new-stale round-trip: {error}"))?,
+        "workspace A new stale search",
+    )?;
+    assert_stale_episode(
+        &search_new_stale,
+        "/response/data/degraded",
+        true,
+        true,
+        "search_new_stale",
+    )?;
+
+    rebuild_test_index(&workspace_a, &database_a, &index_a)?;
+    let context_ready_before_episode = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &context_request_for_workspace(
+                "req-advisory-context-ready-before",
+                &workspace_a,
+                &database_a,
+                "release provenance context ready before stale episode",
+            ),
+        )
+        .map_err(|error| format!("context ready-before round-trip: {error}"))?,
+        "workspace A context ready before stale episode",
+    )?;
+    assert_stale_episode(
+        &context_ready_before_episode,
+        "/data/degraded",
+        false,
+        false,
+        "context_ready_before_episode",
+    )?;
+    plant_large_index_gap(&database_a, 300_000, "workspace-a-context-first")?;
+    let context_first = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &context_request_for_workspace(
+                "req-advisory-context-first",
+                &workspace_a,
+                &database_a,
+                "release provenance context first stale episode",
+            ),
+        )
+        .map_err(|error| format!("context first round-trip: {error}"))?,
+        "workspace A first stale context",
+    )?;
+    let context_repeated = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &context_request_for_workspace(
+                "req-advisory-context-repeated",
+                &workspace_a,
+                &database_a,
+                "release provenance context repeated stale episode",
+            ),
+        )
+        .map_err(|error| format!("context repeated round-trip: {error}"))?,
+        "workspace A repeated stale context",
+    )?;
+    assert_stale_episode(
+        &context_first,
+        "/data/degraded",
+        true,
+        true,
+        "context_first_stale",
+    )?;
+    assert_stale_episode(
+        &context_repeated,
+        "/data/degraded",
+        true,
+        false,
+        "context_repeated_stale",
+    )?;
+
+    rebuild_test_index(&workspace_a, &database_a, &index_a)?;
+    let context_ready = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &context_request_for_workspace(
+                "req-advisory-context-ready",
+                &workspace_a,
+                &database_a,
+                "release provenance context authoritative ready",
+            ),
+        )
+        .map_err(|error| format!("context ready round-trip: {error}"))?,
+        "workspace A ready context",
+    )?;
+    assert_stale_episode(
+        &context_ready,
+        "/data/degraded",
+        false,
+        false,
+        "context_ready",
+    )?;
+    plant_large_index_gap(&database_a, 400_000, "workspace-a-context-new")?;
+    let context_new_stale = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &context_request_for_workspace(
+                "req-advisory-context-new-stale",
+                &workspace_a,
+                &database_a,
+                "release provenance context later stale episode",
+            ),
+        )
+        .map_err(|error| format!("context new-stale round-trip: {error}"))?,
+        "workspace A new stale context",
+    )?;
+    assert_stale_episode(
+        &context_new_stale,
+        "/data/degraded",
+        true,
+        true,
+        "context_new_stale",
+    )?;
+
+    plant_large_index_gap(&database_b, 500_000, "workspace-b-first")?;
+    let workspace_b_first = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &search_request(
+                "req-advisory-workspace-b-first",
+                &workspace_b,
+                &database_b,
+                &index_b,
+            ),
+        )
+        .map_err(|error| format!("workspace B first round-trip: {error}"))?,
+        "workspace B first stale search",
+    )?;
+    assert_stale_episode(
+        &workspace_b_first,
+        "/response/data/degraded",
+        true,
+        true,
+        "workspace_b_first_stale",
+    )?;
+    ensure(
+        workspace_b_first
+            .pointer("/response/data/rerank/advisory/code")
+            .and_then(serde_json::Value::as_str)
+            == Some("rerank_model_unavailable")
+            && workspace_b_first
+                .pointer("/response/data/rerank/advisorySummary/emittedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1),
+        format!(
+            "workspace B was cross-suppressed by workspace A permanent state: {workspace_b_first}"
+        ),
+    )?;
+
+    handle
+        .shutdown()
+        .map_err(|error| format!("shutdown: {error}"))?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires EE_E2E_RERANK_MODEL_ARCHIVE with the verified native reranker archive"]
+fn daemon_verified_reranker_archive_rearms_permanent_episode_over_uds() -> TestResult {
+    let archive = std::env::var_os("EE_E2E_RERANK_MODEL_ARCHIVE")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            "EE_E2E_RERANK_MODEL_ARCHIVE must point to the verified rerank-default-v1 archive"
+                .to_owned()
+        })?;
+    ensure(
+        archive.is_file(),
+        format!("reranker archive does not exist: {}", archive.display()),
+    )?;
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-reranker-episode.sock")?;
+    let (workspace, database) = seed_context_workspace(temp.path())?;
+    let workspace_id = stable_test_workspace_id(&workspace)?;
+    let index_dir = workspace.join(".ee").join("index");
+    let model_store = temp.path().join("model-store");
+    seed_rerank_candidates(&workspace, &database)?;
+    rebuild_test_index(&workspace, &database, &index_dir)?;
+    let mut handle = start_server_for_workspace(&socket_path, workspace.display().to_string())
+        .map_err(|error| format!("start_server_for_workspace: {error}"))?;
+
+    let first_absent = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &search_request(
+                "req-reranker-episode-absent-first",
+                &workspace,
+                &database,
+                &index_dir,
+            ),
+        )
+        .map_err(|error| format!("first absent round-trip: {error}"))?,
+        "first absent reranker search",
+    )?;
+    let repeated_absent = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &search_request(
+                "req-reranker-episode-absent-repeated",
+                &workspace,
+                &database,
+                &index_dir,
+            ),
+        )
+        .map_err(|error| format!("repeated absent round-trip: {error}"))?,
+        "repeated absent reranker search",
+    )?;
+    ensure(
+        first_absent
+            .pointer("/response/data/rerank/advisory/code")
+            .and_then(serde_json::Value::as_str)
+            == Some("rerank_model_unavailable")
+            && first_absent
+                .pointer("/response/data/rerank/advisorySummary/scope")
+                .and_then(serde_json::Value::as_str)
+                == Some(SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED)
+            && first_absent
+                .pointer("/response/data/rerank/advisorySummary/emittedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1),
+        format!("first permanent episode did not emit: {first_absent}"),
+    )?;
+    ensure(
+        repeated_absent
+            .pointer("/response/data/rerank/advisory")
+            .is_some_and(serde_json::Value::is_null)
+            && repeated_absent
+                .pointer("/response/data/rerank/advisorySummary/suppressedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1),
+        format!("repeated permanent episode did not suppress: {repeated_absent}"),
+    )?;
+    ensure(
+        first_absent
+            .pointer("/response/data/results")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|results| {
+                !results.is_empty()
+                    && results
+                        .iter()
+                        .all(|result| result.get("rerankScore").is_none())
+            }),
+        format!("absent runtime planted negative unexpectedly carried scores: {first_absent}"),
+    )?;
+
+    fetch_rerank_model(&ModelFetchOptions {
+        workspace_path: &workspace,
+        database_path: Some(&database),
+        model_id: "rerank-default",
+        from_file: Some(&archive),
+        model_store_root: Some(&model_store),
+    })
+    .map_err(|error| format!("verified reranker import: {error}"))?;
+
+    let available = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &search_request(
+                "req-reranker-episode-real-available",
+                &workspace,
+                &database,
+                &index_dir,
+            ),
+        )
+        .map_err(|error| format!("real available round-trip: {error}"))?,
+        "real native reranker search",
+    )?;
+    let available_results = available
+        .pointer("/response/data/results")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("real native reranker result array missing: {available}"))?;
+    ensure(
+        available
+            .pointer("/response/data/rerank/available")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && available
+                .pointer("/response/data/rerank/mode")
+                .and_then(serde_json::Value::as_str)
+                == Some("reranked")
+            && available
+                .pointer("/response/data/rerank/rerankScoreCount")
+                .and_then(serde_json::Value::as_u64)
+                == u64::try_from(available_results.len()).ok()
+            && available_results.len() >= 5
+            && available_results.iter().all(|result| {
+                result
+                    .get("rerankScore")
+                    .and_then(serde_json::Value::as_f64)
+                    .is_some_and(f64::is_finite)
+            })
+            && available
+                .pointer("/response/data/rerank/advisory")
+                .is_some_and(serde_json::Value::is_null),
+        format!("native loader/inference did not produce real UDS rerank scores: {available}"),
+    )?;
+
+    let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    let reranker_entry = connection
+        .list_model_registry_entries(&workspace_id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|entry| entry.purpose == ModelPurpose::Reranker)
+        .ok_or_else(|| "verified import did not register a reranker row".to_owned())?;
+    let disabled_input = CreateModelRegistryInput {
+        workspace_id: reranker_entry.workspace_id.clone(),
+        provider: reranker_entry.provider,
+        model_name: reranker_entry.model_name.clone(),
+        purpose: reranker_entry.purpose,
+        dimension: reranker_entry.dimension,
+        distance_metric: reranker_entry.distance_metric,
+        status: ModelRegistryStatus::Unavailable,
+        version: reranker_entry.version.clone(),
+        source_uri: reranker_entry.source_uri.clone(),
+        content_hash: reranker_entry.content_hash.clone(),
+        metadata_json: reranker_entry.metadata_json.clone(),
+        last_checked_at: reranker_entry.last_checked_at.clone(),
+    };
+    ensure(
+        connection
+            .update_model_registry_entry(&reranker_entry.id, &disabled_input)
+            .map_err(|error| format!("disable verified reranker row: {error}"))?,
+        "reranker transition back to unavailable affected no row",
+    )?;
+    connection.close().map_err(|error| error.to_string())?;
+
+    let later_absent = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &search_request(
+                "req-reranker-episode-absent-later",
+                &workspace,
+                &database,
+                &index_dir,
+            ),
+        )
+        .map_err(|error| format!("later absent round-trip: {error}"))?,
+        "later absent reranker search",
+    )?;
+    ensure(
+        later_absent
+            .pointer("/response/data/rerank/available")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+            && later_absent
+                .pointer("/response/data/rerank/advisory/code")
+                .and_then(serde_json::Value::as_str)
+                == Some("rerank_model_unavailable")
+            && later_absent
+                .pointer("/response/data/rerank/advisorySummary/emittedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1)
+            && later_absent
+                .pointer("/response/data/rerank/advisorySummary/sessionOccurrenceCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1)
+            && later_absent
+                .pointer("/response/data/results")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|results| {
+                    !results.is_empty()
+                        && results
+                            .iter()
+                            .all(|result| result.get("rerankScore").is_none())
+                }),
+        format!("new permanent episode did not re-emit after real recovery: {later_absent}"),
     )?;
 
     handle

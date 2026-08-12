@@ -113,7 +113,7 @@
       "required": ["scope", "permanent", "distinctCount", "emittedCount", "suppressedCount", "sessionOccurrenceCount", "sessionSuppressedCount"],
       "additionalProperties": false,
       "properties": {
-        "scope": {"type": "string", "enum": ["process", "response"]},
+        "scope": {"type": "string", "enum": ["workspace_active_episode_bounded", "response"]},
         "permanent": {"type": ["boolean", "null"]},
         "distinctCount": {"$ref": "#/$defs/uint64"},
         "emittedCount": {"$ref": "#/$defs/uint64"},

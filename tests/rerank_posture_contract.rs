@@ -1,8 +1,8 @@
 use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::core::search::{
-    RERANK_MODEL_UNAVAILABLE_ADVISORY, RERANK_MODEL_UNAVAILABLE_REPAIR, ScoreSource,
-    SearchAdvisorySession, SearchDegradation, SearchHit, SearchReport, SearchSourceMode,
-    SearchStatus,
+    RERANK_MODEL_UNAVAILABLE_ADVISORY, RERANK_MODEL_UNAVAILABLE_REPAIR,
+    SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED, ScoreSource, SearchAdvisorySession,
+    SearchDegradation, SearchHit, SearchReport, SearchSourceMode, SearchStatus,
 };
 use ee::models::{EmbedBackend, MemoryScope, MemoryScopeStats};
 
@@ -110,6 +110,10 @@ fn ordinary_search_json_is_pure_and_structural() {
         RERANK_MODEL_UNAVAILABLE_REPAIR
     );
     assert!(json["rerank"]["advisorySummary"].get("schema").is_none());
+    assert_eq!(
+        json["rerank"]["advisorySummary"]["scope"],
+        SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED
+    );
     assert_eq!(json["rerank"]["advisorySummary"]["emittedCount"], 1);
     assert_eq!(json["rerank"]["advisorySummary"]["suppressedCount"], 0);
     assert_eq!(repeated_json["rerank"], json["rerank"]);
@@ -141,6 +145,10 @@ fn explicit_long_lived_session_emits_permanent_advisory_once() {
     let second_json = second.data_json_with_advisory_session(&mut session);
 
     assert_eq!(first_json["rerank"]["advisory"]["permanent"], true);
+    assert_eq!(
+        first_json["rerank"]["advisorySummary"]["scope"],
+        SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED
+    );
     assert_eq!(first_json["rerank"]["advisorySummary"]["emittedCount"], 1);
     assert_eq!(
         first_json["rerank"]["advisorySummary"]["suppressedCount"],
@@ -164,7 +172,10 @@ fn explicit_long_lived_session_emits_permanent_advisory_once() {
 }
 
 #[test]
-fn permanent_reranker_advisory_rearms_after_available_zero_result_query() {
+fn structural_session_rearms_after_available_zero_result_report() {
+    // This pins the pure renderer state machine only. The daemon UDS suite
+    // contains the archive-gated absent -> verified import -> absent runtime
+    // proof; this fixture is not evidence that the gated path executed.
     let absent = empty_search_report(
         vec![SearchDegradation {
             code: "rerank_model_unavailable".to_string(),

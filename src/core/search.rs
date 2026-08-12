@@ -120,6 +120,12 @@ const DEFAULT_SEARCH_RERANK_TOP_K: usize = 50;
 pub const RERANK_MODEL_UNAVAILABLE_ADVISORY: &str = "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.";
 pub const RERANK_MODEL_UNAVAILABLE_REPAIR: &str =
     "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst";
+/// Stable wire token for a bounded, workspace-partitioned advisory ledger.
+/// Eviction or authoritative recovery can start a later active episode, so
+/// this deliberately claims neither daemon ownership nor once-ever process
+/// scope.
+pub const SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED: &str =
+    "workspace_active_episode_bounded";
 const RERANK_MODEL_TOKENIZER: &str = "tokenizer.json";
 const RERANK_MODEL_SAFETENSORS_PRIMARY: &str = "model_f32.safetensors";
 const RERANK_MODEL_SAFETENSORS_FALLBACK: &str = "model.safetensors";
@@ -894,7 +900,7 @@ impl SearchAdvisoryDeliveryReservation {
     }
 }
 
-/// Process/session-scoped ledger for active search-advisory episodes.
+/// Bounded, workspace-partitioned ledger for active search-advisory episodes.
 ///
 /// Canonical transient degradations remain visible in every affected response.
 /// The companion `search_index_large_gap` repair advisory is the sole
@@ -2610,7 +2616,7 @@ impl SearchReport {
     }
 
     /// Render JSON while recording permanent advisories in the supplied
-    /// long-lived process/session ledger.
+    /// bounded active-episode ledger.
     ///
     /// The ordinary renderer intentionally uses a fresh session so repeated
     /// serialization stays pure and deterministic. Long-lived owners such as
@@ -5581,7 +5587,7 @@ fn search_rerank_posture_json_inner(
                 })
             });
             let mut summary = serde_json::json!({
-                "scope": "process",
+                "scope": SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED,
                 "permanent": true,
                 "distinctCount": observation.distinct_count,
                 "emittedCount": if observation.emitted { 1 } else { 0 },
