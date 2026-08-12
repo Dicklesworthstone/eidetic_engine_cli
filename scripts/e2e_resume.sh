@@ -125,8 +125,8 @@ else
     event empty_store_reports_no_evidence fail "exit ${LAST_EXIT}; $(head -c 250 "${LAST_STDOUT}")"
 fi
 
-# --- literal acceptance corpus: three tagged sessions, two revisit
-# decisions, one next-tagged item, and a superseded stale note -------------
+# --- literal acceptance corpus: three tagged sessions, every open-loop tag,
+# legacy + typed revisit decisions, a planted secret tag, and stale truth ---
 run_ee remember "Session A wrapped the parser refactor." \
     --workspace "${WS}" --level episodic --kind note --tags "session-20260801" --json
 SESSION_A_ONE_EXIT=$LAST_EXIT
@@ -151,15 +151,42 @@ run_ee remember "Next: begin optimization passes." \
     --workspace "${WS}" --level semantic --kind note --tags "next,optimization" --json
 NEXT_EXIT=$LAST_EXIT
 NEXT_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
+SECRET_TAG="ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+run_ee remember "Queue: review the public resume projection." \
+    --workspace "${WS}" --level semantic --kind note \
+    --tags "queue,resume-public,${SECRET_TAG}" --json
+QUEUE_EXIT=$LAST_EXIT
+QUEUE_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
+run_ee remember "Blocking: finish the deterministic gate." \
+    --workspace "${WS}" --level semantic --kind note --tags "blocking,resume-gate" --json
+BLOCKING_EXIT=$LAST_EXIT
+BLOCKING_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
+run_ee remember "Pending: obtain the remote acceptance proof." \
+    --workspace "${WS}" --level semantic --kind note --tags "pending,resume-proof" --json
+PENDING_EXIT=$LAST_EXIT
+PENDING_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
+run_ee remember "Todo: verify the bounded resume bundle." \
+    --workspace "${WS}" --level semantic --kind note --tags "todo,resume-bundle" --json
+TODO_EXIT=$LAST_EXIT
+TODO_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
+run_ee remember "Revisit: re-check the store-discovery dependency." \
+    --workspace "${WS}" --level semantic --kind note --tags "revisit,resume-discovery" --json
+REVISIT_TAG_EXIT=$LAST_EXIT
+REVISIT_TAG_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
 if [[ "${SESSION_A_ONE_EXIT}" -eq 0 && "${SESSION_A_TWO_EXIT}" -eq 0 \
     && "${SESSION_B_EXIT}" -eq 0 && "${SESSION_C_EXIT}" -eq 0 \
     && "${STALE_OLD_EXIT}" -eq 0 && "${STALE_NEW_EXIT}" -eq 0 \
-    && "${NEXT_EXIT}" -eq 0 && -n "${STALE_OLD_ID}" \
-    && -n "${STALE_NEW_ID}" && -n "${NEXT_ID}" ]]; then
+    && "${NEXT_EXIT}" -eq 0 && "${QUEUE_EXIT}" -eq 0 \
+    && "${BLOCKING_EXIT}" -eq 0 && "${PENDING_EXIT}" -eq 0 \
+    && "${TODO_EXIT}" -eq 0 && "${REVISIT_TAG_EXIT}" -eq 0 \
+    && -n "${STALE_OLD_ID}" \
+    && -n "${STALE_NEW_ID}" && -n "${NEXT_ID}" && -n "${QUEUE_ID}" \
+    && -n "${BLOCKING_ID}" && -n "${PENDING_ID}" && -n "${TODO_ID}" \
+    && -n "${REVISIT_TAG_ID}" ]]; then
     event corpus_seeded pass
 else
     event corpus_seeded fail \
-        "remember exits ${SESSION_A_ONE_EXIT}/${SESSION_A_TWO_EXIT}/${SESSION_B_EXIT}/${SESSION_C_EXIT}/${STALE_OLD_EXIT}/${STALE_NEW_EXIT}/${NEXT_EXIT}; ids=${STALE_OLD_ID}/${STALE_NEW_ID}/${NEXT_ID}"
+        "remember exits ${SESSION_A_ONE_EXIT}/${SESSION_A_TWO_EXIT}/${SESSION_B_EXIT}/${SESSION_C_EXIT}/${STALE_OLD_EXIT}/${STALE_NEW_EXIT}/${NEXT_EXIT}/${QUEUE_EXIT}/${BLOCKING_EXIT}/${PENDING_EXIT}/${TODO_EXIT}/${REVISIT_TAG_EXIT}"
 fi
 
 run_ee decide record "resume e2e revisit decision" --chosen "ship now" \
@@ -172,19 +199,26 @@ run_ee decide record "resume e2e second decision" --chosen "keep sqlite" \
     --revisit-by "+90d" --workspace "${WS}" --json
 DECIDE_TWO=$LAST_EXIT
 DECIDE_TWO_ID="$(jq -r '.data.decision.memoryId // empty' "${LAST_STDOUT}")"
+run_ee remember "typed sidecar resume decision" --workspace "${WS}" \
+    --level semantic --kind decision --field "chosen=consume canonical fields" \
+    --field "revisit_by=2026-12-31T00:00:00Z" --json
+DECIDE_TYPED=$LAST_EXIT
+DECIDE_TYPED_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
 if [[ "${DECIDE_ONE}" -eq 0 && "${DECIDE_TWO}" -eq 0 \
-    && -n "${DECIDE_ONE_ID}" && -n "${DECIDE_TWO_ID}" ]]; then
+    && "${DECIDE_TYPED}" -eq 0 && -n "${DECIDE_ONE_ID}" \
+    && -n "${DECIDE_TWO_ID}" && -n "${DECIDE_TYPED_ID}" ]]; then
     event decisions_recorded pass
 else
     event decisions_recorded fail \
-        "decide exits ${DECIDE_ONE}/${DECIDE_TWO}; ids=${DECIDE_ONE_ID}/${DECIDE_TWO_ID}"
+        "decision exits ${DECIDE_ONE}/${DECIDE_TWO}/${DECIDE_TYPED}; ids=${DECIDE_ONE_ID}/${DECIDE_TWO_ID}/${DECIDE_TYPED_ID}"
 fi
 
 # --- the bundle -----------------------------------------------------------
 STORE_DATABASE="${WS}/.ee/ee.db"
 JSON_HASH_BEFORE="$(store_fingerprint "${STORE_DATABASE}")"
-run_ee resume --workspace "${WS}" --json
+run_ee resume --workspace "${WS}" --sessions 2 --json
 R="${LAST_STDOUT}"
+cp "${R}" "${LOG_DIR}/resume-report.json"
 JSON_HASH_AFTER="$(store_fingerprint "${STORE_DATABASE}")"
 if [[ "${JSON_HASH_BEFORE}" == "${JSON_HASH_AFTER}" ]]; then
     event json_resume_preserves_db_wal_shm pass
@@ -213,51 +247,135 @@ else
     event resume_items_carry_public_posture fail "$(head -c 350 "${R}")"
 fi
 
-if jq -e '[.data.report.sessions[]?.label]
-          == ["session-20260809", "session-20260808", "session-20260801"]' \
+if jq -e '.data.report.episodicTotal == 5
+        and [.data.report.sessions[]?.label]
+            == ["session-20260809", "session-20260808"]
+        and ([.data.report.sessions[]?.items[]?.content
+              | select(contains("Session A"))] | length) == 0' \
     "${R}" >/dev/null 2>&1; then
-    event three_tagged_sessions_grouped pass
+    event requested_two_newest_sessions_only pass
 else
-    event three_tagged_sessions_grouped fail "$(jq -c '[.data.report.sessions[]?.label]' "${R}" 2>/dev/null)"
+    event requested_two_newest_sessions_only fail \
+        "$(jq -c '{total:.data.report.episodicTotal, sessions:[.data.report.sessions[]? | {label,items:[.items[]?.content]}]}' "${R}" 2>/dev/null)"
 fi
 
 if jq -e --arg decision_one "${DECIDE_ONE_ID}" --arg decision_two "${DECIDE_TWO_ID}" \
+    --arg decision_typed "${DECIDE_TYPED_ID}" \
     '(.data.report.openLoops.revisitDecisions
       | all(.revisitBy != null))
+     and ([.data.report.openLoops.revisitDecisions[]? | .memoryId] | sort)
+         == ([$decision_one, $decision_two, $decision_typed] | sort)
      and ([.data.report.openLoops.revisitDecisions[]?
-           | {memoryId, topic}] | sort_by(.memoryId))
-         == ([{memoryId: $decision_one, topic: "resume e2e revisit decision"},
-              {memoryId: $decision_two, topic: "resume e2e second decision"}]
-             | sort_by(.memoryId))' \
+           | select(.memoryId == $decision_typed
+                    and .topic == "typed sidecar resume decision"
+                    and .chosen == "consume canonical fields"
+                    and .revisitBy == "2026-12-31T00:00:00Z")]
+          | length) == 1' \
     "${R}" >/dev/null 2>&1; then
-    event revisit_decisions_surfaced pass
+    event canonical_typed_revisit_decision_surfaced pass
 else
-    event revisit_decisions_surfaced fail "$(jq -c '.data.report.openLoops.revisitDecisions' "${R}" 2>/dev/null | head -c 250)"
+    event canonical_typed_revisit_decision_surfaced fail \
+        "$(jq -c '.data.report.openLoops.revisitDecisions' "${R}" 2>/dev/null | head -c 350)"
 fi
 
-if jq -e '.data.report.openLoops.revisitDecisionsTotal == 2
+if jq -e '.data.report.openLoops.revisitDecisionsTotal == 3
         and .data.report.openLoops.revisitDecisionsTruncated == false
-        and (.data.report.openLoops.revisitDecisions | length) == 2
-        and .data.report.openLoops.taggedItemsTotal == 1
+        and (.data.report.openLoops.revisitDecisions | length) == 3
+        and .data.report.openLoops.taggedItemsTotal == 6
         and .data.report.openLoops.taggedItemsTruncated == false
-        and (.data.report.openLoops.taggedItems | length) == 1' \
+        and (.data.report.openLoops.taggedItems | length) == 6' \
     "${R}" >/dev/null 2>&1; then
     event open_loop_totals_are_exact pass
 else
     event open_loop_totals_are_exact fail "$(jq -c '.data.report.openLoops' "${R}" 2>/dev/null | head -c 350)"
 fi
 
-if jq -e --arg next_id "${NEXT_ID}" \
-    '.data.report.openLoops.taggedItems
-     | length == 1
-       and .[0].memoryId == $next_id
-       and .[0].content == "Next: begin optimization passes."
-       and .[0].tags == ["next", "optimization"]
-       and .[0].stale == null' \
+if jq -e --arg next_id "${NEXT_ID}" --arg queue_id "${QUEUE_ID}" \
+    --arg blocking_id "${BLOCKING_ID}" --arg pending_id "${PENDING_ID}" \
+    --arg todo_id "${TODO_ID}" --arg revisit_id "${REVISIT_TAG_ID}" \
+    '([.data.report.openLoops.taggedItems[]? | .memoryId] | sort)
+        == ([$next_id, $queue_id, $blocking_id, $pending_id, $todo_id, $revisit_id] | sort)
+     and ([.data.report.openLoops.taggedItems[]?
+           | select(.memoryId == $next_id and (.tags | index("next")) != null)] | length) == 1
+     and ([.data.report.openLoops.taggedItems[]?
+           | select(.memoryId == $queue_id and (.tags | index("queue")) != null)] | length) == 1
+     and ([.data.report.openLoops.taggedItems[]?
+           | select(.memoryId == $blocking_id and (.tags | index("blocking")) != null)] | length) == 1
+     and ([.data.report.openLoops.taggedItems[]?
+           | select(.memoryId == $pending_id and (.tags | index("pending")) != null)] | length) == 1
+     and ([.data.report.openLoops.taggedItems[]?
+           | select(.memoryId == $todo_id and (.tags | index("todo")) != null)] | length) == 1
+     and ([.data.report.openLoops.taggedItems[]?
+           | select(.memoryId == $revisit_id and (.tags | index("revisit")) != null)] | length) == 1
+     and all(.data.report.openLoops.taggedItems[]?; .stale == null)' \
     "${R}" >/dev/null 2>&1; then
-    event next_tagged_item_surfaced pass
+    event all_six_open_loop_tags_surfaced pass
 else
-    event next_tagged_item_surfaced fail "$(jq -c '.data.report.openLoops.taggedItems' "${R}" 2>/dev/null | head -c 250)"
+    event all_six_open_loop_tags_surfaced fail \
+        "$(jq -c '.data.report.openLoops.taggedItems' "${R}" 2>/dev/null | head -c 400)"
+fi
+
+if jq -e --arg decision_typed "${DECIDE_TYPED_ID}" \
+    --arg next_id "${NEXT_ID}" --arg queue_id "${QUEUE_ID}" \
+    --arg blocking_id "${BLOCKING_ID}" --arg pending_id "${PENDING_ID}" \
+    --arg todo_id "${TODO_ID}" --arg revisit_id "${REVISIT_TAG_ID}" '
+        (.data.report.sessions | length) == 2
+        and [.data.report.sessions[].label]
+            == ["session-20260809", "session-20260808"]
+        and ([.data.report.openLoops.revisitDecisions[]?.memoryId]
+             | index($decision_typed)) != null
+        and ([.data.report.openLoops.taggedItems[]?.memoryId] | sort)
+            == ([$next_id, $queue_id, $blocking_id, $pending_id, $todo_id, $revisit_id] | sort)
+    ' "${R}" >/dev/null 2>&1; then
+    event requested_sessions_plus_every_open_loop_in_one_resume pass
+else
+    event requested_sessions_plus_every_open_loop_in_one_resume fail \
+        "$(jq -c '.data.report | {sessions,openLoops}' "${R}" 2>/dev/null | head -c 500)"
+fi
+
+if ! grep -Fq "${SECRET_TAG}" "${R}" \
+    && jq -e --arg queue_id "${QUEUE_ID}" '
+        [.data.report.openLoops.taggedItems[]?
+         | select(.memoryId == $queue_id
+                  and .redaction.applied == true
+                  and ([.redaction.reasons[]? | startswith("tag:")] | any))]
+        | length == 1
+    ' "${R}" >/dev/null 2>&1; then
+    event resume_json_redacts_planted_secret pass
+else
+    event resume_json_redacts_planted_secret fail "JSON secret leak or missing redaction posture"
+fi
+
+EXPECTED_NEXT_COMMANDS='["ee decide list --json  # open decisions incl. revisit conditions","ee orient \"<current task>\" --json  # task-conditioned pack once you know the task","ee conflict list --json  # anything contradictory left behind"]'
+if [[ "$(jq -c '.data.report.nextCommands' "${R}" 2>/dev/null)" == "${EXPECTED_NEXT_COMMANDS}" ]]; then
+    event canonical_next_commands_preserved pass
+else
+    event canonical_next_commands_preserved fail \
+        "$(jq -c '.data.report.nextCommands' "${R}" 2>/dev/null)"
+fi
+
+NEXT_COMMANDS_EXIT=0
+while IFS= read -r command; do
+    STEP=$((STEP + 1))
+    COMMAND_STDOUT="${LOG_DIR}/step${STEP}.stdout"
+    COMMAND_STDERR="${LOG_DIR}/step${STEP}.stderr"
+    (cd "${WS}" && PATH="$(dirname "${REAL_EE}"):${PATH}" bash -c "${command}") \
+        >"${COMMAND_STDOUT}" 2>"${COMMAND_STDERR}"
+    COMMAND_EXIT=$?
+    if [[ "${COMMAND_EXIT}" -ne 0 ]]; then
+        NEXT_COMMANDS_EXIT="${COMMAND_EXIT}"
+        break
+    fi
+    if ! jq -e '.schema == "ee.response.v2" and .success == true' \
+        "${COMMAND_STDOUT}" >/dev/null 2>&1; then
+        NEXT_COMMANDS_EXIT=2
+        break
+    fi
+done < <(jq -r '.data.report.nextCommands[]' "${R}")
+if [[ "${NEXT_COMMANDS_EXIT}" -eq 0 ]]; then
+    event canonical_next_commands_execute pass
+else
+    event canonical_next_commands_execute fail "exit=${NEXT_COMMANDS_EXIT}"
 fi
 
 # The older session note and newer semantic note share only the non-control
@@ -279,7 +397,7 @@ fi
 
 # --- human contract: every declared section remains visible ---------------
 HUMAN_HASH_BEFORE="$(store_fingerprint "${STORE_DATABASE}")"
-run_ee resume --workspace "${WS}"
+run_ee resume --workspace "${WS}" --sessions 2
 H="${LAST_STDOUT}"
 HUMAN_HASH_AFTER="$(store_fingerprint "${STORE_DATABASE}")"
 if [[ "${HUMAN_HASH_BEFORE}" == "${HUMAN_HASH_AFTER}" ]]; then
@@ -296,17 +414,129 @@ else
     event human_declared_sections_visible fail "exit ${LAST_EXIT}; $(head -c 250 "${H}")"
 fi
 
-if grep -Fq "resume: 5 episodic memories, 3 sessions shown, 2/2 open decisions, 1/1 queued items, 1 stale flags" "${H}" \
+STALE_NEW_CREATED_AT="$(jq -r --arg stale_old "${STALE_OLD_ID}" \
+    '[.. | objects | select(.memoryId? == $stale_old and .stale? != null)][0].stale.supersededByCreatedAt // empty' \
+    "${R}" 2>/dev/null)"
+if grep -Fq "resume: 5 episodic memories, 2 sessions shown, 3/3 open decisions, 6/6 queued items, 1 stale flags" "${H}" \
     && grep -Fq "[session-20260809]" "${H}" \
     && grep -Fq "[session-20260808]" "${H}" \
-    && grep -Fq "[session-20260801]" "${H}" \
+    && ! grep -Fq "[session-20260801]" "${H}" \
+    && ! grep -Fq "Session A" "${H}" \
     && grep -Fq "decision ${DECIDE_ONE_ID}: resume e2e revisit decision (revisit " "${H}" \
     && grep -Fq "decision ${DECIDE_TWO_ID}: resume e2e second decision (revisit " "${H}" \
+    && grep -Fq "decision ${DECIDE_TYPED_ID}: typed sidecar resume decision (revisit 2026-12-31T00:00:00Z)" "${H}" \
     && grep -Fq "queued ${NEXT_ID}: Next: begin optimization passes." "${H}" \
-    && grep -Fq "${STALE_OLD_ID} [STALE]: Arc 4 driver wiring remains unfinished." "${H}"; then
+    && grep -Fq "queued ${QUEUE_ID} [REDACTED]: Queue: review the public resume projection." "${H}" \
+    && grep -Fq "queued ${TODO_ID}: Todo: verify the bounded resume bundle." "${H}" \
+    && grep -Fq "${STALE_OLD_ID} [STALE]: Arc 4 driver wiring remains unfinished. [superseded by ${STALE_NEW_ID} at ${STALE_NEW_CREATED_AT}; shared tags: arc4]" "${H}" \
+    && ! grep -Fq "${SECRET_TAG}" "${H}"; then
     event human_open_loop_and_staleness_visible pass
 else
     event human_open_loop_and_staleness_visible fail "$(head -c 500 "${H}")"
+fi
+
+if grep -Fq "queued ${QUEUE_ID} [REDACTED]" "${H}" \
+    && ! grep -Fq "${SECRET_TAG}" "${H}"; then
+    event resume_human_redacts_planted_secret pass
+else
+    event resume_human_redacts_planted_secret fail "human secret leak or missing redaction marker"
+fi
+
+# Zero is invalid, must return the standard structured error, and must not
+# mutate the addressed store while refusing the request.
+ZERO_HASH_BEFORE="$(store_fingerprint "${STORE_DATABASE}")"
+run_ee resume --workspace "${WS}" --sessions 0 --json
+ZERO_JSON="${LAST_STDOUT}"
+ZERO_HASH_AFTER="$(store_fingerprint "${STORE_DATABASE}")"
+if [[ "${LAST_EXIT}" -ne 0 && "${ZERO_HASH_BEFORE}" == "${ZERO_HASH_AFTER}" ]] \
+    && jq -e '.schema == "ee.error.v2"
+        and .error.code == "usage"
+        and (.error.message | contains("--sessions") and contains("at least 1"))
+        and (.error.repair | contains("--sessions 1"))' \
+        "${ZERO_JSON}" >/dev/null 2>&1; then
+    event zero_sessions_structured_nonzero_no_mutation pass
+else
+    event zero_sessions_structured_nonzero_no_mutation fail \
+        "exit=${LAST_EXIT}; before=${ZERO_HASH_BEFORE//$'\n'/,}; after=${ZERO_HASH_AFTER//$'\n'/,}; $(head -c 300 "${ZERO_JSON}")"
+fi
+
+# Untagged memories exercise the literal four-hour boundary. The records are
+# created through the real binary; deterministic timestamps are then planted
+# in that real store before the compiled resume binary reads it.
+BOUNDARY_WS="${ROOT}/untagged-four-hour-boundary"
+mkdir -p "${BOUNDARY_WS}"
+run_ee init --workspace "${BOUNDARY_WS}" --json
+BOUNDARY_INIT_EXIT=$LAST_EXIT
+BOUNDARY_CONTENTS=(
+    "Boundary newest at noon."
+    "Boundary exactly four hours older."
+    "Boundary four hours and one minute older."
+    "Boundary oldest within second session."
+)
+BOUNDARY_SEED_EXIT=0
+for content in "${BOUNDARY_CONTENTS[@]}"; do
+    run_ee remember "${content}" --workspace "${BOUNDARY_WS}" \
+        --level episodic --kind note --json
+    if [[ "${LAST_EXIT}" -ne 0 ]]; then
+        BOUNDARY_SEED_EXIT=$LAST_EXIT
+        break
+    fi
+done
+BOUNDARY_DATABASE="${BOUNDARY_WS}/.ee/ee.db"
+python3 - "${BOUNDARY_DATABASE}" <<'PY'
+import sqlite3
+import sys
+
+database = sys.argv[1]
+timestamps = {
+    "Boundary newest at noon.": "2026-08-10T12:00:00Z",
+    "Boundary exactly four hours older.": "2026-08-10T08:00:00Z",
+    "Boundary four hours and one minute older.": "2026-08-10T03:59:00Z",
+    "Boundary oldest within second session.": "2026-08-10T00:00:00Z",
+}
+with sqlite3.connect(database) as connection:
+    for content, timestamp in timestamps.items():
+        connection.execute(
+            "UPDATE memories SET created_at = ?, updated_at = ? WHERE content = ?",
+            (timestamp, timestamp, content),
+        )
+PY
+BOUNDARY_TIME_EXIT=$?
+BOUNDARY_HASH_BEFORE="$(store_fingerprint "${BOUNDARY_DATABASE}")"
+run_ee resume --workspace "${BOUNDARY_WS}" --sessions 1 --json
+BOUNDARY_ONE_EXIT=$LAST_EXIT
+BOUNDARY_ONE_JSON="${LAST_STDOUT}"
+BOUNDARY_HASH_AFTER="$(store_fingerprint "${BOUNDARY_DATABASE}")"
+if [[ "${BOUNDARY_INIT_EXIT}" -eq 0 && "${BOUNDARY_SEED_EXIT}" -eq 0 \
+    && "${BOUNDARY_TIME_EXIT}" -eq 0 && "${BOUNDARY_ONE_EXIT}" -eq 0 \
+    && "${BOUNDARY_HASH_BEFORE}" == "${BOUNDARY_HASH_AFTER}" ]] \
+    && jq -e '.data.report.episodicTotal == 4
+        and (.data.report.sessions | length) == 1
+        and .data.report.sessions[0].memberCount == 2
+        and .data.report.sessions[0].newestAt == "2026-08-10T12:00:00Z"
+        and .data.report.sessions[0].oldestAt == "2026-08-10T08:00:00Z"
+        and ([.data.report.sessions[0].items[].content]
+             == ["Boundary newest at noon.", "Boundary exactly four hours older."])
+        and ([.. | strings | select(contains("four hours and one minute"))] | length) == 0
+        and ([.. | strings | select(contains("oldest within second session"))] | length) == 0' \
+        "${BOUNDARY_ONE_JSON}" >/dev/null 2>&1; then
+    event untagged_four_hour_boundary_and_sessions_one_truncation pass
+else
+    event untagged_four_hour_boundary_and_sessions_one_truncation fail \
+        "init/seed/time/resume=${BOUNDARY_INIT_EXIT}/${BOUNDARY_SEED_EXIT}/${BOUNDARY_TIME_EXIT}/${BOUNDARY_ONE_EXIT}; $(head -c 500 "${BOUNDARY_ONE_JSON}")"
+fi
+
+run_ee resume --workspace "${BOUNDARY_WS}" --sessions 2 --json
+if [[ "${LAST_EXIT}" -eq 0 ]] \
+    && jq -e '(.data.report.sessions | length) == 2
+        and [.data.report.sessions[].memberCount] == [2, 2]
+        and [.data.report.sessions[].newestAt]
+            == ["2026-08-10T12:00:00Z", "2026-08-10T03:59:00Z"]' \
+        "${LAST_STDOUT}" >/dev/null 2>&1; then
+    event untagged_sessions_two_returns_both_real_groups pass
+else
+    event untagged_sessions_two_returns_both_real_groups fail \
+        "exit=${LAST_EXIT}; $(head -c 500 "${LAST_STDOUT}")"
 fi
 
 # --- genuinely cold workspace: discovery + executable database retarget ---
@@ -384,6 +614,7 @@ COLD_DATABASE="${COLD_WS}/.ee/ee.db"
 COLD_JSON_HASH_BEFORE="$(store_fingerprint "${COLD_DATABASE}")"
 run_ee resume --workspace "${COLD_WS}" --json
 COLD_JSON="${LAST_STDOUT}"
+cp "${COLD_JSON}" "${LOG_DIR}/resume-cold-report.json"
 COLD_JSON_HASH_AFTER="$(store_fingerprint "${COLD_DATABASE}")"
 BEST_ROOT="$(jq -r '.data.report.nearbyStores.stores[0].workspaceRoot // empty' \
     "${COLD_JSON}" 2>/dev/null)"
@@ -393,16 +624,26 @@ BEST_DOCS="$(jq -r '.data.report.nearbyStores.stores[0].documents // 0' \
     "${COLD_JSON}" 2>/dev/null)"
 BEST_LAST_WRITE="$(jq -r '.data.report.nearbyStores.stores[0].lastWrite // empty' \
     "${COLD_JSON}" 2>/dev/null)"
+BEST_SCAN_OUTCOME="$(jq -r '.data.report.nearbyStores.outcome // empty' \
+    "${COLD_JSON}" 2>/dev/null)"
 FIRST_COMMAND="$(jq -r '.data.report.nextCommands[0] // empty' "${COLD_JSON}" 2>/dev/null)"
 EXPECTED_COMMAND="ee resume --workspace '${NEARBY_WS}' --database '${CAMPAIGN_DATABASE}' --json"
 if [[ "${LAST_EXIT}" -eq 0 && "${BEST_ROOT}" == "${NEARBY_WS}" \
     && "${BEST_STORE}" == "${CAMPAIGN_STORE}" && "${BEST_DOCS}" -gt 0 \
-    && -n "${BEST_LAST_WRITE}" \
+    && -n "${BEST_LAST_WRITE}" && "${BEST_SCAN_OUTCOME}" == "complete" \
     && "${FIRST_COMMAND}" == "${EXPECTED_COMMAND}" ]]; then
     event nearby_store_prepends_quoted_database_resume pass
 else
     event nearby_store_prepends_quoted_database_resume fail \
-        "exit=${LAST_EXIT}; root=${BEST_ROOT}; store=${BEST_STORE}; docs=${BEST_DOCS}; lastWrite=${BEST_LAST_WRITE}; command=${FIRST_COMMAND}"
+        "exit=${LAST_EXIT}; root=${BEST_ROOT}; store=${BEST_STORE}; docs=${BEST_DOCS}; lastWrite=${BEST_LAST_WRITE}; outcome=${BEST_SCAN_OUTCOME}; command=${FIRST_COMMAND}"
+fi
+if [[ "${BEST_SCAN_OUTCOME}" == "complete" ]] \
+    && ! jq -e '.data.report.nearbyStores | has("truncated")' \
+        "${COLD_JSON}" >/dev/null 2>&1; then
+    event nearby_store_exact_complete_outcome_surfaced pass
+else
+    event nearby_store_exact_complete_outcome_surfaced fail \
+        "outcome=${BEST_SCAN_OUTCOME}; $(jq -c '.data.report.nearbyStores' "${COLD_JSON}" 2>/dev/null)"
 fi
 if [[ "${LAST_EXIT}" -eq 0 \
     && "$(jq -r '.data.report.schema // empty' "${COLD_JSON}" 2>/dev/null)" == "ee.resume.v1" \
@@ -413,6 +654,21 @@ if [[ "${LAST_EXIT}" -eq 0 \
 else
     event missing_db_returns_empty_resume_without_initializing fail \
         "exit=${LAST_EXIT}; before=${COLD_JSON_HASH_BEFORE//$'\n'/,}; after=${COLD_JSON_HASH_AFTER//$'\n'/,}; cold .ee exists=$([[ -e "${COLD_WS}/.ee" ]] && printf yes || printf no)"
+fi
+
+COLD_HUMAN_HASH_BEFORE="$(store_fingerprint "${COLD_DATABASE}")"
+run_ee resume --workspace "${COLD_WS}"
+COLD_HUMAN="${LAST_STDOUT}"
+COLD_HUMAN_HASH_AFTER="$(store_fingerprint "${COLD_DATABASE}")"
+if [[ "${LAST_EXIT}" -eq 0 \
+    && "${COLD_HUMAN_HASH_BEFORE}" == "${COLD_HUMAN_HASH_AFTER}" ]] \
+    && grep -Fq "Nearby populated stores:" "${COLD_HUMAN}" \
+    && grep -Fq "Nearby-store discovery outcome: complete." "${COLD_HUMAN}" \
+    && ! grep -Fq "outcome: unavailable" "${COLD_HUMAN}"; then
+    event nearby_store_human_complete_outcome_is_explicit pass
+else
+    event nearby_store_human_complete_outcome_is_explicit fail \
+        "exit=${LAST_EXIT}; $(head -c 500 "${COLD_HUMAN}")"
 fi
 
 STEP=$((STEP + 1))

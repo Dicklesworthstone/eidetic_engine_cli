@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.resume.v1.json",
   "title": "ee.resume.v1",
-  "description": "Session-resume bundle for ee resume (bd-resume-verb-v0f57): the 'where was I' report a resuming agent needs in one read-only call. Recent episodic sessions are newest-first (session-* tags are stable identities even across interleaved/backfilled writes; untagged rows cluster by write-time gap), public-admitted items carry redaction-safe provenance and explicit redaction posture, open-loop lanes expose exact totals plus bounded truncation, same-kind strictly newer memories sharing at least one non-control subject tag flag surfaced items as stale, and nearby populated stores are reported when the addressed store has nothing episodic. Session-* and next/queue/blocking/pending/todo tags are control tags and never establish subject identity.",
+  "description": "Session-resume bundle for ee resume (bd-resume-verb-v0f57): the 'where was I' report a resuming agent needs in one read-only call. Recent episodic sessions are newest-first (session-* tags are stable identities even across interleaved/backfilled writes; untagged rows cluster by write-time gap), public-admitted items carry redaction-safe provenance and explicit redaction posture, open-loop lanes expose exact totals plus bounded truncation, canonical typed revisit_by decision sidecars are authoritative when present, same-kind strictly newer memories sharing at least one non-control subject tag flag surfaced items as stale, and nearby-store discovery preserves the exact complete, truncated, or unavailable outcome when the addressed store has nothing episodic. Session-* and next/queue/blocking/pending/todo/revisit tags are control tags and never establish subject identity.",
   "type": "object",
   "required": [
     "schema",
@@ -66,6 +66,7 @@
         "revisitDecisions": {
           "type": "array",
           "maxItems": 32,
+          "description": "Current decisions carrying revisit_by, read from the canonical typed decision sidecar when present and from legacy literal decision prose only when no sidecar exists.",
           "items": {
             "type": "object",
             "required": [
@@ -90,7 +91,7 @@
         "taggedItemsTotal": {
           "type": "integer",
           "minimum": 0,
-          "description": "Exact count of current next/queue/blocking/pending/todo-tagged memories before output bounding."
+          "description": "Exact count of current next/queue/blocking/pending/todo/revisit-tagged memories before output bounding."
         },
         "taggedItemsTruncated": { "type": "boolean" },
         "taggedItems": {
@@ -107,8 +108,9 @@
     },
     "nearbyStores": {
       "type": ["object", "null"],
-      "description": "Populated only when the store has nothing episodic; reuses the orient nearby-store scan shape.",
-      "required": ["stores", "truncated"],
+      "description": "Populated only when the store has nothing episodic. Outcome is exact: unavailable never means a complete scan or proof that no populated store exists.",
+      "required": ["stores", "outcome"],
+      "additionalProperties": false,
       "properties": {
         "stores": {
           "type": "array",
@@ -123,7 +125,10 @@
             }
           }
         },
-        "truncated": { "type": "boolean" }
+        "outcome": {
+          "type": "string",
+          "enum": ["complete", "truncated", "unavailable"]
+        }
       }
     },
     "nextCommands": {
@@ -198,7 +203,7 @@
               "type": "array",
               "items": { "type": "string" },
               "minItems": 1,
-              "description": "Shared subject tags establishing staleness; excludes session-* and next/queue/blocking/pending/todo control tags."
+              "description": "Shared subject tags establishing staleness; excludes session-* and next/queue/blocking/pending/todo/revisit control tags."
             }
           }
         }

@@ -9,7 +9,7 @@
 //!    else write-time clustering (a gap over [`SESSION_GAP_SECONDS`] starts
 //!    a new session).
 //! 2. OPEN LOOPS — decisions carrying revisit conditions (the `ee decide`
-//!    surface) plus memories tagged next/queue/blocking/pending/todo.
+//!    surface) plus memories tagged next/queue/blocking/pending/todo/revisit.
 //! 3. STALENESS — surfaced items superseded by newer writes on the same
 //!    subject (same kind, strictly newer timestamp, and at least one shared
 //!    subject tag) are flagged rather than silently ranked down. Session tags
@@ -23,13 +23,15 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use sqlmodel_core::Value as SqlValue;
 
 use crate::core::orient::{
-    AddressedStoreState, NearbyStoreScan, addressed_store_state,
-    discover_nearby_stores_for_database,
+    AddressedStoreState, NearbyStoreScanAssessment, NearbyStoreScanOutcome, addressed_store_state,
+    assess_nearby_stores_for_database,
 };
 use crate::db::{DbConnection, StoredMemory};
-use crate::models::DomainError;
+use crate::models::memory::typed_memory_fields_from_json;
+use crate::models::{DomainError, MemoryKind};
 
 /// Wire schema id for the resume report.
 pub const RESUME_SCHEMA_V1: &str = "ee.resume.v1";
@@ -38,7 +40,7 @@ pub const SESSION_GAP_SECONDS: i64 = 4 * 3600;
 /// Items listed per session (summary counts stay exact).
 pub const SESSION_ITEM_CAP: usize = 20;
 /// Open-loop tag vocabulary.
-pub const OPEN_LOOP_TAGS: [&str; 5] = ["next", "queue", "blocking", "pending", "todo"];
+pub const OPEN_LOOP_TAGS: [&str; 6] = ["next", "queue", "blocking", "pending", "todo", "revisit"];
 /// Wall-clock budget for the nearby-store scan.
 pub const RESUME_NEARBY_SCAN_BUDGET_MS: u64 = 250;
 /// Cap on open-loop tagged items and staleness flags.
@@ -142,7 +144,7 @@ pub struct ResumeReport {
     /// Unique stale memory IDs across every rendered projection.
     pub stale_count: usize,
     /// Populated when the store has nothing episodic to resume from.
-    pub nearby_stores: Option<NearbyStoreScan>,
+    pub nearby_stores: Option<NearbyStoreScanAssessment>,
     pub next_commands: Vec<String>,
 }
 
@@ -430,14 +432,83 @@ fn revisit_status(revisit_by: &str, now: &DateTime<Utc>) -> String {
     }
 }
 
+fn resume_storage_error(message: impl Into<String>) -> DomainError {
+    DomainError::Storage {
+        message: message.into(),
+        repair: Some(
+            "Run `ee doctor --workspace . --json`, repair the reported storage failure, then retry `ee resume`."
+                .to_owned(),
+        ),
+    }
+}
+
+fn load_decision_typed_fields(
+    connection: &DbConnection,
+    memories: &[StoredMemory],
+) -> Result<BTreeMap<String, String>, DomainError> {
+    let decision_ids: Vec<&str> = memories
+        .iter()
+        .filter(|memory| memory.kind == "decision")
+        .map(|memory| memory.id.as_str())
+        .collect();
+    let mut typed_fields = BTreeMap::new();
+    for page in decision_ids.chunks(RESUME_STORAGE_PAGE_SIZE) {
+        let placeholders: Vec<String> = (1..=page.len()).map(|index| format!("?{index}")).collect();
+        let sql = format!(
+            "SELECT id, typed_fields_json FROM memories WHERE id IN ({}) AND typed_fields_json IS NOT NULL ORDER BY id ASC",
+            placeholders.join(", ")
+        );
+        let params: Vec<SqlValue> = page
+            .iter()
+            .map(|memory_id| SqlValue::Text((*memory_id).to_owned()))
+            .collect();
+        let rows = connection.query(&sql, &params).map_err(|error| {
+            resume_storage_error(format!(
+                "Failed to batch-load canonical decision typed fields for resume: {error}"
+            ))
+        })?;
+        for row in rows {
+            let memory_id = match row.get(0) {
+                Some(SqlValue::Text(value)) => value.clone(),
+                value => {
+                    return Err(resume_storage_error(format!(
+                        "Canonical decision typed-field row has invalid memory id value {value:?}"
+                    )));
+                }
+            };
+            let raw = match row.get(1) {
+                Some(SqlValue::Text(value)) => value.clone(),
+                value => {
+                    return Err(resume_storage_error(format!(
+                        "Canonical decision typed-field row for {memory_id} has invalid sidecar value {value:?}"
+                    )));
+                }
+            };
+            typed_fields.insert(memory_id, raw);
+        }
+    }
+    Ok(typed_fields)
+}
+
+fn typed_decision_string_field(
+    fields: &BTreeMap<String, serde_json::Value>,
+    name: &str,
+) -> Option<String> {
+    fields
+        .get(name)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
 /// Project every current decision carrying a revisit condition in one bounded,
 /// chunked pass over the already-loaded newest-first memory rows. This avoids
 /// the decide list's presentation limit, performs no per-decision storage
 /// queries, and only redacts/materializes the public output page.
 fn collect_revisit_decisions(
     memories: &[StoredMemory],
+    typed_fields_by_memory: &BTreeMap<String, String>,
     now: DateTime<Utc>,
-) -> (Vec<ResumeDecision>, usize, bool) {
+) -> Result<(Vec<ResumeDecision>, usize, bool), DomainError> {
     let mut decisions = Vec::new();
     let mut total = 0usize;
     for page in memories.chunks(RESUME_STORAGE_PAGE_SIZE) {
@@ -445,7 +516,32 @@ fn collect_revisit_decisions(
             if memory.kind != "decision" {
                 continue;
             }
-            let Some(revisit_by) = decision_line(&memory.content, "Revisit by:") else {
+            let typed_fields = typed_fields_by_memory
+                .get(&memory.id)
+                .map(|raw| typed_memory_fields_from_json(&MemoryKind::Decision, raw))
+                .transpose()
+                .map_err(|error| {
+                    resume_storage_error(format!(
+                        "Invalid canonical decision typed fields for {}: {error}",
+                        memory.id
+                    ))
+                })?;
+            let topic = typed_fields.as_ref().map_or_else(
+                || decision_line(&memory.content, "Topic:").unwrap_or_default(),
+                |_| {
+                    decision_line(&memory.content, "Topic:")
+                        .unwrap_or_else(|| memory.content.clone())
+                },
+            );
+            let chosen = typed_fields.as_ref().map_or_else(
+                || decision_line(&memory.content, "Chosen:").unwrap_or_default(),
+                |fields| typed_decision_string_field(fields, "chosen").unwrap_or_default(),
+            );
+            let revisit_by = typed_fields.as_ref().map_or_else(
+                || decision_line(&memory.content, "Revisit by:"),
+                |fields| typed_decision_string_field(fields, "revisit_by"),
+            );
+            let Some(revisit_by) = revisit_by else {
                 continue;
             };
             total = total.saturating_add(1);
@@ -453,12 +549,8 @@ fn collect_revisit_decisions(
                 continue;
             }
             let mut redaction_reasons = Vec::new();
-            let topic = decision_line(&memory.content, "Topic:")
-                .map(|value| public_resume_text(&value, "decision.topic", &mut redaction_reasons))
-                .unwrap_or_default();
-            let chosen = decision_line(&memory.content, "Chosen:")
-                .map(|value| public_resume_text(&value, "decision.chosen", &mut redaction_reasons))
-                .unwrap_or_default();
+            let topic = public_resume_text(&topic, "decision.topic", &mut redaction_reasons);
+            let chosen = public_resume_text(&chosen, "decision.chosen", &mut redaction_reasons);
             let safe_revisit_by =
                 public_resume_text(&revisit_by, "decision.revisitBy", &mut redaction_reasons);
             decisions.push(ResumeDecision {
@@ -471,7 +563,7 @@ fn collect_revisit_decisions(
             });
         }
     }
-    (decisions, total, total > OPEN_LOOP_CAP)
+    Ok((decisions, total, total > OPEN_LOOP_CAP))
 }
 
 /// Options for [`build_resume_report`].
@@ -485,6 +577,12 @@ pub struct ResumeOptions<'a> {
 
 /// Assemble the resume bundle. Read-only.
 pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, DomainError> {
+    if options.sessions == 0 {
+        return Err(DomainError::Usage {
+            message: "`--sessions` must be at least 1; received 0.".to_owned(),
+            repair: Some("ee resume --sessions 1 --workspace . --json".to_owned()),
+        });
+    }
     match std::fs::symlink_metadata(options.database_path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(empty_resume_report(options));
@@ -573,12 +671,13 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
     });
     let episodic_total = episodic.len();
 
-    let mut sessions = group_sessions(&episodic, &tags, options.sessions.max(1));
+    let mut sessions = group_sessions(&episodic, &tags, options.sessions);
 
     // Open loops: all current revisit-conditioned decisions, then a bounded
     // public page with exact total/truncation posture.
+    let typed_decision_fields = load_decision_typed_fields(&connection, &all_live)?;
     let (revisit_decisions, revisit_decisions_total, revisit_decisions_truncated) =
-        collect_revisit_decisions(&all_live, now);
+        collect_revisit_decisions(&all_live, &typed_decision_fields, now)?;
 
     let mut tagged_memories: Vec<&StoredMemory> = all_live
         .iter()
@@ -608,7 +707,7 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
     let stale_count = apply_report_staleness(&mut tagged_items, &mut sessions, &all_live, &tags);
 
     let nearby_stores = if episodic_total == 0 {
-        Some(discover_nearby_stores_for_database(
+        Some(assess_nearby_stores_for_database(
             options.workspace_path,
             options.database_path,
             std::time::Duration::from_millis(RESUME_NEARBY_SCAN_BUDGET_MS),
@@ -643,7 +742,7 @@ fn empty_resume_report(options: &ResumeOptions<'_>) -> ResumeReport {
         .workspace_path
         .canonicalize()
         .unwrap_or_else(|_| options.workspace_path.to_path_buf());
-    let nearby_stores = Some(discover_nearby_stores_for_database(
+    let nearby_stores = Some(assess_nearby_stores_for_database(
         options.workspace_path,
         options.database_path,
         std::time::Duration::from_millis(RESUME_NEARBY_SCAN_BUDGET_MS),
@@ -662,13 +761,28 @@ fn empty_resume_report(options: &ResumeOptions<'_>) -> ResumeReport {
     }
 }
 
-fn resume_next_commands(nearby_stores: Option<&NearbyStoreScan>) -> Vec<String> {
+fn resume_next_commands(nearby_stores: Option<&NearbyStoreScanAssessment>) -> Vec<String> {
     let mut commands = vec![
         "ee decide list --json  # open decisions incl. revisit conditions".to_owned(),
         "ee orient \"<current task>\" --json  # task-conditioned pack once you know the task"
             .to_owned(),
         "ee conflict list --json  # anything contradictory left behind".to_owned(),
     ];
+    if let Some(scan) = nearby_stores {
+        match scan.outcome {
+            NearbyStoreScanOutcome::Complete => {}
+            NearbyStoreScanOutcome::Truncated => commands.insert(
+                0,
+                "ee workspace list --json  # nearby-store discovery truncated; inspect registered stores"
+                    .to_owned(),
+            ),
+            NearbyStoreScanOutcome::Unavailable => commands.insert(
+                0,
+                "ee doctor --workspace . --json  # diagnose unavailable nearby-store discovery"
+                    .to_owned(),
+            ),
+        }
+    }
     if let Some(best) = nearby_stores.and_then(|scan| scan.stores.first()) {
         let workspace = shell_quote_cli_arg(&best.workspace_root);
         let database =
@@ -704,7 +818,7 @@ mod tests {
         build_resume_report, collect_revisit_decisions, group_sessions, item, parse_ts,
         resume_next_commands,
     };
-    use crate::core::orient::{NearbyStore, NearbyStoreScan};
+    use crate::core::orient::{NearbyStore, NearbyStoreScanAssessment, NearbyStoreScanOutcome};
     use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection, StoredMemory};
     use crate::models::{DomainError, MemoryId};
     use std::collections::{BTreeMap, BTreeSet};
@@ -909,10 +1023,50 @@ mod tests {
             memories.push(decision);
         }
         let now = parse_ts("2026-08-10T00:00:00Z").unwrap();
-        let (decisions, total, truncated) = collect_revisit_decisions(&memories, now);
+        let (decisions, total, truncated) =
+            collect_revisit_decisions(&memories, &BTreeMap::new(), now).unwrap();
         assert_eq!(total, 225);
         assert!(truncated);
         assert_eq!(decisions.len(), OPEN_LOOP_CAP);
+    }
+
+    #[test]
+    fn revisit_decision_scan_prefers_canonical_typed_sidecar() {
+        let mut decision = memory(
+            "mem_typed_decision",
+            "semantic",
+            "decision",
+            "2026-08-09T20:00:00Z",
+        );
+        decision.content = "Typed sidecar decision without literal field prose.".to_owned();
+        let typed = BTreeMap::from([(
+            decision.id.clone(),
+            serde_json::json!({
+                "schema": "ee.memory.typed_fields.v2",
+                "kind": "decision",
+                "fields": {
+                    "chosen": "ship the canonical sidecar",
+                    "revisit_by": "2026-12-31T00:00:00Z"
+                }
+            })
+            .to_string(),
+        )]);
+        let now = parse_ts("2026-08-10T00:00:00Z").unwrap();
+
+        let (decisions, total, truncated) =
+            collect_revisit_decisions(&[decision], &typed, now).unwrap();
+
+        assert_eq!(total, 1);
+        assert!(!truncated);
+        assert_eq!(
+            decisions[0].topic,
+            "Typed sidecar decision without literal field prose."
+        );
+        assert_eq!(decisions[0].chosen, "ship the canonical sidecar");
+        assert_eq!(
+            decisions[0].revisit_by.as_deref(),
+            Some("2026-12-31T00:00:00Z")
+        );
     }
 
     #[test]
@@ -948,6 +1102,7 @@ mod tests {
                 "blocking".to_owned(),
                 "pending".to_owned(),
                 "todo".to_owned(),
+                "revisit".to_owned(),
                 "arc4".to_owned(),
             ],
         );
@@ -960,6 +1115,7 @@ mod tests {
                 "blocking".to_owned(),
                 "pending".to_owned(),
                 "todo".to_owned(),
+                "revisit".to_owned(),
                 "arc4".to_owned(),
             ],
         );
@@ -1017,7 +1173,10 @@ mod tests {
         let all = vec![next_only, different_kind, equal_time, older];
         assert!(apply_staleness(&mut items, &all, &tags).is_empty());
         assert!(items[0].stale.is_none());
-        assert!(OPEN_LOOP_TAGS.contains(&"next"));
+        assert_eq!(
+            OPEN_LOOP_TAGS,
+            ["next", "queue", "blocking", "pending", "todo", "revisit"]
+        );
     }
 
     #[test]
@@ -1093,6 +1252,31 @@ mod tests {
                 Ok(())
             }
             other => Err(format!("expected resume tag storage error, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn zero_session_limit_is_a_usage_error_before_store_access() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("zero-session-workspace");
+        let database = workspace.join(".ee").join("ee.db");
+
+        match build_resume_report(&ResumeOptions {
+            workspace_path: &workspace,
+            database_path: &database,
+            sessions: 0,
+        }) {
+            Err(DomainError::Usage { message, repair }) => {
+                assert!(message.contains("must be at least 1"));
+                assert!(
+                    repair
+                        .as_deref()
+                        .is_some_and(|value| value.contains("--sessions 1"))
+                );
+                assert!(!workspace.exists());
+                Ok(())
+            }
+            other => Err(format!("expected zero sessions usage error, got {other:?}")),
         }
     }
 
@@ -1261,14 +1445,14 @@ mod tests {
 
     #[test]
     fn nearby_resume_command_is_prepended_and_shell_quoted() {
-        let scan = NearbyStoreScan {
+        let scan = NearbyStoreScanAssessment {
             stores: vec![NearbyStore {
                 workspace_root: "/tmp/campaign's best root".to_owned(),
                 store_dir: "/tmp/campaign's best root/.ee-campaign".to_owned(),
                 documents: 42,
                 last_write: Some("2026-08-10T14:15:16Z".to_owned()),
             }],
-            truncated: false,
+            outcome: NearbyStoreScanOutcome::Complete,
         };
 
         let commands = resume_next_commands(Some(&scan));
@@ -1277,6 +1461,26 @@ mod tests {
             Some(
                 "ee resume --workspace '/tmp/campaign'\\''s best root' --database '/tmp/campaign'\\''s best root/.ee-campaign/ee.db' --json"
             )
+        );
+    }
+
+    #[test]
+    fn unavailable_nearby_scan_emits_diagnostic_without_claiming_no_store() {
+        let scan = NearbyStoreScanAssessment {
+            stores: Vec::new(),
+            outcome: NearbyStoreScanOutcome::Unavailable,
+        };
+
+        let commands = resume_next_commands(Some(&scan));
+
+        assert_eq!(
+            commands.first().map(String::as_str),
+            Some("ee doctor --workspace . --json  # diagnose unavailable nearby-store discovery")
+        );
+        assert!(
+            commands
+                .iter()
+                .all(|command| !command.contains("no nearby"))
         );
     }
 }

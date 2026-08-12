@@ -17278,7 +17278,7 @@ where
             "code": "resume_no_session_evidence",
             "severity": "info",
             "message": "No episodic memories to resume from in this store.",
-            "repair": "ee remember \"<session note>\" --level episodic --workspace . --json  # or check nearbyStores for the populated one",
+            "repair": "ee remember \"<session note>\" --level episodic --workspace . --json  # inspect nearbyStores.outcome and candidates before retargeting",
         }));
     }
 
@@ -17316,13 +17316,22 @@ fn render_resume_human(report: &crate::core::resume::ResumeReport) -> String {
             session.label, session.member_count, session.oldest_at, session.newest_at
         ));
         for session_item in &session.items {
-            let marker = if session_item.stale.is_some() {
+            let stale_marker = if session_item.stale.is_some() {
                 " [STALE]"
             } else {
                 ""
             };
+            let redaction_marker = if session_item.redaction.applied {
+                " [REDACTED]"
+            } else {
+                ""
+            };
             let head: String = session_item.content.chars().take(96).collect();
-            text.push_str(&format!("  - {}{marker}: {head}\n", session_item.memory_id));
+            let stale_truth = render_resume_stale_truth(session_item.stale.as_ref());
+            text.push_str(&format!(
+                "  - {}{stale_marker}{redaction_marker}: {head}{stale_truth}\n",
+                session_item.memory_id
+            ));
         }
     }
     text.push_str("\nOpen loops:\n");
@@ -17335,14 +17344,20 @@ fn render_resume_human(report: &crate::core::resume::ResumeReport) -> String {
         ));
     }
     for queued in &report.open_loops.tagged_items {
-        let marker = if queued.stale.is_some() {
+        let stale_marker = if queued.stale.is_some() {
             " [STALE]"
         } else {
             ""
         };
+        let redaction_marker = if queued.redaction.applied {
+            " [REDACTED]"
+        } else {
+            ""
+        };
         let head: String = queued.content.chars().take(96).collect();
+        let stale_truth = render_resume_stale_truth(queued.stale.as_ref());
         text.push_str(&format!(
-            "  - queued {}{marker}: {head}\n",
+            "  - queued {}{stale_marker}{redaction_marker}: {head}{stale_truth}\n",
             queued.memory_id
         ));
     }
@@ -17375,11 +17390,21 @@ fn render_resume_human(report: &crate::core::resume::ResumeReport) -> String {
                 ));
             }
         }
-        if scan.truncated {
-            text.push_str(&format!(
-                "Nearby-store scan hit its {} ms time budget; the candidate list may be incomplete.\n",
-                crate::core::resume::RESUME_NEARBY_SCAN_BUDGET_MS
-            ));
+        match scan.outcome {
+            crate::core::orient::NearbyStoreScanOutcome::Complete => {
+                text.push_str("Nearby-store discovery outcome: complete.\n");
+            }
+            crate::core::orient::NearbyStoreScanOutcome::Truncated => {
+                text.push_str(&format!(
+                    "Nearby-store discovery outcome: truncated after the {} ms budget; the candidate list may be incomplete.\n",
+                    crate::core::resume::RESUME_NEARBY_SCAN_BUDGET_MS
+                ));
+            }
+            crate::core::orient::NearbyStoreScanOutcome::Unavailable => {
+                text.push_str(
+                    "Nearby-store discovery outcome: unavailable; an empty candidate list is not evidence that no populated store exists.\n",
+                );
+            }
         }
     }
     text.push_str("\nNext commands:\n");
@@ -17387,6 +17412,17 @@ fn render_resume_human(report: &crate::core::resume::ResumeReport) -> String {
         text.push_str(&format!("  - {command}\n"));
     }
     text
+}
+
+fn render_resume_stale_truth(stale: Option<&crate::core::resume::StaleFlag>) -> String {
+    stale.map_or_else(String::new, |stale| {
+        format!(
+            " [superseded by {} at {}; shared tags: {}]",
+            stale.superseded_by,
+            stale.superseded_by_created_at,
+            stale.shared_tags.join(",")
+        )
+    })
 }
 
 /// `ee conflict resolve <a> <b> --verb ... [--apply]` (bd-3a1op.4, ADR 0066).
@@ -67518,7 +67554,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_human_reports_candidate_last_write_and_truncation_together() -> TestResult {
+    fn resume_human_reports_candidate_last_write_and_truncated_outcome() -> TestResult {
         let report = crate::core::resume::ResumeReport {
             schema: crate::core::resume::RESUME_SCHEMA_V1,
             workspace_id: "wsp_fixture".to_owned(),
@@ -67526,14 +67562,14 @@ mod tests {
             sessions: Vec::new(),
             open_loops: crate::core::resume::OpenLoops::default(),
             stale_count: 0,
-            nearby_stores: Some(crate::core::orient::NearbyStoreScan {
+            nearby_stores: Some(crate::core::orient::NearbyStoreScanAssessment {
                 stores: vec![crate::core::orient::NearbyStore {
                     workspace_root: "/fixture/best campaign".to_owned(),
                     store_dir: "/fixture/best campaign/.ee-campaign".to_owned(),
                     documents: 17,
                     last_write: Some("2026-08-10T14:15:16Z".to_owned()),
                 }],
-                truncated: true,
+                outcome: crate::core::orient::NearbyStoreScanOutcome::Truncated,
             }),
             next_commands: vec![
                 "ee resume --workspace '/fixture/best campaign' --database '/fixture/best campaign/.ee-campaign/ee.db' --json"
@@ -67546,12 +67582,43 @@ mod tests {
             "/fixture/best campaign/.ee-campaign",
             "17 documents",
             "last write 2026-08-10T14:15:16Z",
-            "Nearby-store scan hit its 250 ms time budget; the candidate list may be incomplete.",
+            "Nearby-store discovery outcome: truncated after the 250 ms budget; the candidate list may be incomplete.",
             "ee resume --workspace '/fixture/best campaign' --database '/fixture/best campaign/.ee-campaign/ee.db' --json",
         ] {
             ensure_contains(&human, expected, "resume nearby-store human posture")?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn resume_human_preserves_unavailable_nearby_store_truth() -> TestResult {
+        let report = crate::core::resume::ResumeReport {
+            schema: crate::core::resume::RESUME_SCHEMA_V1,
+            workspace_id: "wsp_fixture".to_owned(),
+            episodic_total: 0,
+            sessions: Vec::new(),
+            open_loops: crate::core::resume::OpenLoops::default(),
+            stale_count: 0,
+            nearby_stores: Some(crate::core::orient::NearbyStoreScanAssessment {
+                stores: Vec::new(),
+                outcome: crate::core::orient::NearbyStoreScanOutcome::Unavailable,
+            }),
+            next_commands: vec![
+                "ee doctor --workspace . --json  # diagnose unavailable nearby-store discovery"
+                    .to_owned(),
+            ],
+        };
+
+        let human = super::render_resume_human(&report);
+        ensure_contains(
+            &human,
+            "Nearby-store discovery outcome: unavailable; an empty candidate list is not evidence that no populated store exists.",
+            "resume unavailable nearby-store truth",
+        )?;
+        ensure(
+            !human.contains("Nearby-store discovery outcome: complete."),
+            "an unavailable scan must not render as complete",
+        )
     }
 
     #[test]

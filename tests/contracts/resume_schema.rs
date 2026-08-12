@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use ee::core::workspace::stable_workspace_id;
 use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 use ee::output::{public_schemas, render_schema_export_json};
+use ee::testing::validate_json_schema_instance;
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
@@ -212,9 +213,43 @@ fn resume_required_fields_and_staleness_contract_are_pinned() -> TestResult {
             .is_some_and(|description| {
                 description.contains("subject tags")
                     && description.contains("session-*")
-                    && description.contains("next/queue/blocking/pending/todo")
+                    && description.contains("next/queue/blocking/pending/todo/revisit")
             }),
         "stale.sharedTags must exclude session and open-loop control tags",
+    )?;
+
+    let nearby_required = string_set(&schema, "/properties/nearbyStores/required")?;
+    let expected_nearby: BTreeSet<String> = ["stores", "outcome"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    ensure(
+        nearby_required == expected_nearby,
+        format!("nearbyStores required set drifted: {nearby_required:?}"),
+    )?;
+    let outcomes = string_set(&schema, "/properties/nearbyStores/properties/outcome/enum")?;
+    let expected_outcomes: BTreeSet<String> = ["complete", "truncated", "unavailable"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    ensure(
+        outcomes == expected_outcomes,
+        format!("nearbyStores outcome vocabulary drifted: {outcomes:?}"),
+    )?;
+    ensure(
+        schema
+            .pointer("/properties/nearbyStores/properties/truncated")
+            .is_none(),
+        "resume must not collapse nearby-store outcome into legacy truncated",
+    )?;
+    ensure(
+        schema
+            .pointer("/properties/nearbyStores/description")
+            .and_then(Value::as_str)
+            .is_some_and(|description| {
+                description.contains("unavailable") && description.contains("no populated store")
+            }),
+        "nearbyStores must deny a no-store conclusion when discovery is unavailable",
     )
 }
 
@@ -281,17 +316,50 @@ fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
         ),
     )?;
 
+    let roots = std::fs::read_dir(temp.path())
+        .map_err(|error| format!("read E2E temp root {}: {error}", temp.path().display()))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    ensure(
+        roots.len() == 1,
+        format!("expected one resume E2E artifact root, found {roots:?}"),
+    )?;
+    let schema = load_schema()?;
+    for artifact in ["resume-report.json", "resume-cold-report.json"] {
+        let emitted_path = roots[0].join("logs").join(artifact);
+        let emitted: Value = serde_json::from_slice(
+            &std::fs::read(&emitted_path)
+                .map_err(|error| format!("read {}: {error}", emitted_path.display()))?,
+        )
+        .map_err(|error| format!("parse {}: {error}", emitted_path.display()))?;
+        let emitted_report = emitted
+            .pointer("/data/report")
+            .ok_or_else(|| format!("{} has no data.report: {emitted}", emitted_path.display()))?;
+        validate_json_schema_instance(emitted_report, &schema).map_err(|error| {
+            format!(
+                "real compiled-binary resume report from {artifact} failed ee.resume.v1 validation: {error}; report={emitted_report}"
+            )
+        })?;
+    }
+
     let required_labels: BTreeSet<String> = [
+        "all_six_open_loop_tags_surfaced",
+        "canonical_next_commands_execute",
+        "canonical_next_commands_preserved",
+        "canonical_typed_revisit_decision_surfaced",
         "corpus_seeded",
         "decisions_recorded",
         "empty_store_reports_no_evidence",
         "human_resume_preserves_db_wal_shm",
         "open_loop_totals_are_exact",
+        "requested_sessions_plus_every_open_loop_in_one_resume",
+        "requested_two_newest_sessions_only",
         "resume_items_carry_public_posture",
+        "resume_human_redacts_planted_secret",
+        "resume_json_redacts_planted_secret",
         "resume_returns_schema",
-        "three_tagged_sessions_grouped",
-        "revisit_decisions_surfaced",
-        "next_tagged_item_surfaced",
         "next_only_overlap_does_not_mark_stale",
         "superseded_note_carries_stale_marker",
         "stale_count_deduplicates_open_loop_and_session_projections",
@@ -307,7 +375,12 @@ fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
         "emitted_resume_leaves_cold_root_uninitialized",
         "missing_db_returns_empty_resume_without_initializing",
         "nearby_store_prepends_quoted_database_resume",
+        "nearby_store_exact_complete_outcome_surfaced",
+        "nearby_store_human_complete_outcome_is_explicit",
         "nearby_store_seeded",
+        "untagged_four_hour_boundary_and_sessions_one_truncation",
+        "untagged_sessions_two_returns_both_real_groups",
+        "zero_sessions_structured_nonzero_no_mutation",
     ]
     .into_iter()
     .map(str::to_owned)
