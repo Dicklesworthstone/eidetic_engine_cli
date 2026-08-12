@@ -35,5 +35,5 @@ pub mod science;
 
 #[cfg(test)]
 pub mod fuzz;
-#[cfg(test)]
+#[doc(hidden)]
 pub mod testing;
