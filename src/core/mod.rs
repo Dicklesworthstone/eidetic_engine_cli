@@ -1393,6 +1393,7 @@ mod tests {
                 store_dir: "/tmp/unverified foreign workspace/.ee".to_owned(),
                 documents: 99,
                 last_write: Some("2026-08-10T14:15:16Z".to_owned()),
+                provenance: crate::core::orient::NearbyStoreProvenance::WorkspaceRegistry,
             }],
             outcome: crate::core::orient::NearbyStoreScanOutcome::Unavailable,
         };

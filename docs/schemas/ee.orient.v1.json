@@ -175,13 +175,17 @@
     },
     "nearbyStore": {
       "type": "object",
-      "required": ["workspaceRoot", "storeDir", "documents", "lastWrite"],
+      "required": ["workspaceRoot", "storeDir", "documents", "lastWrite", "provenance"],
       "additionalProperties": false,
       "properties": {
         "workspaceRoot": { "type": "string" },
         "storeDir": { "type": "string" },
         "documents": { "type": "integer", "minimum": 1 },
-        "lastWrite": { "type": ["string", "null"], "format": "date-time" }
+        "lastWrite": { "type": ["string", "null"], "format": "date-time" },
+        "provenance": {
+          "type": "string",
+          "enum": ["workspace_root", "child_scan", "parent_scan", "workspace_registry"]
+        }
       }
     },
     "storeDiscovery": {

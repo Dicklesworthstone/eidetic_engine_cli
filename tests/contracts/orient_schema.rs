@@ -192,7 +192,8 @@ fn orient_fast_and_full_instances_validate_and_unknown_fields_fail() -> TestResu
                 "workspaceRoot": "/repo/child",
                 "storeDir": "/repo/child/.ee",
                 "documents": 3,
-                "lastWrite": "2026-08-12T12:00:00Z"
+                "lastWrite": "2026-08-12T12:00:00Z",
+                "provenance": "child_scan"
             }]
         }
     });

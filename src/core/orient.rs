@@ -658,6 +658,32 @@ pub struct NearbyStore {
     /// Newest regular database or WAL file mtime (RFC 3339): the last actual
     /// durable write. The shared-memory sidecar is intentionally excluded.
     pub last_write: Option<String>,
+    /// How this store entered the bounded discovery set. This is retained for
+    /// the public orient projection; other surfaces intentionally keep their
+    /// existing nearby-store wire contracts.
+    #[serde(skip_serializing)]
+    pub provenance: NearbyStoreProvenance,
+}
+
+/// Read-only evidence source for one nearby-store candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NearbyStoreProvenance {
+    WorkspaceRoot,
+    ChildScan,
+    ParentScan,
+    WorkspaceRegistry,
+}
+
+impl NearbyStoreProvenance {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkspaceRoot => "workspace_root",
+            Self::ChildScan => "child_scan",
+            Self::ParentScan => "parent_scan",
+            Self::WorkspaceRegistry => "workspace_registry",
+        }
+    }
 }
 
 /// Completeness of a bounded nearby-store discovery attempt.
@@ -774,6 +800,7 @@ struct NearbyStoreRegistryIdentity {
 struct NearbyStoreCandidate {
     workspace_root: PathBuf,
     registry_identity: Option<NearbyStoreRegistryIdentity>,
+    provenance: NearbyStoreProvenance,
 }
 
 enum NearbyStoreScanUpdate {
@@ -1040,9 +1067,12 @@ fn scan_nearby_stores_with_registry(
     let mut seen_candidates = BTreeSet::new();
     let mut seen_databases = BTreeSet::new();
 
-    if let Some(candidate) =
-        add_nearby_store_candidate(scan_root.clone(), None, &mut seen_candidates)
-    {
+    if let Some(candidate) = add_nearby_store_candidate(
+        scan_root.clone(),
+        None,
+        NearbyStoreProvenance::WorkspaceRoot,
+        &mut seen_candidates,
+    ) {
         inspect_nearby_store_candidate(
             cx,
             &candidate,
@@ -1065,9 +1095,12 @@ fn scan_nearby_stores_with_registry(
             break;
         }
         if depth > 0 {
-            if let Some(candidate) =
-                add_nearby_store_candidate(dir.clone(), None, &mut seen_candidates)
-            {
+            if let Some(candidate) = add_nearby_store_candidate(
+                dir.clone(),
+                None,
+                NearbyStoreProvenance::ChildScan,
+                &mut seen_candidates,
+            ) {
                 inspect_nearby_store_candidate(
                     cx,
                     &candidate,
@@ -1142,9 +1175,12 @@ fn scan_nearby_stores_with_registry(
         if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
             break;
         }
-        if let Some(candidate) =
-            add_nearby_store_candidate(dir.to_path_buf(), None, &mut seen_candidates)
-        {
+        if let Some(candidate) = add_nearby_store_candidate(
+            dir.to_path_buf(),
+            None,
+            NearbyStoreProvenance::ParentScan,
+            &mut seen_candidates,
+        ) {
             inspect_nearby_store_candidate(
                 cx,
                 &candidate,
@@ -1187,6 +1223,7 @@ fn scan_nearby_stores_with_registry(
                     if let Some(candidate) = add_nearby_store_candidate(
                         PathBuf::from(workspace.path),
                         Some(identity),
+                        NearbyStoreProvenance::WorkspaceRegistry,
                         &mut seen_candidates,
                     ) {
                         inspect_nearby_store_candidate(
@@ -1232,6 +1269,7 @@ fn nearby_store_scan_should_stop(
 fn add_nearby_store_candidate(
     candidate: PathBuf,
     registry_identity: Option<NearbyStoreRegistryIdentity>,
+    provenance: NearbyStoreProvenance,
     seen: &mut BTreeSet<PathBuf>,
 ) -> Option<NearbyStoreCandidate> {
     if crate::core::path_safety::path_has_symlink_component(&candidate).unwrap_or(true) {
@@ -1249,6 +1287,7 @@ fn add_nearby_store_candidate(
     Some(NearbyStoreCandidate {
         workspace_root: canonical,
         registry_identity,
+        provenance,
     })
 }
 
@@ -1296,6 +1335,7 @@ fn inspect_nearby_store_candidate(
             store_dir: store_dir.display().to_string(),
             documents,
             last_write,
+            provenance: candidate.provenance,
         });
         rank_nearby_stores(scan);
         publish(scan);
@@ -2246,6 +2286,11 @@ mod tests {
         ensure(
             scan.stores[0].last_write.is_some(),
             "last_write must be populated".to_owned(),
+        )?;
+        ensure_equal(
+            &scan.stores[0].provenance,
+            &NearbyStoreProvenance::ChildScan,
+            "child-scan provenance",
         )
     }
 
@@ -2304,6 +2349,7 @@ mod tests {
         let local = NearbyStoreCandidate {
             workspace_root: workspace_root.clone(),
             registry_identity: None,
+            provenance: NearbyStoreProvenance::ChildScan,
         };
         let wrong_workspace = NearbyStoreCandidate {
             workspace_root: workspace_root.clone(),
@@ -2311,6 +2357,7 @@ mod tests {
                 workspace_id: WorkspaceId::from_uuid(uuid::Uuid::from_u128(0x73)).to_string(),
                 repository_fingerprint: Some("repo:actual".to_owned()),
             }),
+            provenance: NearbyStoreProvenance::WorkspaceRegistry,
         };
         let wrong_repository = NearbyStoreCandidate {
             workspace_root: workspace_root.clone(),
@@ -2318,6 +2365,7 @@ mod tests {
                 workspace_id: workspace_id.clone(),
                 repository_fingerprint: Some("repo:stale".to_owned()),
             }),
+            provenance: NearbyStoreProvenance::WorkspaceRegistry,
         };
         let matching_registry = NearbyStoreCandidate {
             workspace_root,
@@ -2325,6 +2373,7 @@ mod tests {
                 workspace_id,
                 repository_fingerprint: Some("repo:actual".to_owned()),
             }),
+            provenance: NearbyStoreProvenance::WorkspaceRegistry,
         };
 
         let mut seen_candidates = BTreeSet::new();
@@ -2332,12 +2381,14 @@ mod tests {
             add_nearby_store_candidate(
                 wrong_repository.workspace_root.clone(),
                 wrong_repository.registry_identity.clone(),
+                wrong_repository.provenance,
                 &mut seen_candidates,
             )
             .is_some()
                 && add_nearby_store_candidate(
                     local.workspace_root.clone(),
                     None,
+                    local.provenance,
                     &mut seen_candidates,
                 )
                 .is_some(),
@@ -2771,6 +2822,7 @@ mod tests {
                     store_dir: "late/.ee".to_owned(),
                     documents: 1,
                     last_write: None,
+                    provenance: NearbyStoreProvenance::ChildScan,
                 }],
                 outcome: NearbyStoreScanOutcome::Complete,
             }
@@ -2808,6 +2860,7 @@ mod tests {
                         store_dir: "proved-before-timeout/.ee".to_owned(),
                         documents: 2,
                         last_write: None,
+                        provenance: NearbyStoreProvenance::ChildScan,
                     }],
                     outcome: NearbyStoreScanOutcome::Complete,
                 };

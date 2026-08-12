@@ -2061,7 +2061,11 @@ fn orient_explicit_external_database_uses_recorded_workspace_identity() -> TestR
 fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
     let root = tempdir.path().join("empty_root_ft1z5");
-    let child = root.join("campaign").join("copulattice_ft1z5");
+    // A secret-like workspace name is not itself sensitive evidence and must
+    // not trigger a broad path-name refusal.
+    let child = root
+        .join("campaign")
+        .join("secret-research-copulattice_ft1z5");
     let poorer_child = root.join("campaign").join("smaller_ft1z5");
     std::fs::create_dir_all(&child).map_err(|error| error.to_string())?;
     std::fs::create_dir_all(&poorer_child).map_err(|error| error.to_string())?;
@@ -2149,7 +2153,9 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
             &system_prefix,
         )
         .map_err(|error| error.to_string())?;
-        let aliased = system_prefix.join("campaign").join("copulattice_ft1z5");
+        let aliased = system_prefix
+            .join("campaign")
+            .join("secret-research-copulattice_ft1z5");
         ensure(
             aliased.canonicalize().map_err(|error| error.to_string())?
                 == child.canonicalize().map_err(|error| error.to_string())?,
@@ -2212,6 +2218,10 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
     ensure(
         best_documents == 3,
         format!("orient best nearby child must report all three seeded documents, got: {best:?}"),
+    )?;
+    ensure(
+        string_at(best, "/provenance", "orient best nearby child provenance")? == "child_scan",
+        format!("orient must identify the bounded child scan as candidate provenance: {best:?}"),
     )?;
     ensure(
         !best_last_write.is_empty(),
@@ -2465,9 +2475,10 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         human.contains("copulattice_ft1z5")
             && human.contains(&format!("{best_documents} docs"))
             && human.contains(&format!("last write {best_last_write}"))
+            && human.contains("provenance child_scan")
             && human.contains(first_next_command),
         format!(
-            "human orient at the empty root must print the child path/documents/last-write and exact retargeted command; \
+            "human orient at the empty root must print the child path/documents/last-write/provenance and exact suggested command; \
              documents={best_documents}, lastWrite={best_last_write:?}, command={first_next_command:?}\n{human}"
         ),
     )?;
@@ -2865,6 +2876,7 @@ fn empty_workspace_discovers_registered_remote_store_and_skips_bad_rows() -> Tes
     ensure(
         string_at(best, "/workspaceRoot", "registered best workspace")? == registered_canonical
             && best["documents"].as_u64() == Some(3)
+            && best["provenance"] == serde_json::json!("workspace_registry")
             && string_at(best, "/lastWrite", "registered best last write")? == expected_last_write,
         format!(
             "registered best store must expose its exact canonical path, three rows, and durable last-write; expectedPath={registered_canonical:?}, expectedLastWrite={expected_last_write:?}, best={best:?}"
@@ -2873,6 +2885,7 @@ fn empty_workspace_discovers_registered_remote_store_and_skips_bad_rows() -> Tes
     ensure(
         string_at(&nearby[1], "/workspaceRoot", "deduped local workspace")? == local_canonical
             && nearby[1]["documents"].as_u64() == Some(1)
+            && nearby[1]["provenance"] == serde_json::json!("child_scan")
             && nearby
                 .iter()
                 .filter(|store| {

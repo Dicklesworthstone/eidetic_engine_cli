@@ -39680,6 +39680,19 @@ fn orient_store_discovery(
     } else {
         scan.stores.first().cloned()
     };
+    let nearby_stores = scan
+        .stores
+        .iter()
+        .map(|store| {
+            serde_json::json!({
+                "workspaceRoot": &store.workspace_root,
+                "storeDir": &store.store_dir,
+                "documents": store.documents,
+                "lastWrite": &store.last_write,
+                "provenance": store.provenance.as_str(),
+            })
+        })
+        .collect::<Vec<_>>();
     let value = serde_json::json!({
         "addressedStorePath": addressed_store_path,
         "addressedState": addressed_state,
@@ -39687,7 +39700,7 @@ fn orient_store_discovery(
         "thinStoreThreshold": crate::core::orient::NEARBY_STORE_THIN_LIVE_MEMORY_THRESHOLD,
         "storeEmpty": store_empty,
         "outcome": outcome,
-        "nearbyStores": scan.stores,
+        "nearbyStores": nearby_stores,
     });
     (Some(value), best)
 }
@@ -39899,16 +39912,20 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
                         .get("lastWrite")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("-");
+                    let provenance = store
+                        .get("provenance")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown");
                     out.push_str(&format!(
-                        "  {path} (store {store_dir}; {documents} docs, last write {last_write})\n"
+                        "  {path} (store {store_dir}; {documents} docs, last write {last_write}, provenance {provenance})\n"
                     ));
                 }
                 match discovery_outcome {
                     "complete" => out.push_str(
-                        "The first Next command below is retargeted at the best candidate.\n",
+                        "The first Next command below targets the top-ranked candidate.\n",
                     ),
                     "truncated" => out.push_str(
-                        "The first Next command below is retargeted at the leading candidate from a partial scan; richer stores may exist beyond the time budget.\n",
+                        "The first Next command below targets the leading candidate from a partial scan; richer stores may exist beyond the time budget.\n",
                     ),
                     _ => out.push_str(
                         "No automatic retarget was selected because nearby-store discovery was unavailable.\n",
@@ -67452,7 +67469,8 @@ mod tests {
             "workspaceRoot": "/fixture/best-campaign",
             "storeDir": "/fixture/best-campaign/.ee-campaign",
             "documents": 17,
-            "lastWrite": "2026-08-10T14:15:16Z"
+            "lastWrite": "2026-08-10T14:15:16Z",
+            "provenance": "child_scan"
         });
         for nearby_stores in [vec![nearby_store], Vec::new()] {
             let orient = super::render_orient_human(
@@ -67489,7 +67507,8 @@ mod tests {
                         "workspaceRoot": "/fixture/best-campaign",
                         "storeDir": "/fixture/best-campaign/.ee-campaign",
                         "documents": 17,
-                        "lastWrite": "2026-08-10T14:15:16Z"
+                        "lastWrite": "2026-08-10T14:15:16Z",
+                        "provenance": "child_scan"
                     }]
                 }
             }),
@@ -67500,7 +67519,8 @@ mod tests {
             "store /fixture/best-campaign/.ee-campaign;",
             "17 docs",
             "last write 2026-08-10T14:15:16Z",
-            "The first Next command below is retargeted at the leading candidate from a partial scan; richer stores may exist beyond the time budget.",
+            "provenance child_scan",
+            "The first Next command below targets the leading candidate from a partial scan; richer stores may exist beyond the time budget.",
         ] {
             ensure_contains(
                 &orient,
@@ -67509,7 +67529,7 @@ mod tests {
             )?;
         }
         ensure(
-            !orient.contains("retargeted at the best candidate"),
+            !orient.contains("targets the top-ranked candidate"),
             "a truncated scan must never claim a global best candidate",
         )?;
 
@@ -67526,7 +67546,8 @@ mod tests {
                         "workspaceRoot": "/fixture/best-campaign",
                         "storeDir": "/fixture/best-campaign/.ee-campaign",
                         "documents": 17,
-                        "lastWrite": "2026-08-10T14:15:16Z"
+                        "lastWrite": "2026-08-10T14:15:16Z",
+                        "provenance": "child_scan"
                     }]
                 }
             }),
@@ -67534,7 +67555,8 @@ mod tests {
         );
         for expected in [
             "store /fixture/best-campaign/.ee-campaign;",
-            "The first Next command below is retargeted at the best candidate.",
+            "provenance child_scan",
+            "The first Next command below targets the top-ranked candidate.",
         ] {
             ensure_contains(
                 &complete,
@@ -67578,8 +67600,8 @@ mod tests {
             )?;
         }
         ensure(
-            !unavailable.contains("retargeted at the best candidate")
-                && !unavailable.contains("leading candidate from a partial scan"),
+            !unavailable.contains("targets the top-ranked candidate")
+                && !unavailable.contains("targets the leading candidate from a partial scan"),
             "unavailable discovery must not claim a best or leading retarget",
         )?;
         Ok(())
@@ -67600,6 +67622,7 @@ mod tests {
                     store_dir: "/fixture/best campaign/.ee-campaign".to_owned(),
                     documents: 17,
                     last_write: Some("2026-08-10T14:15:16Z".to_owned()),
+                    provenance: crate::core::orient::NearbyStoreProvenance::ChildScan,
                 }],
                 outcome: crate::core::orient::NearbyStoreScanOutcome::Truncated,
             }),
