@@ -651,15 +651,26 @@ SECRET_TAG="ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 run_ee --workspace "${SCALE_WS}" remember "Planted secret-shaped tag probe for fast orientation." \
     --level episodic --kind note --tags "fastprobe,${SECRET_TAG}" --json
 SECRET_PLANT_EXIT=$LAST_EXIT
+SECRET_MEMORY_ID="$(jq -r \
+    '.data.memory_id // .data.memoryId // .data.memory.id // .data.id // empty' \
+    "${LAST_STDOUT}" 2>/dev/null)"
 run_ee --workspace "${SCALE_WS}" orient --fast "Planted secret-shaped tag probe" --json
 SECRET_FAST_JSON="${LAST_STDOUT}"
 SECRET_FAST_EXIT=$LAST_EXIT
 if [[ "${SECRET_PLANT_EXIT}" -eq 0 && "${SECRET_FAST_EXIT}" -eq 0 ]] \
+    && [[ -n "${SECRET_MEMORY_ID}" ]] \
     && ! grep -Fq "${SECRET_TAG}" "${SECRET_FAST_JSON}" \
-    && jq -e '[.data.fastContent.recent[]?, .data.fastContent.relevant[]?
-              | select(.content == "Planted secret-shaped tag probe for fast orientation.")
-              | select(any(.tags[]?; . == "[REDACTED:github_token]"))]
-              | length >= 1' "${SECRET_FAST_JSON}" >/dev/null 2>&1; then
+    && jq -e --arg id "${SECRET_MEMORY_ID}" '
+        ([.data.fastContent.recent[]?
+          | select(.id == $id)
+          | select(any(.tags[]?; . == "[REDACTED:github_token]"))]
+         | length == 1)
+        and
+        ([.data.fastContent.relevant[]?
+          | select(.id == $id)
+          | select(any(.tags[]?; . == "[REDACTED:github_token]"))]
+         | length == 1)
+    ' "${SECRET_FAST_JSON}" >/dev/null 2>&1; then
     event fast_orient_json_redacts_secret_shaped_tag pass
 else
     event fast_orient_json_redacts_secret_shaped_tag fail \
@@ -669,6 +680,10 @@ fi
 run_ee --workspace "${SCALE_WS}" orient --fast "Planted secret-shaped tag probe"
 SECRET_FAST_HUMAN="${LAST_STDOUT}"
 if [[ "${LAST_EXIT}" -eq 0 ]] \
+    && [[ -n "${SECRET_MEMORY_ID}" ]] \
+    && grep -Fq "${SECRET_MEMORY_ID}" "${SECRET_FAST_HUMAN}" \
+    && grep -Fq "Planted secret-shaped tag probe for fast orientation." \
+        "${SECRET_FAST_HUMAN}" \
     && grep -Fq "[REDACTED:github_token]" "${SECRET_FAST_HUMAN}" \
     && ! grep -Fq "${SECRET_TAG}" "${SECRET_FAST_HUMAN}"; then
     event fast_orient_human_never_leaks_secret_shaped_tag pass
