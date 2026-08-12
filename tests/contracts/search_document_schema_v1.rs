@@ -45,6 +45,7 @@ fn report_with_results(results: Vec<SearchHit>) -> SearchReport {
         runtime_profile: test_runtime_profile(),
         rerank_configured_mode: ee::config::SearchRerankMode::Auto,
         rerank_configured_top_k: 50,
+        rerank_runtime_available: false,
         relevance_floor_applied: Some(0.0),
         candidates_below_floor: 0,
         query_assist: None,

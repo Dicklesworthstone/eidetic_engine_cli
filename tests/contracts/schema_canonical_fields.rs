@@ -519,6 +519,7 @@ fn search_surface_normalizes_legacy_content_preview_metadata() -> TestResult {
         ),
         rerank_configured_mode: ee::config::SearchRerankMode::Auto,
         rerank_configured_top_k: 50,
+        rerank_runtime_available: false,
         relevance_floor_applied: None,
         candidates_below_floor: 0,
         query_assist: None,

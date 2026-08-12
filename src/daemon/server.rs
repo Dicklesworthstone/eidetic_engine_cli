@@ -168,6 +168,7 @@ pub const DAEMON_HANDLER_PANIC_CODE: &str = "daemon_handler_panic";
 const DAEMON_PANIC_LOG_MAX_BYTES: usize = 512;
 const DAEMON_WORKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_SCHEDULER_JOIN_TIMEOUT: Duration = Duration::from_millis(750);
+const DAEMON_ADVISORY_COMMIT_MAX_ATTEMPTS: usize = 4;
 
 /// Per-daemon dispatch policy that is resolved at daemon start and
 /// then shared by every accepted connection. Connection-level peer
@@ -2755,54 +2756,73 @@ fn dispatch_search(
             }
         };
     let report = search_run.report;
-    let mut advisory_session = search_advisory_session
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut staged_advisory_session = advisory_session.clone();
-    let timing =
-        DaemonSearchTiming::from_trace(daemon_total_start.elapsed(), &search_run.performance);
-    let mut method_result = DaemonSearchResult::from_report(
-        &report,
-        options.explain,
-        authorized_workspace_id,
-        &mut staged_advisory_session,
-        timing,
-    );
-    method_result.timing.daemon_total =
-        DaemonSearchTimingMeasurement::from_duration(daemon_total_start.elapsed());
-    let response_degraded_codes = daemon_search_degraded_codes(&method_result);
-    let result = match serde_json::to_value(method_result) {
-        Ok(result) => result,
-        Err(error) => {
+    for _attempt in 0..DAEMON_ADVISORY_COMMIT_MAX_ATTEMPTS {
+        let base_advisory_session = search_advisory_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut staged_advisory_session = base_advisory_session.clone();
+        let timing =
+            DaemonSearchTiming::from_trace(daemon_total_start.elapsed(), &search_run.performance);
+        let mut method_result = DaemonSearchResult::from_report(
+            &report,
+            options.explain,
+            authorized_workspace_id,
+            &mut staged_advisory_session,
+            timing,
+        );
+        method_result.timing.daemon_total =
+            DaemonSearchTimingMeasurement::from_duration(daemon_total_start.elapsed());
+        let response_degraded_codes = daemon_search_degraded_codes(&method_result);
+        let result = match serde_json::to_value(method_result) {
+            Ok(result) => result,
+            Err(error) => {
+                return DaemonResponse::err(
+                    request.request_id.clone(),
+                    request.agent_id.clone(),
+                    request.workspace_id.clone(),
+                    DAEMON_SEARCH_EXECUTION_FAILED_CODE,
+                    format!("ee.daemon.search could not encode its response: {error}"),
+                );
+            }
+        };
+        let mut response = DaemonResponse::ok(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            result,
+        );
+        for code in response_degraded_codes {
+            response = response.with_degraded(code);
+        }
+        if !daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
             return DaemonResponse::err(
                 request.request_id.clone(),
                 request.agent_id.clone(),
                 request.workspace_id.clone(),
                 DAEMON_SEARCH_EXECUTION_FAILED_CODE,
-                format!("ee.daemon.search could not encode its response: {error}"),
+                "ee.daemon.search response exceeded the daemon response cap; lower --limit or use canonical in-process search.",
             );
         }
-    };
-    let mut response = DaemonResponse::ok(
+        let committed = search_advisory_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .commit_workspace_if_unchanged(
+                &base_advisory_session,
+                &staged_advisory_session,
+                authorized_workspace_id,
+            );
+        if committed {
+            return response;
+        }
+    }
+    DaemonResponse::err(
         request.request_id.clone(),
         request.agent_id.clone(),
         request.workspace_id.clone(),
-        result,
-    );
-    for code in response_degraded_codes {
-        response = response.with_degraded(code);
-    }
-    if !daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
-        return DaemonResponse::err(
-            request.request_id.clone(),
-            request.agent_id.clone(),
-            request.workspace_id.clone(),
-            DAEMON_SEARCH_EXECUTION_FAILED_CODE,
-            "ee.daemon.search response exceeded the daemon response cap; lower --limit or use canonical in-process search.",
-        );
-    }
-    *advisory_session = staged_advisory_session;
-    response
+        DAEMON_SEARCH_EXECUTION_FAILED_CODE,
+        "ee.daemon.search advisory state changed concurrently in the same workspace; retry the request.",
+    )
 }
 
 fn daemon_response_fits(response: &DaemonResponse, max_bytes: usize) -> bool {
@@ -3737,6 +3757,15 @@ fn dispatch_context(
             );
         }
     };
+    let Some(authorized_workspace_id) = request.workspace_id.as_deref() else {
+        return DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            DAEMON_CONTEXT_PARAMS_INVALID_CODE,
+            "authorized envelope `workspace_id` is missing",
+        );
+    };
     let context_started = Instant::now();
     if matches!(params.timeout_ms, Some(0)) {
         return DaemonResponse::err(
@@ -3824,7 +3853,7 @@ fn dispatch_context(
             "ee.daemon.context deadline expired while rendering the response.",
         );
     }
-    let mut result = match serde_json::from_str::<serde_json::Value>(&rendered) {
+    let result = match serde_json::from_str::<serde_json::Value>(&rendered) {
         Ok(result) => result,
         Err(error) => {
             return DaemonResponse::err(
@@ -3836,52 +3865,72 @@ fn dispatch_context(
             );
         }
     };
-    let mut advisory_session = search_advisory_session
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut staged_advisory_session = advisory_session.clone();
-    filter_context_large_gap_advisory(
-        &mut result,
-        &mut staged_advisory_session,
-        authorized_workspace_id,
-    );
-    if daemon_context_deadline_expired(context_started, params.timeout_ms) {
-        return daemon_context_deadline_response(
-            request,
-            "ee.daemon.context deadline expired while finalizing degradations.",
+    for _attempt in 0..DAEMON_ADVISORY_COMMIT_MAX_ATTEMPTS {
+        let base_advisory_session = search_advisory_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut staged_advisory_session = base_advisory_session.clone();
+        let mut staged_result = result.clone();
+        filter_context_large_gap_advisory(
+            &mut staged_result,
+            &mut staged_advisory_session,
+            authorized_workspace_id,
         );
-    }
-    let degraded_codes = result
-        .pointer("/data/degraded")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.get("code").and_then(serde_json::Value::as_str))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let mut response = DaemonResponse::ok(
-        request.request_id.clone(),
-        request.agent_id.clone(),
-        request.workspace_id.clone(),
-        result,
-    );
-    for code in degraded_codes {
-        response = response.with_degraded(code);
-    }
-    if !daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
-        return DaemonResponse::err(
+        if daemon_context_deadline_expired(context_started, params.timeout_ms) {
+            return daemon_context_deadline_response(
+                request,
+                "ee.daemon.context deadline expired while finalizing degradations.",
+            );
+        }
+        let degraded_codes = staged_result
+            .pointer("/data/degraded")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.get("code").and_then(serde_json::Value::as_str))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let mut response = DaemonResponse::ok(
             request.request_id.clone(),
             request.agent_id.clone(),
             request.workspace_id.clone(),
-            DAEMON_CONTEXT_EXECUTION_FAILED_CODE,
-            format!(
-                "ee.daemon.context response exceeded the {}-byte daemon response cap; lower maxTokens or use the in-process CLI pack path.",
-                super::DAEMON_RESPONSE_MAX_BYTES
-            ),
+            staged_result,
         );
+        for code in degraded_codes {
+            response = response.with_degraded(code);
+        }
+        if !daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
+            return DaemonResponse::err(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                request.workspace_id.clone(),
+                DAEMON_CONTEXT_EXECUTION_FAILED_CODE,
+                format!(
+                    "ee.daemon.context response exceeded the {}-byte daemon response cap; lower maxTokens or use the in-process CLI pack path.",
+                    super::DAEMON_RESPONSE_MAX_BYTES
+                ),
+            );
+        }
+        let committed = search_advisory_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .commit_workspace_if_unchanged(
+                &base_advisory_session,
+                &staged_advisory_session,
+                authorized_workspace_id,
+            );
+        if committed {
+            return response;
+        }
     }
-    *advisory_session = staged_advisory_session;
-    response
+    DaemonResponse::err(
+        request.request_id.clone(),
+        request.agent_id.clone(),
+        request.workspace_id.clone(),
+        DAEMON_CONTEXT_EXECUTION_FAILED_CODE,
+        "ee.daemon.context advisory state changed concurrently in the same workspace; retry the request.",
+    )
 }
 
 fn filter_context_large_gap_advisory(
@@ -3900,7 +3949,7 @@ fn filter_context_large_gap_advisory(
                 })
             })
     });
-    if session.emit_response_code_while_active(workspace_id, CODE, has_large_gap) {
+    if session.emit_large_gap_while_active(workspace_id, has_large_gap) {
         return;
     }
     if !has_large_gap {
@@ -4447,6 +4496,7 @@ mod tests {
             ),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: 50,
+            rerank_runtime_available: false,
             relevance_floor_applied: Some(0.0),
             candidates_below_floor: 0,
             query_assist: None,
@@ -4561,19 +4611,22 @@ mod tests {
     }
 
     #[test]
-    fn unbound_daemon_advisories_are_isolated_by_request_workspace() {
+    fn unbound_daemon_concurrent_workspace_commits_merge_without_cross_suppression() {
         let report = permanent_reranker_advisory_report();
         let policy = DaemonDispatchPolicy::default();
         assert!(policy.bound_workspace_id().is_none());
-        let mut session = policy
+        let mut shared = policy
             .search_advisory_session()
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
 
-        let (_, first_a) = advisory_candidate_for_workspace(&report, &mut session, "workspace-a");
-        let (_, repeated_a) =
-            advisory_candidate_for_workspace(&report, &mut session, "workspace-a");
-        let (_, first_b) = advisory_candidate_for_workspace(&report, &mut session, "workspace-b");
+        let base_a = shared.clone();
+        let mut staged_a = base_a.clone();
+        let (_, first_a) = advisory_candidate_for_workspace(&report, &mut staged_a, "workspace-a");
+        let base_b = shared.clone();
+        let mut staged_b = base_b.clone();
+        let (_, first_b) = advisory_candidate_for_workspace(&report, &mut staged_b, "workspace-b");
 
         assert_eq!(
             first_a
@@ -4581,17 +4634,65 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("rerank_model_unavailable")
         );
-        assert!(
-            repeated_a
-                .pointer("/response/data/rerank/advisory")
-                .is_some_and(serde_json::Value::is_null)
-        );
         assert_eq!(
             first_b
                 .pointer("/response/data/rerank/advisory/code")
                 .and_then(serde_json::Value::as_str),
             Some("rerank_model_unavailable"),
             "workspace-a must not suppress the first active episode in workspace-b"
+        );
+        assert!(shared.commit_workspace_if_unchanged(&base_a, &staged_a, "workspace-a"));
+        assert!(
+            shared.commit_workspace_if_unchanged(&base_b, &staged_b, "workspace-b"),
+            "workspace-b CAS must merge instead of overwriting workspace-a"
+        );
+
+        let mut after_merge = shared.clone();
+        let (_, repeated_a) =
+            advisory_candidate_for_workspace(&report, &mut after_merge, "workspace-a");
+        let (_, repeated_b) =
+            advisory_candidate_for_workspace(&report, &mut after_merge, "workspace-b");
+        for repeated in [&repeated_a, &repeated_b] {
+            assert!(
+                repeated
+                    .pointer("/response/data/rerank/advisory")
+                    .is_some_and(serde_json::Value::is_null)
+            );
+        }
+    }
+
+    #[test]
+    fn same_workspace_concurrent_commit_conflicts_and_rerenders_from_fresh_state() {
+        let report = permanent_reranker_advisory_report();
+        let mut shared = SearchAdvisorySession::default();
+        let first_base = shared.clone();
+        let mut first_stage = first_base.clone();
+        let _ = advisory_candidate_for_workspace(&report, &mut first_stage, TEST_WORKSPACE_ID);
+        let competing_base = shared.clone();
+        let mut competing_stage = competing_base.clone();
+        let _ = advisory_candidate_for_workspace(&report, &mut competing_stage, TEST_WORKSPACE_ID);
+
+        assert!(
+            shared.commit_workspace_if_unchanged(&first_base, &first_stage, TEST_WORKSPACE_ID,)
+        );
+        assert!(!shared.commit_workspace_if_unchanged(
+            &competing_base,
+            &competing_stage,
+            TEST_WORKSPACE_ID,
+        ));
+
+        let retry_base = shared.clone();
+        let mut retry_stage = retry_base.clone();
+        let (_, retry_result) =
+            advisory_candidate_for_workspace(&report, &mut retry_stage, TEST_WORKSPACE_ID);
+        assert!(
+            retry_result
+                .pointer("/response/data/rerank/advisory")
+                .is_some_and(serde_json::Value::is_null),
+            "CAS retry must rerender against the committed advisory episode"
+        );
+        assert!(
+            shared.commit_workspace_if_unchanged(&retry_base, &retry_stage, TEST_WORKSPACE_ID,)
         );
     }
 

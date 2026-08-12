@@ -177,6 +177,7 @@ fn search_report(results: Vec<SearchHit>) -> SearchReport {
         ),
         rerank_configured_mode: ee::config::SearchRerankMode::Auto,
         rerank_configured_top_k: 50,
+        rerank_runtime_available: false,
         relevance_floor_applied: Some(0.005),
         candidates_below_floor: 0,
         query_assist: None,

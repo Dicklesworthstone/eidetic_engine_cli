@@ -33,7 +33,10 @@ fn generated_catalog_preserves_the_exact_offline_reranker_repair() {
     );
 }
 
-fn empty_search_report(degraded: Vec<SearchDegradation>) -> SearchReport {
+fn empty_search_report(
+    degraded: Vec<SearchDegradation>,
+    rerank_runtime_available: bool,
+) -> SearchReport {
     SearchReport {
         status: SearchStatus::NoResults,
         embed_backend: EmbedBackend::HashFallback,
@@ -46,6 +49,7 @@ fn empty_search_report(degraded: Vec<SearchDegradation>) -> SearchReport {
         runtime_profile: runtime_profile(),
         rerank_configured_mode: ee::config::SearchRerankMode::Auto,
         rerank_configured_top_k: 50,
+        rerank_runtime_available,
         relevance_floor_applied: Some(0.0),
         candidates_below_floor: 0,
         query_assist: None,
@@ -61,20 +65,23 @@ fn empty_search_report(degraded: Vec<SearchDegradation>) -> SearchReport {
 
 #[test]
 fn ordinary_search_json_is_pure_and_structural() {
-    let report = empty_search_report(vec![
-        SearchDegradation {
-            code: "rerank_model_unavailable".to_string(),
-            severity: "low".to_string(),
-            message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
-        },
-        SearchDegradation {
-            code: "rerank_model_unavailable".to_string(),
-            severity: "low".to_string(),
-            message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
-        },
-    ]);
+    let report = empty_search_report(
+        vec![
+            SearchDegradation {
+                code: "rerank_model_unavailable".to_string(),
+                severity: "low".to_string(),
+                message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
+                repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+            },
+            SearchDegradation {
+                code: "rerank_model_unavailable".to_string(),
+                severity: "low".to_string(),
+                message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
+                repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+            },
+        ],
+        false,
+    );
 
     let human = report.human_summary();
     let json = report.data_json();
@@ -117,12 +124,15 @@ fn ordinary_search_json_is_pure_and_structural() {
 
 #[test]
 fn explicit_long_lived_session_emits_permanent_advisory_once() {
-    let first = empty_search_report(vec![SearchDegradation {
-        code: "rerank_model_unavailable".to_string(),
-        severity: "low".to_string(),
-        message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-        repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
-    }]);
+    let first = empty_search_report(
+        vec![SearchDegradation {
+            code: "rerank_model_unavailable".to_string(),
+            severity: "low".to_string(),
+            message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
+            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+        }],
+        false,
+    );
     let mut second = first.clone();
     second.query = "a distinct second query in the same process".to_string();
     let mut session = SearchAdvisorySession::default();
@@ -154,26 +164,17 @@ fn explicit_long_lived_session_emits_permanent_advisory_once() {
 }
 
 #[test]
-fn permanent_reranker_advisory_rearms_after_authoritative_recovery() {
-    let absent = empty_search_report(vec![SearchDegradation {
-        code: "rerank_model_unavailable".to_string(),
-        severity: "low".to_string(),
-        message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-        repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
-    }]);
-    let mut available = empty_search_report(Vec::new());
-    available.status = SearchStatus::Success;
-    available.results.push(SearchHit {
-        doc_id: "memory-reranked".to_string(),
-        score: 0.91,
-        source: ScoreSource::Reranked,
-        fast_score: Some(0.72),
-        quality_score: None,
-        lexical_score: Some(0.63),
-        rerank_score: Some(0.91),
-        metadata: None,
-        explanation: None,
-    });
+fn permanent_reranker_advisory_rearms_after_available_zero_result_query() {
+    let absent = empty_search_report(
+        vec![SearchDegradation {
+            code: "rerank_model_unavailable".to_string(),
+            severity: "low".to_string(),
+            message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
+            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+        }],
+        false,
+    );
+    let available = empty_search_report(Vec::new(), true);
     let mut session = SearchAdvisorySession::default();
 
     let first_absent = absent.data_json_with_advisory_session(&mut session);
@@ -185,7 +186,10 @@ fn permanent_reranker_advisory_rearms_after_authoritative_recovery() {
         "rerank_model_unavailable"
     );
     assert!(recovered["rerank"]["advisory"].is_null());
-    assert_eq!(recovered["rerank"]["mode"], "reranked");
+    assert_eq!(recovered["resultCount"], 0);
+    assert_eq!(recovered["rerank"]["rerankScoreCount"], 0);
+    assert_eq!(recovered["rerank"]["available"], true);
+    assert_eq!(recovered["rerank"]["mode"], "fusion_only");
     assert_eq!(
         second_absent["rerank"]["advisory"]["code"], "rerank_model_unavailable",
         "absent -> available -> absent must begin a new advisory episode"
@@ -198,21 +202,24 @@ fn permanent_reranker_advisory_rearms_after_authoritative_recovery() {
 
 #[test]
 fn large_gap_advisory_rearms_after_ready_response() {
-    let large_gap = empty_search_report(vec![
-        SearchDegradation {
-            code: "search_index_stale".to_string(),
-            severity: "medium".to_string(),
-            message: "Search index is stale.".to_string(),
-            repair: Some("ee index rebuild --workspace .".to_string()),
-        },
-        SearchDegradation {
-            code: "search_index_large_gap".to_string(),
-            severity: "medium".to_string(),
-            message: "Search index generation gap is large.".to_string(),
-            repair: Some("ee index rebuild --workspace .".to_string()),
-        },
-    ]);
-    let ready = empty_search_report(Vec::new());
+    let large_gap = empty_search_report(
+        vec![
+            SearchDegradation {
+                code: "search_index_stale".to_string(),
+                severity: "medium".to_string(),
+                message: "Search index is stale.".to_string(),
+                repair: Some("ee index rebuild --workspace .".to_string()),
+            },
+            SearchDegradation {
+                code: "search_index_large_gap".to_string(),
+                severity: "medium".to_string(),
+                message: "Search index generation gap is large.".to_string(),
+                repair: Some("ee index rebuild --workspace .".to_string()),
+            },
+        ],
+        false,
+    );
+    let ready = empty_search_report(Vec::new(), false);
     let mut session = SearchAdvisorySession::default();
 
     let first_gap = large_gap.data_json_with_advisory_session(&mut session);
@@ -240,18 +247,24 @@ fn large_gap_advisory_rearms_after_ready_response() {
 
 #[test]
 fn explicit_session_emits_each_distinct_permanent_advisory_once() {
-    let first = empty_search_report(vec![SearchDegradation {
-        code: "rerank_model_unavailable".to_string(),
-        severity: "low".to_string(),
-        message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-        repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
-    }]);
-    let second = empty_search_report(vec![SearchDegradation {
-        code: "rerank_model_unavailable".to_string(),
-        severity: "warning".to_string(),
-        message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-        repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
-    }]);
+    let first = empty_search_report(
+        vec![SearchDegradation {
+            code: "rerank_model_unavailable".to_string(),
+            severity: "low".to_string(),
+            message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
+            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+        }],
+        false,
+    );
+    let second = empty_search_report(
+        vec![SearchDegradation {
+            code: "rerank_model_unavailable".to_string(),
+            severity: "warning".to_string(),
+            message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
+            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+        }],
+        false,
+    );
     let repeated_first = first.clone();
     let mut session = SearchAdvisorySession::default();
 
@@ -275,19 +288,22 @@ fn explicit_session_emits_each_distinct_permanent_advisory_once() {
 
 #[test]
 fn transient_reranker_load_failure_remains_a_query_degradation() {
-    let permanent = empty_search_report(vec![SearchDegradation {
-        code: "rerank_model_unavailable".to_string(),
-        severity: "low".to_string(),
-        message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-        repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
-    }]);
+    let permanent = empty_search_report(
+        vec![SearchDegradation {
+            code: "rerank_model_unavailable".to_string(),
+            severity: "low".to_string(),
+            message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
+            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+        }],
+        false,
+    );
     let report = empty_search_report(vec![SearchDegradation {
         code: "rerank_model_unavailable".to_string(),
         severity: "low".to_string(),
         message: "The registered local reranker could not be loaded; retry the query or inspect local model status."
             .to_string(),
         repair: None,
-    }]);
+    }], false);
 
     let mut repeated = report.clone();
     repeated.query = "second transient query".to_string();

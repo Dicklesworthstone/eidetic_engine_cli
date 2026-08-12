@@ -70509,6 +70509,7 @@ mod tests {
             ),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: 50,
+            rerank_runtime_available: true,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,

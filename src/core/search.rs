@@ -805,6 +805,9 @@ pub struct SearchReport {
     pub runtime_profile: RuntimeProfileReport,
     pub rerank_configured_mode: crate::config::SearchRerankMode,
     pub rerank_configured_top_k: usize,
+    /// Whether runtime resolution loaded a usable reranker for this search.
+    /// This is capability state and is independent of candidate/result count.
+    pub rerank_runtime_available: bool,
     /// Relevance floor that was applied to this search (B1 bd-17c65.2.1).
     /// `None` only for error cases where no search ran.
     pub relevance_floor_applied: Option<f32>,
@@ -840,12 +843,13 @@ struct SearchAdvisoryObservation {
 
 const DEFAULT_SEARCH_ADVISORY_WORKSPACE: &str = "process-default";
 const MAX_SEARCH_ADVISORY_WORKSPACES: usize = 64;
+const MAX_PERMANENT_ADVISORY_IDENTITIES_PER_WORKSPACE: usize = 16;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct SearchAdvisoryWorkspaceState {
     permanent_occurrences: BTreeMap<SearchAdvisoryIdentity, u64>,
     suppressed_count: u64,
-    response_once_occurrences: BTreeMap<String, u64>,
+    large_gap_occurrence_count: u64,
     last_observed: u64,
 }
 
@@ -900,6 +904,12 @@ impl SearchAdvisorySession {
             repair: degradation.repair.clone(),
         };
         let state = self.workspace_mut(workspace_id);
+        if !state.permanent_occurrences.contains_key(&identity)
+            && state.permanent_occurrences.len() >= MAX_PERMANENT_ADVISORY_IDENTITIES_PER_WORKSPACE
+            && let Some(evicted) = state.permanent_occurrences.keys().next().cloned()
+        {
+            state.permanent_occurrences.remove(&evicted);
+        }
         let occurrence_count = {
             let occurrence_count = state.permanent_occurrences.entry(identity).or_insert(0);
             *occurrence_count = occurrence_count.saturating_add(1);
@@ -925,31 +935,67 @@ impl SearchAdvisorySession {
         }
     }
 
-    pub(crate) fn emit_response_code_while_active(
-        &mut self,
-        workspace_id: &str,
-        code: &str,
-        active: bool,
-    ) -> bool {
+    pub(crate) fn emit_large_gap_while_active(&mut self, workspace_id: &str, active: bool) -> bool {
         if !active {
             if let Some(state) = self.workspaces.get_mut(workspace_id) {
-                state.response_once_occurrences.remove(code);
+                state.large_gap_occurrence_count = 0;
             }
             return false;
         }
-        let occurrence_count = self
-            .workspace_mut(workspace_id)
-            .response_once_occurrences
-            .entry(code.to_owned())
-            .or_insert(0);
-        *occurrence_count = occurrence_count.saturating_add(1);
-        *occurrence_count == 1
+        let state = self.workspace_mut(workspace_id);
+        state.large_gap_occurrence_count = state.large_gap_occurrence_count.saturating_add(1);
+        state.large_gap_occurrence_count == 1
     }
 
     fn suppressed_count(&self, workspace_id: &str) -> u64 {
         self.workspaces
             .get(workspace_id)
             .map_or(0, |state| state.suppressed_count)
+    }
+
+    /// Commit one staged workspace partition only when that partition has not
+    /// changed since `base` was cloned. Updates in other workspaces are merged
+    /// by construction because their current partitions are never replaced.
+    pub(crate) fn commit_workspace_if_unchanged(
+        &mut self,
+        base: &Self,
+        staged: &Self,
+        workspace_id: &str,
+    ) -> bool {
+        let base_state = base.workspaces.get(workspace_id);
+        let current_state = self.workspaces.get(workspace_id);
+        if current_state != base_state {
+            return false;
+        }
+        let staged_state = staged.workspaces.get(workspace_id);
+        if staged_state == base_state {
+            return true;
+        }
+        match staged_state.cloned() {
+            Some(mut state) => {
+                self.observation_clock = self.observation_clock.saturating_add(1);
+                state.last_observed = self.observation_clock;
+                if !self.workspaces.contains_key(workspace_id)
+                    && self.workspaces.len() >= MAX_SEARCH_ADVISORY_WORKSPACES
+                    && let Some(oldest_workspace) = self
+                        .workspaces
+                        .iter()
+                        .min_by(|(left_id, left), (right_id, right)| {
+                            left.last_observed
+                                .cmp(&right.last_observed)
+                                .then_with(|| left_id.cmp(right_id))
+                        })
+                        .map(|(workspace_id, _)| workspace_id.clone())
+                {
+                    self.workspaces.remove(&oldest_workspace);
+                }
+                self.workspaces.insert(workspace_id.to_owned(), state);
+            }
+            None => {
+                self.workspaces.remove(workspace_id);
+            }
+        }
+        true
     }
 }
 
@@ -2655,6 +2701,7 @@ impl SearchReport {
                 &self.degraded,
                 self.rerank_configured_mode,
                 self.rerank_configured_top_k,
+                self.rerank_runtime_available,
                 session,
                 workspace_id,
             ),
@@ -2831,11 +2878,7 @@ fn search_degraded_data_json_with_advisory_session(
     let has_large_gap = aggregated.iter().any(|entry| {
         entry.get("code").and_then(serde_json::Value::as_str) == Some("search_index_large_gap")
     });
-    let emit_large_gap = session.emit_response_code_while_active(
-        workspace_id,
-        "search_index_large_gap",
-        has_large_gap,
-    );
+    let emit_large_gap = session.emit_large_gap_while_active(workspace_id, has_large_gap);
     aggregated.retain(|entry| {
         let Some(code) = entry.get("code").and_then(serde_json::Value::as_str) else {
             return true;
@@ -5269,6 +5312,7 @@ fn search_rerank_posture_json(
     degraded: &[SearchDegradation],
     configured_mode: crate::config::SearchRerankMode,
     configured_top_k: usize,
+    runtime_available: bool,
     advisory_session: &mut SearchAdvisorySession,
     workspace_id: &str,
 ) -> serde_json::Value {
@@ -5331,7 +5375,7 @@ fn search_rerank_posture_json(
             )
         }
         None => {
-            if rerank_score_count > 0 {
+            if runtime_available {
                 advisory_session.recover_permanent(workspace_id, "rerank_model_unavailable");
             }
             (
@@ -5355,7 +5399,7 @@ fn search_rerank_posture_json(
         "topK": configured_top_k,
         "rerankScoreCount": rerank_score_count,
         "scoreKind": if rerank_score_count > 0 { "reranked" } else { "rrf_fused" },
-        "available": rerank_score_count > 0,
+        "available": runtime_available,
         "degradedCode": unavailable.map(|degradation| degradation.code.as_str()),
         "advisory": advisory,
         "advisorySummary": advisory_summary,
@@ -7384,6 +7428,7 @@ async fn run_search_inner_with_performance(
         rerank_configured_top_k,
         &mut degraded,
     );
+    let rerank_runtime_available = rerank_runtime.is_enabled();
     trace.record_elapsed("search::rerankResolve", rerank_resolve_start);
     let fusion_weights = resolved_search_fusion_weights(&options.workspace_path);
     if source_mode.unavailable_no_results {
@@ -7403,6 +7448,7 @@ async fn run_search_inner_with_performance(
                 runtime_profile,
                 rerank_configured_mode,
                 rerank_configured_top_k,
+                rerank_runtime_available,
                 relevance_floor_applied: None,
                 candidates_below_floor: 0,
                 query_assist: None,
@@ -7776,6 +7822,7 @@ async fn run_search_inner_with_performance(
                     runtime_profile,
                     rerank_configured_mode,
                     rerank_configured_top_k,
+                    rerank_runtime_available,
                     relevance_floor_applied: Some(floor),
                     candidates_below_floor: dropped,
                     query_assist,
@@ -7815,6 +7862,7 @@ async fn run_search_inner_with_performance(
                     runtime_profile,
                     rerank_configured_mode,
                     rerank_configured_top_k,
+                    rerank_runtime_available,
                     relevance_floor_applied: None,
                     candidates_below_floor: 0,
                     query_assist: None,
@@ -8007,6 +8055,7 @@ async fn run_diag_search_with_cx_and_embedder(
         runtime_profile,
         rerank_configured_mode,
         rerank_configured_top_k,
+        rerank_runtime_available: false,
         relevance_floor_applied: Some(floor),
         candidates_below_floor: dropped,
         query_assist,
@@ -11796,6 +11845,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: Some(0.05),
             candidates_below_floor: 0,
             query_assist: None,
@@ -11894,6 +11944,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: Some(0.0),
             candidates_below_floor: 0,
             query_assist: None,
@@ -12128,6 +12179,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -12190,6 +12242,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -13182,6 +13235,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -13436,6 +13490,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -13517,6 +13572,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -14005,6 +14061,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -14120,6 +14177,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -14285,6 +14343,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -14454,6 +14513,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -14569,6 +14629,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -14613,6 +14674,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -14666,6 +14728,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -14908,6 +14971,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -14967,6 +15031,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -15027,6 +15092,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -15088,6 +15154,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -15960,6 +16027,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -16016,6 +16084,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -16080,6 +16149,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -16155,6 +16225,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -16218,6 +16289,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -16274,6 +16346,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -16407,6 +16480,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -16474,6 +16548,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -16498,7 +16573,7 @@ mod tests {
             EmbedBackend::NeuralLocal => EmbedBackend::HashFallback,
             EmbedBackend::HashFallback => EmbedBackend::NeuralLocal,
         };
-        let mut report = rerank_test_report(Vec::new(), Vec::new());
+        let mut report = rerank_test_report(Vec::new(), Vec::new(), false);
         report.embed_backend = captured_backend;
 
         std::thread::yield_now();
@@ -16756,6 +16831,7 @@ mod tests {
                 synthetic_hit(memory_id, 0.8),
             ],
             Vec::new(),
+            false,
         );
 
         apply_memory_kind_and_typed_field_filters_to_report_with_connection(
@@ -16875,6 +16951,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -16913,6 +16990,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -16953,6 +17031,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -16990,6 +17069,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -17027,6 +17107,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -17495,6 +17576,7 @@ mod tests {
     fn rerank_test_report(
         results: Vec<SearchHit>,
         degraded: Vec<SearchDegradation>,
+        rerank_runtime_available: bool,
     ) -> SearchReport {
         SearchReport {
             status: SearchStatus::Success,
@@ -17508,6 +17590,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
@@ -17538,6 +17621,7 @@ mod tests {
                 synthetic_hybrid_hit("mem_fusion", 2.0 / 61.0),
             ],
             Vec::new(),
+            true,
         );
 
         let json = report.data_json();
@@ -17585,7 +17669,7 @@ mod tests {
 
     #[test]
     fn search_report_data_json_uses_report_rerank_config() {
-        let mut report = rerank_test_report(Vec::new(), Vec::new());
+        let mut report = rerank_test_report(Vec::new(), Vec::new(), false);
         report.rerank_configured_mode = crate::config::SearchRerankMode::Off;
         report.rerank_configured_top_k = 12;
 
@@ -17605,6 +17689,7 @@ mod tests {
             &[],
             crate::config::SearchRerankMode::Auto,
             DEFAULT_SEARCH_RERANK_TOP_K,
+            true,
             &mut advisory_session,
             DEFAULT_SEARCH_ADVISORY_WORKSPACE,
         );
@@ -17628,6 +17713,7 @@ mod tests {
             &[],
             crate::config::SearchRerankMode::Off,
             12,
+            false,
             &mut advisory_session,
             DEFAULT_SEARCH_ADVISORY_WORKSPACE,
         );
@@ -17643,6 +17729,25 @@ mod tests {
     }
 
     #[test]
+    fn rerank_posture_reports_loaded_runtime_available_without_hits() {
+        let mut advisory_session = SearchAdvisorySession::default();
+        let posture = search_rerank_posture_json(
+            &[],
+            &[],
+            crate::config::SearchRerankMode::Auto,
+            DEFAULT_SEARCH_RERANK_TOP_K,
+            true,
+            &mut advisory_session,
+            DEFAULT_SEARCH_ADVISORY_WORKSPACE,
+        );
+
+        assert_eq!(posture["mode"], "fusion_only");
+        assert_eq!(posture["rerankScoreCount"], 0);
+        assert_eq!(posture["available"], true);
+        assert!(posture["advisory"].is_null());
+    }
+
+    #[test]
     fn rerank_posture_counts_mixed_reranked_hits_only() {
         let reranked_a = synthetic_reranked_hit("mem_reranked_a", 0.98);
         let fusion = synthetic_hybrid_hit("mem_fusion", 2.0 / 61.0);
@@ -17655,6 +17760,7 @@ mod tests {
             &[],
             crate::config::SearchRerankMode::Auto,
             DEFAULT_SEARCH_RERANK_TOP_K,
+            true,
             &mut advisory_session,
             DEFAULT_SEARCH_ADVISORY_WORKSPACE,
         );
@@ -17682,6 +17788,7 @@ mod tests {
             &degraded,
             crate::config::SearchRerankMode::Auto,
             DEFAULT_SEARCH_RERANK_TOP_K,
+            true,
             &mut advisory_session,
             DEFAULT_SEARCH_ADVISORY_WORKSPACE,
         );
@@ -17689,7 +17796,7 @@ mod tests {
         assert_eq!(posture["mode"], "fusion_only");
         assert_eq!(posture["rerankScoreCount"], 0);
         assert_eq!(posture["scoreKind"], "rrf_fused");
-        assert_eq!(posture["available"], false);
+        assert_eq!(posture["available"], true);
         assert!(posture["degradedCode"].is_null());
     }
 
@@ -17703,6 +17810,7 @@ mod tests {
             &degraded,
             crate::config::SearchRerankMode::Auto,
             DEFAULT_SEARCH_RERANK_TOP_K,
+            false,
             &mut advisory_session,
             DEFAULT_SEARCH_ADVISORY_WORKSPACE,
         );
@@ -17727,7 +17835,11 @@ mod tests {
 
     #[test]
     fn search_report_data_json_reports_degraded_rerank_on_empty_results() {
-        let report = rerank_test_report(Vec::new(), vec![SearchDegradation::rerank_model_absent()]);
+        let report = rerank_test_report(
+            Vec::new(),
+            vec![SearchDegradation::rerank_model_absent()],
+            false,
+        );
         let mut advisory_session = SearchAdvisorySession::default();
 
         let json = report.data_json_with_advisory_session(&mut advisory_session);
@@ -17769,6 +17881,7 @@ mod tests {
             vec![SearchDegradation::rerank_model_unavailable(
                 "The registered local reranker could not be loaded; retry the query or inspect local model status.",
             )],
+            false,
         );
         let mut advisory_session = SearchAdvisorySession::default();
 
@@ -17785,8 +17898,11 @@ mod tests {
 
     #[test]
     fn permanent_rerank_advisory_is_omitted_from_default_degraded_prose() {
-        let mut report =
-            rerank_test_report(Vec::new(), vec![SearchDegradation::rerank_model_absent()]);
+        let mut report = rerank_test_report(
+            Vec::new(),
+            vec![SearchDegradation::rerank_model_absent()],
+            false,
+        );
         report
             .degraded
             .push(SearchDegradation::stale_index(Some(2), Some(1)));
@@ -17812,6 +17928,7 @@ mod tests {
                 SearchDegradation::stale_index(Some(102), Some(1)),
                 SearchDegradation::large_index_gap(102, 1),
             ],
+            false,
         );
         first.rerank_configured_mode = crate::config::SearchRerankMode::Off;
         let mut changed_generation = first.clone();
@@ -17842,7 +17959,11 @@ mod tests {
 
     #[test]
     fn staged_permanent_advisory_does_not_mutate_source_session() {
-        let report = rerank_test_report(Vec::new(), vec![SearchDegradation::rerank_model_absent()]);
+        let report = rerank_test_report(
+            Vec::new(),
+            vec![SearchDegradation::rerank_model_absent()],
+            false,
+        );
         let source = SearchAdvisorySession::default();
         let mut staged = source.clone();
 
@@ -17855,7 +17976,11 @@ mod tests {
 
     #[test]
     fn advisory_session_bounds_workspace_partitions() {
-        let report = rerank_test_report(Vec::new(), vec![SearchDegradation::rerank_model_absent()]);
+        let report = rerank_test_report(
+            Vec::new(),
+            vec![SearchDegradation::rerank_model_absent()],
+            false,
+        );
         let mut session = SearchAdvisorySession::default();
 
         for index in 0..=MAX_SEARCH_ADVISORY_WORKSPACES {
@@ -17871,6 +17996,39 @@ mod tests {
                 .workspaces
                 .contains_key(&format!("workspace-{MAX_SEARCH_ADVISORY_WORKSPACES:03}"))
         );
+    }
+
+    #[test]
+    fn advisory_session_bounds_permanent_identities_per_workspace() {
+        let mut session = SearchAdvisorySession::default();
+        let workspace_id = "bounded-identities";
+
+        for index in 0..=MAX_PERMANENT_ADVISORY_IDENTITIES_PER_WORKSPACE {
+            let degradation = SearchDegradation {
+                code: "rerank_model_unavailable".to_owned(),
+                severity: "low".to_owned(),
+                message: format!("permanent identity {index:03}"),
+                repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+            };
+            let _ = session.observe_permanent(workspace_id, &degradation);
+        }
+
+        let identities = &session.workspaces[workspace_id].permanent_occurrences;
+        assert_eq!(
+            identities.len(),
+            MAX_PERMANENT_ADVISORY_IDENTITIES_PER_WORKSPACE
+        );
+        assert!(
+            identities
+                .keys()
+                .all(|identity| identity.message != "permanent identity 000")
+        );
+        assert!(identities.keys().any(|identity| {
+            identity.message
+                == format!(
+                    "permanent identity {MAX_PERMANENT_ADVISORY_IDENTITIES_PER_WORKSPACE:03}"
+                )
+        }));
     }
 
     #[test]
@@ -18726,6 +18884,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
             relevance_floor_applied: None,
             candidates_below_floor: 0,
             query_assist: None,
