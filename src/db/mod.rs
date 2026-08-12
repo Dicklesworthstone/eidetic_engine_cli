@@ -36171,6 +36171,124 @@ mod tests {
     }
 
     #[test]
+    fn v084_file_rebuild_is_durable_and_leaves_no_snapshot_tables() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let database_path = tempdir.path().join("v084-file-rebuild.db");
+        let workspace_id = "wsp_01234567890123456789012345";
+        let pack_id = "pack_000000000000000000000v084f";
+        let selected_memory_id = "mem_000000000000000000000v084f";
+        let omitted_memory_id = "mem_000000000000000000000v084o";
+
+        {
+            let connection = DbConnection::open_file(&database_path)?;
+            seed_migrations_through(&connection, 83)?;
+            setup_workspace(&connection)?;
+            insert_pack_test_memory(
+                &connection,
+                selected_memory_id,
+                "V084 file-backed selected memory",
+            )?;
+            insert_pack_test_memory(
+                &connection,
+                omitted_memory_id,
+                "V084 file-backed omitted memory",
+            )?;
+            let pack_hash = pack_test_hash("v084-file-backed-pack");
+            connection.insert_pack_record_at(
+                pack_id,
+                &super::CreatePackRecordInput {
+                    workspace_id: workspace_id.to_owned(),
+                    query: "v084 file-backed migration".to_owned(),
+                    profile: "compact".to_owned(),
+                    max_tokens: 256,
+                    used_tokens: 50,
+                    item_count: 1,
+                    omitted_count: 1,
+                    pack_hash: pack_hash.clone(),
+                    degraded_json: None,
+                    created_by: Some("v084-file-test".to_owned()),
+                },
+                &[pack_item_input(pack_id, selected_memory_id, 1)],
+                &[pack_omission_input(pack_id, omitted_memory_id)],
+                "2026-07-11T00:00:00Z",
+            )?;
+            connection.insert_pack_baseline(
+                &super::CreatePackBaselineInput {
+                    workspace_id: workspace_id.to_owned(),
+                    agent_name: "V084FileAgent".to_owned(),
+                    task_key: Some("migration".to_owned()),
+                    pack_id: pack_id.to_owned(),
+                    pack_hash,
+                },
+                10,
+                Some("v084-file-test"),
+            )?;
+
+            let migration = connection.migrate()?;
+            ensure(
+                migration.applied().contains(&84),
+                "file-backed migration applies V084",
+            )?;
+        }
+
+        let reopened = DbConnection::open_file(&database_path)?;
+        ensure(
+            reopened.has_migration(84)?,
+            "reopened database records V084",
+        )?;
+        let record = reopened
+            .get_pack_record(pack_id)?
+            .ok_or_else(|| TestFailure::new("file-backed V084 parent row missing after reopen"))?;
+        ensure_equal(
+            &record.profile,
+            &"compact".to_owned(),
+            "file-backed V084 preserves the parent profile",
+        )?;
+        ensure_equal(
+            &table_row_count(&reopened, "pack_items")?,
+            &1,
+            "file-backed V084 preserves selected children",
+        )?;
+        ensure_equal(
+            &table_row_count(&reopened, "pack_omissions")?,
+            &1,
+            "file-backed V084 preserves omitted children",
+        )?;
+        ensure_equal(
+            &table_row_count(&reopened, "pack_candidate_impressions")?,
+            &2,
+            "file-backed V084 preserves candidate impressions",
+        )?;
+        ensure_equal(
+            &table_row_count(&reopened, "pack_baselines")?,
+            &1,
+            "file-backed V084 preserves baselines",
+        )?;
+        ensure(
+            reopened
+                .resolve_pack_baseline(workspace_id, "V084FileAgent", Some("migration"))?
+                .is_some(),
+            "file-backed V084 baseline resolves after reopen",
+        )?;
+        ensure(
+            reopened.check_foreign_keys()?.passed,
+            "file-backed V084 foreign keys pass after reopen",
+        )?;
+        ensure(
+            reopened.check_integrity()?.passed,
+            "file-backed V084 integrity passes after reopen",
+        )?;
+        let leftovers = reopened.query(
+            "SELECT name FROM sqlite_master WHERE name LIKE 'v084_%' UNION ALL SELECT name FROM sqlite_temp_master WHERE name LIKE 'v084_%'",
+            &[],
+        )?;
+        ensure(
+            leftovers.is_empty(),
+            "file-backed V084 leaves no snapshot tables after reopen",
+        )
+    }
+
+    #[test]
     fn v085_legacy_evidence_is_denied_and_raw_provenance_is_erased() -> TestResult {
         let connection = DbConnection::open_memory()?;
         seed_migrations_through(&connection, 84)?;
