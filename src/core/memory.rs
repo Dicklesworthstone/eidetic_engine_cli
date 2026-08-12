@@ -2016,7 +2016,7 @@ fn remember_index_status(report: &IndexProcessingJobReport) -> String {
 
 /// Reconcile an already-committed memory index job without rewriting the
 /// durable source-of-truth mutation as a whole-command failure.
-fn reconcile_committed_memory_index_job(
+pub(crate) fn reconcile_committed_memory_index_job(
     connection: &DbConnection,
     workspace_id: &str,
     index_job_id: &str,

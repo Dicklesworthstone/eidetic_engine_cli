@@ -5807,9 +5807,9 @@ fn curate_apply_index_publish_failed(
         code: CURATE_APPLY_INDEX_PUBLISH_FAILED_CODE.to_owned(),
         severity: "medium".to_owned(),
         message: format!(
-            "The create-derived memory was committed, but automatic publication of durable search-index job {index_job_id} did not complete (outcome: {outcome}). Search may omit the new memory until queued index work is retried."
+            "The create-derived memory was committed, but automatic publication of durable search-index job {index_job_id} did not complete (outcome: {outcome}). Search may omit the new memory until the durable job is retried."
         ),
-        repair: "ee index rebuild --workspace .".to_owned(),
+        repair: "ee job run index_coalesce --workspace . --json".to_owned(),
     }
 }
 
@@ -15969,12 +15969,12 @@ mod tests {
         build_reflection_source_package, reflection_request_ledger_material,
     };
     use crate::db::{
-        AdvisoryLockId, CreateCurationCandidateInput, CreateEvidenceSpanInput,
-        CreateFeedbackEventInput, CreateMemoryInput, CreateMemoryLinkInput,
-        CreateProceduralRuleInput, CreateSessionInput, CreateWorkspaceInput, DbConnection,
-        EvidenceProducerKind, EvidenceSpanMemoryAttachResult, MemoryLinkRelation, MemoryLinkSource,
-        ReflectionRequestReplayStatus, SearchIndexJobStatus, StoredCurationCandidate,
-        StoredEvidenceSpan, StoredReflectionRequestLedger, StoredSession, audit_actions,
+        CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateFeedbackEventInput,
+        CreateMemoryInput, CreateMemoryLinkInput, CreateProceduralRuleInput, CreateSessionInput,
+        CreateWorkspaceInput, DbConnection, EvidenceProducerKind, EvidenceSpanMemoryAttachResult,
+        MemoryLinkRelation, MemoryLinkSource, ReflectionRequestReplayStatus, SearchIndexJobStatus,
+        StoredCurationCandidate, StoredEvidenceSpan, StoredReflectionRequestLedger, StoredSession,
+        audit_actions,
     };
     use crate::models::degradation::{
         ADVISORY_LOCK_TIMEOUT_CODE, GRAPH_CURATE_DISCONNECTED_GRAPH_CODE,
@@ -22124,8 +22124,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_curation_candidate_retries_same_derived_index_job_after_publish_contention()
-    -> TestResult {
+    fn apply_curation_candidate_retries_same_job_after_claimed_publish_failure() -> TestResult {
         let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         fs::create_dir_all(workspace_path.join(".ee")).map_err(|error| error.to_string())?;
@@ -22155,20 +22154,31 @@ mod tests {
         })
         .map_err(|error| error.message())?;
 
-        let publish_lock = AdvisoryLockId::index(&workspace_id);
-        let fixture_holder = "curate:publish-contention-fixture";
-        let held = connection
-            .acquire_advisory_lock(
-                &publish_lock,
-                fixture_holder,
-                Some(60),
-                Some("plant create-derived post-commit publish contention"),
+        // Plant a real filesystem publication failure. The publisher acquires
+        // its advisory lock and claims the durable job before rejecting this
+        // symlinked active index path, so the failure evidence is post-claim
+        // rather than pre-claim contention.
+        let index_dir = workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR);
+        let preserved_index_dir = workspace_path.join(".ee").join("index-before-failure");
+        fs::create_dir_all(&index_dir).map_err(|error| {
+            format!(
+                "failed to create the active index fixture path {}: {error}",
+                index_dir.display()
             )
-            .map_err(|error| error.to_string())?;
-        assert!(
-            held.is_acquired(),
-            "fixture must hold the real publish lock"
-        );
+        })?;
+        fs::rename(&index_dir, &preserved_index_dir).map_err(|error| {
+            format!(
+                "failed to preserve active index path {} as {}: {error}",
+                index_dir.display(),
+                preserved_index_dir.display()
+            )
+        })?;
+        std::os::unix::fs::symlink(&preserved_index_dir, &index_dir).map_err(|error| {
+            format!(
+                "failed to install deterministic index publication blocker {}: {error}",
+                index_dir.display()
+            )
+        })?;
 
         let first = apply_curation_candidate(&super::CurateApplyOptions {
             workspace_path,
@@ -22187,7 +22197,7 @@ mod tests {
             .application
             .created_memory_id
             .as_deref()
-            .ok_or_else(|| "contended apply omitted created memory id".to_owned())?
+            .ok_or_else(|| "failed-publish apply omitted created memory id".to_owned())?
             .to_owned();
         let index_job_id = super::generate_memory_search_index_job_id(&created_memory_id);
         assert_eq!(first.degraded.len(), 1);
@@ -22200,29 +22210,51 @@ mod tests {
         let stored = connection
             .get_curation_candidate(&workspace_id, &candidate_id)
             .map_err(|error| error.to_string())?
-            .ok_or_else(|| "contended apply lost its durable candidate".to_owned())?;
+            .ok_or_else(|| "failed-publish apply lost its durable candidate".to_owned())?;
         assert_eq!(stored.status, "applied");
         let created = connection
             .get_memory(&created_memory_id)
             .map_err(|error| error.to_string())?
-            .ok_or_else(|| "contended apply lost its durable derived memory".to_owned())?;
+            .ok_or_else(|| "failed-publish apply lost its durable derived memory".to_owned())?;
         assert_eq!(created.id, created_memory_id);
-        let pending_job = connection
+        let failed_job = connection
             .get_search_index_job(&index_job_id)
             .map_err(|error| error.to_string())?
-            .ok_or_else(|| "contended apply lost its durable index job".to_owned())?;
+            .ok_or_else(|| "failed-publish apply lost its durable index job".to_owned())?;
         assert_eq!(
-            pending_job.status_enum(),
-            Some(SearchIndexJobStatus::Pending),
-            "real publish-lock contention must preserve retryable durable work"
+            failed_job.status_enum(),
+            Some(SearchIndexJobStatus::Failed),
+            "real post-claim publication failure must preserve retryable durable work"
+        );
+        assert!(
+            failed_job.started_at.is_some(),
+            "post-claim failure must retain started-at claim evidence"
+        );
+        assert!(
+            failed_job.error_message.as_deref().is_some_and(|message| {
+                message.contains("symlink") || message.contains("symbolic link")
+            }),
+            "failed row must retain the real publication error: {failed_job:?}"
         );
 
-        assert!(
-            connection
-                .release_advisory_lock(&publish_lock, fixture_holder)
-                .map_err(|error| error.to_string())?,
-            "fixture must release the real publish lock before retry"
-        );
+        // Preserve the blocker as evidence without deleting it, then restore
+        // the original active generation so the public same-row retry can
+        // converge.
+        let preserved_blocker = workspace_path.join(".ee").join("index-publish-blocker");
+        fs::rename(&index_dir, &preserved_blocker).map_err(|error| {
+            format!(
+                "failed to preserve publication blocker {} as {}: {error}",
+                index_dir.display(),
+                preserved_blocker.display()
+            )
+        })?;
+        fs::rename(&preserved_index_dir, &index_dir).map_err(|error| {
+            format!(
+                "failed to restore active index path {} as {}: {error}",
+                preserved_index_dir.display(),
+                index_dir.display()
+            )
+        })?;
         let retry = apply_curation_candidate(&super::CurateApplyOptions {
             workspace_path,
             database_path: Some(&database_path),

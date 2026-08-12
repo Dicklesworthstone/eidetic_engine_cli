@@ -507,7 +507,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `policy_secret_detected_with_offsets` | medium | bd-17c65.3.4 (C4) |
 | `policy_tag_rejected_with_details` | low | bd-17c65.3.4 (C4) |
 
-#### Learn / curate (16)
+#### Learn / curate (17)
 | Code | Severity | Bead |
 |------|----------|------|
 | `auto_propose_deferred_to_maintenance` | info | bd-17c65.7.3 (G3) |
@@ -516,6 +516,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `auto_propose_skipped_existing_rule_covers` | info | bd-17c65.7.3 (G3) |
 | `auto_propose_skipped_too_few_neighbors` | info | bd-17c65.7.3 (G3) |
 | `cass_evidence_not_available` | low | bd-17c65.7.4 (G4) |
+| `curate_apply_index_publish_failed` | medium | bd-index-auto-freshness-m5kwf (I) |
 | `curation_harmful_candidate_escalated` | high | bd-17c65.7.4 (G4) |
 | `curation_health_unavailable` | low | bd-17c65.10.6 (J6) |
 | `curation_ttl_blocked` | medium | bd-17c65.7.4 (G4) |

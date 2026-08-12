@@ -123,6 +123,7 @@ in the same commit, keeping the catalog complete by construction.
 | `curation_ttl_blocked` | status, curate disposition | medium | bd-17c65.7.4 (G4) |
 | `create_derived_replay_ambiguous_audit` | curate apply | high | bd-3vw03 |
 | `create_derived_replay_missing_audit` | curate apply | high | bd-3vw03 |
+| `curate_apply_index_publish_failed` | curate apply | medium | bd-index-auto-freshness-m5kwf (I) |
 | `derived_sources_invalid` | curate validate, curate apply, reflect propose | medium | bd-1vnvl |
 | `derived_source_hash_drifted` | curate validate, curate apply | medium | bd-1vnvl |
 | `derived_source_hash_mismatch` | curate validate, curate apply | medium | bd-3vw03 |

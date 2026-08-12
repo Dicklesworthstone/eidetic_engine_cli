@@ -1,0 +1,35 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "curate_apply_index_publish_failed",
+  "introduced_by": {
+    "bead": "bd-index-auto-freshness-m5kwf",
+    "epic_letter": "I"
+  },
+  "surfaces": [
+    "curate apply"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A create-derived curation apply commits the candidate, derived memory, provenance, audit row, and exact durable index job, but real publication fails after the publisher claims that job.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# Create and approve a create-derived curation candidate through the integration harness.",
+      "# Replace the active index directory with a symlink so the real publisher claims the job and then rejects publication."
+    ],
+    "invocation": "ee curate apply <candidate-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "curate_apply_index_publish_failed",
+    "severity": "medium",
+    "message_contains": [
+      "create-derived memory was committed",
+      "automatic publication of durable search-index job",
+      "did not complete",
+      "Search may omit the new memory until the durable job is retried"
+    ],
+    "repair_contains": "ee job run index_coalesce",
+    "repair_string": "ee job run index_coalesce --workspace . --json",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}

@@ -62,6 +62,10 @@ fn hooks_installer_source_file() -> PathBuf {
     src_dir().join("hooks").join("installer.rs")
 }
 
+fn curate_source_file() -> PathBuf {
+    src_dir().join("core").join("curate.rs")
+}
+
 fn docs_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs")
 }
@@ -611,6 +615,140 @@ fn failure_mode_catalog_has_schema_and_readme() -> TestResult {
         readme.exists(),
         format!("{}: README.md must exist", readme.display()),
     )?;
+    Ok(())
+}
+
+#[test]
+fn curate_apply_index_publish_failed_contract_is_pinned() -> TestResult {
+    const CODE: &str = "curate_apply_index_publish_failed";
+    const REPAIR: &str = "ee job run index_coalesce --workspace . --json";
+    const MESSAGE_FRAGMENTS: [&str; 4] = [
+        "create-derived memory was committed",
+        "automatic publication of durable search-index job",
+        "did not complete",
+        "Search may omit the new memory until the durable job is retried",
+    ];
+
+    let fixture_path = fixtures_dir().join(format!("{CODE}.json"));
+    validate_fixture(&fixture_path)?;
+    let fixture = read_fixture(&fixture_path)?;
+    ensure(
+        array_contains_string(&fixture, "/surfaces", "curate apply"),
+        format!(
+            "{}: surfaces[] must include `curate apply`",
+            fixture_path.display()
+        ),
+    )?;
+    ensure(
+        fixture.pointer("/severity").and_then(Value::as_str) == Some("medium"),
+        format!("{}: severity must remain `medium`", fixture_path.display()),
+    )?;
+    ensure(
+        fixture.pointer("/repair_present").and_then(Value::as_bool) == Some(true),
+        format!(
+            "{}: repair_present must remain true",
+            fixture_path.display()
+        ),
+    )?;
+    ensure(
+        fixture
+            .pointer("/trigger/description")
+            .and_then(Value::as_str)
+            .is_some_and(|description| description.contains("publisher claims that job")),
+        format!(
+            "{}: trigger must pin real post-claim publication failure",
+            fixture_path.display()
+        ),
+    )?;
+    ensure(
+        fixture
+            .pointer("/trigger/invocation")
+            .and_then(Value::as_str)
+            == Some("ee curate apply <candidate-id> --workspace . --json"),
+        format!(
+            "{}: invocation must pin `ee curate apply`",
+            fixture_path.display()
+        ),
+    )?;
+    ensure(
+        fixture
+            .pointer("/expected_emission/repair_string")
+            .and_then(Value::as_str)
+            == Some(REPAIR),
+        format!(
+            "{}: repair_string must remain `{REPAIR}`",
+            fixture_path.display()
+        ),
+    )?;
+
+    let expected_fragments = fixture
+        .pointer("/expected_emission/message_contains")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            format!(
+                "{}: expected_emission.message_contains[] missing",
+                fixture_path.display()
+            )
+        })?;
+    let source_path = curate_source_file();
+    let source = fs::read_to_string(&source_path)
+        .map_err(|error| format!("read {}: {error}", source_path.display()))?;
+    for fragment in MESSAGE_FRAGMENTS {
+        ensure(
+            expected_fragments
+                .iter()
+                .any(|value| value.as_str() == Some(fragment)),
+            format!(
+                "{}: expected_emission.message_contains[] must pin `{fragment}`",
+                fixture_path.display()
+            ),
+        )?;
+        ensure(
+            source.contains(fragment),
+            format!(
+                "{}: runtime emission must contain fixture fragment `{fragment}`",
+                source_path.display()
+            ),
+        )?;
+    }
+    ensure(
+        source.contains(REPAIR),
+        format!(
+            "{}: runtime repair must contain `{REPAIR}`",
+            source_path.display()
+        ),
+    )?;
+
+    let taxonomy_path = docs_dir().join("degraded_code_taxonomy.md");
+    let taxonomy = fs::read_to_string(&taxonomy_path)
+        .map_err(|error| format!("read {}: {error}", taxonomy_path.display()))?;
+    ensure(
+        taxonomy_has_code_with_severity(&taxonomy, CODE, "medium"),
+        format!(
+            "{}: missing `{CODE}` taxonomy row with medium severity",
+            taxonomy_path.display()
+        ),
+    )?;
+
+    let readme_path = fixtures_dir().join("README.md");
+    let readme = fs::read_to_string(&readme_path)
+        .map_err(|error| format!("read {}: {error}", readme_path.display()))?;
+    ensure(
+        fixture_readme_has_code(&readme, CODE),
+        format!("{}: missing `{CODE}` catalog row", readme_path.display()),
+    )?;
+
+    let generated_docs_path = docs_dir().join("degraded_codes.md");
+    let generated_docs = fs::read_to_string(&generated_docs_path)
+        .map_err(|error| format!("read {}: {error}", generated_docs_path.display()))?;
+    ensure(
+        generated_docs_has_fixture_link(&generated_docs, CODE),
+        format!(
+            "{}: missing `{CODE}` heading or fixture link",
+            generated_docs_path.display()
+        ),
+    )?;
+
     Ok(())
 }
 
