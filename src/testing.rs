@@ -334,7 +334,10 @@ fn validate_json_schema_value(
         }
         if schema.get("uniqueItems").and_then(Value::as_bool) == Some(true) {
             for (index, item) in array.iter().enumerate() {
-                if array[..index].iter().any(|existing| existing == item) {
+                if array[..index]
+                    .iter()
+                    .any(|existing| json_schema_values_equal(existing, item))
+                {
                     return Err(format!("{path}[{index}] duplicates an earlier item"));
                 }
             }
@@ -1029,6 +1032,7 @@ mod tests {
         let const_schema = serde_json::json!({ "const": 1 });
         let enum_schema = serde_json::json!({ "enum": [0, 1] });
         let nested_schema = serde_json::json!({ "const": { "value": [1] } });
+        let unique_schema = serde_json::json!({ "uniqueItems": true });
         for raw in ["1", "1.0", "1e0"] {
             let value: Value = serde_json::from_str(raw)
                 .map_err(|error| format!("parse numeric equality fixture {raw}: {error}"))?;
@@ -1038,6 +1042,15 @@ mod tests {
         let nested: Value = serde_json::from_str(r#"{"value":[1.0]}"#)
             .map_err(|error| format!("parse nested numeric equality fixture: {error}"))?;
         validate_json_schema_instance(&nested, &nested_schema)?;
+        for raw in ["[1,1.0]", "[1,1e0]", "[1.0,1e0]"] {
+            let value: Value = serde_json::from_str(raw)
+                .map_err(|error| format!("parse numeric uniqueness fixture {raw}: {error}"))?;
+            if validate_json_schema_instance(&value, &unique_schema).is_ok() {
+                return Err(format!(
+                    "uniqueItems accepted mathematically duplicate numbers in {raw}"
+                ));
+            }
+        }
         if validate_json_schema_instance(&serde_json::json!(2), &const_schema).is_ok()
             || validate_json_schema_instance(&serde_json::json!(2), &enum_schema).is_ok()
         {

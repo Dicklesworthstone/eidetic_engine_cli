@@ -2067,6 +2067,21 @@ fn daemon_search_default_limit() -> u32 {
     10
 }
 
+fn deserialize_daemon_search_limit<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+    let limit = json_number_to_u64(&value)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| {
+            <D::Error as serde::de::Error>::custom(
+                "limit must be a mathematical integer between 0 and 4294967295",
+            )
+        })?;
+    Ok(limit)
+}
+
 fn daemon_search_default_speed() -> String {
     "default".to_owned()
 }
@@ -2096,7 +2111,10 @@ pub struct DaemonSearchParams {
     database_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     index_dir: Option<PathBuf>,
-    #[serde(default = "daemon_search_default_limit")]
+    #[serde(
+        default = "daemon_search_default_limit",
+        deserialize_with = "deserialize_daemon_search_limit"
+    )]
     limit: u32,
     #[serde(default = "daemon_search_default_speed")]
     speed: String,
@@ -6152,6 +6170,44 @@ mod tests {
             explain_performance,
             "performance request bit must survive strict wire decoding"
         );
+    }
+
+    #[test]
+    fn daemon_search_request_v2_accepts_exact_integral_decimal_limits() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        for (raw, expected) in [
+            ("1", 1_u32),
+            ("1.0", 1_u32),
+            ("1e0", 1_u32),
+            ("4294967295.0", u32::MAX),
+        ] {
+            let mut value = serde_json::json!({
+                "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                "query": "release",
+                "workspacePath": workspace.path()
+            });
+            value["limit"] = serde_json::from_str(raw).expect("exact numeric fixture");
+            let params = DaemonSearchParams::from_value(&value)
+                .unwrap_or_else(|error| panic!("limit {raw} must decode: {error}"));
+            assert_eq!(params.limit, expected, "limit {raw}");
+        }
+    }
+
+    #[test]
+    fn daemon_search_request_v2_rejects_non_u32_limits() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        for raw in ["-1", "1.5", "4294967296", "1e400"] {
+            let mut value = serde_json::json!({
+                "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                "query": "release",
+                "workspacePath": workspace.path()
+            });
+            value["limit"] = serde_json::from_str(raw).expect("exact numeric fixture");
+            assert!(
+                DaemonSearchParams::from_value(&value).is_err(),
+                "limit {raw} must be rejected"
+            );
+        }
     }
 
     #[test]
