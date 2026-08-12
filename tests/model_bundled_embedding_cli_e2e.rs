@@ -25,7 +25,9 @@ use ee::core::model::{BUNDLED_EMBEDDING_DIMENSION, BUNDLED_EMBEDDING_MODEL_ID};
 #[cfg(unix)]
 use ee::daemon::protocol::{DAEMON_SEARCH_REQUEST_SCHEMA_V2, DaemonRequest, METHOD_SEARCH};
 #[cfg(unix)]
-use ee::daemon::server::{METHOD_SHUTDOWN, client_round_trip, client_round_trip_before};
+use ee::daemon::server::{
+    DaemonServerHandle, METHOD_SHUTDOWN, client_round_trip, client_round_trip_before, start_server,
+};
 #[cfg(unix)]
 use ee::db::{CreateModelRegistryInput, DbConnection, StoredModelRegistryEntry};
 use ee::models::{
@@ -285,6 +287,108 @@ struct RunningE2eDaemon {
     socket_path: PathBuf,
     workspace_id: String,
     child: Child,
+}
+
+#[cfg(unix)]
+struct RunningInProcessDaemon {
+    handle: DaemonServerHandle,
+}
+
+#[cfg(unix)]
+impl RunningInProcessDaemon {
+    fn start(workspace: &E2eWorkspace) -> TestResult<Self> {
+        let socket_parent = workspace.path.join("in-process-daemon-sockets");
+        fs::create_dir_all(&socket_parent)
+            .map_err(|error| format!("create {}: {error}", socket_parent.display()))?;
+        fs::set_permissions(&socket_parent, fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                format!(
+                    "secure in-process daemon socket parent {}: {error}",
+                    socket_parent.display()
+                )
+            },
+        )?;
+        let socket_path = socket_parent.join("registry-order-e2e.sock");
+        let handle = start_server(socket_path)
+            .map_err(|error| format!("start unbound in-process daemon: {error}"))?;
+        Ok(Self { handle })
+    }
+
+    fn search(
+        &self,
+        workspace: &E2eWorkspace,
+        query: &str,
+        request_suffix: &str,
+        source_mode: &str,
+        strict_source_mode: bool,
+    ) -> TestResult<Value> {
+        let mut request = DaemonRequest::new(
+            format!("registry-order-{request_suffix}-{}", std::process::id()),
+            "model-bundled-embedding-cli-e2e",
+            METHOD_SEARCH,
+            json!({
+                "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                "query": query,
+                "workspacePath": workspace.workspace_arg()?,
+                "databasePath": path_string(&workspace.path.join(".ee/ee.db")),
+                "indexDir": path_string(&workspace.path.join(".ee/index")),
+                "limit": 10,
+                "speed": "default",
+                "relevanceFloor": 0.0,
+                "sourceMode": source_mode,
+                "strictSourceMode": strict_source_mode,
+                "memoryScope": "swarm"
+            }),
+        );
+        request.workspace_id = Some(workspace.workspace_arg()?.to_owned());
+        let response = client_round_trip_before(
+            self.handle.socket_path(),
+            &request,
+            Instant::now() + Duration::from_secs(120),
+        )
+        .map_err(|error| format!("direct daemon search {request_suffix}: {error}"))?;
+        if let Some(error) = response.error {
+            return Err(format!(
+                "direct daemon search {request_suffix} failed with {}: {}",
+                error.code, error.message
+            ));
+        }
+        for forbidden in ["daemon_method_unauthorized", "daemon_search_fallback"] {
+            if response.degraded_codes.iter().any(|code| code == forbidden) {
+                return Err(format!(
+                    "direct daemon search {request_suffix} unexpectedly emitted {forbidden}: {:?}",
+                    response.degraded_codes
+                ));
+            }
+        }
+        let result = response
+            .result
+            .ok_or_else(|| format!("direct daemon search {request_suffix} result missing"))?;
+        let degraded = result
+            .pointer("/response/degraded")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                format!("direct daemon search {request_suffix} canonical degraded array missing")
+            })?;
+        for forbidden in ["daemon_method_unauthorized", "daemon_search_fallback"] {
+            if degraded
+                .iter()
+                .any(|entry| entry.get("code").and_then(Value::as_str) == Some(forbidden))
+            {
+                return Err(format!(
+                    "direct daemon search {request_suffix} canonical response unexpectedly emitted {forbidden}: {degraded:?}"
+                ));
+            }
+        }
+        Ok(result)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RunningInProcessDaemon {
+    fn drop(&mut self) {
+        let _ = self.handle.shutdown();
+    }
 }
 
 #[cfg(unix)]
@@ -953,6 +1057,9 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
             query,
             "--workspace",
             workspace.workspace_arg()?,
+            "--source-mode",
+            "semantic_only",
+            "--strict-source-mode",
             "--max-tokens",
             "800",
             "--json",
@@ -1390,6 +1497,61 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         0,
     )?;
 
+    // Build a second workspace through the same public init/remember/reembed
+    // path, then invalidate only its registry metadata. Both workspaces are
+    // queried through one daemon below, in rejected->valid->rejected order, so
+    // the test exercises process-local ordering rather than isolated CLI
+    // subprocesses that could hide OnceLock contamination.
+    let rejected_workspace = E2eWorkspace::create("registry-order-rejected")?;
+    let rejected_init = run_ee_with_env(
+        &rejected_workspace,
+        "registry_order_rejected_init",
+        &[
+            "init",
+            "--workspace",
+            rejected_workspace.workspace_arg()?,
+            "--json",
+        ],
+        &bootstrap_env,
+    )?;
+    ensure_success(&rejected_init, "registry-order rejected init")?;
+    let rejected_remember = run_ee_with_env(
+        &rejected_workspace,
+        "registry_order_rejected_remember",
+        &[
+            "remember",
+            "A rejected workspace must not poison semantic retrieval in another workspace.",
+            "--workspace",
+            rejected_workspace.workspace_arg()?,
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--no-auto-link",
+            "--no-propose-candidates",
+            "--json",
+        ],
+        &bootstrap_env,
+    )?;
+    ensure_success(&rejected_remember, "registry-order rejected remember")?;
+    let rejected_reembed = run_ee_with_env(
+        &rejected_workspace,
+        "registry_order_rejected_reembed",
+        &[
+            "index",
+            "reembed",
+            "--workspace",
+            rejected_workspace.workspace_arg()?,
+            "--json",
+        ],
+        &bootstrap_env,
+    )?;
+    ensure_success(&rejected_reembed, "registry-order rejected reembed")?;
+    update_model2vec_registry_metadata_json(
+        &rejected_workspace,
+        Some("{registry-order-invalid".to_string()),
+    )?;
+
     let registry_before_daemon = model2vec_registry_entry(&workspace)?;
     ensure_eq_str(
         registry_before_daemon
@@ -1454,6 +1616,84 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         ModelDistanceMetric::Cosine.as_str(),
         "index manifest storedDistanceMetric",
     )?;
+
+    {
+        // The public foreground daemon is intentionally workspace-bound. Use
+        // the public unbound server entry point here so two real requests
+        // can exercise distinct workspace registries through one server
+        // process without turning the test into an authorization failure.
+        let rejected_cache_root = rejected_workspace.xdg_data.join("ee/models");
+        let rejected_cache_before = model_cache_artifact_state(&rejected_cache_root)?;
+        let daemon = RunningInProcessDaemon::start(&workspace)?;
+        let rejected_first = daemon.search(
+            &rejected_workspace,
+            query,
+            "rejected-first",
+            "hybrid",
+            false,
+        )?;
+        ensure_registry_fallback_daemon_search_result(
+            &rejected_first,
+            "registry-order rejected-first search",
+        )?;
+
+        let valid_after_rejected = daemon.search(
+            &workspace,
+            query,
+            "valid-after-rejected",
+            "semantic_only",
+            true,
+        )?;
+        ensure_eq_str(
+            valid_after_rejected
+                .pointer("/response/data/embed_backend")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    "registry-order valid-after-rejected embed_backend missing".to_string()
+                })?,
+            "neural_local",
+            "registry-order valid-after-rejected backend",
+        )?;
+        ensure_eq_str(
+            valid_after_rejected
+                .pointer("/response/data/metrics/sourceModeApplied")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    "registry-order valid-after-rejected sourceModeApplied missing".to_string()
+                })?,
+            "semantic_only",
+            "registry-order valid-after-rejected source mode",
+        )?;
+        ensure_u64_at_least(
+            valid_after_rejected
+                .pointer("/response/data/metrics/fastScoreCount")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    "registry-order valid-after-rejected fastScoreCount missing".to_string()
+                })?,
+            1,
+            "registry-order valid-after-rejected neural score count",
+        )?;
+
+        let rejected_after_valid = daemon.search(
+            &rejected_workspace,
+            query,
+            "rejected-after-valid",
+            "hybrid",
+            false,
+        )?;
+        ensure_registry_fallback_daemon_search_result(
+            &rejected_after_valid,
+            "registry-order rejected-after-valid search",
+        )?;
+        network_tripwire.assert_unused()?;
+        let rejected_cache_after = model_cache_artifact_state(&rejected_cache_root)?;
+        if rejected_cache_after != rejected_cache_before {
+            return Err(format!(
+                "registry-order daemon searches mutated rejected workspace model cache: before={rejected_cache_before:?} after={rejected_cache_after:?}"
+            ));
+        }
+    }
 
     let (daemon_search_first, daemon_search_second, daemon_search_third, daemon_search_performance) = {
         let daemon = RunningE2eDaemon::start(&workspace, &offline_env)?;
@@ -1657,6 +1897,9 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
             query,
             "--workspace",
             workspace.workspace_arg()?,
+            "--source-mode",
+            "semantic_only",
+            "--strict-source-mode",
             "--max-tokens",
             "800",
             "--json",
@@ -1849,6 +2092,13 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         &offline_env,
         &network_tripwire,
     )?;
+    let malformed_metadata_with_override = run_offline_registry_fallback_search(
+        &workspace,
+        "registry_path_malformed_metadata_with_override",
+        query,
+        &bootstrap_env,
+        &network_tripwire,
+    )?;
     let malformed_metadata_pack = run_offline_registry_fallback_surface(
         &workspace,
         "registry_path_malformed_metadata_pack",
@@ -1861,6 +2111,13 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
             "800",
             "--json",
         ],
+        &offline_env,
+        &network_tripwire,
+    )?;
+    let malformed_metadata_pack_performance = run_offline_registry_fallback_pack_performance(
+        &workspace,
+        "registry_path_malformed_metadata_pack_performance",
+        query,
         &offline_env,
         &network_tripwire,
     )?;
@@ -2079,7 +2336,15 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         ("unverified", &unverified),
         ("mismatched_name", &mismatched_name),
         ("malformed_metadata", &malformed_metadata),
+        (
+            "malformed_metadata_with_override",
+            &malformed_metadata_with_override,
+        ),
         ("malformed_metadata_pack", &malformed_metadata_pack),
+        (
+            "malformed_metadata_pack_performance",
+            &malformed_metadata_pack_performance,
+        ),
         ("malformed_metadata_orient", &malformed_metadata_orient),
         ("malformed_hash", &malformed_hash),
         ("mismatched_hash", &mismatched_hash),
@@ -2123,7 +2388,15 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         ("unverified", &unverified),
         ("mismatched_name", &mismatched_name),
         ("malformed_metadata", &malformed_metadata),
+        (
+            "malformed_metadata_with_override",
+            &malformed_metadata_with_override,
+        ),
         ("malformed_metadata_pack", &malformed_metadata_pack),
+        (
+            "malformed_metadata_pack_performance",
+            &malformed_metadata_pack_performance,
+        ),
         ("malformed_metadata_orient", &malformed_metadata_orient),
         ("malformed_hash", &malformed_hash),
         ("mismatched_hash", &mismatched_hash),
@@ -2281,7 +2554,13 @@ fn run_offline_registry_fallback_search(
         env,
         network_tripwire,
     )?;
-    let response = stdout_json(&output, phase)?;
+    ensure_registry_fallback_search_output(&output, phase)?;
+    Ok(output)
+}
+
+#[cfg(unix)]
+fn ensure_registry_fallback_search_output(output: &Output, phase: &str) -> TestResult {
+    let response = stdout_json(output, phase)?;
     ensure_eq_str(
         response
             .pointer("/data/metrics/sourceModeApplied")
@@ -2306,6 +2585,129 @@ fn run_offline_registry_fallback_search(
         0,
         &format!("{phase} neural fast-score count"),
     )?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_registry_fallback_daemon_search_result(result: &Value, phase: &str) -> TestResult {
+    ensure_eq_str(
+        result
+            .pointer("/response/data/embed_backend")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{phase} embed_backend missing"))?,
+        "hash_fallback",
+        &format!("{phase} embed backend"),
+    )?;
+    ensure_eq_str(
+        result
+            .pointer("/response/data/metrics/sourceModeApplied")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{phase} sourceModeApplied missing"))?,
+        "lexical_only",
+        &format!("{phase} applied source mode"),
+    )?;
+    ensure_eq_bool(
+        result
+            .pointer("/response/data/metrics/fallbackApplied")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| format!("{phase} fallbackApplied missing"))?,
+        true,
+        &format!("{phase} source-mode fallback"),
+    )?;
+    ensure_eq_u64(
+        result
+            .pointer("/response/data/metrics/fastScoreCount")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("{phase} fastScoreCount missing"))?,
+        0,
+        &format!("{phase} neural fast-score count"),
+    )?;
+    let degraded = result
+        .pointer("/response/degraded")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{phase} degraded array missing"))?;
+    let embed_model_unavailable_count = degraded
+        .iter()
+        .filter(|entry| {
+            entry.get("code").and_then(Value::as_str) == Some("embed_model_unavailable")
+        })
+        .count();
+    if embed_model_unavailable_count != 1 {
+        return Err(format!(
+            "{phase} expected exactly one embed_model_unavailable degradation, got {embed_model_unavailable_count}: {degraded:?}"
+        ));
+    }
+    for forbidden in ["daemon_method_unauthorized", "daemon_search_fallback"] {
+        if degraded
+            .iter()
+            .any(|entry| entry.get("code").and_then(Value::as_str) == Some(forbidden))
+        {
+            return Err(format!(
+                "{phase} unexpectedly emitted {forbidden}: {degraded:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn run_offline_registry_fallback_pack_performance(
+    workspace: &E2eWorkspace,
+    phase: &str,
+    query: &str,
+    env: &[(String, String)],
+    network_tripwire: &NetworkTripwire,
+) -> TestResult<Output> {
+    let model_cache_root = workspace.xdg_data.join("ee/models");
+    let cache_before = model_cache_artifact_state(&model_cache_root)?;
+    let output = run_ee_with_env(
+        workspace,
+        phase,
+        &[
+            "pack",
+            query,
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--max-tokens",
+            "800",
+            "--explain-performance",
+            "--json",
+        ],
+        env,
+    )?;
+    ensure_success(&output, phase)?;
+    let response = stdout_json(&output, phase)?;
+    ensure_eq_str(
+        response
+            .pointer("/data/queryPlan/sourceModeApplied")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{phase} sourceModeApplied missing"))?,
+        "lexical_only",
+        &format!("{phase} applied source mode"),
+    )?;
+    ensure_eq_bool(
+        response
+            .pointer("/data/queryPlan/fallbackApplied")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| format!("{phase} fallbackApplied missing"))?,
+        true,
+        &format!("{phase} source-mode fallback"),
+    )?;
+    ensure_eq_u64(
+        response
+            .pointer("/data/search/metrics/fieldCoverage/fastScoreCount")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("{phase} fastScoreCount missing"))?,
+        0,
+        &format!("{phase} neural fast-score count"),
+    )?;
+    network_tripwire.assert_unused()?;
+    let cache_after = model_cache_artifact_state(&model_cache_root)?;
+    if cache_after != cache_before {
+        return Err(format!(
+            "{phase} mutated the model cache after rejecting the registry row: before={cache_before:?} after={cache_after:?}"
+        ));
+    }
     Ok(output)
 }
 

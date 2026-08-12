@@ -8716,21 +8716,28 @@ fn resolve_source_mode(
         );
     }
 
-    let embed_model_unavailable = embed_model_unavailable_reason_from_env();
     let prepared_semantic = fast_embedder_override.is_some_and(|embedder| embedder.is_semantic());
-    let semantic_unavailable = (!prepared_semantic && embed_model_unavailable.is_none())
-        .then(semantic_retrieval_unavailable_reason)
+    let prepared_hash_fallback =
+        fast_embedder_override.is_some_and(|embedder| !embedder.is_semantic());
+    let embed_model_unavailable = (!prepared_hash_fallback)
+        .then(embed_model_unavailable_reason_from_env)
         .flatten();
-    let semantic_pending = (!prepared_semantic && embed_model_unavailable.is_none())
-        .then(semantic_retrieval_pending_reason)
-        .flatten();
+    let semantic_unavailable = if prepared_hash_fallback {
+        Some(HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON.to_owned())
+    } else {
+        (!prepared_semantic && embed_model_unavailable.is_none())
+            .then(semantic_retrieval_unavailable_reason)
+            .flatten()
+    };
+    let semantic_pending =
+        (!prepared_semantic && !prepared_hash_fallback && embed_model_unavailable.is_none())
+            .then(semantic_retrieval_pending_reason)
+            .flatten();
     let tiers = SearchTierState {
         lexical_available,
         embed_model_unavailable: embed_model_unavailable.as_deref(),
         semantic_embedder_pending: semantic_pending.as_deref(),
-        semantic_embedder_degraded: semantic_unavailable
-            .as_deref()
-            .filter(|_| lexical_available),
+        semantic_embedder_degraded: semantic_unavailable.as_deref(),
     };
     resolve_source_mode_with_tiers(options, degraded, tiers)
 }
@@ -8820,6 +8827,18 @@ fn resolve_source_mode_with_tiers(
             reason,
             "active embedder is deterministic hash fallback; semantic similarity unavailable"
         );
+        if lexical_available {
+            return Ok(SourceModeResolution {
+                applied: SearchSourceMode::LexicalOnly,
+                fallback_applied: true,
+                unavailable_no_results: false,
+            });
+        }
+        return Ok(SourceModeResolution {
+            applied: SearchSourceMode::LexicalOnly,
+            fallback_applied: true,
+            unavailable_no_results: true,
+        });
     }
 
     match requested {
@@ -14202,7 +14221,7 @@ mod tests {
     }
 
     #[test]
-    fn emit_embed_model_unavailable_for_hash_fallback_without_source_mode_fallback() -> TestResult {
+    fn hash_fallback_forces_lexical_only_without_fast_scoring() -> TestResult {
         let options = source_mode_test_options(SearchSourceMode::Hybrid, false);
         let mut degraded = Vec::new();
         let resolution = resolve_source_mode_with_tiers(
@@ -14217,8 +14236,8 @@ mod tests {
         )
         .map_err(|error| error.to_string())?;
 
-        assert_eq!(resolution.applied, SearchSourceMode::Hybrid);
-        assert!(!resolution.fallback_applied);
+        assert_eq!(resolution.applied, SearchSourceMode::LexicalOnly);
+        assert!(resolution.fallback_applied);
         assert!(!resolution.unavailable_no_results);
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0].code, "embed_model_unavailable");
@@ -14227,6 +14246,30 @@ mod tests {
             "hash fallback reason should reach the degraded message: {}",
             degraded[0].message
         );
+        Ok(())
+    }
+
+    #[test]
+    fn hash_fallback_never_reenters_hybrid_when_lexical_is_unavailable() -> TestResult {
+        let options = source_mode_test_options(SearchSourceMode::Hybrid, false);
+        let mut degraded = Vec::new();
+        let resolution = resolve_source_mode_with_tiers(
+            &options,
+            &mut degraded,
+            SearchTierState {
+                lexical_available: false,
+                embed_model_unavailable: None,
+                semantic_embedder_pending: None,
+                semantic_embedder_degraded: Some(HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(resolution.applied, SearchSourceMode::LexicalOnly);
+        assert!(resolution.fallback_applied);
+        assert!(resolution.unavailable_no_results);
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "embed_model_unavailable");
         Ok(())
     }
 

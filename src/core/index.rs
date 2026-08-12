@@ -5342,6 +5342,37 @@ enum RegisteredModel2VecResolution {
     Rejected(EmbedModelResolution),
 }
 
+struct WorkspaceRegistryEmbedderSelection {
+    stack: EmbedderStack,
+    model_resolution: EmbedModelResolution,
+}
+
+fn workspace_registry_selection_from_resolution(
+    resolution: RegisteredModel2VecResolution,
+) -> Option<WorkspaceRegistryEmbedderSelection> {
+    match resolution {
+        RegisteredModel2VecResolution::NotRegistered => None,
+        RegisteredModel2VecResolution::Ready(stack) => Some(WorkspaceRegistryEmbedderSelection {
+            stack,
+            model_resolution: EmbedModelResolution::ready(EmbedModelSource::Registered),
+        }),
+        RegisteredModel2VecResolution::Rejected(model_resolution) => {
+            Some(WorkspaceRegistryEmbedderSelection {
+                stack: hash_fallback_embedder_stack(),
+                model_resolution,
+            })
+        }
+    }
+}
+
+fn workspace_registry_embedder_selection(
+    db: &DbConnection,
+    workspace_id: &str,
+) -> Result<Option<WorkspaceRegistryEmbedderSelection>, DbError> {
+    registered_model2vec_resolution(db, workspace_id)
+        .map(workspace_registry_selection_from_resolution)
+}
+
 fn rejected_registered_model2vec(
     entry: &StoredModelRegistryEntry,
     reason: EmbedRegistryRejectionReason,
@@ -5576,14 +5607,10 @@ fn workspace_embedder_stack(
     db: &DbConnection,
     workspace_id: &str,
 ) -> Result<EmbedderStack, DbError> {
-    if configured_embedder_model_root().is_none() {
-        match registered_model2vec_resolution(db, workspace_id)? {
-            RegisteredModel2VecResolution::NotRegistered => {}
-            RegisteredModel2VecResolution::Ready(stack) => return Ok(stack),
-            RegisteredModel2VecResolution::Rejected(_) => {
-                return Ok(hash_fallback_embedder_stack());
-            }
-        }
+    if configured_embedder_model_root().is_none()
+        && let Some(selection) = workspace_registry_embedder_selection(db, workspace_id)?
+    {
+        return Ok(selection.stack);
     }
     Ok(default_embedder_stack())
 }
@@ -5858,7 +5885,7 @@ pub(crate) async fn prepare_search_embedder_for_workspace(
     database_path: &Path,
 ) -> Result<EmbedderPreparation, SearchError> {
     let started = Instant::now();
-    if configured_embedder_model_root().is_none() && database_path.exists() {
+    if database_path.exists() {
         let db = DbConnection::open_file_read_only(database_path).map_err(|error| {
             SearchError::SubsystemError {
                 subsystem: "model registry",
@@ -5873,39 +5900,23 @@ pub(crate) async fn prepare_search_embedder_for_workspace(
                 }
             })?
         {
-            match registered_model2vec_resolution(&db, &workspace_id).map_err(|error| {
-                SearchError::SubsystemError {
+            if let Some(selection) = workspace_registry_embedder_selection(&db, &workspace_id)
+                .map_err(|error| SearchError::SubsystemError {
                     subsystem: "model registry",
                     source: Box::new(error),
-                }
-            })? {
-                RegisteredModel2VecResolution::NotRegistered => {}
-                RegisteredModel2VecResolution::Ready(stack) => {
-                    return Ok(EmbedderPreparation::new(
-                        EmbedBackend::NeuralLocal,
-                        EmbedModelResolution::ready(EmbedModelSource::Registered),
-                        started.elapsed(),
-                        stack.fast_arc(),
-                    ));
-                }
-                RegisteredModel2VecResolution::Rejected(model_resolution) => {
-                    let stack = hash_fallback_embedder_stack();
-                    // The search source-mode resolver still consults the
-                    // process-default stack when deciding whether to emit its
-                    // semantic-unavailable degradation. Pin an as-yet
-                    // uninitialized default to the same fail-closed backend so
-                    // a valid machine cache cannot contradict the workspace
-                    // rejection and make hash execution look neural.
-                    let _ = DEFAULT_SEARCH_EMBEDDER.get_or_init(|| {
-                        DefaultSearchEmbedder::ready(stack.clone(), model_resolution.clone())
-                    });
-                    return Ok(EmbedderPreparation::new(
-                        EmbedBackend::HashFallback,
-                        model_resolution,
-                        started.elapsed(),
-                        stack.fast_arc(),
-                    ));
-                }
+                })?
+            {
+                let backend = if selection.stack.fast().is_semantic() {
+                    EmbedBackend::NeuralLocal
+                } else {
+                    EmbedBackend::HashFallback
+                };
+                return Ok(EmbedderPreparation::new(
+                    backend,
+                    selection.model_resolution,
+                    started.elapsed(),
+                    selection.stack.fast_arc(),
+                ));
             }
         }
     }
@@ -8107,6 +8118,76 @@ mod tests {
         ensure(
             preparation.fast_embedder.id() == HashEmbedder::default_256().id(),
             "rejected registration must serve the real deterministic hash embedder",
+        )
+    }
+
+    #[test]
+    fn workspace_registry_selection_is_order_independent() -> TestResult {
+        fn rejected(workspace: &str) -> RegisteredModel2VecResolution {
+            RegisteredModel2VecResolution::Rejected(EmbedModelResolution::registry_rejected(
+                format!("mdl_{workspace}_rejected"),
+                EmbedRegistryRejectionReason::MetadataMalformed,
+            ))
+        }
+
+        fn ready(workspace: &str) -> RegisteredModel2VecResolution {
+            RegisteredModel2VecResolution::Ready(EmbedderStack::from_parts(
+                Arc::new(TestSemanticEmbedder::new(
+                    &format!("{POTION_MODEL_NAME}-{workspace}"),
+                    usize::try_from(BUNDLED_EMBEDDING_DIMENSION)
+                        .expect("bundled dimension fits usize"),
+                )) as Arc<dyn crate::search::Embedder>,
+                None,
+            ))
+        }
+
+        let rejected_then_ready = [
+            workspace_registry_selection_from_resolution(rejected("a")),
+            workspace_registry_selection_from_resolution(ready("b")),
+        ];
+        let ready_then_rejected = [
+            workspace_registry_selection_from_resolution(ready("b")),
+            workspace_registry_selection_from_resolution(rejected("a")),
+        ];
+
+        for rejected_selection in [
+            rejected_then_ready[0].as_ref(),
+            ready_then_rejected[1].as_ref(),
+        ] {
+            let selection = rejected_selection
+                .ok_or_else(|| "rejected workspace must have an explicit selection".to_owned())?;
+            ensure(
+                !selection.stack.fast().is_semantic(),
+                "rejected workspace must remain hash-backed in either order",
+            )?;
+            ensure(
+                selection.model_resolution.source == EmbedModelSource::RegistryRejected,
+                "rejected workspace must retain its own registry rejection",
+            )?;
+        }
+        for ready_selection in [
+            rejected_then_ready[1].as_ref(),
+            ready_then_rejected[0].as_ref(),
+        ] {
+            let selection = ready_selection
+                .ok_or_else(|| "valid workspace must have an explicit selection".to_owned())?;
+            ensure(
+                selection.stack.fast().is_semantic(),
+                "valid workspace must remain neural in either order",
+            )?;
+            ensure(
+                selection.model_resolution
+                    == EmbedModelResolution::ready(EmbedModelSource::Registered),
+                "valid workspace must retain registered-model truth",
+            )?;
+        }
+
+        ensure(
+            workspace_registry_selection_from_resolution(
+                RegisteredModel2VecResolution::NotRegistered,
+            )
+            .is_none(),
+            "an unregistered workspace must defer to the independent process default",
         )
     }
 

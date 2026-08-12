@@ -577,11 +577,20 @@ candidate retrieval through the same workspace-aware embedder, rejects any
 semantic-unavailable degradation, and hashes the database, WAL, and
 shared-memory artifacts before and after to prove the registry lookup remains
 read-only. Only the negative fixture matrix rewrites the registry row directly
-through
-missing, unregistered, unavailable, unverified, mismatched-name, mismatched-hash,
-mismatched-dimension, mismatched-distance, and nonlocal states; each must report
-explicit `hash_fallback` with downloads off while the network tripwire records
-zero connection attempts.
+through missing-source, missing source URI, unavailable, unverified,
+mismatched-name, malformed-metadata, malformed-hash, mismatched-hash,
+mismatched-dimension, mismatched-distance, nonlocal, symlink, and
+permission-denied states. Each rejected registration must execute lexical-only
+retrieval with `fallbackApplied=true`, `fastScoreCount=0`, and an explicit
+`hash_fallback` backend posture, including when an explicit valid model-path
+override is present; pack performance exposes the same source-mode and
+score-coverage truth, while full orient exposes the backend and degradation.
+The harness snapshots the complete model-cache tree around every rejected
+surface and runs behind both a proxy tripwire and the CI route-free network
+namespace, proving that fallback neither mutates cache artifacts nor attempts
+network access. A two-workspace daemon sequence queries rejected, valid, then
+rejected registry state in one process so either request order must preserve
+workspace-local model truth.
 
 The harness pins the analyst paraphrase regression by storing an RBLX
 bookings/FCF memory, querying a zero-ticker paraphrase, and requiring that the
