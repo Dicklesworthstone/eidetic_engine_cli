@@ -2029,6 +2029,21 @@ fn reconcile_committed_memory_index_job(
         }
         RememberIndexPublishRoute::Inline => {
             match process_remember_index_job_with_retry(connection, index_job_id, index_dir) {
+                Ok(report) if remember_index_status(&report) == "queued" => {
+                    // The inline worker may have claimed this exact job and
+                    // then returned it to the retryable cancelled/failed
+                    // lane. A generic tail probe used to see no `pending`
+                    // rows and incorrectly conclude there was nothing to do.
+                    // Elect the existing coalesced drainer with the owning
+                    // job id so its first pending inspection requeues and
+                    // converges that same logical row.
+                    remember_lead_coalesced_index_drain(
+                        connection,
+                        workspace_id,
+                        index_job_id,
+                        index_dir,
+                    )
+                }
                 Ok(report) => {
                     if let Err(error) =
                         remember_drain_peer_tail_after_publish(connection, workspace_id, index_dir)
@@ -2388,19 +2403,20 @@ fn remember_inline_index_publish_route(
             return RememberIndexPublishRoute::Defer;
         }
     };
-    let pending_job_ids = match connection.list_pending_search_index_jobs(workspace_id, Some(2)) {
-        Ok(jobs) => jobs.into_iter().map(|job| job.id).collect::<Vec<_>>(),
-        Err(error) => {
-            tracing::warn!(
-                target: "ee::memory",
-                workspace_id,
-                index_job_id,
-                error = %error,
-                "deferring inline remember indexing because pending-job posture is unavailable"
-            );
-            return RememberIndexPublishRoute::Defer;
-        }
-    };
+    let pending_job_ids =
+        match remember_requeue_and_list_pending_index_job_ids(connection, workspace_id, Some(2)) {
+            Ok(job_ids) => job_ids,
+            Err(error) => {
+                tracing::warn!(
+                    target: "ee::memory",
+                    workspace_id,
+                    index_job_id,
+                    error = %error,
+                    "deferring inline remember indexing because pending-job posture is unavailable"
+                );
+                return RememberIndexPublishRoute::Defer;
+            }
+        };
     remember_index_publish_route(active_publish, &pending_job_ids, index_job_id)
 }
 
@@ -2416,6 +2432,33 @@ fn remember_index_publish_route(
         return RememberIndexPublishRoute::LeadCoalescedDrain;
     }
     RememberIndexPublishRoute::Inline
+}
+
+/// Recover the established retry lane before inspecting a remember tail.
+///
+/// The DB primitive atomically transitions only the existing retry policy —
+/// cancelled/failed jobs — back to `pending` as the same logical rows. Keeping
+/// recovery and inspection adjacent prevents a cancelled owner from looking
+/// like an empty queue without broadening which failures are retryable.
+fn remember_requeue_and_list_pending_index_job_ids(
+    connection: &DbConnection,
+    workspace_id: &str,
+    limit: Option<u32>,
+) -> Result<Vec<String>, IndexRebuildError> {
+    let requeued = connection.requeue_cancelled_search_index_jobs(workspace_id)?;
+    if requeued > 0 {
+        tracing::info!(
+            target: "ee::memory",
+            workspace_id,
+            requeued,
+            "requeued retryable remember index jobs before pending-tail inspection"
+        );
+    }
+    Ok(connection
+        .list_pending_search_index_jobs(workspace_id, limit)?
+        .into_iter()
+        .map(|job| job.id)
+        .collect())
 }
 
 /// Election lock for the burst-drain leader. Distinct from
@@ -2470,7 +2513,11 @@ fn remember_lead_coalesced_index_drain(
         index_job_id,
         &mut || remember_retry_sleep(Duration::ZERO, "lead coalesced index drain"),
         &mut || process_pending_index_jobs_coalesced(connection, workspace_id, index_dir, None),
-        &mut || match connection.list_pending_search_index_jobs(workspace_id, Some(1)) {
+        &mut || match remember_requeue_and_list_pending_index_job_ids(
+            connection,
+            workspace_id,
+            Some(1),
+        ) {
             Ok(pending) => Some(!pending.is_empty()),
             Err(_) => None,
         },
@@ -2489,14 +2536,15 @@ pub(crate) fn reconcile_pending_remember_index_jobs(
     workspace_id: &str,
     index_dir: &Path,
 ) -> Result<Option<IndexProcessingJobReport>, IndexRebuildError> {
-    let pending = connection.list_pending_search_index_jobs(workspace_id, Some(1))?;
-    let Some(first) = pending.first() else {
+    let pending_job_ids =
+        remember_requeue_and_list_pending_index_job_ids(connection, workspace_id, Some(1))?;
+    let Some(first_job_id) = pending_job_ids.first() else {
         return Ok(None);
     };
     Ok(Some(remember_lead_coalesced_index_drain(
         connection,
         workspace_id,
-        &first.id,
+        first_job_id,
         index_dir,
     )))
 }
@@ -17629,6 +17677,159 @@ mod tests {
             "queued".to_owned(),
             "public burst index posture",
         )
+    }
+
+    #[test]
+    fn remember_reconciliation_requeues_cancelled_job_and_restores_exact_lexical_search()
+    -> TestResult {
+        const CONTENT: &str =
+            "Remember cancellation recovery indexes the exact heliotrope turnstile memory.";
+
+        let temp = upgrade_test_workspace()?;
+        let stored = remember_memory_with_index_mode(
+            &upgrade_remember_options(temp.path(), CONTENT, 0.9, None, false),
+            true,
+            &[],
+            None,
+        )
+        .map_err(|error| error.message())?;
+        ensure(
+            stored.index_status.clone(),
+            "queued".to_owned(),
+            "fixture remember leaves its real job pending",
+        )?;
+
+        let canonical = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let workspace_id = stable_workspace_id(&canonical);
+        let database_path = canonical.join(".ee").join("ee.db");
+        let index_dir = canonical.join(".ee").join(DEFAULT_INDEX_SUBDIR);
+        let connection = open_upgrade_test_db(&canonical)?;
+        let jobs = connection
+            .list_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure(jobs.len(), 1, "fixture creates one real index job")?;
+        let job_id = jobs[0].id.clone();
+        ensure(
+            jobs[0].document_id.as_deref(),
+            Some(stored.memory_id.as_str()),
+            "job owns the remembered memory",
+        )?;
+        ensure(
+            connection
+                .start_search_index_job(&job_id)
+                .map_err(|error| error.to_string())?,
+            true,
+            "DB API transitions the real job pending to running",
+        )?;
+        ensure(
+            connection
+                .cancel_running_search_index_job(&job_id)
+                .map_err(|error| error.to_string())?,
+            true,
+            "DB API transitions the real job running to cancelled",
+        )?;
+        let cancelled = connection
+            .get_search_index_job(&job_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "cancelled remember index job disappeared".to_owned())?;
+        ensure(
+            cancelled.status_enum(),
+            Some(SearchIndexJobStatus::Cancelled),
+            "fixture reaches the retryable cancelled state",
+        )?;
+
+        let reconciled =
+            reconcile_committed_memory_index_job(&connection, &workspace_id, &job_id, &index_dir);
+        ensure(
+            remember_index_status(&reconciled),
+            "indexed".to_owned(),
+            "production remember reconciliation completes the recovered job",
+        )?;
+        let completed = connection
+            .get_search_index_job(&job_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "reconciled remember index job disappeared".to_owned())?;
+        ensure(
+            completed.status_enum(),
+            Some(SearchIndexJobStatus::Completed),
+            "the same logical job reaches completed",
+        )?;
+        let retryable_tail = connection
+            .list_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|job| {
+                matches!(
+                    job.status_enum(),
+                    Some(
+                        SearchIndexJobStatus::Pending
+                            | SearchIndexJobStatus::Cancelled
+                            | SearchIndexJobStatus::Failed
+                    )
+                )
+            })
+            .collect::<Vec<_>>();
+        ensure(
+            retryable_tail.is_empty(),
+            true,
+            "reconciliation leaves no pending/cancelled/failed retryable work",
+        )?;
+
+        let status =
+            crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                workspace_path: canonical.clone(),
+                database_path: Some(database_path.clone()),
+                index_dir: Some(index_dir.clone()),
+            })
+            .map_err(|error| error.to_string())?;
+        ensure(
+            status.health,
+            crate::core::index::IndexHealth::Ready,
+            "recovered remember index is ready",
+        )?;
+        ensure(
+            status.db_generation,
+            status.index_generation,
+            "recovered DB and index generations match",
+        )?;
+
+        let search = crate::core::search::run_search_with_filters(
+            &crate::core::search::SearchOptions {
+                workspace_path: canonical,
+                database_path: Some(database_path),
+                index_dir: Some(index_dir),
+                query: "heliotrope turnstile".to_owned(),
+                limit: 10,
+                speed: crate::search::SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Workspace,
+                strict_scope: false,
+            },
+            None,
+            &[],
+        )
+        .map_err(|error| format!("recovered lexical search failed: {error:?}"))?;
+        ensure(
+            search
+                .results
+                .iter()
+                .any(|hit| hit.doc_id == stored.memory_id.as_str()),
+            true,
+            "exact remembered ID is lexically retrievable after recovery",
+        )?;
+        Ok(())
     }
 
     fn drained_test_report(job_id: &str) -> IndexProcessingJobReport {
