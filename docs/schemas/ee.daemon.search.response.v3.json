@@ -53,10 +53,10 @@
             "results": {"type": "array", "items": {"$ref": "#/$defs/searchDocument"}},
             "consensus": {"type": "array"},
             "conflicts": {"type": "array"},
-            "resultCount": {"type": "integer", "minimum": 0},
+            "resultCount": {"$ref": "#/$defs/uint64"},
             "elapsedMs": {"type": "number", "minimum": 0},
             "metrics": {"type": "object"},
-            "rerank": {"type": "object"},
+            "rerank": {"$ref": "#/$defs/rerankPosture"},
             "profileRuntime": {"type": "object"},
             "errors": {"type": "array"},
             "degraded": {"type": "array"},
@@ -68,6 +68,61 @@
     }
   },
   "$defs": {
+    "uint64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "rerankPosture": {
+      "type": "object",
+      "required": ["schema", "mode", "configured", "topK", "rerankScoreCount", "scoreKind", "available", "degradedCode", "advisory", "advisorySummary"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.rerank_posture.v1"},
+        "mode": {"type": "string", "enum": ["reranked", "fusion_only_degraded", "fusion_only"]},
+        "configured": {"type": "string", "enum": ["auto", "off"]},
+        "topK": {"$ref": "#/$defs/uint64"},
+        "rerankScoreCount": {"$ref": "#/$defs/uint64"},
+        "scoreKind": {"type": "string", "enum": ["reranked", "rrf_fused"]},
+        "available": {"type": "boolean"},
+        "degradedCode": {"type": ["string", "null"], "minLength": 1},
+        "advisory": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/rerankAdvisory"}
+          ]
+        },
+        "advisorySummary": {"$ref": "#/$defs/rerankAdvisorySummary"}
+      }
+    },
+    "rerankAdvisory": {
+      "type": "object",
+      "required": ["code", "severity", "permanent", "message", "repair", "resolution"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
+        "permanent": {"type": "boolean"},
+        "message": {"type": "string"},
+        "repair": {"type": ["string", "null"]},
+        "resolution": {"type": "string", "enum": ["verified_offline_import_available", "retry_or_inspect_local_registry"]}
+      }
+    },
+    "rerankAdvisorySummary": {
+      "type": "object",
+      "required": ["scope", "permanent", "distinctCount", "emittedCount", "suppressedCount", "sessionOccurrenceCount", "sessionSuppressedCount"],
+      "additionalProperties": false,
+      "properties": {
+        "scope": {"type": "string", "enum": ["process", "response"]},
+        "permanent": {"type": ["boolean", "null"]},
+        "distinctCount": {"$ref": "#/$defs/uint64"},
+        "emittedCount": {"$ref": "#/$defs/uint64"},
+        "suppressedCount": {"$ref": "#/$defs/uint64"},
+        "sessionOccurrenceCount": {"$ref": "#/$defs/uint64"},
+        "sessionSuppressedCount": {"$ref": "#/$defs/uint64"},
+        "tracking": {"type": "string", "const": "capacity_deferred"}
+      }
+    },
     "performance": {
       "type": "object",
       "required": ["schema", "success", "data"],
@@ -87,7 +142,7 @@
               "additionalProperties": false,
               "properties": {
                 "textIncluded": {"type": "boolean", "const": false},
-                "lengthBytes": {"type": "integer", "minimum": 0},
+                "lengthBytes": {"$ref": "#/$defs/uint64"},
                 "fingerprint": {"type": "string", "pattern": "^blake3:[0-9a-f]{64}$"}
               }
             },
@@ -97,8 +152,8 @@
               "additionalProperties": false,
               "properties": {
                 "retrievalMode": {"type": "string", "enum": ["instant", "default", "quality"]},
-                "requestedLimit": {"type": "integer", "minimum": 0},
-                "candidateBudget": {"type": "integer", "minimum": 0},
+                "requestedLimit": {"$ref": "#/$defs/uint64"},
+                "candidateBudget": {"$ref": "#/$defs/uint64"},
                 "usesEmbeddings": {"type": "boolean"},
                 "scoreExplanationsRequested": {"type": "boolean"},
                 "sourceModeRequested": {"type": "string", "enum": ["lexical_only", "semantic_only", "hybrid"]},
@@ -115,10 +170,10 @@
               "required": ["indexStatusChecks", "memoryReads", "tagReads", "artifactLinkReads"],
               "additionalProperties": false,
               "properties": {
-                "indexStatusChecks": {"type": "integer", "minimum": 0},
-                "memoryReads": {"type": "integer", "minimum": 0},
-                "tagReads": {"type": "integer", "minimum": 0},
-                "artifactLinkReads": {"type": "integer", "minimum": 0}
+                "indexStatusChecks": {"$ref": "#/$defs/uint64"},
+                "memoryReads": {"$ref": "#/$defs/uint64"},
+                "tagReads": {"$ref": "#/$defs/uint64"},
+                "artifactLinkReads": {"$ref": "#/$defs/uint64"}
               }
             },
             "search": {"$ref": "#/$defs/performanceSearch"},
@@ -162,8 +217,8 @@
               "required": ["candidateLimit", "concurrentIndexReaders", "staleIndexTolerance"],
               "additionalProperties": false,
               "properties": {
-                "candidateLimit": {"type": "integer", "minimum": 0},
-                "concurrentIndexReaders": {"type": "integer", "minimum": 0},
+                "candidateLimit": {"$ref": "#/$defs/uint64"},
+                "concurrentIndexReaders": {"$ref": "#/$defs/uint64"},
                 "staleIndexTolerance": {"type": "string", "enum": ["strict", "repair_hint"]}
               }
             },
@@ -172,8 +227,8 @@
               "required": ["maxTokens", "maxCandidateMemories", "explanationVerbosity"],
               "additionalProperties": false,
               "properties": {
-                "maxTokens": {"type": "integer", "minimum": 0},
-                "maxCandidateMemories": {"type": "integer", "minimum": 0},
+                "maxTokens": {"$ref": "#/$defs/uint64"},
+                "maxCandidateMemories": {"$ref": "#/$defs/uint64"},
                 "explanationVerbosity": {"type": "string", "enum": ["standard", "full"]}
               }
             },
@@ -182,9 +237,9 @@
               "required": ["memoryCapMb", "entryCap", "hotsetPrewarmLimit"],
               "additionalProperties": false,
               "properties": {
-                "memoryCapMb": {"type": "integer", "minimum": 0},
-                "entryCap": {"type": "integer", "minimum": 0},
-                "hotsetPrewarmLimit": {"type": "integer", "minimum": 0}
+                "memoryCapMb": {"$ref": "#/$defs/uint64"},
+                "entryCap": {"$ref": "#/$defs/uint64"},
+                "hotsetPrewarmLimit": {"$ref": "#/$defs/uint64"}
               }
             },
             "writeSpool": {
@@ -192,9 +247,9 @@
               "required": ["queueCap", "batchCap", "retryBudget"],
               "additionalProperties": false,
               "properties": {
-                "queueCap": {"type": "integer", "minimum": 0},
-                "batchCap": {"type": "integer", "minimum": 0},
-                "retryBudget": {"type": "integer", "minimum": 0}
+                "queueCap": {"$ref": "#/$defs/uint64"},
+                "batchCap": {"$ref": "#/$defs/uint64"},
+                "retryBudget": {"$ref": "#/$defs/uint64"}
               }
             },
             "steward": {
@@ -202,8 +257,8 @@
               "required": ["maintenanceWindowMs", "graphRefreshBudget", "daemonPrewarm"],
               "additionalProperties": false,
               "properties": {
-                "maintenanceWindowMs": {"type": "integer", "minimum": 0},
-                "graphRefreshBudget": {"type": "integer", "minimum": 0},
+                "maintenanceWindowMs": {"$ref": "#/$defs/uint64"},
+                "graphRefreshBudget": {"$ref": "#/$defs/uint64"},
                 "daemonPrewarm": {"type": "boolean"}
               }
             },
@@ -237,17 +292,17 @@
       "additionalProperties": false,
       "properties": {
         "status": {"type": "string", "enum": ["success", "no_results", "index_not_found", "index_error"]},
-        "returnedHits": {"type": "integer", "minimum": 0},
+        "returnedHits": {"$ref": "#/$defs/uint64"},
         "sourceCounts": {
           "type": "object",
           "required": ["lexical", "semanticFast", "semanticQuality", "hybrid", "reranked"],
           "additionalProperties": false,
           "properties": {
-            "lexical": {"type": "integer", "minimum": 0},
-            "semanticFast": {"type": "integer", "minimum": 0},
-            "semanticQuality": {"type": "integer", "minimum": 0},
-            "hybrid": {"type": "integer", "minimum": 0},
-            "reranked": {"type": "integer", "minimum": 0}
+            "lexical": {"$ref": "#/$defs/uint64"},
+            "semanticFast": {"$ref": "#/$defs/uint64"},
+            "semanticQuality": {"$ref": "#/$defs/uint64"},
+            "hybrid": {"$ref": "#/$defs/uint64"},
+            "reranked": {"$ref": "#/$defs/uint64"}
           }
         },
         "scoreDistribution": {
@@ -266,12 +321,12 @@
           "required": ["fastScoreCount", "qualityScoreCount", "lexicalScoreCount", "rerankScoreCount", "metadataCount", "explanationCount"],
           "additionalProperties": false,
           "properties": {
-            "fastScoreCount": {"type": "integer", "minimum": 0},
-            "qualityScoreCount": {"type": "integer", "minimum": 0},
-            "lexicalScoreCount": {"type": "integer", "minimum": 0},
-            "rerankScoreCount": {"type": "integer", "minimum": 0},
-            "metadataCount": {"type": "integer", "minimum": 0},
-            "explanationCount": {"type": "integer", "minimum": 0}
+            "fastScoreCount": {"$ref": "#/$defs/uint64"},
+            "qualityScoreCount": {"$ref": "#/$defs/uint64"},
+            "lexicalScoreCount": {"$ref": "#/$defs/uint64"},
+            "rerankScoreCount": {"$ref": "#/$defs/uint64"},
+            "metadataCount": {"$ref": "#/$defs/uint64"},
+            "explanationCount": {"$ref": "#/$defs/uint64"}
           }
         },
         "errors": {"type": "array", "items": {"type": "string"}},

@@ -17,9 +17,9 @@ use ee::daemon::DAEMON_RESPONSE_SCHEMA_V1;
 use ee::daemon::protocol::{DaemonRequest, DaemonResponse};
 use ee::daemon::server::{
     DAEMON_SEARCH_EXECUTION_FAILED_CODE, DAEMON_SEARCH_PARAMS_INVALID_CODE,
-    DAEMON_SEARCH_REQUEST_SCHEMA_V2, DAEMON_SEARCH_RESPONSE_SCHEMA_V3, METHOD_CAPABILITIES,
-    METHOD_CONTEXT, METHOD_ECHO, METHOD_SEARCH, METHOD_SHUTDOWN, METHOD_TELEMETRY, METHOD_WRITE,
-    METHOD_WRITE_JOURNAL, dispatch,
+    DAEMON_SEARCH_REQUEST_SCHEMA_V2, DAEMON_SEARCH_RESPONSE_SCHEMA_V3, DaemonSearchResult,
+    METHOD_CAPABILITIES, METHOD_CONTEXT, METHOD_ECHO, METHOD_SEARCH, METHOD_SHUTDOWN,
+    METHOD_TELEMETRY, METHOD_WRITE, METHOD_WRITE_JOURNAL, dispatch,
 };
 use ee::db::{CreateWorkspaceInput, DbConnection};
 
@@ -341,6 +341,21 @@ fn daemon_search_method_schemas_pin_paths_timings_and_nested_strictness() -> Tes
         ),
         (
             &response,
+            "/$defs/rerankPosture/additionalProperties",
+            "canonical rerank posture",
+        ),
+        (
+            &response,
+            "/$defs/rerankAdvisory/additionalProperties",
+            "canonical rerank advisory",
+        ),
+        (
+            &response,
+            "/$defs/rerankAdvisorySummary/additionalProperties",
+            "canonical rerank advisory summary",
+        ),
+        (
+            &response,
             "/properties/timing/additionalProperties",
             "search timing",
         ),
@@ -514,6 +529,64 @@ fn daemon_search_method_schemas_pin_paths_timings_and_nested_strictness() -> Tes
             "search response performance must reference the canonical performance envelope"
                 .to_owned(),
         );
+    }
+    let uint64 = response
+        .pointer("/$defs/uint64")
+        .ok_or_else(|| "search response uint64 definition missing".to_owned())?;
+    if uint64.get("type").and_then(Value::as_str) != Some("integer")
+        || uint64.get("minimum").and_then(Value::as_u64) != Some(0)
+        || uint64.get("maximum").and_then(Value::as_u64) != Some(u64::MAX)
+    {
+        return Err(format!(
+            "search response uint64 definition must pin Rust Value::as_u64 exactly: {uint64}"
+        ));
+    }
+    for pointer in [
+        "/properties/response/properties/data/properties/resultCount/$ref",
+        "/$defs/rerankPosture/properties/topK/$ref",
+        "/$defs/rerankPosture/properties/rerankScoreCount/$ref",
+        "/$defs/rerankAdvisorySummary/properties/distinctCount/$ref",
+        "/$defs/rerankAdvisorySummary/properties/emittedCount/$ref",
+        "/$defs/rerankAdvisorySummary/properties/suppressedCount/$ref",
+        "/$defs/rerankAdvisorySummary/properties/sessionOccurrenceCount/$ref",
+        "/$defs/rerankAdvisorySummary/properties/sessionSuppressedCount/$ref",
+        "/$defs/performance/properties/data/properties/query/properties/lengthBytes/$ref",
+        "/$defs/performance/properties/data/properties/queryPlan/properties/requestedLimit/$ref",
+        "/$defs/performance/properties/data/properties/queryPlan/properties/candidateBudget/$ref",
+        "/$defs/performance/properties/data/properties/dbReads/properties/indexStatusChecks/$ref",
+        "/$defs/performance/properties/data/properties/dbReads/properties/memoryReads/$ref",
+        "/$defs/performance/properties/data/properties/dbReads/properties/tagReads/$ref",
+        "/$defs/performance/properties/data/properties/dbReads/properties/artifactLinkReads/$ref",
+        "/$defs/performanceRuntimeProfile/properties/budgets/properties/search/properties/candidateLimit/$ref",
+        "/$defs/performanceRuntimeProfile/properties/budgets/properties/search/properties/concurrentIndexReaders/$ref",
+        "/$defs/performanceRuntimeProfile/properties/budgets/properties/pack/properties/maxTokens/$ref",
+        "/$defs/performanceRuntimeProfile/properties/budgets/properties/pack/properties/maxCandidateMemories/$ref",
+        "/$defs/performanceRuntimeProfile/properties/budgets/properties/cache/properties/memoryCapMb/$ref",
+        "/$defs/performanceRuntimeProfile/properties/budgets/properties/cache/properties/entryCap/$ref",
+        "/$defs/performanceRuntimeProfile/properties/budgets/properties/cache/properties/hotsetPrewarmLimit/$ref",
+        "/$defs/performanceRuntimeProfile/properties/budgets/properties/writeSpool/properties/queueCap/$ref",
+        "/$defs/performanceRuntimeProfile/properties/budgets/properties/writeSpool/properties/batchCap/$ref",
+        "/$defs/performanceRuntimeProfile/properties/budgets/properties/writeSpool/properties/retryBudget/$ref",
+        "/$defs/performanceRuntimeProfile/properties/budgets/properties/steward/properties/maintenanceWindowMs/$ref",
+        "/$defs/performanceRuntimeProfile/properties/budgets/properties/steward/properties/graphRefreshBudget/$ref",
+        "/$defs/performanceSearch/properties/returnedHits/$ref",
+        "/$defs/performanceSearch/properties/sourceCounts/properties/lexical/$ref",
+        "/$defs/performanceSearch/properties/sourceCounts/properties/semanticFast/$ref",
+        "/$defs/performanceSearch/properties/sourceCounts/properties/semanticQuality/$ref",
+        "/$defs/performanceSearch/properties/sourceCounts/properties/hybrid/$ref",
+        "/$defs/performanceSearch/properties/sourceCounts/properties/reranked/$ref",
+        "/$defs/performanceSearch/properties/fieldCoverage/properties/fastScoreCount/$ref",
+        "/$defs/performanceSearch/properties/fieldCoverage/properties/qualityScoreCount/$ref",
+        "/$defs/performanceSearch/properties/fieldCoverage/properties/lexicalScoreCount/$ref",
+        "/$defs/performanceSearch/properties/fieldCoverage/properties/rerankScoreCount/$ref",
+        "/$defs/performanceSearch/properties/fieldCoverage/properties/metadataCount/$ref",
+        "/$defs/performanceSearch/properties/fieldCoverage/properties/explanationCount/$ref",
+    ] {
+        if response.pointer(pointer).and_then(Value::as_str) != Some("#/$defs/uint64") {
+            return Err(format!(
+                "search response unsigned field {pointer} must use the pinned uint64 domain"
+            ));
+        }
     }
     let request_description = request
         .pointer("/description")
@@ -780,6 +853,44 @@ fn daemon_search_response_v3_schema_rejects_rust_validator_drift_matrix() -> Tes
         if validate_json_schema(&invalid, &schema, "$").is_ok() {
             return Err(format!(
                 "daemon search response v3 schema accepted invalid {case}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn daemon_search_response_v3_uint64_boundaries_match_rust_validation() -> TestResult {
+    const COUNTER_PATH: &str = "/response/data/rerank/advisorySummary/sessionOccurrenceCount";
+
+    let schema = read_schema(SEARCH_RESPONSE_SCHEMA_PATH)?;
+    let valid = actual_daemon_search_result("uint64 schema boundaries")?;
+
+    let mut maximum = valid.clone();
+    maximum["response"]["data"]["rerank"]["advisorySummary"]["sessionOccurrenceCount"] =
+        serde_json::json!(u64::MAX);
+    validate_json_schema(&maximum, &schema, "$")
+        .map_err(|error| format!("schema rejected u64::MAX at {COUNTER_PATH}: {error}"))?;
+    DaemonSearchResult::from_value(maximum)
+        .map_err(|error| format!("Rust rejected u64::MAX at {COUNTER_PATH}: {error}"))?;
+
+    let over_u64: Value = serde_json::from_str("18446744073709551616")
+        .map_err(|error| format!("parse over-u64 fixture: {error}"))?;
+    for (case, invalid_number) in [
+        ("integral decimal", serde_json::json!(1.0)),
+        ("over-u64 integer", over_u64),
+    ] {
+        let mut invalid = valid.clone();
+        invalid["response"]["data"]["rerank"]["advisorySummary"]["sessionOccurrenceCount"] =
+            invalid_number;
+        if validate_json_schema(&invalid, &schema, "$").is_ok() {
+            return Err(format!(
+                "schema accepted invalid {case} at pinned counter {COUNTER_PATH}"
+            ));
+        }
+        if DaemonSearchResult::from_value(invalid).is_ok() {
+            return Err(format!(
+                "Rust accepted invalid {case} at pinned counter {COUNTER_PATH}"
             ));
         }
     }

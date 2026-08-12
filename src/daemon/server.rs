@@ -3369,21 +3369,19 @@ fn validate_canonical_search_data(data: &serde_json::Value) -> Result<(), String
         return Err("canonical search embed_backend drifted".to_owned());
     }
     if !data.get("query").is_some_and(serde_json::Value::is_string)
-        || ![
-            "request",
-            "scopeStats",
-            "metrics",
-            "rerank",
-            "profileRuntime",
-        ]
-        .iter()
-        .all(|field| data.get(*field).is_some_and(serde_json::Value::is_object))
+        || !["request", "scopeStats", "metrics", "profileRuntime"]
+            .iter()
+            .all(|field| data.get(*field).is_some_and(serde_json::Value::is_object))
         || !["consensus", "conflicts", "errors", "degraded"]
             .iter()
             .all(|field| data.get(*field).is_some_and(serde_json::Value::is_array))
     {
         return Err("canonical search nested data shape drifted".to_owned());
     }
+    validate_canonical_search_rerank(
+        data.get("rerank")
+            .ok_or_else(|| "canonical search rerank posture missing".to_owned())?,
+    )?;
     let elapsed_ms = data
         .get("elapsedMs")
         .and_then(serde_json::Value::as_f64)
@@ -3416,6 +3414,141 @@ fn validate_canonical_search_data(data: &serde_json::Value) -> Result<(), String
         .is_some_and(|value| value.as_str() != Some("data.results"))
     {
         return Err("canonical search resultPath drifted".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_canonical_search_rerank(value: &serde_json::Value) -> Result<(), String> {
+    const REQUIRED: &[&str] = &[
+        "schema",
+        "mode",
+        "configured",
+        "topK",
+        "rerankScoreCount",
+        "scoreKind",
+        "available",
+        "degradedCode",
+        "advisory",
+        "advisorySummary",
+    ];
+    validate_exact_object_fields(value, "canonical search rerank posture", REQUIRED, &[])?;
+    if value.get("schema").and_then(serde_json::Value::as_str) != Some("ee.rerank_posture.v1")
+        || !matches!(
+            value.get("mode").and_then(serde_json::Value::as_str),
+            Some("reranked" | "fusion_only_degraded" | "fusion_only")
+        )
+        || !matches!(
+            value.get("configured").and_then(serde_json::Value::as_str),
+            Some("auto" | "off")
+        )
+        || !["topK", "rerankScoreCount"]
+            .iter()
+            .all(|field| value.get(*field).is_some_and(is_json_unsigned))
+        || !matches!(
+            value.get("scoreKind").and_then(serde_json::Value::as_str),
+            Some("reranked" | "rrf_fused")
+        )
+        || !value
+            .get("available")
+            .is_some_and(serde_json::Value::is_boolean)
+        || !value.get("degradedCode").is_some_and(|code| {
+            code.is_null() || code.as_str().is_some_and(|code| !code.is_empty())
+        })
+    {
+        return Err("canonical search rerank posture field types or values drifted".to_owned());
+    }
+
+    let advisory = value
+        .get("advisory")
+        .ok_or_else(|| "canonical search rerank advisory missing".to_owned())?;
+    if !advisory.is_null() {
+        validate_exact_object_fields(
+            advisory,
+            "canonical search rerank advisory",
+            &[
+                "code",
+                "severity",
+                "permanent",
+                "message",
+                "repair",
+                "resolution",
+            ],
+            &[],
+        )?;
+        if !advisory
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|code| !code.is_empty())
+            || !matches!(
+                advisory.get("severity").and_then(serde_json::Value::as_str),
+                Some("info" | "low" | "warning" | "medium" | "high" | "critical")
+            )
+            || !advisory
+                .get("permanent")
+                .is_some_and(serde_json::Value::is_boolean)
+            || !advisory
+                .get("message")
+                .is_some_and(serde_json::Value::is_string)
+            || !advisory
+                .get("repair")
+                .is_some_and(|repair| repair.is_null() || repair.is_string())
+            || !matches!(
+                advisory
+                    .get("resolution")
+                    .and_then(serde_json::Value::as_str),
+                Some("verified_offline_import_available" | "retry_or_inspect_local_registry")
+            )
+        {
+            return Err(
+                "canonical search rerank advisory field types or values drifted".to_owned(),
+            );
+        }
+    }
+
+    let summary_value = value
+        .get("advisorySummary")
+        .ok_or_else(|| "canonical search rerank advisorySummary missing".to_owned())?;
+    validate_exact_object_fields(
+        summary_value,
+        "canonical search rerank advisorySummary",
+        &[
+            "scope",
+            "permanent",
+            "distinctCount",
+            "emittedCount",
+            "suppressedCount",
+            "sessionOccurrenceCount",
+            "sessionSuppressedCount",
+        ],
+        &["tracking"],
+    )?;
+    let summary = summary_value
+        .as_object()
+        .ok_or_else(|| "canonical search rerank advisorySummary must be an object".to_owned())?;
+    if !matches!(
+        summary.get("scope").and_then(serde_json::Value::as_str),
+        Some("process" | "response")
+    ) || !summary
+        .get("permanent")
+        .is_some_and(|permanent| permanent.is_null() || permanent.is_boolean())
+        || ![
+            "distinctCount",
+            "emittedCount",
+            "suppressedCount",
+            "sessionOccurrenceCount",
+            "sessionSuppressedCount",
+        ]
+        .iter()
+        .all(|field| summary.get(*field).is_some_and(is_json_unsigned))
+    {
+        return Err(
+            "canonical search rerank advisorySummary field types or values drifted".to_owned(),
+        );
+    }
+    if let Some(tracking) = summary.get("tracking")
+        && tracking.as_str() != Some("capacity_deferred")
+    {
+        return Err("canonical search rerank advisorySummary tracking drifted".to_owned());
     }
     Ok(())
 }
@@ -5502,21 +5635,48 @@ mod tests {
         let policy = DaemonDispatchPolicy::default();
         assert!(policy.bound_workspace_id().is_none());
         let barrier = Arc::new(std::sync::Barrier::new(THREADS_PER_WORKSPACE * 2 + 1));
+        let progress_gate = Arc::new(std::sync::Barrier::new(3));
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
         let mut workers = Vec::new();
         for workspace_id in ["workspace-a", "workspace-b"] {
-            for _ in 0..THREADS_PER_WORKSPACE {
+            for worker_index in 0..THREADS_PER_WORKSPACE {
                 let report = report.clone();
                 let policy = policy.clone();
                 let barrier = Arc::clone(&barrier);
+                let progress_gate = Arc::clone(&progress_gate);
+                let progress_tx = progress_tx.clone();
                 workers.push(thread::spawn(move || {
                     barrier.wait();
                     let (response, result) =
                         advisory_delivery_candidate(&report, &policy, workspace_id);
+                    if worker_index == 0 {
+                        progress_tx
+                            .send(workspace_id)
+                            .expect("cross-workspace progress receiver must remain live");
+                        progress_gate.wait();
+                    }
                     (workspace_id, response, result)
                 }));
             }
         }
+        drop(progress_tx);
         barrier.wait();
+        let progressed_workspaces = [
+            progress_rx
+                .recv()
+                .expect("workspace-a or workspace-b must make reservation progress"),
+            progress_rx
+                .recv()
+                .expect("both workspaces must make reservation progress"),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+        progress_gate.wait();
+        assert_eq!(
+            progressed_workspaces,
+            ["workspace-a", "workspace-b"].into_iter().collect(),
+            "both workspaces must complete a reservation while the concurrent wave is still in flight"
+        );
         let mut outcomes = workers
             .into_iter()
             .map(|worker| worker.join().expect("reservation worker must not panic"))
@@ -5546,6 +5706,23 @@ mod tests {
                     .iter()
                     .all(|(_, response, _)| response.error.is_none())
             );
+            for (_, response, result) in workspace_outcomes {
+                let advisory = result
+                    .pointer("/response/data/rerank/advisory")
+                    .expect("rerank advisory field must remain present");
+                if response.delivery.is_some() {
+                    assert_eq!(
+                        advisory.get("code").and_then(serde_json::Value::as_str),
+                        Some("rerank_model_unavailable"),
+                        "each workspace winner must own its advisory"
+                    );
+                } else {
+                    assert!(
+                        advisory.is_null(),
+                        "every competing cross-workspace nonwinner must carry rerank.advisory=null"
+                    );
+                }
+            }
         }
         for (_, response, _) in &mut outcomes {
             settle_daemon_response_delivery(&policy, response, true);
@@ -5610,6 +5787,23 @@ mod tests {
                 .count(),
             1
         );
+        for (response, result) in &outcomes {
+            let advisory = result
+                .pointer("/response/data/rerank/advisory")
+                .expect("rerank advisory field must remain present");
+            if response.delivery.is_some() {
+                assert_eq!(
+                    advisory.get("code").and_then(serde_json::Value::as_str),
+                    Some("rerank_model_unavailable"),
+                    "the reservation winner must own the advisory"
+                );
+            } else {
+                assert!(
+                    advisory.is_null(),
+                    "every competing same-workspace nonwinner must carry rerank.advisory=null"
+                );
+            }
+        }
         let first_response = outcomes
             .iter_mut()
             .find_map(|(response, _)| {
