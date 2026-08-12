@@ -39,6 +39,16 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     }
 }
 
+fn resume_test_tempdir(prefix: &str) -> Result<tempfile::TempDir, String> {
+    let canonical_temp_root = std::env::temp_dir()
+        .canonicalize()
+        .map_err(|error| format!("canonicalize test temp root: {error}"))?;
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(canonical_temp_root)
+        .map_err(|error| format!("create test temp directory: {error}"))
+}
+
 fn string_set(value: &Value, pointer: &str) -> Result<BTreeSet<String>, String> {
     let array = value
         .pointer(pointer)
@@ -143,7 +153,7 @@ fn resume_required_fields_and_staleness_contract_are_pinned() -> TestResult {
 #[test]
 #[ignore = "real-binary resume script acceptance; run as a focused pinned RCH proof"]
 fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
-    let temp = tempfile::tempdir().map_err(|error| format!("create E2E temp base: {error}"))?;
+    let temp = resume_test_tempdir("ee-resume-e2e-bridge.")?;
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/e2e_resume.sh");
     let ee_bin = env!("CARGO_BIN_EXE_ee");
     let output = Command::new(&script)
@@ -256,7 +266,7 @@ fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
 fn resume_real_binary_completes_under_two_seconds_on_10k_store() -> TestResult {
     const CORPUS_SIZE: usize = 10_000;
 
-    let temp = tempfile::tempdir().map_err(|error| format!("create temp workspace: {error}"))?;
+    let temp = resume_test_tempdir("ee-resume-10k.")?;
     let workspace = temp.path().join("workspace");
     let store_dir = workspace.join(".ee");
     std::fs::create_dir_all(&store_dir)
