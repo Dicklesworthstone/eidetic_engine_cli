@@ -589,9 +589,15 @@ fn orient_fast_snippet(content: &str) -> String {
     }
     let dropped_lines = lines.next().is_some();
     let joined = kept.join("\n");
-    let mut chars = joined.chars();
-    let mut snippet = chars.by_ref().take(MAX_CHARS).collect::<String>();
-    if chars.next().is_some() || dropped_lines {
+    let joined_chars = joined.chars().count();
+    let truncated = joined_chars > MAX_CHARS || dropped_lines;
+    let kept_chars = if truncated {
+        MAX_CHARS.saturating_sub(1)
+    } else {
+        MAX_CHARS
+    };
+    let mut snippet = joined.chars().take(kept_chars).collect::<String>();
+    if truncated {
         snippet.push('…');
     }
     snippet
@@ -1386,6 +1392,28 @@ mod tests {
 
     type TestResult = Result<(), String>;
 
+    #[test]
+    fn orient_fast_snippet_keeps_the_480_character_contract() {
+        let chars_479 = "a".repeat(479);
+        let chars_480 = "b".repeat(480);
+        let chars_481 = "c".repeat(481);
+        assert_eq!(orient_fast_snippet(&chars_479), chars_479);
+        assert_eq!(orient_fast_snippet(&chars_480), chars_480);
+        let truncated = orient_fast_snippet(&chars_481);
+        assert_eq!(truncated.chars().count(), 480);
+        assert!(truncated.ends_with('…'));
+
+        let unicode = "λ".repeat(481);
+        let unicode_truncated = orient_fast_snippet(&unicode);
+        assert_eq!(unicode_truncated.chars().count(), 480);
+        assert!(unicode_truncated.ends_with('…'));
+
+        assert_eq!(
+            orient_fast_snippet("  first line  \n\n second line \n third line "),
+            "first line\nsecond line…"
+        );
+    }
+
     fn ensure_equal<T>(actual: &T, expected: &T, context: &str) -> TestResult
     where
         T: std::fmt::Debug + PartialEq,
@@ -1678,7 +1706,7 @@ mod tests {
         if !tag_hygiene
             .tags
             .iter()
-            .any(|tag| tag.starts_with("[REDACTED:public_replay_text:"))
+            .any(|tag| tag == &crate::policy::redaction_placeholder("github_token"))
         {
             return Err(format!(
                 "secret-shaped tag must egress through the shared redaction policy: {tag_hygiene:?}"

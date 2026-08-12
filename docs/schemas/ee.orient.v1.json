@@ -107,7 +107,7 @@
       "additionalProperties": false,
       "properties": {
         "id": { "type": "string" },
-        "snippet": { "type": "string" },
+        "snippet": { "type": "string", "maxLength": 480 },
         "createdAt": { "type": "string" },
         "tags": {
           "type": "array",

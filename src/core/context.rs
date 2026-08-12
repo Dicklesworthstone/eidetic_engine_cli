@@ -1365,9 +1365,14 @@ pub(crate) fn admit_recent_context_memories(
 
 fn orient_fast_snippet_source(content: &str) -> String {
     const MAX_CHARS: usize = 480;
-    let mut chars = content.chars();
-    let mut snippet = chars.by_ref().take(MAX_CHARS).collect::<String>();
-    if chars.next().is_some() {
+    let truncated = content.chars().count() > MAX_CHARS;
+    let kept_chars = if truncated {
+        MAX_CHARS.saturating_sub(1)
+    } else {
+        MAX_CHARS
+    };
+    let mut snippet = content.chars().take(kept_chars).collect::<String>();
+    if truncated {
         snippet.push('…');
     }
     snippet
@@ -11721,6 +11726,19 @@ mod tests {
         PackProvenance, PackResourceProfile, PackScoreBreakdown, PackSection, TokenBudget,
         assemble_draft_with_profile, assemble_draft_with_profile_and_options,
     };
+
+    #[test]
+    fn orient_fast_snippet_source_counts_ellipsis_inside_the_character_cap() {
+        for (length, truncated) in [(479, false), (480, false), (481, true)] {
+            let source = "λ".repeat(length);
+            let snippet = super::orient_fast_snippet_source(&source);
+            assert!(snippet.chars().count() <= 480);
+            assert_eq!(snippet.ends_with('…'), truncated);
+            if !truncated {
+                assert_eq!(snippet, source);
+            }
+        }
+    }
 
     fn workspace_at(root: &str) -> WorkspaceLocation {
         WorkspaceLocation::new(PathBuf::from(root))

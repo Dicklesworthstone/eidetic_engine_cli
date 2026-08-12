@@ -282,5 +282,19 @@ fn orient_fast_and_full_instances_validate_and_unknown_fields_fail() -> TestResu
             format!("strict orient schema must reject an unknown field at {pointer}"),
         )?;
     }
+
+    ensure(
+        schema
+            .pointer("/$defs/fastContentItem/properties/snippet/maxLength")
+            .and_then(Value::as_u64)
+            == Some(480),
+        "fast-content snippets must remain contractually capped at 480 characters",
+    )?;
+    let mut oversized_snippet = fast;
+    oversized_snippet["fastContent"]["recent"][0]["snippet"] = json!("λ".repeat(481));
+    ensure(
+        ee::testing::validate_json_schema_instance(&oversized_snippet, &schema).is_err(),
+        "orient schema must reject a 481-character fast-content snippet",
+    )?;
     Ok(())
 }
