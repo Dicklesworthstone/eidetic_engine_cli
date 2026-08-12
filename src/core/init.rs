@@ -557,6 +557,45 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
         };
     }
 
+    // A new store beside pre-existing agent guidance requires explicit
+    // confirmation. This check must run before creating `.ee` so a mistaken
+    // workspace cannot leave behind a partial store. Existing initialized
+    // stores remain idempotent, and forced initialization still relies on the
+    // create-new boilerplate path below to preserve both files unchanged.
+    let addressed_store_is_missing = matches!(
+        fs::symlink_metadata(&database_path),
+        Err(error) if error.kind() == ErrorKind::NotFound
+    );
+    if addressed_store_is_missing && !options.force {
+        let existing_guidance = [workspace.join("AGENTS.md"), workspace.join("CLAUDE.md")]
+            .into_iter()
+            .filter(|path| fs::symlink_metadata(path).is_ok())
+            .collect::<Vec<_>>();
+        if !existing_guidance.is_empty() {
+            for path in existing_guidance {
+                record_failed_init_action(
+                    &mut actions,
+                    &mut action_errors,
+                    "check_file",
+                    path,
+                    "force_required",
+                    "Existing agent guidance requires explicit initialization intent. Retry the same `ee init` command with `--force`; the existing file will be preserved unchanged.",
+                );
+            }
+            return InitReport {
+                version,
+                status: InitStatus::Failed,
+                workspace,
+                ee_dir,
+                database_path,
+                index_dir,
+                actions,
+                action_errors,
+                dry_run: false,
+            };
+        }
+    }
+
     if let Some(issue) = init_path_safety_issue(&ee_dir, options.allow_symlink) {
         record_failed_init_action(
             &mut actions,

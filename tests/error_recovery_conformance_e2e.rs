@@ -3101,8 +3101,9 @@ fn empty_workspace_discovers_registered_remote_store_and_skips_bad_rows() -> Tes
 /// bd-workspace-miss-init-suggestion-sfjvq negatives: an ORDINARY storage
 /// failure must keep exit 3 / code `storage` — proving the dedicated
 /// workspace-miss exit 10 is a distinction, not a rename — and `ee init`
-/// into a directory with existing AGENTS.md/CLAUDE.md must preserve both
-/// files byte-for-byte (no silent overwrite).
+/// into an uninitialized directory with existing AGENTS.md/CLAUDE.md must
+/// require `--force` before creating a store. Forced and later idempotent init
+/// must preserve both files byte-for-byte (no silent overwrite).
 #[test]
 fn ordinary_storage_failure_keeps_exit_three_and_init_preserves_agent_docs() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -3135,8 +3136,45 @@ fn ordinary_storage_failure_keeps_exit_three_and_init_preserves_agent_docs() -> 
         format!("ordinary storage failure must keep code storage, got: {code}"),
     )?;
 
-    // Phase 2: init preservation re-proof — pre-existing AGENTS.md and
-    // CLAUDE.md must survive `ee init` unchanged.
+    // Phase 2: either guidance file alone is sufficient to require --force.
+    for guidance_name in ["AGENTS.md", "CLAUDE.md"] {
+        let single_root = tempdir
+            .path()
+            .join(format!("init_single_guidance_{guidance_name}"));
+        std::fs::create_dir_all(&single_root).map_err(|error| error.to_string())?;
+        let guidance_path = single_root.join(guidance_name);
+        std::fs::write(
+            &guidance_path,
+            format!("existing {guidance_name} sentinel\n"),
+        )
+        .map_err(|error| error.to_string())?;
+        let guidance_before =
+            snapshot_file(&guidance_path)?.ok_or("single guidance snapshot missing")?;
+        let refusal = run_ee(&[
+            "init".to_owned(),
+            "--workspace".to_owned(),
+            single_root.to_string_lossy().to_string(),
+            "--json".to_owned(),
+        ])?;
+        let refusal_json = stdout_json(&refusal, guidance_name)?;
+        let refusal_errors = array_at(&refusal_json, "/data/actionErrors", guidance_name)?;
+        let guidance_materialized = worker_materialized_path(&guidance_path)?;
+        let guidance_materialized_text = guidance_materialized.to_string_lossy().to_string();
+        ensure(
+            refusal.status.code() == Some(2)
+                && refusal_errors.len() == 1
+                && refusal_errors[0]["status"] == serde_json::json!("force_required")
+                && refusal_errors[0]["path"].as_str() == Some(guidance_materialized_text.as_str())
+                && !single_root.join(".ee").exists()
+                && snapshot_file(&guidance_path)? == Some(guidance_before),
+            format!(
+                "{guidance_name} alone must require --force without changing the file or creating .ee: {refusal_json}"
+            ),
+        )?;
+    }
+
+    // Phase 3: a brand-new store beside both pre-existing files must fail
+    // closed until the caller supplies --force.
     let docs_root = tempdir.path().join("init_preserve_sfjvq");
     std::fs::create_dir_all(&docs_root).map_err(|error| error.to_string())?;
     let agents_sentinel = "existing AGENTS.md sentinel: ee init must never overwrite me\n";
@@ -3149,51 +3187,142 @@ fn ordinary_storage_failure_keeps_exit_three_and_init_preserves_agent_docs() -> 
     let claude_path = docs_root.join("CLAUDE.md");
     let agents_before = snapshot_file(&agents_path)?.ok_or("AGENTS.md snapshot missing")?;
     let claude_before = snapshot_file(&claude_path)?.ok_or("CLAUDE.md snapshot missing")?;
-    for (label, extra) in [("ordinary init", None), ("forced init", Some("--force"))] {
-        let mut args = vec![
-            "init".to_owned(),
-            "--workspace".to_owned(),
-            docs_root.to_string_lossy().to_string(),
-            "--json".to_owned(),
-        ];
-        if let Some(flag) = extra {
-            args.push(flag.to_owned());
-        }
-        let init = run_ee(&args)?;
+    let ordinary = run_ee(&[
+        "init".to_owned(),
+        "--workspace".to_owned(),
+        docs_root.to_string_lossy().to_string(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        ordinary.status.code() == Some(2),
+        format!(
+            "ordinary init beside existing agent docs must require --force with configuration exit 2, got {:?}: {}",
+            ordinary.status.code(),
+            String::from_utf8_lossy(&ordinary.stdout)
+        ),
+    )?;
+    let ordinary_json = stdout_json(&ordinary, "ordinary init refusal")?;
+    ensure(
+        ordinary_json["schema"] == serde_json::json!("ee.response.v2")
+            && ordinary_json["success"] == serde_json::json!(false)
+            && ordinary_json["data"]["status"] == serde_json::json!("failed"),
+        format!("ordinary init refusal envelope drifted: {ordinary_json}"),
+    )?;
+    let refusal_actions = array_at(
+        &ordinary_json,
+        "/data/actions",
+        "ordinary init refusal actions",
+    )?;
+    let refusal_errors = array_at(
+        &ordinary_json,
+        "/data/actionErrors",
+        "ordinary init refusal errors",
+    )?;
+    ensure(
+        refusal_actions.len() == 2 && refusal_errors.len() == 2,
+        format!(
+            "ordinary init must refuse both existing guidance files exactly once: actions={refusal_actions:?} errors={refusal_errors:?}"
+        ),
+    )?;
+    for expected_path in [&agents_path, &claude_path] {
+        let expected_materialized = worker_materialized_path(expected_path)?;
+        let expected_materialized_text = expected_materialized.to_string_lossy().to_string();
         ensure(
-            init.status.success(),
+            refusal_actions.iter().any(|action| {
+                action["action"].as_str() == Some("check_file")
+                    && action["status"].as_str() == Some("force_required")
+                    && action["path"].as_str() == Some(expected_materialized_text.as_str())
+            }) && refusal_errors.iter().any(|error| {
+                error["action"].as_str() == Some("check_file")
+                    && error["status"].as_str() == Some("force_required")
+                    && error["path"].as_str() == Some(expected_materialized_text.as_str())
+                    && error["message"].as_str().is_some_and(|message| {
+                        message.contains("--force") && message.contains("preserved unchanged")
+                    })
+            }),
             format!(
-                "{label} beside existing agent docs must succeed with extra flag {extra:?}: {}",
-                String::from_utf8_lossy(&init.stdout)
-            ),
-        )?;
-        let init_json = stdout_json(&init, label)?;
-        let actions = array_at(&init_json, "/data/actions", label)?;
-        for expected_path in [&agents_path, &claude_path] {
-            let expected_materialized = worker_materialized_path(expected_path)?;
-            let expected_materialized_text = expected_materialized.to_string_lossy().to_string();
-            ensure(
-                actions.iter().any(|action| {
-                    action["action"].as_str() == Some("check_file")
-                        && action["status"].as_str() == Some("exists")
-                        && action["path"].as_str() == Some(expected_materialized_text.as_str())
-                }),
-                format!(
-                    "{label} must report the preserved file as exists: path={} actions={actions:?}",
-                    expected_materialized.display()
-                ),
-            )?;
-        }
-        let agents_after = snapshot_file(&agents_path)?
-            .ok_or_else(|| format!("AGENTS.md disappeared after {label}"))?;
-        let claude_after = snapshot_file(&claude_path)?
-            .ok_or_else(|| format!("CLAUDE.md disappeared after {label}"))?;
-        ensure(
-            agents_after == agents_before && claude_after == claude_before,
-            format!(
-                "{label} must independently preserve AGENTS.md and CLAUDE.md byte-for-byte with metadata"
+                "ordinary init must emit an actionable force_required refusal for {}: actions={refusal_actions:?} errors={refusal_errors:?}",
+                expected_materialized.display()
             ),
         )?;
     }
+    let agents_after_refusal =
+        snapshot_file(&agents_path)?.ok_or("AGENTS.md disappeared after ordinary refusal")?;
+    let claude_after_refusal =
+        snapshot_file(&claude_path)?.ok_or("CLAUDE.md disappeared after ordinary refusal")?;
+    ensure(
+        !docs_root.join(".ee").exists()
+            && agents_after_refusal == agents_before
+            && claude_after_refusal == claude_before,
+        "ordinary refusal must not create .ee or change either guidance file".to_owned(),
+    )?;
+
+    // Phase 4: --force confirms intent but does not authorize overwriting the
+    // existing guidance files.
+    let forced = run_ee(&[
+        "init".to_owned(),
+        "--workspace".to_owned(),
+        docs_root.to_string_lossy().to_string(),
+        "--json".to_owned(),
+        "--force".to_owned(),
+    ])?;
+    ensure(
+        forced.status.success(),
+        format!(
+            "forced init beside existing agent docs must succeed: {}",
+            String::from_utf8_lossy(&forced.stdout)
+        ),
+    )?;
+    let forced_json = stdout_json(&forced, "forced init")?;
+    let forced_actions = array_at(&forced_json, "/data/actions", "forced init")?;
+    for expected_path in [&agents_path, &claude_path] {
+        let expected_materialized = worker_materialized_path(expected_path)?;
+        let expected_materialized_text = expected_materialized.to_string_lossy().to_string();
+        ensure(
+            forced_actions.iter().any(|action| {
+                action["action"].as_str() == Some("check_file")
+                    && action["status"].as_str() == Some("exists")
+                    && action["path"].as_str() == Some(expected_materialized_text.as_str())
+            }),
+            format!(
+                "forced init must report the preserved file as exists: path={} actions={forced_actions:?}",
+                expected_materialized.display()
+            ),
+        )?;
+    }
+    let agents_after_force =
+        snapshot_file(&agents_path)?.ok_or("AGENTS.md disappeared after forced init")?;
+    let claude_after_force =
+        snapshot_file(&claude_path)?.ok_or("CLAUDE.md disappeared after forced init")?;
+    ensure(
+        docs_root.join(".ee").join("ee.db").is_file()
+            && agents_after_force == agents_before
+            && claude_after_force == claude_before,
+        "forced init must create the store and preserve both guidance files byte-for-byte with metadata"
+            .to_owned(),
+    )?;
+
+    // Phase 5: once initialized, ordinary init stays idempotent even though
+    // both guidance files exist.
+    let idempotent = run_ee(&[
+        "init".to_owned(),
+        "--workspace".to_owned(),
+        docs_root.to_string_lossy().to_string(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        idempotent.status.success(),
+        format!(
+            "ordinary init of the initialized store must remain idempotent: {}",
+            String::from_utf8_lossy(&idempotent.stdout)
+        ),
+    )?;
+    let idempotent_json = stdout_json(&idempotent, "idempotent init")?;
+    ensure(
+        idempotent_json["data"]["status"] == serde_json::json!("already_exists")
+            && snapshot_file(&agents_path)? == Some(agents_before)
+            && snapshot_file(&claude_path)? == Some(claude_before),
+        format!("idempotent init must preserve status and both guidance files: {idempotent_json}"),
+    )?;
     Ok(())
 }
