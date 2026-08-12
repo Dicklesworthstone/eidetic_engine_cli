@@ -20,18 +20,23 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlmodel_core::Value as SqlValue;
 
+use crate::core::memory_scope::MemoryScopeContext;
 use crate::core::orient::{
-    AddressedStoreState, NearbyStoreScanAssessment, NearbyStoreScanOutcome, addressed_store_state,
-    discover_nearby_stores_for_database,
+    AddressedStoreState, NEARBY_STORE_REPORT_LIMIT, NearbyStoreScanAssessment,
+    NearbyStoreScanOutcome, addressed_store_state, discover_nearby_stores_for_database,
 };
 use crate::db::{DbConnection, StoredMemory};
 use crate::models::memory::typed_memory_fields_from_json;
-use crate::models::{DomainError, MemoryKind};
+use crate::models::{
+    DomainError, MemoryId, MemoryKind, MemoryLevel, MemoryScope, ProvenanceUri, TrustClass,
+};
+use crate::pack::PackProvenance;
 
 /// Wire schema id for the resume report.
 pub const RESUME_SCHEMA_V1: &str = "ee.resume.v1";
@@ -39,12 +44,16 @@ pub const RESUME_SCHEMA_V1: &str = "ee.resume.v1";
 pub const SESSION_GAP_SECONDS: i64 = 4 * 3600;
 /// Items listed per session (summary counts stay exact).
 pub const SESSION_ITEM_CAP: usize = 20;
+/// Maximum number of session groups one response may materialize.
+pub const RESUME_SESSION_CAP: usize = 64;
 /// Open-loop tag vocabulary.
 pub const OPEN_LOOP_TAGS: [&str; 6] = ["next", "queue", "blocking", "pending", "todo", "revisit"];
 /// Wall-clock budget for the nearby-store scan.
 pub const RESUME_NEARBY_SCAN_BUDGET_MS: u64 = 250;
 /// Cap on open-loop tagged items and staleness flags.
 const OPEN_LOOP_CAP: usize = 32;
+/// Base commands plus one discovery diagnostic and one ranked retarget.
+const RESUME_NEXT_COMMAND_CAP: usize = 5;
 /// Page size for resume storage reads and the single-pass decision projection.
 /// This stays below ordinary SQLite bind limits and prevents per-row queries.
 const RESUME_STORAGE_PAGE_SIZE: usize = 256;
@@ -53,7 +62,7 @@ const RESUME_STORAGE_PAGE_SIZE: usize = 256;
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResumeProvenance {
-    pub uri: Option<String>,
+    pub uri: String,
     pub trust_class: String,
     pub verification_status: String,
 }
@@ -118,6 +127,8 @@ pub struct ResumeDecision {
     pub revisit_by: Option<String>,
     pub revisit_status: String,
     pub created_at: String,
+    pub provenance: ResumeProvenance,
+    pub redaction: ResumeRedactionPosture,
 }
 
 /// Open loops: revisit-conditioned decisions + tagged queue items.
@@ -167,6 +178,110 @@ fn public_resume_text(value: &str, field: &str, reasons: &mut Vec<String>) -> St
     report.content
 }
 
+/// Batched, read-only admission boundary for resume projections.
+///
+/// Storage supplies the candidate rows and tags in bounded queries. This
+/// boundary then applies the same workspace scope, typed identity,
+/// provenance parsing, secret screening, and public-egress posture used by
+/// normal context admission without introducing per-memory SQL.
+struct ResumeAdmissionBoundary {
+    scope: MemoryScopeContext,
+    workspace_id: String,
+}
+
+impl ResumeAdmissionBoundary {
+    fn for_workspace(workspace_path: &Path) -> Self {
+        Self {
+            scope: MemoryScopeContext::for_workspace(workspace_path, MemoryScope::Workspace, false),
+            workspace_id: crate::core::workspace::stable_workspace_id(workspace_path),
+        }
+    }
+
+    fn admit(&self, mut memory: StoredMemory, tags: &[String]) -> Option<StoredMemory> {
+        let level = MemoryLevel::from_str(&memory.level).ok()?;
+        let kind = MemoryKind::from_str(&memory.kind).ok()?;
+        if MemoryId::from_str(&memory.id).is_err()
+            || memory.workspace_id != self.workspace_id
+            || memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+            || !self.scope.memory_in_scope_with_tags(&memory, tags)
+            || !crate::policy::redact_secret_like_content(&memory.content)
+                .redacted_reasons
+                .is_empty()
+        {
+            return None;
+        }
+        memory.level = level.as_str().to_owned();
+        memory.kind = kind.as_str().to_owned();
+        Some(memory)
+    }
+}
+
+fn resume_provenance_uri(memory: &StoredMemory, reasons: &mut Vec<String>) -> String {
+    let memory_id = match MemoryId::from_str(&memory.id) {
+        Ok(memory_id) => memory_id,
+        Err(_) => {
+            reasons.push("provenanceUri:invalid_memory_id".to_owned());
+            return "[REDACTED:invalid_memory_id]".to_owned();
+        }
+    };
+    let uri = match memory.provenance_uri.as_deref() {
+        Some(raw) => {
+            // Record the public-egress posture even though the canonical URI
+            // parser and PackProvenance renderer own the value we emit.
+            let public_raw = public_resume_text(raw, "provenanceUri", reasons);
+            if public_raw == raw {
+                match ProvenanceUri::from_str(raw) {
+                    Ok(uri) => uri,
+                    Err(_) => {
+                        reasons.push("provenanceUri:invalid_fallback".to_owned());
+                        ProvenanceUri::EeMemory(memory_id)
+                    }
+                }
+            } else {
+                ProvenanceUri::EeMemory(memory_id)
+            }
+        }
+        None => ProvenanceUri::EeMemory(memory_id),
+    };
+    let rendered = match PackProvenance::new(uri, "Admitted by the bounded resume projection.") {
+        Ok(provenance) => provenance.rendered().uri,
+        Err(_) => {
+            reasons.push("provenanceUri:render_failed".to_owned());
+            return "[REDACTED:invalid_provenance]".to_owned();
+        }
+    };
+    if memory
+        .provenance_uri
+        .as_deref()
+        .is_some_and(|raw| raw != rendered)
+    {
+        reasons.push("provenanceUri:pack_output_redaction".to_owned());
+    }
+    rendered
+}
+
+fn resume_provenance(memory: &StoredMemory, reasons: &mut Vec<String>) -> ResumeProvenance {
+    let trust_class = match TrustClass::from_str(&memory.trust_class) {
+        Ok(trust_class) => trust_class,
+        Err(_) => {
+            reasons.push("provenance.trustClass:invalid_fallback".to_owned());
+            TrustClass::AgentAssertion
+        }
+    }
+    .as_str()
+    .to_owned();
+    let verification_status = public_resume_text(
+        &memory.provenance_verification_status,
+        "provenance.verificationStatus",
+        reasons,
+    );
+    ResumeProvenance {
+        uri: resume_provenance_uri(memory, reasons),
+        trust_class,
+        verification_status,
+    }
+}
+
 fn item(
     memory: &StoredMemory,
     tags: &BTreeMap<String, Vec<String>>,
@@ -180,10 +295,7 @@ fn item(
         .flatten()
         .map(|tag| public_resume_text(tag, "tag", &mut redaction_reasons))
         .collect();
-    let provenance_uri = memory
-        .provenance_uri
-        .as_deref()
-        .map(|uri| public_resume_text(uri, "provenanceUri", &mut redaction_reasons));
+    let provenance = resume_provenance(memory, &mut redaction_reasons);
     redaction_reasons.sort();
     redaction_reasons.dedup();
     ResumeItem {
@@ -194,11 +306,7 @@ fn item(
         tags: safe_tags,
         created_at: memory.created_at.clone(),
         selection_reason,
-        provenance: ResumeProvenance {
-            uri: provenance_uri,
-            trust_class: memory.trust_class.clone(),
-            verification_status: memory.provenance_verification_status.clone(),
-        },
+        provenance,
         redaction: ResumeRedactionPosture {
             applied: !redaction_reasons.is_empty(),
             reasons: redaction_reasons,
@@ -304,7 +412,7 @@ fn group_sessions(
             .cmp(&left.newest_at)
             .then_with(|| left.label.cmp(&right.label))
     });
-    grouped.truncate(limit);
+    grouped.truncate(limit.min(RESUME_SESSION_CAP));
     grouped
 }
 
@@ -553,6 +661,9 @@ fn collect_revisit_decisions(
             let chosen = public_resume_text(&chosen, "decision.chosen", &mut redaction_reasons);
             let safe_revisit_by =
                 public_resume_text(&revisit_by, "decision.revisitBy", &mut redaction_reasons);
+            let provenance = resume_provenance(memory, &mut redaction_reasons);
+            redaction_reasons.sort();
+            redaction_reasons.dedup();
             decisions.push(ResumeDecision {
                 memory_id: memory.id.clone(),
                 topic,
@@ -560,6 +671,11 @@ fn collect_revisit_decisions(
                 revisit_status: revisit_status(&revisit_by, &now),
                 revisit_by: Some(safe_revisit_by),
                 created_at: memory.created_at.clone(),
+                provenance,
+                redaction: ResumeRedactionPosture {
+                    applied: !redaction_reasons.is_empty(),
+                    reasons: redaction_reasons,
+                },
             });
         }
     }
@@ -581,6 +697,17 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
         return Err(DomainError::Usage {
             message: "`--sessions` must be at least 1; received 0.".to_owned(),
             repair: Some("ee resume --sessions 1 --workspace . --json".to_owned()),
+        });
+    }
+    if options.sessions > RESUME_SESSION_CAP {
+        return Err(DomainError::Usage {
+            message: format!(
+                "`--sessions` cannot exceed {RESUME_SESSION_CAP}; received {}.",
+                options.sessions
+            ),
+            repair: Some(format!(
+                "ee resume --sessions {RESUME_SESSION_CAP} --workspace . --json"
+            )),
         });
     }
     match std::fs::symlink_metadata(options.database_path) {
@@ -633,15 +760,10 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
             message: format!("Failed to list current resume memories: {error}"),
             repair: Some("ee doctor --workspace . --json".to_owned()),
         })?;
-    // The exact placeholder is reserved for commit-reveal memories. Exclude it
-    // fail closed without a sidecar lookup, so even a placeholder-heavy store
-    // cannot turn admission into an unbounded N+1 query pattern.
-    let all_live: Vec<StoredMemory> = current_memories
-        .into_iter()
-        .filter(|memory| memory.content != crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT)
+    let ids: Vec<&str> = current_memories
+        .iter()
+        .map(|memory| memory.id.as_str())
         .collect();
-
-    let ids: Vec<&str> = all_live.iter().map(|memory| memory.id.as_str()).collect();
     let mut tags = BTreeMap::new();
     for page in ids.chunks(RESUME_STORAGE_PAGE_SIZE) {
         let page_tags = connection
@@ -657,6 +779,20 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
             })?;
         tags.extend(page_tags);
     }
+
+    // Apply the ordinary workspace-scope and public-content admission rules
+    // only after the one batched tag read. The exact sealed placeholder and
+    // secret-bearing bodies fail closed; tags and provenance remain eligible
+    // for field-level public redaction during projection. This deliberately
+    // performs no per-memory storage lookup.
+    let admission = ResumeAdmissionBoundary::for_workspace(&canonical_workspace);
+    let all_live: Vec<StoredMemory> = current_memories
+        .into_iter()
+        .filter_map(|memory| {
+            let memory_tags = tags.get(&memory.id).map(Vec::as_slice).unwrap_or_default();
+            admission.admit(memory, memory_tags)
+        })
+        .collect();
 
     // Recent end-state: episodic memories, newest first (created_at desc, id
     // desc as the deterministic tie-break).
@@ -707,11 +843,13 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
     let stale_count = apply_report_staleness(&mut tagged_items, &mut sessions, &all_live, &tags);
 
     let nearby_stores = if episodic_total == 0 {
-        Some(discover_nearby_stores_for_database(
+        let mut scan = discover_nearby_stores_for_database(
             options.workspace_path,
             options.database_path,
             std::time::Duration::from_millis(RESUME_NEARBY_SCAN_BUDGET_MS),
-        ))
+        );
+        scan.stores.truncate(NEARBY_STORE_REPORT_LIMIT);
+        Some(scan)
     } else {
         None
     };
@@ -742,11 +880,13 @@ fn empty_resume_report(options: &ResumeOptions<'_>) -> ResumeReport {
         .workspace_path
         .canonicalize()
         .unwrap_or_else(|_| options.workspace_path.to_path_buf());
-    let nearby_stores = Some(discover_nearby_stores_for_database(
+    let mut scan = discover_nearby_stores_for_database(
         options.workspace_path,
         options.database_path,
         std::time::Duration::from_millis(RESUME_NEARBY_SCAN_BUDGET_MS),
-    ));
+    );
+    scan.stores.truncate(NEARBY_STORE_REPORT_LIMIT);
+    let nearby_stores = Some(scan);
     let next_commands = resume_next_commands(nearby_stores.as_ref());
 
     ResumeReport {
@@ -795,6 +935,7 @@ fn resume_next_commands(nearby_stores: Option<&NearbyStoreScanAssessment>) -> Ve
             format!("ee resume --workspace {workspace} --database {database} --json"),
         );
     }
+    commands.truncate(RESUME_NEXT_COMMAND_CAP);
     commands
 }
 
@@ -816,10 +957,10 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        OPEN_LOOP_CAP, OPEN_LOOP_TAGS, ResumeItem, ResumeOptions, ResumeProvenance,
-        ResumeRedactionPosture, ResumeSession, StaleFlag, apply_report_staleness, apply_staleness,
-        build_resume_report, collect_revisit_decisions, group_sessions, item, parse_ts,
-        resume_next_commands,
+        OPEN_LOOP_CAP, OPEN_LOOP_TAGS, RESUME_SESSION_CAP, ResumeAdmissionBoundary, ResumeItem,
+        ResumeOptions, ResumeProvenance, ResumeRedactionPosture, ResumeSession, StaleFlag,
+        apply_report_staleness, apply_staleness, build_resume_report, collect_revisit_decisions,
+        group_sessions, item, parse_ts, resume_next_commands,
     };
     use crate::core::orient::{NearbyStore, NearbyStoreScanAssessment, NearbyStoreScanOutcome};
     use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection, StoredMemory};
@@ -839,7 +980,7 @@ mod tests {
             utility: 0.5,
             importance: 0.5,
             provenance_uri: None,
-            trust_class: "agent_inferred".to_owned(),
+            trust_class: "agent_assertion".to_owned(),
             trust_subclass: None,
             provenance_chain_hash: None,
             provenance_chain_hash_version: "1".to_owned(),
@@ -968,9 +1109,33 @@ mod tests {
     }
 
     #[test]
+    fn admission_boundary_rejects_cross_workspace_rows() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let boundary = ResumeAdmissionBoundary::for_workspace(&workspace);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x52534d47)).to_string();
+        let mut stored = memory(&memory_id, "episodic", "note", "2026-08-09T20:00:00Z");
+        stored.level = "EPISODIC".to_owned();
+        stored.kind = "playbook_step".to_owned();
+
+        assert!(boundary.admit(stored.clone(), &[]).is_none());
+        stored.workspace_id = crate::core::workspace::stable_workspace_id(&workspace);
+        let admitted = boundary
+            .admit(stored, &[])
+            .ok_or("same-workspace memory should be admitted")?;
+        assert_eq!(admitted.level, "episodic");
+        assert_eq!(admitted.kind, "playbook-step");
+        Ok(())
+    }
+
+    #[test]
     fn resume_item_applies_public_redaction_and_safe_provenance() {
         let secret = format!("sk_live_{}", "1234567890abcdef1234567890abcdef");
-        let mut stored = memory("mem_secret", "episodic", "note", "2026-08-09T20:00:00Z");
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x52534d46)).to_string();
+        let mut stored = memory(&memory_id, "episodic", "note", "2026-08-09T20:00:00Z");
         stored.content = format!("Use token={secret} only for the fixture.");
         stored.provenance_uri = Some("/Users/alice/private/session.jsonl".to_owned());
         stored.trust_class = "agent_assertion".to_owned();
@@ -987,13 +1152,7 @@ mod tests {
         assert!(projected.tags.iter().all(|tag| !tag.contains(&secret)));
         assert_eq!(projected.provenance.trust_class, "agent_assertion");
         assert_eq!(projected.provenance.verification_status, "unverified");
-        assert!(
-            projected
-                .provenance
-                .uri
-                .as_deref()
-                .is_some_and(|uri| !uri.contains("/Users/alice"))
-        );
+        assert!(!projected.provenance.uri.contains("/Users/alice"));
         assert!(
             projected
                 .redaction
@@ -1007,6 +1166,22 @@ mod tests {
                 .reasons
                 .iter()
                 .any(|reason| reason.starts_with("provenanceUri:"))
+        );
+    }
+
+    #[test]
+    fn invalid_trust_class_falls_back_with_explicit_redaction_posture() {
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x52534d48)).to_string();
+        let mut stored = memory(&memory_id, "episodic", "note", "2026-08-09T20:00:00Z");
+        stored.trust_class = "untrusted-free-form".to_owned();
+
+        let projected = item(&stored, &BTreeMap::new(), "recent_session_member");
+
+        assert_eq!(projected.provenance.trust_class, "agent_assertion");
+        assert!(projected.redaction.applied);
+        assert_eq!(
+            projected.redaction.reasons,
+            vec!["provenance.trustClass:invalid_fallback".to_owned()]
         );
     }
 
@@ -1070,6 +1245,10 @@ mod tests {
             decisions[0].revisit_by.as_deref(),
             Some("2026-12-31T00:00:00Z")
         );
+        assert_eq!(decisions[0].provenance.trust_class, "agent_assertion",);
+        assert_eq!(decisions[0].provenance.verification_status, "unverified",);
+        assert!(!decisions[0].redaction.applied);
+        assert!(decisions[0].redaction.reasons.is_empty());
     }
 
     #[test]
@@ -1083,7 +1262,7 @@ mod tests {
             created_at: "2026-08-01T00:00:00Z".to_owned(),
             selection_reason: "open_loop_tag",
             provenance: ResumeProvenance {
-                uri: None,
+                uri: "ee-mem://fixture".to_owned(),
                 trust_class: "agent_assertion".to_owned(),
                 verification_status: "unverified".to_owned(),
             },
@@ -1142,7 +1321,7 @@ mod tests {
             created_at: "2026-08-05T00:00:00Z".to_owned(),
             selection_reason: "open_loop_tag",
             provenance: ResumeProvenance {
-                uri: None,
+                uri: "ee-mem://fixture".to_owned(),
                 trust_class: "agent_assertion".to_owned(),
                 verification_status: "unverified".to_owned(),
             },
@@ -1284,6 +1463,33 @@ mod tests {
     }
 
     #[test]
+    fn session_limit_above_public_cap_is_a_usage_error_before_store_access() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("oversized-session-workspace");
+        let database = workspace.join(".ee").join("ee.db");
+
+        match build_resume_report(&ResumeOptions {
+            workspace_path: &workspace,
+            database_path: &database,
+            sessions: RESUME_SESSION_CAP + 1,
+        }) {
+            Err(DomainError::Usage { message, repair }) => {
+                assert!(message.contains("cannot exceed 64"));
+                assert!(
+                    repair
+                        .as_deref()
+                        .is_some_and(|value| value.contains("--sessions 64"))
+                );
+                assert!(!workspace.exists());
+                Ok(())
+            }
+            other => Err(format!(
+                "expected oversized sessions usage error, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
     fn revisit_decisions_do_not_depend_on_per_row_link_queries() -> Result<(), String> {
         let (_temp, workspace, database) = resume_storage_fixture("decision", &[])?;
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
@@ -1393,6 +1599,36 @@ mod tests {
         .map_err(|error| error.to_string())?;
         assert_eq!(report.episodic_total, 0);
         assert!(report.sessions.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn secret_bearing_body_is_not_admitted_to_public_resume() -> Result<(), String> {
+        let (_temp, workspace, database) =
+            resume_storage_fixture("note", &["session-secret-body", "next"])?;
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x52534d45)).to_string();
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let secret = format!("sk_live_{}", "1234567890abcdef1234567890abcdef");
+        connection
+            .execute_raw(&format!(
+                "UPDATE memories SET content = 'token={secret}' WHERE id = '{memory_id}'"
+            ))
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let report = build_resume_report(&ResumeOptions {
+            workspace_path: &workspace,
+            database_path: &database,
+            sessions: 3,
+        })
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.episodic_total, 0);
+        assert!(report.sessions.is_empty());
+        assert_eq!(report.open_loops.tagged_items_total, 0);
+        assert!(report.open_loops.tagged_items.is_empty());
+        let serialized = serde_json::to_string(&report).map_err(|error| error.to_string())?;
+        assert!(!serialized.contains(&secret));
         Ok(())
     }
 

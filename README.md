@@ -88,6 +88,7 @@ distilled memory.
 For agent use, the core rhythm is small and repetitive:
 
 ```bash
+ee resume --workspace . --json
 ee orient "<task>" --workspace . --include-primer --fast --json
 ee swarm brief --workspace . --json
 ee pack "<task>" --workspace . --read-only --max-tokens 4000 --format markdown
@@ -111,7 +112,7 @@ ee outcome trace <memory-id> --workspace . --json
 | Situation | First `ee` command |
 |---|---|
 | Resuming work — "where was I?" | `ee resume --workspace . --json` |
-| Starting from a cold agent session | `ee orient "<task>" --workspace . --include-primer --fast --json` |
+| Starting from a cold agent session | `ee resume --workspace . --json` (read `data.report`, then follow `nextCommands`) |
 | You want the standing workspace charter | `ee primer --workspace . --format markdown` |
 | AGENTS.md might be lying about the rules | `ee diag agentsmd-drift --workspace . --json` |
 | Starting substantive work | `ee pack "<task>" --workspace . --read-only --max-tokens 4000 --format markdown` |
@@ -384,8 +385,16 @@ ee doctor --gc-plan 30 --json
 
 ## Quick Start
 
+Start read-only: `ee resume` reports the recent session end-state, open
+decisions, queued work, provenance/redaction posture, and safe next commands.
+If the addressed workspace has no store, it does not initialize one; it can
+instead point at a nearby populated store with an executable retarget command.
+
 ```bash
-# 1. Open a workspace (idempotent)
+# 0. Resume an existing campaign without mutating or initializing the store
+ee resume --workspace . --json
+
+# 1. Open a workspace when this is genuinely a new campaign (idempotent)
 ee init --workspace .
 
 # 2. Optionally import cass history, then build the derived evidence index
@@ -481,7 +490,7 @@ Current top-level groups:
 | `ee status [--json]` | DB generation, index generation, degraded capabilities, recent jobs |
 | `ee doctor [--json]` | Health checks with repair commands for every failure |
 | `ee capabilities [--json]` | Feature, schema, renderer, env-var, and capability posture |
-| `ee resume [--sessions N] [--json]` | The read-only "where was I" bundle: last N episodic sessions newest-first (stable `session-*` identity survives interleaved/backfilled rows), public-redacted items with provenance/redaction posture, bounded revisit/queue lanes with exact totals and `truncated` flags, staleness from a strictly newer same-kind memory sharing a non-control subject tag (`session-*` and open-loop tags never establish identity; `staleCount` deduplicates memory IDs across projections), and nearby populated stores when the addressed store is empty (`ee.resume.v1`) |
+| `ee resume [--sessions N] [--json]` | The read-only "where was I" bundle: last N episodic sessions newest-first (`N` is 1–64; stable `session-*` identity survives interleaved/backfilled rows), public-redacted items and decisions with provenance/redaction posture, bounded revisit/queue lanes with exact totals and `truncated` flags, staleness from a strictly newer same-kind memory sharing a non-control subject tag (`session-*` and open-loop tags never establish identity; `staleCount` deduplicates memory IDs across projections), and nearby populated stores when the addressed store is empty (`ee.resume.v1`) |
 | `ee orient "<task>" --fast --json` | Fast read-only session-start bundle: bounded swarm brief, install/path posture, workspace hygiene, and explicit follow-up commands for full doctor/pack surfaces |
 | `ee primer [--tokens N] [--refresh] [--json]` | Deterministic, cached workspace charter (~600 tokens): top rules, unresolved warnings, key decisions, load-bearing memories, every line provenance-backed (`ee orient --include-primer` folds it into orientation) |
 | `ee export agentsmd [--file AGENTS.md] [--create] [--dry-run]` | Render the primer rules+warnings into a marker-delimited managed block; never edits outside its markers, backs up before mutating, refuses hand-edited blocks without `--force-managed-block` |

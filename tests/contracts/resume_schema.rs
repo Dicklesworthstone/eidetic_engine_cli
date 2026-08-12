@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use ee::core::resume::{ResumeOptions, build_resume_report};
 use ee::core::workspace::stable_workspace_id;
 use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 use ee::output::{public_schemas, render_schema_export_json};
@@ -148,6 +149,24 @@ fn resume_required_fields_and_staleness_contract_are_pinned() -> TestResult {
             format!("resume open-loop bound drifted at {pointer}"),
         )?;
     }
+    for (pointer, expected) in [
+        ("/properties/sessions/maxItems", 64),
+        ("/properties/sessions/items/properties/items/maxItems", 20),
+        ("/properties/nearbyStores/properties/stores/maxItems", 5),
+        ("/properties/nextCommands/maxItems", 5),
+    ] {
+        ensure(
+            schema.pointer(pointer).and_then(Value::as_u64) == Some(expected),
+            format!("resume public bound drifted at {pointer}"),
+        )?;
+    }
+    ensure(
+        schema
+            .pointer("/properties/nextCommands/minItems")
+            .and_then(Value::as_u64)
+            == Some(3),
+        "resume must always expose its three base next commands",
+    )?;
 
     // Every surfaced item must carry the stale field (nullable), and the
     // flag itself must name what superseded the item and why.
@@ -162,7 +181,7 @@ fn resume_required_fields_and_staleness_contract_are_pinned() -> TestResult {
             && item_required.contains("redaction"),
         "every resume item must carry selection, safe provenance, and redaction posture",
     )?;
-    let provenance_required = string_set(&schema, "/$defs/item/properties/provenance/required")?;
+    let provenance_required = string_set(&schema, "/$defs/provenance/required")?;
     let expected_provenance: BTreeSet<String> = ["uri", "trustClass", "verificationStatus"]
         .into_iter()
         .map(str::to_owned)
@@ -171,7 +190,14 @@ fn resume_required_fields_and_staleness_contract_are_pinned() -> TestResult {
         provenance_required == expected_provenance,
         format!("resume provenance contract drifted: {provenance_required:?}"),
     )?;
-    let redaction_required = string_set(&schema, "/$defs/item/properties/redaction/required")?;
+    ensure(
+        schema
+            .pointer("/$defs/provenance/properties/uri/type")
+            .and_then(Value::as_str)
+            == Some("string"),
+        "resume provenance URI must be explicit; admitted memories use an ee-mem fallback",
+    )?;
+    let redaction_required = string_set(&schema, "/$defs/redaction/required")?;
     let expected_redaction: BTreeSet<String> = ["applied", "reasons"]
         .into_iter()
         .map(str::to_owned)
@@ -179,6 +205,23 @@ fn resume_required_fields_and_staleness_contract_are_pinned() -> TestResult {
     ensure(
         redaction_required == expected_redaction,
         format!("resume redaction contract drifted: {redaction_required:?}"),
+    )?;
+    let decision_required = string_set(
+        &schema,
+        "/properties/openLoops/properties/revisitDecisions/items/required",
+    )?;
+    ensure(
+        decision_required.contains("provenance") && decision_required.contains("redaction"),
+        "every resume decision must carry provenance and redaction posture",
+    )?;
+    ensure(
+        schema
+            .pointer(
+                "/properties/openLoops/properties/revisitDecisions/items/properties/revisitStatus/enum",
+            )
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.len() == 4),
+        "resume decision revisitStatus vocabulary must stay closed",
     )?;
     let stale_required = string_set(&schema, "/$defs/item/properties/stale/required")?;
     let expected_stale: BTreeSet<String> = ["supersededBy", "supersededByCreatedAt", "sharedTags"]
@@ -250,7 +293,126 @@ fn resume_required_fields_and_staleness_contract_are_pinned() -> TestResult {
                 description.contains("unavailable") && description.contains("no populated store")
             }),
         "nearbyStores must deny a no-store conclusion when discovery is unavailable",
+    )?;
+    ensure(
+        schema
+            .pointer("/properties/nearbyStores/properties/stores/items/additionalProperties")
+            .and_then(Value::as_bool)
+            == Some(false),
+        "nearby store entries must reject undeclared fields",
+    )?;
+    ensure(
+        schema
+            .pointer("/$defs/memoryId/pattern")
+            .and_then(Value::as_str)
+            == Some("^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"),
+        "resume memory IDs must use the canonical typed-id contract",
+    )?;
+    ensure(
+        schema
+            .pointer("/$defs/publicText/maxLength")
+            .and_then(Value::as_u64)
+            == Some(4096),
+        "resume public text must stay within the public-replay scan bound",
     )
+}
+
+#[test]
+fn real_core_resume_report_validates_against_public_schema() -> TestResult {
+    let temp = resume_test_tempdir("ee-resume-schema-core.")?;
+    let workspace = temp.path().join("workspace");
+    let store = workspace.join(".ee");
+    std::fs::create_dir_all(&store)
+        .map_err(|error| format!("create {}: {error}", store.display()))?;
+    let canonical_workspace = workspace
+        .canonicalize()
+        .map_err(|error| format!("canonicalize {}: {error}", workspace.display()))?;
+    let workspace_id = stable_workspace_id(&canonical_workspace);
+    let database = store.join("ee.db");
+    let connection = DbConnection::open_file(&database)
+        .map_err(|error| format!("open {}: {error}", database.display()))?;
+    connection
+        .migrate()
+        .map_err(|error| format!("migrate resume schema store: {error}"))?;
+    connection
+        .insert_workspace(
+            &workspace_id,
+            &CreateWorkspaceInput {
+                path: canonical_workspace.display().to_string(),
+                name: Some("resume-schema-core".to_owned()),
+            },
+        )
+        .map_err(|error| format!("insert resume schema workspace: {error}"))?;
+
+    for (seed, tag) in [
+        (0x52534d51_u128, "session-public-a"),
+        (0x52534d52_u128, "session-public-b"),
+        (0x52534d53_u128, "session-public-c"),
+    ] {
+        connection
+            .insert_memory(
+                &ee::models::MemoryId::from_uuid(uuid::Uuid::from_u128(seed)).to_string(),
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "episodic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: format!("Public resume evidence for {tag}."),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some(format!("test://resume-schema/{tag}")),
+                    trust_class: "agent_assertion".to_owned(),
+                    trust_subclass: None,
+                    tags: vec![tag.to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| format!("insert {tag}: {error}"))?;
+    }
+    connection
+        .insert_memory(
+            &ee::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0x52534d54)).to_string(),
+            &CreateMemoryInput {
+                workspace_id: workspace_id.clone(),
+                level: "semantic".to_owned(),
+                kind: "decision".to_owned(),
+                content: "Topic: Resume schema admission\nChosen: validate emitted reports\nRevisit by: 2099-12-31T00:00:00Z".to_owned(),
+                workflow_id: None,
+                confidence: 0.8,
+                utility: 0.5,
+                importance: 0.5,
+                provenance_uri: Some("test://resume-schema/decision".to_owned()),
+                trust_class: "agent_assertion".to_owned(),
+                trust_subclass: None,
+                tags: vec!["next".to_owned(), "resume-schema".to_owned()],
+                valid_from: None,
+                valid_to: None,
+            },
+        )
+        .map_err(|error| format!("insert resume schema decision: {error}"))?;
+    drop(connection);
+
+    let report = build_resume_report(&ResumeOptions {
+        workspace_path: &canonical_workspace,
+        database_path: &database,
+        sessions: 3,
+    })
+    .map_err(|error| format!("build real core resume report: {error}"))?;
+    ensure(
+        report.sessions.len() == 3,
+        format!("real core report did not surface all three tagged sessions: {report:?}"),
+    )?;
+    ensure(
+        report.open_loops.revisit_decisions.len() == 1,
+        format!("real core report omitted the revisit decision: {report:?}"),
+    )?;
+    let emitted = serde_json::to_value(&report)
+        .map_err(|error| format!("serialize real core resume report: {error}"))?;
+    validate_json_schema_instance(&emitted, &load_schema()?).map_err(|error| {
+        format!("real core ee.resume.v1 report failed public schema validation: {error}; {emitted}")
+    })
 }
 
 #[test]
@@ -346,6 +508,7 @@ fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
 
     let required_labels: BTreeSet<String> = [
         "all_six_open_loop_tags_surfaced",
+        "all_three_tagged_sessions_publicly_surfaced",
         "canonical_next_commands_execute",
         "canonical_next_commands_preserved",
         "canonical_typed_revisit_decision_surfaced",
@@ -360,6 +523,7 @@ fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
         "resume_human_redacts_planted_secret",
         "resume_json_redacts_planted_secret",
         "resume_returns_schema",
+        "sessions_above_public_cap_structured_nonzero_no_mutation",
         "next_only_overlap_does_not_mark_stale",
         "superseded_note_carries_stale_marker",
         "stale_count_deduplicates_open_loop_and_session_projections",

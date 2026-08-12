@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.resume.v1.json",
   "title": "ee.resume.v1",
-  "description": "Session-resume bundle for ee resume (bd-resume-verb-v0f57): the 'where was I' report a resuming agent needs in one read-only call. Recent episodic sessions are newest-first (session-* tags are stable identities even across interleaved/backfilled writes; untagged rows cluster by write-time gap), public-admitted items carry redaction-safe provenance and explicit redaction posture, open-loop lanes expose exact totals plus bounded truncation, canonical typed revisit_by decision sidecars are authoritative when present, same-kind strictly newer memories sharing at least one non-control subject tag flag surfaced items as stale, and nearby-store discovery preserves the exact complete, truncated, or unavailable outcome when the addressed store has nothing episodic. Session-* and next/queue/blocking/pending/todo/revisit tags are control tags and never establish subject identity.",
+  "description": "Session-resume bundle for ee resume (bd-resume-verb-v0f57): the 'where was I' report a resuming agent needs in one read-only call. Recent episodic sessions are newest-first (session-* tags are stable identities even across interleaved/backfilled writes; untagged rows cluster by write-time gap), public-admitted items and decisions carry redaction-safe provenance and explicit redaction posture, open-loop lanes expose exact totals plus bounded truncation, canonical typed revisit_by decision sidecars are authoritative when present, same-kind strictly newer memories sharing at least one non-control subject tag flag surfaced items as stale, and nearby-store discovery preserves the exact complete, truncated, or unavailable outcome when the addressed store has nothing episodic. Session-* and next/queue/blocking/pending/todo/revisit tags are control tags and never establish subject identity.",
   "type": "object",
   "required": [
     "schema",
@@ -21,7 +21,8 @@
       "const": "ee.resume.v1"
     },
     "workspaceId": {
-      "type": "string"
+      "type": "string",
+      "pattern": "^wsp_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "episodicTotal": {
       "type": "integer",
@@ -29,17 +30,19 @@
     },
     "sessions": {
       "type": "array",
+      "maxItems": 64,
       "items": {
         "type": "object",
         "required": ["label", "memberCount", "newestAt", "oldestAt", "items"],
         "additionalProperties": false,
         "properties": {
-          "label": { "type": "string" },
+          "label": { "type": "string", "minLength": 1, "maxLength": 4096 },
           "memberCount": { "type": "integer", "minimum": 1 },
-          "newestAt": { "type": "string" },
-          "oldestAt": { "type": "string" },
+          "newestAt": { "type": "string", "format": "date-time" },
+          "oldestAt": { "type": "string", "format": "date-time" },
           "items": {
             "type": "array",
+            "maxItems": 20,
             "items": { "$ref": "#/$defs/item" }
           }
         }
@@ -75,16 +78,23 @@
               "chosen",
               "revisitBy",
               "revisitStatus",
-              "createdAt"
+              "createdAt",
+              "provenance",
+              "redaction"
             ],
             "additionalProperties": false,
             "properties": {
-              "memoryId": { "type": "string" },
-              "topic": { "type": "string" },
-              "chosen": { "type": "string" },
-              "revisitBy": { "type": ["string", "null"] },
-              "revisitStatus": { "type": "string" },
-              "createdAt": { "type": "string" }
+              "memoryId": { "$ref": "#/$defs/memoryId" },
+              "topic": { "$ref": "#/$defs/publicText" },
+              "chosen": { "$ref": "#/$defs/publicText" },
+              "revisitBy": { "type": ["string", "null"], "format": "date-time" },
+              "revisitStatus": {
+                "type": "string",
+                "enum": ["overdue", "due", "future", "unknown"]
+              },
+              "createdAt": { "type": "string", "format": "date-time" },
+              "provenance": { "$ref": "#/$defs/provenance" },
+              "redaction": { "$ref": "#/$defs/redaction" }
             }
           }
         },
@@ -114,14 +124,16 @@
       "properties": {
         "stores": {
           "type": "array",
+          "maxItems": 5,
           "items": {
             "type": "object",
             "required": ["workspaceRoot", "storeDir", "documents", "lastWrite"],
+            "additionalProperties": false,
             "properties": {
-              "workspaceRoot": { "type": "string" },
-              "storeDir": { "type": "string" },
+              "workspaceRoot": { "type": "string", "minLength": 1, "maxLength": 4096 },
+              "storeDir": { "type": "string", "minLength": 1, "maxLength": 4096 },
               "documents": { "type": "integer", "minimum": 0 },
-              "lastWrite": { "type": ["string", "null"] }
+              "lastWrite": { "type": ["string", "null"], "format": "date-time" }
             }
           }
         },
@@ -133,7 +145,9 @@
     },
     "nextCommands": {
       "type": "array",
-      "items": { "type": "string" }
+      "minItems": 3,
+      "maxItems": 5,
+      "items": { "type": "string", "minLength": 1, "maxLength": 16384 }
     }
   },
   "$defs": {
@@ -153,59 +167,91 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "memoryId": { "type": "string" },
-        "level": { "type": "string" },
-        "kind": { "type": "string" },
-        "content": { "type": "string" },
+        "memoryId": { "$ref": "#/$defs/memoryId" },
+        "level": {
+          "type": "string",
+          "enum": ["working", "episodic", "semantic", "procedural"]
+        },
+        "kind": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "content": { "$ref": "#/$defs/publicText" },
         "tags": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
         },
-        "createdAt": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
         "selectionReason": {
           "type": "string",
           "enum": ["recent_session_member", "open_loop_tag"],
           "description": "Why this memory was admitted to the bounded resume view."
         },
-        "provenance": {
-          "type": "object",
-          "required": ["uri", "trustClass", "verificationStatus"],
-          "additionalProperties": false,
-          "properties": {
-            "uri": {
-              "type": ["string", "null"],
-              "description": "Public-redacted provenance URI; unsafe path/token-bearing values are replaced by a deterministic marker."
-            },
-            "trustClass": { "type": "string" },
-            "verificationStatus": { "type": "string" }
-          }
-        },
-        "redaction": {
-          "type": "object",
-          "required": ["applied", "reasons"],
-          "additionalProperties": false,
-          "properties": {
-            "applied": { "type": "boolean" },
-            "reasons": {
-              "type": "array",
-              "items": { "type": "string" }
-            }
-          }
-        },
+        "provenance": { "$ref": "#/$defs/provenance" },
+        "redaction": { "$ref": "#/$defs/redaction" },
         "stale": {
           "type": ["object", "null"],
           "required": ["supersededBy", "supersededByCreatedAt", "sharedTags"],
           "additionalProperties": false,
           "properties": {
-            "supersededBy": { "type": "string" },
-            "supersededByCreatedAt": { "type": "string" },
+            "supersededBy": { "$ref": "#/$defs/memoryId" },
+            "supersededByCreatedAt": { "type": "string", "format": "date-time" },
             "sharedTags": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": { "type": "string", "minLength": 1, "maxLength": 4096 },
               "minItems": 1,
               "description": "Shared subject tags establishing staleness; excludes session-* and next/queue/blocking/pending/todo/revisit control tags."
             }
           }
+        }
+      }
+    },
+    "memoryId": {
+      "type": "string",
+      "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "publicText": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["uri", "trustClass", "verificationStatus"],
+      "additionalProperties": false,
+      "properties": {
+        "uri": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Public-redacted provenance URI; unsafe path/token-bearing values are replaced by a deterministic marker."
+        },
+        "trustClass": {
+          "type": "string",
+          "enum": [
+            "human_explicit",
+            "peer_human_attested",
+            "agent_validated",
+            "agent_assertion",
+            "cass_evidence",
+            "legacy_import"
+          ]
+        },
+        "verificationStatus": {
+          "type": "string",
+          "enum": ["unverified", "verified", "missing", "mismatch", "skipped"]
+        }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "required": ["applied", "reasons"],
+      "additionalProperties": false,
+      "properties": {
+        "applied": { "type": "boolean" },
+        "reasons": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
         }
       }
     }

@@ -216,7 +216,8 @@ fi
 # --- the bundle -----------------------------------------------------------
 STORE_DATABASE="${WS}/.ee/ee.db"
 JSON_HASH_BEFORE="$(store_fingerprint "${STORE_DATABASE}")"
-run_ee resume --workspace "${WS}" --sessions 2 --json
+run_ee resume --workspace "${WS}" --sessions 3 --json
+MAIN_RESUME_EXIT=$LAST_EXIT
 R="${LAST_STDOUT}"
 cp "${R}" "${LOG_DIR}/resume-report.json"
 JSON_HASH_AFTER="$(store_fingerprint "${STORE_DATABASE}")"
@@ -225,21 +226,30 @@ if [[ "${JSON_HASH_BEFORE}" == "${JSON_HASH_AFTER}" ]]; then
 else
     event json_resume_preserves_db_wal_shm fail "before=${JSON_HASH_BEFORE//$'\n'/,}; after=${JSON_HASH_AFTER//$'\n'/,}"
 fi
-if [[ "${LAST_EXIT}" -eq 0 ]] \
+if [[ "${MAIN_RESUME_EXIT}" -eq 0 ]] \
     && jq -e '.data.report.schema == "ee.resume.v1"' "${R}" >/dev/null 2>&1; then
     event resume_returns_schema pass
 else
-    event resume_returns_schema fail "exit ${LAST_EXIT}; $(head -c 250 "${R}")"
+    event resume_returns_schema fail "exit ${MAIN_RESUME_EXIT}; $(head -c 250 "${R}")"
 fi
 
 if jq -e '
     all(.data.report.sessions[]?.items[]?;
         .selectionReason == "recent_session_member"
-        and (.provenance | has("uri") and has("trustClass") and has("verificationStatus"))
+        and (.provenance
+             | (.uri | type) == "string" and (.uri | length) > 0
+               and has("trustClass") and has("verificationStatus"))
         and (.redaction | has("applied") and has("reasons")))
     and all(.data.report.openLoops.taggedItems[]?;
         .selectionReason == "open_loop_tag"
-        and (.provenance | has("uri") and has("trustClass") and has("verificationStatus"))
+        and (.provenance
+             | (.uri | type) == "string" and (.uri | length) > 0
+               and has("trustClass") and has("verificationStatus"))
+        and (.redaction | has("applied") and has("reasons")))
+    and all(.data.report.openLoops.revisitDecisions[]?;
+        (.provenance
+         | (.uri | type) == "string" and (.uri | length) > 0
+           and has("trustClass") and has("verificationStatus"))
         and (.redaction | has("applied") and has("reasons")))
 ' "${R}" >/dev/null 2>&1; then
     event resume_items_carry_public_posture pass
@@ -249,14 +259,29 @@ fi
 
 if jq -e '.data.report.episodicTotal == 5
         and [.data.report.sessions[]?.label]
+            == ["session-20260809", "session-20260808", "session-20260801"]
+        and ([.data.report.sessions[]?.items[]?.content
+              | select(contains("Session A"))] | length) == 2' \
+    "${R}" >/dev/null 2>&1; then
+    event all_three_tagged_sessions_publicly_surfaced pass
+else
+    event all_three_tagged_sessions_publicly_surfaced fail \
+        "$(jq -c '{total:.data.report.episodicTotal, sessions:[.data.report.sessions[]? | {label,items:[.items[]?.content]}]}' "${R}" 2>/dev/null)"
+fi
+
+run_ee resume --workspace "${WS}" --sessions 2 --json
+TWO_SESSION_EXIT=$LAST_EXIT
+TWO_SESSION_JSON="${LAST_STDOUT}"
+if [[ "${TWO_SESSION_EXIT}" -eq 0 ]] \
+    && jq -e '[.data.report.sessions[]?.label]
             == ["session-20260809", "session-20260808"]
         and ([.data.report.sessions[]?.items[]?.content
               | select(contains("Session A"))] | length) == 0' \
-    "${R}" >/dev/null 2>&1; then
+        "${TWO_SESSION_JSON}" >/dev/null 2>&1; then
     event requested_two_newest_sessions_only pass
 else
     event requested_two_newest_sessions_only fail \
-        "$(jq -c '{total:.data.report.episodicTotal, sessions:[.data.report.sessions[]? | {label,items:[.items[]?.content]}]}' "${R}" 2>/dev/null)"
+        "exit=${TWO_SESSION_EXIT}; $(head -c 400 "${TWO_SESSION_JSON}")"
 fi
 
 if jq -e --arg decision_one "${DECIDE_ONE_ID}" --arg decision_two "${DECIDE_TWO_ID}" \
@@ -319,9 +344,9 @@ if jq -e --arg decision_typed "${DECIDE_TYPED_ID}" \
     --arg next_id "${NEXT_ID}" --arg queue_id "${QUEUE_ID}" \
     --arg blocking_id "${BLOCKING_ID}" --arg pending_id "${PENDING_ID}" \
     --arg todo_id "${TODO_ID}" --arg revisit_id "${REVISIT_TAG_ID}" '
-        (.data.report.sessions | length) == 2
+        (.data.report.sessions | length) == 3
         and [.data.report.sessions[].label]
-            == ["session-20260809", "session-20260808"]
+            == ["session-20260809", "session-20260808", "session-20260801"]
         and ([.data.report.openLoops.revisitDecisions[]?.memoryId]
              | index($decision_typed)) != null
         and ([.data.report.openLoops.taggedItems[]?.memoryId] | sort)
@@ -397,7 +422,7 @@ fi
 
 # --- human contract: every declared section remains visible ---------------
 HUMAN_HASH_BEFORE="$(store_fingerprint "${STORE_DATABASE}")"
-run_ee resume --workspace "${WS}" --sessions 2
+run_ee resume --workspace "${WS}" --sessions 3
 H="${LAST_STDOUT}"
 HUMAN_HASH_AFTER="$(store_fingerprint "${STORE_DATABASE}")"
 if [[ "${HUMAN_HASH_BEFORE}" == "${HUMAN_HASH_AFTER}" ]]; then
@@ -417,11 +442,12 @@ fi
 STALE_NEW_CREATED_AT="$(jq -r --arg stale_old "${STALE_OLD_ID}" \
     '[.. | objects | select(.memoryId? == $stale_old and .stale? != null)][0].stale.supersededByCreatedAt // empty' \
     "${R}" 2>/dev/null)"
-if grep -Fq "resume: 5 episodic memories, 2 sessions shown, 3/3 open decisions, 6/6 queued items, 1 stale flags" "${H}" \
+if grep -Fq "resume: 5 episodic memories, 3 sessions shown, 3/3 open decisions, 6/6 queued items, 1 stale flags" "${H}" \
     && grep -Fq "[session-20260809]" "${H}" \
     && grep -Fq "[session-20260808]" "${H}" \
-    && ! grep -Fq "[session-20260801]" "${H}" \
-    && ! grep -Fq "Session A" "${H}" \
+    && grep -Fq "[session-20260801]" "${H}" \
+    && grep -Fq "Session A wrapped the parser refactor." "${H}" \
+    && grep -Fq "Session A left the lexer half-done." "${H}" \
     && grep -Fq "decision ${DECIDE_ONE_ID}: resume e2e revisit decision (revisit " "${H}" \
     && grep -Fq "decision ${DECIDE_TWO_ID}: resume e2e second decision (revisit " "${H}" \
     && grep -Fq "decision ${DECIDE_TYPED_ID}: typed sidecar resume decision (revisit 2026-12-31T00:00:00Z)" "${H}" \
@@ -458,6 +484,22 @@ if [[ "${LAST_EXIT}" -ne 0 && "${ZERO_HASH_BEFORE}" == "${ZERO_HASH_AFTER}" ]] \
 else
     event zero_sessions_structured_nonzero_no_mutation fail \
         "exit=${LAST_EXIT}; before=${ZERO_HASH_BEFORE//$'\n'/,}; after=${ZERO_HASH_AFTER//$'\n'/,}; $(head -c 300 "${ZERO_JSON}")"
+fi
+
+CAP_HASH_BEFORE="$(store_fingerprint "${STORE_DATABASE}")"
+run_ee resume --workspace "${WS}" --sessions 65 --json
+CAP_JSON="${LAST_STDOUT}"
+CAP_HASH_AFTER="$(store_fingerprint "${STORE_DATABASE}")"
+if [[ "${LAST_EXIT}" -ne 0 && "${CAP_HASH_BEFORE}" == "${CAP_HASH_AFTER}" ]] \
+    && jq -e '.schema == "ee.error.v2"
+        and .error.code == "usage"
+        and (.error.message | contains("cannot exceed 64"))
+        and (.error.repair | contains("--sessions 64"))' \
+        "${CAP_JSON}" >/dev/null 2>&1; then
+    event sessions_above_public_cap_structured_nonzero_no_mutation pass
+else
+    event sessions_above_public_cap_structured_nonzero_no_mutation fail \
+        "exit=${LAST_EXIT}; before=${CAP_HASH_BEFORE//$'\n'/,}; after=${CAP_HASH_AFTER//$'\n'/,}; $(head -c 300 "${CAP_JSON}")"
 fi
 
 # Untagged memories exercise the literal four-hour boundary. The records are
@@ -965,21 +1007,38 @@ run_ee --workspace "${SCALE_WS}" orient --fast "Resume scale row 09999"
 SCALE_FAST_HUMAN_ELAPSED_MS=$(( $(now_ms) - SCALE_FAST_HUMAN_STARTED_MS ))
 SCALE_FAST_HUMAN="${LAST_STDOUT}"
 SCALE_FAST_HUMAN_HASH_AFTER="$(store_fingerprint "${SCALE_DATABASE}")"
+SCALE_FAST_HUMAN_RECENT="$(awk '
+    /^Recent memories:$/ { capture = 1; next }
+    capture && /^Task-relevant memories:$/ { exit }
+    capture { print }
+' "${SCALE_FAST_HUMAN}")"
 SCALE_FAST_HUMAN_RELEVANT="$(awk '
     /^Task-relevant memories:$/ { capture = 1; next }
     capture && /^(Degraded|Next commands):$/ { exit }
     capture { print }
 ' "${SCALE_FAST_HUMAN}")"
+SCALE_FAST_HUMAN_RECENT_SNIPPETS="$(awk '
+    /^    / { sub(/^    /, ""); if (length > 0) print }
+' <<<"${SCALE_FAST_HUMAN_RECENT}")"
+SCALE_FAST_HUMAN_RELEVANT_SNIPPETS="$(awk '
+    /^    / { sub(/^    /, ""); if (length > 0) print }
+' <<<"${SCALE_FAST_HUMAN_RELEVANT}")"
+SCALE_FAST_HUMAN_RECENT_COUNT="$(awk 'NF { count++ } END { print count + 0 }' \
+    <<<"${SCALE_FAST_HUMAN_RECENT_SNIPPETS}")"
+SCALE_FAST_HUMAN_RELEVANT_COUNT="$(awk 'NF { count++ } END { print count + 0 }' \
+    <<<"${SCALE_FAST_HUMAN_RELEVANT_SNIPPETS}")"
 if [[ "${LAST_EXIT}" -eq 0 && "${SCALE_FAST_HUMAN_ELAPSED_MS}" -lt 1000 ]] \
-    && grep -Fq "Recent memories:" "${SCALE_FAST_HUMAN}" \
-    && grep -Fq "Task-relevant memories:" "${SCALE_FAST_HUMAN}" \
-    && grep -Fq "Resume scale row 09999." <<<"${SCALE_FAST_HUMAN_RELEVANT}" \
+    && [[ "${SCALE_FAST_HUMAN_RECENT_COUNT}" -ge 1 \
+        && "${SCALE_FAST_HUMAN_RECENT_COUNT}" -le 5 ]] \
+    && [[ "${SCALE_FAST_HUMAN_RELEVANT_COUNT}" -ge 1 \
+        && "${SCALE_FAST_HUMAN_RELEVANT_COUNT}" -le 5 ]] \
+    && grep -Fxq "Resume scale row 09999." <<<"${SCALE_FAST_HUMAN_RELEVANT_SNIPPETS}" \
     && grep -Fq "orient_doctor_skipped" "${SCALE_FAST_HUMAN}" \
     && ! grep -Fq "orient_pack_skipped" "${SCALE_FAST_HUMAN}"; then
     event scale_10k_fast_human_orient_under_1s_with_queried_content pass
 else
     event scale_10k_fast_human_orient_under_1s_with_queried_content fail \
-        "exit=${LAST_EXIT}; elapsedMs=${SCALE_FAST_HUMAN_ELAPSED_MS}; relevant=$(head -c 300 <<<"${SCALE_FAST_HUMAN_RELEVANT}")"
+        "exit=${LAST_EXIT}; elapsedMs=${SCALE_FAST_HUMAN_ELAPSED_MS}; recentCount=${SCALE_FAST_HUMAN_RECENT_COUNT}; relevantCount=${SCALE_FAST_HUMAN_RELEVANT_COUNT}; recent=$(head -c 180 <<<"${SCALE_FAST_HUMAN_RECENT_SNIPPETS}"); relevant=$(head -c 180 <<<"${SCALE_FAST_HUMAN_RELEVANT_SNIPPETS}")"
 fi
 if [[ "${SCALE_FAST_HUMAN_HASH_BEFORE}" == "${SCALE_FAST_HUMAN_HASH_AFTER}" ]]; then
     event scale_10k_fast_human_orient_preserves_db_wal_shm pass
