@@ -2941,9 +2941,11 @@ impl SearchReport {
             })
             .collect();
         let consensus_conflicts = search_consensus_conflict_report(&self.query, &visible_results);
-        let rerank_hits: Vec<&SearchHit> = visible_results.iter().collect();
         let rerank = search_rerank_posture_json_inner(
-            &rerank_hits,
+            visible_results
+                .iter()
+                .filter(|hit| hit.rerank_score.is_some())
+                .count(),
             &self.degraded,
             self.rerank_configured_mode,
             self.rerank_configured_top_k,
@@ -5650,7 +5652,7 @@ fn search_rerank_posture_json(
     workspace_id: &str,
 ) -> serde_json::Value {
     search_rerank_posture_json_inner(
-        hits,
+        hits.iter().filter(|hit| hit.rerank_score.is_some()).count(),
         degraded,
         configured_mode,
         configured_top_k,
@@ -5663,7 +5665,7 @@ fn search_rerank_posture_json(
 }
 
 fn search_rerank_posture_json_inner(
-    hits: &[&SearchHit],
+    rerank_score_count: usize,
     degraded: &[SearchDegradation],
     configured_mode: crate::config::SearchRerankMode,
     configured_top_k: usize,
@@ -5673,7 +5675,6 @@ fn search_rerank_posture_json_inner(
     advisory_scope: &'static str,
     reservation: Option<&mut SearchAdvisoryDeliveryReservation>,
 ) -> serde_json::Value {
-    let rerank_score_count = hits.iter().filter(|hit| hit.rerank_score.is_some()).count();
     let unavailable = degraded
         .iter()
         .find(|degradation| degradation.code == "rerank_model_unavailable");
@@ -5767,6 +5768,44 @@ fn search_rerank_posture_json_inner(
         "degradedCode": unavailable.map(|degradation| degradation.code.as_str()),
         "advisory": advisory,
         "advisorySummary": advisory_summary,
+    })
+}
+
+/// Render only the delivery-sensitive search fields needed by a cached
+/// context pack. The caller supplies the authoritative inputs captured with
+/// the fresh search; this deliberately does not infer posture from cached
+/// advisory prose.
+pub(crate) fn search_advisory_snapshot_data_json_with_delivery_reservation(
+    rerank_score_count: usize,
+    degraded: &[SearchDegradation],
+    configured_mode: crate::config::SearchRerankMode,
+    configured_top_k: usize,
+    runtime_available: bool,
+    session: &mut SearchAdvisorySession,
+    workspace_id: &str,
+    mut reservation: Option<&mut SearchAdvisoryDeliveryReservation>,
+) -> serde_json::Value {
+    let rerank = search_rerank_posture_json_inner(
+        rerank_score_count,
+        degraded,
+        configured_mode,
+        configured_top_k,
+        runtime_available,
+        session,
+        workspace_id,
+        SEARCH_ADVISORY_SCOPE_PROCESS,
+        reservation.as_deref_mut(),
+    );
+    let degraded = search_degraded_data_json_with_advisory_session_inner(
+        "search",
+        degraded,
+        session,
+        workspace_id,
+        reservation,
+    );
+    serde_json::json!({
+        "rerank": rerank,
+        "degraded": degraded,
     })
 }
 

@@ -202,3 +202,151 @@ fn ee_mcp_serve_stdio_completes_initialize_tools_list_shutdown_handshake() -> Te
 
     Ok(())
 }
+
+fn run_workspace_setup(workspace: &std::path::Path, args: &[&str]) -> TestResult {
+    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .arg("--json")
+        .arg("--workspace")
+        .arg(workspace)
+        .args(args)
+        .output()
+        .map_err(|error| format!("run ee workspace setup {args:?}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ee workspace setup {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+fn write_tool_call(
+    stdin: &mut std::process::ChildStdin,
+    reader: &mut BufReader<std::process::ChildStdout>,
+    id: u64,
+    name: &str,
+    query: &str,
+    workspace: &std::path::Path,
+) -> Result<Value, String> {
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {
+            "name": name,
+            "arguments": {
+                "query": query,
+                "workspace": workspace
+            }
+        }
+    });
+    writeln!(stdin, "{request}").map_err(|error| format!("write {name}: {error}"))?;
+    stdin
+        .flush()
+        .map_err(|error| format!("flush {name}: {error}"))?;
+    let response = read_one_response_line(reader)?;
+    let text = response
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{name} response missing tool text: {response}"))?;
+    serde_json::from_str(text).map_err(|error| format!("{name} tool text was not JSON: {error}"))
+}
+
+#[test]
+fn ee_mcp_real_stdio_context_first_consumes_process_advisory() -> TestResult {
+    let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    run_workspace_setup(workspace.path(), &["init"])?;
+    run_workspace_setup(
+        workspace.path(),
+        &[
+            "remember",
+            "Real MCP context-first advisory evidence.",
+            "--level",
+            "semantic",
+            "--kind",
+            "fact",
+        ],
+    )?;
+    run_workspace_setup(workspace.path(), &["index", "rebuild"])?;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(["mcp", "serve-stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("spawn real advisory MCP server: {error}"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "real advisory MCP stdin was not piped".to_owned())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "real advisory MCP stdout was not piped".to_owned())?;
+    let mut reader = BufReader::new(stdout);
+
+    let context = write_tool_call(
+        &mut stdin,
+        &mut reader,
+        1,
+        "ee_context",
+        "MCP context-first advisory evidence",
+        workspace.path(),
+    )?;
+    assert_eq!(
+        context
+            .pointer("/data/rerank/advisory/code")
+            .and_then(Value::as_str),
+        Some("rerank_model_unavailable"),
+        "real MCP context must expose the production rerank advisory: {context}"
+    );
+    assert_eq!(
+        context
+            .pointer("/data/rerank/advisorySummary/scope")
+            .and_then(Value::as_str),
+        Some("process")
+    );
+
+    let search = write_tool_call(
+        &mut stdin,
+        &mut reader,
+        2,
+        "ee_search",
+        "MCP context-first advisory evidence",
+        workspace.path(),
+    )?;
+    assert!(
+        search
+            .pointer("/data/rerank/advisory")
+            .is_some_and(Value::is_null),
+        "search after delivered MCP context must suppress the advisory: {search}"
+    );
+    assert_eq!(
+        search
+            .pointer("/data/rerank/advisorySummary/sessionOccurrenceCount")
+            .and_then(Value::as_u64),
+        Some(2)
+    );
+    assert_eq!(
+        search
+            .pointer("/data/rerank/advisorySummary/sessionSuppressedCount")
+            .and_then(Value::as_u64),
+        Some(1)
+    );
+
+    let shutdown = json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown"});
+    writeln!(stdin, "{shutdown}").map_err(|error| format!("write shutdown: {error}"))?;
+    stdin
+        .flush()
+        .map_err(|error| format!("flush shutdown: {error}"))?;
+    let _ = read_one_response_line(&mut reader)?;
+    drop(stdin);
+    let status = child
+        .wait()
+        .map_err(|error| format!("wait for real advisory MCP server: {error}"))?;
+    if !status.success() {
+        return Err(format!("real advisory MCP server exited {status}"));
+    }
+    Ok(())
+}

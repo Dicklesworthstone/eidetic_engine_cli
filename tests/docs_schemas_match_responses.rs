@@ -2329,6 +2329,20 @@ fn stale_search_response_with_structured_freshness_matches_public_schema() -> Te
         "generationGap": 106,
         "largeGap": true
     });
+    if response
+        .pointer("/data/rerank/advisory/code")
+        .and_then(Value::as_str)
+        != Some("rerank_model_unavailable")
+        || response
+            .pointer("/data/rerank/advisory/resolution")
+            .and_then(Value::as_str)
+            != Some("automatic_repair_unavailable")
+        || !response
+            .pointer("/data/rerank/advisory/repair")
+            .is_some_and(Value::is_null)
+    {
+        return Err("stale search sample must retain the canonical rerank posture".to_owned());
+    }
 
     validate_json_schema(&response, &schema, &schema, "$")?;
     let standard = schema
@@ -2347,33 +2361,22 @@ fn search_schema_closes_rerank_advisory_and_rejects_fake_automatic_repairs() -> 
     let mut response = read_json(&fixture_path(
         "golden/agent/search_deterministic_ranking.json.golden",
     ))?;
-    response["data"]["rerank"] = json!({
-        "schema": "ee.rerank_posture.v1",
-        "mode": "fusion_only_degraded",
-        "configured": "auto",
-        "topK": 50,
-        "rerankScoreCount": 0,
-        "scoreKind": "rrf_fused",
-        "available": false,
-        "degradedCode": "rerank_model_unavailable",
-        "advisory": {
-            "code": "rerank_model_unavailable",
-            "severity": "low",
-            "permanent": true,
-            "message": "No usable local reranker is registered.",
-            "repair": null,
-            "resolution": "automatic_repair_unavailable"
-        },
-        "advisorySummary": {
-            "scope": "invocation",
-            "permanent": true,
-            "distinctCount": 1,
-            "emittedCount": 1,
-            "suppressedCount": 0,
-            "sessionOccurrenceCount": 1,
-            "sessionSuppressedCount": 0
-        }
-    });
+    if response
+        .pointer("/data/rerank/advisory/code")
+        .and_then(Value::as_str)
+        != Some("rerank_model_unavailable")
+        || response
+            .pointer("/data/rerank/advisory/resolution")
+            .and_then(Value::as_str)
+            != Some("automatic_repair_unavailable")
+        || !response
+            .pointer("/data/rerank/advisory/repair")
+            .is_some_and(Value::is_null)
+    {
+        return Err(
+            "real search golden must carry the canonical permanent rerank advisory".to_owned(),
+        );
+    }
     validate_json_schema(&response, &schema, &schema, "$")?;
 
     let mut missing_rerank = response.clone();
@@ -2415,33 +2418,23 @@ fn search_schema_closes_rerank_advisory_and_rejects_fake_automatic_repairs() -> 
 fn pack_schema_accepts_permanent_rerank_advisory_and_rejects_fake_repair() -> TestResult {
     let schema = schema_doc("ee.pack.v2")?;
     let mut response = read_json(&fixture_path("golden/agent/context_pack.json.golden"))?;
-    response["data"]["rerank"] = json!({
-        "schema": "ee.rerank_posture.v1",
-        "mode": "fusion_only_degraded",
-        "configured": "auto",
-        "topK": 50,
-        "rerankScoreCount": 0,
-        "scoreKind": "rrf_fused",
-        "available": false,
-        "degradedCode": "rerank_model_unavailable",
-        "advisory": {
-            "code": "rerank_model_unavailable",
-            "severity": "low",
-            "permanent": true,
-            "message": "No usable local reranker is registered.",
-            "repair": null,
-            "resolution": "automatic_repair_unavailable"
-        },
-        "advisorySummary": {
-            "scope": "process",
-            "permanent": true,
-            "distinctCount": 1,
-            "emittedCount": 1,
-            "suppressedCount": 0,
-            "sessionOccurrenceCount": 1,
-            "sessionSuppressedCount": 0
-        }
-    });
+    if response
+        .pointer("/data/rerank/advisory/code")
+        .and_then(Value::as_str)
+        != Some("rerank_model_unavailable")
+        || response
+            .pointer("/data/rerank/advisory/resolution")
+            .and_then(Value::as_str)
+            != Some("automatic_repair_unavailable")
+        || !response
+            .pointer("/data/rerank/advisory/repair")
+            .is_some_and(Value::is_null)
+    {
+        return Err(
+            "real context-pack golden must carry the canonical permanent rerank advisory"
+                .to_owned(),
+        );
+    }
     validate_json_schema(&response, &schema, &schema, "$")?;
 
     response["data"]["rerank"]["advisory"]["repair"] =

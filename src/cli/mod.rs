@@ -66,7 +66,8 @@ use crate::core::config_surface::{
 };
 use crate::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
-    ContextPackOutputOptions, ContextPackOutputProfile, ContextTaskLens,
+    ContextPackOutputOptions, ContextPackOutputProfile, ContextSearchAdvisorySnapshot,
+    ContextTaskLens, attach_context_cached_search_advisories_for_delivery,
     attach_pack_dna_to_context_response, context_request_from_options, explain_why_not_default,
     run_context_pack_with_performance,
 };
@@ -239,12 +240,12 @@ use crate::core::rule::{
     protect_rule, show_rule, update_rule,
 };
 use crate::core::search::{
-    FamilyRetrievalOptions, SearchAdvisorySession, SearchDedupMode, SearchDegradation, SearchError,
-    SearchFamilyReport, SearchOptions, SearchReport, SearchScoreRecalibrationReport,
-    SearchSourceMode, SimilarError, SimilarOptions, SimilarReport, TypedMemoryFieldFilter,
-    elapsed_timing_json, normalize_memory_kind_filter, recalibrate_search_score_calibration,
-    run_diag_search, run_family_retrieval, run_search, run_search_with_filters,
-    run_search_with_performance_and_filters, run_similar,
+    FamilyRetrievalOptions, SearchAdvisorySession, SearchAdvisorySettlement, SearchDedupMode,
+    SearchDegradation, SearchError, SearchFamilyReport, SearchOptions, SearchReport,
+    SearchScoreRecalibrationReport, SearchSourceMode, SimilarError, SimilarOptions, SimilarReport,
+    TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
+    recalibrate_search_score_calibration, run_diag_search, run_family_retrieval, run_search,
+    run_search_with_filters, run_search_with_performance_and_filters, run_similar,
 };
 use crate::core::sentinel::{SentinelCheckContext, observe_sentinel, observe_sentinel_explicit};
 use crate::core::session_budget::{BudgetPlannerInput, plan_cheapest_next_command};
@@ -12828,7 +12829,7 @@ pub fn run_from_env() -> ProcessExitCode {
 /// Standalone `ee` execution constructs one owner and invokes it once. An
 /// embedder that issues multiple CLI queries in the same process retains this
 /// value so process-scoped advisories are not repeated between renders.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CliProcess {
     search_advisory_session: SearchAdvisorySession,
 }
@@ -12840,7 +12841,12 @@ impl CliProcess {
         W: Write,
         E: Write,
     {
-        run_in_process(self, args, stdout, stderr)
+        let advisory_checkpoint = self.search_advisory_session.clone();
+        let exit = run_in_process(self, args, stdout, stderr);
+        if exit != ProcessExitCode::Success {
+            self.search_advisory_session = advisory_checkpoint;
+        }
+        exit
     }
 }
 
@@ -13088,7 +13094,7 @@ where
             ClaimCommand::Verify(args) => handle_claim_verify(&cli, args, stdout, stderr),
         },
         Some(Command::Context(ref args)) => {
-            handle_context_pack_query(&cli, args, PACK_COMMAND, true, stdout, stderr)
+            handle_context_pack_query(process, &cli, args, PACK_COMMAND, true, stdout, stderr)
         }
         Some(Command::Demo(ref demo_cmd)) => match demo_cmd {
             DemoCommand::List(args) => handle_demo_list(&cli, args, stdout, stderr),
@@ -14078,7 +14084,7 @@ where
         Some(Command::Trust(TrustCommand::Report(ref args))) => {
             handle_trust_report(&cli, args, stdout, stderr)
         }
-        Some(Command::Pack(ref args)) => handle_pack_command(&cli, args, stdout, stderr),
+        Some(Command::Pack(ref args)) => handle_pack_command(process, &cli, args, stdout, stderr),
         Some(Command::Perf(ref perf_cmd)) => handle_perf_command(&cli, perf_cmd, stdout, stderr),
         Some(Command::Proximity(ref args)) => handle_proximity(&cli, args, stdout, stderr),
         Some(Command::Recall(ref args)) => handle_recall(&cli, args, stdout, stderr),
@@ -38566,6 +38572,54 @@ fn parse_rfc3339_arg(value: &str) -> Result<chrono::DateTime<chrono::Utc>, Strin
         .map_err(|error| format!("Expected RFC3339 timestamp, got {value:?}: {error}"))
 }
 
+struct ContextSearchAdvisoryDelivery<'a> {
+    snapshot: &'a ContextSearchAdvisorySnapshot,
+    session: &'a mut SearchAdvisorySession,
+    workspace_id: &'a str,
+}
+
+fn render_context_json_for_delivery(
+    response: &ContextResponse,
+    render_options: output::ContextJsonRenderOptions,
+    advisory_delivery: Option<ContextSearchAdvisoryDelivery<'_>>,
+) -> Result<String, String> {
+    let rendered = output::render_context_response_json_with_options(response, render_options);
+    let Some(delivery) = advisory_delivery else {
+        return Ok(rendered);
+    };
+    let mut payload: serde_json::Value = serde_json::from_str(&rendered).map_err(|error| {
+        format!("Failed to decode the canonical context JSON renderer: {error}")
+    })?;
+    let mut reservation = delivery.session.reserve_delivery(delivery.workspace_id);
+    attach_context_cached_search_advisories_for_delivery(
+        &mut payload,
+        delivery.snapshot,
+        delivery.session,
+        delivery.workspace_id,
+        &mut reservation,
+    );
+    for attempt in 0..=2 {
+        let settlement = delivery.session.settle_delivery(
+            reservation.workspace_id(),
+            reservation.token(),
+            true,
+            reservation.large_gap_capacity_busy(),
+        );
+        if settlement == SearchAdvisorySettlement::Complete {
+            return serde_json::to_string(&payload).map_err(|error| {
+                format!("Failed to encode the canonical context JSON renderer: {error}")
+            });
+        }
+        if attempt < 2 {
+            std::thread::yield_now();
+        }
+    }
+    Err(
+        "Context advisory delivery state remained busy after bounded settlement retries."
+            .to_owned(),
+    )
+}
+
 fn write_context_response<W, E>(
     renderer: output::Renderer,
     requested_format: OutputFormat,
@@ -38574,6 +38628,7 @@ fn write_context_response<W, E>(
     render_options: output::ContextJsonRenderOptions,
     result_path_hint: Option<&'static str>,
     output_path: Option<&Path>,
+    advisory_delivery: Option<ContextSearchAdvisoryDelivery<'_>>,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -38597,38 +38652,59 @@ where
 
     let rendered = match renderer {
         output::Renderer::Human => output::render_context_response_human(response),
-        output::Renderer::Toon => match redaction {
-            Some(redaction) => {
-                let (fields, patterns) = context_redaction_fields_and_patterns(response);
-                output::render_toon_from_json(&json_with_redaction_metadata(
-                    output::render_context_response_json_with_options(response, render_options),
-                    redaction,
-                    fields,
-                    patterns,
-                )) + "\n"
-            }
-            None => output::render_context_response_toon(response) + "\n",
-        },
-        output::Renderer::Json => match redaction {
-            Some(redaction) => {
-                let (fields, patterns) = context_redaction_fields_and_patterns(response);
-                json_with_redaction_metadata(
-                    json_with_data_result_path(
-                        output::render_context_response_json_with_options(response, render_options),
-                        result_path_hint,
-                    ),
-                    redaction,
-                    fields,
-                    patterns,
-                ) + "\n"
-            }
-            None => {
-                json_with_data_result_path(
-                    output::render_context_response_json_with_options(response, render_options),
-                    result_path_hint,
-                ) + "\n"
-            }
-        },
+        output::Renderer::Toon => {
+            let json =
+                match render_context_json_for_delivery(response, render_options, advisory_delivery)
+                {
+                    Ok(json) => json,
+                    Err(message) => {
+                        return write_domain_error(
+                            &DomainError::Storage {
+                                message,
+                                repair: Some("Retry the context request.".to_owned()),
+                            },
+                            true,
+                            stdout,
+                            stderr,
+                        );
+                    }
+                };
+            let json = match redaction {
+                Some(redaction) => {
+                    let (fields, patterns) = context_redaction_fields_and_patterns(response);
+                    json_with_redaction_metadata(json, redaction, fields, patterns)
+                }
+                None => json,
+            };
+            output::render_toon_from_json(&json) + "\n"
+        }
+        output::Renderer::Json => {
+            let json =
+                match render_context_json_for_delivery(response, render_options, advisory_delivery)
+                {
+                    Ok(json) => json,
+                    Err(message) => {
+                        return write_domain_error(
+                            &DomainError::Storage {
+                                message,
+                                repair: Some("Retry the context request.".to_owned()),
+                            },
+                            true,
+                            stdout,
+                            stderr,
+                        );
+                    }
+                };
+            let json = json_with_data_result_path(json, result_path_hint);
+            let json = match redaction {
+                Some(redaction) => {
+                    let (fields, patterns) = context_redaction_fields_and_patterns(response);
+                    json_with_redaction_metadata(json, redaction, fields, patterns)
+                }
+                None => json,
+            };
+            json + "\n"
+        }
         output::Renderer::Jsonl => output::render_context_response_jsonl(response) + "\n",
         output::Renderer::Compact => output::render_context_response_compact(response) + "\n",
         output::Renderer::Hook => output::render_context_response_hook(response) + "\n",
@@ -40073,6 +40149,7 @@ const CONTEXT_DEPRECATED_ALIAS_REPAIR: &str =
     "Use `ee pack \"<task>\" ...` in new harnesses, scripts, and docs.";
 
 fn handle_context_pack_query<W, E>(
+    process: &mut CliProcess,
     cli: &Cli,
     args: &ContextArgs,
     command: &'static str,
@@ -40095,7 +40172,8 @@ where
         }
     };
 
-    let workspace_path = cli.resolve_workspace();
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
+    let advisory_workspace_id = crate::core::workspace::stable_workspace_id(&workspace_path);
     let database_path_for_pack_dna = args
         .database
         .clone()
@@ -40277,8 +40355,10 @@ where
         };
     }
 
-    match run_context_pack_with_performance(&options, command).map(|run| run.response) {
-        Ok(mut response) => {
+    match run_context_pack_with_performance(&options, command) {
+        Ok(run) => {
+            let mut response = run.response;
+            let search_advisory_snapshot = run.search_advisory_snapshot;
             if deprecated_alias {
                 let entry = ContextResponseDegradation::new(
                     "deprecated_alias",
@@ -40330,6 +40410,11 @@ where
                 render_options,
                 args.explain.then_some("data.pack.items"),
                 args.output.as_deref(),
+                Some(ContextSearchAdvisoryDelivery {
+                    snapshot: &search_advisory_snapshot,
+                    session: &mut process.search_advisory_session,
+                    workspace_id: &advisory_workspace_id,
+                }),
                 stdout,
                 stderr,
             )
@@ -43360,6 +43445,7 @@ struct DbPendingMigration {
 }
 
 fn handle_pack_command<W, E>(
+    process: &mut CliProcess,
     cli: &Cli,
     args: &PackArgs,
     stdout: &mut W,
@@ -43498,23 +43584,34 @@ where
             no_baseline_write: args.no_baseline_write,
             max_delta_bytes: None,
         };
-        return handle_context_pack_query(cli, &context_args, PACK_COMMAND, false, stdout, stderr);
+        return handle_context_pack_query(
+            process,
+            cli,
+            &context_args,
+            PACK_COMMAND,
+            false,
+            stdout,
+            stderr,
+        );
     }
 
     match &args.command {
-        Some(PackCommand::Build(build_args)) => handle_pack(cli, build_args, stdout, stderr),
+        Some(PackCommand::Build(build_args)) => {
+            handle_pack(process, cli, build_args, stdout, stderr)
+        }
         Some(PackCommand::Replay(replay_args)) => {
             handle_pack_replay(cli, replay_args, stdout, stderr)
         }
         Some(PackCommand::Diff(diff_args)) => handle_pack_diff(cli, diff_args, stdout, stderr),
         None => match args.legacy_build_args() {
-            Ok(build_args) => handle_pack(cli, &build_args, stdout, stderr),
+            Ok(build_args) => handle_pack(process, cli, &build_args, stdout, stderr),
             Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
         },
     }
 }
 
 fn handle_pack<W, E>(
+    process: &mut CliProcess,
     cli: &Cli,
     args: &PackBuildArgs,
     stdout: &mut W,
@@ -43715,8 +43812,10 @@ where
         };
     }
 
-    match run_context_pack_with_performance(&options, PACK_COMMAND).map(|run| run.response) {
-        Ok(mut response) => {
+    match run_context_pack_with_performance(&options, PACK_COMMAND) {
+        Ok(run) => {
+            let mut response = run.response;
+            let search_advisory_snapshot = run.search_advisory_snapshot;
             response.data.degraded.extend(request.degraded);
             if args.explain_gaps {
                 let report = crate::pack::explain_coverage_gap(&options.query, &response.data.pack);
@@ -43737,6 +43836,9 @@ where
                 attach_pack_dna_to_context_response(&database_path_for_pack_dna, &mut response);
             }
             attach_revisable_pack_metadata(&mut response, args.mesh_mode, "pack");
+            let advisory_workspace_path = resolve_cli_workspace_path(&options.workspace_path);
+            let advisory_workspace_id =
+                crate::core::workspace::stable_workspace_id(&advisory_workspace_path);
             write_context_response(
                 renderer,
                 cli.format,
@@ -43745,6 +43847,11 @@ where
                 output::ContextJsonRenderOptions::from(output_options),
                 args.explain.then_some("data.pack.items"),
                 args.output.as_deref(),
+                Some(ContextSearchAdvisoryDelivery {
+                    snapshot: &search_advisory_snapshot,
+                    session: &mut process.search_advisory_session,
+                    workspace_id: &advisory_workspace_id,
+                }),
                 stdout,
                 stderr,
             )
@@ -71708,6 +71815,180 @@ mod tests {
                 "rerank_model_unavailable"
             );
         }
+    }
+
+    fn prepare_real_advisory_workspace(
+        process: &mut CliProcess,
+        prefix: &str,
+    ) -> Result<String, String> {
+        let workspace = unique_temp_workspace(prefix)?;
+        for args in [
+            vec!["ee", "--json", "--workspace", workspace.as_str(), "init"],
+            vec![
+                "ee",
+                "--json",
+                "--workspace",
+                workspace.as_str(),
+                "remember",
+                "Production context advisory lifecycle evidence.",
+                "--level",
+                "semantic",
+                "--kind",
+                "fact",
+            ],
+            vec![
+                "ee",
+                "--json",
+                "--workspace",
+                workspace.as_str(),
+                "index",
+                "rebuild",
+            ],
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = process.run(
+                args.into_iter().map(OsString::from),
+                &mut stdout,
+                &mut stderr,
+            );
+            if exit != ProcessExitCode::Success {
+                return Err(format!(
+                    "real advisory workspace setup failed with exit {}: {}",
+                    exit as u8,
+                    String::from_utf8_lossy(&stderr)
+                ));
+            }
+        }
+        Ok(workspace)
+    }
+
+    fn run_real_advisory_json(
+        process: &mut CliProcess,
+        workspace: &str,
+        command: &str,
+        query: &str,
+    ) -> Result<serde_json::Value, String> {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = process.run(
+            ["ee", "--json", "--workspace", workspace, command, query]
+                .into_iter()
+                .map(OsString::from),
+            &mut stdout,
+            &mut stderr,
+        );
+        if exit != ProcessExitCode::Success {
+            return Err(format!(
+                "real {command} advisory request failed with exit {}: {}",
+                exit as u8,
+                String::from_utf8_lossy(&stderr)
+            ));
+        }
+        serde_json::from_slice(&stdout)
+            .map_err(|error| format!("real {command} response was not JSON: {error}"))
+    }
+
+    #[test]
+    fn reusable_cli_context_first_consumes_advisory_only_after_visible_delivery() -> TestResult {
+        let mut process = CliProcess::default();
+        let workspace = prepare_real_advisory_workspace(&mut process, "cli-context-advisory")?;
+
+        let context = run_real_advisory_json(
+            &mut process,
+            &workspace,
+            "context",
+            "advisory lifecycle evidence",
+        )?;
+        ensure_equal(
+            &context["data"]["rerank"]["advisory"]["code"],
+            &serde_json::json!("rerank_model_unavailable"),
+            "context receives canonical rerank advisory",
+        )?;
+        ensure_equal(
+            &context["data"]["rerank"]["advisorySummary"]["scope"],
+            &serde_json::json!("process"),
+            "context advisory scope",
+        )?;
+
+        let search = run_real_advisory_json(
+            &mut process,
+            &workspace,
+            "search",
+            "advisory lifecycle evidence",
+        )?;
+        ensure(
+            search["data"]["rerank"]["advisory"].is_null(),
+            "search after delivered context must suppress the permanent advisory",
+        )?;
+        ensure_equal(
+            &search["data"]["rerank"]["advisorySummary"]["sessionOccurrenceCount"],
+            &serde_json::json!(2),
+            "context-first occurrence count",
+        )?;
+        ensure_equal(
+            &search["data"]["rerank"]["advisorySummary"]["sessionSuppressedCount"],
+            &serde_json::json!(1),
+            "context-first suppression count",
+        )
+    }
+
+    struct FailingContextWriter;
+
+    impl Write for FailingContextWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "intentional context delivery failure",
+            ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn reusable_cli_failed_context_writer_rolls_back_advisory_delivery() -> TestResult {
+        let mut process = CliProcess::default();
+        let workspace = prepare_real_advisory_workspace(&mut process, "cli-context-retry")?;
+        let mut failed_stdout = FailingContextWriter;
+        let mut failed_stderr = Vec::new();
+        let failed_exit = process.run(
+            [
+                "ee",
+                "--json",
+                "--workspace",
+                workspace.as_str(),
+                "pack",
+                "advisory lifecycle evidence",
+            ]
+            .into_iter()
+            .map(OsString::from),
+            &mut failed_stdout,
+            &mut failed_stderr,
+        );
+        ensure(
+            failed_exit != ProcessExitCode::Success,
+            "failed context writer must fail the CLI delivery",
+        )?;
+
+        let retry = run_real_advisory_json(
+            &mut process,
+            &workspace,
+            "pack",
+            "advisory lifecycle evidence",
+        )?;
+        ensure_equal(
+            &retry["data"]["rerank"]["advisory"]["code"],
+            &serde_json::json!("rerank_model_unavailable"),
+            "retry after failed context delivery receives the advisory",
+        )?;
+        ensure_equal(
+            &retry["data"]["rerank"]["advisorySummary"]["sessionOccurrenceCount"],
+            &serde_json::json!(1),
+            "failed context delivery does not consume an occurrence",
+        )
     }
 
     fn why_rationale_trace_fixture() -> WhyReport {

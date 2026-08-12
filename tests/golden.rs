@@ -3066,6 +3066,31 @@ mod tests {
             "context request candidate pool",
         )?;
         ensure_equal(
+            &value["data"]["rerank"]["schema"],
+            &serde_json::json!("ee.rerank_posture.v1"),
+            "context production rerank schema",
+        )?;
+        ensure_equal(
+            &value["data"]["rerank"]["advisory"]["code"],
+            &serde_json::json!("rerank_model_unavailable"),
+            "context production rerank advisory",
+        )?;
+        ensure_equal(
+            &value["data"]["rerank"]["advisory"]["resolution"],
+            &serde_json::json!("automatic_repair_unavailable"),
+            "context production rerank resolution",
+        )?;
+        ensure_equal(
+            &value["data"]["rerank"]["advisory"]["repair"],
+            &serde_json::Value::Null,
+            "context permanent rerank advisory has no fake repair",
+        )?;
+        ensure_equal(
+            &value["data"]["rerank"]["advisorySummary"]["scope"],
+            &serde_json::json!("process"),
+            "context production rerank advisory scope",
+        )?;
+        ensure_equal(
             &value["data"]["pack"]["meta"]["algorithm"]["objective"],
             &serde_json::json!("mmr_redundancy"),
             "context algorithm objective",
@@ -3199,6 +3224,16 @@ mod tests {
             &value["data"]["request"]["profile"],
             &serde_json::json!("compact"),
             "pack query-file profile",
+        )?;
+        ensure_equal(
+            &value["data"]["rerank"]["schema"],
+            &serde_json::json!("ee.rerank_posture.v1"),
+            "query-file production rerank schema",
+        )?;
+        ensure_equal(
+            &value["data"]["rerank"]["advisory"]["code"],
+            &serde_json::json!("rerank_model_unavailable"),
+            "query-file production rerank advisory",
         )?;
         ensure(
             value.pointer("/data/pack/selectionAudit").is_some(),

@@ -340,6 +340,33 @@ fn pack_response_sample(deprecated_alias: bool) -> Value {
                 "strictScope": false,
                 "sections": ["procedural_rules"]
             },
+            "rerank": {
+                "schema": "ee.rerank_posture.v1",
+                "mode": "fusion_only_degraded",
+                "configured": "auto",
+                "topK": 50,
+                "rerankScoreCount": 0,
+                "scoreKind": "rrf_fused",
+                "available": false,
+                "degradedCode": "rerank_model_unavailable",
+                "advisory": {
+                    "code": "rerank_model_unavailable",
+                    "severity": "low",
+                    "permanent": true,
+                    "message": "No usable local reranker is registered.",
+                    "repair": null,
+                    "resolution": "automatic_repair_unavailable"
+                },
+                "advisorySummary": {
+                    "scope": "process",
+                    "permanent": true,
+                    "distinctCount": 1,
+                    "emittedCount": 1,
+                    "suppressedCount": 0,
+                    "sessionOccurrenceCount": 1,
+                    "sessionSuppressedCount": 0
+                }
+            },
             "pack": {
                 "schema": "ee.pack.v2",
                 "query": "response envelope conformance",

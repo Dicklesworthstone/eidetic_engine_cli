@@ -3108,6 +3108,34 @@ mod tests {
 
     type TestResult = Result<(), String>;
 
+    fn current_dir_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct CurrentDirGuard<'a> {
+        _guard: std::sync::MutexGuard<'a, ()>,
+        previous: PathBuf,
+    }
+
+    impl Drop for CurrentDirGuard<'_> {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.previous);
+        }
+    }
+
+    fn enter_current_dir(path: &Path) -> Result<CurrentDirGuard<'static>, String> {
+        let guard = current_dir_test_lock()
+            .lock()
+            .map_err(|_| "serve current-directory test lock poisoned".to_owned())?;
+        let previous = std::env::current_dir().map_err(|error| error.to_string())?;
+        std::env::set_current_dir(path).map_err(|error| error.to_string())?;
+        Ok(CurrentDirGuard {
+            _guard: guard,
+            previous,
+        })
+    }
+
     fn ensure<T>(actual: T, expected: T, label: &str) -> TestResult
     where
         T: std::fmt::Debug + PartialEq,
@@ -3383,6 +3411,118 @@ mod tests {
             delivered_json["response"]["payload"]["data"]["rerank"]["advisory"].is_null(),
             true,
             "successful retry consumes advisory",
+        )
+    }
+
+    #[test]
+    fn serve_failed_real_context_delivery_retries_before_search_suppresses() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let init = crate::core::init::init_workspace(&crate::core::init::InitOptions {
+            workspace_path: workspace.path().to_path_buf(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        if matches!(init.status, crate::core::init::InitStatus::Failed) {
+            return Err(format!(
+                "initialize real serve advisory workspace: {:?}",
+                init.action_errors
+            ));
+        }
+        remember_memory(&RememberMemoryOptions {
+            workspace_path: workspace.path(),
+            database_path: None,
+            content: "Real serve context failed-delivery advisory evidence.",
+            workflow_id: None,
+            level: "semantic",
+            kind: "fact",
+            tags: Some("serve-advisory"),
+            confidence: 0.9,
+            source: Some("test://serve-context-advisory"),
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: false,
+            propose_candidates: false,
+            allow_secret_mention: false,
+        })
+        .map_err(|error| format!("remember real serve advisory evidence: {error:?}"))?;
+        crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+            workspace_path: workspace.path().to_path_buf(),
+            database_path: Some(workspace.path().join(".ee").join("ee.db")),
+            index_dir: None,
+            dry_run: false,
+        })
+        .map_err(|error| format!("rebuild real serve advisory index: {error:?}"))?;
+        let _cwd = enter_current_dir(workspace.path())?;
+
+        let token = "01234567890123456789012345678901";
+        let context_request = format!(
+            "GET /v1/context?task=serve%20failed%20delivery HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+        );
+        let state = ServeSearchAdvisoryState::default();
+        let first = render_serve_transport_exchange_with_state(
+            "req-real-context-failed",
+            context_request.as_bytes(),
+            &ServeLimits::default(),
+            Some(token),
+            0,
+            &state,
+            serve_search_payload_json,
+        );
+        let first_json = serve_response_json(&first.wire)?;
+        ensure(
+            first_json["response"]["payload"]["data"]["rerank"]["advisory"].is_object(),
+            true,
+            "real context payload carries advisory before failed delivery",
+        )?;
+        write_serve_rendered_response(&mut FailingServeWriter, first, &state)
+            .expect_err("real context disconnected writer must fail");
+
+        let retry = render_serve_transport_exchange_with_state(
+            "req-real-context-retry",
+            context_request.as_bytes(),
+            &ServeLimits::default(),
+            Some(token),
+            0,
+            &state,
+            serve_search_payload_json,
+        );
+        let retry_json = serve_response_json(&retry.wire)?;
+        ensure(
+            retry_json["response"]["payload"]["data"]["rerank"]["advisory"].is_object(),
+            true,
+            "real context retry preserves the undelivered advisory",
+        )?;
+        ensure(
+            retry_json["response"]["payload"]["data"]["rerank"]["advisorySummary"]
+                ["sessionOccurrenceCount"]
+                .as_u64(),
+            Some(1),
+            "failed real context delivery does not consume an occurrence",
+        )?;
+        write_serve_rendered_response(&mut Vec::new(), retry, &state)
+            .map_err(|error| error.to_string())?;
+
+        let search_request = format!(
+            "GET /v1/search?q=serve%20failed%20delivery HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+        );
+        let search = render_serve_transport_exchange_with_state(
+            "req-real-search-after-context",
+            search_request.as_bytes(),
+            &ServeLimits::default(),
+            Some(token),
+            0,
+            &state,
+            serve_search_payload_json,
+        );
+        let search_json = serve_response_json(&search.wire)?;
+        ensure(
+            search_json["response"]["payload"]["data"]["rerank"]["advisory"].is_null(),
+            true,
+            "search suppresses advisory after the real context retry is delivered",
         )
     }
 

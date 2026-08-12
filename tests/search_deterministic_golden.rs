@@ -561,6 +561,31 @@ fn assert_search_contract(value: &JsonValue) -> TestResult {
         &serde_json::json!(0),
         "search error count",
     )?;
+    ensure_equal(
+        &value["data"]["rerank"]["schema"],
+        &serde_json::json!("ee.rerank_posture.v1"),
+        "search production rerank schema",
+    )?;
+    ensure_equal(
+        &value["data"]["rerank"]["advisory"]["code"],
+        &serde_json::json!("rerank_model_unavailable"),
+        "search production rerank advisory",
+    )?;
+    ensure_equal(
+        &value["data"]["rerank"]["advisory"]["resolution"],
+        &serde_json::json!("automatic_repair_unavailable"),
+        "search production rerank resolution",
+    )?;
+    ensure_equal(
+        &value["data"]["rerank"]["advisory"]["repair"],
+        &JsonValue::Null,
+        "search permanent rerank advisory has no fake repair",
+    )?;
+    ensure_equal(
+        &value["data"]["rerank"]["advisorySummary"]["scope"],
+        &serde_json::json!("process"),
+        "search production rerank advisory scope",
+    )?;
 
     let results = value["data"]["results"]
         .as_array()

@@ -2616,13 +2616,24 @@ fn build_cli_args_for_resource(uri: &str) -> Result<Vec<OsString>, String> {
 }
 
 fn run_cli_tool(process: &mut McpProcess, args: Vec<OsString>) -> McpCliRunResult {
-    let max_bytes = mcp_stdio_byte_limit();
+    run_cli_tool_with_limit(process, args, mcp_stdio_byte_limit())
+}
+
+fn run_cli_tool_with_limit(
+    process: &mut McpProcess,
+    args: Vec<OsString>,
+    max_bytes: usize,
+) -> McpCliRunResult {
+    let advisory_checkpoint = process.cli.clone();
     let mut stdout = LimitedCapture::new(max_bytes);
     let mut stderr = LimitedCapture::new(max_bytes);
     let exit = process.cli.run(args, &mut stdout, &mut stderr);
     let stdout_bytes_seen = stdout.bytes_seen;
     let stderr_bytes_seen = stderr.bytes_seen;
     let truncated = stdout.truncated || stderr.truncated;
+    if truncated {
+        process.cli = advisory_checkpoint;
+    }
     McpCliRunResult {
         exit,
         stdout: stdout.into_string(),
@@ -3099,9 +3110,10 @@ fn write_json_rpc_response<W: Write>(
     stdout: &mut W,
     response: &Value,
     max_bytes: usize,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let response_text = response.to_string();
-    let output_text = if response_text.len() > max_bytes {
+    let replaced = response_text.len() > max_bytes;
+    let output_text = if replaced {
         let id = response.get("id").cloned().filter(|value| !value.is_null());
         let error = mcp_size_limit_exceeded_error(id, "response", response_text.len(), max_bytes);
         let mut error_text = error.to_string();
@@ -3124,7 +3136,40 @@ fn write_json_rpc_response<W: Write>(
     writeln!(stdout, "{output_text}").map_err(|error| format!("stdout write error: {error}"))?;
     stdout
         .flush()
-        .map_err(|error| format!("stdout flush error: {error}"))
+        .map_err(|error| format!("stdout flush error: {error}"))?;
+    Ok(!replaced)
+}
+
+fn response_replaced_cli_payload(response: &Value) -> bool {
+    response.pointer("/error/data/code").and_then(Value::as_str)
+        == Some(MCP_SIZE_LIMIT_EXCEEDED_CODE)
+}
+
+fn deliver_stdio_line_in_process<W: Write>(
+    process: &mut McpProcess,
+    line: &str,
+    max_bytes: usize,
+    stdout: &mut W,
+) -> Result<StdioLineOutcome, String> {
+    let advisory_checkpoint = process.cli.clone();
+    let outcome = handle_stdio_line_in_process(process, line, max_bytes);
+    let delivered = if let Some(response) = outcome.response.as_ref() {
+        match write_json_rpc_response(stdout, response, max_bytes) {
+            Ok(original_delivered) => {
+                original_delivered && !response_replaced_cli_payload(response)
+            }
+            Err(error) => {
+                process.cli = advisory_checkpoint;
+                return Err(error);
+            }
+        }
+    } else {
+        false
+    };
+    if !delivered {
+        process.cli = advisory_checkpoint;
+    }
+    Ok(outcome)
 }
 
 /// Run the MCP stdio server.
@@ -3149,20 +3194,17 @@ pub fn run_stdio_server() -> Result<(), String> {
             StdioLineRead::Line(line) => line,
             StdioLineRead::TooLarge(actual_bytes) => {
                 let error = mcp_size_limit_exceeded_error(None, "request", actual_bytes, max_bytes);
-                write_json_rpc_response(&mut stdout, &error, max_bytes)?;
+                let _ = write_json_rpc_response(&mut stdout, &error, max_bytes)?;
                 continue;
             }
             StdioLineRead::InvalidUtf8(message) => {
                 let error = json_rpc_error(None, -32700, &format!("Parse error: {message}"));
-                write_json_rpc_response(&mut stdout, &error, max_bytes)?;
+                let _ = write_json_rpc_response(&mut stdout, &error, max_bytes)?;
                 continue;
             }
         };
 
-        let outcome = handle_stdio_line_in_process(&mut process, &line, max_bytes);
-        if let Some(response) = outcome.response {
-            write_json_rpc_response(&mut stdout, &response, max_bytes)?;
-        }
+        let outcome = deliver_stdio_line_in_process(&mut process, &line, max_bytes, &mut stdout)?;
 
         if outcome.shutdown {
             eprintln!("[ee-mcp] Shutdown requested");
@@ -3321,7 +3363,7 @@ mod tests {
             }),
         );
         let mut output = Vec::new();
-        write_json_rpc_response(&mut output, &response, 1024)?;
+        assert!(!write_json_rpc_response(&mut output, &response, 1024)?);
 
         let rendered = String::from_utf8(output).map_err(|error| error.to_string())?;
         let parsed: Value =
@@ -3358,7 +3400,7 @@ mod tests {
             }),
         );
         let mut output = Vec::new();
-        write_json_rpc_response(&mut output, &response, 1024)?;
+        assert!(!write_json_rpc_response(&mut output, &response, 1024)?);
 
         let rendered = String::from_utf8(output).map_err(|error| error.to_string())?;
         let parsed: Value =
@@ -4120,7 +4162,7 @@ mod tests {
     }
 
     #[test]
-    fn stdio_process_reuses_cli_advisory_state_across_real_search_calls() -> Result<(), String> {
+    fn stdio_process_shares_advisory_state_from_real_context_into_search() -> Result<(), String> {
         let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_text = workspace.path().to_string_lossy().into_owned();
         let mut process = McpProcess::default();
@@ -4163,13 +4205,13 @@ mod tests {
             }
         }
 
-        let request = |id: u64, query: &str| {
+        let request = |id: u64, tool: &str, query: &str| {
             json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "method": "tools/call",
                 "params": {
-                    "name": "ee_search",
+                    "name": tool,
                     "arguments": {
                         "query": query,
                         "workspace": workspace_text.as_str()
@@ -4179,23 +4221,23 @@ mod tests {
         };
         let first_outcome = handle_stdio_line_in_process(
             &mut process,
-            &request(1, "MCP advisory first search").to_string(),
+            &request(1, "ee_context", "MCP advisory context first").to_string(),
             DEFAULT_MCP_MAX_REQUEST_BYTES,
         );
         let repeated_outcome = handle_stdio_line_in_process(
             &mut process,
-            &request(2, "MCP advisory repeated search").to_string(),
+            &request(2, "ee_search", "MCP advisory repeated search").to_string(),
             DEFAULT_MCP_MAX_REQUEST_BYTES,
         );
         assert!(!first_outcome.shutdown && !repeated_outcome.shutdown);
         let first_response = first_outcome
             .response
-            .ok_or_else(|| "first MCP search response missing".to_owned())?;
+            .ok_or_else(|| "first MCP context response missing".to_owned())?;
         let repeated_response = repeated_outcome
             .response
             .ok_or_else(|| "repeated MCP search response missing".to_owned())?;
         let first: Value = serde_json::from_str(first_tool_text(&first_response)?)
-            .map_err(|error| format!("first MCP search returned invalid JSON: {error}"))?;
+            .map_err(|error| format!("first MCP context returned invalid JSON: {error}"))?;
         let repeated: Value = serde_json::from_str(first_tool_text(&repeated_response)?)
             .map_err(|error| format!("repeated MCP search returned invalid JSON: {error}"))?;
 
@@ -4225,6 +4267,179 @@ mod tests {
         assert_eq!(
             repeated
                 .pointer("/data/rerank/advisorySummary/sessionSuppressedCount")
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        Ok(())
+    }
+
+    struct FailingMcpWriter;
+
+    impl Write for FailingMcpWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "intentional MCP client disconnect",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn mcp_failed_context_deliveries_retry_advisory_on_next_visible_response() -> Result<(), String>
+    {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_text = workspace.path().to_string_lossy().into_owned();
+        let mut process = McpProcess::default();
+        for args in [
+            vec!["ee", "--json", "--workspace", &workspace_text, "init"],
+            vec![
+                "ee",
+                "--json",
+                "--workspace",
+                &workspace_text,
+                "remember",
+                "MCP failed-delivery advisory production evidence.",
+                "--level",
+                "semantic",
+                "--kind",
+                "fact",
+            ],
+            vec![
+                "ee",
+                "--json",
+                "--workspace",
+                &workspace_text,
+                "index",
+                "rebuild",
+            ],
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = process.cli.run(
+                args.into_iter().map(OsString::from),
+                &mut stdout,
+                &mut stderr,
+            );
+            if exit != ProcessExitCode::Success {
+                return Err(format!(
+                    "MCP failed-delivery setup failed with exit {}: {}",
+                    exit as u8,
+                    String::from_utf8_lossy(&stderr)
+                ));
+            }
+        }
+
+        let context_request = |id: Option<u64>| {
+            let mut request = json!({
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": "ee_context",
+                    "arguments": {
+                        "query": "MCP failed delivery advisory",
+                        "workspace": workspace_text.as_str()
+                    }
+                }
+            });
+            if let Some(id) = id {
+                request["id"] = json!(id);
+            }
+            request
+        };
+
+        let inner_run = run_cli_tool_with_limit(
+            &mut process,
+            [
+                "ee",
+                "--json",
+                "--workspace",
+                workspace_text.as_str(),
+                "pack",
+                "MCP inner capture advisory",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+            1024,
+        );
+        assert!(
+            inner_run.truncated,
+            "context payload must exceed the inner cap"
+        );
+        assert!(cli_output_size_limit_error(json!(1), &inner_run).is_some());
+
+        let mut outer_output = Vec::new();
+        let outer_outcome = deliver_stdio_line_in_process(
+            &mut process,
+            &context_request(Some(2)).to_string(),
+            1024,
+            &mut outer_output,
+        )?;
+        assert!(outer_outcome.response.is_some());
+        let outer: Value = serde_json::from_slice(&outer_output)
+            .map_err(|error| format!("outer cap response was not JSON: {error}"))?;
+        assert_eq!(
+            outer.pointer("/error/data/code").and_then(Value::as_str),
+            Some(MCP_SIZE_LIMIT_EXCEEDED_CODE)
+        );
+
+        let failed = deliver_stdio_line_in_process(
+            &mut process,
+            &context_request(Some(3)).to_string(),
+            DEFAULT_MCP_MAX_REQUEST_BYTES,
+            &mut FailingMcpWriter,
+        );
+        assert!(
+            failed.is_err(),
+            "disconnected MCP writer must fail delivery"
+        );
+
+        let mut notification_output = Vec::new();
+        let notification = deliver_stdio_line_in_process(
+            &mut process,
+            &context_request(None).to_string(),
+            DEFAULT_MCP_MAX_REQUEST_BYTES,
+            &mut notification_output,
+        )?;
+        assert!(notification.response.is_none());
+        assert!(notification_output.is_empty());
+
+        let search_request = json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "ee_search",
+                "arguments": {
+                    "query": "MCP failed delivery advisory",
+                    "workspace": workspace_text
+                }
+            }
+        });
+        let mut search_output = Vec::new();
+        deliver_stdio_line_in_process(
+            &mut process,
+            &search_request.to_string(),
+            DEFAULT_MCP_MAX_REQUEST_BYTES,
+            &mut search_output,
+        )?;
+        let search_response: Value = serde_json::from_slice(&search_output)
+            .map_err(|error| format!("MCP retry response was not JSON: {error}"))?;
+        let search: Value = serde_json::from_str(first_tool_text(&search_response)?)
+            .map_err(|error| format!("MCP retry tool payload was not JSON: {error}"))?;
+        assert_eq!(
+            search
+                .pointer("/data/rerank/advisory/code")
+                .and_then(Value::as_str),
+            Some("rerank_model_unavailable")
+        );
+        assert_eq!(
+            search
+                .pointer("/data/rerank/advisorySummary/sessionOccurrenceCount")
                 .and_then(Value::as_u64),
             Some(1)
         );

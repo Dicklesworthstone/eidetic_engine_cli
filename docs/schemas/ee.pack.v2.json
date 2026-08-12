@@ -12,7 +12,7 @@
     "fields": {"type": "string"},
     "data": {
       "type": "object",
-      "required": ["command", "embed_backend", "request", "pack", "degraded"],
+      "required": ["command", "embed_backend", "request", "rerank", "pack", "degraded"],
       "additionalProperties": false,
       "properties": {
         "command": {"type": "string", "const": "pack"},

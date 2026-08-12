@@ -108,6 +108,28 @@ fn response_sse_data_json(response: &str) -> Result<JsonValue, String> {
     serde_json::from_str(data_lines[0]).map_err(|error| error.to_string())
 }
 
+fn send_foreground_request(port: u16, token: &str, path: &str) -> Result<JsonValue, String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))
+        .map_err(|error| format!("connect to serve listener on port {port}: {error}"))?;
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("write serve request {path}: {error}"))?;
+    stream
+        .shutdown(Shutdown::Write)
+        .map_err(|error| format!("shutdown serve request {path}: {error}"))?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| format!("read serve response {path}: {error}"))?;
+    if !response.starts_with("HTTP/1.1 200 OK\r\n") {
+        return Err(format!("serve request {path} did not succeed: {response}"));
+    }
+    response_body_json(&response)
+}
+
 #[test]
 fn serve_foreground_cli_accepts_one_real_status_request() -> TestResult {
     let _trace = test_tracing::init_test_tracing(
@@ -236,6 +258,120 @@ fn serve_foreground_cli_accepts_one_real_status_request() -> TestResult {
         ));
     }
 
+    Ok(())
+}
+
+#[test]
+fn serve_foreground_real_context_first_consumes_process_advisory() -> TestResult {
+    let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    for args in [
+        vec!["init"],
+        vec![
+            "remember",
+            "Real serve context-first advisory evidence.",
+            "--level",
+            "semantic",
+            "--kind",
+            "fact",
+        ],
+        vec!["index", "rebuild"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .arg("--json")
+            .arg("--workspace")
+            .arg(workspace.path())
+            .args(&args)
+            .output()
+            .map_err(|error| format!("run serve workspace setup {args:?}: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "serve workspace setup {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+
+    let token = "01234567890123456789012345678901";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args([
+            "serve",
+            "--foreground",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--json",
+        ])
+        .current_dir(workspace.path())
+        .env("EE_SERVE_TOKEN", token)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("spawn context-first serve foreground: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "context-first serve stdout was not piped".to_owned())?;
+    let mut stdout_reader = BufReader::new(stdout);
+    let mut startup_line = String::new();
+    stdout_reader
+        .read_line(&mut startup_line)
+        .map_err(|error| format!("read context-first serve startup: {error}"))?;
+    let startup: JsonValue = serde_json::from_str(startup_line.trim())
+        .map_err(|error| format!("parse context-first serve startup: {error}"))?;
+    let port = startup["data"]["listener"]["boundPort"]
+        .as_u64()
+        .and_then(|port| u16::try_from(port).ok())
+        .ok_or_else(|| format!("context-first startup missing port: {startup}"))?;
+
+    let context = send_foreground_request(
+        port,
+        token,
+        "/v1/context?task=serve%20context-first%20advisory",
+    )?;
+    let context_payload = &context["response"]["payload"];
+    assert_eq!(
+        context_payload
+            .pointer("/data/rerank/advisory/code")
+            .and_then(JsonValue::as_str),
+        Some("rerank_model_unavailable"),
+        "real serve context must carry canonical rerank advisory: {context_payload}"
+    );
+    assert_eq!(
+        context_payload
+            .pointer("/data/rerank/advisorySummary/scope")
+            .and_then(JsonValue::as_str),
+        Some("process")
+    );
+
+    let search =
+        send_foreground_request(port, token, "/v1/search?q=serve%20context-first%20advisory")?;
+    let search_payload = &search["response"]["payload"];
+    assert!(
+        search_payload
+            .pointer("/data/rerank/advisory")
+            .is_some_and(JsonValue::is_null),
+        "real serve search after context must suppress the advisory: {search_payload}"
+    );
+    assert_eq!(
+        search_payload
+            .pointer("/data/rerank/advisorySummary/sessionOccurrenceCount")
+            .and_then(JsonValue::as_u64),
+        Some(2)
+    );
+    assert_eq!(
+        search_payload
+            .pointer("/data/rerank/advisorySummary/sessionSuppressedCount")
+            .and_then(JsonValue::as_u64),
+        Some(1)
+    );
+
+    child
+        .kill()
+        .map_err(|error| format!("stop context-first serve child: {error}"))?;
+    let _ = child
+        .wait()
+        .map_err(|error| format!("wait for context-first serve child: {error}"))?;
     Ok(())
 }
 

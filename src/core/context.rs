@@ -73,7 +73,7 @@ use crate::core::search::{
     performance_redaction_json, query_observation_json, reconcile_search_index_before_read_with_cx,
     run_context_search_with_preloaded_memories,
     run_context_search_with_preloaded_memories_and_workspace_state_with_cx,
-    search_degraded_data_json,
+    search_advisory_snapshot_data_json_with_delivery_reservation, search_degraded_data_json,
 };
 use crate::db::read_pool::{
     PoolConfig, PoolStats, READ_POOL_ACQUIRE_TIMEOUT_CODE, READ_POOL_UNDERSIZED_CODE,
@@ -121,7 +121,8 @@ static CONTEXT_PROXIMITY_TREE_CACHE: OnceLock<RwLock<Option<CachedContextProximi
 const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
 #[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
 pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V4: &str = "ee.pack.l2_cache_key.v4";
-const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2: &str = "ee.pack.l2_context_response.v2";
+const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3: &str = "ee.pack.l2_context_response.v3";
+const CONTEXT_SEARCH_ADVISORY_SNAPSHOT_SCHEMA_V1: &str = "ee.context.search_advisory_snapshot.v1";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
 const CONTEXT_CHANGED_SYMBOL_BOOST: f32 = 0.05;
 const CONTEXT_MEMORY_TIER_HOT_BOOST: f32 = 0.025;
@@ -859,9 +860,144 @@ pub struct ContextPackPerformanceRun {
     pub performance: serde_json::Value,
     /// The authoritative search observation that produced this pack. Long-lived
     /// transports retain advisory delivery state and render this report only
-    /// when the response is ready to be written. L2 cache hits carry no current
-    /// search observation and therefore leave this unset.
+    /// when the response is ready to be written. L2 cache hits retain the
+    /// minimal authoritative observation required for the same delivery-aware
+    /// rendering without repeating retrieval.
     pub(crate) search_report: Option<SearchReport>,
+    pub(crate) search_advisory_snapshot: ContextSearchAdvisorySnapshot,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ContextSearchAdvisorySnapshot {
+    rerank_configured_mode: crate::config::SearchRerankMode,
+    rerank_configured_top_k: usize,
+    rerank_runtime_available: bool,
+    rerank_score_count: usize,
+    degraded: Vec<SearchDegradation>,
+}
+
+impl ContextSearchAdvisorySnapshot {
+    fn from_search_report(report: &SearchReport) -> Self {
+        let rerank_score_count = report
+            .data_json()
+            .pointer("/rerank/rerankScoreCount")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(0);
+        Self {
+            rerank_configured_mode: report.rerank_configured_mode,
+            rerank_configured_top_k: report.rerank_configured_top_k,
+            rerank_runtime_available: report.rerank_runtime_available,
+            rerank_score_count,
+            degraded: report.degraded.clone(),
+        }
+    }
+
+    fn cache_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": CONTEXT_SEARCH_ADVISORY_SNAPSHOT_SCHEMA_V1,
+            "rerankConfiguredMode": self.rerank_configured_mode.as_str(),
+            "rerankConfiguredTopK": self.rerank_configured_top_k,
+            "rerankRuntimeAvailable": self.rerank_runtime_available,
+            "rerankScoreCount": self.rerank_score_count,
+            "degraded": self.degraded.iter().map(|entry| serde_json::json!({
+                "code": entry.code,
+                "severity": entry.severity,
+                "message": entry.message,
+                "repair": entry.repair,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    fn from_cache_json(value: &serde_json::Value) -> Result<Self, String> {
+        if value.get("schema").and_then(serde_json::Value::as_str)
+            != Some(CONTEXT_SEARCH_ADVISORY_SNAPSHOT_SCHEMA_V1)
+        {
+            return Err(
+                "L2 pack cache search advisory snapshot has an unexpected schema".to_owned(),
+            );
+        }
+        let configured_mode = value
+            .get("rerankConfiguredMode")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "L2 pack cache search advisory snapshot is missing rerankConfiguredMode".to_owned())?
+            .parse::<crate::config::SearchRerankMode>()
+            .map_err(|error| format!("L2 pack cache search advisory snapshot has an invalid rerankConfiguredMode: {error}"))?;
+        let configured_top_k = value
+            .get("rerankConfiguredTopK")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| {
+                "L2 pack cache search advisory snapshot is missing rerankConfiguredTopK".to_owned()
+            })?;
+        let runtime_available = value
+            .get("rerankRuntimeAvailable")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| {
+                "L2 pack cache search advisory snapshot is missing rerankRuntimeAvailable"
+                    .to_owned()
+            })?;
+        let rerank_score_count = value
+            .get("rerankScoreCount")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| {
+                "L2 pack cache search advisory snapshot is missing rerankScoreCount".to_owned()
+            })?;
+        let degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "L2 pack cache search advisory snapshot is missing degraded".to_owned())?
+            .iter()
+            .map(|entry| {
+                let field = |name| {
+                    entry
+                        .get(name)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!("L2 pack cache search advisory snapshot degradation is missing {name}"))
+                };
+                let repair = match entry.get("repair") {
+                    Some(value) if value.is_null() => None,
+                    Some(value) => Some(value.as_str().ok_or_else(|| {
+                        "L2 pack cache search advisory snapshot degradation repair is invalid".to_owned()
+                    })?.to_owned()),
+                    None => return Err("L2 pack cache search advisory snapshot degradation is missing repair".to_owned()),
+                };
+                Ok(SearchDegradation {
+                    code: field("code")?,
+                    severity: field("severity")?,
+                    message: field("message")?,
+                    repair,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(Self {
+            rerank_configured_mode: configured_mode,
+            rerank_configured_top_k: configured_top_k,
+            rerank_runtime_available: runtime_available,
+            rerank_score_count,
+            degraded,
+        })
+    }
+
+    fn data_json_with_delivery_reservation(
+        &self,
+        session: &mut SearchAdvisorySession,
+        workspace_id: &str,
+        reservation: &mut SearchAdvisoryDeliveryReservation,
+    ) -> serde_json::Value {
+        search_advisory_snapshot_data_json_with_delivery_reservation(
+            self.rerank_score_count,
+            &self.degraded,
+            self.rerank_configured_mode,
+            self.rerank_configured_top_k,
+            self.rerank_runtime_available,
+            session,
+            workspace_id,
+            Some(reservation),
+        )
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -3437,10 +3573,13 @@ async fn run_context_pack_with_performance_inner(
     );
 
     control.check()?;
+    let search_advisory_snapshot =
+        ContextSearchAdvisorySnapshot::from_search_report(&search_report);
     Ok(ContextPackPerformanceRun {
         response,
         performance,
         search_report: Some(search_report),
+        search_advisory_snapshot,
     })
 }
 
@@ -3957,6 +4096,13 @@ pub(crate) fn attach_context_search_advisories_for_delivery(
         workspace_id,
         reservation,
     );
+    attach_context_search_advisory_data(response, &search_data);
+}
+
+fn attach_context_search_advisory_data(
+    response: &mut serde_json::Value,
+    search_data: &serde_json::Value,
+) {
     if let Some(rerank) = search_data.get("rerank").cloned()
         && let Some(data) = response
             .get_mut("data")
@@ -3993,6 +4139,18 @@ pub(crate) fn attach_context_search_advisories_for_delivery(
         });
         entries.extend(search_stale_entries.iter().cloned());
     }
+}
+
+pub(crate) fn attach_context_cached_search_advisories_for_delivery(
+    response: &mut serde_json::Value,
+    snapshot: &ContextSearchAdvisorySnapshot,
+    session: &mut SearchAdvisorySession,
+    workspace_id: &str,
+    reservation: &mut SearchAdvisoryDeliveryReservation,
+) {
+    let search_data =
+        snapshot.data_json_with_delivery_reservation(session, workspace_id, reservation);
+    attach_context_search_advisory_data(response, &search_data);
 }
 
 fn push_selected_context_memory_drift_degradations(
@@ -5891,6 +6049,23 @@ fn context_pack_l2_try_hit(
                 l2_context.key_input.embed_backend,
             ) {
                 Ok(cached_json) => {
+                    let search_advisory_snapshot =
+                        match context_pack_l2_cached_search_advisory_snapshot(&hit.pack_json) {
+                            Ok(snapshot) => snapshot,
+                            Err(message) => {
+                                push_pack_l2_corruption(degraded, message);
+                                trace.record_elapsed("packL2Lookup", lookup_start);
+                                tracing::warn!(
+                                    target: "ee::pack_l2",
+                                    event = "pack_l2_cache_corruption",
+                                    command,
+                                    key = %l2_context.key,
+                                    path = %hit.path.display(),
+                                    reason = "search_advisory_snapshot_invalid",
+                                );
+                                return None;
+                            }
+                        };
                     let source_mode_metadata =
                         context_pack_l2_cached_source_mode_metadata(&hit.pack_json, options);
                     if source_mode_metadata.fallback {
@@ -5939,6 +6114,7 @@ fn context_pack_l2_try_hit(
                             },
                         ),
                         search_report: None,
+                        search_advisory_snapshot,
                     });
                 }
                 Err(message) => {
@@ -6004,9 +6180,12 @@ fn context_pack_l2_store(
         response,
         crate::output::ContextJsonRenderOptions::from(options.output_options),
     );
+    let search_advisory_snapshot =
+        ContextSearchAdvisorySnapshot::from_search_report(search_report).cache_json();
     let payload = serde_json::json!({
-        "schema": PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2,
+        "schema": PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
         "responseJson": rendered,
+        "searchAdvisorySnapshot": search_advisory_snapshot,
         "sourceMode": {
             "requested": source_mode_metadata.requested.as_str(),
             "applied": source_mode_metadata.applied.as_str(),
@@ -6338,7 +6517,7 @@ fn context_pack_l2_cached_response_json(
         .get("schema")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "L2 pack cache payload is missing schema".to_string())?;
-    if schema != PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2 {
+    if schema != PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3 {
         return Err(format!(
             "L2 pack cache payload has unexpected schema {schema}"
         ));
@@ -6401,6 +6580,15 @@ fn context_pack_l2_cached_response_json(
     }
     serde_json::to_string(&adjusted)
         .map_err(|error| format!("L2 pack cache responseJson rewrite failed: {error}"))
+}
+
+fn context_pack_l2_cached_search_advisory_snapshot(
+    payload: &serde_json::Value,
+) -> Result<ContextSearchAdvisorySnapshot, String> {
+    let snapshot = payload
+        .get("searchAdvisorySnapshot")
+        .ok_or_else(|| "L2 pack cache payload is missing searchAdvisorySnapshot".to_owned())?;
+    ContextSearchAdvisorySnapshot::from_cache_json(snapshot)
 }
 
 fn context_pack_l2_cached_source_mode_metadata(
@@ -15582,7 +15770,7 @@ pub fn unrelated_context() -> u64 {{
         })
         .to_string();
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
             "responseJson": response_json,
         });
 
@@ -15606,7 +15794,7 @@ pub fn unrelated_context() -> u64 {{
     #[test]
     fn l2_cached_response_json_rejects_unattributed_embedding_backend() {
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
             "responseJson": serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
@@ -15637,7 +15825,7 @@ pub fn unrelated_context() -> u64 {{
     #[test]
     fn l2_cached_response_json_rejects_backend_mismatch_with_cache_key() {
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
             "responseJson": serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
@@ -15728,7 +15916,7 @@ pub fn unrelated_context() -> u64 {{
         })
         .to_string();
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
             "responseJson": response_json,
         });
 
@@ -15795,7 +15983,7 @@ pub fn unrelated_context() -> u64 {{
             no_lod: false,
         };
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
             "responseJson": "{\"schema\":\"ee.response.v2\",\"success\":true,\"data\":{\"command\":\"pack\"},\"degraded\":[]}",
             "sourceMode": {
                 "requested": "semantic_only",
@@ -16045,7 +16233,9 @@ pub fn unrelated_context() -> u64 {{
             no_lod: false,
         };
 
-        let fresh = super::run_context_pack(&options).map_err(|error| error.to_string())?;
+        let fresh_run = super::run_context_pack_with_performance(&options, PACK_COMMAND)
+            .map_err(|error| error.to_string())?;
+        let fresh = fresh_run.response;
         assert!(
             fresh.cached_json.is_none(),
             "first run should assemble fresh output"
@@ -16090,7 +16280,58 @@ pub fn unrelated_context() -> u64 {{
                 .is_some(),
             "compressed v2 entry should carry compressed payload bytes"
         );
-        let cached = super::run_context_pack(&options).map_err(|error| error.to_string())?;
+        let cached_run = super::run_context_pack_with_performance(&options, PACK_COMMAND)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            cached_run
+                .performance
+                .pointer("/data/cache/status")
+                .and_then(serde_json::Value::as_str),
+            Some("hit"),
+            "second identical pack request must remain an L2 hit"
+        );
+        let mut advisory_session = SearchAdvisorySession::default();
+        let advisory_workspace_id = super::stable_context_workspace_id(&workspace);
+        let mut render_advisory = |snapshot: &super::ContextSearchAdvisorySnapshot| {
+            let mut reservation = advisory_session.reserve_delivery(&advisory_workspace_id);
+            let data = snapshot.data_json_with_delivery_reservation(
+                &mut advisory_session,
+                &advisory_workspace_id,
+                &mut reservation,
+            );
+            assert_eq!(
+                advisory_session.settle_delivery(
+                    reservation.workspace_id(),
+                    reservation.token(),
+                    true,
+                    reservation.large_gap_capacity_busy(),
+                ),
+                crate::core::search::SearchAdvisorySettlement::Complete
+            );
+            data
+        };
+        let fresh_advisory = render_advisory(&fresh_run.search_advisory_snapshot);
+        let cached_advisory = render_advisory(&cached_run.search_advisory_snapshot);
+        assert_eq!(
+            fresh_advisory
+                .pointer("/rerank/advisory/code")
+                .and_then(serde_json::Value::as_str),
+            Some("rerank_model_unavailable"),
+            "fresh pack must emit the permanent advisory"
+        );
+        assert!(
+            cached_advisory
+                .pointer("/rerank/advisory")
+                .is_some_and(serde_json::Value::is_null),
+            "L2 hit must share the process advisory ledger and suppress repetition"
+        );
+        assert_eq!(
+            cached_advisory
+                .pointer("/rerank/advisorySummary/sessionOccurrenceCount")
+                .and_then(serde_json::Value::as_u64),
+            Some(2)
+        );
+        let cached = cached_run.response;
         assert!(
             cached.cached_json.is_some(),
             "second run should return the L2 cached JSON response"

@@ -295,6 +295,33 @@
       "level_source": "built_in_default",
       "fields_redacted": [],
       "patterns_matched": []
+    },
+    "rerank": {
+      "advisory": {
+        "code": "rerank_model_unavailable",
+        "message": "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.",
+        "permanent": true,
+        "repair": null,
+        "resolution": "automatic_repair_unavailable",
+        "severity": "low"
+      },
+      "advisorySummary": {
+        "distinctCount": 1,
+        "emittedCount": 1,
+        "permanent": true,
+        "scope": "process",
+        "sessionOccurrenceCount": 1,
+        "sessionSuppressedCount": 0,
+        "suppressedCount": 0
+      },
+      "available": false,
+      "configured": "auto",
+      "degradedCode": "rerank_model_unavailable",
+      "mode": "fusion_only_degraded",
+      "rerankScoreCount": 0,
+      "schema": "ee.rerank_posture.v1",
+      "scoreKind": "rrf_fused",
+      "topK": 50
     }
   },
   "degraded": [
