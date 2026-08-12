@@ -75,6 +75,8 @@
 //! }
 //! ```
 
+use std::cmp::Ordering;
+
 use asupersync::lab::{LabConfig, LabRuntime};
 use regex_lite::Regex;
 use serde_json::Value;
@@ -229,26 +231,26 @@ fn validate_json_schema_value(
         }
     }
 
-    if let Some(number) = value.as_f64() {
-        if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64)
-            && number < minimum
+    if let Some(number) = value.as_number() {
+        if let Some(minimum) = schema.get("minimum").and_then(Value::as_number)
+            && compare_json_numbers(number, minimum) == Some(Ordering::Less)
         {
             return Err(format!("{path} value {number} is below minimum {minimum}"));
         }
-        if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64)
-            && number > maximum
+        if let Some(maximum) = schema.get("maximum").and_then(Value::as_number)
+            && compare_json_numbers(number, maximum) == Some(Ordering::Greater)
         {
             return Err(format!("{path} value {number} is above maximum {maximum}"));
         }
-        if let Some(minimum) = schema.get("exclusiveMinimum").and_then(Value::as_f64)
-            && number <= minimum
+        if let Some(minimum) = schema.get("exclusiveMinimum").and_then(Value::as_number)
+            && compare_json_numbers(number, minimum).is_some_and(Ordering::is_le)
         {
             return Err(format!(
                 "{path} value {number} is not above exclusive minimum {minimum}"
             ));
         }
-        if let Some(maximum) = schema.get("exclusiveMaximum").and_then(Value::as_f64)
-            && number >= maximum
+        if let Some(maximum) = schema.get("exclusiveMaximum").and_then(Value::as_number)
+            && compare_json_numbers(number, maximum).is_some_and(Ordering::is_ge)
         {
             return Err(format!(
                 "{path} value {number} is not below exclusive maximum {maximum}"
@@ -363,7 +365,7 @@ fn json_schema_type_matches(value: &Value, expected: &str) -> bool {
         "null" => value.is_null(),
         "boolean" => value.is_boolean(),
         "number" => value.is_number(),
-        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "integer" => value.as_number().is_some_and(json_schema_number_is_integer),
         "string" => value.is_string(),
         "array" => value.is_array(),
         "object" => value.is_object(),
@@ -375,12 +377,126 @@ fn json_schema_type_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",
         Value::Bool(_) => "boolean",
-        Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
+        Value::Number(number) if json_schema_number_is_integer(number) => "integer",
         Value::Number(_) => "number",
         Value::String(_) => "string",
         Value::Array(_) => "array",
         Value::Object(_) => "object",
     }
+}
+
+#[derive(Debug)]
+struct NormalizedJsonDecimal {
+    negative: bool,
+    digits: Vec<u8>,
+    exponent: i64,
+}
+
+// Compare the decimal rendering exactly so a u64::MAX schema boundary is not
+// rounded to 2^64 through f64 before applying minimum/maximum keywords.
+fn normalize_json_number(number: &serde_json::Number) -> Option<NormalizedJsonDecimal> {
+    let rendered = number.to_string();
+    let (mantissa, explicit_exponent) =
+        rendered
+            .find(['e', 'E'])
+            .map_or((rendered.as_str(), 0_i64), |index| {
+                rendered[index + 1..]
+                    .parse::<i64>()
+                    .ok()
+                    .map(|exponent| (&rendered[..index], exponent))
+                    .unwrap_or(("", 0))
+            });
+    if mantissa.is_empty() {
+        return None;
+    }
+    let (negative, mantissa) = mantissa
+        .strip_prefix('-')
+        .map_or((false, mantissa), |unsigned| (true, unsigned));
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let mut digits = whole
+        .bytes()
+        .chain(fraction.bytes())
+        .skip_while(|byte| *byte == b'0')
+        .collect::<Vec<_>>();
+    if digits.is_empty() {
+        return Some(NormalizedJsonDecimal {
+            negative: false,
+            digits: vec![b'0'],
+            exponent: 0,
+        });
+    }
+    let fraction_len = i64::try_from(fraction.len()).ok()?;
+    let mut exponent = explicit_exponent.checked_sub(fraction_len)?;
+    while digits.last() == Some(&b'0') {
+        digits.pop();
+        exponent = exponent.checked_add(1)?;
+    }
+    Some(NormalizedJsonDecimal {
+        negative,
+        digits,
+        exponent,
+    })
+}
+
+fn json_schema_number_is_integer(number: &serde_json::Number) -> bool {
+    normalize_json_number(number).is_some_and(|number| number.exponent >= 0)
+}
+
+fn compare_json_numbers(left: &serde_json::Number, right: &serde_json::Number) -> Option<Ordering> {
+    let left = normalize_json_number(left)?;
+    let right = normalize_json_number(right)?;
+    let left_is_zero = left.digits == [b'0'];
+    let right_is_zero = right.digits == [b'0'];
+    if left_is_zero || right_is_zero {
+        return Some(match (left_is_zero, right_is_zero) {
+            (true, true) => Ordering::Equal,
+            (true, false) if right.negative => Ordering::Greater,
+            (true, false) => Ordering::Less,
+            (false, true) if left.negative => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            (false, false) => unreachable!("zero branch requires at least one zero"),
+        });
+    }
+    if left.negative != right.negative {
+        return Some(if left.negative {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        });
+    }
+    let left_magnitude = i64::try_from(left.digits.len())
+        .ok()?
+        .checked_add(left.exponent)?;
+    let right_magnitude = i64::try_from(right.digits.len())
+        .ok()?
+        .checked_add(right.exponent)?;
+    let magnitude_order = left_magnitude.cmp(&right_magnitude);
+    let absolute_order = if magnitude_order == Ordering::Equal {
+        let width = left.digits.len().max(right.digits.len());
+        (0..width)
+            .map(|index| {
+                left.digits
+                    .get(index)
+                    .copied()
+                    .unwrap_or(b'0')
+                    .cmp(&right.digits.get(index).copied().unwrap_or(b'0'))
+            })
+            .find(|ordering| *ordering != Ordering::Equal)
+            .unwrap_or(Ordering::Equal)
+    } else {
+        magnitude_order
+    };
+    Some(if left.negative {
+        absolute_order.reverse()
+    } else {
+        absolute_order
+    })
 }
 
 /// Assert that two values are equal, with context on failure.
@@ -783,6 +899,47 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn draft_2020_12_integer_accepts_integral_decimal_numbers() -> TestResult {
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 18446744073709551615_u64
+        });
+        for value in [
+            serde_json::json!(0.0),
+            serde_json::json!(1.0),
+            serde_json::json!(1e3),
+            serde_json::json!(u64::MAX),
+        ] {
+            validate_json_schema_instance(&value, &schema).map_err(|error| {
+                format!("schema rejected integral JSON number {value}: {error}")
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn draft_2020_12_uint64_schema_rejects_out_of_domain_numbers() -> TestResult {
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 18446744073709551615_u64
+        });
+        let over_u64: Value = serde_json::from_str("18446744073709551616")
+            .map_err(|error| format!("parse over-u64 fixture: {error}"))?;
+        for value in [serde_json::json!(-1), serde_json::json!(1.5), over_u64] {
+            if validate_json_schema_instance(&value, &schema).is_ok() {
+                return Err(format!(
+                    "uint64 schema accepted out-of-domain JSON number {value}"
+                ));
+            }
+        }
+        Ok(())
+    }
 
     // ========================================================================
     // Fixture Constants Tests

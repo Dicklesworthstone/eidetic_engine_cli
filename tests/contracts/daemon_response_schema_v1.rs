@@ -29,6 +29,47 @@ const REQUEST_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.request.v1.json";
 const RESPONSE_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.response.v1.json";
 const SEARCH_REQUEST_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.search.request.v2.json";
 const SEARCH_RESPONSE_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.search.response.v3.json";
+const SEARCH_RESPONSE_UINT64_INSTANCE_POINTERS: &[&str] = &[
+    "/response/data/resultCount",
+    "/response/data/rerank/topK",
+    "/response/data/rerank/rerankScoreCount",
+    "/response/data/rerank/advisorySummary/distinctCount",
+    "/response/data/rerank/advisorySummary/emittedCount",
+    "/response/data/rerank/advisorySummary/suppressedCount",
+    "/response/data/rerank/advisorySummary/sessionOccurrenceCount",
+    "/response/data/rerank/advisorySummary/sessionSuppressedCount",
+    "/performance/data/query/lengthBytes",
+    "/performance/data/queryPlan/requestedLimit",
+    "/performance/data/queryPlan/candidateBudget",
+    "/performance/data/dbReads/indexStatusChecks",
+    "/performance/data/dbReads/memoryReads",
+    "/performance/data/dbReads/tagReads",
+    "/performance/data/dbReads/artifactLinkReads",
+    "/performance/data/profileRuntime/budgets/search/candidateLimit",
+    "/performance/data/profileRuntime/budgets/search/concurrentIndexReaders",
+    "/performance/data/profileRuntime/budgets/pack/maxTokens",
+    "/performance/data/profileRuntime/budgets/pack/maxCandidateMemories",
+    "/performance/data/profileRuntime/budgets/cache/memoryCapMb",
+    "/performance/data/profileRuntime/budgets/cache/entryCap",
+    "/performance/data/profileRuntime/budgets/cache/hotsetPrewarmLimit",
+    "/performance/data/profileRuntime/budgets/writeSpool/queueCap",
+    "/performance/data/profileRuntime/budgets/writeSpool/batchCap",
+    "/performance/data/profileRuntime/budgets/writeSpool/retryBudget",
+    "/performance/data/profileRuntime/budgets/steward/maintenanceWindowMs",
+    "/performance/data/profileRuntime/budgets/steward/graphRefreshBudget",
+    "/performance/data/search/returnedHits",
+    "/performance/data/search/sourceCounts/lexical",
+    "/performance/data/search/sourceCounts/semanticFast",
+    "/performance/data/search/sourceCounts/semanticQuality",
+    "/performance/data/search/sourceCounts/hybrid",
+    "/performance/data/search/sourceCounts/reranked",
+    "/performance/data/search/fieldCoverage/fastScoreCount",
+    "/performance/data/search/fieldCoverage/qualityScoreCount",
+    "/performance/data/search/fieldCoverage/lexicalScoreCount",
+    "/performance/data/search/fieldCoverage/rerankScoreCount",
+    "/performance/data/search/fieldCoverage/metadataCount",
+    "/performance/data/search/fieldCoverage/explanationCount",
+];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -538,7 +579,7 @@ fn daemon_search_method_schemas_pin_paths_timings_and_nested_strictness() -> Tes
         || uint64.get("maximum").and_then(Value::as_u64) != Some(u64::MAX)
     {
         return Err(format!(
-            "search response uint64 definition must pin Rust Value::as_u64 exactly: {uint64}"
+            "search response uint64 definition must pin the mathematical uint64 domain exactly: {uint64}"
         ));
     }
     for pointer in [
@@ -865,33 +906,94 @@ fn daemon_search_response_v3_uint64_boundaries_match_rust_validation() -> TestRe
 
     let schema = read_schema(SEARCH_RESPONSE_SCHEMA_PATH)?;
     let valid = actual_daemon_search_result("uint64 schema boundaries")?;
+    if SEARCH_RESPONSE_UINT64_INSTANCE_POINTERS.len() != 39 {
+        return Err(format!(
+            "daemon search uint64 instance selector count drifted: expected 39, got {}",
+            SEARCH_RESPONSE_UINT64_INSTANCE_POINTERS.len()
+        ));
+    }
+
+    for pointer in SEARCH_RESPONSE_UINT64_INSTANCE_POINTERS {
+        let original = valid
+            .pointer(pointer)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("real daemon response omitted uint64 field {pointer}"))?;
+        let mut integral_decimal = valid.clone();
+        let field = integral_decimal
+            .pointer_mut(pointer)
+            .ok_or_else(|| format!("could not mutate uint64 field {pointer}"))?;
+        *field = serde_json::json!(original as f64);
+        validate_json_schema(&integral_decimal, &schema, "$").map_err(|error| {
+            format!("Draft 2020-12 schema rejected integral decimal at {pointer}: {error}")
+        })?;
+        let renderings = DaemonSearchResult::from_value(integral_decimal)
+            .map_err(|error| format!("Rust rejected integral decimal at {pointer}: {error}"))?
+            .into_renderings()
+            .map_err(|error| format!("render canonical uint64 at {pointer}: {error}"))?;
+        let canonical = if let Some(response_pointer) = pointer.strip_prefix("/response") {
+            renderings.response.pointer(response_pointer)
+        } else if let Some(performance_pointer) = pointer.strip_prefix("/performance") {
+            renderings
+                .performance
+                .as_ref()
+                .and_then(|performance| performance.pointer(performance_pointer))
+        } else {
+            None
+        }
+        .ok_or_else(|| format!("canonicalized rendering omitted uint64 field {pointer}"))?;
+        if canonical.as_u64() != Some(original)
+            || !canonical
+                .as_number()
+                .is_some_and(serde_json::Number::is_u64)
+        {
+            return Err(format!(
+                "Rust did not canonicalize integral decimal at {pointer} to u64 {original}: {canonical}"
+            ));
+        }
+    }
 
     let mut maximum = valid.clone();
     maximum["response"]["data"]["rerank"]["advisorySummary"]["sessionOccurrenceCount"] =
         serde_json::json!(u64::MAX);
     validate_json_schema(&maximum, &schema, "$")
         .map_err(|error| format!("schema rejected u64::MAX at {COUNTER_PATH}: {error}"))?;
-    DaemonSearchResult::from_value(maximum)
-        .map_err(|error| format!("Rust rejected u64::MAX at {COUNTER_PATH}: {error}"))?;
+    let maximum_renderings = DaemonSearchResult::from_value(maximum)
+        .map_err(|error| format!("Rust rejected u64::MAX at {COUNTER_PATH}: {error}"))?
+        .into_renderings()
+        .map_err(|error| format!("render u64::MAX at {COUNTER_PATH}: {error}"))?;
+    if maximum_renderings
+        .response
+        .pointer("/data/rerank/advisorySummary/sessionOccurrenceCount")
+        .and_then(Value::as_u64)
+        != Some(u64::MAX)
+    {
+        return Err(format!("Rust did not preserve u64::MAX at {COUNTER_PATH}"));
+    }
 
     let over_u64: Value = serde_json::from_str("18446744073709551616")
         .map_err(|error| format!("parse over-u64 fixture: {error}"))?;
     for (case, invalid_number) in [
-        ("integral decimal", serde_json::json!(1.0)),
+        ("fractional", serde_json::json!(1.5)),
+        ("negative", serde_json::json!(-1)),
         ("over-u64 integer", over_u64),
+        ("non-number", serde_json::json!("1")),
     ] {
-        let mut invalid = valid.clone();
-        invalid["response"]["data"]["rerank"]["advisorySummary"]["sessionOccurrenceCount"] =
-            invalid_number;
-        if validate_json_schema(&invalid, &schema, "$").is_ok() {
-            return Err(format!(
-                "schema accepted invalid {case} at pinned counter {COUNTER_PATH}"
-            ));
-        }
-        if DaemonSearchResult::from_value(invalid).is_ok() {
-            return Err(format!(
-                "Rust accepted invalid {case} at pinned counter {COUNTER_PATH}"
-            ));
+        for pointer in SEARCH_RESPONSE_UINT64_INSTANCE_POINTERS {
+            let mut invalid = valid.clone();
+            *invalid
+                .pointer_mut(pointer)
+                .ok_or_else(|| format!("could not mutate uint64 field {pointer}"))? =
+                invalid_number.clone();
+            if validate_json_schema(&invalid, &schema, "$").is_ok() {
+                return Err(format!(
+                    "schema accepted invalid {case} at uint64 field {pointer}"
+                ));
+            }
+            if DaemonSearchResult::from_value(invalid).is_ok() {
+                return Err(format!(
+                    "Rust accepted invalid {case} at uint64 field {pointer}"
+                ));
+            }
         }
     }
     Ok(())

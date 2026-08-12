@@ -2483,6 +2483,82 @@ pub struct DaemonSearchRenderings {
     pub timing: serde_json::Value,
 }
 
+// Keep this in one-to-one correspondence with the 39 `$defs/uint64` references
+// in ee.daemon.search.response.v3. Optional performance paths are skipped when
+// the negotiated response omits that block.
+const DAEMON_SEARCH_UINT64_INSTANCE_POINTERS: &[&str] = &[
+    "/response/data/resultCount",
+    "/response/data/rerank/topK",
+    "/response/data/rerank/rerankScoreCount",
+    "/response/data/rerank/advisorySummary/distinctCount",
+    "/response/data/rerank/advisorySummary/emittedCount",
+    "/response/data/rerank/advisorySummary/suppressedCount",
+    "/response/data/rerank/advisorySummary/sessionOccurrenceCount",
+    "/response/data/rerank/advisorySummary/sessionSuppressedCount",
+    "/performance/data/query/lengthBytes",
+    "/performance/data/queryPlan/requestedLimit",
+    "/performance/data/queryPlan/candidateBudget",
+    "/performance/data/dbReads/indexStatusChecks",
+    "/performance/data/dbReads/memoryReads",
+    "/performance/data/dbReads/tagReads",
+    "/performance/data/dbReads/artifactLinkReads",
+    "/performance/data/profileRuntime/budgets/search/candidateLimit",
+    "/performance/data/profileRuntime/budgets/search/concurrentIndexReaders",
+    "/performance/data/profileRuntime/budgets/pack/maxTokens",
+    "/performance/data/profileRuntime/budgets/pack/maxCandidateMemories",
+    "/performance/data/profileRuntime/budgets/cache/memoryCapMb",
+    "/performance/data/profileRuntime/budgets/cache/entryCap",
+    "/performance/data/profileRuntime/budgets/cache/hotsetPrewarmLimit",
+    "/performance/data/profileRuntime/budgets/writeSpool/queueCap",
+    "/performance/data/profileRuntime/budgets/writeSpool/batchCap",
+    "/performance/data/profileRuntime/budgets/writeSpool/retryBudget",
+    "/performance/data/profileRuntime/budgets/steward/maintenanceWindowMs",
+    "/performance/data/profileRuntime/budgets/steward/graphRefreshBudget",
+    "/performance/data/search/returnedHits",
+    "/performance/data/search/sourceCounts/lexical",
+    "/performance/data/search/sourceCounts/semanticFast",
+    "/performance/data/search/sourceCounts/semanticQuality",
+    "/performance/data/search/sourceCounts/hybrid",
+    "/performance/data/search/sourceCounts/reranked",
+    "/performance/data/search/fieldCoverage/fastScoreCount",
+    "/performance/data/search/fieldCoverage/qualityScoreCount",
+    "/performance/data/search/fieldCoverage/lexicalScoreCount",
+    "/performance/data/search/fieldCoverage/rerankScoreCount",
+    "/performance/data/search/fieldCoverage/metadataCount",
+    "/performance/data/search/fieldCoverage/explanationCount",
+];
+
+const U64_EXCLUSIVE_UPPER_BOUND_AS_F64: f64 = 18_446_744_073_709_551_616.0;
+
+// Draft 2020-12's `integer` type is mathematical, not lexical: `1.0` is an
+// integer. The exclusive 2^64 bound avoids the rounded `u64::MAX as f64` trap.
+fn json_number_to_u64(value: &serde_json::Value) -> Option<u64> {
+    if let Some(unsigned) = value.as_u64() {
+        return Some(unsigned);
+    }
+    if let Some(signed) = value.as_i64() {
+        return u64::try_from(signed).ok();
+    }
+    let float = value.as_f64()?;
+    (float.is_finite()
+        && float >= 0.0
+        && float.fract() == 0.0
+        && float < U64_EXCLUSIVE_UPPER_BOUND_AS_F64)
+        .then(|| float as u64)
+}
+
+fn canonicalize_daemon_search_uint64s(value: &mut serde_json::Value) -> Result<(), String> {
+    for pointer in DAEMON_SEARCH_UINT64_INSTANCE_POINTERS {
+        let Some(field) = value.pointer_mut(pointer) else {
+            continue;
+        };
+        let unsigned = json_number_to_u64(field)
+            .ok_or_else(|| format!("daemon search unsigned field `{pointer}` is not a uint64"))?;
+        *field = serde_json::Value::from(unsigned);
+    }
+    Ok(())
+}
+
 impl DaemonSearchResult {
     fn from_report(
         report: &SearchReport,
@@ -2567,7 +2643,8 @@ impl DaemonSearchResult {
     }
 
     /// Decode and validate the complete method-specific response contract.
-    pub fn from_value(value: serde_json::Value) -> Result<Self, String> {
+    pub fn from_value(mut value: serde_json::Value) -> Result<Self, String> {
+        canonicalize_daemon_search_uint64s(&mut value)?;
         let result: Self = serde_json::from_value(value)
             .map_err(|_| "result does not match ee.daemon.search.response.v3".to_owned())?;
         result.validate()?;
@@ -2756,9 +2833,7 @@ fn validate_search_performance_query(value: &serde_json::Value) -> Result<(), St
         .get("textIncluded")
         .and_then(serde_json::Value::as_bool)
         != Some(false)
-        || !value
-            .get("lengthBytes")
-            .is_some_and(|value| value.as_u64().is_some())
+        || !value.get("lengthBytes").is_some_and(is_json_unsigned)
         || !value
             .get("fingerprint")
             .and_then(serde_json::Value::as_str)
@@ -2812,11 +2887,9 @@ fn validate_search_performance_query_plan(value: &serde_json::Value) -> Result<(
             "memoryScope",
             &["self", "team", "global", "workspace", "verified", "swarm"],
         )
-        || !["requestedLimit", "candidateBudget"].iter().all(|field| {
-            value
-                .get(*field)
-                .is_some_and(|value| value.as_u64().is_some())
-        })
+        || !["requestedLimit", "candidateBudget"]
+            .iter()
+            .all(|field| value.get(*field).is_some_and(is_json_unsigned))
         || ![
             "usesEmbeddings",
             "scoreExplanationsRequested",
@@ -3158,7 +3231,7 @@ fn validate_performance_optional_number_object(
 }
 
 fn is_json_unsigned(value: &serde_json::Value) -> bool {
-    value.as_u64().is_some()
+    json_number_to_u64(value).is_some()
 }
 
 fn validate_search_performance_db_reads(value: &serde_json::Value) -> Result<(), String> {
@@ -3169,11 +3242,10 @@ fn validate_search_performance_db_reads(value: &serde_json::Value) -> Result<(),
         "artifactLinkReads",
     ];
     validate_exact_object_fields(value, "daemon search performance dbReads", FIELDS, &[])?;
-    if FIELDS.iter().all(|field| {
-        value
-            .get(*field)
-            .is_some_and(|value| value.as_u64().is_some())
-    }) {
+    if FIELDS
+        .iter()
+        .all(|field| value.get(*field).is_some_and(is_json_unsigned))
+    {
         Ok(())
     } else {
         Err("daemon search performance dbReads field types drifted".to_owned())
@@ -3395,7 +3467,7 @@ fn validate_canonical_search_data(data: &serde_json::Value) -> Result<(), String
         .ok_or_else(|| "canonical search results must be an array".to_owned())?;
     let result_count = data
         .get("resultCount")
-        .and_then(serde_json::Value::as_u64)
+        .and_then(json_number_to_u64)
         .ok_or_else(|| "canonical search resultCount must be a non-negative integer".to_owned())?;
     if result_count != results.len() as u64 {
         return Err("canonical search resultCount does not match results length".to_owned());
@@ -6252,6 +6324,40 @@ mod tests {
         });
         nested_drift["response"]["data"]["unknown"] = serde_json::json!(true);
         assert!(DaemonSearchResult::from_value(nested_drift).is_err());
+    }
+
+    #[test]
+    fn daemon_search_uint64_conversion_is_exact_and_bounded() {
+        assert_eq!(DAEMON_SEARCH_UINT64_INSTANCE_POINTERS.len(), 39);
+        for (value, expected) in [
+            (serde_json::json!(0), 0),
+            (serde_json::json!(1.0), 1),
+            (serde_json::json!(1e3), 1_000),
+            (
+                serde_json::json!(18_446_744_073_709_549_568.0),
+                18_446_744_073_709_549_568,
+            ),
+            (serde_json::json!(u64::MAX), u64::MAX),
+        ] {
+            assert_eq!(json_number_to_u64(&value), Some(expected), "{value}");
+        }
+
+        let over_u64: serde_json::Value = serde_json::from_str("18446744073709551616")
+            .expect("over-u64 JSON number must parse for contract validation");
+        for value in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            over_u64,
+            serde_json::json!("1"),
+        ] {
+            assert_eq!(json_number_to_u64(&value), None, "{value}");
+        }
+        for unrepresentable in ["NaN", "Infinity", "-Infinity", "1e400"] {
+            assert!(
+                serde_json::from_str::<serde_json::Value>(unrepresentable).is_err(),
+                "nonfinite or unrepresentable JSON number must fail before uint64 conversion: {unrepresentable}"
+            );
+        }
     }
 
     #[test]
