@@ -235,6 +235,7 @@ mod tests {
                 message: "nope".to_owned(),
             }),
             degraded_codes: Vec::new(),
+            delivery: None,
         }
     }
 

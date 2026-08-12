@@ -5,8 +5,9 @@
 # supplies a real ee binary through EE_BINARY/EE_BIN or PATH. The harness:
 #   - proves missing and rejected-corrupt artifacts degrade to fusion-only with
 #     a successful search exit and explicit rerank_model_unavailable evidence;
-#   - provisions the verified safetensors archive when local fixtures exist and
-#     proves a real cross-encoder changes the fusion-only order;
+#   - provisions the verified safetensors archive through the public model
+#     command, proves doctor observes recovery, and proves a real cross-encoder
+#     changes the fusion-only order;
 #   - rejects any ee binary dynamically linked to ONNX Runtime / libort; and
 #   - retains ee.test_event.v1 command, assertion, timing, and artifact logs.
 #
@@ -642,6 +643,20 @@ run_model_backed_lane() {
         "reranker archive SHA-256 matches the pinned manifest"
 
     init_workspace "${home_dir}" "${workspace}"
+    run_ee_json "doctor_before_reranker_registration" 0 "${home_dir}" "${workspace}" \
+        doctor --full --json
+    assert_json_file "${LAST_STDOUT_FILE}" '
+        .schema == "ee.response.v2"
+        and .success == true
+        and ([.data.checks[] | select(.name == "reranker_posture")] | length) == 1
+        and any(.data.checks[];
+            .name == "reranker_posture"
+            and .tier == "advisory"
+            and .severity == "warning"
+            and (.message | startswith("Permanent capability gap:"))
+            and .repair == "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst")
+    ' "doctor observes the public pre-registration reranker capability gap"
+
     run_ee_json "fetch_native_reranker" 0 "${home_dir}" "${workspace}" \
         model fetch rerank-default --from-file "${archive}" --json
     assert_json_file "${LAST_STDOUT_FILE}" '
@@ -725,6 +740,19 @@ run_model_backed_lane() {
         and ((.data.results[1].content // "") | startswith("BD1NL1314_RERANK_TRAP"))
         and (.data.results[0].rerankScore > .data.results[1].rerankScore)' \
         "native reranker ranks the precise release policy above the lexical trap"
+    run_ee_json "doctor_after_native_reranked_search" 0 "${home_dir}" "${workspace}" \
+        doctor --full --json
+    assert_json_file "${LAST_STDOUT_FILE}" '
+        .schema == "ee.response.v2"
+        and .success == true
+        and ([.data.checks[] | select(.name == "reranker_posture")] | length) == 1
+        and any(.data.checks[];
+            .name == "reranker_posture"
+            and .tier == "advisory"
+            and .severity == "ok"
+            and .message == "Local reranker capability is available; search can apply reranked scoring when configured."
+            and (has("repair") | not))
+    ' "doctor observes recovery after public registration and real reranked search"
     unpacked_dir="${home_dir}/.local/share/ee/models/rerank/rerank-default-v1/rerank-default-v1"
     withheld_dir="${unpacked_dir}.withheld"
     if [[ "${unpacked_dir}" != "${home_dir}/"* || ! -d "${unpacked_dir}" \

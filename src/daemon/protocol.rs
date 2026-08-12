@@ -148,6 +148,27 @@ pub struct DaemonResponseError {
     pub message: String,
 }
 
+/// Server-local bookkeeping that is deliberately excluded from the wire
+/// envelope. The connection owner settles this token only after the complete
+/// framed response has been written successfully.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DaemonResponseDelivery {
+    workspace_id: String,
+    search_advisory_token: u64,
+}
+
+impl DaemonResponseDelivery {
+    #[must_use]
+    pub(crate) fn workspace_id(&self) -> &str {
+        &self.workspace_id
+    }
+
+    #[must_use]
+    pub(crate) const fn search_advisory_token(&self) -> u64 {
+        self.search_advisory_token
+    }
+}
+
 /// Wire-level response envelope. Exactly one of `result` or `error` is
 /// populated per response; the other field is serialized as `null`
 /// (via `Option<...>` defaulting to `None`, then `skip_serializing_if =
@@ -165,6 +186,8 @@ pub struct DaemonResponse {
     pub error: Option<DaemonResponseError>,
     #[serde(default)]
     pub degraded_codes: Vec<String>,
+    #[serde(skip)]
+    pub(crate) delivery: Option<DaemonResponseDelivery>,
 }
 
 // Hand-written `Deserialize` so the read side enforces the
@@ -221,6 +244,7 @@ impl<'de> Deserialize<'de> for DaemonResponse {
             result: wire.result,
             error: wire.error,
             degraded_codes: wire.degraded_codes,
+            delivery: None,
         })
     }
 }
@@ -242,6 +266,7 @@ impl DaemonResponse {
             result: Some(result),
             error: None,
             degraded_codes: Vec::new(),
+            delivery: None,
         }
     }
 
@@ -265,6 +290,7 @@ impl DaemonResponse {
                 message: message.into(),
             }),
             degraded_codes: Vec::new(),
+            delivery: None,
         }
     }
 
@@ -277,6 +303,23 @@ impl DaemonResponse {
             self.degraded_codes.push(code);
         }
         self
+    }
+
+    #[must_use]
+    pub(crate) fn with_search_advisory_delivery(
+        mut self,
+        workspace_id: impl Into<String>,
+        search_advisory_token: u64,
+    ) -> Self {
+        self.delivery = Some(DaemonResponseDelivery {
+            workspace_id: workspace_id.into(),
+            search_advisory_token,
+        });
+        self
+    }
+
+    pub(crate) fn take_delivery(&mut self) -> Option<DaemonResponseDelivery> {
+        self.delivery.take()
     }
 }
 
@@ -502,6 +545,26 @@ mod tests {
         let mut cursor = Cursor::new(buffer);
         let parsed = read_request(&mut cursor).expect("frame must parse");
         assert_eq!(parsed, request);
+    }
+
+    #[test]
+    fn response_delivery_bookkeeping_never_crosses_the_wire() {
+        let response = DaemonResponse::ok(
+            "req-delivery-001",
+            "agent-protocol-test",
+            Some("workspace-delivery-test".to_owned()),
+            serde_json::json!({"success": true}),
+        )
+        .with_search_advisory_delivery("workspace-delivery-test", 41);
+
+        let encoded = serde_json::to_value(&response).expect("response must serialize");
+        assert!(encoded.get("delivery").is_none());
+        assert!(encoded.get("search_advisory_token").is_none());
+
+        let decoded: DaemonResponse =
+            serde_json::from_value(encoded).expect("wire response must deserialize");
+        assert!(decoded.delivery.is_none());
+        assert_eq!(decoded.result, response.result);
     }
 
     #[test]

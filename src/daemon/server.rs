@@ -44,10 +44,10 @@ use crate::core::context::{
     run_context_pack_with_performance_controlled,
 };
 use crate::core::search::{
-    PERFORMANCE_EXPLAIN_SCHEMA_V1, PERFORMANCE_FALLBACK_REDACTED_MESSAGE, SearchAdvisorySession,
-    SearchDedupMode, SearchOptions, SearchPerformanceTrace, SearchReport, SearchSourceMode,
-    TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
-    run_search_with_performance_and_filters,
+    PERFORMANCE_EXPLAIN_SCHEMA_V1, PERFORMANCE_FALLBACK_REDACTED_MESSAGE,
+    SearchAdvisoryDeliveryReservation, SearchAdvisorySession, SearchDedupMode, SearchOptions,
+    SearchPerformanceTrace, SearchReport, SearchSourceMode, TypedMemoryFieldFilter,
+    elapsed_timing_json, normalize_memory_kind_filter, run_search_with_performance_and_filters,
 };
 use crate::models::{MemoryScope, QueryFilters, RedactionLevel};
 use crate::output::{ContextJsonRenderOptions, render_context_response_json_with_options};
@@ -169,7 +169,6 @@ pub const DAEMON_HANDLER_PANIC_CODE: &str = "daemon_handler_panic";
 const DAEMON_PANIC_LOG_MAX_BYTES: usize = 512;
 const DAEMON_WORKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_SCHEDULER_JOIN_TIMEOUT: Duration = Duration::from_millis(750);
-const DAEMON_ADVISORY_COMMIT_MAX_ATTEMPTS: usize = 4;
 
 /// Per-daemon dispatch policy that is resolved at daemon start and
 /// then shared by every accepted connection. Connection-level peer
@@ -211,6 +210,70 @@ impl DaemonDispatchPolicy {
 
     fn search_advisory_session(&self) -> &Mutex<SearchAdvisorySession> {
         &self.search_advisory_session
+    }
+}
+
+/// Own a provisional advisory emission until it is either attached to a
+/// socket response or abandoned. Early returns and unwinds release the
+/// reservation without consuming the once-per-session advisory.
+struct PendingSearchAdvisoryDelivery<'a> {
+    session: &'a Mutex<SearchAdvisorySession>,
+    reservation: Option<SearchAdvisoryDeliveryReservation>,
+}
+
+impl<'a> PendingSearchAdvisoryDelivery<'a> {
+    fn new(session: &'a Mutex<SearchAdvisorySession>, workspace_id: &str) -> Self {
+        let reservation = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reserve_delivery(workspace_id);
+        Self {
+            session,
+            reservation: Some(reservation),
+        }
+    }
+
+    fn reservation_mut(&mut self) -> &mut SearchAdvisoryDeliveryReservation {
+        self.reservation
+            .as_mut()
+            .expect("pending advisory delivery must retain its reservation")
+    }
+
+    fn finish(
+        mut self,
+        response: DaemonResponse,
+        defer_until_socket_write: bool,
+    ) -> DaemonResponse {
+        let reservation = self
+            .reservation
+            .take()
+            .expect("pending advisory delivery must retain its reservation");
+        if !reservation.emitted() {
+            return response;
+        }
+        if defer_until_socket_write {
+            return response
+                .with_search_advisory_delivery(reservation.workspace_id(), reservation.token());
+        }
+        self.session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .settle_delivery(reservation.workspace_id(), reservation.token(), true);
+        response
+    }
+}
+
+impl Drop for PendingSearchAdvisoryDelivery<'_> {
+    fn drop(&mut self) {
+        let Some(reservation) = self.reservation.take() else {
+            return;
+        };
+        if reservation.emitted() {
+            self.session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .settle_delivery(reservation.workspace_id(), reservation.token(), false);
+        }
     }
 }
 
@@ -1670,7 +1733,7 @@ fn handle_connection(
             dispatch_with_policy_and_shutdown(&request, dispatch_policy.as_ref(), shutdown.as_ref())
         })
     }));
-    let response = match dispatched {
+    let mut response = match dispatched {
         Ok(response) => response,
         Err(payload) => {
             metrics.record_handler_panic(&request.method);
@@ -1689,7 +1752,27 @@ fn handle_connection(
         schema_mismatch,
         unknown_method,
     );
-    let _ = write_response(&mut stream, &response);
+    let delivered = write_response(&mut stream, &response).is_ok();
+    settle_daemon_response_delivery(dispatch_policy.as_ref(), &mut response, delivered);
+}
+
+fn settle_daemon_response_delivery(
+    dispatch_policy: &DaemonDispatchPolicy,
+    response: &mut DaemonResponse,
+    delivered: bool,
+) {
+    let Some(delivery) = response.take_delivery() else {
+        return;
+    };
+    dispatch_policy
+        .search_advisory_session()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .settle_delivery(
+            delivery.workspace_id(),
+            delivery.search_advisory_token(),
+            delivered,
+        );
 }
 
 /// Construct the structured envelope returned to a client whose
@@ -1794,13 +1877,14 @@ fn dispatch_with_policy_and_shutdown(
     policy: &DaemonDispatchPolicy,
     shutdown: &AtomicBool,
 ) -> DaemonResponse {
-    dispatch_with_echo_policy_and_workspace(
+    dispatch_with_echo_policy_and_workspace_inner(
         request,
         daemon_echo_enabled(),
         policy.bound_workspace_id(),
         shutdown,
         policy.write_router(),
         policy.search_advisory_session(),
+        true,
     )
 }
 
@@ -1824,6 +1908,26 @@ fn dispatch_with_echo_policy_and_workspace(
     shutdown: &AtomicBool,
     write_router: Option<&DaemonWriteRouter>,
     search_advisory_session: &Mutex<SearchAdvisorySession>,
+) -> DaemonResponse {
+    dispatch_with_echo_policy_and_workspace_inner(
+        request,
+        echo_enabled,
+        bound_workspace_id,
+        shutdown,
+        write_router,
+        search_advisory_session,
+        false,
+    )
+}
+
+fn dispatch_with_echo_policy_and_workspace_inner(
+    request: &DaemonRequest,
+    echo_enabled: bool,
+    bound_workspace_id: Option<&str>,
+    shutdown: &AtomicBool,
+    write_router: Option<&DaemonWriteRouter>,
+    search_advisory_session: &Mutex<SearchAdvisorySession>,
+    defer_advisory_until_socket_write: bool,
 ) -> DaemonResponse {
     if request.schema != super::DAEMON_REQUEST_SCHEMA_V1 {
         return DaemonResponse::err(
@@ -1893,8 +1997,18 @@ fn dispatch_with_echo_policy_and_workspace(
                 }),
             )
         }
-        METHOD_CONTEXT => dispatch_context(request, shutdown, search_advisory_session),
-        METHOD_SEARCH => dispatch_search(request, shutdown, search_advisory_session),
+        METHOD_CONTEXT => dispatch_context(
+            request,
+            shutdown,
+            search_advisory_session,
+            defer_advisory_until_socket_write,
+        ),
+        METHOD_SEARCH => dispatch_search(
+            request,
+            shutdown,
+            search_advisory_session,
+            defer_advisory_until_socket_write,
+        ),
         METHOD_TELEMETRY => dispatch_telemetry(request),
         METHOD_WRITE => dispatch_write(request, write_router),
         METHOD_WRITE_JOURNAL => dispatch_journal(request, write_router),
@@ -2369,8 +2483,56 @@ impl DaemonSearchResult {
         timing: DaemonSearchTiming,
         performance: Option<serde_json::Value>,
     ) -> Self {
-        let mut data =
-            report.data_json_with_advisory_session_for_workspace(advisory_session, workspace_id);
+        Self::from_report_inner(
+            report,
+            explain,
+            workspace_id,
+            advisory_session,
+            None,
+            timing,
+            performance,
+        )
+    }
+
+    fn from_report_for_delivery(
+        report: &SearchReport,
+        explain: bool,
+        workspace_id: &str,
+        advisory_session: &mut SearchAdvisorySession,
+        reservation: &mut SearchAdvisoryDeliveryReservation,
+        timing: DaemonSearchTiming,
+        performance: Option<serde_json::Value>,
+    ) -> Self {
+        Self::from_report_inner(
+            report,
+            explain,
+            workspace_id,
+            advisory_session,
+            Some(reservation),
+            timing,
+            performance,
+        )
+    }
+
+    fn from_report_inner(
+        report: &SearchReport,
+        explain: bool,
+        workspace_id: &str,
+        advisory_session: &mut SearchAdvisorySession,
+        reservation: Option<&mut SearchAdvisoryDeliveryReservation>,
+        timing: DaemonSearchTiming,
+        performance: Option<serde_json::Value>,
+    ) -> Self {
+        let mut data = match reservation {
+            Some(reservation) => report.data_json_with_advisory_delivery_reservation(
+                advisory_session,
+                workspace_id,
+                reservation,
+            ),
+            None => {
+                report.data_json_with_advisory_session_for_workspace(advisory_session, workspace_id)
+            }
+        };
         let human = daemon_search_human_summary(report, &data);
         if explain && let Some(object) = data.as_object_mut() {
             object.insert(
@@ -2504,21 +2666,40 @@ fn validate_search_performance_explain(value: &serde_json::Value) -> Result<(), 
         ],
         &[],
     )?;
-    if data.get("command").and_then(serde_json::Value::as_str) != Some("search")
-        || data
-            .pointer("/query/textIncluded")
-            .and_then(serde_json::Value::as_bool)
-            != Some(false)
-        || data
-            .pointer("/redaction/memoryContentIncluded")
-            .and_then(serde_json::Value::as_bool)
-            != Some(false)
-        || data
-            .pointer("/redaction/queryTextIncluded")
-            .and_then(serde_json::Value::as_bool)
-            != Some(false)
-    {
-        return Err("daemon search performance redaction contract drifted".to_owned());
+    if data.get("command").and_then(serde_json::Value::as_str) != Some("search") {
+        return Err("daemon search performance command drifted".to_owned());
+    }
+    validate_search_performance_query(
+        data.get("query")
+            .ok_or_else(|| "daemon search performance query missing".to_owned())?,
+    )?;
+    validate_search_performance_query_plan(
+        data.get("queryPlan")
+            .ok_or_else(|| "daemon search performance queryPlan missing".to_owned())?,
+    )?;
+    validate_search_performance_runtime_profile(
+        data.get("profileRuntime")
+            .ok_or_else(|| "daemon search performance profileRuntime missing".to_owned())?,
+    )?;
+    validate_search_performance_db_reads(
+        data.get("dbReads")
+            .ok_or_else(|| "daemon search performance dbReads missing".to_owned())?,
+    )?;
+    validate_search_performance_search(
+        data.get("search")
+            .ok_or_else(|| "daemon search performance search missing".to_owned())?,
+    )?;
+    validate_search_performance_timings(
+        data.get("timings")
+            .ok_or_else(|| "daemon search performance timings missing".to_owned())?,
+        "daemon search performance timings",
+    )?;
+    for field in ["pack", "cache", "graph"] {
+        validate_search_performance_not_used(
+            data.get(field)
+                .ok_or_else(|| format!("daemon search performance {field} missing"))?,
+            field,
+        )?;
     }
     let fallbacks = data
         .get("fallbacks")
@@ -2531,13 +2712,508 @@ fn validate_search_performance_explain(value: &serde_json::Value) -> Result<(), 
             &["code", "severity", "message", "sources"],
             &[],
         )?;
-        if fallback.get("message").and_then(serde_json::Value::as_str)
-            != Some(PERFORMANCE_FALLBACK_REDACTED_MESSAGE)
+        if !fallback
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|code| !code.is_empty())
+            || !matches!(
+                fallback.get("severity").and_then(serde_json::Value::as_str),
+                Some("info" | "low" | "warning" | "medium" | "high" | "critical")
+            )
+            || fallback.get("message").and_then(serde_json::Value::as_str)
+                != Some(PERFORMANCE_FALLBACK_REDACTED_MESSAGE)
+            || fallback.get("sources") != Some(&serde_json::json!(["search"]))
         {
             return Err(format!(
-                "daemon search performance fallback {index} contains unredacted details"
+                "daemon search performance fallback {index} field types or values drifted"
             ));
         }
+    }
+    validate_search_performance_redaction(
+        data.get("redaction")
+            .ok_or_else(|| "daemon search performance redaction missing".to_owned())?,
+    )?;
+    Ok(())
+}
+
+fn validate_search_performance_query(value: &serde_json::Value) -> Result<(), String> {
+    validate_exact_object_fields(
+        value,
+        "daemon search performance query",
+        &["textIncluded", "lengthBytes", "fingerprint"],
+        &[],
+    )?;
+    if value
+        .get("textIncluded")
+        .and_then(serde_json::Value::as_bool)
+        != Some(false)
+        || !value
+            .get("lengthBytes")
+            .is_some_and(|value| value.as_u64().is_some())
+        || !value
+            .get("fingerprint")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(valid_blake3_fingerprint)
+    {
+        return Err("daemon search performance query field types or values drifted".to_owned());
+    }
+    Ok(())
+}
+
+fn valid_blake3_fingerprint(value: &str) -> bool {
+    value.strip_prefix("blake3:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn validate_search_performance_query_plan(value: &serde_json::Value) -> Result<(), String> {
+    const REQUIRED: &[&str] = &[
+        "retrievalMode",
+        "requestedLimit",
+        "candidateBudget",
+        "usesEmbeddings",
+        "scoreExplanationsRequested",
+        "sourceModeRequested",
+        "sourceModeApplied",
+        "strictSourceMode",
+        "fallbackApplied",
+        "memoryScope",
+        "strictScope",
+    ];
+    validate_exact_object_fields(value, "daemon search performance queryPlan", REQUIRED, &[])?;
+    let string_is = |field: &str, allowed: &[&str]| {
+        value
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|actual| allowed.contains(&actual))
+    };
+    if !string_is("retrievalMode", &["instant", "default", "quality"])
+        || !string_is(
+            "sourceModeRequested",
+            &["lexical_only", "semantic_only", "hybrid"],
+        )
+        || !string_is(
+            "sourceModeApplied",
+            &["lexical_only", "semantic_only", "hybrid"],
+        )
+        || !string_is(
+            "memoryScope",
+            &["self", "team", "global", "workspace", "verified", "swarm"],
+        )
+        || !["requestedLimit", "candidateBudget"].iter().all(|field| {
+            value
+                .get(*field)
+                .is_some_and(|value| value.as_u64().is_some())
+        })
+        || ![
+            "usesEmbeddings",
+            "scoreExplanationsRequested",
+            "strictSourceMode",
+            "fallbackApplied",
+            "strictScope",
+        ]
+        .iter()
+        .all(|field| value.get(*field).is_some_and(serde_json::Value::is_boolean))
+    {
+        return Err("daemon search performance queryPlan field types or values drifted".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_search_performance_runtime_profile(value: &serde_json::Value) -> Result<(), String> {
+    validate_exact_object_fields(
+        value,
+        "daemon search performance profileRuntime",
+        &["schema", "activeProfile", "source", "budgets"],
+        &[],
+    )?;
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        != Some(crate::core::profile::RUNTIME_PROFILE_SCHEMA_V1)
+        || !matches!(
+            value
+                .get("activeProfile")
+                .and_then(serde_json::Value::as_str),
+            Some("constrained" | "portable" | "workstation" | "swarm")
+        )
+        || !value
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|source| !source.is_empty())
+    {
+        return Err(
+            "daemon search performance profileRuntime field types or values drifted".to_owned(),
+        );
+    }
+    let budgets = value
+        .get("budgets")
+        .ok_or_else(|| "daemon search performance profileRuntime.budgets missing".to_owned())?;
+    validate_exact_object_fields(
+        budgets,
+        "daemon search performance profileRuntime.budgets",
+        &[
+            "search",
+            "pack",
+            "cache",
+            "writeSpool",
+            "steward",
+            "verification",
+            "diagnostics",
+        ],
+        &[],
+    )?;
+    validate_performance_unsigned_object(
+        budgets.get("cache"),
+        "daemon search performance profileRuntime.budgets.cache",
+        &["memoryCapMb", "entryCap", "hotsetPrewarmLimit"],
+    )?;
+    validate_performance_unsigned_object(
+        budgets.get("writeSpool"),
+        "daemon search performance profileRuntime.budgets.writeSpool",
+        &["queueCap", "batchCap", "retryBudget"],
+    )?;
+
+    let search = required_performance_object(
+        budgets.get("search"),
+        "daemon search performance profileRuntime.budgets.search",
+        &[
+            "candidateLimit",
+            "concurrentIndexReaders",
+            "staleIndexTolerance",
+        ],
+    )?;
+    if !["candidateLimit", "concurrentIndexReaders"]
+        .iter()
+        .all(|field| search.get(*field).is_some_and(is_json_unsigned))
+        || !matches!(
+            search
+                .get("staleIndexTolerance")
+                .and_then(serde_json::Value::as_str),
+            Some("strict" | "repair_hint")
+        )
+    {
+        return Err("daemon search performance profileRuntime.budgets.search drifted".to_owned());
+    }
+
+    let pack = required_performance_object(
+        budgets.get("pack"),
+        "daemon search performance profileRuntime.budgets.pack",
+        &["maxTokens", "maxCandidateMemories", "explanationVerbosity"],
+    )?;
+    if !["maxTokens", "maxCandidateMemories"]
+        .iter()
+        .all(|field| pack.get(*field).is_some_and(is_json_unsigned))
+        || !matches!(
+            pack.get("explanationVerbosity")
+                .and_then(serde_json::Value::as_str),
+            Some("standard" | "full")
+        )
+    {
+        return Err("daemon search performance profileRuntime.budgets.pack drifted".to_owned());
+    }
+
+    let steward = required_performance_object(
+        budgets.get("steward"),
+        "daemon search performance profileRuntime.budgets.steward",
+        &["maintenanceWindowMs", "graphRefreshBudget", "daemonPrewarm"],
+    )?;
+    if !["maintenanceWindowMs", "graphRefreshBudget"]
+        .iter()
+        .all(|field| steward.get(*field).is_some_and(is_json_unsigned))
+        || !steward
+            .get("daemonPrewarm")
+            .is_some_and(serde_json::Value::is_boolean)
+    {
+        return Err("daemon search performance profileRuntime.budgets.steward drifted".to_owned());
+    }
+
+    let verification = required_performance_object(
+        budgets.get("verification"),
+        "daemon search performance profileRuntime.budgets.verification",
+        &[
+            "recipe",
+            "targetDirPosture",
+            "timeoutClass",
+            "heavyStrategy",
+        ],
+    )?;
+    for (field, allowed) in [
+        ("recipe", &["quick", "workspace", "full"][..]),
+        ("targetDirPosture", &["shared", "isolated"][..]),
+        ("timeoutClass", &["short", "standard", "extended"][..]),
+        (
+            "heavyStrategy",
+            &["manual", "rch_preferred", "rch_default"][..],
+        ),
+    ] {
+        if !verification
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| allowed.contains(&value))
+        {
+            return Err(format!(
+                "daemon search performance profileRuntime.budgets.verification.{field} drifted"
+            ));
+        }
+    }
+
+    let diagnostics = required_performance_object(
+        budgets.get("diagnostics"),
+        "daemon search performance profileRuntime.budgets.diagnostics",
+        &["supportBundleProfile", "redaction"],
+    )?;
+    if !diagnostics
+        .get("supportBundleProfile")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| ["minimal", "standard", "full"].contains(&value))
+        || !diagnostics
+            .get("redaction")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| ["strict", "policy_applied"].contains(&value))
+    {
+        return Err(
+            "daemon search performance profileRuntime.budgets.diagnostics drifted".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_search_performance_search(value: &serde_json::Value) -> Result<(), String> {
+    const FIELDS: &[&str] = &[
+        "status",
+        "returnedHits",
+        "sourceCounts",
+        "scoreDistribution",
+        "fieldCoverage",
+        "errors",
+        "elapsed",
+        "timings",
+    ];
+    validate_exact_object_fields(value, "daemon search performance search", FIELDS, &[])?;
+    if !matches!(
+        value.get("status").and_then(serde_json::Value::as_str),
+        Some("success" | "no_results" | "index_not_found" | "index_error")
+    ) || !value.get("returnedHits").is_some_and(is_json_unsigned)
+        || !value
+            .get("errors")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|errors| errors.iter().all(serde_json::Value::is_string))
+    {
+        return Err("daemon search performance search field types or values drifted".to_owned());
+    }
+    validate_performance_unsigned_object(
+        value.get("sourceCounts"),
+        "daemon search performance search.sourceCounts",
+        &[
+            "lexical",
+            "semanticFast",
+            "semanticQuality",
+            "hybrid",
+            "reranked",
+        ],
+    )?;
+    validate_performance_optional_number_object(
+        value.get("scoreDistribution"),
+        "daemon search performance search.scoreDistribution",
+        &["top", "min", "max", "mean"],
+    )?;
+    validate_performance_unsigned_object(
+        value.get("fieldCoverage"),
+        "daemon search performance search.fieldCoverage",
+        &[
+            "fastScoreCount",
+            "qualityScoreCount",
+            "lexicalScoreCount",
+            "rerankScoreCount",
+            "metadataCount",
+            "explanationCount",
+        ],
+    )?;
+    validate_search_performance_elapsed(
+        value
+            .get("elapsed")
+            .ok_or_else(|| "daemon search performance search.elapsed missing".to_owned())?,
+        "daemon search performance search.elapsed",
+        false,
+    )?;
+    validate_search_performance_timings(
+        value
+            .get("timings")
+            .ok_or_else(|| "daemon search performance search.timings missing".to_owned())?,
+        "daemon search performance search.timings",
+    )
+}
+
+fn validate_search_performance_timings(
+    value: &serde_json::Value,
+    context: &str,
+) -> Result<(), String> {
+    let timings = value
+        .as_array()
+        .ok_or_else(|| format!("{context} must be an array"))?;
+    for (index, timing) in timings.iter().enumerate() {
+        validate_search_performance_elapsed(timing, &format!("{context}[{index}]"), true)?;
+    }
+    Ok(())
+}
+
+fn validate_search_performance_elapsed(
+    value: &serde_json::Value,
+    context: &str,
+    named: bool,
+) -> Result<(), String> {
+    let required = if named {
+        &["elapsedMs", "elapsedMsBucket", "nondeterministic", "name"][..]
+    } else {
+        &["elapsedMs", "elapsedMsBucket", "nondeterministic"][..]
+    };
+    validate_exact_object_fields(value, context, required, &[])?;
+    if !value
+        .get("elapsedMs")
+        .and_then(serde_json::Value::as_f64)
+        .is_some_and(|elapsed| elapsed.is_finite() && elapsed >= 0.0)
+        || !matches!(
+            value
+                .get("elapsedMsBucket")
+                .and_then(serde_json::Value::as_str),
+            Some(
+                "lt_1ms"
+                    | "1_9ms"
+                    | "10_49ms"
+                    | "50_99ms"
+                    | "100_499ms"
+                    | "500_999ms"
+                    | "gte_1000ms"
+            )
+        )
+        || value
+            .get("nondeterministic")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        || named
+            && !value
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| !name.is_empty())
+    {
+        return Err(format!("{context} field types or values drifted"));
+    }
+    Ok(())
+}
+
+fn required_performance_object<'a>(
+    value: Option<&'a serde_json::Value>,
+    context: &str,
+    fields: &[&str],
+) -> Result<&'a serde_json::Map<String, serde_json::Value>, String> {
+    let value = value.ok_or_else(|| format!("{context} missing"))?;
+    validate_exact_object_fields(value, context, fields, &[])?;
+    value
+        .as_object()
+        .ok_or_else(|| format!("{context} must be an object"))
+}
+
+fn validate_performance_unsigned_object(
+    value: Option<&serde_json::Value>,
+    context: &str,
+    fields: &[&str],
+) -> Result<(), String> {
+    let object = required_performance_object(value, context, fields)?;
+    if fields
+        .iter()
+        .all(|field| object.get(*field).is_some_and(is_json_unsigned))
+    {
+        Ok(())
+    } else {
+        Err(format!("{context} field types drifted"))
+    }
+}
+
+fn validate_performance_optional_number_object(
+    value: Option<&serde_json::Value>,
+    context: &str,
+    fields: &[&str],
+) -> Result<(), String> {
+    let object = required_performance_object(value, context, fields)?;
+    if fields.iter().all(|field| {
+        object.get(*field).is_some_and(|value| {
+            value.is_null() || value.as_f64().is_some_and(|number| number.is_finite())
+        })
+    }) {
+        Ok(())
+    } else {
+        Err(format!("{context} field types drifted"))
+    }
+}
+
+fn is_json_unsigned(value: &serde_json::Value) -> bool {
+    value.as_u64().is_some()
+}
+
+fn validate_search_performance_db_reads(value: &serde_json::Value) -> Result<(), String> {
+    const FIELDS: &[&str] = &[
+        "indexStatusChecks",
+        "memoryReads",
+        "tagReads",
+        "artifactLinkReads",
+    ];
+    validate_exact_object_fields(value, "daemon search performance dbReads", FIELDS, &[])?;
+    if FIELDS.iter().all(|field| {
+        value
+            .get(*field)
+            .is_some_and(|value| value.as_u64().is_some())
+    }) {
+        Ok(())
+    } else {
+        Err("daemon search performance dbReads field types drifted".to_owned())
+    }
+}
+
+fn validate_search_performance_not_used(
+    value: &serde_json::Value,
+    field: &str,
+) -> Result<(), String> {
+    let context = format!("daemon search performance {field}");
+    validate_exact_object_fields(value, &context, &["status", "reason"], &[])?;
+    if value.get("status").and_then(serde_json::Value::as_str) != Some("not_used")
+        || !value
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|reason| !reason.is_empty())
+    {
+        return Err(format!("{context} field types or values drifted"));
+    }
+    Ok(())
+}
+
+fn validate_search_performance_redaction(value: &serde_json::Value) -> Result<(), String> {
+    validate_exact_object_fields(
+        value,
+        "daemon search performance redaction",
+        &["memoryContentIncluded", "queryTextIncluded", "safeFields"],
+        &[],
+    )?;
+    if value
+        .get("memoryContentIncluded")
+        .and_then(serde_json::Value::as_bool)
+        != Some(false)
+        || value
+            .get("queryTextIncluded")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+        || value.get("safeFields")
+            != Some(&serde_json::json!([
+                "counts",
+                "elapsedMs",
+                "elapsedMsBucket",
+                "status",
+                "fingerprints",
+                "degradationCodes"
+            ]))
+    {
+        return Err("daemon search performance redaction contract drifted".to_owned());
     }
     Ok(())
 }
@@ -2837,6 +3513,7 @@ fn dispatch_search(
     request: &DaemonRequest,
     shutdown: &AtomicBool,
     search_advisory_session: &Mutex<SearchAdvisorySession>,
+    defer_advisory_until_socket_write: bool,
 ) -> DaemonResponse {
     let daemon_total_start = Instant::now();
     if shutdown.load(Ordering::SeqCst) {
@@ -2882,74 +3559,58 @@ fn dispatch_search(
         )
     });
     let report = search_run.report;
-    for _attempt in 0..DAEMON_ADVISORY_COMMIT_MAX_ATTEMPTS {
-        let base_advisory_session = search_advisory_session
+    let mut pending_delivery =
+        PendingSearchAdvisoryDelivery::new(search_advisory_session, authorized_workspace_id);
+    let timing =
+        DaemonSearchTiming::from_trace(daemon_total_start.elapsed(), &search_run.performance);
+    let mut method_result = {
+        let mut advisory_session = search_advisory_session
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let mut staged_advisory_session = base_advisory_session.clone();
-        let timing =
-            DaemonSearchTiming::from_trace(daemon_total_start.elapsed(), &search_run.performance);
-        let mut method_result = DaemonSearchResult::from_report(
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        DaemonSearchResult::from_report_for_delivery(
             &report,
             options.explain,
             authorized_workspace_id,
-            &mut staged_advisory_session,
+            &mut advisory_session,
+            pending_delivery.reservation_mut(),
             timing,
-            performance.clone(),
-        );
-        method_result.timing.daemon_total =
-            DaemonSearchTimingMeasurement::from_duration(daemon_total_start.elapsed());
-        let response_degraded_codes = daemon_search_degraded_codes(&method_result);
-        let result = match serde_json::to_value(method_result) {
-            Ok(result) => result,
-            Err(error) => {
-                return DaemonResponse::err(
-                    request.request_id.clone(),
-                    request.agent_id.clone(),
-                    request.workspace_id.clone(),
-                    DAEMON_SEARCH_EXECUTION_FAILED_CODE,
-                    format!("ee.daemon.search could not encode its response: {error}"),
-                );
-            }
-        };
-        let mut response = DaemonResponse::ok(
-            request.request_id.clone(),
-            request.agent_id.clone(),
-            request.workspace_id.clone(),
-            result,
-        );
-        for code in response_degraded_codes {
-            response = response.with_degraded(code);
-        }
-        if !daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
+            performance,
+        )
+    };
+    method_result.timing.daemon_total =
+        DaemonSearchTimingMeasurement::from_duration(daemon_total_start.elapsed());
+    let response_degraded_codes = daemon_search_degraded_codes(&method_result);
+    let result = match serde_json::to_value(method_result) {
+        Ok(result) => result,
+        Err(error) => {
             return DaemonResponse::err(
                 request.request_id.clone(),
                 request.agent_id.clone(),
                 request.workspace_id.clone(),
                 DAEMON_SEARCH_EXECUTION_FAILED_CODE,
-                "ee.daemon.search response exceeded the daemon response cap; lower --limit or use canonical in-process search.",
+                format!("ee.daemon.search could not encode its response: {error}"),
             );
         }
-        let committed = search_advisory_session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .commit_workspace_if_unchanged(
-                &base_advisory_session,
-                &staged_advisory_session,
-                authorized_workspace_id,
-            );
-        if committed {
-            return response;
-        }
-    }
-    DaemonResponse::err(
+    };
+    let mut response = DaemonResponse::ok(
         request.request_id.clone(),
         request.agent_id.clone(),
         request.workspace_id.clone(),
-        DAEMON_SEARCH_EXECUTION_FAILED_CODE,
-        "ee.daemon.search advisory state changed concurrently in the same workspace; retry the request.",
-    )
+        result,
+    );
+    for code in response_degraded_codes {
+        response = response.with_degraded(code);
+    }
+    if !daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
+        return DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            DAEMON_SEARCH_EXECUTION_FAILED_CODE,
+            "ee.daemon.search response exceeded the daemon response cap; lower --limit or use canonical in-process search.",
+        );
+    }
+    pending_delivery.finish(response, defer_advisory_until_socket_write)
 }
 
 fn daemon_response_fits(response: &DaemonResponse, max_bytes: usize) -> bool {
@@ -3864,6 +4525,7 @@ fn dispatch_context(
     request: &DaemonRequest,
     shutdown: &AtomicBool,
     search_advisory_session: &Mutex<SearchAdvisorySession>,
+    defer_advisory_until_socket_write: bool,
 ) -> DaemonResponse {
     if shutdown.load(Ordering::SeqCst) {
         return daemon_shutting_down_response(
@@ -3992,78 +4654,72 @@ fn dispatch_context(
             );
         }
     };
-    for _attempt in 0..DAEMON_ADVISORY_COMMIT_MAX_ATTEMPTS {
-        let base_advisory_session = search_advisory_session
+    let mut pending_delivery =
+        PendingSearchAdvisoryDelivery::new(search_advisory_session, authorized_workspace_id);
+    let mut result = result;
+    {
+        let mut advisory_session = search_advisory_session
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let mut staged_advisory_session = base_advisory_session.clone();
-        let mut staged_result = result.clone();
-        filter_context_large_gap_advisory(
-            &mut staged_result,
-            &mut staged_advisory_session,
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        filter_context_large_gap_advisory_for_delivery(
+            &mut result,
+            &mut advisory_session,
             authorized_workspace_id,
+            pending_delivery.reservation_mut(),
         );
-        if daemon_context_deadline_expired(context_started, params.timeout_ms) {
-            return daemon_context_deadline_response(
-                request,
-                "ee.daemon.context deadline expired while finalizing degradations.",
-            );
-        }
-        let degraded_codes = staged_result
-            .pointer("/data/degraded")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| entry.get("code").and_then(serde_json::Value::as_str))
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let mut response = DaemonResponse::ok(
-            request.request_id.clone(),
-            request.agent_id.clone(),
-            request.workspace_id.clone(),
-            staged_result,
-        );
-        for code in degraded_codes {
-            response = response.with_degraded(code);
-        }
-        if !daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
-            return DaemonResponse::err(
-                request.request_id.clone(),
-                request.agent_id.clone(),
-                request.workspace_id.clone(),
-                DAEMON_CONTEXT_EXECUTION_FAILED_CODE,
-                format!(
-                    "ee.daemon.context response exceeded the {}-byte daemon response cap; lower maxTokens or use the in-process CLI pack path.",
-                    super::DAEMON_RESPONSE_MAX_BYTES
-                ),
-            );
-        }
-        let committed = search_advisory_session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .commit_workspace_if_unchanged(
-                &base_advisory_session,
-                &staged_advisory_session,
-                authorized_workspace_id,
-            );
-        if committed {
-            return response;
-        }
     }
-    DaemonResponse::err(
+    if daemon_context_deadline_expired(context_started, params.timeout_ms) {
+        return daemon_context_deadline_response(
+            request,
+            "ee.daemon.context deadline expired while finalizing degradations.",
+        );
+    }
+    let degraded_codes = result
+        .pointer("/data/degraded")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("code").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut response = DaemonResponse::ok(
         request.request_id.clone(),
         request.agent_id.clone(),
         request.workspace_id.clone(),
-        DAEMON_CONTEXT_EXECUTION_FAILED_CODE,
-        "ee.daemon.context advisory state changed concurrently in the same workspace; retry the request.",
-    )
+        result,
+    );
+    for code in degraded_codes {
+        response = response.with_degraded(code);
+    }
+    if !daemon_response_fits(&response, super::DAEMON_RESPONSE_MAX_BYTES) {
+        return DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            DAEMON_CONTEXT_EXECUTION_FAILED_CODE,
+            format!(
+                "ee.daemon.context response exceeded the {}-byte daemon response cap; lower maxTokens or use the in-process CLI pack path.",
+                super::DAEMON_RESPONSE_MAX_BYTES
+            ),
+        );
+    }
+    pending_delivery.finish(response, defer_advisory_until_socket_write)
 }
 
-fn filter_context_large_gap_advisory(
+fn filter_context_large_gap_advisory_for_delivery(
     response: &mut serde_json::Value,
     session: &mut SearchAdvisorySession,
     workspace_id: &str,
+    reservation: &mut SearchAdvisoryDeliveryReservation,
+) {
+    filter_context_large_gap_advisory_inner(response, session, workspace_id, Some(reservation));
+}
+
+fn filter_context_large_gap_advisory_inner(
+    response: &mut serde_json::Value,
+    session: &mut SearchAdvisorySession,
+    workspace_id: &str,
+    reservation: Option<&mut SearchAdvisoryDeliveryReservation>,
 ) {
     const CODE: &str = "search_index_large_gap";
     let has_large_gap = ["/degraded", "/data/degraded"].into_iter().any(|pointer| {
@@ -4076,7 +4732,15 @@ fn filter_context_large_gap_advisory(
                 })
             })
     });
-    if session.emit_large_gap_while_active(workspace_id, has_large_gap) {
+    let emit_large_gap = match reservation {
+        Some(reservation) => session.emit_large_gap_while_active_for_delivery(
+            workspace_id,
+            has_large_gap,
+            reservation,
+        ),
+        None => session.emit_large_gap_while_active(workspace_id, has_large_gap),
+    };
+    if emit_large_gap {
         return;
     }
     if !has_large_gap {
@@ -4661,70 +5325,72 @@ mod tests {
         report
     }
 
-    fn advisory_candidate(
+    fn advisory_delivery_candidate(
         report: &SearchReport,
-        session: &mut SearchAdvisorySession,
-    ) -> (DaemonResponse, serde_json::Value) {
-        advisory_candidate_for_workspace(report, session, TEST_WORKSPACE_ID)
-    }
-
-    fn advisory_candidate_for_workspace(
-        report: &SearchReport,
-        session: &mut SearchAdvisorySession,
+        policy: &DaemonDispatchPolicy,
         workspace_id: &str,
     ) -> (DaemonResponse, serde_json::Value) {
-        let result = serde_json::to_value(DaemonSearchResult::from_report(
-            report,
-            false,
-            workspace_id,
-            session,
-            DaemonSearchTiming::from_trace(
-                Duration::from_millis(1),
-                &SearchPerformanceTrace::default(),
-            ),
-            None,
-        ))
-        .expect("encode method result");
+        let mut pending =
+            PendingSearchAdvisoryDelivery::new(policy.search_advisory_session(), workspace_id);
+        let result = {
+            let mut session = policy
+                .search_advisory_session()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            serde_json::to_value(DaemonSearchResult::from_report_for_delivery(
+                report,
+                false,
+                workspace_id,
+                &mut session,
+                pending.reservation_mut(),
+                DaemonSearchTiming::from_trace(
+                    Duration::from_millis(1),
+                    &SearchPerformanceTrace::default(),
+                ),
+                None,
+            ))
+            .expect("encode method result")
+        };
         let response = DaemonResponse::ok(
             "req-advisory-delivery",
             TEST_AGENT_ID,
-            Some(TEST_WORKSPACE_ID.to_owned()),
+            Some(workspace_id.to_owned()),
             result.clone(),
         );
-        (response, result)
+        (pending.finish(response, true), result)
     }
 
     #[test]
-    fn rejected_search_response_does_not_consume_permanent_advisory() {
+    fn failed_search_response_delivery_does_not_consume_permanent_advisory() {
         let report = permanent_reranker_advisory_report();
-        let mut shared = SearchAdvisorySession::default();
+        let policy = DaemonDispatchPolicy::for_workspace(TEST_WORKSPACE_ID);
 
-        let mut rejected_stage = shared.clone();
-        let (rejected_response, rejected_result) = advisory_candidate(&report, &mut rejected_stage);
+        let (mut failed_response, failed_result) =
+            advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
         assert_eq!(
-            rejected_result
+            failed_result
                 .pointer("/response/data/rerank/advisory/code")
                 .and_then(serde_json::Value::as_str),
             Some("rerank_model_unavailable")
         );
-        assert!(!daemon_response_fits(&rejected_response, 1));
-        assert_eq!(shared, SearchAdvisorySession::default());
+        assert!(failed_response.delivery.is_some());
+        settle_daemon_response_delivery(&policy, &mut failed_response, false);
+        assert!(failed_response.delivery.is_none());
 
-        let mut delivered_stage = shared.clone();
-        let (delivered_response, delivered_result) =
-            advisory_candidate(&report, &mut delivered_stage);
-        assert!(daemon_response_fits(&delivered_response, usize::MAX));
+        let (mut delivered_response, delivered_result) =
+            advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
         assert_eq!(
             delivered_result
                 .pointer("/response/data/rerank/advisory/code")
                 .and_then(serde_json::Value::as_str),
             Some("rerank_model_unavailable")
         );
-        assert_eq!(shared, SearchAdvisorySession::default());
-        shared = delivered_stage;
+        assert!(delivered_response.delivery.is_some());
+        settle_daemon_response_delivery(&policy, &mut delivered_response, true);
 
-        let mut repeated_stage = shared.clone();
-        let (_, repeated_result) = advisory_candidate(&report, &mut repeated_stage);
+        let (repeated_response, repeated_result) =
+            advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
+        assert!(repeated_response.delivery.is_none());
         assert!(
             repeated_result
                 .pointer("/response/data/rerank/advisory")
@@ -4739,22 +5405,14 @@ mod tests {
     }
 
     #[test]
-    fn unbound_daemon_concurrent_workspace_commits_merge_without_cross_suppression() {
+    fn unbound_daemon_concurrent_workspace_reservations_do_not_cross_suppress() {
         let report = permanent_reranker_advisory_report();
         let policy = DaemonDispatchPolicy::default();
         assert!(policy.bound_workspace_id().is_none());
-        let mut shared = policy
-            .search_advisory_session()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-
-        let base_a = shared.clone();
-        let mut staged_a = base_a.clone();
-        let (_, first_a) = advisory_candidate_for_workspace(&report, &mut staged_a, "workspace-a");
-        let base_b = shared.clone();
-        let mut staged_b = base_b.clone();
-        let (_, first_b) = advisory_candidate_for_workspace(&report, &mut staged_b, "workspace-b");
+        let (mut response_a, first_a) =
+            advisory_delivery_candidate(&report, &policy, "workspace-a");
+        let (mut response_b, first_b) =
+            advisory_delivery_candidate(&report, &policy, "workspace-b");
 
         assert_eq!(
             first_a
@@ -4769,17 +5427,11 @@ mod tests {
             Some("rerank_model_unavailable"),
             "workspace-a must not suppress the first active episode in workspace-b"
         );
-        assert!(shared.commit_workspace_if_unchanged(&base_a, &staged_a, "workspace-a"));
-        assert!(
-            shared.commit_workspace_if_unchanged(&base_b, &staged_b, "workspace-b"),
-            "workspace-b CAS must merge instead of overwriting workspace-a"
-        );
+        settle_daemon_response_delivery(&policy, &mut response_a, true);
+        settle_daemon_response_delivery(&policy, &mut response_b, true);
 
-        let mut after_merge = shared.clone();
-        let (_, repeated_a) =
-            advisory_candidate_for_workspace(&report, &mut after_merge, "workspace-a");
-        let (_, repeated_b) =
-            advisory_candidate_for_workspace(&report, &mut after_merge, "workspace-b");
+        let (_, repeated_a) = advisory_delivery_candidate(&report, &policy, "workspace-a");
+        let (_, repeated_b) = advisory_delivery_candidate(&report, &policy, "workspace-b");
         for repeated in [&repeated_a, &repeated_b] {
             assert!(
                 repeated
@@ -4790,51 +5442,52 @@ mod tests {
     }
 
     #[test]
-    fn same_workspace_concurrent_commit_conflicts_and_rerenders_from_fresh_state() {
+    fn same_workspace_concurrent_reservations_suppress_duplicates_without_errors() {
         let report = permanent_reranker_advisory_report();
-        let mut shared = SearchAdvisorySession::default();
-        let first_base = shared.clone();
-        let mut first_stage = first_base.clone();
-        let _ = advisory_candidate_for_workspace(&report, &mut first_stage, TEST_WORKSPACE_ID);
-        let competing_base = shared.clone();
-        let mut competing_stage = competing_base.clone();
-        let _ = advisory_candidate_for_workspace(&report, &mut competing_stage, TEST_WORKSPACE_ID);
-
-        assert!(
-            shared.commit_workspace_if_unchanged(&first_base, &first_stage, TEST_WORKSPACE_ID,)
+        let policy = DaemonDispatchPolicy::for_workspace(TEST_WORKSPACE_ID);
+        let (mut first_response, first_result) =
+            advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
+        let (competing_response, competing_result) =
+            advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
+        assert!(first_response.error.is_none());
+        assert_eq!(
+            first_result
+                .pointer("/response/data/rerank/advisory/code")
+                .and_then(serde_json::Value::as_str),
+            Some("rerank_model_unavailable")
         );
-        assert!(!shared.commit_workspace_if_unchanged(
-            &competing_base,
-            &competing_stage,
-            TEST_WORKSPACE_ID,
-        ));
-
-        let retry_base = shared.clone();
-        let mut retry_stage = retry_base.clone();
-        let (_, retry_result) =
-            advisory_candidate_for_workspace(&report, &mut retry_stage, TEST_WORKSPACE_ID);
         assert!(
-            retry_result
+            competing_result
                 .pointer("/response/data/rerank/advisory")
                 .is_some_and(serde_json::Value::is_null),
-            "CAS retry must rerender against the committed advisory episode"
+            "an in-flight reservation must suppress a duplicate without failing search"
         );
-        assert!(
-            shared.commit_workspace_if_unchanged(&retry_base, &retry_stage, TEST_WORKSPACE_ID,)
+        assert!(competing_response.error.is_none());
+        assert!(competing_response.delivery.is_none());
+
+        settle_daemon_response_delivery(&policy, &mut first_response, false);
+        let (mut retry_response, retry_result) =
+            advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
+        assert_eq!(
+            retry_result
+                .pointer("/response/data/rerank/advisory/code")
+                .and_then(serde_json::Value::as_str),
+            Some("rerank_model_unavailable"),
+            "a failed delivery must release the advisory for the next response"
         );
+        settle_daemon_response_delivery(&policy, &mut retry_response, true);
     }
 
     #[test]
     fn large_gap_repair_is_once_but_daemon_stale_truth_remains() {
         let first_report = stale_index_advisory_report(108, 1);
         let changed_generation_report = stale_index_advisory_report(112, 2);
-        let mut shared = SearchAdvisorySession::default();
+        let policy = DaemonDispatchPolicy::for_workspace(TEST_WORKSPACE_ID);
 
-        let mut rejected_stage = shared.clone();
-        let (rejected_response, rejected_result) =
-            advisory_candidate(&first_report, &mut rejected_stage);
+        let (mut failed_response, failed_result) =
+            advisory_delivery_candidate(&first_report, &policy, TEST_WORKSPACE_ID);
         assert!(
-            rejected_result
+            failed_result
                 .pointer("/response/data/degraded")
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|entries| entries.iter().any(|entry| {
@@ -4842,12 +5495,10 @@ mod tests {
                         == Some("search_index_large_gap")
                 }))
         );
-        assert!(!daemon_response_fits(&rejected_response, 1));
-        assert_eq!(shared, SearchAdvisorySession::default());
+        settle_daemon_response_delivery(&policy, &mut failed_response, false);
 
-        let mut delivered_stage = shared.clone();
-        let (delivered_response, delivered_result) =
-            advisory_candidate(&first_report, &mut delivered_stage);
+        let (mut delivered_response, delivered_result) =
+            advisory_delivery_candidate(&first_report, &policy, TEST_WORKSPACE_ID);
         assert!(daemon_response_fits(&delivered_response, usize::MAX));
         assert!(
             delivered_result
@@ -4866,20 +5517,12 @@ mod tests {
                         == Some("search_index_large_gap")
                 }))
         );
-        shared = delivered_stage;
+        settle_daemon_response_delivery(&policy, &mut delivered_response, true);
 
-        let mut repeated_stage = shared.clone();
-        let repeated_result = DaemonSearchResult::from_report(
-            &changed_generation_report,
-            false,
-            TEST_WORKSPACE_ID,
-            &mut repeated_stage,
-            DaemonSearchTiming::from_trace(
-                Duration::from_millis(1),
-                &SearchPerformanceTrace::default(),
-            ),
-            None,
-        );
+        let (_, repeated_value) =
+            advisory_delivery_candidate(&changed_generation_report, &policy, TEST_WORKSPACE_ID);
+        let repeated_result = DaemonSearchResult::from_value(repeated_value)
+            .expect("repeated result must remain a valid success response");
         assert_eq!(
             daemon_search_degraded_codes(&repeated_result),
             vec!["search_index_stale"]
@@ -4893,7 +5536,7 @@ mod tests {
     }
 
     #[test]
-    fn context_large_gap_advisory_is_staged_once_without_hiding_stale_truth() {
+    fn context_large_gap_advisory_is_consumed_only_after_successful_delivery() {
         fn context_response() -> serde_json::Value {
             let degraded = serde_json::json!([
                 {"code": "search_index_stale", "severity": "medium", "message": "stale"},
@@ -4907,25 +5550,53 @@ mod tests {
             })
         }
 
-        let mut shared = SearchAdvisorySession::default();
-        let mut rejected_stage = shared.clone();
-        let mut rejected = context_response();
-        filter_context_large_gap_advisory(&mut rejected, &mut rejected_stage, TEST_WORKSPACE_ID);
-        assert!(rejected["degraded"].as_array().is_some_and(|entries| {
+        fn context_delivery_candidate(
+            policy: &DaemonDispatchPolicy,
+        ) -> (DaemonResponse, serde_json::Value) {
+            let mut pending = PendingSearchAdvisoryDelivery::new(
+                policy.search_advisory_session(),
+                TEST_WORKSPACE_ID,
+            );
+            let mut result = context_response();
+            {
+                let mut session = policy
+                    .search_advisory_session()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                filter_context_large_gap_advisory_for_delivery(
+                    &mut result,
+                    &mut session,
+                    TEST_WORKSPACE_ID,
+                    pending.reservation_mut(),
+                );
+            }
+            let response = DaemonResponse::ok(
+                "req-context-advisory-delivery",
+                TEST_AGENT_ID,
+                Some(TEST_WORKSPACE_ID.to_owned()),
+                result.clone(),
+            );
+            (pending.finish(response, true), result)
+        }
+
+        let policy = DaemonDispatchPolicy::for_workspace(TEST_WORKSPACE_ID);
+        let (mut failed_response, failed) = context_delivery_candidate(&policy);
+        assert!(failed["degraded"].as_array().is_some_and(|entries| {
             entries
                 .iter()
                 .any(|entry| entry["code"] == "search_index_large_gap")
         }));
-        assert_eq!(shared, SearchAdvisorySession::default());
+        settle_daemon_response_delivery(&policy, &mut failed_response, false);
 
-        let mut delivered_stage = shared.clone();
-        let mut delivered = context_response();
-        filter_context_large_gap_advisory(&mut delivered, &mut delivered_stage, TEST_WORKSPACE_ID);
-        shared = delivered_stage;
+        let (mut delivered_response, delivered) = context_delivery_candidate(&policy);
+        assert!(delivered["degraded"].as_array().is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry["code"] == "search_index_large_gap")
+        }));
+        settle_daemon_response_delivery(&policy, &mut delivered_response, true);
 
-        let mut repeated_stage = shared.clone();
-        let mut repeated = context_response();
-        filter_context_large_gap_advisory(&mut repeated, &mut repeated_stage, TEST_WORKSPACE_ID);
+        let (_, repeated) = context_delivery_candidate(&policy);
         for pointer in ["/degraded", "/data/degraded"] {
             let codes = repeated
                 .pointer(pointer)
@@ -5265,6 +5936,77 @@ mod tests {
             Some(&canonical),
             "client decoding must preserve every canonical performance field"
         );
+    }
+
+    #[test]
+    fn daemon_search_performance_strict_v3_rejects_raw_text_and_type_drift() {
+        let report = stale_index_advisory_report(108, 1);
+        let trace = SearchPerformanceTrace::default();
+        let canonical =
+            report.performance_explain_json_with_trace(SpeedMode::Default, false, &trace);
+        assert!(
+            canonical["data"]["fallbacks"]
+                .as_array()
+                .is_some_and(|fallbacks| !fallbacks.is_empty()),
+            "fixture must exercise the strict fallback item validator"
+        );
+        let timing = DaemonSearchTiming::from_trace(Duration::from_millis(2), &trace);
+        let mut advisory_session = SearchAdvisorySession::default();
+        let encoded = serde_json::to_value(DaemonSearchResult::from_report(
+            &report,
+            false,
+            TEST_WORKSPACE_ID,
+            &mut advisory_session,
+            timing,
+            Some(canonical),
+        ))
+        .expect("daemon search result must encode");
+        DaemonSearchResult::from_value(encoded.clone())
+            .expect("canonical strict-v3 performance payload must validate");
+
+        let mut raw_text = encoded.clone();
+        raw_text["performance"]["data"]["query"]["rawText"] = serde_json::json!("release secret");
+        assert!(
+            DaemonSearchResult::from_value(raw_text).is_err(),
+            "strict v3 must reject raw query text even when all required fields remain"
+        );
+
+        let mut query_type_drift = encoded.clone();
+        query_type_drift["performance"]["data"]["query"]["lengthBytes"] = serde_json::json!("7");
+        assert!(DaemonSearchResult::from_value(query_type_drift).is_err());
+
+        let mut plan_type_drift = encoded.clone();
+        plan_type_drift["performance"]["data"]["queryPlan"]["usesEmbeddings"] =
+            serde_json::json!("false");
+        assert!(DaemonSearchResult::from_value(plan_type_drift).is_err());
+
+        let mut read_type_drift = encoded.clone();
+        read_type_drift["performance"]["data"]["dbReads"]["memoryReads"] = serde_json::json!(-1);
+        assert!(DaemonSearchResult::from_value(read_type_drift).is_err());
+
+        let mut profile_nested_drift = encoded.clone();
+        profile_nested_drift["performance"]["data"]["profileRuntime"]["budgets"]["search"]["unexpected"] =
+            serde_json::json!(1);
+        assert!(DaemonSearchResult::from_value(profile_nested_drift).is_err());
+
+        let mut search_type_drift = encoded.clone();
+        search_type_drift["performance"]["data"]["search"]["returnedHits"] = serde_json::json!("1");
+        assert!(DaemonSearchResult::from_value(search_type_drift).is_err());
+
+        let mut timing_nested_drift = encoded.clone();
+        timing_nested_drift["performance"]["data"]["search"]["elapsed"]["nondeterministic"] =
+            serde_json::json!(false);
+        assert!(DaemonSearchResult::from_value(timing_nested_drift).is_err());
+
+        let mut fallback_type_drift = encoded.clone();
+        fallback_type_drift["performance"]["data"]["fallbacks"][0]["sources"] =
+            serde_json::json!([7]);
+        assert!(DaemonSearchResult::from_value(fallback_type_drift).is_err());
+
+        let mut redaction_value_drift = encoded;
+        redaction_value_drift["performance"]["data"]["redaction"]["safeFields"] =
+            serde_json::json!(["counts"]);
+        assert!(DaemonSearchResult::from_value(redaction_value_drift).is_err());
     }
 
     fn read_framed_daemon_response(stream: &mut UnixStream) -> DaemonResponse {
