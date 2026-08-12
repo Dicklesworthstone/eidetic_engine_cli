@@ -660,7 +660,57 @@ pub struct NearbyStore {
     pub last_write: Option<String>,
 }
 
-/// Bounded discovery result.
+/// Completeness of a bounded nearby-store discovery attempt.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NearbyStoreScanOutcome {
+    /// Every configured discovery source was inspected within the budget.
+    #[default]
+    Complete,
+    /// Discovery began but its bounded wall-clock budget expired.
+    Truncated,
+    /// A required discovery source or worker could not be read or started.
+    Unavailable,
+}
+
+/// Canonical bounded discovery result.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NearbyStoreScanAssessment {
+    /// Ranked by document count (desc), then path; capped at
+    /// [`NEARBY_STORE_REPORT_LIMIT`].
+    pub stores: Vec<NearbyStore>,
+    /// Whether discovery completed, returned a bounded partial result, or was
+    /// unavailable. This is the source of truth for recovery decisions.
+    pub outcome: NearbyStoreScanOutcome,
+}
+
+impl NearbyStoreScanAssessment {
+    fn mark_truncated(&mut self) {
+        if self.outcome == NearbyStoreScanOutcome::Complete {
+            self.outcome = NearbyStoreScanOutcome::Truncated;
+        }
+    }
+
+    fn mark_unavailable(&mut self) {
+        self.outcome = NearbyStoreScanOutcome::Unavailable;
+    }
+
+    fn into_legacy_scan(self) -> NearbyStoreScan {
+        NearbyStoreScan {
+            stores: self.stores,
+            // Residual orient/resume projections still expose this boolean.
+            // Treat unavailable as incomplete so they cannot claim a complete
+            // scan while their schemas are migrated to `outcome`.
+            truncated: self.outcome != NearbyStoreScanOutcome::Complete,
+        }
+    }
+}
+
+/// Legacy bounded discovery projection used by orient/resume schemas that
+/// still expose `truncated`. New recovery logic must consume
+/// [`NearbyStoreScanAssessment`] so worker and registry failure truth is not
+/// collapsed into a boolean.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct NearbyStoreScan {
     /// Ranked by document count (desc), then path; capped at
@@ -751,8 +801,8 @@ struct NearbyStoreCandidate {
 }
 
 enum NearbyStoreScanUpdate {
-    Progress(NearbyStoreScan),
-    Finished(NearbyStoreScan),
+    Progress(NearbyStoreScanAssessment),
+    Finished(NearbyStoreScanAssessment),
 }
 
 /// Source-of-truth population state for one resolved addressed database.
@@ -855,7 +905,8 @@ pub fn discover_nearby_stores(
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
     let addressed_database = workspace_root.join(".ee").join("ee.db");
-    discover_nearby_stores_with_registry(workspace_path, &addressed_database, budget, None)
+    assess_nearby_stores_with_registry(workspace_path, &addressed_database, budget, None)
+        .into_legacy_scan()
 }
 
 /// Scan while preserving the exact database already resolved by the caller.
@@ -868,15 +919,35 @@ pub fn discover_nearby_stores_for_database(
     addressed_database: &Path,
     budget: std::time::Duration,
 ) -> NearbyStoreScan {
-    discover_nearby_stores_with_registry(workspace_path, addressed_database, budget, None)
+    assess_nearby_stores_for_database(workspace_path, addressed_database, budget).into_legacy_scan()
 }
 
-fn discover_nearby_stores_with_registry(
+/// Scan while retaining explicit completion, truncation, and unavailability
+/// truth for callers that make recovery decisions.
+#[must_use]
+pub fn assess_nearby_stores_for_database(
+    workspace_path: &Path,
+    addressed_database: &Path,
+    budget: std::time::Duration,
+) -> NearbyStoreScanAssessment {
+    assess_nearby_stores_with_registry(workspace_path, addressed_database, budget, None)
+}
+
+pub(crate) fn assess_nearby_stores_for_database_with_registry(
     workspace_path: &Path,
     addressed_database: &Path,
     budget: std::time::Duration,
     registry_path: Option<&Path>,
-) -> NearbyStoreScan {
+) -> NearbyStoreScanAssessment {
+    assess_nearby_stores_with_registry(workspace_path, addressed_database, budget, registry_path)
+}
+
+fn assess_nearby_stores_with_registry(
+    workspace_path: &Path,
+    addressed_database: &Path,
+    budget: std::time::Duration,
+    registry_path: Option<&Path>,
+) -> NearbyStoreScanAssessment {
     let workspace_path = workspace_path.to_path_buf();
     let addressed_database = addressed_database.to_path_buf();
     let registry_path = registry_path.map(Path::to_path_buf);
@@ -896,9 +967,14 @@ fn discover_nearby_stores_with_registry(
 /// read-only database operation blocks past the cooperative deadline checks.
 /// Progress snapshots preserve candidates already proved populated; timeout
 /// requests cooperative cancellation and returns the latest partial result.
-fn run_nearby_store_scan_bounded<F>(budget: std::time::Duration, scan: F) -> NearbyStoreScan
+fn run_nearby_store_scan_bounded<F>(
+    budget: std::time::Duration,
+    scan: F,
+) -> NearbyStoreScanAssessment
 where
-    F: FnOnce(&Cx<NoCaps>, &mut dyn FnMut(&NearbyStoreScan)) -> NearbyStoreScan + Send + 'static,
+    F: FnOnce(&Cx<NoCaps>, &mut dyn FnMut(&NearbyStoreScanAssessment)) -> NearbyStoreScanAssessment
+        + Send
+        + 'static,
 {
     run_nearby_store_scan_bounded_with_limiter(budget, nearby_store_scan_worker_limiter(), scan)
 }
@@ -907,21 +983,23 @@ fn run_nearby_store_scan_bounded_with_limiter<F>(
     budget: std::time::Duration,
     worker_limiter: std::sync::Arc<NearbyStoreScanWorkerLimiter>,
     scan: F,
-) -> NearbyStoreScan
+) -> NearbyStoreScanAssessment
 where
-    F: FnOnce(&Cx<NoCaps>, &mut dyn FnMut(&NearbyStoreScan)) -> NearbyStoreScan + Send + 'static,
+    F: FnOnce(&Cx<NoCaps>, &mut dyn FnMut(&NearbyStoreScanAssessment)) -> NearbyStoreScanAssessment
+        + Send
+        + 'static,
 {
     if budget.is_zero() {
-        return NearbyStoreScan {
+        return NearbyStoreScanAssessment {
             stores: Vec::new(),
-            truncated: true,
+            outcome: NearbyStoreScanOutcome::Truncated,
         };
     }
 
     let Some(worker_permit) = NearbyStoreScanWorkerLimiter::try_acquire(&worker_limiter) else {
-        return NearbyStoreScan {
+        return NearbyStoreScanAssessment {
             stores: Vec::new(),
-            truncated: true,
+            outcome: NearbyStoreScanOutcome::Unavailable,
         };
     };
 
@@ -935,46 +1013,46 @@ where
             let _worker_permit = worker_permit;
             let _ambient_cx = worker_cx.clone().set_current_restricted();
             let progress_sender = sender.clone();
-            let mut publish = move |scan: &NearbyStoreScan| {
+            let mut publish = move |scan: &NearbyStoreScanAssessment| {
                 let _ = progress_sender.send(NearbyStoreScanUpdate::Progress(scan.clone()));
             };
             let result = scan(&worker_cx, &mut publish);
             let _ = sender.send(NearbyStoreScanUpdate::Finished(result));
         });
     if spawned.is_err() {
-        return NearbyStoreScan {
+        return NearbyStoreScanAssessment {
             stores: Vec::new(),
-            truncated: true,
+            outcome: NearbyStoreScanOutcome::Unavailable,
         };
     }
 
-    let mut latest = NearbyStoreScan::default();
+    let mut latest = NearbyStoreScanAssessment::default();
     loop {
         let remaining = budget.saturating_sub(started.elapsed());
         if remaining.is_zero() {
             cancel_cx.set_cancel_reason(
                 CancelReason::timeout().with_message("nearby-store discovery timed out"),
             );
-            latest.truncated = true;
+            latest.mark_truncated();
             return latest;
         }
         match receiver.recv_timeout(remaining) {
             Ok(NearbyStoreScanUpdate::Progress(progress)) => latest = progress,
             Ok(NearbyStoreScanUpdate::Finished(mut result)) => {
                 if started.elapsed() >= budget {
-                    result.truncated = true;
+                    result.mark_truncated();
                 }
                 return result;
             }
-            Err(
-                std::sync::mpsc::RecvTimeoutError::Timeout
-                | std::sync::mpsc::RecvTimeoutError::Disconnected,
-            ) => {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 cancel_cx.set_cancel_reason(
-                    CancelReason::timeout()
-                        .with_message("nearby-store discovery worker unavailable"),
+                    CancelReason::timeout().with_message("nearby-store discovery timed out"),
                 );
-                latest.truncated = true;
+                latest.mark_truncated();
+                return latest;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                latest.mark_unavailable();
                 return latest;
             }
         }
@@ -987,10 +1065,10 @@ fn scan_nearby_stores_with_registry(
     addressed_database: &Path,
     budget: std::time::Duration,
     registry_path: Option<&Path>,
-    publish: &mut dyn FnMut(&NearbyStoreScan),
-) -> NearbyStoreScan {
+    publish: &mut dyn FnMut(&NearbyStoreScanAssessment),
+) -> NearbyStoreScanAssessment {
     let started = std::time::Instant::now();
-    let mut scan = NearbyStoreScan::default();
+    let mut scan = NearbyStoreScanAssessment::default();
     let scan_root = workspace_path
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
@@ -1121,44 +1199,47 @@ fn scan_nearby_stores_with_registry(
         parent = dir.parent();
     }
 
-    // (c) registered workspaces. Registry failures are deliberately quiet:
-    // discovery is a best-effort recovery hint, and inability to inspect one
-    // candidate must never be reported as evidence that its store is empty.
+    // (c) registered workspaces. A registry failure does not fail the caller,
+    // but it does make discovery unavailable as a completeness claim. Keep
+    // any locally proved candidates while preserving that source failure.
     if !nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
-        if let Ok(registry) = crate::core::workspace::list_workspace_registry(
+        match crate::core::workspace::list_workspace_registry(
             &crate::core::workspace::WorkspaceListOptions {
                 registry_path: registry_path.map(Path::to_path_buf),
             },
         ) {
-            if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
-                return scan;
-            }
-            for workspace in registry.workspaces {
+            Ok(registry) => {
                 if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
-                    break;
+                    return scan;
                 }
-                let identity = NearbyStoreRegistryIdentity {
-                    workspace_id: workspace.workspace_id,
-                    repository_fingerprint: workspace.repository_fingerprint,
-                };
-                if let Some(candidate) = add_nearby_store_candidate(
-                    PathBuf::from(workspace.path),
-                    Some(identity),
-                    &mut seen_candidates,
-                ) {
-                    inspect_nearby_store_candidate(
-                        cx,
-                        &candidate,
-                        addressed_database,
-                        addressed_database_canonical.as_deref(),
-                        started,
-                        budget,
-                        &mut seen_databases,
-                        &mut scan,
-                        publish,
-                    );
+                for workspace in registry.workspaces {
+                    if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
+                        break;
+                    }
+                    let identity = NearbyStoreRegistryIdentity {
+                        workspace_id: workspace.workspace_id,
+                        repository_fingerprint: workspace.repository_fingerprint,
+                    };
+                    if let Some(candidate) = add_nearby_store_candidate(
+                        PathBuf::from(workspace.path),
+                        Some(identity),
+                        &mut seen_candidates,
+                    ) {
+                        inspect_nearby_store_candidate(
+                            cx,
+                            &candidate,
+                            addressed_database,
+                            addressed_database_canonical.as_deref(),
+                            started,
+                            budget,
+                            &mut seen_databases,
+                            &mut scan,
+                            publish,
+                        );
+                    }
                 }
             }
+            Err(_) => scan.mark_unavailable(),
         }
     }
 
@@ -1174,12 +1255,12 @@ fn nearby_store_scan_should_stop(
     cx: &Cx<NoCaps>,
     started: std::time::Instant,
     budget: std::time::Duration,
-    scan: &mut NearbyStoreScan,
+    scan: &mut NearbyStoreScanAssessment,
 ) -> bool {
     if cx.checkpoint().is_ok() && started.elapsed() < budget {
         false
     } else {
-        scan.truncated = true;
+        scan.mark_truncated();
         true
     }
 }
@@ -1216,8 +1297,8 @@ fn inspect_nearby_store_candidate(
     started: std::time::Instant,
     budget: std::time::Duration,
     seen_databases: &mut BTreeSet<PathBuf>,
-    scan: &mut NearbyStoreScan,
-    publish: &mut dyn FnMut(&NearbyStoreScan),
+    scan: &mut NearbyStoreScanAssessment,
+    publish: &mut dyn FnMut(&NearbyStoreScanAssessment),
 ) {
     for marker in NEARBY_STORE_MARKERS {
         if nearby_store_scan_should_stop(cx, started, budget, scan) {
@@ -1257,7 +1338,7 @@ fn inspect_nearby_store_candidate(
     }
 }
 
-fn rank_nearby_stores(scan: &mut NearbyStoreScan) {
+fn rank_nearby_stores(scan: &mut NearbyStoreScanAssessment) {
     scan.stores.sort_by(|left, right| {
         right
             .documents
@@ -2163,13 +2244,16 @@ mod tests {
         std::time::Duration::from_secs(10)
     }
 
-    fn discover_local_stores(workspace: &Path, budget: std::time::Duration) -> NearbyStoreScan {
+    fn discover_local_stores(
+        workspace: &Path,
+        budget: std::time::Duration,
+    ) -> NearbyStoreScanAssessment {
         let absent_registry = workspace.join("registry-not-present-for-local-scan.db");
         let workspace_root = workspace
             .canonicalize()
             .unwrap_or_else(|_| workspace.to_path_buf());
         let addressed_database = workspace_root.join(".ee").join("ee.db");
-        discover_nearby_stores_with_registry(
+        assess_nearby_stores_with_registry(
             workspace,
             &addressed_database,
             budget,
@@ -2448,7 +2532,7 @@ mod tests {
         let addressed_database = workspace_root.join(".ee").join("ee.db");
         let absent_registry = temp.path().join("registry-not-present-for-ranking.db");
         let cx = Cx::detached_cancel_context();
-        let mut ignore_progress = |_scan: &NearbyStoreScan| {};
+        let mut ignore_progress = |_scan: &NearbyStoreScanAssessment| {};
         let scan = scan_nearby_stores_with_registry(
             &cx,
             temp.path(),
@@ -2505,7 +2589,7 @@ mod tests {
         let cx = Cx::detached_cancel_context();
         let mut seen = BTreeSet::new();
         let mut publication_order = Vec::new();
-        let mut publish = |snapshot: &NearbyStoreScan| {
+        let mut publish = |snapshot: &NearbyStoreScanAssessment| {
             for store in &snapshot.stores {
                 if seen.insert(store.workspace_root.clone()) {
                     publication_order.push(store.workspace_root.clone());
@@ -2588,7 +2672,7 @@ mod tests {
         let addressed_database = addressed.join(".ee").join("ee.db");
         let cx = Cx::detached_cancel_context();
         let mut first_published = None;
-        let mut publish = |snapshot: &NearbyStoreScan| {
+        let mut publish = |snapshot: &NearbyStoreScanAssessment| {
             if first_published.is_none() {
                 first_published = snapshot
                     .stores
@@ -2657,6 +2741,40 @@ mod tests {
     }
 
     #[test]
+    fn discovery_registry_read_failure_is_unavailable_without_creating_state() -> TestResult {
+        let temp = orient_test_tempdir()?;
+        let workspace = temp.path().join("registry-unavailable-workspace");
+        std::fs::create_dir_all(workspace.join(".git")).map_err(|error| error.to_string())?;
+        let addressed_database = workspace.join(".ee").join("ee.db");
+        let invalid_registry = temp.path().join("invalid-workspace-registry.db");
+        let original_registry = b"not a sqlite registry";
+        std::fs::write(&invalid_registry, original_registry).map_err(|error| error.to_string())?;
+
+        let scan = assess_nearby_stores_for_database_with_registry(
+            &workspace,
+            &addressed_database,
+            scan_budget(),
+            Some(&invalid_registry),
+        );
+
+        ensure_equal(
+            &scan.outcome,
+            &NearbyStoreScanOutcome::Unavailable,
+            "registry-read failure outcome",
+        )?;
+        ensure_equal(&scan.stores.len(), &0_usize, "no locally proved stores")?;
+        ensure(
+            !workspace.join(".ee").exists() && !addressed_database.exists(),
+            "read-only discovery must not create the addressed store".to_owned(),
+        )?;
+        ensure_equal(
+            &std::fs::read(&invalid_registry).map_err(|error| error.to_string())?,
+            &original_registry.to_vec(),
+            "registry bytes remain unchanged",
+        )
+    }
+
+    #[test]
     fn discovery_zero_budget_truncates_before_scanning() -> TestResult {
         let temp = orient_test_tempdir()?;
         let child = temp.path().join("populated-child");
@@ -2664,7 +2782,11 @@ mod tests {
         remember_fixture(&child, "Unscanned store rule.", "nearby", None)?;
 
         let scan = discover_local_stores(temp.path(), std::time::Duration::ZERO);
-        ensure(scan.truncated, "zero-budget scan must truncate".to_owned())?;
+        ensure_equal(
+            &scan.outcome,
+            &NearbyStoreScanOutcome::Truncated,
+            "zero-budget scan outcome",
+        )?;
         ensure_equal(
             &scan.stores.len(),
             &0_usize,
@@ -2679,14 +2801,14 @@ mod tests {
         let limiter = std::sync::Arc::new(NearbyStoreScanWorkerLimiter::new(1));
         let scan = run_nearby_store_scan_bounded_with_limiter(budget, limiter, |_, _| {
             std::thread::sleep(std::time::Duration::from_millis(250));
-            NearbyStoreScan {
+            NearbyStoreScanAssessment {
                 stores: vec![NearbyStore {
                     workspace_root: "late".to_owned(),
                     store_dir: "late/.ee".to_owned(),
                     documents: 1,
                     last_write: None,
                 }],
-                truncated: false,
+                outcome: NearbyStoreScanOutcome::Complete,
             }
         });
         let elapsed = started.elapsed();
@@ -2698,8 +2820,8 @@ mod tests {
             ),
         )?;
         ensure(
-            scan.truncated,
-            "a timed-out blocking operation must report truncated=true".to_owned(),
+            scan.outcome == NearbyStoreScanOutcome::Truncated,
+            "a timed-out blocking operation must report a truncated outcome".to_owned(),
         )?;
         ensure_equal(
             &scan.stores,
@@ -2716,14 +2838,14 @@ mod tests {
         let limiter = std::sync::Arc::new(NearbyStoreScanWorkerLimiter::new(1));
         let scan =
             run_nearby_store_scan_bounded_with_limiter(budget, limiter, move |cx, publish| {
-                let partial = NearbyStoreScan {
+                let partial = NearbyStoreScanAssessment {
                     stores: vec![NearbyStore {
                         workspace_root: "proved-before-timeout".to_owned(),
                         store_dir: "proved-before-timeout/.ee".to_owned(),
                         documents: 2,
                         last_write: None,
                     }],
-                    truncated: false,
+                    outcome: NearbyStoreScanOutcome::Complete,
                 };
                 publish(&partial);
                 while cx.checkpoint().is_ok() {
@@ -2731,7 +2853,7 @@ mod tests {
                 }
                 worker_observation.store(true, std::sync::atomic::Ordering::Release);
                 let mut cancelled = partial;
-                cancelled.truncated = true;
+                cancelled.mark_truncated();
                 cancelled
             });
 
@@ -2742,8 +2864,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         ensure(
-            scan.truncated,
-            "partial timeout result must be marked truncated".to_owned(),
+            scan.outcome == NearbyStoreScanOutcome::Truncated,
+            "partial timeout result must carry a truncated outcome".to_owned(),
         )?;
         ensure_equal(
             &scan.stores.len(),
@@ -2765,10 +2887,14 @@ mod tests {
             first_limiter,
             |_, _| {
                 std::thread::sleep(std::time::Duration::from_millis(100));
-                NearbyStoreScan::default()
+                NearbyStoreScanAssessment::default()
             },
         );
-        ensure(first.truncated, "first blocking scan times out".to_owned())?;
+        ensure_equal(
+            &first.outcome,
+            &NearbyStoreScanOutcome::Truncated,
+            "first blocking scan timeout outcome",
+        )?;
         ensure_equal(&limiter.active_count(), &1_usize, "permit retained")?;
 
         let second_invoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2778,12 +2904,12 @@ mod tests {
             std::sync::Arc::clone(&limiter),
             move |_, _| {
                 second_marker.store(true, std::sync::atomic::Ordering::Release);
-                NearbyStoreScan::default()
+                NearbyStoreScanAssessment::default()
             },
         );
         ensure(
-            second.truncated,
-            "permit refusal is explicitly truncated".to_owned(),
+            second.outcome == NearbyStoreScanOutcome::Unavailable,
+            "permit refusal must be explicitly unavailable".to_owned(),
         )?;
         ensure(
             !second_invoked.load(std::sync::atomic::Ordering::Acquire),

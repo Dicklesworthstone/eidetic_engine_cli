@@ -118,6 +118,19 @@ fn worker_materialized_path(path: &Path) -> Result<std::path::PathBuf, String> {
     Ok(resolved)
 }
 
+fn shell_quote_cli_arg(value: &str) -> String {
+    if value.is_empty() {
+        "''".to_owned()
+    } else if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct FileSnapshot {
     bytes: Vec<u8>,
@@ -335,29 +348,37 @@ fn assert_storage_recovery_contract(case: &ConformanceCase, output: &Output) -> 
         format!("{}: recovery priorities must be strictly ordered", case.id),
     )?;
 
+    let addressed_workspace = string_at(&json, "/error/details/addressedWorkspacePath", case.id)?;
+    let addressed_store = string_at(&json, "/error/details/addressedStorePath", case.id)?;
+    let addressed_argument = format!("--workspace {}", shell_quote_cli_arg(addressed_workspace));
     ensure(
         recovery[0]["priority"] == serde_json::json!(1)
             && recovery[0]["kind"] == serde_json::json!("flag")
             && recovery[0]["flagName"] == serde_json::json!("--workspace")
-            && recovery[0]["valueHint"] == serde_json::json!("<path>"),
+            && recovery[0]["valueHint"] == serde_json::json!(addressed_workspace)
+            && recovery[0]["example"] == serde_json::json!(addressed_argument.as_str()),
         format!(
             "{}: first recovery action must correct workspace addressing",
             case.id
         ),
     )?;
+    let database_assignment = format!("EE_DATABASE_PATH={}", shell_quote_cli_arg(addressed_store));
     ensure(
         recovery[1]["priority"] == serde_json::json!(2)
             && recovery[1]["kind"] == serde_json::json!("env")
-            && recovery[1]["envName"] == serde_json::json!("EE_DATABASE_PATH"),
+            && recovery[1]["envName"] == serde_json::json!("EE_DATABASE_PATH")
+            && recovery[1]["valueHint"] == serde_json::json!(addressed_store)
+            && recovery[1]["example"] == serde_json::json!(database_assignment),
         format!(
-            "{}: second recovery action must expose EE_DATABASE_PATH",
+            "{}: second recovery action must expose the exact database override",
             case.id
         ),
     )?;
+    let init_command = format!("ee init {addressed_argument}");
     ensure(
         recovery[2]["priority"] == serde_json::json!(3)
             && recovery[2]["kind"] == serde_json::json!("seed")
-            && recovery[2]["command"] == serde_json::json!("ee init --workspace ."),
+            && recovery[2]["command"] == serde_json::json!(init_command.as_str()),
         format!(
             "{}: ee init must be the final conditional recovery action",
             case.id
@@ -366,14 +387,16 @@ fn assert_storage_recovery_contract(case: &ConformanceCase, output: &Output) -> 
 
     let repair = string_at(&json, "/error/repair", case.id)?;
     ensure(
-        repair.contains("Re-check --workspace addressing (looked for"),
+        repair.contains(&format!(
+            "Re-check --workspace addressing with {addressed_argument} (looked for"
+        )),
         format!(
             "{}: freetext repair must lead with addressing and the looked-for path, got: {repair}",
             case.id
         ),
     )?;
     let recheck_at = repair.find("Re-check --workspace addressing");
-    let init_at = repair.find("ee init --workspace .");
+    let init_at = repair.find(&init_command);
     ensure(
         matches!((recheck_at, init_at), (Some(recheck), Some(init)) if recheck < init)
             && repair.contains("Only if you intended to create a NEW store here"),
@@ -399,6 +422,7 @@ fn assert_storage_recovery_contract(case: &ConformanceCase, output: &Output) -> 
 #[test]
 fn storage_database_not_found_recovery_contract() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(tempdir.path().join(".git")).map_err(|error| error.to_string())?;
     let workspace = tempdir.path().to_string_lossy().to_string();
     let cases = storage_error_cases(&workspace);
 
@@ -672,12 +696,21 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
     let canonical_store_root = store_root
         .canonicalize()
         .map_err(|error| format!("canonicalize nearby store root: {error}"))?;
-    let addressed_store = leaf
+    let canonical_leaf = leaf
         .canonicalize()
-        .map_err(|error| format!("canonicalize storeless leaf: {error}"))?
-        .join(".ee")
-        .join("ee.db");
+        .map_err(|error| format!("canonicalize storeless leaf: {error}"))?;
+    let addressed_store = canonical_leaf.join(".ee").join("ee.db");
     let addressed_store_str = addressed_store.to_string_lossy().to_string();
+    let nearby_database = canonical_store_root.join(".ee").join("ee.db");
+    let expected_retarget = format!(
+        "--workspace {} --database {}",
+        shell_quote_cli_arg(canonical_store_root.to_string_lossy().as_ref()),
+        shell_quote_cli_arg(nearby_database.to_string_lossy().as_ref())
+    );
+    let expected_init = format!(
+        "ee init --workspace {}",
+        shell_quote_cli_arg(canonical_leaf.to_string_lossy().as_ref())
+    );
 
     let init = run_ee(&[
         "init".to_owned(),
@@ -766,7 +799,7 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
         ensure(
             repair.contains("a populated store exists at")
                 && repair.contains("nearby_store_root_sfjvq")
-                && repair.contains("retarget with --workspace"),
+                && repair.contains(&format!("retarget with {expected_retarget}")),
             format!(
                 "{}: repair must surface the nearby populated store, got: {repair}",
                 verb.join(" ")
@@ -780,9 +813,9 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
             ),
         )?;
         ensure(
-            repair.ends_with(
-                "Only if you intended to create a NEW store here: ee init --workspace .",
-            ),
+            repair.ends_with(&format!(
+                "Only if you intended to create a NEW store here: {expected_init}"
+            )),
             format!(
                 "{}: conditional init guidance must be last, got: {repair}",
                 verb.join(" ")
@@ -799,7 +832,14 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
             &verb.join(" "),
         )?;
         ensure(
-            json.pointer("/error/details/storeDiscovery/scanned") == Some(&serde_json::json!(true))
+            json.pointer("/error/details/storeDiscovery/outcome")
+                == Some(&serde_json::json!("complete"))
+                && json
+                    .pointer("/error/details/storeDiscovery/truncated")
+                    .is_none()
+                && json
+                    .pointer("/error/details/storeDiscovery/scanned")
+                    .is_none()
                 && nearby.len() == 1
                 && string_at(&nearby[0], "/workspaceRoot", &verb.join(" "))?
                     == canonical_store_root.to_string_lossy()
@@ -816,10 +856,9 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
                 && recovery[0]["flagName"].as_str() == Some("--workspace")
                 && recovery[1]["valueHint"].as_str()
                     == Some(canonical_store_root.to_string_lossy().as_ref())
+                && recovery[1]["example"].as_str() == Some(expected_retarget.as_str())
                 && recovery[2]["kind"].as_str() == Some("seed")
-                && recovery[2]["command"]
-                    .as_str()
-                    .is_some_and(|command| command.contains("storeless_leaf_sfjvq")),
+                && recovery[2]["command"].as_str() == Some(expected_init.as_str()),
             format!(
                 "{}: exact ranked recovery actions drifted: {recovery:?}",
                 verb.join(" ")
@@ -860,7 +899,7 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
       "code": "workspace_store_missing",
       "severity": "high",
       "message": "Database not found at <ADDRESSED_STORE>",
-      "repair": "Re-check --workspace addressing (looked for <ADDRESSED_STORE>); a populated store exists at <NEARBY_WORKSPACE> (1 docs) — retarget with --workspace <NEARBY_WORKSPACE>. Only if you intended to create a NEW store here: ee init --workspace ."
+      "repair": "Re-check --workspace addressing with --workspace <STORELESS_WORKSPACE> (looked for <ADDRESSED_STORE>); a populated store exists at <NEARBY_WORKSPACE> (1 docs) — retarget with --workspace <NEARBY_WORKSPACE> --database <NEARBY_WORKSPACE>/.ee/ee.db. Only if you intended to create a NEW store here: ee init --workspace <STORELESS_WORKSPACE>"
     }
     "###);
     let search_snapshot = error_snapshots
@@ -874,7 +913,7 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
       "code": "workspace_store_missing",
       "severity": "high",
       "message": "Database not found at <ADDRESSED_STORE>",
-      "repair": "Re-check --workspace addressing (looked for <ADDRESSED_STORE>); a populated store exists at <NEARBY_WORKSPACE> (1 docs) — retarget with --workspace <NEARBY_WORKSPACE>. Only if you intended to create a NEW store here: ee init --workspace ."
+      "repair": "Re-check --workspace addressing with --workspace <STORELESS_WORKSPACE> (looked for <ADDRESSED_STORE>); a populated store exists at <NEARBY_WORKSPACE> (1 docs) — retarget with --workspace <NEARBY_WORKSPACE> --database <NEARBY_WORKSPACE>/.ee/ee.db. Only if you intended to create a NEW store here: ee init --workspace <STORELESS_WORKSPACE>"
     }
     "###);
     let orient_snapshot = error_snapshots
@@ -888,7 +927,7 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
       "code": "workspace_store_missing",
       "severity": "high",
       "message": "Database not found at <ADDRESSED_STORE>",
-      "repair": "Re-check --workspace addressing (looked for <ADDRESSED_STORE>); a populated store exists at <NEARBY_WORKSPACE> (1 docs) — retarget with --workspace <NEARBY_WORKSPACE>. Only if you intended to create a NEW store here: ee init --workspace ."
+      "repair": "Re-check --workspace addressing with --workspace <STORELESS_WORKSPACE> (looked for <ADDRESSED_STORE>); a populated store exists at <NEARBY_WORKSPACE> (1 docs) — retarget with --workspace <NEARBY_WORKSPACE> --database <NEARBY_WORKSPACE>/.ee/ee.db. Only if you intended to create a NEW store here: ee init --workspace <STORELESS_WORKSPACE>"
     }
     "###);
 
@@ -946,7 +985,9 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
             .find("a populated store exists at")
             .ok_or_else(|| format!("human {surface}: nearby recovery missing: {human}"))?;
         let conditional_init = human
-            .find("Only if you intended to create a NEW store here: ee init --workspace .")
+            .find(&format!(
+                "Only if you intended to create a NEW store here: {expected_init}"
+            ))
             .ok_or_else(|| format!("human {surface}: conditional init missing: {human}"))?;
         ensure(
             human.contains(&addressed_store_str)
@@ -1019,10 +1060,10 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
         ensure(
             repair.contains("looked for")
                 && repair.contains("a populated store exists at")
-                && repair.contains("retarget with --workspace")
-                && repair.ends_with(
-                    "Only if you intended to create a NEW store here: ee init --workspace .",
-                ),
+                && repair.contains(&format!("retarget with {expected_retarget}"))
+                && repair.ends_with(&format!(
+                    "Only if you intended to create a NEW store here: {expected_init}"
+                )),
             format!(
                 "{surface}: repair must be nearby-first with conditional init last, got: {repair}"
             ),
@@ -1153,31 +1194,51 @@ fn storeless_custom_address_reports_all_ranked_nearby_stores() -> TestResult {
     let canonical_root = root.canonicalize().map_err(|error| error.to_string())?;
     let canonical_middle = middle.canonicalize().map_err(|error| error.to_string())?;
     let canonical_lowest = lowest.canonicalize().map_err(|error| error.to_string())?;
-    let shell_quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
-    let quoted_root = shell_quote(&canonical_root);
-    let quoted_middle = shell_quote(&canonical_middle);
-    let quoted_lowest = shell_quote(&canonical_lowest);
+    let quoted_root = shell_quote_cli_arg(canonical_root.to_string_lossy().as_ref());
+    let quoted_middle = shell_quote_cli_arg(canonical_middle.to_string_lossy().as_ref());
+    let quoted_lowest = shell_quote_cli_arg(canonical_lowest.to_string_lossy().as_ref());
+    let expected_init = format!("ee init --workspace {quoted_root}");
     let repair = string_at(&json, "/error/repair", "custom storeless address")?;
     let looked_for = format!(
-        "Re-check --workspace addressing (looked for {})",
+        "Re-check --workspace addressing with --workspace {quoted_root} (looked for {})",
         missing_database_materialized.display()
     );
     let init_at = repair
-        .find("Only if you intended to create a NEW store here: ee init --workspace .")
+        .find(&format!(
+            "Only if you intended to create a NEW store here: {expected_init}"
+        ))
         .ok_or_else(|| format!("conditional init missing from repair: {repair}"))?;
     let ranked = [
-        (&canonical_root, 3_u64, &quoted_root),
-        (&canonical_middle, 2_u64, &quoted_middle),
-        (&canonical_lowest, 1_u64, &quoted_lowest),
+        (
+            &canonical_root,
+            3_u64,
+            &quoted_root,
+            canonical_root.join(".ee").join("ee.db"),
+        ),
+        (
+            &canonical_middle,
+            2_u64,
+            &quoted_middle,
+            canonical_middle.join(".ee").join("ee.db"),
+        ),
+        (
+            &canonical_lowest,
+            1_u64,
+            &quoted_lowest,
+            canonical_lowest.join(".ee").join("ee.db"),
+        ),
     ];
     let mut previous_at = 0_usize;
-    for (store, documents, quoted) in ranked {
+    for (store, documents, quoted, database) in ranked {
         let listing = format!("{} ({documents} docs)", store.display());
         let listing_count = repair.matches(&listing).count();
         let listing_at = repair.find(&listing).ok_or_else(|| {
             format!("ranked nearby store missing from repair: {listing}: {repair}")
         })?;
-        let retarget = format!("retarget with --workspace {quoted}");
+        let retarget = format!(
+            "retarget with --workspace {quoted} --database {}",
+            shell_quote_cli_arg(database.to_string_lossy().as_ref())
+        );
         let retarget_count = repair.matches(&retarget).count();
         ensure(
             listing_count == 1
@@ -1193,9 +1254,9 @@ fn storeless_custom_address_reports_all_ranked_nearby_stores() -> TestResult {
     ensure(
         repair.starts_with(&looked_for)
             && repair.matches("retarget with --workspace ").count() == 3
-            && repair.ends_with(
-                "Only if you intended to create a NEW store here: ee init --workspace .",
-            ),
+            && repair.ends_with(&format!(
+                "Only if you intended to create a NEW store here: {expected_init}"
+            )),
         format!(
             "repair must contain the exact custom address, exactly three unique retargets, and conditional init last: {repair}"
         ),
@@ -1228,15 +1289,326 @@ fn storeless_custom_address_reports_all_ranked_nearby_stores() -> TestResult {
                         == Some(u64::try_from(index + 2).unwrap_or(u64::MAX))
             })
             && structured_recovery.last().is_some_and(|action| {
-                action["kind"].as_str() == Some("seed") && action["priority"].as_u64() == Some(5)
+                action["kind"].as_str() == Some("seed")
+                    && action["priority"].as_u64() == Some(5)
+                    && action["command"].as_str() == Some(expected_init.as_str())
             }),
         format!(
             "custom details must expose all ranked stores once and init last: stores={structured_stores:?} recovery={structured_recovery:?}"
         ),
     )?;
+    let human_miss = run_ee_with_registry(
+        &[
+            "--workspace".to_owned(),
+            root.to_string_lossy().to_string(),
+            "search".to_owned(),
+            "nearby facts".to_owned(),
+            "--database".to_owned(),
+            missing_database.to_string_lossy().to_string(),
+        ],
+        &registry,
+    )?;
+    ensure(
+        human_miss.status.code() == Some(10) && human_miss.stdout.is_empty(),
+        "human custom miss must preserve strict error-envelope exit behavior".to_owned(),
+    )?;
+    let human = String::from_utf8(human_miss.stderr)
+        .map_err(|error| format!("custom human miss stderr was not UTF-8: {error}"))?;
+    ensure(
+        human.contains(repair),
+        format!("human and JSON recovery must render the same canonical assessment: {human}"),
+    )?;
+
+    let best_retarget = structured_recovery[1]["example"]
+        .as_str()
+        .ok_or("best structured recovery action must carry an executable example")?;
+    ensure(
+        repair.contains(&format!("retarget with {best_retarget}")),
+        "human repair and JSON recovery must share the exact best retarget".to_owned(),
+    )?;
+    let executed = run_emitted_ee_command_with_registry(
+        &format!("ee {best_retarget} search 'root default nearby fact' --json"),
+        &registry,
+    )?;
+    ensure(
+        executed.status.success(),
+        format!(
+            "custom quoted retarget must execute: stdout={} stderr={}",
+            String::from_utf8_lossy(&executed.stdout),
+            String::from_utf8_lossy(&executed.stderr)
+        ),
+    )?;
+    let executed_json = stdout_json(&executed, "custom quoted retarget")?;
+    let executed_results = array_at(&executed_json, "/data/results", "custom quoted retarget")?;
+    ensure(
+        executed_results.iter().any(|result| {
+            result
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|content| content.starts_with("root default nearby fact"))
+        }),
+        format!(
+            "custom quoted retarget must read the exact candidate database: {executed_results:?}"
+        ),
+    )?;
     ensure(
         !missing_database.exists(),
-        "custom storeless search must not create the addressed database".to_owned(),
+        "custom storeless search and emitted retarget must not create the addressed database"
+            .to_owned(),
+    )
+}
+
+/// A custom miss at a workspace that owns both supported store markers must
+/// preserve the exact database identity in each retarget. Workspace-only
+/// guidance is ambiguous because both candidates share the same root.
+#[test]
+fn storeless_same_root_default_and_campaign_retargets_are_database_exact() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().join("same root stores sfjvq");
+    let registry = tempdir.path().join("same-root-registry.db");
+    std::fs::create_dir_all(workspace.join(".git")).map_err(|error| error.to_string())?;
+    let workspace_text = workspace.to_string_lossy().to_string();
+
+    let first_init = run_ee_with_registry(
+        &[
+            "init".to_owned(),
+            "--workspace".to_owned(),
+            workspace_text.clone(),
+            "--json".to_owned(),
+        ],
+        &registry,
+    )?;
+    ensure(first_init.status.success(), "campaign fixture init failed")?;
+    for content in ["campaign same-root fact one", "campaign same-root fact two"] {
+        let remember = run_ee_with_registry(
+            &[
+                "--workspace".to_owned(),
+                workspace_text.clone(),
+                "remember".to_owned(),
+                content.to_owned(),
+                "--json".to_owned(),
+            ],
+            &registry,
+        )?;
+        ensure(
+            remember.status.success(),
+            "campaign fixture remember failed",
+        )?;
+    }
+    std::fs::rename(workspace.join(".ee"), workspace.join(".ee-campaign"))
+        .map_err(|error| error.to_string())?;
+
+    let second_init = run_ee_with_registry(
+        &[
+            "init".to_owned(),
+            "--workspace".to_owned(),
+            workspace_text.clone(),
+            "--database".to_owned(),
+            workspace
+                .join(".ee")
+                .join("ee.db")
+                .to_string_lossy()
+                .to_string(),
+            "--json".to_owned(),
+        ],
+        &registry,
+    )?;
+    ensure(second_init.status.success(), "default fixture init failed")?;
+    for content in [
+        "default same-root fact one",
+        "default same-root fact two",
+        "default same-root fact three",
+    ] {
+        let remember = run_ee_with_registry(
+            &[
+                "--workspace".to_owned(),
+                workspace_text.clone(),
+                "remember".to_owned(),
+                content.to_owned(),
+                "--json".to_owned(),
+            ],
+            &registry,
+        )?;
+        ensure(remember.status.success(), "default fixture remember failed")?;
+    }
+
+    let missing_database = workspace.join("missing same-root database.db");
+    let miss = run_ee_with_registry(
+        &[
+            "--workspace".to_owned(),
+            workspace_text,
+            "search".to_owned(),
+            "same-root facts".to_owned(),
+            "--database".to_owned(),
+            missing_database.to_string_lossy().to_string(),
+            "--json".to_owned(),
+        ],
+        &registry,
+    )?;
+    ensure(
+        miss.status.code() == Some(10),
+        "same-root custom miss must exit 10",
+    )?;
+    let json = stdout_json(&miss, "same-root custom miss")?;
+    let stores = array_at(
+        &json,
+        "/error/details/storeDiscovery/nearbyStores",
+        "same-root custom miss",
+    )?;
+    let recovery = array_at(&json, "/error/details/recovery", "same-root custom miss")?;
+    ensure(
+        stores.len() == 2
+            && stores[0]["storeDir"]
+                .as_str()
+                .is_some_and(|path| path.ends_with(".ee"))
+            && stores[1]["storeDir"]
+                .as_str()
+                .is_some_and(|path| path.ends_with(".ee-campaign")),
+        format!("same-root stores must remain distinct and ranked: {stores:?}"),
+    )?;
+    let default_database = workspace
+        .canonicalize()
+        .map_err(|error| error.to_string())?
+        .join(".ee")
+        .join("ee.db");
+    let campaign_database = workspace
+        .canonicalize()
+        .map_err(|error| error.to_string())?
+        .join(".ee-campaign")
+        .join("ee.db");
+    let default_retarget = recovery[1]["example"]
+        .as_str()
+        .ok_or("default recovery example missing")?;
+    let campaign_retarget = recovery[2]["example"]
+        .as_str()
+        .ok_or("campaign recovery example missing")?;
+    ensure(
+        default_retarget.contains(default_database.to_string_lossy().as_ref())
+            && !default_retarget.contains(campaign_database.to_string_lossy().as_ref())
+            && campaign_retarget.contains(campaign_database.to_string_lossy().as_ref())
+            && default_retarget != campaign_retarget,
+        format!(
+            "same-root recovery must disambiguate exact databases: default={default_retarget:?} campaign={campaign_retarget:?}"
+        ),
+    )?;
+    let repair = string_at(&json, "/error/repair", "same-root custom miss")?;
+    ensure(
+        repair.matches(default_retarget).count() == 1
+            && repair.matches(campaign_retarget).count() == 1,
+        format!("human repair must use the exact JSON retargets once each: {repair}"),
+    )?;
+
+    let executed = run_emitted_ee_command_with_registry(
+        &format!("ee {campaign_retarget} search 'campaign same-root fact' --json"),
+        &registry,
+    )?;
+    ensure(
+        executed.status.success(),
+        format!(
+            "campaign retarget failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&executed.stdout),
+            String::from_utf8_lossy(&executed.stderr)
+        ),
+    )?;
+    let executed_json = stdout_json(&executed, "same-root campaign retarget")?;
+    let results = array_at(
+        &executed_json,
+        "/data/results",
+        "same-root campaign retarget",
+    )?;
+    ensure(
+        results.iter().any(|result| {
+            result
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|content| content.starts_with("campaign same-root fact"))
+        }),
+        format!("campaign retarget must read campaign content: {results:?}"),
+    )?;
+    ensure(
+        !missing_database.exists(),
+        "same-root miss and retarget must not create the addressed database".to_owned(),
+    )
+}
+
+/// A real binary miss against an unreadable registry must retain that source
+/// failure as `unavailable`; an empty candidate list is not a no-nearby claim.
+#[test]
+fn storeless_unavailable_registry_is_honest_and_read_only() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().join("unavailable registry workspace sfjvq");
+    std::fs::create_dir_all(workspace.join(".git")).map_err(|error| error.to_string())?;
+    let registry = tempdir.path().join("unavailable-registry.db");
+    let registry_bytes = b"not a sqlite registry";
+    std::fs::write(&registry, registry_bytes).map_err(|error| error.to_string())?;
+    let workspace_text = workspace.to_string_lossy().to_string();
+    let args = [
+        "--workspace".to_owned(),
+        workspace_text.clone(),
+        "search".to_owned(),
+        "unavailable discovery".to_owned(),
+        "--json".to_owned(),
+    ];
+
+    let miss = run_ee_with_registry(&args, &registry)?;
+    ensure(
+        miss.status.code() == Some(10),
+        "unavailable-registry miss must exit 10",
+    )?;
+    let json = stdout_json(&miss, "unavailable-registry miss")?;
+    ensure(
+        json.pointer("/error/details/storeDiscovery/outcome")
+            == Some(&serde_json::json!("unavailable"))
+            && array_at(
+                &json,
+                "/error/details/storeDiscovery/nearbyStores",
+                "unavailable-registry miss",
+            )?
+            .is_empty(),
+        format!("registry failure must propagate as unavailable: {json}"),
+    )?;
+    let repair = string_at(&json, "/error/repair", "unavailable-registry miss")?;
+    let canonical_workspace = workspace
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let exact_init = format!(
+        "ee init --workspace {}",
+        shell_quote_cli_arg(canonical_workspace.to_string_lossy().as_ref())
+    );
+    ensure(
+        repair.contains("discovery was unavailable")
+            && repair.contains("no complete nearby-store conclusion is available")
+            && !repair.contains("discovery completed and found no populated stores")
+            && repair.ends_with(&format!(
+                "Only if you intended to create a NEW store here: {exact_init}"
+            )),
+        format!("unavailable repair must be honest and exact: {repair}"),
+    )?;
+
+    let human_args = [
+        "--workspace".to_owned(),
+        workspace_text,
+        "search".to_owned(),
+        "unavailable discovery".to_owned(),
+    ];
+    let human_miss = run_ee_with_registry(&human_args, &registry)?;
+    ensure(
+        human_miss.status.code() == Some(10) && human_miss.stdout.is_empty(),
+        "human unavailable-registry miss must preserve exit/stderr semantics",
+    )?;
+    let human = String::from_utf8(human_miss.stderr)
+        .map_err(|error| format!("unavailable human stderr was not UTF-8: {error}"))?;
+    ensure(
+        human.contains(repair),
+        format!("human and JSON unavailable recovery must match: {human}"),
+    )?;
+    ensure(
+        !workspace.join(".ee").exists()
+            && std::fs::read(&registry)
+                .map_err(|error| error.to_string())?
+                .as_slice()
+                == registry_bytes,
+        "unavailable scans must not initialize a store or mutate the invalid registry",
     )
 }
 
@@ -1293,6 +1665,14 @@ fn storeless_miss_quotes_spaced_nearby_workspace_and_command_executes() -> TestR
         "'{}'",
         canonical_root.to_string_lossy().replace('\'', "'\\''")
     );
+    let quoted_database = shell_quote_cli_arg(
+        canonical_root
+            .join(".ee")
+            .join("ee.db")
+            .to_string_lossy()
+            .as_ref(),
+    );
+    let expected_retarget = format!("--workspace {quoted_root} --database {quoted_database}");
 
     let miss = run_ee(&[
         "--workspace".to_owned(),
@@ -1316,10 +1696,19 @@ fn storeless_miss_quotes_spaced_nearby_workspace_and_command_executes() -> TestR
     )?;
     let repair = string_at(&miss_json, "/error/repair", "spaced storeless remember")?;
     ensure(
-        repair.contains(&format!("retarget with --workspace {quoted_root}")),
+        repair.contains(&format!("retarget with {expected_retarget}")),
         format!(
-            "repair must shell-quote the spaced nearby workspace so the hint is executable, got: {repair}"
+            "repair must shell-quote the exact nearby workspace and database so the hint is executable, got: {repair}"
         ),
+    )?;
+    let recovery = array_at(
+        &miss_json,
+        "/error/details/recovery",
+        "spaced storeless remember",
+    )?;
+    ensure(
+        recovery[1]["example"].as_str() == Some(expected_retarget.as_str()),
+        "human and JSON recovery must share the exact quoted retarget".to_owned(),
     )?;
     ensure(
         !leaf.join(".ee").exists(),

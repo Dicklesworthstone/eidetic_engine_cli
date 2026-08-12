@@ -584,69 +584,131 @@ fn shell_quote_repair_arg(value: &str) -> String {
 
 struct StorelessWorkspaceAssessment {
     addressed_store_path: String,
-    discovery_scanned: bool,
-    discovery: crate::core::orient::NearbyStoreScan,
+    addressed_workspace_path: String,
+    addressed_workspace_argument: String,
+    discovery: crate::core::orient::NearbyStoreScanAssessment,
+    candidate_retargets: Vec<StorelessWorkspaceRetarget>,
+    init_command: String,
     recovery_actions: Vec<crate::models::RecoveryAction>,
+}
+
+struct StorelessWorkspaceRetarget {
+    store: crate::core::orient::NearbyStore,
+    arguments: String,
 }
 
 impl StorelessWorkspaceAssessment {
     fn inspect(database_path: &std::path::Path) -> Self {
-        let addressed_store_path = database_path.display().to_string();
-        let addressed_workspace = storeless_workspace_root(database_path);
-        let discovery = crate::core::orient::discover_nearby_stores_for_database(
-            &addressed_workspace,
+        Self::inspect_with_discovery(
             database_path,
             std::time::Duration::from_millis(crate::core::orient::NEARBY_STORE_SCAN_BUDGET_MS),
+            None,
+        )
+    }
+
+    fn inspect_with_discovery(
+        database_path: &std::path::Path,
+        budget: std::time::Duration,
+        registry_path: Option<&std::path::Path>,
+    ) -> Self {
+        let addressed_store_path = database_path.display().to_string();
+        let addressed_workspace = storeless_workspace_root(database_path);
+        let addressed_workspace_path = addressed_workspace.display().to_string();
+        let addressed_workspace_argument = format!(
+            "--workspace {}",
+            shell_quote_repair_arg(&addressed_workspace_path)
         );
-        let recovery_actions =
-            storeless_workspace_recovery_actions(&addressed_workspace, &discovery.stores);
+        let discovery = crate::core::orient::assess_nearby_stores_for_database_with_registry(
+            &addressed_workspace,
+            database_path,
+            budget,
+            registry_path,
+        );
+        let candidate_retargets = discovery
+            .stores
+            .iter()
+            .cloned()
+            .map(|store| {
+                let database = std::path::Path::new(&store.store_dir).join("ee.db");
+                let arguments = format!(
+                    "--workspace {} --database {}",
+                    shell_quote_repair_arg(&store.workspace_root),
+                    shell_quote_repair_arg(&database.display().to_string())
+                );
+                StorelessWorkspaceRetarget { store, arguments }
+            })
+            .collect::<Vec<_>>();
+        let init_command = format!("ee init {addressed_workspace_argument}");
+        let recovery_actions = storeless_workspace_recovery_actions(
+            &addressed_store_path,
+            &addressed_workspace_path,
+            &addressed_workspace_argument,
+            &candidate_retargets,
+            &init_command,
+        );
         Self {
             addressed_store_path,
-            discovery_scanned: true,
+            addressed_workspace_path,
+            addressed_workspace_argument,
             discovery,
+            candidate_retargets,
+            init_command,
             recovery_actions,
         }
     }
 
     fn repair(&self) -> String {
         let looked_for = &self.addressed_store_path;
-        if let Some((best, additional)) = self.discovery.stores.split_first() {
-            let mut repair = format!(
-                "Re-check --workspace addressing (looked for {looked_for}); a populated store exists at {} ({} docs) — retarget with --workspace {}",
-                best.workspace_root,
-                best.documents,
-                shell_quote_repair_arg(&best.workspace_root),
-            );
+        let mut repair = format!(
+            "Re-check --workspace addressing with {} (looked for {looked_for})",
+            self.addressed_workspace_argument
+        );
+        if let Some((best, additional)) = self.candidate_retargets.split_first() {
+            repair.push_str(&format!(
+                "; a populated store exists at {} ({} docs) — retarget with {}",
+                best.store.workspace_root, best.store.documents, best.arguments,
+            ));
             if !additional.is_empty() {
                 repair.push_str(". Other nearby populated stores:");
-                for (index, store) in additional.iter().enumerate() {
+                for (index, retarget) in additional.iter().enumerate() {
                     if index > 0 {
                         repair.push(';');
                     }
                     repair.push_str(&format!(
-                        " {} ({} docs) — retarget with --workspace {}",
-                        store.workspace_root,
-                        store.documents,
-                        shell_quote_repair_arg(&store.workspace_root),
+                        " {} ({} docs) — retarget with {}",
+                        retarget.store.workspace_root, retarget.store.documents, retarget.arguments,
                     ));
                 }
             }
-            repair.push_str(
-                ". Only if you intended to create a NEW store here: ee init --workspace .",
-            );
-            return repair;
         }
-        format!(
-            "Re-check --workspace addressing (looked for {looked_for}). Only if you intended to create a NEW store here: ee init --workspace ."
-        )
+        match self.discovery.outcome {
+            crate::core::orient::NearbyStoreScanOutcome::Complete => {
+                if self.candidate_retargets.is_empty() {
+                    repair.push_str(
+                        ". Nearby-store discovery completed and found no populated stores",
+                    );
+                }
+            }
+            crate::core::orient::NearbyStoreScanOutcome::Truncated => repair.push_str(
+                ". Nearby-store discovery was truncated; listed results are partial, and an empty list is not evidence that no populated store exists",
+            ),
+            crate::core::orient::NearbyStoreScanOutcome::Unavailable => repair.push_str(
+                ". Nearby-store discovery was unavailable; listed results, if any, are partial, and no complete nearby-store conclusion is available",
+            ),
+        }
+        repair.push_str(&format!(
+            ". Only if you intended to create a NEW store here: {}",
+            self.init_command
+        ));
+        repair
     }
 
     fn details_json(&self) -> String {
         serde_json::json!({
             "addressedStorePath": self.addressed_store_path,
+            "addressedWorkspacePath": self.addressed_workspace_path,
             "storeDiscovery": {
-                "scanned": self.discovery_scanned,
-                "truncated": self.discovery.truncated,
+                "outcome": self.discovery.outcome,
                 "nearbyStores": self.discovery.stores,
             }
         })
@@ -672,41 +734,48 @@ fn storeless_workspace_root(database_path: &std::path::Path) -> std::path::PathB
 }
 
 fn storeless_workspace_recovery_actions(
-    addressed_workspace: &std::path::Path,
-    stores: &[crate::core::orient::NearbyStore],
+    addressed_store_path: &str,
+    addressed_workspace_path: &str,
+    addressed_workspace_argument: &str,
+    retargets: &[StorelessWorkspaceRetarget],
+    init_command: &str,
 ) -> Vec<crate::models::RecoveryAction> {
-    let addressed_workspace_text = addressed_workspace.display().to_string();
     let mut addressed = crate::models::RecoveryAction::flag(
         1,
         "--workspace",
-        addressed_workspace_text.clone(),
+        addressed_workspace_path.to_owned(),
         "Re-check the exact addressed workspace before selecting another store.",
     );
-    addressed.example = Some(format!(
-        "--workspace {}",
-        shell_quote_repair_arg(&addressed_workspace_text)
-    ));
+    addressed.example = Some(addressed_workspace_argument.to_owned());
     let mut actions = vec![addressed];
-    for (index, store) in stores.iter().enumerate() {
+    if retargets.is_empty() {
+        let mut database = crate::models::RecoveryAction::env(
+            2,
+            "EE_DATABASE_PATH",
+            addressed_store_path,
+            "Re-check the exact addressed database override before initializing a new store.",
+        );
+        database.example = Some(format!(
+            "EE_DATABASE_PATH={}",
+            shell_quote_repair_arg(addressed_store_path)
+        ));
+        actions.push(database);
+    }
+    for (index, retarget) in retargets.iter().enumerate() {
         let priority = u8::try_from(index.saturating_add(2)).unwrap_or(u8::MAX - 1);
-        let database = std::path::Path::new(&store.store_dir).join("ee.db");
         let mut action = crate::models::RecoveryAction::flag(
             priority,
             "--workspace",
-            store.workspace_root.clone(),
+            retarget.store.workspace_root.clone(),
             format!(
                 "Retarget to this ranked populated workspace ({} live memories).",
-                store.documents
+                retarget.store.documents
             ),
         );
-        action.example = Some(format!(
-            "--workspace {} --database {}",
-            shell_quote_repair_arg(&store.workspace_root),
-            shell_quote_repair_arg(&database.display().to_string())
-        ));
+        action.example = Some(retarget.arguments.clone());
         actions.push(action);
     }
-    let init_priority = u8::try_from(stores.len().saturating_add(2)).unwrap_or(u8::MAX);
+    let init_priority = u8::try_from(actions.len().saturating_add(1)).unwrap_or(u8::MAX);
     actions.push(crate::models::RecoveryAction {
         priority: init_priority,
         kind: crate::models::RecoveryKind::Seed,
@@ -718,10 +787,7 @@ fn storeless_workspace_recovery_actions(
         config_path: None,
         config_key: None,
         flag_name: None,
-        command: Some(format!(
-            "ee init --workspace {}",
-            shell_quote_repair_arg(&addressed_workspace_text)
-        )),
+        command: Some(init_command.to_owned()),
         results_in: None,
         example: None,
     });
@@ -851,10 +917,11 @@ mod tests {
     use asupersync::{LabConfig, LabRuntime};
 
     use super::{
-        BUILD_TIMESTAMP_POLICY, RuntimeProfile, VERSION_PROVENANCE_SCHEMA_V1, VersionReport,
-        build_features, build_info, clean_build_metadata, db_migration_range,
-        duration_millis_saturating, parse_build_bool, run_cli_future, runtime_status,
-        serialize_or_error, serialize_pretty_or_error, shell_quote_repair_arg, supported_schemas,
+        BUILD_TIMESTAMP_POLICY, RuntimeProfile, StorelessWorkspaceAssessment,
+        VERSION_PROVENANCE_SCHEMA_V1, VersionReport, build_features, build_info,
+        clean_build_metadata, db_migration_range, duration_millis_saturating, parse_build_bool,
+        run_cli_future, runtime_status, serialize_or_error, serialize_pretty_or_error,
+        shell_quote_repair_arg, supported_schemas,
     };
 
     type TestResult = Result<(), String>;
@@ -1222,6 +1289,90 @@ mod tests {
             &duration_millis_saturating(Duration::from_secs(u64::MAX)),
             &u64::MAX,
             "overflowing millisecond duration saturates",
+        )
+    }
+
+    #[test]
+    fn storeless_assessment_propagates_truncated_discovery_without_creating_state() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("partial workspace's path");
+        std::fs::create_dir_all(workspace.join(".git")).map_err(|error| error.to_string())?;
+        let database = workspace.join(".ee").join("ee.db");
+        let absent_registry = temp.path().join("absent-registry.db");
+
+        let assessment = StorelessWorkspaceAssessment::inspect_with_discovery(
+            &database,
+            Duration::ZERO,
+            Some(&absent_registry),
+        );
+        let details: serde_json::Value =
+            serde_json::from_str(&assessment.details_json()).map_err(|error| error.to_string())?;
+        let repair = assessment.repair();
+
+        ensure_equal(
+            &details.pointer("/storeDiscovery/outcome"),
+            &Some(&serde_json::json!("truncated")),
+            "truncated store-discovery outcome",
+        )?;
+        ensure(
+            details.pointer("/storeDiscovery/truncated").is_none()
+                && details.pointer("/storeDiscovery/scanned").is_none(),
+            "ambiguous discovery booleans must be absent from the canonical assessment",
+        )?;
+        ensure(
+            repair.contains("discovery was truncated")
+                && repair.contains("not evidence that no populated store exists")
+                && !repair.contains("discovery completed and found no populated stores"),
+            format!("truncated recovery must not claim complete/no-nearby truth: {repair}"),
+        )?;
+        ensure(
+            repair.contains("ee init --workspace '") && !repair.contains("--workspace ."),
+            format!("conditional init must quote the exact addressed workspace: {repair}"),
+        )?;
+        ensure(
+            !workspace.join(".ee").exists() && !database.exists() && !absent_registry.exists(),
+            "truncated read-only assessment must not create a store or registry",
+        )
+    }
+
+    #[test]
+    fn storeless_assessment_propagates_unavailable_registry_without_creating_state() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("unavailable workspace");
+        std::fs::create_dir_all(workspace.join(".git")).map_err(|error| error.to_string())?;
+        let database = workspace.join(".ee").join("ee.db");
+        let invalid_registry = temp.path().join("invalid-registry.db");
+        let registry_bytes = b"not a sqlite registry";
+        std::fs::write(&invalid_registry, registry_bytes).map_err(|error| error.to_string())?;
+
+        let assessment = StorelessWorkspaceAssessment::inspect_with_discovery(
+            &database,
+            Duration::from_secs(5),
+            Some(&invalid_registry),
+        );
+        let details: serde_json::Value =
+            serde_json::from_str(&assessment.details_json()).map_err(|error| error.to_string())?;
+        let repair = assessment.repair();
+
+        ensure_equal(
+            &details.pointer("/storeDiscovery/outcome"),
+            &Some(&serde_json::json!("unavailable")),
+            "unavailable store-discovery outcome",
+        )?;
+        ensure(
+            repair.contains("discovery was unavailable")
+                && repair.contains("no complete nearby-store conclusion is available")
+                && !repair.contains("discovery completed and found no populated stores"),
+            format!("unavailable recovery must not claim complete/no-nearby truth: {repair}"),
+        )?;
+        ensure(
+            !workspace.join(".ee").exists()
+                && !database.exists()
+                && std::fs::read(&invalid_registry)
+                    .map_err(|error| error.to_string())?
+                    .as_slice()
+                    == registry_bytes,
+            "unavailable read-only assessment must not create a store or mutate its registry",
         )
     }
 }

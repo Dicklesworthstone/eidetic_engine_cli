@@ -42,6 +42,10 @@
               "type": "string",
               "description": "Exact absolute database path checked by a workspace_store_missing failure."
             },
+            "addressedWorkspacePath": {
+              "type": "string",
+              "description": "Exact workspace path used by workspace_store_missing recovery commands."
+            },
             "storeDiscovery": {
               "$ref": "#/$defs/storeDiscovery"
             }
@@ -153,11 +157,14 @@
     "storeDiscovery": {
       "type": "object",
       "description": "Bounded read-only discovery evidence attached to workspace_store_missing errors.",
-      "required": ["scanned", "truncated", "nearbyStores"],
+      "required": ["outcome", "nearbyStores"],
       "additionalProperties": false,
       "properties": {
-        "scanned": {"type": "boolean"},
-        "truncated": {"type": "boolean"},
+        "outcome": {
+          "type": "string",
+          "enum": ["complete", "truncated", "unavailable"],
+          "description": "Truthful bounded-discovery result; truncated and unavailable never imply that no nearby store exists."
+        },
         "nearbyStores": {
           "type": "array",
           "items": {"$ref": "#/$defs/nearbyStore"},
