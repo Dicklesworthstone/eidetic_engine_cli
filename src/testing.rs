@@ -406,40 +406,186 @@ fn json_schema_type_name(value: &Value) -> &'static str {
 struct NormalizedJsonDecimal {
     negative: bool,
     digits: Vec<u8>,
-    exponent: i64,
+    exponent: SignedDecimalInteger,
 }
 
-fn parse_json_decimal_exponent(raw: &str) -> Option<i64> {
-    let (negative, digits) = raw
-        .strip_prefix('-')
-        .map_or((false, raw), |digits| (true, digits));
-    let digits = digits.strip_prefix('+').unwrap_or(digits);
-    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SignedDecimalInteger {
+    negative: bool,
+    digits: Vec<u8>,
+}
+
+impl SignedDecimalInteger {
+    fn zero() -> Self {
+        Self {
+            negative: false,
+            digits: vec![0],
+        }
     }
-    let magnitude = digits.bytes().fold(0_i64, |value, byte| {
-        value
-            .saturating_mul(10)
-            .saturating_add(i64::from(byte - b'0'))
-    });
-    Some(if negative {
-        magnitude.saturating_neg()
-    } else {
-        magnitude
-    })
+
+    fn parse(raw: &str) -> Option<Self> {
+        let (negative, digits) = if let Some(digits) = raw.strip_prefix('-') {
+            (true, digits)
+        } else if let Some(digits) = raw.strip_prefix('+') {
+            (false, digits)
+        } else {
+            (false, raw)
+        };
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let digits = digits
+            .bytes()
+            .skip_while(|digit| *digit == b'0')
+            .map(|digit| digit - b'0')
+            .collect::<Vec<_>>();
+        if digits.is_empty() {
+            return Some(Self::zero());
+        }
+        Some(Self { negative, digits })
+    }
+
+    fn from_usize(value: usize) -> Self {
+        Self {
+            negative: false,
+            digits: value
+                .to_string()
+                .bytes()
+                .map(|digit| digit - b'0')
+                .collect(),
+        }
+    }
+
+    fn is_zero(&self) -> bool {
+        self.digits == [0]
+    }
+
+    fn is_nonnegative(&self) -> bool {
+        !self.negative
+    }
+
+    fn compare_absolute(left: &[u8], right: &[u8]) -> Ordering {
+        left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+    }
+
+    fn add_absolute(left: &[u8], right: &[u8]) -> Vec<u8> {
+        let mut output = Vec::with_capacity(left.len().max(right.len()) + 1);
+        let mut left_index = left.len();
+        let mut right_index = right.len();
+        let mut carry = 0_u8;
+        while left_index > 0 || right_index > 0 || carry != 0 {
+            let left_digit = if left_index > 0 {
+                left_index -= 1;
+                left[left_index]
+            } else {
+                0
+            };
+            let right_digit = if right_index > 0 {
+                right_index -= 1;
+                right[right_index]
+            } else {
+                0
+            };
+            let sum = left_digit + right_digit + carry;
+            output.push(sum % 10);
+            carry = sum / 10;
+        }
+        output.reverse();
+        output
+    }
+
+    fn subtract_absolute(larger: &[u8], smaller: &[u8]) -> Vec<u8> {
+        debug_assert!(Self::compare_absolute(larger, smaller) != Ordering::Less);
+        let mut output = Vec::with_capacity(larger.len());
+        let mut smaller_index = smaller.len();
+        let mut borrow = 0_i8;
+        for larger_index in (0..larger.len()).rev() {
+            let smaller_digit = if smaller_index > 0 {
+                smaller_index -= 1;
+                smaller[smaller_index] as i8
+            } else {
+                0
+            };
+            let mut difference = larger[larger_index] as i8 - borrow - smaller_digit;
+            if difference < 0 {
+                difference += 10;
+                borrow = 1;
+            } else {
+                borrow = 0;
+            }
+            output.push(difference as u8);
+        }
+        debug_assert_eq!(borrow, 0);
+        output.reverse();
+        let first_nonzero = output
+            .iter()
+            .position(|digit| *digit != 0)
+            .unwrap_or(output.len() - 1);
+        output[first_nonzero..].to_vec()
+    }
+
+    fn add_signed_usize(&mut self, negative: bool, value: usize) {
+        if value == 0 {
+            return;
+        }
+        let other = Self::from_usize(value);
+        if self.is_zero() {
+            self.negative = negative;
+            self.digits = other.digits;
+            return;
+        }
+        if self.negative == negative {
+            self.digits = Self::add_absolute(&self.digits, &other.digits);
+            return;
+        }
+        match Self::compare_absolute(&self.digits, &other.digits) {
+            Ordering::Greater => {
+                self.digits = Self::subtract_absolute(&self.digits, &other.digits);
+            }
+            Ordering::Equal => *self = Self::zero(),
+            Ordering::Less => {
+                self.digits = Self::subtract_absolute(&other.digits, &self.digits);
+                self.negative = negative;
+            }
+        }
+    }
+
+    fn add_usize(&mut self, value: usize) {
+        self.add_signed_usize(false, value);
+    }
+
+    fn subtract_usize(&mut self, value: usize) {
+        self.add_signed_usize(true, value);
+    }
+
+    fn compare(&self, other: &Self) -> Ordering {
+        if self.negative != other.negative {
+            return if self.negative {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
+        }
+        let ordering = Self::compare_absolute(&self.digits, &other.digits);
+        if self.negative {
+            ordering.reverse()
+        } else {
+            ordering
+        }
+    }
 }
 
 // Compare the decimal rendering exactly so a u64::MAX schema boundary is not
 // rounded to 2^64 through f64 before applying minimum/maximum keywords.
 fn normalize_json_number(number: &serde_json::Number) -> Option<NormalizedJsonDecimal> {
     let rendered = number.to_string();
-    let (mantissa, explicit_exponent) =
-        rendered
-            .find(['e', 'E'])
-            .map_or(Some((rendered.as_str(), 0_i64)), |index| {
-                parse_json_decimal_exponent(&rendered[index + 1..])
-                    .map(|exponent| (&rendered[..index], exponent))
-            })?;
+    let (mantissa, explicit_exponent) = rendered.find(['e', 'E']).map_or(
+        Some((rendered.as_str(), SignedDecimalInteger::zero())),
+        |index| {
+            SignedDecimalInteger::parse(&rendered[index + 1..])
+                .map(|exponent| (&rendered[..index], exponent))
+        },
+    )?;
     if mantissa.is_empty() {
         return None;
     }
@@ -462,14 +608,14 @@ fn normalize_json_number(number: &serde_json::Number) -> Option<NormalizedJsonDe
         return Some(NormalizedJsonDecimal {
             negative: false,
             digits: vec![b'0'],
-            exponent: 0,
+            exponent: SignedDecimalInteger::zero(),
         });
     }
-    let fraction_len = i64::try_from(fraction.len()).ok()?;
-    let mut exponent = explicit_exponent.checked_sub(fraction_len)?;
+    let mut exponent = explicit_exponent;
+    exponent.subtract_usize(fraction.len());
     while digits.last() == Some(&b'0') {
         digits.pop();
-        exponent = exponent.checked_add(1)?;
+        exponent.add_usize(1);
     }
     Some(NormalizedJsonDecimal {
         negative,
@@ -479,7 +625,7 @@ fn normalize_json_number(number: &serde_json::Number) -> Option<NormalizedJsonDe
 }
 
 fn json_schema_number_is_integer(number: &serde_json::Number) -> bool {
-    normalize_json_number(number).is_some_and(|number| number.exponent >= 0)
+    normalize_json_number(number).is_some_and(|number| number.exponent.is_nonnegative())
 }
 
 fn json_schema_values_equal(left: &Value, right: &Value) -> bool {
@@ -528,13 +674,11 @@ fn compare_json_numbers(left: &serde_json::Number, right: &serde_json::Number) -
             Ordering::Greater
         });
     }
-    let left_magnitude = i64::try_from(left.digits.len())
-        .ok()?
-        .checked_add(left.exponent)?;
-    let right_magnitude = i64::try_from(right.digits.len())
-        .ok()?
-        .checked_add(right.exponent)?;
-    let magnitude_order = left_magnitude.cmp(&right_magnitude);
+    let mut left_magnitude = left.exponent.clone();
+    left_magnitude.add_usize(left.digits.len());
+    let mut right_magnitude = right.exponent.clone();
+    right_magnitude.add_usize(right.digits.len());
+    let magnitude_order = left_magnitude.compare(&right_magnitude);
     let absolute_order = if magnitude_order == Ordering::Equal {
         let width = left.digits.len().max(right.digits.len());
         (0..width)
@@ -1001,6 +1145,8 @@ mod tests {
             .map_err(|error| format!("parse near-boundary fractional fixture: {error}"))?;
         let huge_exponent: Value = serde_json::from_str("1e9223372036854775808")
             .map_err(|error| format!("parse huge-exponent fixture: {error}"))?;
+        let huge_negative: Value = serde_json::from_str("-1e9223372036854775808")
+            .map_err(|error| format!("parse huge-negative fixture: {error}"))?;
         for value in [
             serde_json::json!(-1),
             serde_json::json!(1.5),
@@ -1020,9 +1166,14 @@ mod tests {
             "maximum": 18446744073709551615_u64
         });
         if validate_json_schema_instance(&huge_exponent, &bounded_number_schema).is_ok() {
-            return Err(
-                "bounded number schema accepted a value whose exact comparison overflowed".into(),
-            );
+            return Err("bounded number schema accepted an extreme positive value".into());
+        }
+        let bounded_negative_schema = serde_json::json!({
+            "type": "number",
+            "minimum": -1
+        });
+        if validate_json_schema_instance(&huge_negative, &bounded_negative_schema).is_ok() {
+            return Err("bounded number schema accepted an extreme negative value".into());
         }
         Ok(())
     }
@@ -1051,6 +1202,20 @@ mod tests {
                 ));
             }
         }
+        let tiny_a: Value = serde_json::from_str("1e-9223372036854775808")
+            .map_err(|error| format!("parse first extreme exponent: {error}"))?;
+        let tiny_b: Value = serde_json::from_str("1e-9999999999999999999")
+            .map_err(|error| format!("parse second extreme exponent: {error}"))?;
+        let mut extreme_const_schema = serde_json::json!({ "const": null });
+        extreme_const_schema["const"] = tiny_a.clone();
+        validate_json_schema_instance(&tiny_a, &extreme_const_schema)?;
+        if validate_json_schema_instance(&tiny_b, &extreme_const_schema).is_ok() {
+            return Err("distinct extreme exponents collapsed under const equality".into());
+        }
+        validate_json_schema_instance(
+            &serde_json::Value::Array(vec![tiny_a, tiny_b]),
+            &unique_schema,
+        )?;
         if validate_json_schema_instance(&serde_json::json!(2), &const_schema).is_ok()
             || validate_json_schema_instance(&serde_json::json!(2), &enum_schema).is_ok()
         {
