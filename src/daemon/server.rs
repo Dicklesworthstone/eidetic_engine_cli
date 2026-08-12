@@ -41,8 +41,7 @@ use crate::config::env_registry::{self, EnvVar};
 use crate::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
     ContextPackOutputOptions, attach_context_search_advisories_for_delivery,
-    attach_pack_dna_to_context_response,
-    run_context_pack_with_performance_controlled,
+    attach_pack_dna_to_context_response, run_context_pack_with_performance_controlled,
 };
 use crate::core::search::{
     MAX_SEARCH_ADVISORY_WORKSPACES, PERFORMANCE_EXPLAIN_SCHEMA_V1,
@@ -4921,8 +4920,7 @@ fn dispatch_context(
         "pack",
         deadline,
         Some(shutdown),
-    )
-    {
+    ) {
         Ok(run) => run,
         Err(ContextPackError::DeadlineExceeded(error)) => {
             return DaemonResponse::err(

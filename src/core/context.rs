@@ -66,11 +66,11 @@ use crate::core::memory_scope::{
 };
 use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::search::{
-    PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
-    SearchAdvisoryDeliveryReservation, SearchAdvisorySession, SearchOptions,
-    SearchPerformanceTrace, SearchReport, SearchSourceMode, SearchStatus, SearchWorkspaceProbeState,
-    elapsed_timing_json, map_frankensearch_error, performance_redaction_json,
-    query_observation_json, reconcile_search_index_before_read_with_cx,
+    PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchAdvisoryDeliveryReservation,
+    SearchAdvisorySession, SearchDegradation, SearchError, SearchHit, SearchOptions,
+    SearchPerformanceTrace, SearchReport, SearchSourceMode, SearchStatus,
+    SearchWorkspaceProbeState, elapsed_timing_json, map_frankensearch_error,
+    performance_redaction_json, query_observation_json, reconcile_search_index_before_read_with_cx,
     run_context_search_with_preloaded_memories,
     run_context_search_with_preloaded_memories_and_workspace_state_with_cx,
     search_degraded_data_json,
@@ -3958,7 +3958,9 @@ pub(crate) fn attach_context_search_advisories_for_delivery(
         reservation,
     );
     if let Some(rerank) = search_data.get("rerank").cloned()
-        && let Some(data) = response.get_mut("data").and_then(serde_json::Value::as_object_mut)
+        && let Some(data) = response
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
     {
         data.insert("rerank".to_owned(), rerank);
     }
