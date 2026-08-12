@@ -4829,11 +4829,30 @@ impl DaemonContextParams {
             .with_resource_profile(self.resource_profile)
     }
 
-    fn context_options(&self) -> ContextPackOptions {
-        ContextPackOptions {
-            workspace_path: self.workspace_path.clone(),
-            database_path: self.database_path.clone(),
-            index_dir: self.index_dir.clone(),
+    fn context_options(&self, authorized_workspace_id: &str) -> Result<ContextPackOptions, String> {
+        let workspace_path = canonical_workspace_path(&self.workspace_path, "workspacePath")?;
+        let authorized_workspace =
+            canonical_workspace_path(Path::new(authorized_workspace_id), "workspace_id")?;
+        if workspace_path != authorized_workspace {
+            return Err(
+                "field `workspacePath` must identify the authorized envelope `workspace_id`"
+                    .to_owned(),
+            );
+        }
+        let database_path = self
+            .database_path
+            .as_deref()
+            .map(|path| canonical_contained_path(&workspace_path, path, "databasePath"))
+            .transpose()?;
+        let index_dir = self
+            .index_dir
+            .as_deref()
+            .map(|path| canonical_contained_path(&workspace_path, path, "indexDir"))
+            .transpose()?;
+        Ok(ContextPackOptions {
+            workspace_path,
+            database_path,
+            index_dir,
             query: self.query.clone(),
             speed: self.speed,
             source_mode: self.source_mode,
@@ -4866,7 +4885,7 @@ impl DaemonContextParams {
             // bd-1n0np.5.8: the daemon does not expose `--no-lod`; keep LOD
             // tiering on (the default), matching the one-shot CLI default.
             no_lod: false,
-        }
+        })
     }
 }
 
@@ -4915,9 +4934,20 @@ fn dispatch_context(
         );
     }
 
-    let options = params.context_options();
+    let options = match params.context_options(authorized_workspace_id) {
+        Ok(options) => options,
+        Err(message) => {
+            return DaemonResponse::err(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                request.workspace_id.clone(),
+                DAEMON_CONTEXT_PARAMS_INVALID_CODE,
+                format!("invalid ee.daemon.context params: {message}"),
+            );
+        }
+    };
     let advisory_workspace_id =
-        crate::core::workspace::stable_workspace_id(Path::new(authorized_workspace_id));
+        crate::core::workspace::stable_workspace_id(&options.workspace_path);
     let deadline = params.timeout_ms.map(Duration::from_millis);
     let context_run = match run_context_pack_with_performance_controlled(
         &options,

@@ -2412,6 +2412,50 @@ fn search_schema_closes_rerank_advisory_and_rejects_fake_automatic_repairs() -> 
 }
 
 #[test]
+fn pack_schema_accepts_permanent_rerank_advisory_and_rejects_fake_repair() -> TestResult {
+    let schema = schema_doc("ee.pack.v2")?;
+    let mut response = read_json(&fixture_path("golden/agent/context_pack.json.golden"))?;
+    response["data"]["rerank"] = json!({
+        "schema": "ee.rerank_posture.v1",
+        "mode": "fusion_only_degraded",
+        "configured": "auto",
+        "topK": 50,
+        "rerankScoreCount": 0,
+        "scoreKind": "rrf_fused",
+        "available": false,
+        "degradedCode": "rerank_model_unavailable",
+        "advisory": {
+            "code": "rerank_model_unavailable",
+            "severity": "low",
+            "permanent": true,
+            "message": "No usable local reranker is registered.",
+            "repair": null,
+            "resolution": "automatic_repair_unavailable"
+        },
+        "advisorySummary": {
+            "scope": "process",
+            "permanent": true,
+            "distinctCount": 1,
+            "emittedCount": 1,
+            "suppressedCount": 0,
+            "sessionOccurrenceCount": 1,
+            "sessionSuppressedCount": 0
+        }
+    });
+    validate_json_schema(&response, &schema, &schema, "$")?;
+
+    response["data"]["rerank"]["advisory"]["repair"] =
+        json!("ee model fetch rerank-default --from-file /path/to/model.tar.zst");
+    if validate_json_schema(&response, &schema, &schema, "$").is_ok() {
+        return Err(
+            "ee.pack.v2 must reject a repair string on a permanent automatic_repair_unavailable advisory"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn remember_level_kind_cross_wire_errors_match_error_schema() -> TestResult {
     let schema = schema_doc("ee.error.v2")?;
     for (level, kind, expected_code) in [

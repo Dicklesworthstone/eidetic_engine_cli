@@ -307,6 +307,23 @@ fn context_request_for_workspace(
     request
 }
 
+fn hybrid_context_request_for_workspace(
+    request_id: &'static str,
+    params_workspace: &Path,
+    authorized_workspace: &Path,
+    database: &Path,
+    index_dir: &Path,
+    task: &str,
+) -> DaemonRequest {
+    let mut params = context_pack_params(params_workspace, database, task);
+    params["sourceMode"] = serde_json::json!("hybrid");
+    params["indexDir"] = serde_json::json!(index_dir.display().to_string());
+    params["includeNonAffectingDegradations"] = serde_json::json!(true);
+    let mut request = DaemonRequest::new(request_id, TEST_AGENT_ID, METHOD_CONTEXT, params);
+    request.workspace_id = Some(authorized_workspace.display().to_string());
+    request
+}
+
 fn successful_result(response: DaemonResponse, label: &str) -> Result<serde_json::Value, String> {
     ensure(
         response.error.is_none(),
@@ -1412,6 +1429,189 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
             .and_then(serde_json::Value::as_str)
             == Some("mem_00000000000000000000005001"),
         format!("seeded memory missing from daemon search: {first_result}"),
+    )?;
+
+    handle
+        .shutdown()
+        .map_err(|error| format!("shutdown: {error}"))?;
+    Ok(())
+}
+
+#[test]
+fn daemon_context_binds_workspace_and_shares_canonical_advisory_partition() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-context-binding.sock")?;
+    let (workspace_a, database_a) = seed_context_workspace(&temp.path().join("workspace-a"))?;
+    let (workspace_b, database_b) = seed_context_workspace(&temp.path().join("workspace-b"))?;
+    let index_a = workspace_a.join(".ee").join("index");
+    let index_b = workspace_b.join(".ee").join("index");
+    rebuild_test_index(&workspace_a, &database_a, &index_a)?;
+    rebuild_test_index(&workspace_b, &database_b, &index_b)?;
+    let workspace_a_alias = temp.path().join("workspace-a-alias");
+    std::os::unix::fs::symlink(&workspace_a, &workspace_a_alias)
+        .map_err(|error| format!("create workspace alias: {error}"))?;
+
+    let mut handle =
+        start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
+
+    let mismatched = client_round_trip(
+        handle.socket_path(),
+        &hybrid_context_request_for_workspace(
+            "req-context-workspace-mismatch",
+            &workspace_b,
+            &workspace_a,
+            &database_b,
+            &index_b,
+            "mismatched context workspace must not execute",
+        ),
+    )
+    .map_err(|error| format!("mismatched context round-trip: {error}"))?;
+    ensure(
+        mismatched.result.is_none()
+            && mismatched.error.as_ref().is_some_and(|error| {
+                error.code == DAEMON_CONTEXT_PARAMS_INVALID_CODE
+                    && error.message.contains(
+                        "workspacePath` must identify the authorized envelope `workspace_id",
+                    )
+            }),
+        format!("valid-envelope/mismatched context params were not rejected: {mismatched:?}"),
+    )?;
+
+    plant_large_index_gap(&database_a, 600_000, "workspace-a-context-alias-first")?;
+    let context_first = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &hybrid_context_request_for_workspace(
+                "req-context-alias-first",
+                &workspace_a_alias,
+                &workspace_a_alias,
+                &database_a,
+                &index_a,
+                "context alias emits the first process advisory",
+            ),
+        )
+        .map_err(|error| format!("context-first alias round-trip: {error}"))?,
+        "context-first alias request",
+    )?;
+    assert_stale_episode(
+        &context_first,
+        "/data/degraded",
+        true,
+        true,
+        "context_alias_first",
+    )?;
+    ensure(
+        context_first
+            .pointer("/data/rerank/advisory/code")
+            .and_then(serde_json::Value::as_str)
+            == Some("rerank_model_unavailable")
+            && context_first
+                .pointer("/data/rerank/advisory/permanent")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            && context_first
+                .pointer("/data/rerank/advisorySummary/scope")
+                .and_then(serde_json::Value::as_str)
+                == Some(SEARCH_ADVISORY_SCOPE_PROCESS)
+            && context_first
+                .pointer("/data/rerank/advisorySummary/sessionOccurrenceCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1),
+        format!("context-first request did not emit the process advisory: {context_first}"),
+    )?;
+
+    let search_repeated = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &search_request(
+                "req-search-canonical-repeat",
+                &workspace_a,
+                &database_a,
+                &index_a,
+            ),
+        )
+        .map_err(|error| format!("canonical search repeat round-trip: {error}"))?,
+        "canonical search repeat",
+    )?;
+    assert_stale_episode(
+        &search_repeated,
+        "/response/data/degraded",
+        false,
+        false,
+        "search_canonical_repeat",
+    )?;
+    ensure(
+        search_repeated
+            .pointer("/response/data/rerank/advisory")
+            .is_some_and(serde_json::Value::is_null)
+            && search_repeated
+                .pointer("/response/data/rerank/advisorySummary/sessionOccurrenceCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(2)
+            && search_repeated
+                .pointer("/response/data/rerank/advisorySummary/sessionSuppressedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(1),
+        format!("canonical search did not share context advisory state: {search_repeated}"),
+    )?;
+
+    let context_repeated = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &hybrid_context_request_for_workspace(
+                "req-context-canonical-repeat",
+                &workspace_a,
+                &workspace_a,
+                &database_a,
+                &index_a,
+                "canonical context repeats the process advisory",
+            ),
+        )
+        .map_err(|error| format!("canonical context repeat round-trip: {error}"))?,
+        "canonical context repeat",
+    )?;
+    assert_stale_episode(
+        &context_repeated,
+        "/data/degraded",
+        true,
+        false,
+        "context_canonical_repeat",
+    )?;
+    ensure(
+        context_repeated
+            .pointer("/data/rerank/advisory")
+            .is_some_and(serde_json::Value::is_null)
+            && context_repeated
+                .pointer("/data/rerank/advisorySummary/sessionOccurrenceCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(3)
+            && context_repeated
+                .pointer("/data/rerank/advisorySummary/sessionSuppressedCount")
+                .and_then(serde_json::Value::as_u64)
+                == Some(2),
+        format!("canonical context did not suppress the repeated advisory: {context_repeated}"),
+    )?;
+
+    plant_large_index_gap(&database_b, 700_000, "workspace-b-independent")?;
+    let workspace_b_first = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &search_request(
+                "req-search-workspace-b-independent",
+                &workspace_b,
+                &database_b,
+                &index_b,
+            ),
+        )
+        .map_err(|error| format!("workspace B first round-trip: {error}"))?,
+        "workspace B first advisory episode",
+    )?;
+    assert_stale_episode(
+        &workspace_b_first,
+        "/response/data/degraded",
+        true,
+        true,
+        "workspace_b_independent",
     )?;
 
     handle
