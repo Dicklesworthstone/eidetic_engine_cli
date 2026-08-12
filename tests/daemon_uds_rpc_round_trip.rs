@@ -1089,6 +1089,31 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
         &search_request("req-search-warm-003", &workspace, &database, &index_dir),
     )
     .map_err(|error| format!("third search round-trip: {error}"))?;
+    let mut context_params = context_pack_params(
+        &workspace,
+        &database,
+        "release provenance daemon context advisory",
+    );
+    context_params["sourceMode"] = serde_json::json!("hybrid");
+    context_params["indexDir"] = serde_json::json!(index_dir.display().to_string());
+    let mut first_context_request = DaemonRequest::new(
+        "req-context-warm-001",
+        TEST_AGENT_ID,
+        METHOD_CONTEXT,
+        context_params.clone(),
+    );
+    first_context_request.workspace_id = Some(workspace.display().to_string());
+    let first_context = client_round_trip(handle.socket_path(), &first_context_request)
+        .map_err(|error| format!("first context round-trip: {error}"))?;
+    let mut second_context_request = DaemonRequest::new(
+        "req-context-warm-002",
+        TEST_AGENT_ID,
+        METHOD_CONTEXT,
+        context_params,
+    );
+    second_context_request.workspace_id = Some(workspace.display().to_string());
+    let second_context = client_round_trip(handle.socket_path(), &second_context_request)
+        .map_err(|error| format!("second context round-trip: {error}"))?;
     const SECRET_QUERY: &str = "release provenance sk_live_uds_query_must_not_escape_performance";
     let privacy = client_round_trip(
         handle.socket_path(),
@@ -1117,6 +1142,12 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
     ensure(
         privacy.error.is_none(),
         format!("privacy search failed: {privacy:?}"),
+    )?;
+    ensure(
+        first_context.error.is_none() && second_context.error.is_none(),
+        format!(
+            "mixed long-lived context requests failed: first={first_context:?}; second={second_context:?}"
+        ),
     )?;
     let privacy_result = privacy
         .result
@@ -1328,6 +1359,53 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
                 == Some(2),
         format!("third daemon query suppression summary drifted: {third_result}"),
     )?;
+    let first_context_result = first_context
+        .result
+        .as_ref()
+        .ok_or_else(|| "first mixed context result missing".to_owned())?;
+    let second_context_result = second_context
+        .result
+        .as_ref()
+        .ok_or_else(|| "second mixed context result missing".to_owned())?;
+    for (ordinal, result, occurrence_count, suppressed_count) in [
+        ("first", first_context_result, 4_u64, 3_u64),
+        ("second", second_context_result, 5_u64, 4_u64),
+    ] {
+        ensure(
+            result
+                .pointer("/data/rerank/advisory")
+                .is_some_and(serde_json::Value::is_null)
+                && result
+                    .pointer("/data/rerank/advisorySummary/permanent")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                && result
+                    .pointer("/data/rerank/advisorySummary/scope")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(SEARCH_ADVISORY_SCOPE_PROCESS)
+                && result
+                    .pointer("/data/rerank/advisorySummary/sessionOccurrenceCount")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(occurrence_count)
+                && result
+                    .pointer("/data/rerank/advisorySummary/sessionSuppressedCount")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(suppressed_count),
+            format!(
+                "{ordinal} mixed context request did not share cumulative process advisory state: {result}"
+            ),
+        )?;
+        for pointer in ["/degraded", "/data/degraded"] {
+            ensure(
+                degraded_codes_at(result, pointer, "mixed context")?
+                    .into_iter()
+                    .all(|code| code != "rerank_model_unavailable"),
+                format!(
+                    "{ordinal} mixed context request repeated permanent posture as degradation: {result}"
+                ),
+            )?;
+        }
+    }
     ensure(
         first_result
             .pointer("/response/data/results/0/docId")

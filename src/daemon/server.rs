@@ -40,7 +40,8 @@ use rustix::fs::{FlockOperation, flock};
 use crate::config::env_registry::{self, EnvVar};
 use crate::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
-    ContextPackOutputOptions, attach_pack_dna_to_context_response,
+    ContextPackOutputOptions, attach_context_search_advisories_for_delivery,
+    attach_pack_dna_to_context_response,
     run_context_pack_with_performance_controlled,
 };
 use crate::core::search::{
@@ -4915,15 +4916,14 @@ fn dispatch_context(
 
     let options = params.context_options();
     let deadline = params.timeout_ms.map(Duration::from_millis);
-    let mut context_response = match run_context_pack_with_performance_controlled(
+    let context_run = match run_context_pack_with_performance_controlled(
         &options,
         "pack",
         deadline,
         Some(shutdown),
     )
-    .map(|run| run.response)
     {
-        Ok(response) => response,
+        Ok(run) => run,
         Err(ContextPackError::DeadlineExceeded(error)) => {
             return DaemonResponse::err(
                 request.request_id.clone(),
@@ -4953,6 +4953,8 @@ fn dispatch_context(
             );
         }
     };
+    let mut context_response = context_run.response;
+    let context_search_report = context_run.search_report;
 
     if shutdown.load(Ordering::SeqCst) {
         return daemon_shutting_down_response(
@@ -5008,12 +5010,22 @@ fn dispatch_context(
         let mut advisory_session = search_advisory_session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        filter_context_large_gap_advisory_for_delivery(
-            &mut result,
-            &mut advisory_session,
-            authorized_workspace_id,
-            pending_delivery.reservation_mut(),
-        );
+        if let Some(search_report) = context_search_report.as_ref() {
+            attach_context_search_advisories_for_delivery(
+                &mut result,
+                search_report,
+                &mut advisory_session,
+                authorized_workspace_id,
+                pending_delivery.reservation_mut(),
+            );
+        } else {
+            filter_context_large_gap_advisory_for_delivery(
+                &mut result,
+                &mut advisory_session,
+                authorized_workspace_id,
+                pending_delivery.reservation_mut(),
+            );
+        }
     }
     if daemon_context_deadline_expired(context_started, params.timeout_ms) {
         return daemon_context_deadline_response(
@@ -5717,6 +5729,41 @@ mod tests {
         (pending.finish(response, true), result)
     }
 
+    fn context_advisory_delivery_candidate(
+        report: &SearchReport,
+        policy: &DaemonDispatchPolicy,
+        workspace_id: &str,
+    ) -> (DaemonResponse, serde_json::Value) {
+        let mut pending =
+            PendingSearchAdvisoryDelivery::new(policy.search_advisory_session(), workspace_id);
+        let mut result = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
+            "success": true,
+            "data": {"command": "pack", "degraded": []},
+            "degraded": [],
+        });
+        {
+            let mut session = policy
+                .search_advisory_session()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            attach_context_search_advisories_for_delivery(
+                &mut result,
+                report,
+                &mut session,
+                workspace_id,
+                pending.reservation_mut(),
+            );
+        }
+        let response = DaemonResponse::ok(
+            "req-context-advisory-delivery",
+            TEST_AGENT_ID,
+            Some(workspace_id.to_owned()),
+            result.clone(),
+        );
+        (pending.finish(response, true), result)
+    }
+
     #[test]
     fn successful_socket_delivery_consumes_permanent_advisory() {
         let report = permanent_reranker_advisory_report();
@@ -5784,6 +5831,37 @@ mod tests {
         assert_eq!(
             retry_result
                 .pointer("/response/data/rerank/advisory/code")
+                .and_then(serde_json::Value::as_str),
+            Some("rerank_model_unavailable")
+        );
+    }
+
+    #[test]
+    fn disconnected_context_socket_does_not_consume_permanent_advisory() {
+        let report = permanent_reranker_advisory_report();
+        let policy = DaemonDispatchPolicy::for_workspace(TEST_WORKSPACE_ID);
+        let (mut failed_response, failed_result) =
+            context_advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
+        assert_eq!(
+            failed_result
+                .pointer("/data/rerank/advisory/code")
+                .and_then(serde_json::Value::as_str),
+            Some("rerank_model_unavailable")
+        );
+        let (mut server_side, client_side) = UnixStream::pair().expect("socketpair");
+        drop(client_side);
+        assert!(!write_and_settle_daemon_response(
+            &mut server_side,
+            &policy,
+            &mut failed_response,
+        ));
+
+        let (retry_response, retry_result) =
+            context_advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
+        assert!(retry_response.delivery.is_some());
+        assert_eq!(
+            retry_result
+                .pointer("/data/rerank/advisory/code")
                 .and_then(serde_json::Value::as_str),
             Some("rerank_model_unavailable")
         );

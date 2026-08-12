@@ -67,9 +67,10 @@ use crate::core::memory_scope::{
 use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
-    SearchOptions, SearchPerformanceTrace, SearchReport, SearchSourceMode, SearchStatus,
-    SearchWorkspaceProbeState, elapsed_timing_json, map_frankensearch_error,
-    performance_redaction_json, query_observation_json, reconcile_search_index_before_read_with_cx,
+    SearchAdvisoryDeliveryReservation, SearchAdvisorySession, SearchOptions,
+    SearchPerformanceTrace, SearchReport, SearchSourceMode, SearchStatus, SearchWorkspaceProbeState,
+    elapsed_timing_json, map_frankensearch_error, performance_redaction_json,
+    query_observation_json, reconcile_search_index_before_read_with_cx,
     run_context_search_with_preloaded_memories,
     run_context_search_with_preloaded_memories_and_workspace_state_with_cx,
     search_degraded_data_json,
@@ -852,10 +853,15 @@ pub struct ContextPagination {
     pub query_hash: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ContextPackPerformanceRun {
     pub response: ContextResponse,
     pub performance: serde_json::Value,
+    /// The authoritative search observation that produced this pack. Long-lived
+    /// transports retain advisory delivery state and render this report only
+    /// when the response is ready to be written. L2 cache hits carry no current
+    /// search observation and therefore leave this unset.
+    pub(crate) search_report: Option<SearchReport>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -3434,6 +3440,7 @@ async fn run_context_pack_with_performance_inner(
     Ok(ContextPackPerformanceRun {
         response,
         performance,
+        search_report: Some(search_report),
     })
 }
 
@@ -3927,6 +3934,62 @@ fn push_search_degradations(
             entry.message.clone(),
             entry.repair.clone(),
         );
+    }
+}
+
+/// Attach the internal search's structured reranker posture to a context
+/// response while sharing the long-lived transport's delivery reservation.
+///
+/// The search renderer also owns stale/large-gap episode accounting. Replace
+/// only those two context degradation entries with its delivery-filtered view
+/// so one response cannot observe the same episode twice. All other context
+/// degradations, including transient reranker load failures, remain visible on
+/// every affected response.
+pub(crate) fn attach_context_search_advisories_for_delivery(
+    response: &mut serde_json::Value,
+    search_report: &SearchReport,
+    session: &mut SearchAdvisorySession,
+    workspace_id: &str,
+    reservation: &mut SearchAdvisoryDeliveryReservation,
+) {
+    let search_data = search_report.data_json_with_advisory_delivery_reservation(
+        session,
+        workspace_id,
+        reservation,
+    );
+    if let Some(rerank) = search_data.get("rerank").cloned()
+        && let Some(data) = response.get_mut("data").and_then(serde_json::Value::as_object_mut)
+    {
+        data.insert("rerank".to_owned(), rerank);
+    }
+
+    let search_stale_entries = search_data
+        .get("degraded")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| {
+            matches!(
+                entry.get("code").and_then(serde_json::Value::as_str),
+                Some("search_index_stale" | "search_index_large_gap")
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for pointer in ["/degraded", "/data/degraded"] {
+        let Some(entries) = response
+            .pointer_mut(pointer)
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        entries.retain(|entry| {
+            !matches!(
+                entry.get("code").and_then(serde_json::Value::as_str),
+                Some("search_index_stale" | "search_index_large_gap")
+            )
+        });
+        entries.extend(search_stale_entries.iter().cloned());
     }
 }
 
@@ -5873,6 +5936,7 @@ fn context_pack_l2_try_hit(
                                 source_mode: source_mode_metadata,
                             },
                         ),
+                        search_report: None,
                     });
                 }
                 Err(message) => {

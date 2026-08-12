@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
 use crate::core::context::{
-    ContextPackOptions, ContextPackOutputOptions, run_context_pack_with_performance,
+    ContextPackOptions, ContextPackOutputOptions, attach_context_search_advisories_for_delivery,
+    run_context_pack_with_performance,
 };
 use crate::core::doctor::DoctorReport;
 use crate::core::memory::{RememberMemoryOptions, RememberMemoryReport, remember_memory};
@@ -65,7 +66,8 @@ struct ServeSearchAdvisoryDelivery {
     large_gap_capacity_busy: bool,
 }
 
-/// Process-lifetime advisory state for repeated `/v1/search` requests.
+/// Process-lifetime advisory state shared by repeated `/v1/search` and
+/// `/v1/context` requests.
 ///
 /// The ordinary search renderer is deliberately invocation-scoped. A
 /// long-lived transport owner must retain an explicit session so permanent
@@ -103,6 +105,36 @@ impl ServeSearchAdvisoryState {
             large_gap_capacity_busy: reservation.large_gap_capacity_busy(),
         });
         Ok((data, delivery))
+    }
+
+    fn render_context_for_delivery(
+        &self,
+        mut payload: JsonValue,
+        report: &SearchReport,
+        workspace_key: &str,
+    ) -> Result<(JsonValue, Option<ServeSearchAdvisoryDelivery>), DomainError> {
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| DomainError::Configuration {
+                message: "ee serve search advisory state is unavailable after a process panic."
+                    .to_owned(),
+                repair: Some("Restart `ee serve --foreground`.".to_owned()),
+            })?;
+        let mut reservation = session.reserve_delivery(workspace_key);
+        attach_context_search_advisories_for_delivery(
+            &mut payload,
+            report,
+            &mut session,
+            workspace_key,
+            &mut reservation,
+        );
+        let delivery = reservation.emitted().then(|| ServeSearchAdvisoryDelivery {
+            workspace_key: reservation.workspace_id().to_owned(),
+            token: reservation.token(),
+            large_gap_capacity_busy: reservation.large_gap_capacity_busy(),
+        });
+        Ok((payload, delivery))
     }
 
     fn settle(
@@ -1676,9 +1708,7 @@ fn serve_dispatch_payload_for_plan(
             serve_doctor_payload_json().map(ServeDispatchPayload::without_delivery)
         }
         ServeEndpoint::Search => search_payload_renderer(request, advisory_state),
-        ServeEndpoint::Context => {
-            serve_context_payload_json(request).map(ServeDispatchPayload::without_delivery)
-        }
+        ServeEndpoint::Context => serve_context_payload_json(request, advisory_state),
         ServeEndpoint::Why => {
             serve_why_payload_json(request).map(ServeDispatchPayload::without_delivery)
         }
@@ -1780,7 +1810,10 @@ fn serve_search_payload_json(
     })
 }
 
-fn serve_context_payload_json(request: &ServeHttpRequest) -> Result<JsonValue, DomainError> {
+fn serve_context_payload_json(
+    request: &ServeHttpRequest,
+    advisory_state: &ServeSearchAdvisoryState,
+) -> Result<ServeDispatchPayload, DomainError> {
     let workspace_path = serve_current_workspace_path()?;
     let task = require_single_query_value(request, "task", "/v1/context")?;
     let output_options = ContextPackOutputOptions::default();
@@ -1819,13 +1852,25 @@ fn serve_context_payload_json(request: &ServeHttpRequest) -> Result<JsonValue, D
         baseline_write: None,
         no_lod: false,
     };
-    let response = run_context_pack_with_performance(&options, "pack")
-        .map(|run| run.response)
+    let run = run_context_pack_with_performance(&options, "pack")
         .map_err(serve_context_error_to_domain)?;
-    parse_rendered_response_json(
-        &crate::output::render_context_response_json(&response),
+    let payload = parse_rendered_response_json(
+        &crate::output::render_context_response_json(&run.response),
         "pack",
-    )
+    )?;
+    let Some(search_report) = run.search_report.as_ref() else {
+        return Ok(ServeDispatchPayload::without_delivery(payload));
+    };
+    let workspace_key = options.workspace_path.to_string_lossy();
+    let (payload, advisory_delivery) = advisory_state.render_context_for_delivery(
+        payload,
+        search_report,
+        workspace_key.as_ref(),
+    )?;
+    Ok(ServeDispatchPayload {
+        payload,
+        advisory_delivery,
+    })
 }
 
 fn serve_why_payload_json(request: &ServeHttpRequest) -> Result<JsonValue, DomainError> {
