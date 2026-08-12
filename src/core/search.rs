@@ -838,53 +838,118 @@ struct SearchAdvisoryObservation {
     session_suppressed_count: u64,
 }
 
-/// Process/session-scoped ledger for permanent search advisories.
+const DEFAULT_SEARCH_ADVISORY_WORKSPACE: &str = "process-default";
+const MAX_SEARCH_ADVISORY_WORKSPACES: usize = 64;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct SearchAdvisoryWorkspaceState {
+    permanent_occurrences: BTreeMap<SearchAdvisoryIdentity, u64>,
+    suppressed_count: u64,
+    response_once_occurrences: BTreeMap<String, u64>,
+    last_observed: u64,
+}
+
+/// Process/session-scoped ledger for active search-advisory episodes.
 ///
 /// Canonical transient degradations remain visible in every affected response.
 /// The companion `search_index_large_gap` repair advisory is the sole
-/// once-per-process transient: `search_index_stale` itself remains present for
-/// as long as retrieval is actually stale. A fresh one-shot CLI process gets a
-/// fresh ledger, while the long-lived daemon shares the process ledger across
-/// its connection worker threads.
+/// once-per-episode transient: `search_index_stale` itself remains present for
+/// as long as retrieval is actually stale. Authoritative recovery clears the
+/// active condition so a later episode emits again. Workspace partitions are
+/// bounded to keep an exported unbound daemon from accumulating state forever
+/// or suppressing one workspace because another workspace observed the same
+/// advisory.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SearchAdvisorySession {
-    occurrences: BTreeMap<SearchAdvisoryIdentity, u64>,
-    suppressed_count: u64,
-    response_once_occurrences: BTreeMap<String, u64>,
+    workspaces: BTreeMap<String, SearchAdvisoryWorkspaceState>,
+    observation_clock: u64,
 }
 
 impl SearchAdvisorySession {
-    fn observe_permanent(&mut self, degradation: &SearchDegradation) -> SearchAdvisoryObservation {
+    fn workspace_mut(&mut self, workspace_id: &str) -> &mut SearchAdvisoryWorkspaceState {
+        self.observation_clock = self.observation_clock.saturating_add(1);
+        let observed_at = self.observation_clock;
+        if !self.workspaces.contains_key(workspace_id)
+            && self.workspaces.len() >= MAX_SEARCH_ADVISORY_WORKSPACES
+            && let Some(oldest_workspace) = self
+                .workspaces
+                .iter()
+                .min_by(|(left_id, left), (right_id, right)| {
+                    left.last_observed
+                        .cmp(&right.last_observed)
+                        .then_with(|| left_id.cmp(right_id))
+                })
+                .map(|(workspace_id, _)| workspace_id.clone())
+        {
+            self.workspaces.remove(&oldest_workspace);
+        }
+        let state = self.workspaces.entry(workspace_id.to_owned()).or_default();
+        state.last_observed = observed_at;
+        state
+    }
+
+    fn observe_permanent(
+        &mut self,
+        workspace_id: &str,
+        degradation: &SearchDegradation,
+    ) -> SearchAdvisoryObservation {
         let identity = SearchAdvisoryIdentity {
             code: degradation.code.clone(),
             severity: degradation.severity.clone(),
             message: degradation.message.clone(),
             repair: degradation.repair.clone(),
         };
+        let state = self.workspace_mut(workspace_id);
         let occurrence_count = {
-            let occurrence_count = self.occurrences.entry(identity).or_insert(0);
+            let occurrence_count = state.permanent_occurrences.entry(identity).or_insert(0);
             *occurrence_count = occurrence_count.saturating_add(1);
             *occurrence_count
         };
         let emitted = occurrence_count == 1;
         if !emitted {
-            self.suppressed_count = self.suppressed_count.saturating_add(1);
+            state.suppressed_count = state.suppressed_count.saturating_add(1);
         }
         SearchAdvisoryObservation {
             emitted,
             occurrence_count,
-            distinct_count: self.occurrences.len(),
-            session_suppressed_count: self.suppressed_count,
+            distinct_count: state.permanent_occurrences.len(),
+            session_suppressed_count: state.suppressed_count,
         }
     }
 
-    pub(crate) fn emit_response_code_once(&mut self, code: &str) -> bool {
+    fn recover_permanent(&mut self, workspace_id: &str, code: &str) {
+        if let Some(state) = self.workspaces.get_mut(workspace_id) {
+            state
+                .permanent_occurrences
+                .retain(|identity, _| identity.code != code);
+        }
+    }
+
+    pub(crate) fn emit_response_code_while_active(
+        &mut self,
+        workspace_id: &str,
+        code: &str,
+        active: bool,
+    ) -> bool {
+        if !active {
+            if let Some(state) = self.workspaces.get_mut(workspace_id) {
+                state.response_once_occurrences.remove(code);
+            }
+            return false;
+        }
         let occurrence_count = self
+            .workspace_mut(workspace_id)
             .response_once_occurrences
             .entry(code.to_owned())
             .or_insert(0);
         *occurrence_count = occurrence_count.saturating_add(1);
         *occurrence_count == 1
+    }
+
+    fn suppressed_count(&self, workspace_id: &str) -> u64 {
+        self.workspaces
+            .get(workspace_id)
+            .map_or(0, |state| state.suppressed_count)
     }
 }
 
@@ -2377,6 +2442,21 @@ impl SearchReport {
         &self,
         session: &mut SearchAdvisorySession,
     ) -> serde_json::Value {
+        self.data_json_with_advisory_session_for_workspace(
+            session,
+            DEFAULT_SEARCH_ADVISORY_WORKSPACE,
+        )
+    }
+
+    /// Render JSON against one workspace partition of a long-lived advisory
+    /// ledger. Daemon callers must pass the authorized request workspace so
+    /// advisory episodes cannot cross-suppress unrelated workspaces.
+    #[must_use]
+    pub fn data_json_with_advisory_session_for_workspace(
+        &self,
+        session: &mut SearchAdvisorySession,
+        workspace_id: &str,
+    ) -> serde_json::Value {
         let output_redaction_enabled = self.output_redaction_enabled();
         let visible_results = search_display_visible_hits(&self.results);
         let mut metrics = RetrievalMetrics::from_hits_with_floor(
@@ -2576,6 +2656,7 @@ impl SearchReport {
                 self.rerank_configured_mode,
                 self.rerank_configured_top_k,
                 session,
+                workspace_id,
             ),
             "profileRuntime": self.runtime_profile.data_json(),
             "errors": self.errors,
@@ -2583,6 +2664,7 @@ impl SearchReport {
                 "search",
                 &self.degraded,
                 session,
+                workspace_id,
             ),
         });
         if let Some(query_assist) = &self.query_assist
@@ -2743,13 +2825,22 @@ fn search_degraded_data_json_with_advisory_session(
     source: &'static str,
     degraded: &[SearchDegradation],
     session: &mut SearchAdvisorySession,
+    workspace_id: &str,
 ) -> Vec<serde_json::Value> {
     let mut aggregated = search_degraded_data_json(source, degraded);
+    let has_large_gap = aggregated.iter().any(|entry| {
+        entry.get("code").and_then(serde_json::Value::as_str) == Some("search_index_large_gap")
+    });
+    let emit_large_gap = session.emit_response_code_while_active(
+        workspace_id,
+        "search_index_large_gap",
+        has_large_gap,
+    );
     aggregated.retain(|entry| {
         let Some(code) = entry.get("code").and_then(serde_json::Value::as_str) else {
             return true;
         };
-        code != "search_index_large_gap" || session.emit_response_code_once(code)
+        code != "search_index_large_gap" || emit_large_gap
     });
     aggregated
 }
@@ -5179,6 +5270,7 @@ fn search_rerank_posture_json(
     configured_mode: crate::config::SearchRerankMode,
     configured_top_k: usize,
     advisory_session: &mut SearchAdvisorySession,
+    workspace_id: &str,
 ) -> serde_json::Value {
     let rerank_score_count = hits.iter().filter(|hit| hit.rerank_score.is_some()).count();
     let unavailable = degraded
@@ -5194,7 +5286,7 @@ fn search_rerank_posture_json(
     };
     let (advisory, advisory_summary) = match unavailable {
         Some(degradation) if unavailable_is_permanent => {
-            let observation = advisory_session.observe_permanent(degradation);
+            let observation = advisory_session.observe_permanent(workspace_id, degradation);
             let advisory = observation.emitted.then(|| {
                 serde_json::json!({
                     "code": degradation.code,
@@ -5216,37 +5308,45 @@ fn search_rerank_posture_json(
             });
             (advisory, summary)
         }
-        Some(degradation) => (
-            Some(serde_json::json!({
+        Some(degradation) => {
+            advisory_session.recover_permanent(workspace_id, "rerank_model_unavailable");
+            (
+                Some(serde_json::json!({
                 "code": degradation.code,
                 "severity": degradation.severity,
                 "permanent": false,
                 "message": degradation.message,
                 "repair": degradation.repair,
                 "resolution": "retry_or_inspect_local_registry",
-            })),
-            serde_json::json!({
-                "scope": "response",
-                "permanent": false,
-                "distinctCount": 1,
-                "emittedCount": 1,
-                "suppressedCount": 0,
-                "sessionOccurrenceCount": 1,
-                "sessionSuppressedCount": advisory_session.suppressed_count,
-            }),
-        ),
-        None => (
-            None,
-            serde_json::json!({
-                "scope": "response",
-                "permanent": serde_json::Value::Null,
-                "distinctCount": 0,
-                "emittedCount": 0,
-                "suppressedCount": 0,
-                "sessionOccurrenceCount": 0,
-                "sessionSuppressedCount": advisory_session.suppressed_count,
-            }),
-        ),
+                })),
+                serde_json::json!({
+                    "scope": "response",
+                    "permanent": false,
+                    "distinctCount": 1,
+                    "emittedCount": 1,
+                    "suppressedCount": 0,
+                    "sessionOccurrenceCount": 1,
+                    "sessionSuppressedCount": advisory_session.suppressed_count(workspace_id),
+                }),
+            )
+        }
+        None => {
+            if rerank_score_count > 0 {
+                advisory_session.recover_permanent(workspace_id, "rerank_model_unavailable");
+            }
+            (
+                None,
+                serde_json::json!({
+                    "scope": "response",
+                    "permanent": serde_json::Value::Null,
+                    "distinctCount": 0,
+                    "emittedCount": 0,
+                    "suppressedCount": 0,
+                    "sessionOccurrenceCount": 0,
+                    "sessionSuppressedCount": advisory_session.suppressed_count(workspace_id),
+                }),
+            )
+        }
     };
     serde_json::json!({
         "schema": "ee.rerank_posture.v1",
@@ -17506,6 +17606,7 @@ mod tests {
             crate::config::SearchRerankMode::Auto,
             DEFAULT_SEARCH_RERANK_TOP_K,
             &mut advisory_session,
+            DEFAULT_SEARCH_ADVISORY_WORKSPACE,
         );
 
         assert_eq!(posture["schema"], "ee.rerank_posture.v1");
@@ -17528,6 +17629,7 @@ mod tests {
             crate::config::SearchRerankMode::Off,
             12,
             &mut advisory_session,
+            DEFAULT_SEARCH_ADVISORY_WORKSPACE,
         );
 
         assert_eq!(posture["schema"], "ee.rerank_posture.v1");
@@ -17554,6 +17656,7 @@ mod tests {
             crate::config::SearchRerankMode::Auto,
             DEFAULT_SEARCH_RERANK_TOP_K,
             &mut advisory_session,
+            DEFAULT_SEARCH_ADVISORY_WORKSPACE,
         );
 
         assert_eq!(posture["mode"], "reranked");
@@ -17580,6 +17683,7 @@ mod tests {
             crate::config::SearchRerankMode::Auto,
             DEFAULT_SEARCH_RERANK_TOP_K,
             &mut advisory_session,
+            DEFAULT_SEARCH_ADVISORY_WORKSPACE,
         );
 
         assert_eq!(posture["mode"], "fusion_only");
@@ -17600,6 +17704,7 @@ mod tests {
             crate::config::SearchRerankMode::Auto,
             DEFAULT_SEARCH_RERANK_TOP_K,
             &mut advisory_session,
+            DEFAULT_SEARCH_ADVISORY_WORKSPACE,
         );
 
         assert_eq!(posture["mode"], "fusion_only_degraded");
@@ -17746,6 +17851,26 @@ mod tests {
         assert_eq!(source, SearchAdvisorySession::default());
         assert_ne!(staged, source);
         assert_eq!(json["rerank"]["advisorySummary"]["emittedCount"], 1);
+    }
+
+    #[test]
+    fn advisory_session_bounds_workspace_partitions() {
+        let report = rerank_test_report(Vec::new(), vec![SearchDegradation::rerank_model_absent()]);
+        let mut session = SearchAdvisorySession::default();
+
+        for index in 0..=MAX_SEARCH_ADVISORY_WORKSPACES {
+            let workspace_id = format!("workspace-{index:03}");
+            let _ =
+                report.data_json_with_advisory_session_for_workspace(&mut session, &workspace_id);
+        }
+
+        assert_eq!(session.workspaces.len(), MAX_SEARCH_ADVISORY_WORKSPACES);
+        assert!(!session.workspaces.contains_key("workspace-000"));
+        assert!(
+            session
+                .workspaces
+                .contains_key(&format!("workspace-{MAX_SEARCH_ADVISORY_WORKSPACES:03}"))
+        );
     }
 
     #[test]

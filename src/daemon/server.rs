@@ -178,8 +178,7 @@ const DAEMON_SCHEDULER_JOIN_TIMEOUT: Duration = Duration::from_millis(750);
 #[derive(Clone, Debug, Default)]
 pub struct DaemonDispatchPolicy {
     bound_workspace_id: Option<String>,
-    /// Permanent search advisories are emitted once for this daemon process.
-    /// Transient query degradations bypass this session and remain per-response.
+    /// Search advisories are emitted once per active workspace condition.
     search_advisory_session: Arc<Mutex<SearchAdvisorySession>>,
     /// Set once at daemon start when the workspace is bound and the long-lived
     /// write-owner actor is hosted (Inc 2, bd-wx6ou.3). Carries the shared
@@ -2332,10 +2331,12 @@ impl DaemonSearchResult {
     fn from_report(
         report: &SearchReport,
         explain: bool,
+        workspace_id: &str,
         advisory_session: &mut SearchAdvisorySession,
         timing: DaemonSearchTiming,
     ) -> Self {
-        let mut data = report.data_json_with_advisory_session(advisory_session);
+        let mut data =
+            report.data_json_with_advisory_session_for_workspace(advisory_session, workspace_id);
         let human = daemon_search_human_summary(report, &data);
         if explain && let Some(object) = data.as_object_mut() {
             object.insert(
@@ -2763,6 +2764,7 @@ fn dispatch_search(
     let mut method_result = DaemonSearchResult::from_report(
         &report,
         options.explain,
+        authorized_workspace_id,
         &mut staged_advisory_session,
         timing,
     );
@@ -3838,7 +3840,11 @@ fn dispatch_context(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut staged_advisory_session = advisory_session.clone();
-    filter_context_large_gap_advisory(&mut result, &mut staged_advisory_session);
+    filter_context_large_gap_advisory(
+        &mut result,
+        &mut staged_advisory_session,
+        authorized_workspace_id,
+    );
     if daemon_context_deadline_expired(context_started, params.timeout_ms) {
         return daemon_context_deadline_response(
             request,
@@ -3881,6 +3887,7 @@ fn dispatch_context(
 fn filter_context_large_gap_advisory(
     response: &mut serde_json::Value,
     session: &mut SearchAdvisorySession,
+    workspace_id: &str,
 ) {
     const CODE: &str = "search_index_large_gap";
     let has_large_gap = ["/degraded", "/data/degraded"].into_iter().any(|pointer| {
@@ -3893,7 +3900,10 @@ fn filter_context_large_gap_advisory(
                 })
             })
     });
-    if !has_large_gap || session.emit_response_code_once(CODE) {
+    if session.emit_response_code_while_active(workspace_id, CODE, has_large_gap) {
+        return;
+    }
+    if !has_large_gap {
         return;
     }
     for pointer in ["/degraded", "/data/degraded"] {
@@ -4478,9 +4488,18 @@ mod tests {
         report: &SearchReport,
         session: &mut SearchAdvisorySession,
     ) -> (DaemonResponse, serde_json::Value) {
+        advisory_candidate_for_workspace(report, session, TEST_WORKSPACE_ID)
+    }
+
+    fn advisory_candidate_for_workspace(
+        report: &SearchReport,
+        session: &mut SearchAdvisorySession,
+        workspace_id: &str,
+    ) -> (DaemonResponse, serde_json::Value) {
         let result = serde_json::to_value(DaemonSearchResult::from_report(
             report,
             false,
+            workspace_id,
             session,
             DaemonSearchTiming::from_trace(
                 Duration::from_millis(1),
@@ -4542,6 +4561,41 @@ mod tests {
     }
 
     #[test]
+    fn unbound_daemon_advisories_are_isolated_by_request_workspace() {
+        let report = permanent_reranker_advisory_report();
+        let policy = DaemonDispatchPolicy::default();
+        assert!(policy.bound_workspace_id().is_none());
+        let mut session = policy
+            .search_advisory_session()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let (_, first_a) = advisory_candidate_for_workspace(&report, &mut session, "workspace-a");
+        let (_, repeated_a) =
+            advisory_candidate_for_workspace(&report, &mut session, "workspace-a");
+        let (_, first_b) = advisory_candidate_for_workspace(&report, &mut session, "workspace-b");
+
+        assert_eq!(
+            first_a
+                .pointer("/response/data/rerank/advisory/code")
+                .and_then(serde_json::Value::as_str),
+            Some("rerank_model_unavailable")
+        );
+        assert!(
+            repeated_a
+                .pointer("/response/data/rerank/advisory")
+                .is_some_and(serde_json::Value::is_null)
+        );
+        assert_eq!(
+            first_b
+                .pointer("/response/data/rerank/advisory/code")
+                .and_then(serde_json::Value::as_str),
+            Some("rerank_model_unavailable"),
+            "workspace-a must not suppress the first active episode in workspace-b"
+        );
+    }
+
+    #[test]
     fn large_gap_repair_is_once_but_daemon_stale_truth_remains() {
         let first_report = stale_index_advisory_report(108, 1);
         let changed_generation_report = stale_index_advisory_report(112, 2);
@@ -4589,6 +4643,7 @@ mod tests {
         let repeated_result = DaemonSearchResult::from_report(
             &changed_generation_report,
             false,
+            TEST_WORKSPACE_ID,
             &mut repeated_stage,
             DaemonSearchTiming::from_trace(
                 Duration::from_millis(1),
@@ -4625,7 +4680,7 @@ mod tests {
         let mut shared = SearchAdvisorySession::default();
         let mut rejected_stage = shared.clone();
         let mut rejected = context_response();
-        filter_context_large_gap_advisory(&mut rejected, &mut rejected_stage);
+        filter_context_large_gap_advisory(&mut rejected, &mut rejected_stage, TEST_WORKSPACE_ID);
         assert!(rejected["degraded"].as_array().is_some_and(|entries| {
             entries
                 .iter()
@@ -4635,12 +4690,12 @@ mod tests {
 
         let mut delivered_stage = shared.clone();
         let mut delivered = context_response();
-        filter_context_large_gap_advisory(&mut delivered, &mut delivered_stage);
+        filter_context_large_gap_advisory(&mut delivered, &mut delivered_stage, TEST_WORKSPACE_ID);
         shared = delivered_stage;
 
         let mut repeated_stage = shared.clone();
         let mut repeated = context_response();
-        filter_context_large_gap_advisory(&mut repeated, &mut repeated_stage);
+        filter_context_large_gap_advisory(&mut repeated, &mut repeated_stage, TEST_WORKSPACE_ID);
         for pointer in ["/degraded", "/data/degraded"] {
             let codes = repeated
                 .pointer(pointer)

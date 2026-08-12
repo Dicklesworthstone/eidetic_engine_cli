@@ -154,6 +154,91 @@ fn explicit_long_lived_session_emits_permanent_advisory_once() {
 }
 
 #[test]
+fn permanent_reranker_advisory_rearms_after_authoritative_recovery() {
+    let absent = empty_search_report(vec![SearchDegradation {
+        code: "rerank_model_unavailable".to_string(),
+        severity: "low".to_string(),
+        message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
+        repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+    }]);
+    let mut available = empty_search_report(Vec::new());
+    available.status = SearchStatus::Success;
+    available.results.push(SearchHit {
+        doc_id: "memory-reranked".to_string(),
+        score: 0.91,
+        source: ScoreSource::Reranked,
+        fast_score: Some(0.72),
+        quality_score: None,
+        lexical_score: Some(0.63),
+        rerank_score: Some(0.91),
+        metadata: None,
+        explanation: None,
+    });
+    let mut session = SearchAdvisorySession::default();
+
+    let first_absent = absent.data_json_with_advisory_session(&mut session);
+    let recovered = available.data_json_with_advisory_session(&mut session);
+    let second_absent = absent.data_json_with_advisory_session(&mut session);
+
+    assert_eq!(
+        first_absent["rerank"]["advisory"]["code"],
+        "rerank_model_unavailable"
+    );
+    assert!(recovered["rerank"]["advisory"].is_null());
+    assert_eq!(recovered["rerank"]["mode"], "reranked");
+    assert_eq!(
+        second_absent["rerank"]["advisory"]["code"], "rerank_model_unavailable",
+        "absent -> available -> absent must begin a new advisory episode"
+    );
+    assert_eq!(
+        second_absent["rerank"]["advisorySummary"]["sessionOccurrenceCount"],
+        1
+    );
+}
+
+#[test]
+fn large_gap_advisory_rearms_after_ready_response() {
+    let large_gap = empty_search_report(vec![
+        SearchDegradation {
+            code: "search_index_stale".to_string(),
+            severity: "medium".to_string(),
+            message: "Search index is stale.".to_string(),
+            repair: Some("ee index rebuild --workspace .".to_string()),
+        },
+        SearchDegradation {
+            code: "search_index_large_gap".to_string(),
+            severity: "medium".to_string(),
+            message: "Search index generation gap is large.".to_string(),
+            repair: Some("ee index rebuild --workspace .".to_string()),
+        },
+    ]);
+    let ready = empty_search_report(Vec::new());
+    let mut session = SearchAdvisorySession::default();
+
+    let first_gap = large_gap.data_json_with_advisory_session(&mut session);
+    let repeated_gap = large_gap.data_json_with_advisory_session(&mut session);
+    let ready_response = ready.data_json_with_advisory_session(&mut session);
+    let new_gap = large_gap.data_json_with_advisory_session(&mut session);
+
+    assert!(first_gap["degraded"].as_array().is_some_and(|entries| {
+        entries
+            .iter()
+            .any(|entry| entry["code"] == "search_index_large_gap")
+    }));
+    assert!(repeated_gap["degraded"].as_array().is_some_and(|entries| {
+        entries
+            .iter()
+            .all(|entry| entry["code"] != "search_index_large_gap")
+    }));
+    assert_eq!(ready_response["degraded"], serde_json::json!([]));
+    assert!(new_gap["degraded"].as_array().is_some_and(|entries| {
+        entries
+            .iter()
+            .any(|entry| entry["code"] == "search_index_large_gap")
+    }));
+}
+
+#[test]
 fn explicit_session_emits_each_distinct_permanent_advisory_once() {
     let first = empty_search_report(vec![SearchDegradation {
         code: "rerank_model_unavailable".to_string(),
