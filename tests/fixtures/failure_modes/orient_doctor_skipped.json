@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "orient_doctor_skipped",
+  "introduced_by": {
+    "bead": "bd-orient-fast-content-iubub",
+    "epic_letter": "O"
+  },
+  "surfaces": [
+    "orient"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Fast orientation deliberately skips the heavier doctor triage while retaining bounded recent and relevant memory content.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Run static checks before release.' --workspace . --level procedural --kind rule",
+      "ee index rebuild --workspace ."
+    ],
+    "invocation": "ee orient --fast 'prepare release' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "orient_doctor_skipped",
+    "severity": "info",
+    "message_contains": [
+      "Doctor triage was skipped",
+      "--fast"
+    ],
+    "repair_contains": "ee doctor --workspace"
+  }
+}

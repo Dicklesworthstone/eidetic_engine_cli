@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "orient_fast_relevant_unavailable",
+  "introduced_by": {
+    "bead": "bd-orient-fast-content-iubub",
+    "epic_letter": "O"
+  },
+  "surfaces": [
+    "orient"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Fast orientation cannot use the bounded strict lexical provider, for example because the derived lexical index is missing.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Run static checks before release.' --workspace . --level procedural --kind rule"
+    ],
+    "invocation": "ee orient --fast 'prepare release' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "orient_fast_relevant_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "Bounded lexical retrieval was unavailable"
+    ],
+    "repair_contains": "ee index status --workspace . --json",
+    "repair_string": "Run `ee index status --workspace . --json`; rebuild the lexical index if needed.",
+    "repair_command_regex": "(?P<cmd>ee index status --workspace \\. --json)"
+  }
+}

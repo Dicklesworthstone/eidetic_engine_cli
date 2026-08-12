@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "orient_fast_recent_unavailable",
+  "introduced_by": {
+    "bead": "bd-orient-fast-content-iubub",
+    "epic_letter": "O"
+  },
+  "surfaces": [
+    "orient"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Fast orientation cannot open or query the addressed memory store for bounded recent-memory admission.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "mv .ee/ee.db .ee/ee.db.saved",
+      "mkdir .ee/ee.db"
+    ],
+    "invocation": "ee orient --fast 'resume work' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "orient_fast_recent_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "Recent context admission was unavailable"
+    ],
+    "repair_contains": "ee doctor --workspace . --json",
+    "repair_string": "Run `ee doctor --workspace . --json` and inspect the local memory store.",
+    "repair_command_regex": "(?P<cmd>ee doctor --workspace \\. --json)"
+  }
+}

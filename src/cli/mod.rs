@@ -39132,17 +39132,27 @@ where
         }
     };
 
-    let fast_content = args.fast.then(|| {
-        orient_fast_content(&OrientFastContentOptions {
+    let fast_content = if args.fast {
+        let report = orient_fast_content(&OrientFastContentOptions {
             workspace_path: &workspace_path,
             database_path: Some(&addressed_database_path),
             index_dir: Some(&addressed_index_dir),
             task: &args.task,
             max_tokens: args.max_tokens,
             candidate_pool: args.candidate_pool,
-        })
-        .data_json()
-    });
+        });
+        degraded.extend(report.issues.iter().map(|issue| {
+            orient_degradation_value(
+                &issue.code,
+                &issue.severity,
+                issue.message.clone(),
+                issue.repair.clone(),
+            )
+        }));
+        Some(report.data_json())
+    } else {
+        None
+    };
 
     let pack = if args.fast {
         serde_json::Value::Null
@@ -39467,8 +39477,8 @@ fn orient_primer_value(
 }
 
 fn orient_degradation_value(
-    code: &'static str,
-    severity: &'static str,
+    code: &str,
+    severity: &str,
     message: String,
     repair: Option<String>,
 ) -> serde_json::Value {
@@ -70447,7 +70457,7 @@ mod tests {
         )?;
         ensure_equal(
             &envelope["data"]["fastContent"]["strategy"]["relevant"],
-            &serde_json::json!("context_pack_lexical_only_v1"),
+            &serde_json::json!("direct_lexical_admitted_v1"),
             "fast relevant strategy",
         )?;
         ensure_equal(
@@ -70490,6 +70500,21 @@ mod tests {
                     .is_some_and(|provenance| !provenance.is_empty()),
                 &format!("fast {section} binds provenance"),
             )?;
+            if section == "relevant" {
+                ensure_equal(
+                    &item["provenance"],
+                    &serde_json::json!([{
+                        "uri": "file://AGENTS.md#L1",
+                        "scheme": "file",
+                        "label": "AGENTS.md:L1",
+                        "locator": "L1",
+                        "note": format!(
+                            "Memory {memory_id} selected by bounded direct lexical orientation retrieval."
+                        ),
+                    }]),
+                    "exact JSON direct-lexical provenance",
+                )?;
+            }
         }
         let forbidden_ids = [
             tombstoned.memory_id.to_string(),
@@ -70535,7 +70560,7 @@ mod tests {
             "Verify release checksums",
             "orient-cli",
             "recent=context_admitted_recency_v1",
-            "relevant=context_pack_lexical_only_v1",
+            "relevant=direct_lexical_admitted_v1",
             "orient_doctor_skipped",
         ] {
             ensure(
@@ -70564,6 +70589,270 @@ mod tests {
                 &format!("human fast output leaked {forbidden_content:?}"),
             )?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn orient_fast_promotes_lexical_provider_failure_to_top_level_degraded() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path();
+        let init_report = init_workspace(&InitOptions {
+            workspace_path: workspace.to_path_buf(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        if matches!(init_report.status, crate::core::init::InitStatus::Failed) {
+            return Err(format!(
+                "initialize orient provider-failure fixture: {:?}",
+                init_report.action_errors
+            ));
+        }
+        crate::core::memory::remember_memory(&crate::core::memory::RememberMemoryOptions {
+            workspace_path: workspace,
+            database_path: None,
+            content: "Provider failure fixture remains available through recent admission.",
+            workflow_id: None,
+            level: "procedural",
+            kind: "rule",
+            tags: Some("orient-provider-failure"),
+            confidence: 0.9,
+            source: Some("file://AGENTS.md#L1"),
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: false,
+            propose_candidates: false,
+            allow_secret_mention: false,
+        })
+        .map_err(|error| format!("remember orient provider-failure fixture: {error:?}"))?;
+
+        let workspace_arg = workspace.display().to_string();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run(
+            [
+                "ee",
+                "orient",
+                "provider failure fixture",
+                "--workspace",
+                workspace_arg.as_str(),
+                "--fast",
+                "--json",
+            ]
+            .iter()
+            .map(OsString::from),
+            &mut stdout,
+            &mut stderr,
+        );
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "orient provider-failure exit",
+        )?;
+        let output = String::from_utf8(stdout).map_err(|error| error.to_string())?;
+        let envelope: serde_json::Value =
+            serde_json::from_str(&output).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &envelope["data"]["pack"],
+            &serde_json::Value::Null,
+            "fast provider failure never assembles a pack",
+        )?;
+        ensure(
+            envelope["data"]["fastContent"]["recent"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty()),
+            "recent content must survive a lexical provider failure",
+        )?;
+        ensure(
+            envelope["data"]["fastContent"]["relevant"]
+                .as_array()
+                .is_some_and(Vec::is_empty),
+            "missing lexical index must leave relevant content empty",
+        )?;
+        for pointer in ["/degraded", "/data/fastContent/issues"] {
+            let issue = envelope
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_array)
+                .and_then(|entries| {
+                    entries.iter().find(|entry| {
+                        entry["code"] == serde_json::json!("orient_fast_relevant_unavailable")
+                    })
+                })
+                .ok_or_else(|| format!("provider failure missing from {pointer}: {output}"))?;
+            ensure_equal(
+                &issue["severity"],
+                &serde_json::json!("warning"),
+                "provider-failure severity",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn orient_fast_keeps_content_and_promotes_nonfatal_stale_index() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path();
+        let init_report = init_workspace(&InitOptions {
+            workspace_path: workspace.to_path_buf(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        if matches!(init_report.status, crate::core::init::InitStatus::Failed) {
+            return Err(format!(
+                "initialize orient stale-provider fixture: {:?}",
+                init_report.action_errors
+            ));
+        }
+        let indexed = crate::core::memory::remember_memory(
+            &crate::core::memory::RememberMemoryOptions {
+            workspace_path: workspace,
+            database_path: None,
+            content: "Indexed quasar checksum rule remains relevant after the index becomes stale.",
+            workflow_id: None,
+            level: "procedural",
+            kind: "rule",
+            tags: Some("orient-stale-provider,indexed"),
+            confidence: 0.9,
+            source: Some("file://AGENTS.md#L1"),
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: false,
+            propose_candidates: false,
+            allow_secret_mention: false,
+            },
+        )
+        .map_err(|error| format!("remember indexed orient stale fixture: {error:?}"))?;
+        let database_path = workspace.join(".ee").join("ee.db");
+        let rebuild = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+            workspace_path: workspace.to_path_buf(),
+            database_path: Some(database_path),
+            index_dir: None,
+            dry_run: false,
+        })
+        .map_err(|error| format!("rebuild orient stale-provider fixture: {error:?}"))?;
+        ensure_equal(
+            &rebuild.status,
+            &crate::core::index::IndexRebuildStatus::Success,
+            "orient stale-provider fixture index status",
+        )?;
+        let connection = crate::db::DbConnection::open_file(&workspace.join(".ee").join("ee.db"))
+            .map_err(|error| format!("open orient stale-provider store: {error}"))?;
+        let workspace_id = connection
+            .get_memory(&indexed.memory_id.to_string())
+            .map_err(|error| format!("load indexed orient stale fixture: {error}"))?
+            .ok_or_else(|| "indexed orient stale fixture missing".to_owned())?
+            .workspace_id;
+        connection
+            .insert_memory(
+                &MemoryId::from_uuid(uuid::Uuid::from_u128(0x0e14)).to_string(),
+                &crate::db::CreateMemoryInput {
+                    workspace_id,
+                    level: "episodic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "Post-index write exists solely to make the derived index stale."
+                        .to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("file://STALE.md#L1".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["orient-stale-provider".to_owned(), "post-index".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| format!("insert post-index orient stale fixture: {error}"))?;
+
+        let workspace_arg = workspace.display().to_string();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run(
+            [
+                "ee",
+                "orient",
+                "quasar checksum",
+                "--workspace",
+                workspace_arg.as_str(),
+                "--fast",
+                "--json",
+            ]
+            .iter()
+            .map(OsString::from),
+            &mut stdout,
+            &mut stderr,
+        );
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "orient stale-provider exit",
+        )?;
+        let output = String::from_utf8(stdout).map_err(|error| error.to_string())?;
+        let envelope: serde_json::Value =
+            serde_json::from_str(&output).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &envelope["data"]["pack"],
+            &serde_json::Value::Null,
+            "stale fast orientation never assembles a pack",
+        )?;
+        ensure_equal(
+            &envelope["data"]["fastContent"]["strategy"]["relevant"],
+            &serde_json::json!("direct_lexical_admitted_v1"),
+            "stale fast orientation remains direct lexical",
+        )?;
+        ensure(
+            envelope["data"]["fastContent"]["relevant"]
+                .as_array()
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item["snippet"]
+                            .as_str()
+                            .is_some_and(|snippet| snippet.contains("Indexed quasar checksum"))
+                    })
+                }),
+            "nonfatal stale index must still return indexed relevant content",
+        )?;
+        for pointer in ["/degraded", "/data/fastContent/issues"] {
+            let issue = envelope
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_array)
+                .and_then(|entries| {
+                    entries
+                        .iter()
+                        .find(|entry| entry["code"] == serde_json::json!("search_index_stale"))
+                })
+                .ok_or_else(|| format!("stale provider issue missing from {pointer}: {output}"))?;
+            ensure_equal(
+                &issue["severity"],
+                &serde_json::json!("medium"),
+                "stale-provider severity",
+            )?;
+        }
+        ensure(
+            !envelope["degraded"].as_array().is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    matches!(
+                        entry["code"].as_str(),
+                        Some(
+                            "no_relevant_results"
+                                | "rerank_model_unavailable"
+                                | "embed_model_unavailable"
+                                | "semantic_embedder_pending"
+                                | "semantic_embedder_degraded"
+                        )
+                    )
+                })
+            }),
+            "fast orient must not import irrelevant no-result, reranker, or semantic advisory noise",
+        )?;
         Ok(())
     }
 

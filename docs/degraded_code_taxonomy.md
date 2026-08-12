@@ -1017,6 +1017,9 @@ the closed daemon hot-mode surface.
 | `semantic_dimension_exceeds_budget` | medium | bd-17c65.10.6 (J6) — composes with semantic-model gating |
 | `tombstone_visibility_unavailable` | medium | bd-17c65.2.8 (B8) |
 | `tripwire_inputs_incomplete` | warning | bd-17c65.10.6 (J6) |
+| `orient_doctor_skipped` | info | bd-orient-fast-content-iubub — intentional fast-mode doctor omission; bounded recent and relevant content still runs |
+| `orient_fast_recent_unavailable` | warning | bd-orient-fast-content-iubub — bounded recent-memory provider could not admit content |
+| `orient_fast_relevant_unavailable` | warning | bd-orient-fast-content-iubub — strict bounded lexical provider could not return relevant content |
 | `orient_revivals_unavailable` | info | bd-wake-on-condition-inverse-sentinel-65uci — implicit read-only revival evaluation could not be assembled for orient |
 | `unknown_method` | medium | (TBD) |
 | `unsupported_artifact_kind` | high | bd-17c65.10.6 (J6) |

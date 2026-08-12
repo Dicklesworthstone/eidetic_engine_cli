@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -13,18 +14,29 @@ use serde_json::{Value as JsonValue, json};
 
 use super::context::{
     ContextPackOptions, ContextPackOutputOptions, ContextPackOutputProfile,
-    admit_recent_context_memories, run_context_pack,
+    admit_recent_context_memories,
 };
 use super::decide::{DecideItem, DecideRevisitOptions, decide_revisit};
-use super::search::SearchSourceMode;
-use crate::db::DbConnection;
-use crate::models::{DomainError, GLOBAL_MEMORY_SCOPE_TAG, MemoryScope, RedactionLevel};
-use crate::pack::{ContextPackProfile, PackResourceProfile, RenderedPackProvenance};
+use super::search::{
+    SearchDedupMode, SearchDegradation, SearchHit, SearchOptions, SearchSourceMode, SearchStatus,
+    run_context_search_with_preloaded_memories,
+};
+use crate::db::{DbConnection, StoredMemory};
+#[cfg(test)]
+use crate::models::GLOBAL_MEMORY_SCOPE_TAG;
+use crate::models::{DomainError, MemoryId, MemoryScope, ProvenanceUri, RedactionLevel};
+use crate::pack::{
+    ContextPackProfile, PackProvenance, PackResourceProfile, RenderedPackProvenance,
+};
+use crate::runtime::determinism::Deterministic;
 use crate::search::SpeedMode;
 
 pub const ORIENT_DECISIONS_SCHEMA_V1: &str = "ee.orient.decisions.v1";
 pub const ORIENT_FAST_CONTENT_SCHEMA_V1: &str = "ee.orient.fast_content.v1";
 pub const ORIENT_FAST_CONTENT_LIMIT: usize = 5;
+pub const ORIENT_FAST_CANDIDATE_POOL_LIMIT: u32 = 100;
+pub const ORIENT_FAST_RECENT_UNAVAILABLE_CODE: &str = "orient_fast_recent_unavailable";
+pub const ORIENT_FAST_RELEVANT_UNAVAILABLE_CODE: &str = "orient_fast_relevant_unavailable";
 
 /// Maximum child-directory depth scanned by nearby-store discovery.
 pub const NEARBY_STORE_CHILD_DEPTH: usize = 3;
@@ -104,7 +116,10 @@ pub struct OrientFastContentStrategy {
 pub struct OrientFastContentIssue {
     pub component: &'static str,
     pub status: &'static str,
+    pub code: String,
+    pub severity: String,
     pub message: String,
+    pub repair: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -141,7 +156,12 @@ impl OrientFastContentReport {
 #[must_use]
 pub fn orient_fast_content(options: &OrientFastContentOptions<'_>) -> OrientFastContentReport {
     let pack_options = orient_fast_pack_options(options);
-    let mut issues = Vec::new();
+    let mut issues = context_search
+        .report
+        .degraded
+        .iter()
+        .filter_map(orient_fast_relevant_provider_issue)
+        .collect::<Vec<_>>();
 
     let recent = match admit_recent_context_memories(&pack_options, ORIENT_FAST_CONTENT_LIMIT) {
         Ok(items) => items
@@ -158,32 +178,25 @@ pub fn orient_fast_content(options: &OrientFastContentOptions<'_>) -> OrientFast
             issues.push(OrientFastContentIssue {
                 component: "recent",
                 status: "unavailable",
+                code: ORIENT_FAST_RECENT_UNAVAILABLE_CODE.to_owned(),
+                severity: "warning".to_owned(),
                 message: format!("Recent context admission was unavailable: {error}"),
+                repair: Some(
+                    "Run `ee doctor --workspace . --json` and inspect the local memory store."
+                        .to_owned(),
+                ),
             });
             Vec::new()
         }
     };
 
-    let relevant = match run_context_pack(&pack_options) {
-        Ok(response) => {
-            match orient_fast_items_from_pack(&pack_options, response.data.pack.items) {
-                Ok(items) => items,
-                Err(message) => {
-                    issues.push(OrientFastContentIssue {
-                        component: "relevant",
-                        status: "metadata_unavailable",
-                        message,
-                    });
-                    Vec::new()
-                }
-            }
+    let relevant = match orient_fast_relevant_content(options) {
+        Ok((items, provider_issues)) => {
+            issues.extend(provider_issues);
+            items
         }
-        Err(error) => {
-            issues.push(OrientFastContentIssue {
-                component: "relevant",
-                status: "unavailable",
-                message: format!("Lexical context retrieval was unavailable: {error}"),
-            });
+        Err(issue) => {
+            issues.push(issue);
             Vec::new()
         }
     };
@@ -205,7 +218,7 @@ pub fn orient_fast_content(options: &OrientFastContentOptions<'_>) -> OrientFast
         posture,
         strategy: OrientFastContentStrategy {
             recent: "context_admitted_recency_v1",
-            relevant: "context_pack_lexical_only_v1",
+            relevant: "direct_lexical_admitted_v1",
             section_overlap: "preserved",
             recent_limit: ORIENT_FAST_CONTENT_LIMIT,
             relevant_limit: ORIENT_FAST_CONTENT_LIMIT,
@@ -255,89 +268,223 @@ fn orient_fast_pack_options(options: &OrientFastContentOptions<'_>) -> ContextPa
     }
 }
 
-fn orient_fast_items_from_pack(
-    options: &ContextPackOptions,
-    items: Vec<crate::pack::PackDraftItem>,
-) -> Result<Vec<OrientFastContentItem>, String> {
-    if items.is_empty() {
-        return Ok(Vec::new());
-    }
+fn orient_fast_relevant_content(
+    options: &OrientFastContentOptions<'_>,
+) -> Result<(Vec<OrientFastContentItem>, Vec<OrientFastContentIssue>), OrientFastContentIssue> {
     let database_path = options
         .database_path
-        .clone()
+        .map(Path::to_path_buf)
         .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
-    let connection = DbConnection::open_file_read_only(&database_path)
-        .map_err(|error| format!("Relevant memory metadata could not be opened: {error}"))?;
-    let memory_ids = items
-        .iter()
-        .map(|item| item.memory_id.to_string())
-        .collect::<Vec<_>>();
-    let memory_refs = memory_ids.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut memories = connection
-        .get_memories_batch(&memory_refs)
-        .map_err(|error| format!("Relevant memory metadata could not be loaded: {error}"))?;
-    let mut tags = connection
-        .get_memory_tags_batch(&memory_refs)
-        .map_err(|error| format!("Relevant memory tags could not be loaded: {error}"))?;
-
-    let missing_ids = memory_ids
-        .iter()
-        .filter(|id| !memories.contains_key(id.as_str()))
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    if !missing_ids.is_empty()
-        && let Ok(paths) = crate::core::global_store::default_global_store_paths_from_env()
-        && paths.database_path.is_file()
-    {
-        let global_connection =
-            DbConnection::open_file_read_only(&paths.database_path).map_err(|error| {
-                format!("Relevant global memory metadata could not be opened: {error}")
-            })?;
-        if global_connection.needs_migration().map_err(|error| {
-            format!("Relevant global memory migration state could not be inspected: {error}")
-        })? {
-            return Err("Relevant global memory metadata requires a database migration".to_owned());
-        }
-        let global_memories =
-            global_connection
-                .get_memories_batch(&missing_ids)
-                .map_err(|error| {
-                    format!("Relevant global memory metadata could not be loaded: {error}")
-                })?;
-        let mut global_tags = global_connection
-            .get_memory_tags_batch(&missing_ids)
-            .map_err(|error| format!("Relevant global memory tags could not be loaded: {error}"))?;
-        for id in global_memories.keys() {
-            let item_tags = global_tags.entry(id.clone()).or_default();
-            if !item_tags.iter().any(|tag| tag == GLOBAL_MEMORY_SCOPE_TAG) {
-                item_tags.push(GLOBAL_MEMORY_SCOPE_TAG.to_owned());
-            }
-        }
-        memories.extend(global_memories);
-        tags.extend(global_tags);
+    let connection = DbConnection::open_file_read_only(&database_path).map_err(|error| {
+        orient_fast_relevant_unavailable(format!(
+            "Bounded lexical retrieval could not open the read-only memory store: {error}"
+        ))
+    })?;
+    if connection.needs_migration().map_err(|error| {
+        orient_fast_relevant_unavailable(format!(
+            "Bounded lexical retrieval could not inspect migration state: {error}"
+        ))
+    })? {
+        return Err(orient_fast_relevant_unavailable(
+            "Bounded lexical retrieval requires a database migration.".to_owned(),
+        ));
     }
 
-    let mut rendered = Vec::with_capacity(items.len());
-    for item in items {
-        // Secret-shaped pack items are never useful orientation output. The
-        // pack path has already replaced their content, and dropping them here
-        // also prevents their identifiers from leaking into fast output.
-        if !item.redactions.is_empty() {
+    let candidate_limit = options
+        .candidate_pool
+        .max(ORIENT_FAST_CONTENT_LIMIT as u32)
+        .min(ORIENT_FAST_CANDIDATE_POOL_LIMIT);
+    let determinism = Deterministic::from_seed(0);
+    let context_search = run_context_search_with_preloaded_memories(
+        &SearchOptions {
+            workspace_path: options.workspace_path.to_path_buf(),
+            database_path: Some(database_path),
+            index_dir: options.index_dir.map(Path::to_path_buf),
+            query: options.task.to_owned(),
+            limit: candidate_limit,
+            speed: SpeedMode::Instant,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::LexicalOnly,
+            strict_source_mode: true,
+            memory_scope: MemoryScope::Workspace,
+            strict_scope: false,
+        },
+        &connection,
+        None,
+        &determinism,
+        None,
+    )
+    .map_err(|error| {
+        orient_fast_relevant_unavailable(format!(
+            "Bounded lexical retrieval was unavailable: {error}"
+        ))
+    })?;
+    let mut issues = Vec::new();
+    if context_search.report.source_mode_applied != SearchSourceMode::LexicalOnly
+        || context_search.report.source_mode_fallback
+    {
+        return Err(orient_fast_relevant_unavailable(format!(
+            "Bounded lexical retrieval applied source mode `{}` instead of lexical_only.",
+            context_search.report.source_mode_applied.as_str()
+        )));
+    }
+    if matches!(
+        context_search.report.status,
+        SearchStatus::IndexNotFound | SearchStatus::IndexError
+    ) {
+        return Err(orient_fast_relevant_unavailable(format!(
+            "Bounded lexical retrieval ended with status `{}`.",
+            context_search.report.status.as_str()
+        )));
+    }
+
+    let mut rendered = Vec::with_capacity(ORIENT_FAST_CONTENT_LIMIT);
+    for hit in &context_search.report.results {
+        if rendered.len() >= ORIENT_FAST_CONTENT_LIMIT {
+            break;
+        }
+        let Some(memory) = context_search.preloaded_memories.get(&hit.doc_id) else {
+            issues.push(OrientFastContentIssue {
+                component: "relevant",
+                status: "metadata_unavailable",
+                code: ORIENT_FAST_RELEVANT_UNAVAILABLE_CODE.to_owned(),
+                severity: "warning".to_owned(),
+                message: format!(
+                    "Bounded lexical retrieval omitted admitted memory metadata for {}.",
+                    hit.doc_id
+                ),
+                repair: Some("Run `ee index rebuild --workspace .`.".to_owned()),
+            });
+            continue;
+        };
+        // Fast orientation is fail-closed for secret-bearing and sealed
+        // bodies. Search has already admitted scope, lifecycle, and source
+        // mode; this final screen prevents identifiers or placeholders from
+        // becoming a side channel in the compact response.
+        if memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+            || !crate::policy::redact_secret_like_content(&memory.content)
+                .redacted_reasons
+                .is_empty()
+        {
             continue;
         }
-        let id = item.memory_id.to_string();
-        let memory = memories.get(&id).ok_or_else(|| {
-            format!("Relevant memory metadata was missing for admitted item {id}")
-        })?;
+        let Some(provenance) = orient_fast_provenance(memory, options.workspace_path) else {
+            continue;
+        };
         rendered.push(OrientFastContentItem {
-            id: id.clone(),
-            snippet: orient_fast_snippet(&item.content),
+            id: memory.id.clone(),
+            snippet: orient_fast_snippet(&memory.content),
             created_at: memory.created_at.clone(),
-            tags: tags.get(&id).cloned().unwrap_or_else(Vec::new),
-            provenance: item.rendered_provenance(),
+            tags: orient_fast_search_hit_tags(hit),
+            provenance: vec![provenance],
         });
     }
-    Ok(rendered)
+    Ok((rendered, issues))
+}
+
+fn orient_fast_relevant_unavailable(message: String) -> OrientFastContentIssue {
+    OrientFastContentIssue {
+        component: "relevant",
+        status: "unavailable",
+        code: ORIENT_FAST_RELEVANT_UNAVAILABLE_CODE.to_owned(),
+        severity: "warning".to_owned(),
+        message,
+        repair: Some(
+            "Run `ee index status --workspace . --json`; rebuild the lexical index if needed."
+                .to_owned(),
+        ),
+    }
+}
+
+/// Keep only degradations that say the bounded lexical provider or its live
+/// admission checks were incomplete. Ranking advisories and expected
+/// visibility filters do not describe a provider failure and would make fast
+/// orientation noisy without changing whether its content is usable.
+fn orient_fast_relevant_provider_issue(
+    degradation: &SearchDegradation,
+) -> Option<OrientFastContentIssue> {
+    matches!(
+        degradation.code.as_str(),
+        "search_index_stale"
+            | "search_index_large_gap"
+            | "search_index_degraded"
+            | "index_missing"
+            | "index_corrupt"
+            | "search_unavailable"
+            | "lexical_unavailable"
+            | "profile_search_limit_capped"
+            | "scope_metadata_unavailable"
+            | "tombstone_visibility_unavailable"
+            | "evidence_live_admission_filtered"
+    )
+    .then(|| OrientFastContentIssue {
+        component: "relevant",
+        status: "degraded",
+        code: degradation.code.clone(),
+        severity: degradation.severity.clone(),
+        message: degradation.message.clone(),
+        repair: degradation.repair.clone(),
+    })
+}
+
+fn orient_fast_search_hit_tags(hit: &SearchHit) -> Vec<String> {
+    let Some(value) = hit
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("tags"))
+    else {
+        return Vec::new();
+    };
+    if let Some(tags) = value.as_array() {
+        return tags
+            .iter()
+            .filter_map(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_owned)
+            .collect();
+    }
+    value.as_str().map_or_else(Vec::new, |tags| {
+        tags.split(',')
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_owned)
+            .collect()
+    })
+}
+
+fn orient_fast_provenance(
+    memory: &StoredMemory,
+    workspace_path: &Path,
+) -> Option<RenderedPackProvenance> {
+    let memory_id = MemoryId::from_str(&memory.id).ok()?;
+    let uri = memory
+        .provenance_uri
+        .as_deref()
+        .and_then(|raw| ProvenanceUri::from_str(raw).ok())
+        .unwrap_or(ProvenanceUri::EeMemory(memory_id));
+    let active_workspace_id = crate::core::curate::stable_workspace_id(workspace_path);
+    let note = if memory.workspace_id == active_workspace_id {
+        format!(
+            "Memory {} selected by bounded direct lexical orientation retrieval.",
+            memory.id
+        )
+    } else {
+        format!(
+            "Memory {} selected by bounded direct lexical cross_shard_read; origin_workspace_id={}; orientation_workspace_id={}.",
+            memory.id, memory.workspace_id, active_workspace_id
+        )
+    };
+    PackProvenance::new(uri, note)
+        .ok()
+        .map(|provenance| provenance.rendered())
 }
 
 fn orient_fast_snippet(content: &str) -> String {
@@ -967,6 +1114,32 @@ mod tests {
             .ok_or_else(|| "positive fixture memory missing".to_owned())?
             .workspace_id;
 
+        let path_provenance_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x50)).to_string();
+        connection
+            .insert_memory(
+                &path_provenance_id,
+                &CreateMemoryInput {
+                    workspace_id: active_workspace.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Release checksum provenance must be redacted before orientation."
+                        .to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.9,
+                    importance: 0.9,
+                    provenance_uri: Some(
+                        "file:///Users/jemanuel/private/orient-proof/AGENTS.md#L7".to_owned(),
+                    ),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["orient-positive".to_owned(), "provenance".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| format!("insert path-provenance fixture: {error}"))?;
+
         let secret_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x51)).to_string();
         connection
             .insert_memory(
@@ -1099,6 +1272,34 @@ mod tests {
                 "positive content/tags were not bound: {positive:?}"
             ));
         }
+        ensure_equal(
+            &positive.provenance,
+            &vec![RenderedPackProvenance {
+                uri: "file://AGENTS.md#L1".to_owned(),
+                scheme: "file".to_owned(),
+                label: "AGENTS.md:L1".to_owned(),
+                locator: Some("L1".to_owned()),
+                note: format!(
+                    "Memory {positive_id} selected by bounded direct lexical orientation retrieval."
+                ),
+            }],
+            "exact direct-lexical provenance",
+        )?;
+        let path_provenance = report
+            .relevant
+            .iter()
+            .find(|item| item.id == path_provenance_id)
+            .and_then(|item| item.provenance.first())
+            .ok_or_else(|| "path-provenance relevant item missing".to_owned())?;
+        ensure_equal(
+            &path_provenance.uri,
+            &"file://[REDACTED_PATH]#L7".to_owned(),
+            "absolute provenance URI redaction",
+        )?;
+        ensure(
+            !path_provenance.label.contains("/Users/") && !path_provenance.note.contains("/Users/"),
+            format!("rendered provenance leaked an absolute path: {path_provenance:?}"),
+        )?;
 
         let forbidden = [secret_id, tombstoned_id, future_id, out_of_scope_id];
         for forbidden_id in forbidden {
@@ -1115,6 +1316,48 @@ mod tests {
         if encoded.contains("orient_fast_must_not_emit") {
             return Err("secret-shaped content leaked through fast content".to_owned());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn orient_fast_relevant_provider_is_direct_lexical_and_non_persisting() -> TestResult {
+        let source = include_str!("orient.rs");
+        let provider_start = source
+            .find("fn orient_fast_relevant_content(")
+            .ok_or_else(|| "orient-fast relevant provider source missing".to_owned())?;
+        let provider_end = source[provider_start..]
+            .find("fn orient_fast_snippet(")
+            .map(|offset| provider_start + offset)
+            .ok_or_else(|| "orient-fast provider source boundary missing".to_owned())?;
+        let provider = &source[provider_start..provider_end];
+        for required in [
+            "DbConnection::open_file_read_only",
+            "run_context_search_with_preloaded_memories",
+            "source_mode: SearchSourceMode::LexicalOnly",
+            "strict_source_mode: true",
+            ".min(ORIENT_FAST_CANDIDATE_POOL_LIMIT)",
+        ] {
+            ensure(
+                provider.contains(required),
+                format!("direct lexical provider lost required guard {required:?}"),
+            )?;
+        }
+        for forbidden in [
+            "run_context_pack",
+            "SearchSourceMode::Hybrid",
+            "SearchSourceMode::SemanticOnly",
+            "persist_pack",
+        ] {
+            ensure(
+                !provider.contains(forbidden),
+                format!("direct lexical provider contains forbidden path {forbidden:?}"),
+            )?;
+        }
+        ensure(
+            provider.contains("&connection,\n        None,\n        &determinism,\n        None,"),
+            "direct lexical provider must pass no audit connection and no embedder override"
+                .to_owned(),
+        )?;
         Ok(())
     }
 
