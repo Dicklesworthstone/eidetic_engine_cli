@@ -2387,8 +2387,8 @@ impl EffectManifest {
             ),
             CommandEffect::durable_write(
                 "memory revise",
-                vec!["memories", "audit_log"],
-                "Inserts a new memory row with the same logical_id as the original, sets the prior row's valid_to, and emits a memory.revise audit entry (N15.2 / bd-17c65.14.15.3)",
+                vec!["memories", "search_index_jobs", "audit_log"],
+                "Inserts a new memory row with the same logical_id as the original, sets the prior row's valid_to, emits a memory.revise audit entry, atomically enqueues the new live row in search_index_jobs, then reconciles that durable job post-commit with truthful immediate-or-queued status (N15.2 / bd-17c65.14.15.3 / bd-index-auto-freshness-m5kwf)",
             ),
             CommandEffect::durable_write(
                 "memory expire",

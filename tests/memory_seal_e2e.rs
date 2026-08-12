@@ -335,6 +335,196 @@ fn seal_reveal_lifecycle_end_to_end() -> TestResult {
 }
 
 #[test]
+fn exact_placeholder_seal_reveal_stays_atomic_fresh_and_searchable() -> TestResult {
+    let workspace = temp_workspace()?;
+    let ws = workspace.path().to_string_lossy().to_string();
+    let init = run_ee(&ws, &["init", "--json"])?;
+    ensure_success(&init, "exact-placeholder init")?;
+    let sealed = run_ee(
+        &ws,
+        &[
+            "remember",
+            MEMORY_SEAL_PLACEHOLDER_CONTENT,
+            "--seal",
+            "--level",
+            "semantic",
+            "--kind",
+            "decision",
+            "--json",
+        ],
+    )?;
+    ensure_success(&sealed, "exact-placeholder remember --seal")?;
+    let sealed_envelope = stdout_json(&sealed, "exact-placeholder remember --seal")?;
+    let original_id = sealed_envelope
+        .pointer("/data/memoryId")
+        .or_else(|| sealed_envelope.pointer("/data/memory_id"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("exact-placeholder seal omitted memory id: {sealed_envelope}"))?
+        .to_owned();
+
+    let content_file = workspace.path().join("exact-placeholder.txt");
+    fs::write(&content_file, MEMORY_SEAL_PLACEHOLDER_CONTENT.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let reveal = run_ee(
+        &ws,
+        &[
+            "memory",
+            "reveal",
+            &original_id,
+            "--content-file",
+            content_file.to_str().unwrap(),
+            "--json",
+        ],
+    )?;
+    ensure_success(&reveal, "exact-placeholder reveal")?;
+    let reveal_envelope = stdout_json(&reveal, "exact-placeholder reveal")?;
+    ensure(
+        reveal_envelope.pointer("/data/indexStatus")
+            == Some(&serde_json::Value::String("indexed".to_owned())),
+        format!("exact-placeholder reveal did not reconcile its index: {reveal_envelope}"),
+    )?;
+    let revealed_id = reveal_envelope
+        .pointer("/data/revealedMemoryId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("exact-placeholder reveal omitted live id: {reveal_envelope}"))?
+        .to_owned();
+    ensure(
+        revealed_id != original_id,
+        "exact-placeholder reveal must mint a live revision",
+    )?;
+
+    let connection = DbConnection::open_file(&workspace.path().join(".ee").join("ee.db"))
+        .map_err(|error| error.to_string())?;
+    let original = connection
+        .get_memory(&original_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "exact-placeholder original missing".to_owned())?;
+    let revealed = connection
+        .get_memory(&revealed_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "exact-placeholder live revision missing".to_owned())?;
+    ensure(
+        original.valid_to.is_some(),
+        "exact-placeholder original was not expired",
+    )?;
+    ensure(
+        revealed.valid_to.is_none(),
+        "exact-placeholder revision is not live",
+    )?;
+    ensure(
+        revealed.content.as_bytes() == MEMORY_SEAL_PLACEHOLDER_CONTENT.as_bytes(),
+        "exact-placeholder revealed bytes changed",
+    )?;
+    ensure(
+        connection
+            .get_memory_logical_id(&revealed_id)
+            .map_err(|error| error.to_string())?
+            .as_deref()
+            == Some(original_id.as_str()),
+        "exact-placeholder revision lost the original seal lineage",
+    )?;
+    ensure(
+        connection
+            .count_memory_chain(&original_id)
+            .map_err(|error| error.to_string())?
+            == 2,
+        "exact-placeholder reveal did not create exactly one live revision",
+    )?;
+    let seal = connection
+        .get_memory_seal(&original_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "exact-placeholder seal row missing".to_owned())?;
+    ensure(
+        seal.revealed_at.is_some() && seal.reveal_verified == Some(true),
+        format!("exact-placeholder seal was not verified: {seal:?}"),
+    )?;
+    let audits = connection
+        .list_audit_entries(Some(&original.workspace_id), None)
+        .map_err(|error| error.to_string())?;
+    ensure(
+        audits.iter().any(|audit| {
+            audit.action == "memory.revise"
+                && audit.target_id.as_deref() == Some(revealed_id.as_str())
+        }),
+        "exact-placeholder reveal omitted memory.revise audit",
+    )?;
+    ensure(
+        audits.iter().any(|audit| {
+            audit.action == "memory.reveal"
+                && audit.target_id.as_deref() == Some(original_id.as_str())
+        }),
+        "exact-placeholder reveal omitted memory.reveal audit",
+    )?;
+    let index_job_id = reveal_envelope
+        .pointer("/data/indexJobId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("exact-placeholder reveal omitted index job: {reveal_envelope}"))?;
+    let index_job = connection
+        .get_search_index_job(index_job_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "exact-placeholder index job missing".to_owned())?;
+    ensure(
+        index_job.document_id.as_deref() == Some(revealed_id.as_str())
+            && index_job.status == "completed",
+        format!("exact-placeholder index job did not publish the live id: {index_job:?}"),
+    )?;
+    drop(connection);
+
+    let status = run_ee(&ws, &["index", "status", "--json"])?;
+    ensure_success(&status, "exact-placeholder index status")?;
+    let status_envelope = stdout_json(&status, "exact-placeholder index status")?;
+    let db_generation = status_envelope
+        .pointer("/data/dbGeneration")
+        .and_then(serde_json::Value::as_u64);
+    let index_generation = status_envelope
+        .pointer("/data/indexGeneration")
+        .and_then(serde_json::Value::as_u64);
+    ensure(
+        db_generation.is_some() && db_generation == index_generation,
+        format!("reveal left stale generations: {status_envelope}"),
+    )?;
+
+    let search = run_ee(
+        &ws,
+        &[
+            "search",
+            "sealed memory content committed reveal",
+            "--limit",
+            "100",
+            "--source-mode",
+            "lexical_only",
+            "--strict-source-mode",
+            "--json",
+        ],
+    )?;
+    ensure_success(&search, "exact-placeholder search")?;
+    let search_stdout = String::from_utf8_lossy(&search.stdout);
+    ensure(
+        search_stdout.contains(&revealed_id),
+        format!("search did not return exact revealed id {revealed_id}: {search_stdout}"),
+    )?;
+    let pack = run_ee(
+        &ws,
+        &["pack", "sealed memory content committed reveal", "--json"],
+    )?;
+    ensure_success(&pack, "exact-placeholder pack")?;
+    ensure(
+        String::from_utf8_lossy(&pack.stdout).contains(&revealed_id),
+        "pack did not admit the revealed live revision",
+    )?;
+
+    let original_why_seal = why_seal(&ws, &original_id)?;
+    let revealed_why_seal = why_seal(&ws, &revealed_id)?;
+    ensure(
+        original_why_seal == revealed_why_seal
+            && revealed_why_seal.get("revealVerified") == Some(&serde_json::Value::Bool(true)),
+        format!(
+            "exact-placeholder why lineage diverged: original={original_why_seal}, revealed={revealed_why_seal}"
+        ),
+    )
+}
+
+#[test]
 fn sealed_memory_stays_out_of_search_and_packs() -> TestResult {
     let workspace = temp_workspace()?;
     let ws = workspace.path().to_string_lossy().to_string();

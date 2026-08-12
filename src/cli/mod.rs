@@ -176,9 +176,9 @@ use crate::core::memory::{
     MemoryReviseReport, MemoryTagsMode, MemoryTagsOptions, MemoryTagsReport, MemoryTimelineOptions,
     RememberBatchOptions, RememberGitCaptureMode, RememberGitCaptureOptions, RememberMemoryOptions,
     RememberMemoryReport, RememberOutcome, RememberWriteControls, ReviseMemoryOptions,
-    ReviseReason, WorkflowCloseOptions, WorkflowCloseReport, WorkflowCreateOptions,
-    build_memory_timeline, close_workflow, create_workflow, expire_memory, get_memory_details,
-    list_memories, remember_git_capture_candidate_from_repo,
+    ReviseReason, UnchangedRevisionPolicy, WorkflowCloseOptions, WorkflowCloseReport,
+    WorkflowCreateOptions, build_memory_timeline, close_workflow, create_workflow, expire_memory,
+    get_memory_details, list_memories, remember_git_capture_candidate_from_repo,
     remember_global_memory_with_controls_and_typed_fields, remember_memory_batch_stdin,
     remember_memory_with_controls_and_typed_fields, revise_memory,
     revise_memory_with_transaction_hook, update_memory_level, update_memory_link,
@@ -37396,6 +37396,7 @@ where
             actor: args.actor.as_deref(),
             dry_run: false,
         },
+        UnchangedRevisionPolicy::RecordSealTransition,
         |transaction_connection, context| {
             if !transaction_connection
                 .mark_memory_seal_revealed(&context.original_id, &context.revised_at)?
@@ -37455,6 +37456,8 @@ where
         "revealedMemoryId": report.new_id,
         "revisionGroupId": report.revision_group_id,
         "revisionNumber": report.revision_number,
+        "indexJobId": report.index_job_id,
+        "indexStatus": report.index_status,
     });
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
@@ -37462,8 +37465,12 @@ where
             write_stdout(
                 stdout,
                 &format!(
-                    "Revealed sealed memory {}\n  Commitment verified: {}\n  Sealed at: {}\n  Revealed memory: {}\n",
-                    args.memory_id, seal.content_commitment, seal.sealed_at, revealed_id
+                    "Revealed sealed memory {}\n  Commitment verified: {}\n  Sealed at: {}\n  Revealed memory: {}\n  Index status: {}\n",
+                    args.memory_id,
+                    seal.content_commitment,
+                    seal.sealed_at,
+                    revealed_id,
+                    report.index_status
                 ),
             )
         }
@@ -52920,10 +52927,15 @@ impl MemoryReviseReport {
             )
         } else if self.success {
             let new_id = self.new_id.as_deref().unwrap_or("unknown");
-            format!(
+            let mut output = format!(
                 "Revised memory {}\n  New memory: {}\n  Reason: {}\n  Changed fields: {}\n",
                 self.original_id, new_id, self.reason, changed_fields
-            )
+            );
+            if let Some(index_job_id) = &self.index_job_id {
+                output.push_str(&format!("  Index job: {index_job_id}\n"));
+            }
+            output.push_str(&format!("  Index status: {}\n", self.index_status));
+            output
         } else {
             let error = self.error.as_deref().unwrap_or("Memory revision failed");
             format!(
@@ -52985,12 +52997,8 @@ impl MemoryReviseReport {
                 "changed_fields": self.changed_fields,
                 "impactAnalysis": impact_analysis,
                 "audit_id": null,
-                "index_job_id": null,
-                "index_status": if self.success && !self.dry_run {
-                    "pending"
-                } else {
-                    "not_scheduled"
-                },
+                "index_job_id": self.index_job_id,
+                "index_status": self.index_status,
                 "policy": if self.success && !self.dry_run {
                     "writes_enabled"
                 } else {
@@ -85158,6 +85166,24 @@ demos:
         }
     }
 
+    #[test]
+    fn memory_revise_hook_failure_report_maps_to_storage() -> TestResult {
+        let message = "Failed to commit revision: planted reveal hook failure";
+        let report = crate::core::memory::MemoryReviseReport::error(
+            "mem_01234567890123456789012345".to_owned(),
+            message.to_owned(),
+        );
+
+        match super::memory_revise_error_to_domain(&report, "mem_01234567890123456789012345") {
+            DomainError::Storage {
+                message: actual, ..
+            } => ensure_equal(&actual, &message.to_owned(), "hook failure storage message"),
+            other => Err(format!(
+                "transaction hook failure must map to Storage, got {other:?}"
+            )),
+        }
+    }
+
     fn memory_revise_impact_report_fixture() -> crate::graph::dominance::MemoryImpactAnalysisReport
     {
         crate::graph::dominance::MemoryImpactAnalysisReport {
@@ -85450,6 +85476,17 @@ demos:
             &value["data"]["changed_fields"],
             &serde_json::json!(["content"]),
             "changed_fields = [content]",
+        )?;
+        ensure(
+            value["data"]["index_job_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty()),
+            "revision response carries its durable index job id",
+        )?;
+        ensure_equal(
+            &value["data"]["index_status"],
+            &serde_json::json!("indexed"),
+            "revision response reports immediate index reconciliation",
         )?;
         ensure_equal(
             &value["data"]["degraded"],

@@ -1763,38 +1763,12 @@ fn remember_memory_inner_with_store(
             fallback_to_full: None,
         }
     } else {
-        match remember_inline_index_publish_route(
+        reconcile_committed_memory_index_job(
             &connection,
             &prepared.workspace_id,
             &index_job_id,
-        ) {
-            RememberIndexPublishRoute::Defer => {
-                remember_index_job_queued_for_coalescing(&index_job_id)
-            }
-            RememberIndexPublishRoute::LeadCoalescedDrain => remember_lead_coalesced_index_drain(
-                &connection,
-                &prepared.workspace_id,
-                &index_job_id,
-                &index_dir,
-            ),
-            RememberIndexPublishRoute::Inline => {
-                let report =
-                    process_remember_index_job_with_retry(&connection, &index_job_id, &index_dir)?;
-                if let Err(error) = remember_drain_peer_tail_after_publish(
-                    &connection,
-                    &prepared.workspace_id,
-                    &index_dir,
-                ) {
-                    tracing::warn!(
-                        target: "ee::memory",
-                        workspace_id = prepared.workspace_id.as_str(),
-                        error = %error,
-                        "remember indexed its own row but could not inspect or drain the peer tail"
-                    );
-                }
-                report
-            }
-        }
+            &index_dir,
+        )
     };
     let index_status = remember_index_status(&index_report);
 
@@ -2037,6 +2011,55 @@ fn remember_index_status(report: &IndexProcessingJobReport) -> String {
         "skipped" => "queued".to_owned(),
         "failed" => "failed".to_owned(),
         other => other.to_owned(),
+    }
+}
+
+/// Reconcile an already-committed memory index job without rewriting the
+/// durable source-of-truth mutation as a whole-command failure.
+fn reconcile_committed_memory_index_job(
+    connection: &DbConnection,
+    workspace_id: &str,
+    index_job_id: &str,
+    index_dir: &Path,
+) -> IndexProcessingJobReport {
+    match remember_inline_index_publish_route(connection, workspace_id, index_job_id) {
+        RememberIndexPublishRoute::Defer => remember_index_job_queued_for_coalescing(index_job_id),
+        RememberIndexPublishRoute::LeadCoalescedDrain => {
+            remember_lead_coalesced_index_drain(connection, workspace_id, index_job_id, index_dir)
+        }
+        RememberIndexPublishRoute::Inline => {
+            match process_remember_index_job_with_retry(connection, index_job_id, index_dir) {
+                Ok(report) => {
+                    if let Err(error) =
+                        remember_drain_peer_tail_after_publish(connection, workspace_id, index_dir)
+                    {
+                        tracing::warn!(
+                            target: "ee::memory",
+                            workspace_id,
+                            index_job_id,
+                            error = %error,
+                            "memory write indexed its own row but could not inspect or drain the peer tail"
+                        );
+                    }
+                    report
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "ee::memory",
+                        workspace_id,
+                        index_job_id,
+                        error = %error.message(),
+                        "memory write committed but immediate derived-index reconciliation did not complete"
+                    );
+                    let mut report =
+                        remember_index_job_report_from_durable_state(connection, index_job_id);
+                    if report.error.is_none() {
+                        report.error = Some(error.message());
+                    }
+                    report
+                }
+            }
+        }
     }
 }
 
@@ -4817,35 +4840,12 @@ fn finish_remember_memory_after_primary_commit(
             fallback_to_full: None,
         }
     } else {
-        match remember_inline_index_publish_route(connection, &prepared.workspace_id, &index_job_id)
-        {
-            RememberIndexPublishRoute::Defer => {
-                remember_index_job_queued_for_coalescing(&index_job_id)
-            }
-            RememberIndexPublishRoute::LeadCoalescedDrain => remember_lead_coalesced_index_drain(
-                connection,
-                &prepared.workspace_id,
-                &index_job_id,
-                &index_dir,
-            ),
-            RememberIndexPublishRoute::Inline => {
-                let report =
-                    process_remember_index_job_with_retry(connection, &index_job_id, &index_dir)?;
-                if let Err(error) = remember_drain_peer_tail_after_publish(
-                    connection,
-                    &prepared.workspace_id,
-                    &index_dir,
-                ) {
-                    tracing::warn!(
-                        target: "ee::memory",
-                        workspace_id = prepared.workspace_id.as_str(),
-                        error = %error,
-                        "daemon remember indexed its own row but could not inspect or drain the peer tail"
-                    );
-                }
-                report
-            }
-        }
+        reconcile_committed_memory_index_job(
+            connection,
+            &prepared.workspace_id,
+            &index_job_id,
+            &index_dir,
+        )
     };
     let index_status = remember_index_status(&index_report);
 
@@ -10896,6 +10896,10 @@ pub struct MemoryReviseReport {
     pub reason: String,
     /// Fields that were changed.
     pub changed_fields: Vec<String>,
+    /// Search-index job enqueued atomically with the revision.
+    pub index_job_id: Option<String>,
+    /// Truthful post-commit derived-index posture.
+    pub index_status: String,
     /// Optional graph-derived impact analysis for dry-run revision previews.
     pub impact_analysis: Option<crate::graph::dominance::MemoryImpactAnalysisReport>,
     /// Error message if revision failed.
@@ -10924,6 +10928,12 @@ impl MemoryReviseReport {
             revision_number: Some(revision_number),
             reason: reason.as_str().to_owned(),
             changed_fields,
+            index_job_id: None,
+            index_status: if dry_run {
+                "dry_run_not_queued".to_owned()
+            } else {
+                "not_scheduled".to_owned()
+            },
             impact_analysis: None,
             error: None,
         }
@@ -10946,6 +10956,8 @@ impl MemoryReviseReport {
             revision_number: None,
             reason: reason.as_str().to_owned(),
             changed_fields,
+            index_job_id: None,
+            index_status: "dry_run_not_queued".to_owned(),
             impact_analysis: None,
             error: None,
         }
@@ -10968,6 +10980,8 @@ impl MemoryReviseReport {
             revision_number: None,
             reason: reason.as_str().to_owned(),
             changed_fields,
+            index_job_id: None,
+            index_status: "not_scheduled".to_owned(),
             impact_analysis: None,
             error: Some(
                 "Memory revision writes are unavailable until immutable revision storage and supersession links are implemented; rerun with --dry-run to preview changes."
@@ -10989,6 +11003,8 @@ impl MemoryReviseReport {
             revision_number: None,
             reason: String::new(),
             changed_fields: Vec::new(),
+            index_job_id: None,
+            index_status: "not_scheduled".to_owned(),
             impact_analysis: None,
             error: Some("Memory not found".to_owned()),
         }
@@ -11007,6 +11023,8 @@ impl MemoryReviseReport {
             revision_number: None,
             reason: String::new(),
             changed_fields: Vec::new(),
+            index_job_id: None,
+            index_status: "not_scheduled".to_owned(),
             impact_analysis: None,
             error: Some("Cannot revise tombstoned memory".to_owned()),
         }
@@ -11025,6 +11043,8 @@ impl MemoryReviseReport {
             revision_number: None,
             reason: String::new(),
             changed_fields: Vec::new(),
+            index_job_id: None,
+            index_status: "not_scheduled".to_owned(),
             impact_analysis: None,
             error: Some(
                 "Cannot revise superseded memory; revise the current revision instead".to_owned(),
@@ -11045,6 +11065,8 @@ impl MemoryReviseReport {
             revision_number: None,
             reason: String::new(),
             changed_fields: Vec::new(),
+            index_job_id: None,
+            index_status: "not_scheduled".to_owned(),
             impact_analysis: None,
             error: Some("No changes specified".to_owned()),
         }
@@ -11063,6 +11085,8 @@ impl MemoryReviseReport {
             revision_number: None,
             reason: String::new(),
             changed_fields: Vec::new(),
+            index_job_id: None,
+            index_status: "not_scheduled".to_owned(),
             impact_analysis: None,
             error: Some(message),
         }
@@ -11075,6 +11099,13 @@ impl MemoryReviseReport {
         impact_analysis: Option<crate::graph::dominance::MemoryImpactAnalysisReport>,
     ) -> Self {
         self.impact_analysis = impact_analysis;
+        self
+    }
+
+    #[must_use]
+    fn with_index_result(mut self, index_job_id: String, index_status: String) -> Self {
+        self.index_job_id = Some(index_job_id);
+        self.index_status = index_status;
         self
     }
 }
@@ -11119,7 +11150,18 @@ pub(crate) fn resolve_memory_seal_lineage(
 ///
 /// If `dry_run` is true, no changes are made but the report shows what would happen.
 pub fn revise_memory(options: &ReviseMemoryOptions<'_>) -> MemoryReviseReport {
-    revise_memory_with_transaction_hook(options, |_, _| Ok(()))
+    revise_memory_with_transaction_hook(options, UnchangedRevisionPolicy::Reject, |_, _| Ok(()))
+}
+
+/// Whether a caller-specific transaction may publish a revision when no
+/// ordinary memory field changed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UnchangedRevisionPolicy {
+    /// Preserve the public `ee memory revise` no-change contract.
+    Reject,
+    /// Record the seal-state transition even when revealed bytes equal the
+    /// public placeholder already stored on the sealed row.
+    RecordSealTransition,
 }
 
 /// Transaction context exposed only to crate-internal revision extensions.
@@ -11139,6 +11181,7 @@ pub(crate) struct RevisionTransactionContext {
 /// operation in the same database transaction.
 pub(crate) fn revise_memory_with_transaction_hook<F>(
     options: &ReviseMemoryOptions<'_>,
+    unchanged_revision_policy: UnchangedRevisionPolicy,
     transaction_hook: F,
 ) -> MemoryReviseReport
 where
@@ -11205,9 +11248,18 @@ where
         }
     }
 
-    // If no changes, return early
+    // Ordinary revisions retain their no-change rejection. Seal reveal is a
+    // real state transition even when the committed bytes happen to equal the
+    // canonical placeholder already stored in the memory row.
     if changed_fields.is_empty() {
-        return MemoryReviseReport::no_changes(options.original_memory_id.to_owned());
+        match unchanged_revision_policy {
+            UnchangedRevisionPolicy::Reject => {
+                return MemoryReviseReport::no_changes(options.original_memory_id.to_owned());
+            }
+            UnchangedRevisionPolicy::RecordSealTransition => {
+                changed_fields.push("seal_state".to_owned());
+            }
+        }
     }
 
     let revised_trust_class = if original.trust_class == TrustClass::PeerHumanAttested.as_str() {
@@ -11232,9 +11284,31 @@ where
         ));
     }
 
+    let workspace = match conn.get_workspace(&original.workspace_id) {
+        Ok(Some(workspace)) => workspace,
+        Ok(None) => {
+            return MemoryReviseReport::error(
+                options.original_memory_id.to_owned(),
+                format!(
+                    "Failed to resolve workspace {} for revision indexing",
+                    original.workspace_id
+                ),
+            );
+        }
+        Err(error) => {
+            return MemoryReviseReport::error(
+                options.original_memory_id.to_owned(),
+                format!("Failed to load revision workspace: {error}"),
+            );
+        }
+    };
+    let index_dir = PathBuf::from(workspace.path)
+        .join(".ee")
+        .join(DEFAULT_INDEX_SUBDIR);
+
     // N15.2 (bd-17c65.14.15.3): turn on the immutable-revision write path.
     //
-    // The transaction does three things atomically:
+    // The transaction does four things atomically:
     //   1. Inserts a new memory row with a fresh `id` but the same
     //      `logical_id` as the original (the revision chain identifier
     //      that V043 added). The new row carries `valid_from = now()`
@@ -11244,6 +11318,7 @@ where
     //   3. Records a `memory.revise` audit entry with `from_id`,
     //      `to_id`, `logical_id`, `revision_number`, `changed_fields`,
     //      and the caller's reason.
+    //   4. Enqueues the new live row for derived-index reconciliation.
     let logical_id = match conn.get_memory_logical_id(options.original_memory_id) {
         Ok(Some(id)) => id,
         Ok(None) => {
@@ -11291,6 +11366,7 @@ where
 
     let new_id = MemoryId::now().to_string();
     let audit_id = generate_audit_id();
+    let index_job_id = generate_search_index_job_id();
     let revised_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     let memory_input = CreateMemoryInput {
         workspace_id: original.workspace_id.clone(),
@@ -11307,6 +11383,13 @@ where
         tags: new_tags,
         valid_from: Some(revised_at.clone()),
         valid_to: None,
+    };
+    let index_input = CreateSearchIndexJobInput {
+        workspace_id: original.workspace_id.clone(),
+        job_type: SearchIndexJobType::SingleDocument,
+        document_source: Some("memory".to_owned()),
+        document_id: Some(new_id.clone()),
+        documents_total: 1,
     };
     let audit_details = serde_json::json!({
         "from_id": options.original_memory_id,
@@ -11361,6 +11444,7 @@ where
                 },
             )?;
             transaction_hook(&conn, &transaction_context)?;
+            conn.insert_search_index_job(&index_job_id, &index_input)?;
             Ok(())
         })
         .map_err(|error| format!("Failed to commit revision: {error}"));
@@ -11368,6 +11452,14 @@ where
     if let Err(message) = result {
         return MemoryReviseReport::error(options.original_memory_id.to_owned(), message);
     }
+
+    let index_report = reconcile_committed_memory_index_job(
+        &conn,
+        &original.workspace_id,
+        &index_job_id,
+        &index_dir,
+    );
+    let index_status = remember_index_status(&index_report);
 
     MemoryReviseReport::success(
         options.original_memory_id.to_owned(),
@@ -11378,6 +11470,7 @@ where
         changed_fields,
         false,
     )
+    .with_index_result(index_job_id, index_status)
 }
 
 fn memory_revision_impact_analysis(
@@ -14493,6 +14586,12 @@ mod tests {
             })
             .map_err(|error| error.to_string())?;
         ensure(
+            status.health == crate::core::index::IndexHealth::Ready
+                && status.db_generation.is_some(),
+            true,
+            "revision leaves a measurable ready index",
+        )?;
+        ensure(
             status.health == crate::core::index::IndexHealth::Ready,
             true,
             "single remember leaves the index ready",
@@ -16387,8 +16486,7 @@ mod tests {
 
     #[test]
     fn revise_memory_non_dry_run_persists_new_revision() -> TestResult {
-        let (_temp, created) =
-            remember_revisable_memory("Store release checks as durable memory.")?;
+        let (temp, created) = remember_revisable_memory("Store release checks as durable memory.")?;
         let memory_id = created.memory_id.to_string();
 
         let report = revise_memory(&ReviseMemoryOptions {
@@ -16424,6 +16522,11 @@ mod tests {
             vec!["content".to_string()],
             "changed fields",
         )?;
+        ensure(
+            report.index_status.clone(),
+            "indexed".to_owned(),
+            "revision index status",
+        )?;
         ensure(report.error.is_none(), true, "no revision error")?;
 
         let connection = crate::db::DbConnection::open_file(&created.database_path)
@@ -16450,12 +16553,88 @@ mod tests {
             revised.valid_to.is_none(),
             true,
             "new revision remains live",
+        )?;
+        let index_job_id = report
+            .index_job_id
+            .as_deref()
+            .ok_or_else(|| "revision should report its index job".to_owned())?;
+        let index_job = connection
+            .get_search_index_job(index_job_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "revision index job missing".to_owned())?;
+        ensure(
+            index_job.document_id.as_deref(),
+            Some(new_id),
+            "revision index job targets new live id",
+        )?;
+        ensure(
+            index_job.status,
+            SearchIndexJobStatus::Completed.as_str().to_owned(),
+            "revision index job completed",
+        )?;
+
+        let canonical = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let status =
+            crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                workspace_path: canonical.clone(),
+                database_path: None,
+                index_dir: None,
+            })
+            .map_err(|error| error.to_string())?;
+        ensure(
+            status.db_generation.is_some(),
+            true,
+            "revision records a database generation",
+        )?;
+        ensure(
+            status.index_generation.is_some(),
+            true,
+            "revision records an index generation",
+        )?;
+        ensure(
+            status.db_generation,
+            status.index_generation,
+            "revision leaves database and index generations equal",
+        )?;
+        let search = crate::core::search::run_search_with_filters(
+            &crate::core::search::SearchOptions {
+                workspace_path: canonical,
+                database_path: None,
+                index_dir: None,
+                query: "clippy gates durable".to_owned(),
+                limit: 10,
+                speed: crate::search::SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Workspace,
+                strict_scope: false,
+            },
+            None,
+            &[],
+        )
+        .map_err(|error| format!("revision search failed: {error:?}"))?;
+        ensure(
+            search.results.iter().any(|hit| hit.doc_id == new_id),
+            true,
+            "new live revision is immediately searchable",
         )
     }
 
     #[test]
     fn revision_transaction_hook_rolls_back_on_planted_reveal_race() -> TestResult {
-        let (_temp, created) = remember_revisable_memory("sealed placeholder")?;
+        let (_temp, created) =
+            remember_revisable_memory(crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT)?;
         let memory_id = created.memory_id.to_string();
         let connection = crate::db::DbConnection::open_file(&created.database_path)
             .map_err(|error| error.to_string())?;
@@ -16463,10 +16642,16 @@ mod tests {
             .get_memory(&memory_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "sealed fixture memory missing".to_owned())?;
+        let index_job_count_before = connection
+            .list_search_index_jobs(&original.workspace_id, None)
+            .map_err(|error| error.to_string())?
+            .len();
         connection
             .insert_memory_seal(
                 &memory_id,
-                &crate::models::memory_seal_commitment(b"revealed protocol"),
+                &crate::models::memory_seal_commitment(
+                    crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT.as_bytes(),
+                ),
                 "2026-08-11T00:00:00Z",
             )
             .map_err(|error| error.to_string())?;
@@ -16477,7 +16662,7 @@ mod tests {
             &ReviseMemoryOptions {
                 database_path: &created.database_path,
                 original_memory_id: &memory_id,
-                content: Some("revealed protocol"),
+                content: Some(crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT),
                 level: None,
                 kind: None,
                 confidence: None,
@@ -16487,6 +16672,7 @@ mod tests {
                 actor: Some("transaction-regression"),
                 dry_run: false,
             },
+            UnchangedRevisionPolicy::RecordSealTransition,
             |transaction_connection, context| {
                 if !transaction_connection
                     .mark_memory_seal_revealed(&context.original_id, &context.revised_at)?
@@ -16568,6 +16754,14 @@ mod tests {
             }),
             false,
             "revision and reveal audits rolled back",
+        )?;
+        ensure(
+            connection
+                .list_search_index_jobs(&original.workspace_id, None)
+                .map_err(|error| error.to_string())?
+                .len(),
+            index_job_count_before,
+            "failed reveal leaves no partial revision index job",
         )
     }
 
@@ -16764,6 +16958,16 @@ mod tests {
             report.error,
             Some("No changes specified".to_string()),
             "no changes error",
+        )?;
+        ensure(
+            report.index_job_id,
+            None,
+            "ordinary no-change revise enqueues no index job",
+        )?;
+        ensure(
+            report.index_status,
+            "not_scheduled".to_owned(),
+            "ordinary no-change revise index status",
         )
     }
 
