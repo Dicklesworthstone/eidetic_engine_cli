@@ -22123,6 +22123,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn apply_curation_candidate_retries_same_job_after_claimed_publish_failure() -> TestResult {
         let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
