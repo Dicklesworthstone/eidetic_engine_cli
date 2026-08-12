@@ -44,11 +44,11 @@ use crate::core::context::{
     attach_pack_dna_to_context_response, run_context_pack_with_performance_controlled,
 };
 use crate::core::search::{
-    MAX_SEARCH_ADVISORY_WORKSPACES, PERFORMANCE_EXPLAIN_SCHEMA_V1,
-    PERFORMANCE_FALLBACK_REDACTED_MESSAGE, SearchAdvisoryDeliveryReservation,
-    SearchAdvisorySession, SearchAdvisorySettlement, SearchDedupMode, SearchOptions,
-    SearchPerformanceTrace, SearchReport, SearchSourceMode, TypedMemoryFieldFilter,
-    elapsed_timing_json, normalize_memory_kind_filter, run_search_with_performance_and_filters,
+    PERFORMANCE_EXPLAIN_SCHEMA_V1, PERFORMANCE_FALLBACK_REDACTED_MESSAGE,
+    SearchAdvisoryDeliveryReservation, SearchAdvisorySession, SearchAdvisorySettlement,
+    SearchDedupMode, SearchOptions, SearchPerformanceTrace, SearchReport, SearchSourceMode,
+    TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
+    run_search_with_performance_and_filters,
 };
 use crate::models::{MemoryScope, QueryFilters, RedactionLevel};
 use crate::output::{ContextJsonRenderOptions, render_context_response_json_with_options};
@@ -5590,6 +5590,8 @@ impl std::error::Error for ClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::search::MAX_SEARCH_ADVISORY_WORKSPACES;
+    use crate::daemon::protocol::DaemonResponseDelivery;
 
     const TEST_AGENT_ID: &str = "agent-daemon-server-test";
     const TEST_WORKSPACE_ID: &str = "workspace-daemon-server-test";
