@@ -426,8 +426,7 @@ fn import_jsonl_public_response_exposes_and_retries_index_publication_failure() 
     )?;
     let decoded = toon::try_decode(toon.trim_end_matches('\n'), None)
         .map_err(|error| format!("decode TOON import response: {error}"))?;
-    let decoded: Value = serde_json::from_str(&decoded)
-        .map_err(|error| format!("parse decoded TOON JSON: {error}\ndecoded: {decoded}"))?;
+    let decoded = Value::from(decoded);
     ensure_equal(
         &decoded.pointer("/schema"),
         &Some(&json!("ee.response.v2")),

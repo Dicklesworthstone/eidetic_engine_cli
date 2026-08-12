@@ -3179,22 +3179,6 @@ pub(crate) fn search_degraded_data_json(
     .collect()
 }
 
-#[cfg(test)]
-fn search_degraded_data_json_with_advisory_session(
-    source: &'static str,
-    degraded: &[SearchDegradation],
-    session: &mut SearchAdvisorySession,
-    workspace_id: &str,
-) -> Vec<serde_json::Value> {
-    search_degraded_data_json_with_advisory_session_inner(
-        source,
-        degraded,
-        session,
-        workspace_id,
-        None,
-    )
-}
-
 fn search_degraded_data_json_with_advisory_session_inner(
     source: &'static str,
     degraded: &[SearchDegradation],
