@@ -14513,6 +14513,97 @@ mod tests {
     }
 
     #[test]
+    fn three_remembers_leave_index_fresh_and_all_content_searchable() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let contents = [
+            "Freshness proof row one about release gates.",
+            "Freshness proof row two about clippy waivers.",
+            "Freshness proof row three about index posture.",
+        ];
+        for content in contents {
+            let report = remember_memory(&RememberMemoryOptions {
+                workspace_path: temp.path(),
+                database_path: None,
+                content,
+                workflow_id: None,
+                level: "procedural",
+                kind: "rule",
+                tags: Some("freshness"),
+                confidence: 0.9,
+                source: Some("file://README.md#L1"),
+                allow_secret_mention: false,
+                valid_from: None,
+                valid_to: None,
+                dry_run: false,
+                auto_link: false,
+                propose_candidates: false,
+            })
+            .map_err(|error| error.message())?;
+            ensure(report.persisted, true, "remember persisted")?;
+            ensure(report.index_status, "indexed".to_string(), "index status")?;
+        }
+
+        let status =
+            crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                workspace_path: temp.path().to_path_buf(),
+                database_path: None,
+                index_dir: None,
+            })
+            .map_err(|error| format!("index status: {error:?}"))?;
+        ensure(
+            status.health,
+            crate::core::index::IndexHealth::Ready,
+            "index ready after three remembers without rebuild",
+        )?;
+        ensure(
+            status.db_generation == status.index_generation,
+            true,
+            "three remembers leave database and index generations equal",
+        )?;
+
+        let search = crate::core::search::run_search_with_filters(
+            &crate::core::search::SearchOptions {
+                workspace_path: temp.path().to_path_buf(),
+                database_path: None,
+                index_dir: None,
+                query: "freshness proof row".to_owned(),
+                limit: 10,
+                speed: crate::search::SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Workspace,
+                strict_scope: false,
+            },
+            None,
+            &[],
+        )
+        .map_err(|error| format!("post-write search: {error:?}"))?;
+        ensure(
+            search.results.len() >= contents.len(),
+            true,
+            "all three new memories searchable immediately",
+        )?;
+        ensure(
+            search
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "search_index_stale"),
+            false,
+            "no stale advisory after ordinary writes",
+        )
+    }
+
+    #[test]
     fn remember_memory_persists_memory_audit_and_publishes_index_job() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;

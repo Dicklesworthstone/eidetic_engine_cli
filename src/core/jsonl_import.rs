@@ -15,8 +15,8 @@ use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
 use crate::db::{
-    CreateAuditInput, CreateMemoryInput, CreateWorkspaceInput, DatabaseConfig, DbConnection,
-    DbError, StoredMemory,
+    CreateAuditInput, CreateMemoryInput, CreateSearchIndexJobInput, CreateWorkspaceInput,
+    DatabaseConfig, DbConnection, DbError, SearchIndexJobType, StoredMemory,
 };
 use crate::models::{
     EXPORT_AGENT_SCHEMA_V1, EXPORT_ARTIFACT_SCHEMA_V1, EXPORT_AUDIT_SCHEMA_V1,
@@ -674,6 +674,20 @@ pub fn import_jsonl_records(
                     details: Some(memory.details.clone()),
                 },
             )?;
+            // bd-index-auto-freshness-m5kwf: an import is a real write path.
+            // Publish the same durable single-document index work remember
+            // publishes, so the post-commit drain converges the derived index
+            // instead of stranding generations behind a manual rebuild.
+            connection.insert_search_index_job(
+                &import_search_index_job_id(&memory.id),
+                &CreateSearchIndexJobInput {
+                    workspace_id: memory.input.workspace_id.clone(),
+                    job_type: SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_owned()),
+                    document_id: Some(memory.id.clone()),
+                    documents_total: 1,
+                },
+            )?;
         }
         Ok(())
     })?;
@@ -686,7 +700,41 @@ pub fn import_jsonl_records(
         total.saturating_add(memory.tag_count)
     });
     report.imported_memory_ids = to_insert.into_iter().map(|memory| memory.id).collect();
+    if !report.imported_memory_ids.is_empty() {
+        // The rows above are durable; converge the derived index the same way
+        // remember and batch remember do. A drain failure downgrades to a
+        // truthful non-fatal issue while the durable jobs stay pending and
+        // retryable by the next writer (bd-index-auto-freshness-m5kwf).
+        let index_dir = workspace_path
+            .join(".ee")
+            .join(crate::core::index::DEFAULT_INDEX_SUBDIR);
+        if let Err(error) = crate::core::index::process_pending_index_jobs_coalesced(
+            &connection,
+            &workspace_id,
+            &index_dir,
+            None,
+        ) {
+            report.issues.push(JsonlImportIssue {
+                line: None,
+                code: "import_index_publish_failed".to_owned(),
+                severity: JsonlImportIssueSeverity::Warning,
+                message: format!(
+                    "Imported memories are durable, but derived index publication failed and the index jobs remain pending: {error}. Run `ee index rebuild --workspace .`."
+                ),
+            });
+        }
+    }
     Ok(report)
+}
+
+/// Deterministic import-lane index-job id. Namespaced so a reimport replays
+/// the same durable job and can never collide with the remember-lane job id
+/// minted for the same memory.
+fn import_search_index_job_id(memory_id: &str) -> String {
+    let hash = blake3::hash(format!("jsonl_import|{memory_id}").as_bytes())
+        .to_hex()
+        .to_string();
+    format!("sidx_{}", &hash[..26])
 }
 
 fn reimport_conflict_issue(
@@ -2637,6 +2685,113 @@ mod tests {
             .get_memory_bayes_posterior("mem_01234567890123456789012345")
             .map_err(|error| error.to_string())?;
         ensure(posterior, Some((2.5, 1.5)), "restored posterior")
+    }
+
+    #[test]
+    fn import_jsonl_leaves_index_fresh_and_content_searchable() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let source = tempdir.path().join("source.jsonl");
+        fs::write(&source, sample_jsonl()).map_err(|error| error.to_string())?;
+
+        let report = import_jsonl_records(&JsonlImportOptions {
+            workspace_path: workspace.clone(),
+            database_path: None,
+            source_path: source,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(report.status.as_str(), "completed", "import status")?;
+        ensure(report.memories_imported, 1, "memories imported")?;
+        ensure(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "import_index_publish_failed"),
+            false,
+            "import drain publishes without a failure issue",
+        )?;
+
+        let status =
+            crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                workspace_path: workspace.clone(),
+                database_path: None,
+                index_dir: None,
+            })
+            .map_err(|error| format!("index status: {error:?}"))?;
+        ensure(
+            status.health,
+            crate::core::index::IndexHealth::Ready,
+            "index ready after import without rebuild",
+        )?;
+        ensure(
+            status.db_generation.is_some(),
+            true,
+            "db generation present",
+        )?;
+        ensure(
+            status.db_generation == status.index_generation,
+            true,
+            "import leaves database and index generations equal",
+        )?;
+
+        let connection =
+            DbConnection::open(DatabaseConfig::file(database_path(&JsonlImportOptions {
+                workspace_path: workspace.clone(),
+                database_path: None,
+                source_path: PathBuf::new(),
+                dry_run: false,
+            })))
+            .map_err(|error| error.to_string())?;
+        let workspace_id =
+            ensure_workspace(&connection, &workspace).map_err(|error| error.to_string())?;
+        let pending = connection
+            .list_pending_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure(pending.len(), 0, "pending index jobs after import drain")?;
+
+        let search = crate::core::search::run_search_with_filters(
+            &crate::core::search::SearchOptions {
+                workspace_path: workspace,
+                database_path: None,
+                index_dir: None,
+                query: "cargo fmt release".to_owned(),
+                limit: 5,
+                speed: crate::search::SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Workspace,
+                strict_scope: false,
+            },
+            None,
+            &[],
+        )
+        .map_err(|error| format!("post-import search: {error:?}"))?;
+        ensure(
+            search
+                .results
+                .iter()
+                .any(|hit| hit.doc_id == "mem_01234567890123456789012345"),
+            true,
+            "imported memory searchable immediately without rebuild",
+        )?;
+        ensure(
+            search
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "search_index_stale"),
+            false,
+            "no stale advisory after import drain",
+        )
     }
 
     fn human_explicit_jsonl() -> String {
