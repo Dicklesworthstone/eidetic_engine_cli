@@ -5790,7 +5790,7 @@ mod tests {
     }
 
     #[test]
-    fn unbound_daemon_concurrent_workspace_reservations_do_not_cross_suppress() {
+    fn unbound_daemon_concurrent_workspace_reservations_share_one_process_winner() {
         const THREADS_PER_WORKSPACE: usize = 8;
 
         let report = permanent_reranker_advisory_report();
@@ -5850,40 +5850,40 @@ mod tests {
                 .filter(|(actual, _, _)| *actual == workspace_id)
                 .collect::<Vec<_>>();
             assert_eq!(workspace_outcomes.len(), THREADS_PER_WORKSPACE);
-            assert_eq!(
-                workspace_outcomes
-                    .iter()
-                    .filter(|(_, _, result)| {
-                        result
-                            .pointer("/response/data/rerank/advisory/code")
-                            .and_then(serde_json::Value::as_str)
-                            == Some("rerank_model_unavailable")
-                    })
-                    .count(),
-                1,
-                "each workspace must reserve its own first advisory"
-            );
             assert!(
                 workspace_outcomes
                     .iter()
                     .all(|(_, response, _)| response.error.is_none())
             );
-            for (_, response, result) in workspace_outcomes {
-                let advisory = result
-                    .pointer("/response/data/rerank/advisory")
-                    .expect("rerank advisory field must remain present");
-                if response.delivery.is_some() {
-                    assert_eq!(
-                        advisory.get("code").and_then(serde_json::Value::as_str),
-                        Some("rerank_model_unavailable"),
-                        "each workspace winner must own its advisory"
-                    );
-                } else {
-                    assert!(
-                        advisory.is_null(),
-                        "every competing cross-workspace nonwinner must carry rerank.advisory=null"
-                    );
-                }
+        }
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|(_, _, result)| {
+                    result
+                        .pointer("/response/data/rerank/advisory/code")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("rerank_model_unavailable")
+                })
+                .count(),
+            1,
+            "one process-wide permanent advisory identity must have one winner across all workspaces"
+        );
+        for (_, response, result) in &outcomes {
+            let advisory = result
+                .pointer("/response/data/rerank/advisory")
+                .expect("rerank advisory field must remain present");
+            if response.delivery.is_some() {
+                assert_eq!(
+                    advisory.get("code").and_then(serde_json::Value::as_str),
+                    Some("rerank_model_unavailable"),
+                    "the process-wide winner must own the permanent advisory"
+                );
+            } else {
+                assert!(
+                    advisory.is_null(),
+                    "every competing process-wide nonwinner must carry rerank.advisory=null"
+                );
             }
         }
         for (_, response, _) in &mut outcomes {
