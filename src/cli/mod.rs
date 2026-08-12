@@ -3081,6 +3081,10 @@ pub struct OrientArgs {
     #[arg(value_name = "TASK")]
     pub task: String,
 
+    /// Database path. Defaults to the addressed workspace's `.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
     /// Maximum token budget for the embedded read-only context pack.
     #[arg(long, short = 't', default_value_t = 4000)]
     pub max_tokens: u32,
@@ -39040,8 +39044,10 @@ where
     };
 
     let workspace_path = cli.resolve_workspace();
-    let addressed_database_path =
-        crate::core::orient::resolved_addressed_database_path(&workspace_path);
+    let addressed_database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| crate::core::orient::resolved_addressed_database_path(&workspace_path));
     if matches!(
         std::fs::symlink_metadata(&addressed_database_path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound
@@ -39315,7 +39321,7 @@ where
     }
 
     let mut data = serde_json::json!({
-        "schema": "ee.orient.v1",
+        "schema": crate::models::ORIENT_SCHEMA_V1,
         "command": "orient",
         "mode": if args.fast { "fast" } else { "full" },
         "embed_backend": embed_backend,

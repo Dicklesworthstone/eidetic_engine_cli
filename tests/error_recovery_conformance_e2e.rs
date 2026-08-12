@@ -2,6 +2,9 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
+use ee::core::workspace::stable_workspace_id;
+use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+
 type TestResult = Result<(), String>;
 
 #[derive(Clone, Debug)]
@@ -1433,6 +1436,145 @@ fn storeless_miss_quotes_spaced_nearby_workspace_and_command_executes() -> TestR
             "initialized-empty orient must preserve the explicitly created store; {} must exist",
             leaf.join(".ee").join("ee.db").display()
         ),
+    )
+}
+
+#[test]
+fn orient_explicit_external_database_uses_recorded_workspace_identity() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().join("external-db-workspace-ft1z5");
+    let external_store = tempdir.path().join("stores");
+    std::fs::create_dir_all(workspace.join(".git")).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&external_store).map_err(|error| error.to_string())?;
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let database = external_store.join("custom.db");
+    let workspace_id = stable_workspace_id(&workspace);
+    let connection = DbConnection::open_file(&database)
+        .map_err(|error| format!("open external orient database: {error}"))?;
+    connection
+        .migrate()
+        .map_err(|error| format!("migrate external orient database: {error}"))?;
+    connection
+        .insert_workspace(
+            &workspace_id,
+            &CreateWorkspaceInput {
+                path: workspace.display().to_string(),
+                name: Some("external-orient-address".to_owned()),
+            },
+        )
+        .map_err(|error| format!("insert external orient workspace: {error}"))?;
+    let expected_content = "External custom database is the addressed orient store.";
+    for (index, content) in [
+        expected_content,
+        "External custom database second admitted memory.",
+        "External custom database third admitted memory.",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        connection
+            .insert_memory(
+                &format!("mem_{index:026}"),
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "episodic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: content.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("test://orient/external-database".to_owned()),
+                    trust_class: "agent_assertion".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["external-orient".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| format!("insert external orient memory {index}: {error}"))?;
+    }
+    drop(connection);
+
+    let output = run_ee(&[
+        "--workspace".to_owned(),
+        workspace.display().to_string(),
+        "orient".to_owned(),
+        "external custom database".to_owned(),
+        "--database".to_owned(),
+        database.display().to_string(),
+        "--fast".to_owned(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        output.status.success(),
+        format!(
+            "orient with an explicit external database failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    let response = stdout_json(&output, "orient explicit external database")?;
+    ensure(
+        response
+            .pointer("/success")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true),
+        format!("external database orient must return success: {response}"),
+    )?;
+    let data = response
+        .pointer("/data")
+        .ok_or("external database orient response is missing data")?;
+    ensure(
+        data.pointer("/schema").and_then(serde_json::Value::as_str)
+            == Some(ee::models::ORIENT_SCHEMA_V1),
+        format!("external database orient must emit ee.orient.v1: {data}"),
+    )?;
+    ensure(
+        data.pointer("/storeDiscovery").is_none(),
+        format!(
+            "three live memories in the explicitly addressed external store must suppress thin-store discovery: {data}"
+        ),
+    )?;
+    let recent = array_at(
+        &response,
+        "/data/fastContent/recent",
+        "external database orient recent content",
+    )?;
+    ensure(
+        recent.iter().any(|item| {
+            item.pointer("/snippet").and_then(serde_json::Value::as_str) == Some(expected_content)
+        }),
+        format!("orient must read admitted content from the external database: {recent:?}"),
+    )?;
+    ensure(
+        response
+            .pointer("/data/fastContent/posture")
+            .and_then(serde_json::Value::as_str)
+            != Some("unavailable")
+            && response
+                .pointer("/degraded")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|degraded| {
+                    degraded.iter().all(|entry| {
+                        entry.pointer("/code").and_then(serde_json::Value::as_str)
+                            != Some("orient_fast_recent_unavailable")
+                    })
+                }),
+        format!("explicit external database must not be reported unavailable: {response}"),
+    )?;
+    let schema_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/schemas/ee.orient.v1.json");
+    let schema: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&schema_path)
+            .map_err(|error| format!("read {}: {error}", schema_path.display()))?,
+    )
+    .map_err(|error| format!("parse {}: {error}", schema_path.display()))?;
+    ee::testing::validate_json_schema_instance(data, &schema)?;
+    ensure(
+        !workspace.join(".ee").join("ee.db").exists(),
+        "orient must not create or fall back to the workspace-default database",
     )
 }
 

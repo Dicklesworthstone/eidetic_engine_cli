@@ -667,7 +667,7 @@ fn storeless_workspace_root(database_path: &std::path::Path) -> std::path::PathB
     } else {
         database_parent
     })
-    .unwrap_or_else(|| std::path::PathBuf::from("."))
+    .unwrap_or_else(|| std::path::Path::new("."))
     .to_path_buf()
 }
 

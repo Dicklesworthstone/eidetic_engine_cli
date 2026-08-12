@@ -93,6 +93,7 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     ("ee.status.v1", "ee.status.v1.json"),
     ("ee.doctor.v1", "ee.doctor.v1.json"),
     ("ee.capabilities.v1", "ee.capabilities.v1.json"),
+    (ee::models::ORIENT_SCHEMA_V1, "ee.orient.v1.json"),
     (SWARM_NEXT_ACTION_SCHEMA_V1, "ee.swarm_next_action.v1.json"),
     ("ee.import.cass.v1", "ee.import.cass.v1.json"),
     ("ee.export.v1", "ee.export.v1.json"),

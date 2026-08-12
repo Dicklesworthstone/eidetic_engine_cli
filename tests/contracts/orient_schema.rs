@@ -1,0 +1,216 @@
+//! bd-orient-store-discovery-ft1z5: public `ee.orient.v1` contract wiring and
+//! representative instance validation.
+
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
+use std::path::PathBuf;
+
+use ee::output::{public_schemas, render_schema_export_json};
+use serde_json::{Value, json};
+
+type TestResult = Result<(), String>;
+
+const SCHEMA_ID: &str = ee::models::ORIENT_SCHEMA_V1;
+const SCHEMA_REL: &str = "docs/schemas/ee.orient.v1.json";
+
+fn load_schema() -> Result<Value, String> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(SCHEMA_REL);
+    let bytes =
+        std::fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    serde_json::from_slice::<Value>(&bytes)
+        .map_err(|error| format!("parse {}: {error}", path.display()))
+}
+
+fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
+    if condition {
+        Ok(())
+    } else {
+        Err(message.into())
+    }
+}
+
+#[test]
+fn orient_schema_identity_registry_inventory_and_golden_are_pinned() -> TestResult {
+    let schema = load_schema()?;
+    ensure(
+        schema.pointer("/title").and_then(Value::as_str) == Some(SCHEMA_ID),
+        "schema title must equal the canonical model schema id",
+    )?;
+    ensure(
+        schema
+            .pointer("/properties/schema/const")
+            .and_then(Value::as_str)
+            == Some(SCHEMA_ID),
+        "properties.schema.const must pin the canonical model schema id",
+    )?;
+    ensure(
+        ee::models::KNOWN_SCHEMAS
+            .iter()
+            .filter(|schema| **schema == SCHEMA_ID)
+            .count()
+            == 1,
+        "ee.orient.v1 must occur exactly once in KNOWN_SCHEMAS",
+    )?;
+
+    let entries = public_schemas()
+        .iter()
+        .filter(|entry| entry.id == SCHEMA_ID)
+        .collect::<Vec<_>>();
+    ensure(
+        entries.len() == 1,
+        "public schema registry must contain ee.orient.v1 exactly once",
+    )?;
+    ensure(entries[0].version == "1", "registry version must be 1")?;
+    ensure(
+        entries[0].category == "context",
+        "registry category must be context",
+    )?;
+    let exported: Value = serde_json::from_str(&render_schema_export_json(Some(SCHEMA_ID)))
+        .map_err(|error| format!("registry export did not parse: {error}"))?;
+    ensure(
+        exported == schema,
+        "registry export must equal the schema file",
+    )?;
+
+    let inventory: Value = serde_json::from_str(include_str!(
+        "../fixtures/contracts/public_contract_inventory.json"
+    ))
+    .map_err(|error| format!("contract inventory did not parse: {error}"))?;
+    let inventory_entries = inventory
+        .pointer("/contracts")
+        .and_then(Value::as_array)
+        .ok_or("contract inventory is missing contracts")?
+        .iter()
+        .filter(|entry| entry.get("schemaId").and_then(Value::as_str) == Some(SCHEMA_ID))
+        .collect::<Vec<_>>();
+    ensure(
+        inventory_entries.len() == 1,
+        "contract inventory must contain ee.orient.v1 exactly once",
+    )?;
+    ensure(
+        inventory_entries[0].get("status").and_then(Value::as_str) == Some("current")
+            && inventory_entries[0]
+                .get("schemaFile")
+                .and_then(Value::as_str)
+                == Some(SCHEMA_REL),
+        "contract inventory must identify the current orient schema file",
+    )?;
+
+    let schema_list: Value = serde_json::from_str(include_str!(
+        "../fixtures/golden/schema/schema_list_json.golden"
+    ))
+    .map_err(|error| format!("schema-list golden did not parse: {error}"))?;
+    let golden_entries = schema_list
+        .pointer("/data/schemas")
+        .and_then(Value::as_array)
+        .ok_or("schema-list golden is missing data.schemas")?
+        .iter()
+        .filter(|entry| entry.get("id").and_then(Value::as_str) == Some(SCHEMA_ID))
+        .count();
+    ensure(
+        golden_entries == 1,
+        "schema-list golden must contain ee.orient.v1 exactly once",
+    )
+}
+
+#[test]
+fn orient_fast_and_full_instances_validate_and_unknown_fields_fail() -> TestResult {
+    let schema = load_schema()?;
+    let fast = json!({
+        "schema": SCHEMA_ID,
+        "command": "orient",
+        "mode": "fast",
+        "embed_backend": "deterministic_hash",
+        "version": "0.2.0",
+        "workspace": "/repo",
+        "task": "resume work",
+        "sideEffectFree": true,
+        "configMutation": "never",
+        "swarmBrief": {},
+        "doctor": {},
+        "install": {},
+        "workspaceHygiene": {},
+        "pack": null,
+        "fastContent": {
+            "schema": "ee.orient.fast_content.v1",
+            "posture": "ready",
+            "strategy": {
+                "recent": "context_admitted_recency_v1",
+                "relevant": "direct_lexical_admitted_v1",
+                "sectionOverlap": "preserved",
+                "recentLimit": 5,
+                "relevantLimit": 5
+            },
+            "recent": [{
+                "id": "mem_01",
+                "snippet": "Use the adjacent populated store.",
+                "createdAt": "2026-08-12T12:00:00Z",
+                "tags": ["orientation"],
+                "provenance": [{
+                    "uri": "memory://mem_01",
+                    "scheme": "memory",
+                    "label": "mem_01",
+                    "locator": null,
+                    "note": "explicit memory"
+                }]
+            }],
+            "relevant": [],
+            "issues": []
+        },
+        "primer": null,
+        "decisions": {},
+        "learnGaps": {},
+        "revivals": {},
+        "nextCommands": ["ee pack --workspace /repo -- resume work"],
+        "storeDiscovery": {
+            "addressedStorePath": "/repo/.ee/ee.db",
+            "addressedState": "thin",
+            "addressedDocuments": 1,
+            "thinStoreThreshold": 3,
+            "storeEmpty": false,
+            "scanned": true,
+            "truncated": false,
+            "nearbyStores": [{
+                "workspaceRoot": "/repo/child",
+                "storeDir": "/repo/child/.ee",
+                "documents": 3,
+                "lastWrite": "2026-08-12T12:00:00Z"
+            }]
+        }
+    });
+    ee::testing::validate_json_schema_instance(&fast, &schema)?;
+
+    let full = json!({
+        "schema": SCHEMA_ID,
+        "command": "orient",
+        "mode": "full",
+        "embed_backend": "neural_local",
+        "version": "0.2.0",
+        "workspace": "/repo",
+        "task": "prepare release",
+        "sideEffectFree": true,
+        "configMutation": "never",
+        "swarmBrief": {},
+        "doctor": {},
+        "install": {},
+        "workspaceHygiene": {},
+        "pack": {},
+        "fastContent": null,
+        "primer": null,
+        "decisions": {},
+        "learnGaps": {},
+        "revivals": {},
+        "nextCommands": []
+    });
+    ee::testing::validate_json_schema_instance(&full, &schema)?;
+
+    let mut invalid = fast;
+    invalid
+        .as_object_mut()
+        .ok_or("fast fixture must be an object")?
+        .insert("uncontractedField".to_owned(), Value::Bool(true));
+    ensure(
+        ee::testing::validate_json_schema_instance(&invalid, &schema).is_err(),
+        "strict orient schema must reject an uncontracted root field",
+    )
+}

@@ -679,6 +679,24 @@
       ]
     },
     {
+      "schemaId": "ee.orient.v1",
+      "status": "current",
+      "surface": "orient_payload",
+      "owner": "src/output/mod.rs::public_schemas",
+      "schemaFile": "docs/schemas/ee.orient.v1.json",
+      "canonicalDocs": [
+        "README.md",
+        "docs/agent-ux/primer.md"
+      ],
+      "currentFacingContexts": [
+        "README.md",
+        "docs/agent-ux/primer.md",
+        "docs/schemas/ee.orient.v1.json"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
       "schemaId": "ee.memory_sentinel.revivals.v1",
       "status": "current",
       "surface": "tripwire_check_revivals_payload",

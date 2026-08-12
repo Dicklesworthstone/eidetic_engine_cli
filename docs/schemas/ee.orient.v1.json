@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.orient.v1.json",
+  "title": "ee.orient.v1",
+  "description": "Read-only agent-orientation bundle. The root and orient-owned fast-content and nearby-store fields are strict; independently versioned component payloads remain delegated to their own public contracts.",
+  "field_presets": {
+    "minimal": ["schema", "command", "mode", "workspace", "task", "nextCommands"],
+    "summary": ["schema", "command", "mode", "workspace", "task", "fastContent", "storeDiscovery", "nextCommands"],
+    "standard": ["schema", "command", "mode", "embed_backend", "workspace", "task", "doctor", "pack", "fastContent", "decisions", "learnGaps", "revivals", "storeDiscovery", "nextCommands"],
+    "full": ["*"]
+  },
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "mode",
+    "embed_backend",
+    "version",
+    "workspace",
+    "task",
+    "sideEffectFree",
+    "configMutation",
+    "swarmBrief",
+    "doctor",
+    "install",
+    "workspaceHygiene",
+    "pack",
+    "fastContent",
+    "primer",
+    "decisions",
+    "learnGaps",
+    "revivals",
+    "nextCommands"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "type": "string", "const": "ee.orient.v1" },
+    "command": { "type": "string", "const": "orient" },
+    "mode": { "type": "string", "enum": ["fast", "full"] },
+    "embed_backend": { "type": "string" },
+    "version": { "type": "string" },
+    "workspace": { "type": "string" },
+    "task": { "type": "string" },
+    "sideEffectFree": { "type": "boolean", "const": true },
+    "configMutation": { "type": "string", "const": "never" },
+    "swarmBrief": { "$ref": "#/$defs/component" },
+    "doctor": { "$ref": "#/$defs/component" },
+    "install": { "$ref": "#/$defs/component" },
+    "workspaceHygiene": { "$ref": "#/$defs/component" },
+    "pack": { "$ref": "#/$defs/component" },
+    "fastContent": {
+      "oneOf": [
+        { "$ref": "#/$defs/fastContent" },
+        { "type": "null" }
+      ]
+    },
+    "primer": { "$ref": "#/$defs/component" },
+    "decisions": { "$ref": "#/$defs/component" },
+    "learnGaps": { "$ref": "#/$defs/component" },
+    "revivals": { "$ref": "#/$defs/component" },
+    "nextCommands": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "storeDiscovery": { "$ref": "#/$defs/storeDiscovery" }
+  },
+  "$defs": {
+    "component": {
+      "description": "Independently versioned component payload, or null when unavailable or not requested.",
+      "type": ["object", "null"]
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["uri", "scheme", "label", "locator", "note"],
+      "additionalProperties": false,
+      "properties": {
+        "uri": { "type": "string" },
+        "scheme": { "type": "string" },
+        "label": { "type": "string" },
+        "locator": { "type": ["string", "null"] },
+        "note": { "type": "string" }
+      }
+    },
+    "fastContentItem": {
+      "type": "object",
+      "required": ["id", "snippet", "createdAt", "tags", "provenance"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "snippet": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "provenance": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/provenance" }
+        }
+      }
+    },
+    "fastContentIssue": {
+      "type": "object",
+      "required": ["component", "status", "code", "severity", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "component": { "type": "string" },
+        "status": { "type": "string" },
+        "code": { "type": "string" },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": { "type": "string" },
+        "repair": { "type": ["string", "null"] }
+      }
+    },
+    "fastContent": {
+      "type": "object",
+      "required": ["schema", "posture", "strategy", "recent", "relevant", "issues"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "type": "string", "const": "ee.orient.fast_content.v1" },
+        "posture": {
+          "type": "string",
+          "enum": ["ready", "empty", "partial", "unavailable"]
+        },
+        "strategy": {
+          "type": "object",
+          "required": ["recent", "relevant", "sectionOverlap", "recentLimit", "relevantLimit"],
+          "additionalProperties": false,
+          "properties": {
+            "recent": { "type": "string", "const": "context_admitted_recency_v1" },
+            "relevant": { "type": "string", "const": "direct_lexical_admitted_v1" },
+            "sectionOverlap": { "type": "string", "const": "preserved" },
+            "recentLimit": { "type": "integer", "minimum": 0 },
+            "relevantLimit": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "recent": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/fastContentItem" }
+        },
+        "relevant": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/fastContentItem" }
+        },
+        "issues": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/fastContentIssue" }
+        }
+      }
+    },
+    "nearbyStore": {
+      "type": "object",
+      "required": ["workspaceRoot", "storeDir", "documents", "lastWrite"],
+      "additionalProperties": false,
+      "properties": {
+        "workspaceRoot": { "type": "string" },
+        "storeDir": { "type": "string" },
+        "documents": { "type": "integer", "minimum": 1 },
+        "lastWrite": { "type": ["string", "null"] }
+      }
+    },
+    "storeDiscovery": {
+      "type": "object",
+      "required": [
+        "addressedStorePath",
+        "addressedState",
+        "addressedDocuments",
+        "thinStoreThreshold",
+        "storeEmpty",
+        "scanned",
+        "truncated",
+        "nearbyStores"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "addressedStorePath": { "type": "string" },
+        "addressedState": { "type": "string", "enum": ["empty", "thin"] },
+        "addressedDocuments": { "type": "integer", "minimum": 0 },
+        "thinStoreThreshold": { "type": "integer", "minimum": 1 },
+        "storeEmpty": { "type": "boolean" },
+        "scanned": { "type": "boolean", "const": true },
+        "truncated": { "type": "boolean" },
+        "nearbyStores": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nearbyStore" }
+        }
+      }
+    }
+  }
+}

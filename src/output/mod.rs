@@ -11348,6 +11348,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: repair_action_graph_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::ORIENT_SCHEMA_V1,
+            version: "1",
+            description: "Read-only agent-orientation bundle with workspace, retrieval, health, decision, revival, and nearby-store posture.",
+            category: "context",
+            definition: orient_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.resume.v1",
             version: "1",
             description: "Session-resume bundle for ee resume: recent episodic sessions, revisit-conditioned decisions, queued-tag items, staleness flags, nearby stores.",
@@ -12153,6 +12160,10 @@ fn conflict_resolve_schema_definition() -> String {
 
 fn graph_diff_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.graph.diff.v1.json").to_string()
+}
+
+fn orient_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.orient.v1.json").to_string()
 }
 
 fn resume_schema_definition() -> String {

@@ -984,7 +984,7 @@ fn scan_nearby_stores_with_registry(
     // are inspected before the machine registry so a large global registry
     // cannot consume the entire budget ahead of an adjacent workspace.
     let mut frontier = VecDeque::from([(scan_root.clone(), 0_usize)]);
-    while let Some((dir, depth)) = frontier.pop_front() {
+    'frontier: while let Some((dir, depth)) = frontier.pop_front() {
         if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
             break;
         }
@@ -1008,20 +1008,30 @@ fn scan_nearby_stores_with_registry(
         if depth >= NEARBY_STORE_CHILD_DEPTH {
             continue;
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        let Ok(read_dir) = std::fs::read_dir(&dir) else {
             continue;
         };
         if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
             break;
         }
-        for entry in entries.flatten() {
+        let mut entries = Vec::new();
+        for entry in read_dir.flatten() {
             // A single very wide directory must not bypass the advertised
             // wall-clock bound while we enumerate it. Checking only between
             // directories lets one directory with millions of entries turn
             // this read-only recovery hint into an unbounded walk.
             if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
-                frontier.clear();
-                break;
+                break 'frontier;
+            }
+            entries.push(entry);
+        }
+        // `read_dir` order is filesystem-dependent. Sort each breadth level's
+        // children before enqueueing so both discovery publication and the
+        // bounded prefix selected under a time limit are deterministic.
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
+                break 'frontier;
             }
             let path = entry.path();
             // `Path::is_dir` follows symlinks. Discovery is intentionally
@@ -1031,8 +1041,7 @@ fn scan_nearby_stores_with_registry(
                 continue;
             };
             if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
-                frontier.clear();
-                break;
+                break 'frontier;
             }
             if !file_type.is_dir() {
                 continue;
@@ -1734,7 +1743,7 @@ mod tests {
             .iter()
             .find(|issue| issue.code == ORIENT_FAST_RECENT_UNAVAILABLE_CODE)
             .ok_or_else(|| format!("recent provider failure issue missing: {report:?}"))?;
-        ensure_equal(&recent_issue.component, &"recent".to_owned(), "component")?;
+        ensure_equal(&recent_issue.component, &"recent", "component")?;
         ensure(
             recent_issue
                 .repair
@@ -1759,7 +1768,7 @@ mod tests {
             let issue = orient_fast_relevant_provider_issue(&degradation)
                 .ok_or_else(|| format!("{code} was not promoted"))?;
             ensure_equal(&issue.code, &code.to_owned(), "promoted code")?;
-            ensure_equal(&issue.status, &"degraded".to_owned(), "promoted status")?;
+            ensure_equal(&issue.status, &"degraded", "promoted status")?;
         }
         Ok(())
     }
@@ -2353,24 +2362,32 @@ mod tests {
     }
 
     #[test]
-    fn discovery_visits_all_depth_one_children_before_depth_two() -> TestResult {
+    fn discovery_publication_order_is_sorted_fifo_across_siblings_and_depths() -> TestResult {
         let temp = orient_test_tempdir()?;
         std::fs::create_dir_all(temp.path().join(".git")).map_err(|error| error.to_string())?;
-        let adjacent = temp.path().join("z-adjacent-store");
-        let nested = temp.path().join("a-branch").join("depth-two-store");
-        remember_fixture(&adjacent, "Adjacent breadth-first store.", "nearby", None)?;
-        remember_fixture(&nested, "Nested depth-two store.", "nearby", None)?;
+        let left = temp.path().join("a-left");
+        let left_child = left.join("a-child");
+        let right = temp.path().join("z-right");
+        let right_child = right.join("z-child");
+        for (workspace, content) in [
+            (&left, "Left depth-one store."),
+            (&left_child, "Left depth-two store."),
+            (&right, "Right depth-one store."),
+            (&right_child, "Right depth-two store."),
+        ] {
+            remember_fixture(workspace, content, "nearby", None)?;
+        }
 
         let addressed_database = temp.path().join(".ee").join("ee.db");
         let absent_registry = temp.path().join("absent-fifo-registry.db");
         let cx = Cx::detached_cancel_context();
-        let mut first_published = None;
+        let mut seen = BTreeSet::new();
+        let mut publication_order = Vec::new();
         let mut publish = |snapshot: &NearbyStoreScan| {
-            if first_published.is_none() {
-                first_published = snapshot
-                    .stores
-                    .first()
-                    .map(|store| store.workspace_root.clone());
+            for store in &snapshot.stores {
+                if seen.insert(store.workspace_root.clone()) {
+                    publication_order.push(store.workspace_root.clone());
+                }
             }
         };
         let scan = scan_nearby_stores_with_registry(
@@ -2382,14 +2399,19 @@ mod tests {
             &mut publish,
         );
 
-        ensure_equal(&scan.stores.len(), &2_usize, "two FIFO candidates")?;
-        ensure(
-            first_published
-                .as_deref()
-                .is_some_and(|path| path.ends_with("z-adjacent-store")),
-            format!(
-                "breadth-first traversal must publish the depth-one store before depth two; first={first_published:?}"
-            ),
+        let expected = [&left, &right, &left_child, &right_child]
+            .into_iter()
+            .map(|path| {
+                path.canonicalize()
+                    .map(|path| path.display().to_string())
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        ensure_equal(&scan.stores.len(), &4_usize, "four FIFO candidates")?;
+        ensure_equal(
+            &publication_order,
+            &expected,
+            "sorted FIFO publication across two siblings and two depths",
         )
     }
 

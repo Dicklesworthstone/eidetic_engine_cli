@@ -15,6 +15,9 @@ mod graph_suggest_links_schema;
 #[path = "contracts/resume_schema.rs"]
 mod resume_schema;
 
+#[path = "contracts/orient_schema.rs"]
+mod orient_schema;
+
 #[path = "contracts/graph_diff_schema.rs"]
 mod graph_diff_schema;
 
