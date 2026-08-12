@@ -653,8 +653,8 @@ fn json_schema_values_equal(left: &Value, right: &Value) -> bool {
 fn compare_json_numbers(left: &serde_json::Number, right: &serde_json::Number) -> Option<Ordering> {
     let left = normalize_json_number(left)?;
     let right = normalize_json_number(right)?;
-    let left_is_zero = left.digits == [b'0'];
-    let right_is_zero = right.digits == [b'0'];
+    let left_is_zero = left.digits.as_slice() == b"0";
+    let right_is_zero = right.digits.as_slice() == b"0";
     if left_is_zero || right_is_zero {
         return Some(match (left_is_zero, right_is_zero) {
             (true, true) => Ordering::Equal,

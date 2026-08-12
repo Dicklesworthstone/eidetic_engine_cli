@@ -134,10 +134,7 @@ pub fn build_structural_graph_input(
             "evidence_count".to_owned(),
             CgseValue::Int(i64::from(link.evidence_count)),
         );
-        if graph
-            .add_edge_with_attrs(a.to_owned(), b.to_owned(), attrs)
-            .is_err()
-        {
+        if graph.add_edge_with_attrs(a, b, attrs).is_err() {
             // Strict graphs reject duplicate edges; the dedup above makes
             // this unreachable for same-pair repeats, but a rejected edge
             // must never abort the whole projection.

@@ -627,7 +627,7 @@ mod tests {
             "relation".to_owned(),
             CgseValue::String("supports".to_owned()),
         );
-        let result = graph.add_edge_with_attrs(source.to_owned(), target.to_owned(), attrs);
+        let result = graph.add_edge_with_attrs(source, target, attrs);
         assert!(
             result.is_ok(),
             "test graph edge should be valid: {result:?}"
