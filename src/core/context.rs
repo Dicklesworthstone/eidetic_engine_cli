@@ -1237,14 +1237,22 @@ pub(crate) fn admit_recent_context_memories(
         if candidates.len() >= candidate_cap {
             break;
         }
-        if memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
-            || !matches!(
-                fallback_memory_validity_visibility(&memory, reference_time, false, false, false),
-                FallbackMemoryVisibility::Visible
-            )
-            || !crate::policy::redact_secret_like_content(&memory.content)
-                .redacted_reasons
-                .is_empty()
+        if !matches!(
+            context_memory_seal_admission(
+                &connection,
+                &memory,
+                &mut degraded,
+                "context_candidate_memory_batch_unavailable",
+                ContextResponseSeverity::Medium,
+                "Orient-fast candidate admission",
+            ),
+            ContextMemorySealAdmission::Admit
+        ) || !matches!(
+            fallback_memory_validity_visibility(&memory, reference_time, false, false, false),
+            FallbackMemoryVisibility::Visible
+        ) || !crate::policy::redact_secret_like_content(&memory.content)
+            .redacted_reasons
+            .is_empty()
         {
             continue;
         }
@@ -7355,6 +7363,43 @@ fn candidates_from_search_with_metrics(
                         continue;
                     }
                 }
+                if let Some(memory) = memories.get(&memory_key) {
+                    match context_memory_seal_admission(
+                        connection,
+                        memory,
+                        degraded,
+                        "context_candidate_memory_batch_unavailable",
+                        ContextResponseSeverity::Medium,
+                        "Search-hit candidate admission",
+                    ) {
+                        ContextMemorySealAdmission::Admit => {}
+                        ContextMemorySealAdmission::Sealed => {
+                            metrics.skipped_candidates =
+                                metrics.skipped_candidates.saturating_add(1);
+                            push_degradation(
+                                degraded,
+                                "context_candidate_sealed",
+                                ContextResponseSeverity::Info,
+                                format!(
+                                    "Memory {} is sealed (content committed by hash, not yet revealed) and was excluded from the pack.",
+                                    hit.doc_id
+                                ),
+                                Some(format!(
+                                    "ee memory reveal {} --content-file <path> --json",
+                                    hit.doc_id
+                                )),
+                            );
+                            metrics.subspans.filtering += filtering_start.elapsed();
+                            continue;
+                        }
+                        ContextMemorySealAdmission::LookupUnavailable => {
+                            metrics.skipped_candidates =
+                                metrics.skipped_candidates.saturating_add(1);
+                            metrics.subspans.filtering += filtering_start.elapsed();
+                            continue;
+                        }
+                    }
+                }
                 if !filters.temporal.is_empty() {
                     let Some(memory) = memories.get(&memory_key) else {
                         metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
@@ -7382,29 +7427,6 @@ fn candidates_from_search_with_metrics(
                                 hit.doc_id
                             ),
                             Some("ee index rebuild --workspace .".to_string()),
-                        );
-                        metrics.subspans.filtering += filtering_start.elapsed();
-                        continue;
-                    }
-                    // Sealed, not-yet-revealed memories store only the
-                    // deterministic placeholder; spending pack budget on it
-                    // would serve meaningless bytes while implying content
-                    // (bd-sealed-preregistration-memory-b67be). Explicit
-                    // surfaces (`ee why`, `ee memory show`) still list them.
-                    if memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
-                        metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
-                        push_degradation(
-                            degraded,
-                            "context_candidate_sealed",
-                            ContextResponseSeverity::Info,
-                            format!(
-                                "Memory {} is sealed (content committed by hash, not yet revealed) and was excluded from the pack.",
-                                hit.doc_id
-                            ),
-                            Some(format!(
-                                "ee memory reveal {} --content-file <path> --json",
-                                hit.doc_id
-                            )),
                         );
                         metrics.subspans.filtering += filtering_start.elapsed();
                         continue;
@@ -9216,7 +9238,17 @@ fn apply_graph_hints(
         if memory.tombstoned_at.is_some() && !include_tombstoned {
             continue;
         }
-        if memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
+        if !matches!(
+            context_memory_seal_admission(
+                connection,
+                memory,
+                degraded,
+                "context_candidate_memory_batch_unavailable",
+                ContextResponseSeverity::Medium,
+                "Graph candidate admission",
+            ),
+            ContextMemorySealAdmission::Admit
+        ) {
             continue;
         }
         if !workspace_ids.contains(&memory.workspace_id) {
@@ -9413,7 +9445,17 @@ fn graph_hint_nodes(
         if seed_memory.tombstoned_at.is_some() && !include_tombstoned {
             continue;
         }
-        if seed_memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
+        if !matches!(
+            context_memory_seal_admission(
+                connection,
+                seed_memory,
+                degraded,
+                "context_graph_neighborhood_unavailable",
+                ContextResponseSeverity::Low,
+                "Graph seed admission",
+            ),
+            ContextMemorySealAdmission::Admit
+        ) {
             continue;
         }
         nodes.insert(
@@ -9509,7 +9551,17 @@ fn graph_hint_nodes(
             if neighbor_memory.tombstoned_at.is_some() && !include_tombstoned {
                 continue;
             }
-            if neighbor_memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
+            if !matches!(
+                context_memory_seal_admission(
+                    connection,
+                    neighbor_memory,
+                    degraded,
+                    "context_graph_neighborhood_unavailable",
+                    ContextResponseSeverity::Low,
+                    "Graph neighbor admission",
+                ),
+                ContextMemorySealAdmission::Admit
+            ) {
                 continue;
             }
             if !workspace_ids.contains(&neighbor_memory.workspace_id) {
@@ -10200,6 +10252,49 @@ fn load_candidate_batch_maps(
     (memories.into_owned(), tags_map)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContextMemorySealAdmission {
+    Admit,
+    Sealed,
+    LookupUnavailable,
+}
+
+/// Resolve placeholder-shaped content against durable seal-sidecar truth.
+///
+/// Ordinary candidates avoid the DB lookup entirely. Exact-placeholder
+/// candidates are admitted only when the sidecar query succeeds and proves
+/// that no seal row exists; lookup failure excludes fail closed and emits an
+/// existing context degradation selected by the caller.
+fn context_memory_seal_admission(
+    connection: &DbConnection,
+    memory: &StoredMemory,
+    degraded: &mut Vec<ContextResponseDegradation>,
+    lookup_degradation_code: &str,
+    lookup_degradation_severity: ContextResponseSeverity,
+    lookup_surface: &str,
+) -> ContextMemorySealAdmission {
+    if memory.content != crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
+        return ContextMemorySealAdmission::Admit;
+    }
+    match connection.get_memory_seal(&memory.id) {
+        Ok(Some(_)) => ContextMemorySealAdmission::Sealed,
+        Ok(None) => ContextMemorySealAdmission::Admit,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                lookup_degradation_code,
+                lookup_degradation_severity,
+                format!(
+                    "{lookup_surface} could not verify seal sidecar state for memory {}; the candidate was excluded fail closed: {error}",
+                    memory.id
+                ),
+                Some("ee status --json".to_string()),
+            );
+            ContextMemorySealAdmission::LookupUnavailable
+        }
+    }
+}
+
 enum CandidateMemoryBatch<'a> {
     Owned(BTreeMap<String, StoredMemory>),
     Borrowed(&'a BTreeMap<String, StoredMemory>),
@@ -10507,21 +10602,32 @@ fn focus_candidate_from_item(
         );
         return None;
     }
-    if memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
-        push_degradation(
-            degraded,
-            "context_focus_sealed_memory",
-            ContextResponseSeverity::Info,
-            format!(
-                "Focused memory {} is sealed and was excluded from context until reveal.",
-                item.memory_id
-            ),
-            Some(format!(
-                "ee memory reveal {} --content-file <path> --json",
-                item.memory_id
-            )),
-        );
-        return None;
+    match context_memory_seal_admission(
+        source.connection,
+        &memory,
+        degraded,
+        "context_focus_memory_lookup_unavailable",
+        ContextResponseSeverity::Low,
+        "Focus candidate admission",
+    ) {
+        ContextMemorySealAdmission::Admit => {}
+        ContextMemorySealAdmission::Sealed => {
+            push_degradation(
+                degraded,
+                "context_focus_sealed_memory",
+                ContextResponseSeverity::Info,
+                format!(
+                    "Focused memory {} is sealed and was excluded from context until reveal.",
+                    item.memory_id
+                ),
+                Some(format!(
+                    "ee memory reveal {} --content-file <path> --json",
+                    item.memory_id
+                )),
+            );
+            return None;
+        }
+        ContextMemorySealAdmission::LookupUnavailable => return None,
     }
     if !crate::policy::redact_secret_like_content(&memory.content)
         .redacted_reasons
@@ -12575,6 +12681,71 @@ mod tests {
             .into_iter()
             .map(|memory| (memory.id.clone(), memory))
             .collect()
+    }
+
+    #[test]
+    fn seal_sidecar_admission_is_lazy_truthful_and_fail_closed() -> TestResult {
+        let unavailable_connection =
+            DbConnection::open_memory().map_err(|error| error.to_string())?;
+        let ordinary_id = MemoryId::from_uuid(uuid::Uuid::from_u128(931));
+        let ordinary = tier_memory(ordinary_id, 0.9, 0.8, 0.7, "fact");
+        let mut degraded = Vec::new();
+        let ordinary_admission = super::context_memory_seal_admission(
+            &unavailable_connection,
+            &ordinary,
+            &mut degraded,
+            "context_candidate_memory_batch_unavailable",
+            ContextResponseSeverity::Medium,
+            "Test candidate admission",
+        );
+        assert_eq!(
+            ordinary_admission,
+            super::ContextMemorySealAdmission::Admit,
+            "non-placeholder content must not query the unavailable sidecar"
+        );
+        assert!(degraded.is_empty());
+
+        let mut unresolved_placeholder = ordinary.clone();
+        unresolved_placeholder.content = crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT.to_owned();
+        let unresolved_admission = super::context_memory_seal_admission(
+            &unavailable_connection,
+            &unresolved_placeholder,
+            &mut degraded,
+            "context_candidate_memory_batch_unavailable",
+            ContextResponseSeverity::Medium,
+            "Test candidate admission",
+        );
+        assert_eq!(
+            unresolved_admission,
+            super::ContextMemorySealAdmission::LookupUnavailable,
+            "sidecar lookup failure must not admit placeholder-shaped content"
+        );
+        assert!(degraded.iter().any(|entry| {
+            entry.code == "context_candidate_memory_batch_unavailable"
+                && entry.message.contains("excluded fail closed")
+        }));
+
+        let available_connection =
+            DbConnection::open_memory().map_err(|error| error.to_string())?;
+        available_connection
+            .migrate()
+            .map_err(|error| error.to_string())?;
+        let mut available_degraded = Vec::new();
+        let unsealed_admission = super::context_memory_seal_admission(
+            &available_connection,
+            &unresolved_placeholder,
+            &mut available_degraded,
+            "context_candidate_memory_batch_unavailable",
+            ContextResponseSeverity::Medium,
+            "Test candidate admission",
+        );
+        assert_eq!(
+            unsealed_admission,
+            super::ContextMemorySealAdmission::Admit,
+            "exact placeholder content without a seal sidecar is ordinary content"
+        );
+        assert!(available_degraded.is_empty());
+        Ok(())
     }
 
     #[test]

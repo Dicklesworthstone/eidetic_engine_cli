@@ -372,6 +372,14 @@ fn sealed_memory_stays_out_of_search_and_packs() -> TestResult {
         "pack must not serve the sealed memory",
     )?;
     ensure(
+        stdout.contains(&placeholder_control_id),
+        "pack must admit the ordinary exact-placeholder control",
+    )?;
+    ensure(
+        stdout.contains(PLACEHOLDER),
+        "pack must preserve ordinary exact-placeholder content",
+    )?;
+    ensure(
         !stdout.contains(PROTOCOL),
         "pack must not expose the unrevealed protocol bytes",
     )

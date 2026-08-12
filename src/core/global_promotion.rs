@@ -37,6 +37,8 @@ pub struct PromotionCandidate {
     pub trust_class: String,
     pub confidence: f32,
     pub tombstoned: bool,
+    /// Durable seal-sidecar state resolved by the storage boundary.
+    pub sealed: bool,
 }
 
 /// An existing global-store row that content-matches the candidate closely
@@ -73,7 +75,7 @@ pub enum PromotionRefusal {
     LaneUnavailable,
     /// The memory is tombstoned; dead rows do not cross the boundary.
     Tombstoned,
-    /// Sealed-placeholder content: the body is withheld pending reveal.
+    /// Sealed memory: the body is withheld pending reveal.
     SealedPlaceholder,
     /// Trust class below the evidence gate.
     EvidenceGateTrustTooLow { trust_class: String },
@@ -223,7 +225,7 @@ pub fn plan_promotion(input: &PromotionInput) -> PromotionPlan {
     if candidate.tombstoned {
         return refuse(PromotionRefusal::Tombstoned);
     }
-    if candidate.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
+    if candidate.sealed {
         return refuse(PromotionRefusal::SealedPlaceholder);
     }
     if !PROMOTABLE_TRUST_CLASSES.contains(&candidate.trust_class.as_str()) {
@@ -352,6 +354,14 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
         .get_memory(options.memory_id)
         .map_err(|error| format!("load memory: {error}"))?
         .ok_or_else(|| format!("memory {} not found", options.memory_id))?;
+    let sealed = if memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
+        workspace_connection
+            .get_memory_seal(&memory.id)
+            .map_err(|error| format!("verify memory seal sidecar: {error}"))?
+            .is_some()
+    } else {
+        false
+    };
 
     // Exact-content twin scan against the global store (deterministic v1
     // duplicate signal; similarity 1.0 by construction).
@@ -372,6 +382,7 @@ pub fn promote_global(options: &PromoteGlobalOptions<'_>) -> Result<PromotionRep
             trust_class: memory.trust_class.clone(),
             confidence: memory.confidence,
             tombstoned: memory.tombstoned_at.is_some(),
+            sealed,
         },
         nearest_global_duplicate: existing_twin.as_ref().map(|twin| GlobalNearDuplicate {
             global_memory_id: twin.id.clone(),
@@ -808,6 +819,7 @@ mod tests {
             trust_class: trust_class.to_owned(),
             confidence: 0.9,
             tombstoned: false,
+            sealed: false,
         }
     }
 
@@ -866,19 +878,29 @@ mod tests {
     }
 
     #[test]
-    fn tombstoned_sealed_and_lane_off_refuse() {
+    fn tombstoned_sealed_and_lane_off_refuse_without_content_heuristics() {
         let mut dead = input(candidate("human_explicit"));
         dead.candidate.tombstoned = true;
         assert!(!plan_promotion(&dead).allowed());
 
         let mut sealed = input(candidate("human_explicit"));
         sealed.candidate.content = crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT.to_owned();
+        sealed.candidate.sealed = true;
         let sealed_plan = plan_promotion(&sealed);
         let PromotionVerdict::Refuse { refusal } = &sealed_plan.verdict else {
-            panic!("sealed placeholder must refuse");
+            panic!("sealed=true must refuse");
         };
         assert_eq!(refusal.code(), "global_promotion_sealed");
         assert!(refusal.repair().contains("ee memory reveal"));
+
+        let mut identical_unsealed = input(candidate("human_explicit"));
+        identical_unsealed.candidate.content =
+            crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT.to_owned();
+        identical_unsealed.candidate.sealed = false;
+        assert!(
+            plan_promotion(&identical_unsealed).allowed(),
+            "identical public content with sealed=false must not be refused"
+        );
 
         let mut off = input(candidate("human_explicit"));
         off.global_lane_available = false;
@@ -952,6 +974,37 @@ mod tests {
             .expect("seed memory");
         connection.close().expect("close workspace db");
         (database_path, memory_id)
+    }
+
+    #[test]
+    fn promote_global_seal_lookup_failure_refuses_before_admission() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (workspace_db, memory_id) = seeded_workspace(
+            temp.path(),
+            "human_explicit",
+            crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+        );
+        let connection = DbConnection::open_file(&workspace_db).expect("open workspace db");
+        connection
+            .execute_raw("DROP TABLE memory_seals")
+            .expect("remove sidecar table for planted failure");
+        connection.close().expect("close workspace db");
+        let paths =
+            super::super::global_store::GlobalStorePaths::from_root(&temp.path().join("global"));
+
+        let error = promote_global(&PromoteGlobalOptions {
+            workspace_database_path: &workspace_db,
+            memory_id: &memory_id,
+            global_paths: &paths,
+            global_lane_available: true,
+            actor: None,
+            dry_run: false,
+        })
+        .expect_err("seal sidecar lookup failure must not admit the promotion candidate");
+        assert!(
+            error.contains("verify memory seal sidecar"),
+            "lookup refusal must name the failed truth source: {error}"
+        );
     }
 
     #[test]
