@@ -1653,6 +1653,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "source",
                 "why",
                 "provenance",
+                "indexFreshness",
                 "degraded",
                 "errors",
                 "metrics",
@@ -25403,6 +25404,15 @@ mod tests {
         ensure(
             FieldProfile::Full.include_verbose_details(),
             "full has verbose",
+        )
+    }
+
+    #[test]
+    fn search_standard_field_preset_retains_structured_index_freshness() -> TestResult {
+        let fields = super::preset_fields_for_command("search", FieldProfile::Standard);
+        ensure(
+            fields.contains(&"indexFreshness"),
+            "search standard preset must retain per-response index freshness truth",
         )
     }
 

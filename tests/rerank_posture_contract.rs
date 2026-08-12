@@ -61,6 +61,7 @@ fn empty_search_report(
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,
         scope_stats: scope_stats(),
+        index_freshness: None,
     }
 }
 

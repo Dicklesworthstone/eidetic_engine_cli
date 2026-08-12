@@ -2317,6 +2317,31 @@ fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
 }
 
 #[test]
+fn stale_search_response_with_structured_freshness_matches_public_schema() -> TestResult {
+    let schema = schema_doc("ee.search.v1")?;
+    let mut response = read_json(&fixture_path(
+        "golden/agent/search_deterministic_ranking.json.golden",
+    ))?;
+    response["data"]["indexFreshness"] = json!({
+        "stale": true,
+        "dbGeneration": 108,
+        "indexGeneration": 2,
+        "generationGap": 106,
+        "largeGap": true
+    });
+
+    validate_json_schema(&response, &schema, &schema, "$")?;
+    let standard = schema
+        .pointer("/field_presets/standard")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "ee.search.v1 standard field preset must be an array".to_owned())?;
+    if !standard.iter().any(|field| field == "indexFreshness") {
+        return Err("ee.search.v1 standard field preset must document indexFreshness".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
 fn remember_level_kind_cross_wire_errors_match_error_schema() -> TestResult {
     let schema = schema_doc("ee.error.v2")?;
     for (level, kind, expected_code) in [

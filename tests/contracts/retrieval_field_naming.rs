@@ -96,6 +96,7 @@ fn search_report_data_json_uses_camel_case_fields() -> TestResult {
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,
         scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        index_freshness: None,
     };
 
     let json = report.data_json();
@@ -251,6 +252,7 @@ fn search_hit_fields_are_camel_case_when_populated() -> TestResult {
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,
         scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        index_freshness: None,
     };
 
     let json = report.data_json();
@@ -308,6 +310,7 @@ fn search_report_data_json_exposes_rerank_posture_contract() -> TestResult {
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,
         scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        index_freshness: None,
     };
 
     let json = report.data_json();
@@ -522,6 +525,7 @@ fn field_naming_contract_is_stable() -> TestResult {
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,
         scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        index_freshness: None,
     };
 
     let json = report.data_json();
@@ -654,6 +658,7 @@ fn optional_hit_fields_absent_when_none() -> TestResult {
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,
         scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        index_freshness: None,
     };
 
     let json = report.data_json();

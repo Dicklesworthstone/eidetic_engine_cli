@@ -56,6 +56,7 @@ fn report_with_results(results: Vec<SearchHit>) -> SearchReport {
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,
         scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        index_freshness: None,
     }
 }
 

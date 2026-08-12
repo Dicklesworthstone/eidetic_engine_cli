@@ -15358,12 +15358,19 @@ mod tests {
             format!("large-gap response omitted explicit rebuild repair: {first}"),
         )?;
         ensure(
-            repeated["degraded"].as_array().is_some_and(|entries| {
-                entries.len() == 1 && entries[0]["code"] == "search_index_stale"
-            }),
-            format!(
-                "repeat rendering must suppress only the repair advisory and retain stale truth: {repeated}"
-            ),
+            repeated["degraded"] == serde_json::json!([]),
+            format!("repeat rendering must suppress both warning prose entries: {repeated}"),
+        )?;
+        ensure(
+            repeated["indexFreshness"]
+                == serde_json::json!({
+                    "stale": true,
+                    "dbGeneration": db_generation,
+                    "indexGeneration": index_generation,
+                    "generationGap": db_generation.saturating_sub(index_generation),
+                    "largeGap": true,
+                }),
+            format!("repeat rendering lost structured freshness truth: {repeated}"),
         )
     }
 
@@ -18514,6 +18521,170 @@ mod tests {
             assert_full_warning(&one_shot, 120, 4);
             assert_freshness(&one_shot, 120, 4, true);
         }
+    }
+
+    #[test]
+    fn successful_auto_reconcile_ready_rearms_later_large_gap_episode() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path();
+        let init = crate::core::init::init_workspace(&crate::core::init::InitOptions {
+            workspace_path: workspace.to_path_buf(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        ensure(
+            !matches!(init.status, crate::core::init::InitStatus::Failed),
+            format!(
+                "initialize auto-reconcile fixture: {:?}",
+                init.action_errors
+            ),
+        )?;
+        let remember = |content: &str, defer_index_processing: bool| {
+            let options = crate::core::memory::RememberMemoryOptions {
+                workspace_path: workspace,
+                database_path: None,
+                content,
+                workflow_id: None,
+                level: "procedural",
+                kind: "rule",
+                tags: Some("auto-reconcile-rearm"),
+                confidence: 0.9,
+                source: Some("test://auto-reconcile-rearm"),
+                allow_secret_mention: false,
+                valid_from: None,
+                valid_to: None,
+                dry_run: false,
+                auto_link: false,
+                propose_candidates: false,
+            };
+            if defer_index_processing {
+                crate::core::memory::remember_memory_with_controls(
+                    &options,
+                    &crate::core::memory::RememberWriteControls {
+                        reinforce: false,
+                        idempotency_key: None,
+                        defer_index_processing: true,
+                    },
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            } else {
+                crate::core::memory::remember_memory(&options)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+        };
+        remember("Initial indexed auto-reconcile rearm rule.", false)?;
+        let database_path = workspace.join(".ee").join("ee.db");
+        let rebuild = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
+            workspace_path: workspace.to_path_buf(),
+            database_path: Some(database_path.clone()),
+            index_dir: None,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(
+            rebuild.status == crate::core::index::IndexRebuildStatus::Success,
+            format!("initial auto-reconcile fixture rebuild failed: {rebuild:?}"),
+        )?;
+        remember(
+            "Queued auto-reconcile update becomes searchable before the read.",
+            true,
+        )?;
+
+        let status_options = crate::core::index::IndexStatusOptions {
+            workspace_path: workspace.to_path_buf(),
+            database_path: Some(database_path.clone()),
+            index_dir: None,
+        };
+        let stale = crate::core::index::get_index_status(&status_options)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            stale.health == crate::core::index::IndexHealth::Stale,
+            format!("queued update must make the pre-search index stale: {stale:?}"),
+        )?;
+
+        let ready_report = run_search(&SearchOptions {
+            workspace_path: workspace.to_path_buf(),
+            database_path: Some(database_path),
+            index_dir: None,
+            query: "auto-reconcile update".to_owned(),
+            limit: 10,
+            speed: SpeedMode::Instant,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::LexicalOnly,
+            strict_source_mode: true,
+            memory_scope: MemoryScope::Workspace,
+            strict_scope: false,
+        })
+        .map_err(|error| error.to_string())?;
+        let ready = crate::core::index::get_index_status(&status_options)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            ready.health == crate::core::index::IndexHealth::Ready,
+            format!("bounded pre-read reconciliation must converge to ready: {ready:?}"),
+        )?;
+        ensure(
+            ready_report.index_freshness.is_none(),
+            format!("ready search must not claim stale freshness: {ready_report:?}"),
+        )?;
+
+        let large_gap_report = |db_generation: u64, index_generation: u64| {
+            let mut report = rerank_test_report(
+                Vec::new(),
+                vec![
+                    SearchDegradation::stale_index(Some(db_generation), Some(index_generation)),
+                    SearchDegradation::large_index_gap(db_generation, index_generation),
+                ],
+                false,
+            );
+            report.rerank_configured_mode = crate::config::SearchRerankMode::Off;
+            report.index_freshness = Some(SearchIndexFreshness {
+                stale: true,
+                db_generation: Some(db_generation),
+                index_generation: Some(index_generation),
+                generation_gap: Some(db_generation.saturating_sub(index_generation)),
+                large_gap: true,
+            });
+            report
+        };
+        let contains_large_gap = |json: &serde_json::Value| {
+            json["degraded"].as_array().is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| entry["code"] == "search_index_large_gap")
+            })
+        };
+
+        let mut session = SearchAdvisorySession::default();
+        let first = large_gap_report(150, 1)
+            .data_json_with_advisory_session_for_workspace(&mut session, "auto-reconcile-wsp");
+        ensure(
+            contains_large_gap(&first),
+            format!("first large-gap episode must emit its advisory: {first}"),
+        )?;
+        let ready_json = ready_report
+            .data_json_with_advisory_session_for_workspace(&mut session, "auto-reconcile-wsp");
+        ensure(
+            !contains_large_gap(&ready_json),
+            format!("ready response must clear the active large-gap episode: {ready_json}"),
+        )?;
+        let rearmed = large_gap_report(300, 2)
+            .data_json_with_advisory_session_for_workspace(&mut session, "auto-reconcile-wsp");
+        ensure(
+            contains_large_gap(&rearmed),
+            format!("later large gap must rearm after ready reconciliation: {rearmed}"),
+        )
     }
 
     #[test]

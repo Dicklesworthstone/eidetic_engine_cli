@@ -530,6 +530,7 @@ fn search_surface_normalizes_legacy_content_preview_metadata() -> TestResult {
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,
         scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        index_freshness: None,
     };
     assert_no_drift("search", &report.data_json().to_string())
 }

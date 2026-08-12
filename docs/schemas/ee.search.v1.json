@@ -95,6 +95,18 @@
         "metrics": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "rerank": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "queryAssist": {"$ref": "#/$defs/queryAssist"},
+        "indexFreshness": {
+          "type": "object",
+          "required": ["stale", "largeGap"],
+          "additionalProperties": false,
+          "properties": {
+            "stale": {"type": "boolean"},
+            "dbGeneration": {"type": "integer", "minimum": 0},
+            "indexGeneration": {"type": "integer", "minimum": 0},
+            "generationGap": {"type": "integer", "minimum": 0},
+            "largeGap": {"type": "boolean"}
+          }
+        },
         "elapsedMs": {"type": "number"},
         "profileRuntime": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "resultPath": {"type": "string", "const": "data.results"}
@@ -104,7 +116,7 @@
   "field_presets": {
     "minimal": ["embed_backend", "memoryId", "docId", "score", "source"],
     "summary": ["query", "status", "embed_backend", "resultCount", "memoryId", "docId", "score", "source"],
-    "standard": ["query", "status", "embed_backend", "resultCount", "results", "memoryId", "docId", "score", "source", "why", "provenance", "degraded", "errors", "metrics", "elapsedMs"],
+    "standard": ["query", "status", "embed_backend", "resultCount", "results", "memoryId", "docId", "score", "source", "why", "provenance", "indexFreshness", "degraded", "errors", "metrics", "elapsedMs"],
     "full": ["*"]
   },
   "$defs": {

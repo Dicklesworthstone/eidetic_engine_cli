@@ -124,7 +124,7 @@ fn context_request(
 }
 
 fn search_request(
-    request_id: &'static str,
+    request_id: &str,
     workspace: &Path,
     database: &Path,
     index_dir: &Path,
@@ -140,7 +140,7 @@ fn search_request(
 }
 
 fn search_request_with_query(
-    request_id: &'static str,
+    request_id: &str,
     workspace: &Path,
     database: &Path,
     index_dir: &Path,
@@ -411,18 +411,41 @@ fn daemon_failed_delivery_does_not_consume_stale_warning_episode() -> TestResult
         handle.socket_path(),
         &search_request("req-abort-first", &workspace, &database, &index_dir),
     )?;
-    // Bounded settle window for the aborted connection's handler to finish;
-    // the daemon's failed write is what releases the reservation.
-    thread::sleep(Duration::from_millis(400));
-
-    let replay = successful_result(
-        client_round_trip(
-            handle.socket_path(),
-            &search_request("req-abort-replay", &workspace, &database, &index_dir),
-        )
-        .map_err(|error| format!("replay round-trip: {error}"))?,
-        "replay after aborted delivery",
-    )?;
+    // Synchronize on the exact production state transition rather than a
+    // scheduling delay: while the aborted response still owns the provisional
+    // reservation, probes carry structured freshness without warning prose.
+    // The first probe after failed-write settlement must receive the full
+    // warning pair and becomes the successfully delivered episode winner.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut attempt = 0_u64;
+    let replay = loop {
+        attempt = attempt.saturating_add(1);
+        let candidate = successful_result(
+            client_round_trip(
+                handle.socket_path(),
+                &search_request(
+                    &format!("req-abort-replay-{attempt}"),
+                    &workspace,
+                    &database,
+                    &index_dir,
+                ),
+            )
+            .map_err(|error| format!("replay round-trip {attempt}: {error}"))?,
+            "replay after aborted delivery",
+        )?;
+        assert_search_index_freshness(&candidate, "failed-delivery-settlement-probe")?;
+        let codes = degraded_codes_at(&candidate, "/response/data/degraded")
+            .ok_or_else(|| format!("settlement probe omitted degraded[]: {candidate}"))?;
+        if codes.contains(&"search_index_stale") && codes.contains(&"search_index_large_gap") {
+            break candidate;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "aborted socket delivery did not release its advisory reservation after {attempt} production round trips; last={candidate}"
+            ));
+        }
+        thread::yield_now();
+    };
     assert_stale_episode(
         &replay,
         "/response/data/degraded",
