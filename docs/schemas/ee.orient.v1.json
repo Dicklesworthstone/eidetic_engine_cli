@@ -153,16 +153,18 @@
             "recent": { "type": "string", "const": "context_admitted_recency_v1" },
             "relevant": { "type": "string", "const": "direct_lexical_admitted_v1" },
             "sectionOverlap": { "type": "string", "const": "preserved" },
-            "recentLimit": { "type": "integer", "minimum": 0 },
-            "relevantLimit": { "type": "integer", "minimum": 0 }
+            "recentLimit": { "type": "integer", "const": 5 },
+            "relevantLimit": { "type": "integer", "const": 5 }
           }
         },
         "recent": {
           "type": "array",
+          "maxItems": 5,
           "items": { "$ref": "#/$defs/fastContentItem" }
         },
         "relevant": {
           "type": "array",
+          "maxItems": 5,
           "items": { "$ref": "#/$defs/fastContentItem" }
         },
         "issues": {

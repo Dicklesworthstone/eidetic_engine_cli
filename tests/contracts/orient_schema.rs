@@ -306,6 +306,48 @@ fn orient_fast_and_full_instances_validate_and_unknown_fields_fail() -> TestResu
         ee::testing::validate_json_schema_instance(&typed_outcome, &schema)?;
     }
 
+    let runtime_fast_limit = u64::try_from(ee::core::orient::ORIENT_FAST_CONTENT_LIMIT)
+        .map_err(|error| format!("runtime fast-content limit did not fit u64: {error}"))?;
+    for pointer in [
+        "/$defs/fastContent/properties/strategy/properties/recentLimit/const",
+        "/$defs/fastContent/properties/strategy/properties/relevantLimit/const",
+        "/$defs/fastContent/properties/recent/maxItems",
+        "/$defs/fastContent/properties/relevant/maxItems",
+    ] {
+        ensure(
+            schema.pointer(pointer).and_then(Value::as_u64) == Some(runtime_fast_limit),
+            format!("{pointer} must equal the runtime fast-content limit"),
+        )?;
+    }
+    for section in ["recent", "relevant"] {
+        let item = fast["fastContent"][section][0].clone();
+        let mut at_limit = fast.clone();
+        at_limit["fastContent"][section] =
+            Value::Array(vec![
+                item.clone();
+                ee::core::orient::ORIENT_FAST_CONTENT_LIMIT
+            ]);
+        ee::testing::validate_json_schema_instance(&at_limit, &schema)?;
+
+        let mut above_limit = at_limit;
+        above_limit["fastContent"][section]
+            .as_array_mut()
+            .ok_or_else(|| format!("fastContent.{section} must be an array"))?
+            .push(item);
+        ensure(
+            ee::testing::validate_json_schema_instance(&above_limit, &schema).is_err(),
+            format!("orient schema must reject more than the runtime limit in {section}"),
+        )?;
+    }
+    for (field, invalid_limit) in [("recentLimit", 4), ("relevantLimit", 6)] {
+        let mut invalid = fast.clone();
+        invalid["fastContent"]["strategy"][field] = json!(invalid_limit);
+        ensure(
+            ee::testing::validate_json_schema_instance(&invalid, &schema).is_err(),
+            format!("orient schema must reject a non-runtime {field}"),
+        )?;
+    }
+
     ensure(
         schema
             .pointer("/$defs/fastContentItem/properties/snippet/maxLength")
