@@ -2,8 +2,9 @@
 #
 # Full commit IDs are mandatory. This set pins the sibling revisions that
 # ee's Cargo.lock must close over. FrankenSQLite is pinned at
-# the 0.3.0 line with the ExpressionTooDeep fix and a dedicated 16 MiB worker
-# for every SQLModel open/query/close mode. SQLModel consumes that stack-safe
+# the 0.3.0 line with the ExpressionTooDeep fix and a dedicated worker for
+# every SQLModel open/query/close mode, with a 32 MiB stack proven necessary
+# by the full EE migration set. SQLModel consumes that stack-safe
 # synchronous facade directly, so fresh schema migration no longer drives
 # deep engine futures on the caller stack. The [patch.crates-io] entry still
 # satisfies sqlmodel-frankensqlite's `fsqlite 0.3` requirement. Frankensearch's
@@ -13,6 +14,6 @@ asupersync	7ecb98499715b18f24ce48f5022ec187fe03afb6
 franken_agent_detection	88fc6783805d80677c4ed18dcc79985fcbb2a694
 franken_networkx	58fe5d194e82572165cd66ff74c040d1aa194c4b
 frankensearch	f65efa25230ca1c1cf8bf544479c65cc89b45558
-frankensqlite	0f8be717ef727ae3d250d5fc6413d8463bc66334
+frankensqlite	013e68a096e790e3bfc871507b1bcd14b157005b
 sqlmodel_rust	44fbb6325bdeb1cb555d1c75684b8b023d45b33c
 toon_rust	e46b71957fad5397d4bae9eef9d428c8ac8b52aa
