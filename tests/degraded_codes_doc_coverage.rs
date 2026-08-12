@@ -41,6 +41,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 type TestResult = Result<(), String>;
 
@@ -158,6 +159,22 @@ fn collect_doc_section_codes(doc_text: &str) -> BTreeSet<String> {
     out
 }
 
+fn collect_doc_section_codes_in_order(doc_text: &str) -> Vec<String> {
+    doc_text
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("## `")?;
+            let end = rest.find('`')?;
+            let code = &rest[..end];
+            (!code.is_empty()
+                && code
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+            .then(|| code.to_owned())
+        })
+        .collect()
+}
+
 fn doc_section<'a>(doc_text: &'a str, code: &str) -> Option<&'a str> {
     let heading = format!("## `{code}`");
     let start = doc_text.find(&heading)?;
@@ -249,6 +266,49 @@ fn fixture_codes_and_doc_codes_are_disjoint_sets_size_match() -> TestResult {
         return Err(format!(
             "K3 catalog has size-mismatched sets: {} fixture(s) without doc sections, {} doc section(s) without fixtures. Run `./scripts/build_degraded_codes_doc.sh` to reconcile.",
             missing, orphan,
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn doc_sections_are_sorted_by_fixture_code() -> TestResult {
+    let expected = collect_fixture_codes()?.into_iter().collect::<Vec<_>>();
+    let doc_text = fs::read_to_string(doc_path())
+        .map_err(|e| format!("read {}: {e}", doc_path().display()))?;
+    let actual = collect_doc_section_codes_in_order(&doc_text);
+    if actual != expected {
+        return Err(format!(
+            "docs/degraded_codes.md sections are not in fixture-code order; run ./scripts/build_degraded_codes_doc.sh\nexpected first drift: {:?}\nactual first drift: {:?}",
+            expected
+                .iter()
+                .zip(&actual)
+                .find(|(left, right)| left != right),
+            actual
+                .iter()
+                .zip(&expected)
+                .find(|(left, right)| left != right),
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn generated_doc_is_byte_identical_to_builder_output() -> TestResult {
+    let script = repo_root()
+        .join("scripts")
+        .join("build_degraded_codes_doc.sh");
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("--check")
+        .current_dir(repo_root())
+        .output()
+        .map_err(|error| format!("run {} --check: {error}", script.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "generated degraded-code catalog drifted from its builder:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
         ));
     }
     Ok(())

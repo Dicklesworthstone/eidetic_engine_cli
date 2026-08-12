@@ -3,6 +3,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -14,7 +15,10 @@ use crate::core::context::{
 };
 use crate::core::doctor::DoctorReport;
 use crate::core::memory::{RememberMemoryOptions, RememberMemoryReport, remember_memory};
-use crate::core::search::{SearchDedupMode, SearchOptions, SearchSourceMode, run_search};
+use crate::core::search::{
+    SearchAdvisorySession, SearchDedupMode, SearchOptions, SearchReport, SearchSourceMode,
+    run_search,
+};
 use crate::core::subscribe::{SubscribePollOptions, parse_subscribe_filter, poll_memory_deltas};
 use crate::core::swarm_brief::{
     SwarmBriefCollectOptions, SwarmBriefSourceKind, SystemSwarmBriefCommandRunner,
@@ -52,6 +56,37 @@ pub const SERVE_ENDPOINT_SCHEMA_V1: &str = "ee.serve.endpoint.v1";
 pub const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 pub const DEFAULT_SERVE_PORT: u16 = 8766;
 pub const MIN_SERVE_TOKEN_BITS: usize = 256;
+
+/// Process-lifetime advisory state for repeated `/v1/search` requests.
+///
+/// The ordinary search renderer is deliberately invocation-scoped. A
+/// long-lived transport owner must retain an explicit session so permanent
+/// capability advisories are emitted once and subsequent responses carry the
+/// cumulative suppression summary. Keeping the state here also prevents the
+/// HTTP adapter from depending on daemon internals.
+#[derive(Debug, Default)]
+struct ServeSearchAdvisoryState {
+    session: Mutex<SearchAdvisorySession>,
+}
+
+impl ServeSearchAdvisoryState {
+    fn render(&self, report: &SearchReport, workspace_key: &str) -> Result<JsonValue, DomainError> {
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| DomainError::Configuration {
+                message: "ee serve search advisory state is unavailable after a process panic."
+                    .to_owned(),
+                repair: Some("Restart `ee serve --foreground`.".to_owned()),
+            })?;
+        Ok(report.data_json_with_advisory_session_for_workspace(&mut session, workspace_key))
+    }
+}
+
+fn serve_search_advisory_state() -> &'static ServeSearchAdvisoryState {
+    static STATE: OnceLock<ServeSearchAdvisoryState> = OnceLock::new();
+    STATE.get_or_init(ServeSearchAdvisoryState::default)
+}
 
 fn trace_serve_localhost(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
     tracing::info!(
@@ -1422,6 +1457,7 @@ fn serve_doctor_payload_json() -> Result<JsonValue, DomainError> {
 
 fn serve_search_payload_json(request: &ServeHttpRequest) -> Result<JsonValue, DomainError> {
     let workspace_path = serve_current_workspace_path()?;
+    let advisory_workspace_key = workspace_path.to_string_lossy().into_owned();
     let query = require_single_query_value(request, "q", "/v1/search")?;
     let report = run_search(&SearchOptions {
         workspace_path,
@@ -1447,7 +1483,7 @@ fn serve_search_payload_json(request: &ServeHttpRequest) -> Result<JsonValue, Do
         message: error.to_string(),
         repair: error.repair_hint().map(str::to_owned),
     })?;
-    let data = report.data_json();
+    let data = serve_search_advisory_state().render(&report, &advisory_workspace_key)?;
     let degraded = data.get("degraded").cloned().unwrap_or_else(|| json!([]));
     Ok(serve_response_payload_from_data(data, degraded))
 }
@@ -2774,6 +2810,85 @@ mod tests {
         headers
             .lines()
             .find_map(|line| line.strip_prefix(prefix.as_str()))
+    }
+
+    fn rerank_unavailable_search_report(query: &str) -> SearchReport {
+        SearchReport {
+            status: crate::core::search::SearchStatus::NoResults,
+            embed_backend: crate::models::EmbedBackend::HashFallback,
+            query: query.to_owned(),
+            requested_limit: 10,
+            results: Vec::new(),
+            elapsed_ms: 0.0,
+            errors: Vec::new(),
+            degraded: vec![crate::core::search::SearchDegradation {
+                code: "rerank_model_unavailable".to_owned(),
+                severity: "low".to_owned(),
+                message: crate::core::search::RERANK_MODEL_UNAVAILABLE_ADVISORY.to_owned(),
+                repair: None,
+            }],
+            runtime_profile: crate::core::profile::RuntimeProfileReport::for_profile(
+                crate::core::profile::OperatingProfile::Swarm,
+                "serve-rerank-advisory-contract",
+            ),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: 50,
+            rerank_runtime_available: false,
+            relevance_floor_applied: Some(0.0),
+            candidates_below_floor: 0,
+            query_assist: None,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: crate::models::MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+            index_freshness: None,
+        }
+    }
+
+    #[test]
+    fn serve_search_advisory_state_emits_permanent_notice_once_per_process_session() -> TestResult {
+        let state = ServeSearchAdvisoryState::default();
+        let first = state
+            .render(
+                &rerank_unavailable_search_report("first serve search"),
+                "serve-workspace",
+            )
+            .map_err(|error| error.to_string())?;
+        let repeated = state
+            .render(
+                &rerank_unavailable_search_report("repeated serve search"),
+                "serve-workspace",
+            )
+            .map_err(|error| error.to_string())?;
+
+        ensure(
+            first["rerank"]["advisory"]["resolution"].as_str(),
+            Some("automatic_repair_unavailable"),
+            "first serve search advisory resolution",
+        )?;
+        ensure(
+            first["rerank"]["advisorySummary"]["scope"].as_str(),
+            Some(crate::core::search::SEARCH_ADVISORY_SCOPE_PROCESS),
+            "serve search advisory scope",
+        )?;
+        ensure(
+            repeated["rerank"]["advisory"].is_null(),
+            true,
+            "repeated serve search suppresses permanent advisory",
+        )?;
+        ensure(
+            repeated["rerank"]["advisorySummary"]["suppressedCount"].as_u64(),
+            Some(1),
+            "repeated serve search suppression count",
+        )?;
+        ensure(
+            repeated["rerank"]["advisorySummary"]["sessionOccurrenceCount"].as_u64(),
+            Some(2),
+            "serve process advisory occurrence count",
+        )
     }
 
     #[test]

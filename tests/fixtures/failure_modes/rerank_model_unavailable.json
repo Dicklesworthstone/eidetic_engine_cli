@@ -27,6 +27,7 @@
       "fusion-only ranking",
       "verified offline reranker artifact"
     ],
-    "repair": null
+    "repair": null,
+    "resolution": "automatic_repair_unavailable"
   }
 }

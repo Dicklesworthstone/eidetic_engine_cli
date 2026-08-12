@@ -21,6 +21,7 @@
 #
 # Usage:
 #   scripts/build_degraded_codes_doc.sh
+#   scripts/build_degraded_codes_doc.sh --check
 #
 # Reads:
 #   tests/fixtures/failure_modes/*.json
@@ -30,6 +31,16 @@
 #   docs/degraded_codes.md  (atomic — staged to a tmp path then mv'd)
 
 set -euo pipefail
+
+MODE="write"
+case "${1:-}" in
+    "") ;;
+    --check) MODE="check" ;;
+    *)
+        echo "build_degraded_codes_doc.sh: usage: $0 [--check]" >&2
+        exit 2
+        ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -47,25 +58,33 @@ if [ ! -d "$FIXTURES_DIR" ]; then
     exit 3
 fi
 
-# Collect every fixture path sorted alphabetically; this is the
-# deterministic source-of-truth ordering for the generated catalog.
-FIXTURES=()
+# Collect every fixture, validate its code, then sort by the fixture's code.
+# Filenames normally match codes, but the generated contract is defined by
+# JSON content rather than incidental path spelling.
+FIXTURE_ROWS=()
 while IFS= read -r f; do
-    FIXTURES+=("$f")
+    code="$(jq -r '.code // empty' "$f")"
+    if [ -z "$code" ]; then
+        echo "build_degraded_codes_doc.sh: fixture $f missing .code" >&2
+        exit 5
+    fi
+    FIXTURE_ROWS+=("${code}"$'\t'"${f}")
 done < <(find "$FIXTURES_DIR" -maxdepth 1 -type f -name '*.json' | LC_ALL=C sort)
 
-if [ "${#FIXTURES[@]}" -eq 0 ]; then
+if [ "${#FIXTURE_ROWS[@]}" -eq 0 ]; then
     echo "build_degraded_codes_doc.sh: no fixtures found under $FIXTURES_DIR" >&2
     exit 4
 fi
 
-STAGE_OUTPUT="$(mktemp "${OUTPUT}.XXXXXX")"
-trap 'rm -f "$STAGE_OUTPUT"' EXIT
+FIXTURES=()
+while IFS=$'\t' read -r _code fixture; do
+    FIXTURES+=("$fixture")
+done < <(printf '%s\n' "${FIXTURE_ROWS[@]}" | LC_ALL=C sort -t $'\t' -k1,1)
 
 # Build the file body. Header documents auto-generation contract;
 # operators reading the doc see it cannot be hand-edited without
 # being overwritten on the next regen.
-{
+build_catalog() {
     cat <<'HEADER'
 # Degraded codes catalog
 
@@ -80,6 +99,7 @@ trap 'rm -f "$STAGE_OUTPUT"' EXIT
 > **To regenerate:**
 > ```bash
 > ./scripts/build_degraded_codes_doc.sh
+> ./scripts/build_degraded_codes_doc.sh --check
 > ```
 >
 > **To add a code:** drop a fixture under
@@ -136,10 +156,6 @@ HEADER
     # One section per fixture, sorted alphabetically by code.
     for fixture in "${FIXTURES[@]}"; do
         code="$(jq -r '.code // empty' "$fixture")"
-        if [ -z "$code" ]; then
-            echo "build_degraded_codes_doc.sh: fixture $fixture missing .code" >&2
-            exit 5
-        fi
         severity="$(jq -r '.severity // "unspecified"' "$fixture")"
         surfaces="$(jq -r '(.surfaces // []) | join(", ")' "$fixture")"
         bead="$(jq -r '.introduced_by.bead // "(unknown)"' "$fixture")"
@@ -180,9 +196,6 @@ HEADER
             fi
             echo ""
             echo "**Historical trigger.** $trigger_desc"
-        elif [ -n "$repair_unavailable_reason" ] && [ "$repair_unavailable_reason" != "null" ]; then
-            echo ""
-            echo "**Repair hint.** $repair_unavailable_reason"
         else
             echo "**Trigger.** $trigger_desc"
         fi
@@ -222,6 +235,9 @@ HEADER
         elif [ "$repair_present" = "true" ]; then
             echo ""
             echo "**Repair hint.** Present in fixture; see the response payload's \`error.repair\` field at runtime."
+        elif [ -n "$repair_unavailable_reason" ] && [ "$repair_unavailable_reason" != "null" ]; then
+            echo ""
+            echo "**Repair hint.** $repair_unavailable_reason"
         else
             echo ""
             echo "**Repair hint.** Not provided — this code is informational; no operator action is required."
@@ -255,11 +271,22 @@ For new degraded codes, follow the J6 fixture-authoring workflow in
 `tests/fixtures/failure_modes/` (see any existing fixture as a
 template), then regenerate.
 FOOTER
-} > "$STAGE_OUTPUT"
+}
 
-# Atomically replace the output file so a partial run doesn't leave
-# half a doc behind.
-mv "$STAGE_OUTPUT" "$OUTPUT"
-trap - EXIT
-
-echo "build_degraded_codes_doc.sh: wrote $OUTPUT ($(wc -l < "$OUTPUT" | tr -d ' ') lines, $(printf '%s\n' "${FIXTURES[@]}" | wc -l | tr -d ' ') fixtures indexed)" >&2
+if [ "$MODE" = "check" ]; then
+    if ! diff -q "$OUTPUT" <(build_catalog) >/dev/null; then
+        echo "build_degraded_codes_doc.sh: $OUTPUT is stale; run ./scripts/build_degraded_codes_doc.sh" >&2
+        diff -u "$OUTPUT" <(build_catalog) >&2 || true
+        exit 1
+    fi
+    echo "build_degraded_codes_doc.sh: $OUTPUT matches the code-sorted fixture catalog" >&2
+else
+    STAGE_OUTPUT="$(mktemp "${OUTPUT}.XXXXXX")"
+    trap 'rm -f "$STAGE_OUTPUT"' EXIT
+    build_catalog > "$STAGE_OUTPUT"
+    # Atomically replace the output file so a partial run doesn't leave
+    # half a doc behind.
+    mv "$STAGE_OUTPUT" "$OUTPUT"
+    trap - EXIT
+    echo "build_degraded_codes_doc.sh: wrote $OUTPUT ($(wc -l < "$OUTPUT" | tr -d ' ') lines, $(printf '%s\n' "${FIXTURES[@]}" | wc -l | tr -d ' ') fixtures indexed)" >&2
+fi

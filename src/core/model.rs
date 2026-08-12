@@ -368,35 +368,42 @@ pub struct ModelDegradation {
     pub code: &'static str,
     pub severity: &'static str,
     pub message: &'static str,
-    pub repair: &'static str,
+    pub repair: Option<&'static str>,
+    pub resolution: Option<&'static str>,
 }
+
+const AUTOMATIC_REPAIR_UNAVAILABLE: &str = "automatic_repair_unavailable";
 
 const DEG_NO_REGISTRY_ENTRIES: ModelDegradation = ModelDegradation {
     code: "model_registry_empty",
     severity: "low",
     message: "No models are registered for this workspace; running on deterministic hash fallback.",
-    repair: "ee index reembed --workspace .",
+    repair: Some("ee index reembed --workspace ."),
+    resolution: None,
 };
 
 const DEG_NO_AVAILABLE_MODEL: ModelDegradation = ModelDegradation {
     code: "model_registry_no_available_entry",
     severity: "medium",
     message: "Model registry has entries but no embedding model is marked available; semantic search is degraded.",
-    repair: "ee doctor --json",
+    repair: Some("ee doctor --json"),
+    resolution: None,
 };
 
 const DEG_RERANK_MODEL_MISSING: ModelDegradation = ModelDegradation {
     code: "rerank_model_missing",
     severity: "warning",
-    message: "A reranker is registered but no default rerank model artifact is marked available.",
-    repair: "ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst",
+    message: "A reranker is registered but no default rerank model artifact is marked available; this build cannot repair the gap automatically.",
+    repair: None,
+    resolution: Some(AUTOMATIC_REPAIR_UNAVAILABLE),
 };
 
 const DEG_RERANK_MODEL_CORRUPT: ModelDegradation = ModelDegradation {
     code: "rerank_model_corrupt",
     severity: "high",
-    message: "The registered default rerank model hash does not match the bundled manifest.",
-    repair: "Remove the corrupt model artifact and rerun `ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst`.",
+    message: "The registered default rerank model hash does not match the bundled manifest; this build cannot select or fetch a replacement artifact automatically.",
+    repair: None,
+    resolution: Some(AUTOMATIC_REPAIR_UNAVAILABLE),
 };
 
 const SEMANTIC_DIMENSION_BUDGET: u32 = 384;
@@ -405,7 +412,8 @@ const DEG_SEMANTIC_DIMENSION_EXCEEDS_BUDGET: ModelDegradation = ModelDegradation
     code: "semantic_dimension_exceeds_budget",
     severity: "medium",
     message: "Available embedding model dimension exceeds the configured budget; semantic search is degraded.",
-    repair: "select a smaller local embedding model or run `ee index reembed --workspace .`",
+    repair: Some("select a smaller local embedding model or run `ee index reembed --workspace .`"),
+    resolution: None,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -788,9 +796,15 @@ impl ModelStatusReport {
             output.push_str("Degraded:\n");
             for degradation in &self.degradations {
                 output.push_str(&format!(
-                    "  [{}] {} -> {}\n",
-                    degradation.severity, degradation.message, degradation.repair,
+                    "  [{}] {}",
+                    degradation.severity, degradation.message,
                 ));
+                if let Some(repair) = degradation.repair {
+                    output.push_str(&format!(" -> {repair}"));
+                } else if let Some(resolution) = degradation.resolution {
+                    output.push_str(&format!(" ({resolution})"));
+                }
+                output.push('\n');
             }
         }
         output
@@ -904,9 +918,15 @@ impl ModelListReport {
             output.push_str("Degraded:\n");
             for degradation in &self.degradations {
                 output.push_str(&format!(
-                    "  [{}] {} -> {}\n",
-                    degradation.severity, degradation.message, degradation.repair,
+                    "  [{}] {}",
+                    degradation.severity, degradation.message,
                 ));
+                if let Some(repair) = degradation.repair {
+                    output.push_str(&format!(" -> {repair}"));
+                } else if let Some(resolution) = degradation.resolution {
+                    output.push_str(&format!(" ({resolution})"));
+                }
+                output.push('\n');
             }
         }
         output
@@ -923,18 +943,35 @@ fn model_degradations_data_json(
             entry.code,
             entry.severity,
             entry.message,
-            entry.repair,
+            entry.repair.unwrap_or_default(),
         )
     }))
     .into_iter()
     .map(|entry| {
-        serde_json::json!({
+        let resolution = degradations
+            .iter()
+            .find(|degradation| {
+                degradation.code == entry.code.as_str()
+                    && degradation.message == entry.message.as_str()
+            })
+            .and_then(|degradation| degradation.resolution);
+        let mut value = serde_json::json!({
             "code": entry.code,
             "severity": entry.severity,
             "message": entry.message,
-            "repair": entry.repair,
+            "repair": if entry.repair.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(entry.repair)
+            },
             "sources": entry.sources,
-        })
+        });
+        if let Some(resolution) = resolution
+            && let Some(object) = value.as_object_mut()
+        {
+            object.insert("resolution".to_owned(), serde_json::json!(resolution));
+        }
+        value
     })
     .collect()
 }
@@ -2768,11 +2805,10 @@ pub fn fetch_rerank_model(
     let manifest = resolve_rerank_model_manifest(options.model_id)?;
     let Some(source_path) = options.from_file else {
         return Err(DomainError::Configuration {
-            message: "Network model fetch is not available in this build; use the explicit offline artifact path."
-                .to_string(),
-            repair: Some(format!(
-                "ee model fetch {DEFAULT_RERANK_MODEL_ALIAS} --from-file /path/to/{DEFAULT_RERANK_MODEL_ARTIFACT_NAME}"
-            )),
+            message: format!(
+                "Network model fetch is not available in this build ({AUTOMATIC_REPAIR_UNAVAILABLE}); reranker import requires an operator-supplied, verified local artifact passed to --from-file."
+            ),
+            repair: None,
         });
     };
 
@@ -4509,13 +4545,15 @@ mod tests {
                     code: "model_registry_no_available_entry",
                     severity: "low",
                     message: "No available model entry.",
-                    repair: "ee model list --workspace . --json",
+                    repair: Some("ee model list --workspace . --json"),
+                    resolution: None,
                 },
                 ModelDegradation {
                     code: "model_registry_no_available_entry",
                     severity: "medium",
                     message: "Model registry has no available semantic model.",
-                    repair: "ee doctor --json",
+                    repair: Some("ee doctor --json"),
+                    resolution: None,
                 },
             ],
         };
@@ -4544,6 +4582,51 @@ mod tests {
         ensure(
             degraded[0]["sources"] == serde_json::json!(["model_status"]),
             "aggregate should expose the model status source label",
+        )
+    }
+
+    #[test]
+    fn reranker_model_degradations_do_not_publish_placeholder_repairs() -> TestResult {
+        let degraded = model_degradations_data_json(
+            "model_status",
+            &[DEG_RERANK_MODEL_MISSING, DEG_RERANK_MODEL_CORRUPT],
+        );
+        ensure(degraded.len() == 2, "reranker degradation count")?;
+        for entry in degraded {
+            ensure(
+                entry["repair"].is_null(),
+                format!("reranker repair must be null: {entry}"),
+            )?;
+            ensure(
+                entry["resolution"] == AUTOMATIC_REPAIR_UNAVAILABLE,
+                format!("reranker resolution must be explicit: {entry}"),
+            )?;
+            ensure(
+                !entry.to_string().contains("/path/to/"),
+                format!("reranker degradation contains placeholder path: {entry}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reranker_fetch_without_operator_artifact_has_no_fake_repair() -> TestResult {
+        let error = fetch_rerank_model(&ModelFetchOptions {
+            workspace_path: Path::new("."),
+            database_path: None,
+            model_id: DEFAULT_RERANK_MODEL_ALIAS,
+            from_file: None,
+            model_store_root: None,
+        })
+        .expect_err("reranker fetch without --from-file must fail");
+
+        ensure(
+            error.repair_hint().is_none(),
+            "reranker fetch without an operator artifact must not invent a repair",
+        )?;
+        ensure(
+            error.message().contains(AUTOMATIC_REPAIR_UNAVAILABLE),
+            "reranker fetch error must expose automatic_repair_unavailable",
         )
     }
 

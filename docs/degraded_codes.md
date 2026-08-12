@@ -11,6 +11,7 @@
 > **To regenerate:**
 > ```bash
 > ./scripts/build_degraded_codes_doc.sh
+> ./scripts/build_degraded_codes_doc.sh --check
 > ```
 >
 > **To add a code:** drop a fixture under
@@ -7646,7 +7647,7 @@ ee init --workspace .
 **Invocation.**
 
 ```bash
-ee import jsonl --workspace . --source-path export.jsonl --json
+ee import jsonl --workspace . --source export.jsonl --json
 ```
 
 **Expected emission.** Message contains: `Imported memories are durable ... automatic publication of durable search-index jobs did not complete ... Search may omit imported memories ... durable jobs are retried`
@@ -13482,9 +13483,9 @@ ee diag model-registry --workspace . --model-id mdl_n8000000000000000000000002 -
 ee model status --workspace . --json
 ```
 
-**Expected emission.** Message contains: `registered default rerank model hash ... bundled manifest`
+**Expected emission.** Message contains: `registered default rerank model hash ... bundled manifest ... cannot select or fetch a replacement artifact automatically`
 
-**Repair hint.** Remove the corrupt model artifact and rerun `ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst`.
+**Repair hint.** No automatic repair is available in this build. An operator must inspect the corrupt registry entry and supply a verified replacement artifact explicitly.
 
 **Fixture.** [`tests/fixtures/failure_modes/rerank_model_corrupt.json`](../tests/fixtures/failure_modes/rerank_model_corrupt.json)
 
@@ -13513,9 +13514,9 @@ ee diag model-registry --workspace . --model-id mdl_n8000000000000000000000001 -
 ee model status --workspace . --json
 ```
 
-**Expected emission.** Message contains: `reranker is registered ... no default rerank model artifact`
+**Expected emission.** Message contains: `reranker is registered ... no default rerank model artifact ... cannot repair the gap automatically`
 
-**Repair hint.** ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst
+**Repair hint.** No automatic repair is available in this build. An operator may import a verified local reranker artifact with --from-file.
 
 **Fixture.** [`tests/fixtures/failure_modes/rerank_model_missing.json`](../tests/fixtures/failure_modes/rerank_model_missing.json)
 

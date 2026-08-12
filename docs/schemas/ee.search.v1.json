@@ -93,7 +93,7 @@
         "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
         "errors": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
         "metrics": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
-        "rerank": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+        "rerank": {"$ref": "#/$defs/rerankPosture"},
         "queryAssist": {"$ref": "#/$defs/queryAssist"},
         "indexFreshness": {
           "type": "object",
@@ -140,6 +140,88 @@
         "reformulations": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
         "didYouMean": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
         "captureTemplate": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      }
+    },
+    "rerankPosture": {
+      "type": "object",
+      "required": [
+        "schema",
+        "mode",
+        "configured",
+        "topK",
+        "rerankScoreCount",
+        "scoreKind",
+        "available",
+        "degradedCode",
+        "advisory",
+        "advisorySummary"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.rerank_posture.v1"},
+        "mode": {"type": "string", "enum": ["reranked", "fusion_only", "fusion_only_degraded"]},
+        "configured": {"type": "string", "enum": ["auto", "off"]},
+        "topK": {"type": "integer", "minimum": 1},
+        "rerankScoreCount": {"type": "integer", "minimum": 0},
+        "scoreKind": {"type": "string", "enum": ["rrf_fused", "reranked"]},
+        "available": {"type": "boolean"},
+        "degradedCode": {"enum": ["rerank_model_unavailable", null]},
+        "advisory": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/permanentRerankAdvisory"},
+            {"$ref": "#/$defs/transientRerankAdvisory"}
+          ]
+        },
+        "advisorySummary": {"$ref": "#/$defs/rerankAdvisorySummary"}
+      }
+    },
+    "permanentRerankAdvisory": {
+      "type": "object",
+      "required": ["code", "severity", "permanent", "message", "repair", "resolution"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string", "const": "rerank_model_unavailable"},
+        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
+        "permanent": {"type": "boolean", "const": true},
+        "message": {"type": "string", "minLength": 1},
+        "repair": {"type": "null"},
+        "resolution": {"type": "string", "const": "automatic_repair_unavailable"}
+      }
+    },
+    "transientRerankAdvisory": {
+      "type": "object",
+      "required": ["code", "severity", "permanent", "message", "repair", "resolution"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string", "const": "rerank_model_unavailable"},
+        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
+        "permanent": {"type": "boolean", "const": false},
+        "message": {"type": "string", "minLength": 1},
+        "repair": {"type": ["string", "null"]},
+        "resolution": {"type": "string", "const": "retry_or_inspect_local_registry"}
+      }
+    },
+    "rerankAdvisorySummary": {
+      "type": "object",
+      "required": [
+        "scope",
+        "permanent",
+        "distinctCount",
+        "emittedCount",
+        "suppressedCount",
+        "sessionOccurrenceCount",
+        "sessionSuppressedCount"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "scope": {"type": "string", "enum": ["invocation", "process", "response"]},
+        "permanent": {"type": ["boolean", "null"]},
+        "distinctCount": {"type": "integer", "minimum": 0},
+        "emittedCount": {"type": "integer", "minimum": 0},
+        "suppressedCount": {"type": "integer", "minimum": 0},
+        "sessionOccurrenceCount": {"type": "integer", "minimum": 0},
+        "sessionSuppressedCount": {"type": "integer", "minimum": 0}
       }
     }
   }
