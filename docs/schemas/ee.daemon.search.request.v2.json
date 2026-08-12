@@ -8,11 +8,11 @@
   "additionalProperties": false,
   "properties": {
     "schema": {"type": "string", "const": "ee.daemon.search.request.v2"},
-    "query": {"type": "string", "minLength": 1},
+    "query": {"type": "string", "minLength": 1, "pattern": "\\S"},
     "workspacePath": {"type": "string", "minLength": 1},
     "databasePath": {"type": "string", "minLength": 1},
     "indexDir": {"type": "string", "minLength": 1},
-    "limit": {"type": "integer", "minimum": 0},
+    "limit": {"type": "integer", "minimum": 0, "maximum": 4294967295},
     "speed": {"type": "string", "enum": ["instant", "default", "quality"]},
     "explain": {"type": "boolean"},
     "explainPerformance": {"type": "boolean"},

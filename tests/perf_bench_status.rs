@@ -172,6 +172,93 @@ fn bench_script_exposes_rch_safe_profiles_and_report_fields() -> TestResult {
 }
 
 #[test]
+fn daemon_search_hard_gate_and_github_observation_are_truthfully_separated() -> TestResult {
+    let budgets = budgets_manifest()?;
+    let profiles = budgets
+        .get("profiles")
+        .ok_or_else(|| "missing TOML field `profiles`".to_owned())?;
+    let hard = profiles
+        .get("daemon-search-slo")
+        .ok_or_else(|| "missing hard daemon-search-slo profile".to_owned())?;
+    let observation = profiles
+        .get("daemon-search-slo-observation")
+        .ok_or_else(|| "missing daemon-search-slo-observation profile".to_owned())?;
+
+    if toml_string(hard, "ci_suitability")? != "stable_self_hosted_linux_x64"
+        || !toml_bool(hard, "release_blocking")?
+        || toml_bool(hard, "advisory")?
+    {
+        return Err(
+            "daemon-search-slo must remain a non-advisory release gate on a stable self-hosted runner"
+                .to_owned(),
+        );
+    }
+    if toml_string(observation, "ci_suitability")? != "github_hosted_linux_x64"
+        || toml_bool(observation, "release_blocking")?
+        || !toml_bool(observation, "advisory")?
+    {
+        return Err(
+            "GitHub-hosted daemon search measurements must remain advisory observations".to_owned(),
+        );
+    }
+
+    let operations = budgets
+        .get("operations")
+        .ok_or_else(|| "missing TOML field `operations`".to_owned())?;
+    let cold = operations
+        .get("ee_search_cli_cold_10k")
+        .ok_or_else(|| "missing cold daemon-search operation".to_owned())?;
+    let warm = operations
+        .get("ee_search_daemon_warm_10k")
+        .ok_or_else(|| "missing warm daemon-search operation".to_owned())?;
+    if toml_f64(cold, "p50_ms_max")? != 1_500.0 || toml_f64(warm, "p50_ms_max")? != 500.0 {
+        return Err(
+            "daemon-search acceptance ceilings must remain cold<1500ms and warm<500ms".to_owned(),
+        );
+    }
+
+    let script = fs::read_to_string("scripts/bench.sh")
+        .map_err(|error| format!("failed to read scripts/bench.sh: {error}"))?;
+    for required in [
+        "EE_BENCH_RUNNER_CLASS=stable_self_hosted_linux_x64",
+        "EE_BENCH_EXCLUSIVE=1",
+        "DAEMON_SEARCH_BENCH_ARG=\"--warm-search-gate\"",
+        "DAEMON_SEARCH_BENCH_ARG=\"--warm-search-observation\"",
+        "ENFORCE_DAEMON_SEARCH_BUDGETS=true",
+    ] {
+        if !script.contains(required) {
+            return Err(format!("scripts/bench.sh missing `{required}`"));
+        }
+    }
+
+    let workflow = fs::read_to_string(".github/workflows/ci.yml")
+        .map_err(|error| format!("failed to read CI workflow: {error}"))?;
+    if !workflow.contains("--profile daemon-search-slo-observation --json")
+        || workflow.contains("--profile daemon-search-slo --json")
+    {
+        return Err(
+            "GitHub-hosted CI must run the observational profile, never the hard gate".to_owned(),
+        );
+    }
+
+    let bench = fs::read_to_string("benches/daemon_round_trip.rs")
+        .map_err(|error| format!("failed to read daemon benchmark: {error}"))?;
+    for required in [
+        "run_warm_search_measurement(true)",
+        "run_warm_search_measurement(false)",
+        "if enforce_budgets",
+        "const SEARCH_COLD_P50_BUDGET_MS: f64 = 1_500.0",
+        "const SEARCH_WARM_P50_BUDGET_MS: f64 = 500.0",
+    ] {
+        if !bench.contains(required) {
+            return Err(format!("daemon benchmark missing `{required}`"));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn s4_benchmark_surface_covers_resource_scale_acceptance() -> TestResult {
     let context_source = fs::read_to_string("benches/context.rs")
         .map_err(|error| format!("failed to read benches/context.rs: {error}"))?;

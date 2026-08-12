@@ -15,6 +15,9 @@
 //! Both paths share the same prebuilt database/index and warmed filesystem
 //! cache. The architectural process/model reuse difference is the point of the
 //! comparison; this benchmark does not claim cold disk-cache performance.
+//! `--warm-search-observation` runs the identical workload without asserting
+//! the ceilings, so variable GitHub-hosted hardware cannot masquerade as the
+//! stable, exclusive-runner closure gate.
 
 #[cfg(unix)]
 use std::hint::black_box;
@@ -953,7 +956,7 @@ fn assert_result_parity(expected: &JsonValue, observation: &SearchObservation, p
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-fn run_warm_search_gate() {
+fn run_warm_search_measurement(enforce_budgets: bool) {
     let ee_binary = std::env::var_os("EE_BENCH_EE_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| panic!("EE_BENCH_EE_BIN must name the release ee binary"));
@@ -1135,27 +1138,43 @@ fn run_warm_search_gate() {
                 "initialEmbedderPreparationMs": daemon_initialization.embedder_preparation_ms,
             },
             "resultParity": "exact_results_array",
+            "budgetEnforcement": if enforce_budgets {
+                "hard_gate"
+            } else {
+                "observation_only"
+            },
             "passed": passed,
         })
     );
 
-    assert!(
-        cold_p50_ms < SEARCH_COLD_P50_BUDGET_MS,
-        "fresh-process cold ee search p50 {cold_p50_ms:.3}ms must be below the exclusive {SEARCH_COLD_P50_BUDGET_MS:.3}ms budget"
-    );
-    assert!(
-        warm_p50_ms < SEARCH_WARM_P50_BUDGET_MS,
-        "warm-daemon ee search p50 {warm_p50_ms:.3}ms must be below the exclusive {SEARCH_WARM_P50_BUDGET_MS:.3}ms budget"
-    );
+    if enforce_budgets {
+        assert!(
+            cold_p50_ms < SEARCH_COLD_P50_BUDGET_MS,
+            "fresh-process cold ee search p50 {cold_p50_ms:.3}ms must be below the exclusive {SEARCH_COLD_P50_BUDGET_MS:.3}ms budget"
+        );
+        assert!(
+            warm_p50_ms < SEARCH_WARM_P50_BUDGET_MS,
+            "warm-daemon ee search p50 {warm_p50_ms:.3}ms must be below the exclusive {SEARCH_WARM_P50_BUDGET_MS:.3}ms budget"
+        );
+    }
 }
 
 #[cfg(unix)]
 fn main() {
     if std::env::args().any(|argument| argument == "--warm-search-gate") {
         #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-        run_warm_search_gate();
+        run_warm_search_measurement(true);
         #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
         panic!("warm-search gate requires safe same-EUID peer credentials on Linux or Apple");
+        return;
+    }
+    if std::env::args().any(|argument| argument == "--warm-search-observation") {
+        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        run_warm_search_measurement(false);
+        #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+        panic!(
+            "warm-search observation requires safe same-EUID peer credentials on Linux or Apple"
+        );
         return;
     }
 

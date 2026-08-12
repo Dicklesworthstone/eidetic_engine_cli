@@ -9,6 +9,7 @@ set -eu
 # Usage:
 #   ./scripts/bench.sh --profile ci-smoke --json
 #   ./scripts/bench.sh --profile daemon-search-slo --json
+#   ./scripts/bench.sh --profile daemon-search-slo-observation --json
 #   ./scripts/bench.sh --profile nightly
 #   ./scripts/bench.sh --profile stress --check-regression
 #   ./scripts/bench.sh --profile auto_enroll --json
@@ -23,7 +24,10 @@ set -eu
 #   EE_BENCH_OUTPUT        Output path for JSON artifact.
 #   EE_EMBED_MODEL_FIXTURE_DIR
 #                          Verified potion-multilingual-128M fixture required
-#                          by the daemon-search-slo profile.
+#                          by both daemon-search 10k profiles.
+#   EE_BENCH_RUNNER_CLASS  Must be stable_self_hosted_linux_x64 for the hard
+#                          daemon-search-slo gate.
+#   EE_BENCH_EXCLUSIVE     Must be 1 for the hard daemon-search-slo gate.
 
 PROFILE="nightly"
 JSON_OUTPUT=false
@@ -31,6 +35,9 @@ CHECK_REGRESSION=false
 LIST_PROFILES=false
 AUTO_ENROLL_BASELINE_ONLY=false
 BUDGET_MODE="advisory"
+DAEMON_SEARCH_PROFILE=false
+ENFORCE_DAEMON_SEARCH_BUDGETS=false
+DAEMON_SEARCH_BENCH_ARG=""
 
 usage() {
     sed -n '3,18p' "$0" | sed 's/^# //' | sed 's/^#//'
@@ -94,7 +101,7 @@ if [ ! -f "$BUDGETS_FILE" ]; then
 fi
 
 if [ "$LIST_PROFILES" = "true" ]; then
-    printf '%s\n' "ci-smoke" "daemon-search-slo" "nightly" "stress" "auto_enroll" "auto_enroll_idle_24h"
+    printf '%s\n' "ci-smoke" "daemon-search-slo" "daemon-search-slo-observation" "nightly" "stress" "auto_enroll" "auto_enroll_idle_24h"
     exit 0
 fi
 
@@ -109,10 +116,31 @@ case "$PROFILE" in
     daemon-search-slo)
         BENCHMARKS=""
         BENCH_ARGS=""
-        PROFILE_CLASS="github_hosted_linux_x64"
+        PROFILE_CLASS="stable_self_hosted_linux_x64"
         WORKLOAD_TIER="10k_search"
         RELEASE_BLOCKING=true
         BUDGET_MODE="hard"
+        DAEMON_SEARCH_PROFILE=true
+        ENFORCE_DAEMON_SEARCH_BUDGETS=true
+        DAEMON_SEARCH_BENCH_ARG="--warm-search-gate"
+        if [ "${EE_BENCH_RUNNER_CLASS:-}" != "stable_self_hosted_linux_x64" ]; then
+            echo "daemon-search-slo requires EE_BENCH_RUNNER_CLASS=stable_self_hosted_linux_x64" >&2
+            exit 1
+        fi
+        if [ "${EE_BENCH_EXCLUSIVE:-}" != "1" ]; then
+            echo "daemon-search-slo requires EE_BENCH_EXCLUSIVE=1" >&2
+            exit 1
+        fi
+        ;;
+    daemon-search-slo-observation)
+        BENCHMARKS=""
+        BENCH_ARGS=""
+        PROFILE_CLASS="github_hosted_linux_x64"
+        WORKLOAD_TIER="10k_search"
+        RELEASE_BLOCKING=false
+        BUDGET_MODE="advisory"
+        DAEMON_SEARCH_PROFILE=true
+        DAEMON_SEARCH_BENCH_ARG="--warm-search-observation"
         ;;
     nightly)
         BENCHMARKS="remember search context tiered_recall pack_size why outcome status workspace_init audit_query index_rebuild concurrent_writes import_cass link graph_pagerank graph_ppr graph_louvain graph_ktruss graph_gomory_hu graph_hits graph_full_stack curate_candidates graph_refresh_cooperative"
@@ -148,7 +176,7 @@ case "$PROFILE" in
         ;;
     *)
         echo "Unknown benchmark profile: $PROFILE" >&2
-        echo "Known profiles: ci-smoke, daemon-search-slo, nightly, stress, auto_enroll, auto_enroll_idle_24h" >&2
+        echo "Known profiles: ci-smoke, daemon-search-slo, daemon-search-slo-observation, nightly, stress, auto_enroll, auto_enroll_idle_24h" >&2
         exit 1
         ;;
 esac
@@ -172,7 +200,7 @@ else
         ci-smoke)
             cargo build --release --bench status >&2
             ;;
-        daemon-search-slo)
+        daemon-search-slo|daemon-search-slo-observation)
             cargo build --release --bench daemon_round_trip >&2
             cargo build --release --bin ee >&2
             ;;
@@ -205,7 +233,7 @@ append_result() {
     regression_status="${8:-not_checked}"
     allocation_count="${9:-null}"
 
-    if [ "$PROFILE" = "daemon-search-slo" ]; then
+    if [ "$DAEMON_SEARCH_PROFILE" = "true" ]; then
         baseline_ref=null
     else
         baseline_ref="{\"file\":\"$BASELINE_FILE\",\"operation\":\"$key\"}"
@@ -399,8 +427,8 @@ json_timing_ms() {
 }
 
 workload_json() {
-    if [ "$PROFILE" = "daemon-search-slo" ]; then
-        printf '%s' '{"schema":"ee.perf.workload_ref.v1","manifest":"benches/daemon_round_trip.rs","tier":"10k_search","ci_suitability":"github_hosted_linux_x64","memory_count":10000,"agent_count":1}'
+    if [ "$DAEMON_SEARCH_PROFILE" = "true" ]; then
+        printf '{"schema":"ee.perf.workload_ref.v1","manifest":"benches/daemon_round_trip.rs","tier":"10k_search","ci_suitability":"%s","memory_count":10000,"agent_count":1}' "$PROFILE_CLASS"
         return
     fi
     if [ "$AUTO_ENROLL_BASELINE_ONLY" = "true" ]; then
@@ -540,11 +568,12 @@ run_criterion_bench() {
 }
 
 run_daemon_search_slo() {
-    markers_file="$ARTIFACT_DIR/daemon-search-slo.markers"
+    markers_file="$ARTIFACT_DIR/$PROFILE.markers"
     echo "" >&2
-    echo "[*] Benchmark: daemon-search-slo" >&2
+    echo "[*] Benchmark: $PROFILE" >&2
     echo "    fixture: 10000 documents, prebuilt before measurement" >&2
     echo "    backend: neural_local required; downloads disabled" >&2
+    echo "    budget enforcement: $BUDGET_MODE" >&2
 
     if [ -z "${EE_EMBED_MODEL_FIXTURE_DIR:-}" ] || [ ! -d "$EE_EMBED_MODEL_FIXTURE_DIR" ]; then
         printf '%s\n' "EE_EMBED_MODEL_FIXTURE_DIR must name an accessible real model fixture" >"$markers_file"
@@ -555,7 +584,7 @@ run_daemon_search_slo() {
         return
     fi
 
-    if output=$(EE_EMBED_DOWNLOAD=off EE_EMBED_MODEL_FIXTURE_DIR="$EE_EMBED_MODEL_FIXTURE_DIR" cargo bench --bench daemon_round_trip -- --warm-search-gate 2>&1); then
+    if output=$(EE_EMBED_DOWNLOAD=off EE_EMBED_MODEL_FIXTURE_DIR="$EE_EMBED_MODEL_FIXTURE_DIR" cargo bench --bench daemon_round_trip -- "$DAEMON_SEARCH_BENCH_ARG" 2>&1); then
         status=0
     else
         status=$?
@@ -604,6 +633,11 @@ run_daemon_search_slo() {
     esac
     cold_within_budget=$(awk -v value="${cold_p50_ms:-999999}" 'BEGIN { print (value < 1500.0) ? "yes" : "no" }')
     warm_within_budget=$(awk -v value="${warm_p50_ms:-999999}" 'BEGIN { print (value < 500.0) ? "yes" : "no" }')
+    budget_contract_satisfied=yes
+    if [ "$ENFORCE_DAEMON_SEARCH_BUDGETS" = "true" ] \
+        && { [ "$cold_within_budget" != "yes" ] || [ "$warm_within_budget" != "yes" ]; }; then
+        budget_contract_satisfied=no
+    fi
 
     if [ "$status" -eq 0 ] \
         && [ -n "$cold_p50_ms" ] \
@@ -613,8 +647,7 @@ run_daemon_search_slo() {
         && [ -n "$index_open_p50_ms" ] \
         && [ -n "$query_p50_ms" ] \
         && [ -n "$initial_embedder_preparation_ms" ] \
-        && [ "$cold_within_budget" = "yes" ] \
-        && [ "$warm_within_budget" = "yes" ] \
+        && [ "$budget_contract_satisfied" = "yes" ] \
         && [ "$sample_count" = "21" ] \
         && [ "$backend" = "neural_local" ] \
         && [ "$parity" = "exact_results_array" ] \
@@ -624,10 +657,20 @@ run_daemon_search_slo() {
         && [ "$model_dimension" = "256" ] \
         && [ "$model_distance_metric" = "cosine" ] \
         && [ "$model_vector_dtype" = "float32" ]; then
-        append_result "ee_search_cli_cold_10k" "measured" "$cold_p50_ms" null null null null "within_budget"
-        append_result "ee_search_daemon_warm_10k" "measured" "$warm_p50_ms" null null null null "within_budget"
-        echo "[+] cold fresh-process search: p50=${cold_p50_ms}ms (<1500ms)" >&2
-        echo "[+] warm daemon search: p50=${warm_p50_ms}ms (<500ms)" >&2
+        if [ "$cold_within_budget" = "yes" ]; then
+            cold_budget_status=within_budget
+        else
+            cold_budget_status=exceeded_budget
+        fi
+        if [ "$warm_within_budget" = "yes" ]; then
+            warm_budget_status=within_budget
+        else
+            warm_budget_status=exceeded_budget
+        fi
+        append_result "ee_search_cli_cold_10k" "measured" "$cold_p50_ms" null null null null "$cold_budget_status"
+        append_result "ee_search_daemon_warm_10k" "measured" "$warm_p50_ms" null null null null "$warm_budget_status"
+        echo "[+] cold fresh-process search: p50=${cold_p50_ms}ms (exclusive acceptance: <1500ms; ${cold_budget_status})" >&2
+        echo "[+] warm daemon search: p50=${warm_p50_ms}ms (exclusive acceptance: <500ms; ${warm_budget_status})" >&2
         echo "[+] backend=${backend} samples=${sample_count} parity=${parity}" >&2
         echo "[+] fingerprint=${model_id}@${model_revision} ${model_hash} ${model_dimension}d/${model_distance_metric}/${model_vector_dtype}" >&2
         echo "[+] daemon timing p50: total=${daemon_total_p50_ms}ms embedder=${embedder_preparation_p50_ms}ms index_open=${index_open_p50_ms}ms query=${query_p50_ms}ms" >&2
@@ -640,7 +683,7 @@ run_daemon_search_slo() {
     [ -n "$warm_p50_ms" ] || warm_p50_ms=null
     append_result "ee_search_cli_cold_10k" "failed" "$cold_p50_ms" null null null null "hard_gate_failed"
     append_result "ee_search_daemon_warm_10k" "failed" "$warm_p50_ms" null null null null "hard_gate_failed"
-    echo "[-] daemon-search-slo failed: exit=${status} backend=${backend:-missing} samples=${sample_count:-missing} parity=${parity:-missing} model_id=${model_id:-missing} model_hash=${model_hash:-missing}" >&2
+    echo "[-] $PROFILE failed: exit=${status} backend=${backend:-missing} samples=${sample_count:-missing} parity=${parity:-missing} model_id=${model_id:-missing} model_hash=${model_hash:-missing}" >&2
     echo "[-] retained markers: $markers_file" >&2
     FAILED=true
 }
@@ -1278,7 +1321,7 @@ append_auto_enroll_baseline_rows() {
 
 if [ "$AUTO_ENROLL_BASELINE_ONLY" = "true" ]; then
     append_auto_enroll_baseline_rows
-elif [ "$PROFILE" = "daemon-search-slo" ]; then
+elif [ "$DAEMON_SEARCH_PROFILE" = "true" ]; then
     run_daemon_search_slo
 else
     for bench in $BENCHMARKS; do
@@ -1307,7 +1350,7 @@ if [ "$PROFILE" = "ci-smoke" ]; then
 fi
 
 WORKLOAD_JSON=$(workload_json)
-if [ "$PROFILE" = "daemon-search-slo" ]; then
+if [ "$DAEMON_SEARCH_PROFILE" = "true" ]; then
     PERF_BASELINE_FILE=null
 else
     PERF_BASELINE_FILE="\"$BASELINE_FILE\""

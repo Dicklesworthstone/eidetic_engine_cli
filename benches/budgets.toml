@@ -32,14 +32,24 @@ release_blocking = false
 advisory = true
 
 [profiles.daemon-search-slo]
-description = "Dedicated stable-runner gate for fresh-process cold search and warm-daemon search over one prebuilt 10k fixture"
-ci_suitability = "github_hosted_linux_x64"
+description = "Dedicated stable/exclusive-runner hard gate for fresh-process cold search and warm-daemon search over one prebuilt 10k fixture"
+ci_suitability = "stable_self_hosted_linux_x64"
 workload_tier = "10k_search"
 benches = ["daemon_round_trip"]
 sample_size = 21
 warmup_samples = 3
 release_blocking = true
 advisory = false
+
+[profiles.daemon-search-slo-observation]
+description = "GitHub-hosted observational run of the 10k cold/warm search workload; reports the unchanged acceptance thresholds but cannot satisfy the stable/exclusive hard gate"
+ci_suitability = "github_hosted_linux_x64"
+workload_tier = "10k_search"
+benches = ["daemon_round_trip"]
+sample_size = 21
+warmup_samples = 3
+release_blocking = false
+advisory = true
 
 [profiles.nightly]
 description = "Broader nightly profile over all Criterion benchmark groups"

@@ -44,9 +44,10 @@ use crate::core::context::{
     run_context_pack_with_performance_controlled,
 };
 use crate::core::search::{
-    PERFORMANCE_EXPLAIN_SCHEMA_V1, SearchAdvisorySession, SearchDedupMode, SearchOptions,
-    SearchPerformanceTrace, SearchReport, SearchSourceMode, TypedMemoryFieldFilter,
-    elapsed_timing_json, normalize_memory_kind_filter, run_search_with_performance_and_filters,
+    PERFORMANCE_EXPLAIN_SCHEMA_V1, PERFORMANCE_FALLBACK_REDACTED_MESSAGE, SearchAdvisorySession,
+    SearchDedupMode, SearchOptions, SearchPerformanceTrace, SearchReport, SearchSourceMode,
+    TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
+    run_search_with_performance_and_filters,
 };
 use crate::models::{MemoryScope, QueryFilters, RedactionLevel};
 use crate::output::{ContextJsonRenderOptions, render_context_response_json_with_options};
@@ -2076,15 +2077,17 @@ impl DaemonSearchParams {
         }
         let speed = parse_daemon_speed_mode(&self.speed)?;
         let source_mode = parse_daemon_source_mode(&self.source_mode)?;
-        let dedup_mode = match self.dedupe.trim().to_ascii_lowercase().as_str() {
-            "doc_id" | "doc-id" => SearchDedupMode::DocId,
+        let dedup_mode = match self.dedupe.as_str() {
+            "doc_id" => SearchDedupMode::DocId,
             "mi" => SearchDedupMode::MutualInformation,
             _ => return Err("field `dedupe` must be `doc_id` or `mi`".to_owned()),
         };
-        let memory_scope = MemoryScope::parse(&self.memory_scope).ok_or_else(|| {
-            "field `memoryScope` must be self, team, global, workspace, verified, or swarm"
-                .to_owned()
-        })?;
+        let memory_scope = MemoryScope::parse(&self.memory_scope)
+            .filter(|scope| scope.as_str() == self.memory_scope)
+            .ok_or_else(|| {
+                "field `memoryScope` must be self, team, global, workspace, verified, or swarm"
+                    .to_owned()
+            })?;
         let as_of = self
             .as_of
             .as_deref()
@@ -2510,8 +2513,31 @@ fn validate_search_performance_explain(value: &serde_json::Value) -> Result<(), 
             .pointer("/redaction/memoryContentIncluded")
             .and_then(serde_json::Value::as_bool)
             != Some(false)
+        || data
+            .pointer("/redaction/queryTextIncluded")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
     {
         return Err("daemon search performance redaction contract drifted".to_owned());
+    }
+    let fallbacks = data
+        .get("fallbacks")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "daemon search performance fallbacks must be an array".to_owned())?;
+    for (index, fallback) in fallbacks.iter().enumerate() {
+        validate_exact_object_fields(
+            fallback,
+            &format!("daemon search performance fallback {index}"),
+            &["code", "severity", "message", "sources"],
+            &[],
+        )?;
+        if fallback.get("message").and_then(serde_json::Value::as_str)
+            != Some(PERFORMANCE_FALLBACK_REDACTED_MESSAGE)
+        {
+            return Err(format!(
+                "daemon search performance fallback {index} contains unredacted details"
+            ));
+        }
     }
     Ok(())
 }
@@ -4184,7 +4210,7 @@ fn parse_daemon_context_profile(value: &str) -> Result<ContextPackProfile, Strin
 }
 
 fn parse_daemon_speed_mode(value: &str) -> Result<SpeedMode, String> {
-    match value.trim().to_ascii_lowercase().as_str() {
+    match value {
         "instant" => Ok(SpeedMode::Instant),
         "default" => Ok(SpeedMode::Default),
         "quality" => Ok(SpeedMode::Quality),
@@ -4195,9 +4221,9 @@ fn parse_daemon_speed_mode(value: &str) -> Result<SpeedMode, String> {
 }
 
 fn parse_daemon_source_mode(value: &str) -> Result<SearchSourceMode, String> {
-    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
-        "lexical_only" | "lexical" => Ok(SearchSourceMode::LexicalOnly),
-        "semantic_only" | "semantic" => Ok(SearchSourceMode::SemanticOnly),
+    match value {
+        "lexical_only" => Ok(SearchSourceMode::LexicalOnly),
+        "semantic_only" => Ok(SearchSourceMode::SemanticOnly),
         "hybrid" => Ok(SearchSourceMode::Hybrid),
         _ => Err(format!(
             "Invalid source mode `{value}`. Expected lexical_only, semantic_only, or hybrid."
@@ -4966,6 +4992,54 @@ mod tests {
     }
 
     #[test]
+    fn daemon_search_request_v2_accepts_only_published_enum_spellings() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let workspace_id = workspace.path().display().to_string();
+        let base = serde_json::json!({
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+            "query": "release",
+            "workspacePath": workspace.path(),
+            "speed": "default",
+            "dedupe": "doc_id",
+            "sourceMode": "hybrid",
+            "memoryScope": "swarm"
+        });
+
+        for (field, canonical) in [
+            ("speed", "quality"),
+            ("dedupe", "mi"),
+            ("sourceMode", "lexical_only"),
+            ("memoryScope", "workspace"),
+        ] {
+            let mut value = base.clone();
+            value[field] = serde_json::json!(canonical);
+            DaemonSearchParams::from_value(&value)
+                .expect("canonical request shape")
+                .into_search_parts(&workspace_id)
+                .unwrap_or_else(|error| panic!("canonical {field}={canonical:?}: {error}"));
+        }
+
+        for (field, noncanonical) in [
+            ("speed", " Quality "),
+            ("dedupe", "doc-id"),
+            ("sourceMode", "lexical"),
+            ("sourceMode", "Semantic_Only"),
+            ("memoryScope", " SWARM "),
+        ] {
+            let mut value = base.clone();
+            value[field] = serde_json::json!(noncanonical);
+            let error = DaemonSearchParams::from_value(&value)
+                .expect("string enum request shape")
+                .into_search_parts(&workspace_id)
+                .expect_err("noncanonical wire enum must be rejected");
+            assert!(
+                !error.is_empty(),
+                "empty error for {field}={noncanonical:?}"
+            );
+        }
+    }
+
+    #[test]
     fn dispatch_search_binds_params_to_authorized_workspace() {
         let response = dispatch(&search_request(serde_json::json!({
             "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
@@ -4996,7 +5070,7 @@ mod tests {
             "indexDir": workspace.join(".ee/index")
         }))
         .expect("strict params");
-        let (options, _, _) = params
+        let (options, _, _, _) = params
             .into_search_parts(&workspace.display().to_string())
             .expect("canonical aliases inside the workspace are accepted");
         assert_eq!(

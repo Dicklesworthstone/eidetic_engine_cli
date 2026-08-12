@@ -12,14 +12,16 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use ee::core::search::PERFORMANCE_FALLBACK_REDACTED_MESSAGE;
 use ee::daemon::DAEMON_RESPONSE_SCHEMA_V1;
 use ee::daemon::protocol::{DaemonRequest, DaemonResponse};
 use ee::daemon::server::{
     DAEMON_SEARCH_EXECUTION_FAILED_CODE, DAEMON_SEARCH_PARAMS_INVALID_CODE,
     DAEMON_SEARCH_REQUEST_SCHEMA_V2, DAEMON_SEARCH_RESPONSE_SCHEMA_V3, METHOD_CAPABILITIES,
     METHOD_CONTEXT, METHOD_ECHO, METHOD_SEARCH, METHOD_SHUTDOWN, METHOD_TELEMETRY, METHOD_WRITE,
-    METHOD_WRITE_JOURNAL,
+    METHOD_WRITE_JOURNAL, dispatch,
 };
+use ee::db::{CreateWorkspaceInput, DbConnection};
 
 type TestResult = Result<(), String>;
 
@@ -154,6 +156,57 @@ fn error_response() -> Value {
         .with_degraded("daemon_unknown_method"),
     )
     .expect("DaemonResponse::err must serialize")
+}
+
+fn actual_daemon_search_result(query: &str) -> Result<Value, String> {
+    let temp = tempfile::tempdir().map_err(|error| format!("search tempdir: {error}"))?;
+    let workspace = temp.path().join("workspace");
+    let state_dir = workspace.join(".ee");
+    fs::create_dir_all(&state_dir).map_err(|error| format!("create search workspace: {error}"))?;
+    let database = state_dir.join("ee.db");
+    let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    connection.migrate().map_err(|error| error.to_string())?;
+    connection
+        .insert_workspace(
+            "wsp_daemon_schema_contract_00001",
+            &CreateWorkspaceInput {
+                path: workspace.display().to_string(),
+                name: Some("daemon schema contract".to_owned()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    connection.close().map_err(|error| error.to_string())?;
+
+    let workspace_id = workspace.display().to_string();
+    let mut request = DaemonRequest::new(
+        "req-search-response-schema",
+        "agent-search-response-schema",
+        METHOD_SEARCH,
+        serde_json::json!({
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+            "query": query,
+            "workspacePath": workspace_id,
+            "databasePath": database,
+            "indexDir": state_dir.join("missing-index"),
+            "speed": "instant",
+            "sourceMode": "lexical_only",
+            "strictSourceMode": true,
+            "dedupe": "doc_id",
+            "memoryScope": "swarm",
+            "explainPerformance": true
+        }),
+    );
+    request.workspace_id = Some(workspace.display().to_string());
+    let response = dispatch(&request);
+    if let Some(error) = response.error {
+        return Err(format!(
+            "real daemon search did not serialize a result: {}: {}",
+            error.code, error.message
+        ));
+    }
+    response
+        .result
+        .ok_or_else(|| "real daemon search response omitted result".to_owned())
 }
 
 #[test]
@@ -303,6 +356,11 @@ fn daemon_search_method_schemas_pin_paths_timings_and_nested_strictness() -> Tes
         ),
         (
             &response,
+            "/$defs/performanceFallback/additionalProperties",
+            "redacted performance fallback",
+        ),
+        (
+            &response,
             "/$defs/searchDocument/additionalProperties",
             "search document",
         ),
@@ -351,6 +409,20 @@ fn daemon_search_method_schemas_pin_paths_timings_and_nested_strictness() -> Tes
         return Err("search response performance must remain optional".to_owned());
     }
     if response
+        .pointer("/$defs/performance/properties/data/properties/redaction/properties/queryTextIncluded/const")
+        .and_then(Value::as_bool)
+        != Some(false)
+        || response
+            .pointer("/$defs/performanceFallback/properties/message/const")
+            .and_then(Value::as_str)
+            != Some(PERFORMANCE_FALLBACK_REDACTED_MESSAGE)
+    {
+        return Err(
+            "search performance schema must pin its query and fallback redaction claims"
+                .to_owned(),
+        );
+    }
+    if response
         .pointer("/properties/performance/$ref")
         .and_then(Value::as_str)
         != Some("#/$defs/performance")
@@ -378,6 +450,109 @@ fn daemon_search_method_schemas_pin_paths_timings_and_nested_strictness() -> Tes
                 "search request containment contract missing {phrase:?}"
             ));
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn daemon_search_request_v2_schema_accepts_only_canonical_enum_values() -> TestResult {
+    let schema = read_schema(SEARCH_REQUEST_SCHEMA_PATH)?;
+    let base = serde_json::json!({
+        "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+        "query": "release",
+        "workspacePath": "/tmp/ee-daemon-search-contract",
+        "speed": "default",
+        "dedupe": "doc_id",
+        "sourceMode": "hybrid",
+        "memoryScope": "swarm"
+    });
+    validate_json_schema(&base, &schema, "$")?;
+
+    for (field, canonical) in [
+        ("speed", "quality"),
+        ("dedupe", "mi"),
+        ("sourceMode", "semantic_only"),
+        ("memoryScope", "workspace"),
+    ] {
+        let mut value = base.clone();
+        value[field] = serde_json::json!(canonical);
+        validate_json_schema(&value, &schema, "$")
+            .map_err(|error| format!("canonical {field}={canonical:?} rejected: {error}"))?;
+    }
+
+    for (field, noncanonical) in [
+        ("speed", " Quality "),
+        ("dedupe", "doc-id"),
+        ("sourceMode", "lexical"),
+        ("sourceMode", "Semantic_Only"),
+        ("memoryScope", " SWARM "),
+    ] {
+        let mut value = base.clone();
+        value[field] = serde_json::json!(noncanonical);
+        if validate_json_schema(&value, &schema, "$").is_ok() {
+            return Err(format!(
+                "request schema accepted noncanonical {field}={noncanonical:?}"
+            ));
+        }
+    }
+
+    let mut blank_query = base;
+    blank_query["query"] = serde_json::json!("   \t");
+    if validate_json_schema(&blank_query, &schema, "$").is_ok() {
+        return Err("request schema accepted a whitespace-only query".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn real_daemon_search_response_v3_validates_and_redacts_performance_fallbacks() -> TestResult {
+    const SECRET_QUERY: &str = "release sk_live_daemon_query_must_not_escape_performance";
+    let schema = read_schema(SEARCH_RESPONSE_SCHEMA_PATH)?;
+    let result = actual_daemon_search_result(SECRET_QUERY)?;
+    validate_json_schema(&result, &schema, "$")?;
+
+    if result
+        .pointer("/performance/data/redaction/queryTextIncluded")
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
+        return Err("real performance response must pin queryTextIncluded=false".to_owned());
+    }
+    let performance = result
+        .get("performance")
+        .ok_or_else(|| "real response omitted requested performance envelope".to_owned())?;
+    let rendered = serde_json::to_string(performance)
+        .map_err(|error| format!("serialize real performance envelope: {error}"))?;
+    if rendered.contains(SECRET_QUERY) || rendered.contains("sk_live_daemon_query") {
+        return Err(format!(
+            "real performance envelope leaked planted query: {rendered}"
+        ));
+    }
+    let fallbacks = performance
+        .pointer("/data/fallbacks")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "real performance envelope omitted fallbacks[]".to_owned())?;
+    if fallbacks.is_empty()
+        || fallbacks.iter().any(|fallback| {
+            fallback.get("message").and_then(Value::as_str)
+                != Some(PERFORMANCE_FALLBACK_REDACTED_MESSAGE)
+        })
+    {
+        return Err(format!(
+            "real performance fallbacks are not uniformly redacted: {fallbacks:?}"
+        ));
+    }
+
+    let mut false_claim = result.clone();
+    false_claim["performance"]["data"]["redaction"]["queryTextIncluded"] = serde_json::json!(true);
+    if validate_json_schema(&false_claim, &schema, "$").is_ok() {
+        return Err("response schema accepted queryTextIncluded=true".to_owned());
+    }
+    let mut leaked_fallback = result;
+    leaked_fallback["performance"]["data"]["fallbacks"][0]["message"] =
+        serde_json::json!(SECRET_QUERY);
+    if validate_json_schema(&leaked_fallback, &schema, "$").is_ok() {
+        return Err("response schema accepted a query-bearing performance fallback".to_owned());
     }
     Ok(())
 }
@@ -569,129 +744,6 @@ fn daemon_schema_descriptions_document_per_uid_socket_default() -> TestResult {
 }
 
 fn validate_json_schema(value: &Value, schema: &Value, path: &str) -> TestResult {
-    if let Some(options) = schema.get("oneOf").and_then(Value::as_array) {
-        let matches = options
-            .iter()
-            .filter(|candidate| validate_json_schema(value, candidate, path).is_ok())
-            .count();
-        if matches != 1 {
-            return Err(format!("{path} matched {matches} oneOf branches"));
-        }
-    }
-
-    if let Some(expected) = schema.get("const")
-        && value != expected
-    {
-        return Err(format!("{path} expected const {expected}, got {value}"));
-    }
-
-    if let Some(options) = schema.get("enum").and_then(Value::as_array)
-        && !options.iter().any(|option| option == value)
-    {
-        return Err(format!("{path} expected one of {options:?}, got {value}"));
-    }
-
-    if let Some(expected_types) = schema_types(schema)
-        && !expected_types
-            .iter()
-            .any(|expected_type| json_type_matches(value, expected_type))
-    {
-        return Err(format!(
-            "{path} expected type {:?}, got {}",
-            expected_types,
-            json_type_name(value)
-        ));
-    }
-
-    if let Some(min_length) = schema.get("minLength").and_then(Value::as_u64)
-        && value
-            .as_str()
-            .is_some_and(|actual| actual.chars().count() < min_length as usize)
-    {
-        return Err(format!("{path} shorter than minLength {min_length}"));
-    }
-
-    if let Some(max_length) = schema.get("maxLength").and_then(Value::as_u64)
-        && value
-            .as_str()
-            .is_some_and(|actual| actual.chars().count() > max_length as usize)
-    {
-        return Err(format!("{path} longer than maxLength {max_length}"));
-    }
-
-    if let Some(object) = value.as_object() {
-        if let Some(required) = schema.get("required").and_then(Value::as_array) {
-            for field in required {
-                let field = field
-                    .as_str()
-                    .ok_or_else(|| format!("{path} schema required entry is not a string"))?;
-                if !object.contains_key(field) {
-                    return Err(format!("{path} missing required field {field}"));
-                }
-            }
-        }
-
-        let properties = schema.get("properties").and_then(Value::as_object);
-        for (key, child) in object {
-            let child_path = format!("{path}.{key}");
-            if let Some(property_schema) = properties.and_then(|props| props.get(key)) {
-                validate_json_schema(child, property_schema, &child_path)?;
-                continue;
-            }
-            match schema.get("additionalProperties") {
-                Some(Value::Bool(false)) => {
-                    return Err(format!("{path} contains unexpected field {key}"));
-                }
-                Some(Value::Bool(true)) | None => {}
-                Some(other) => {
-                    return Err(format!("{path} unsupported additionalProperties: {other}"));
-                }
-            }
-        }
-    }
-
-    if let Some(items) = value.as_array()
-        && let Some(item_schema) = schema.get("items")
-    {
-        for (index, item) in items.iter().enumerate() {
-            validate_json_schema(item, item_schema, &format!("{path}[{index}]"))?;
-        }
-    }
-
-    Ok(())
-}
-
-fn schema_types(schema: &Value) -> Option<Vec<&str>> {
-    match schema.get("type") {
-        Some(Value::String(kind)) => Some(vec![kind.as_str()]),
-        Some(Value::Array(kinds)) => Some(kinds.iter().filter_map(Value::as_str).collect()),
-        _ => None,
-    }
-}
-
-fn json_type_matches(value: &Value, expected: &str) -> bool {
-    match expected {
-        "null" => value.is_null(),
-        "boolean" => value.is_boolean(),
-        "number" => value.is_number(),
-        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
-        "string" => value.is_string(),
-        "array" => value.is_array(),
-        "object" => value.is_object(),
-        _ => false,
-    }
-}
-
-fn json_type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(number) if number.as_i64().is_some() || number.as_u64().is_some() => {
-            "integer"
-        }
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
+    ee::testing::validate_json_schema_instance(value, schema)
+        .map_err(|error| format!("{path}: {error}"))
 }

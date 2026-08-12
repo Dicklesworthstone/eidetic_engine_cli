@@ -74,6 +74,11 @@ use frankensearch::LexicalRead;
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 pub const DIAG_SEARCH_SCHEMA_V1: &str = "ee.diag.search.v1";
 pub const PERFORMANCE_EXPLAIN_SCHEMA_V1: &str = "ee.explain.performance.v1";
+/// Fixed message used by performance fallbacks. Canonical degradation prose may
+/// contain request-specific context, so performance diagnostics expose only the
+/// internal code, severity, source, and this query/content-independent message.
+pub const PERFORMANCE_FALLBACK_REDACTED_MESSAGE: &str =
+    "Fallback details are redacted; inspect the degradation code and canonical response.";
 pub const SEARCH_REVISION_TOKEN_SCHEMA_V1: &str = "ee.search.revision_token.v1";
 pub const SEARCH_SCORE_INTERVAL_SCHEMA_V1: &str = "ee.search.score_interval.v1";
 pub const SEARCH_SCORE_CALIBRATION_SCHEMA_V1: &str = "ee.search.score_calibration.v1";
@@ -1724,12 +1729,7 @@ impl SearchDegradation {
     /// All candidates scored below the relevance floor — no relevant
     /// results to return. Bead bd-17c65.2.1 (B1).
     #[must_use]
-    fn no_relevant_results(
-        query: &str,
-        floor: f32,
-        considered: usize,
-        top_score: Option<f32>,
-    ) -> Self {
+    fn no_relevant_results(floor: f32, considered: usize, top_score: Option<f32>) -> Self {
         let top_note = top_score
             .map(|score| format!(" Top candidate scored {score:.4}."))
             .unwrap_or_default();
@@ -1737,7 +1737,7 @@ impl SearchDegradation {
             code: "no_relevant_results".to_string(),
             severity: "medium".to_string(),
             message: format!(
-                "No memories scored above relevance floor {floor:.4} for query `{query}` (considered {considered} candidate{plural}).{top_note}",
+                "No memories scored above relevance floor {floor:.4} (considered {considered} candidate{plural}).{top_note}",
                 plural = if considered == 1 { "" } else { "s" },
             ),
             repair: Some(
@@ -2823,10 +2823,40 @@ impl SearchReport {
                 "status": "not_used",
                 "reason": "search_command_does_not_request_graph_projection",
             },
-            "fallbacks": search_degraded_data_json("search", &self.degraded),
+            "fallbacks": search_performance_fallbacks_json("search", &self.degraded),
             "redaction": performance_redaction_json(),
         })
     }
+}
+
+fn search_performance_fallbacks_json(
+    source: &'static str,
+    degraded: &[SearchDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_degraded_entries(
+        degraded
+            .iter()
+            .filter(|entry| !entry.is_permanent())
+            .map(|entry| {
+                DegradationAggregationInput::new(
+                    source,
+                    entry.code.clone(),
+                    entry.severity.clone(),
+                    PERFORMANCE_FALLBACK_REDACTED_MESSAGE.to_owned(),
+                    String::new(),
+                )
+            }),
+    )
+    .into_iter()
+    .map(|entry| {
+        serde_json::json!({
+            "code": entry.code,
+            "severity": entry.severity,
+            "message": PERFORMANCE_FALLBACK_REDACTED_MESSAGE,
+            "sources": entry.sources,
+        })
+    })
+    .collect()
 }
 
 pub(crate) fn search_degraded_data_json(
@@ -7290,13 +7320,11 @@ impl RelevanceFloorCounts {
     fn append_degradations(
         self,
         degraded: &mut Vec<SearchDegradation>,
-        query: &str,
         floor: f32,
         top_score_before_floor: Option<f32>,
     ) {
         if self.has_no_relevant_results() {
             degraded.push(SearchDegradation::no_relevant_results(
-                query,
                 floor,
                 self.considered,
                 top_score_before_floor,
@@ -7650,12 +7678,7 @@ async fn run_search_inner_with_performance(
             // Empty workspaces stay plain `NoResults`; significant floor loss
             // is <30% passed with at least three candidates. Later visibility
             // and result-limit drops have their own diagnostics.
-            floor_counts.append_degradations(
-                &mut degraded,
-                &options.query,
-                floor,
-                pre_floor_top_score,
-            );
+            floor_counts.append_degradations(&mut degraded, floor, pre_floor_top_score);
 
             let status = if above_floor.is_empty() {
                 SearchStatus::NoResults
@@ -8023,7 +8046,7 @@ async fn run_diag_search_with_cx_and_embedder(
     }
     // Keep diagnostic search aligned with the live path by deriving floor
     // degradations from the same pre-visibility partition snapshot.
-    floor_counts.append_degradations(&mut degraded, &options.query, floor, pre_floor_top_score);
+    floor_counts.append_degradations(&mut degraded, floor, pre_floor_top_score);
 
     let status = if above_floor.is_empty() {
         SearchStatus::NoResults
@@ -14650,10 +14673,11 @@ mod tests {
 
     #[test]
     fn search_performance_explain_report_is_redaction_safe_and_pins_fallbacks() {
+        const SECRET_QUERY: &str = "rotate secret sk_live_do_not_emit";
         let report = SearchReport {
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
-            query: "rotate secret sk_live_do_not_emit".to_string(),
+            query: SECRET_QUERY.to_string(),
             requested_limit: 10,
             results: vec![SearchHit {
                 doc_id: "mem-secret-doc".to_string(),
@@ -14670,7 +14694,10 @@ mod tests {
             }],
             elapsed_ms: 12.3,
             errors: Vec::new(),
-            degraded: vec![SearchDegradation::stale_index(Some(12), Some(9))],
+            degraded: vec![
+                SearchDegradation::stale_index(Some(12), Some(9)),
+                SearchDegradation::no_relevant_results(0.95, 1, Some(0.42)),
+            ],
             runtime_profile: test_runtime_profile(),
             rerank_configured_mode: crate::config::SearchRerankMode::Auto,
             rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
@@ -14694,8 +14721,26 @@ mod tests {
         assert_eq!(json["data"]["command"], "search");
         assert_eq!(json["data"]["query"]["textIncluded"], false);
         assert_eq!(json["data"]["search"]["returnedHits"], 1);
-        assert_eq!(json["data"]["fallbacks"][0]["code"], "search_index_stale");
+        assert!(
+            json["data"]["fallbacks"]
+                .as_array()
+                .is_some_and(|fallbacks| {
+                    let codes = fallbacks
+                        .iter()
+                        .filter_map(|fallback| fallback["code"].as_str())
+                        .collect::<Vec<_>>();
+                    codes.contains(&"no_relevant_results")
+                        && codes.contains(&"search_index_stale")
+                        && fallbacks.iter().all(|fallback| {
+                            fallback["message"] == PERFORMANCE_FALLBACK_REDACTED_MESSAGE
+                                && fallback.get("repair").is_none()
+                                && fallback.as_object().is_some_and(|object| object.len() == 4)
+                        })
+                })
+        );
         assert_eq!(json["data"]["redaction"]["memoryContentIncluded"], false);
+        assert_eq!(json["data"]["redaction"]["queryTextIncluded"], false);
+        assert!(!rendered.contains(SECRET_QUERY));
         assert!(!rendered.contains("sk_live_do_not_emit"));
         assert!(!rendered.contains("mem-secret-doc"));
         assert!(!rendered.contains("token should not leave"));
@@ -16783,12 +16828,7 @@ mod tests {
                 .any(|entry| entry.code == "scope_strict_excluded_evidence")
         );
 
-        floor_counts.append_degradations(
-            &mut strict_degraded,
-            "strict scope query",
-            0.05,
-            Some(0.9),
-        );
+        floor_counts.append_degradations(&mut strict_degraded, 0.05, Some(0.9));
         assert!(strict_degraded.iter().all(|entry| !matches!(
             entry.code.as_str(),
             "no_relevant_results" | "low_recall_after_floor"
@@ -18284,7 +18324,7 @@ mod tests {
         assert_eq!(hits.len(), 10);
 
         let mut after_limit = Vec::new();
-        floor_counts.append_degradations(&mut after_limit, "reranked query", 0.05, Some(0.90));
+        floor_counts.append_degradations(&mut after_limit, 0.05, Some(0.90));
         assert!(
             after_limit.is_empty(),
             "truncating 50 floor-passing candidates later must not report floor loss"
@@ -18293,7 +18333,6 @@ mod tests {
         let mut after_scope_visibility = Vec::new();
         RelevanceFloorCounts::new(5, 5).append_degradations(
             &mut after_scope_visibility,
-            "strict scope query",
             0.05,
             Some(0.80),
         );
@@ -18305,7 +18344,6 @@ mod tests {
         let mut actual_floor_loss = Vec::new();
         RelevanceFloorCounts::new(10, 2).append_degradations(
             &mut actual_floor_loss,
-            "weak recall query",
             0.05,
             Some(0.20),
         );
@@ -18413,12 +18451,11 @@ mod tests {
 
     #[test]
     fn no_relevant_results_degradation_includes_floor_and_consideration() {
-        let degradation =
-            SearchDegradation::no_relevant_results("test query", 0.05, 12, Some(0.02));
+        let degradation = SearchDegradation::no_relevant_results(0.05, 12, Some(0.02));
         assert_eq!(degradation.code, "no_relevant_results");
         assert_eq!(degradation.severity, "medium");
         assert!(degradation.message.contains("0.0500"));
-        assert!(degradation.message.contains("test query"));
+        assert!(!degradation.message.contains("query `"));
         assert!(degradation.message.contains("12 candidate"));
         assert!(degradation.message.contains("0.0200"));
         assert!(degradation.repair.is_some());
@@ -18426,7 +18463,7 @@ mod tests {
 
     #[test]
     fn no_relevant_results_handles_singular_candidate() {
-        let degradation = SearchDegradation::no_relevant_results("q", 0.05, 1, Some(0.01));
+        let degradation = SearchDegradation::no_relevant_results(0.05, 1, Some(0.01));
         // Singular: "1 candidate" not "1 candidates".
         assert!(degradation.message.contains("1 candidate"));
         assert!(!degradation.message.contains("1 candidates"));
@@ -18443,7 +18480,7 @@ mod tests {
 
     #[test]
     fn no_relevant_results_data_json_round_trips() {
-        let degradation = SearchDegradation::no_relevant_results("q", 0.05, 5, Some(0.0));
+        let degradation = SearchDegradation::no_relevant_results(0.05, 5, Some(0.0));
         let json = degradation.data_json();
         assert_eq!(json["code"], "no_relevant_results");
         assert_eq!(json["severity"], "medium");

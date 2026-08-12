@@ -126,7 +126,7 @@
             "pack": {"$ref": "#/$defs/notUsed"},
             "cache": {"$ref": "#/$defs/notUsed"},
             "graph": {"$ref": "#/$defs/notUsed"},
-            "fallbacks": {"type": "array", "items": {"$ref": "#/$defs/degradation"}},
+            "fallbacks": {"type": "array", "items": {"$ref": "#/$defs/performanceFallback"}},
             "redaction": {
               "type": "object",
               "required": ["memoryContentIncluded", "queryTextIncluded", "safeFields"],
@@ -148,6 +148,17 @@
       "properties": {
         "status": {"type": "string", "const": "not_used"},
         "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "performanceFallback": {
+      "type": "object",
+      "required": ["code", "severity", "message", "sources"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
+        "message": {"type": "string", "const": "Fallback details are redacted; inspect the degradation code and canonical response."},
+        "sources": {"type": "array", "items": {"type": "string", "minLength": 1}}
       }
     },
     "degradation": {

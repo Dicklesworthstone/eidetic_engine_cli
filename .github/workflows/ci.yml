@@ -38,9 +38,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  daemon-search-slo:
+  daemon-search-observation:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    name: daemon search 10k SLO (GitHub runner)
+    name: daemon search 10k observation (GitHub-hosted runner)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -143,7 +143,7 @@ jobs:
               --ignored --exact --nocapture
           EE_UNSHARE
 
-      - name: Enforce cold and warm search p50 budgets
+      - name: Observe cold and warm search p50 against acceptance budgets
         shell: bash
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/ee-daemon-search-target
@@ -151,19 +151,19 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${EE_EMBED_MODEL_FIXTURE_DIR:-}" || ! -d "$EE_EMBED_MODEL_FIXTURE_DIR" ]]; then
-            echo "::error::EE_EMBED_MODEL_FIXTURE_DIR is required by daemon-search-slo" >&2
+            echo "::error::EE_EMBED_MODEL_FIXTURE_DIR is required by daemon-search-slo-observation" >&2
             exit 1
           fi
           mkdir -p "$RUNNER_TEMP/ee-daemon-search-artifacts"
           EE_EMBED_MODEL_FIXTURE_DIR="$EE_EMBED_MODEL_FIXTURE_DIR" \
-            ./scripts/bench.sh --profile daemon-search-slo --json \
+            ./scripts/bench.sh --profile daemon-search-slo-observation --json \
             | tee "$RUNNER_TEMP/ee-daemon-search-artifacts/ee-perf.v1.json"
 
-      - name: Upload daemon search SLO evidence
+      - name: Upload daemon search observational evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: daemon-search-slo-${{ github.sha }}
+          name: daemon-search-slo-observation-${{ github.sha }}
           path: ${{ runner.temp }}/ee-daemon-search-artifacts/
           if-no-files-found: error
           retention-days: 30

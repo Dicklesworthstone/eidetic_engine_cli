@@ -116,23 +116,43 @@ fn search_request(
     database: &Path,
     index_dir: &Path,
 ) -> DaemonRequest {
-    let workspace_id = workspace.display().to_string();
-    let mut request = DaemonRequest::new(
+    search_request_with_query(
         request_id,
-        TEST_AGENT_ID,
-        METHOD_SEARCH,
-        serde_json::json!({
-            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
-            "query": "release provenance",
-            "workspacePath": workspace_id,
-            "databasePath": database.display().to_string(),
-            "indexDir": index_dir.display().to_string(),
-            "limit": 5,
-            "speed": "instant",
-            "sourceMode": "hybrid",
-            "memoryScope": "swarm"
-        }),
-    );
+        workspace,
+        database,
+        index_dir,
+        "release provenance",
+        false,
+    )
+}
+
+fn search_request_with_query(
+    request_id: &'static str,
+    workspace: &Path,
+    database: &Path,
+    index_dir: &Path,
+    query: &str,
+    explain_performance: bool,
+) -> DaemonRequest {
+    let workspace_id = workspace.display().to_string();
+    let mut params = serde_json::json!({
+        "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+        "query": query,
+        "workspacePath": workspace_id,
+        "databasePath": database.display().to_string(),
+        "indexDir": index_dir.display().to_string(),
+        "limit": 5,
+        "speed": "instant",
+        "sourceMode": "hybrid",
+        "memoryScope": "swarm",
+        "explainPerformance": explain_performance
+    });
+    if explain_performance {
+        // Force the planted-query request through the historical
+        // no_relevant_results degradation that used to echo query text.
+        params["relevanceFloor"] = serde_json::json!(1.0);
+    }
+    let mut request = DaemonRequest::new(request_id, TEST_AGENT_ID, METHOD_SEARCH, params);
     request.workspace_id = Some(workspace.display().to_string());
     request
 }
@@ -756,6 +776,19 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
         &search_request("req-search-warm-003", &workspace, &database, &index_dir),
     )
     .map_err(|error| format!("third search round-trip: {error}"))?;
+    const SECRET_QUERY: &str = "release provenance sk_live_uds_query_must_not_escape_performance";
+    let privacy = client_round_trip(
+        handle.socket_path(),
+        &search_request_with_query(
+            "req-search-warm-privacy",
+            &workspace,
+            &database,
+            &index_dir,
+            SECRET_QUERY,
+            true,
+        ),
+    )
+    .map_err(|error| format!("privacy search round-trip: {error}"))?;
     ensure(
         first.error.is_none(),
         format!("first search failed: {first:?}"),
@@ -768,6 +801,37 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
         third.error.is_none(),
         format!("third search failed: {third:?}"),
     )?;
+    ensure(
+        privacy.error.is_none(),
+        format!("privacy search failed: {privacy:?}"),
+    )?;
+    let privacy_result = privacy
+        .result
+        .as_ref()
+        .ok_or_else(|| "privacy search result missing".to_owned())?;
+    let performance = privacy_result
+        .get("performance")
+        .ok_or_else(|| format!("privacy search performance missing: {privacy_result}"))?;
+    let rendered_performance = serde_json::to_string(performance)
+        .map_err(|error| format!("serialize privacy performance: {error}"))?;
+    let fallbacks = performance
+        .pointer("/data/fallbacks")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("privacy search fallbacks missing: {performance}"))?;
+    ensure(
+        performance
+            .pointer("/data/redaction/queryTextIncluded")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+            && fallbacks
+                .iter()
+                .any(|fallback| fallback["code"] == "no_relevant_results")
+            && !rendered_performance.contains(SECRET_QUERY)
+            && !rendered_performance.contains("sk_live_uds_query"),
+        format!("daemon performance leaked planted query: {rendered_performance}"),
+    )?;
+    DaemonSearchResult::from_value(privacy_result.clone())
+        .map_err(|error| format!("privacy method response validation: {error}"))?;
     for (ordinal, response) in [("first", &first), ("second", &second), ("third", &third)] {
         ensure(
             !response
