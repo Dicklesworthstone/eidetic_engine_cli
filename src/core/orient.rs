@@ -181,7 +181,7 @@ pub fn orient_fast_content(options: &OrientFastContentOptions<'_>) -> OrientFast
                 id: admitted.item.memory_id.to_string(),
                 snippet: orient_fast_snippet(&admitted.item.content),
                 created_at: admitted.created_at,
-                tags: admitted.tags,
+                tags: orient_fast_public_tags(admitted.tags),
                 provenance: admitted.item.rendered_provenance(),
             })
             .collect(),
@@ -404,7 +404,7 @@ fn orient_fast_relevant_content(
             id: memory.id.clone(),
             snippet: orient_fast_snippet(&memory.content),
             created_at: memory.created_at.clone(),
-            tags: orient_fast_search_hit_tags(hit),
+            tags: orient_fast_public_tags(orient_fast_search_hit_tags(hit)),
             provenance: vec![provenance],
         });
     }
@@ -569,14 +569,42 @@ fn orient_fast_provenance(
         .map(|provenance| provenance.rendered())
 }
 
+/// Compact fast-mode snippet: at most two trimmed, non-empty lines joined by
+/// a single newline, capped at 480 characters, with an ellipsis whenever any
+/// content was dropped. Fast items promise a 1-2 line shape in both JSON and
+/// human renders (bd-orient-fast-content-iubub).
 fn orient_fast_snippet(content: &str) -> String {
     const MAX_CHARS: usize = 480;
-    let mut chars = content.chars();
+    const MAX_LINES: usize = 2;
+    let mut lines = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let mut kept = Vec::with_capacity(MAX_LINES);
+    for line in lines.by_ref() {
+        kept.push(line);
+        if kept.len() == MAX_LINES {
+            break;
+        }
+    }
+    let dropped_lines = lines.next().is_some();
+    let joined = kept.join("\n");
+    let mut chars = joined.chars();
     let mut snippet = chars.by_ref().take(MAX_CHARS).collect::<String>();
-    if chars.next().is_some() {
+    if chars.next().is_some() || dropped_lines {
         snippet.push('…');
     }
     snippet
+}
+
+/// Route fast-content tags through the shared public-egress text policy so a
+/// secret-shaped or otherwise disallowed tag never leaves the process raw.
+/// The policy's replacement text is self-describing, so the item shape and
+/// schema stay unchanged.
+fn orient_fast_public_tags(tags: Vec<String>) -> Vec<String> {
+    tags.into_iter()
+        .map(|tag| crate::policy::redact_public_replay_text(&tag).content)
+        .collect()
 }
 
 pub fn orient_decisions(
@@ -1488,6 +1516,34 @@ mod tests {
             )
             .map_err(|error| format!("insert path-provenance fixture: {error}"))?;
 
+        // Eligible memory carrying a secret-shaped tag and multi-line content:
+        // the tag must egress redacted by the shared public-replay policy and
+        // the snippet must stay in the promised compact 1-2-line shape.
+        let leaky_tag = format!("ghp_{}", "a".repeat(36));
+        let secret_tag_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x54)).to_string();
+        connection
+            .insert_memory(
+                &secret_tag_id,
+                &CreateMemoryInput {
+                    workspace_id: active_workspace.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Release checksum tag hygiene line one.\n\n  Release checksum tag hygiene line two.  \nRelease checksum tag hygiene line three must be dropped."
+                        .to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.9,
+                    importance: 0.9,
+                    provenance_uri: Some("file://AGENTS.md#L9".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["orient-positive".to_owned(), leaky_tag.clone()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| format!("insert secret-tag fixture: {error}"))?;
+
         let secret_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x51)).to_string();
         connection
             .insert_memory(
@@ -1594,12 +1650,47 @@ mod tests {
                 "fast content must return both sections from a populated indexed store: {report:?}"
             ));
         }
+        if report.recent.len() > ORIENT_FAST_CONTENT_LIMIT
+            || report.relevant.len() > ORIENT_FAST_CONTENT_LIMIT
+        {
+            return Err(format!(
+                "fast sections must stay within the promised {ORIENT_FAST_CONTENT_LIMIT}-item cap: {report:?}"
+            ));
+        }
         for item in report.recent.iter().chain(&report.relevant) {
             if item.created_at.is_empty() || item.provenance.is_empty() {
                 return Err(format!(
                     "item must bind created_at and provenance: {item:?}"
                 ));
             }
+            if item.snippet.lines().count() > 2 || item.snippet.contains("\n\n") {
+                return Err(format!(
+                    "snippet must keep the promised compact 1-2-line shape: {item:?}"
+                ));
+            }
+        }
+        let tag_hygiene = report
+            .recent
+            .iter()
+            .chain(&report.relevant)
+            .find(|item| item.id == secret_tag_id)
+            .ok_or_else(|| format!("eligible secret-tag fixture must stay surfaced: {report:?}"))?;
+        if !tag_hygiene
+            .tags
+            .iter()
+            .any(|tag| tag.starts_with("[REDACTED:public_replay_text:"))
+        {
+            return Err(format!(
+                "secret-shaped tag must egress through the shared redaction policy: {tag_hygiene:?}"
+            ));
+        }
+        if !tag_hygiene.snippet.starts_with(
+            "Release checksum tag hygiene line one.\nRelease checksum tag hygiene line two.",
+        ) || !tag_hygiene.snippet.ends_with('…')
+        {
+            return Err(format!(
+                "multi-line content must normalize to two trimmed lines plus ellipsis: {tag_hygiene:?}"
+            ));
         }
         let positive_recent = report.recent.iter().any(|item| item.id == positive_id);
         let positive_relevant = report.relevant.iter().any(|item| item.id == positive_id);
@@ -1663,6 +1754,9 @@ mod tests {
         let encoded = serde_json::to_string(&report).map_err(|error| error.to_string())?;
         if encoded.contains("orient_fast_must_not_emit") {
             return Err("secret-shaped content leaked through fast content".to_owned());
+        }
+        if encoded.contains(&leaky_tag) {
+            return Err("secret-shaped tag leaked raw through fast content".to_owned());
         }
         Ok(())
     }

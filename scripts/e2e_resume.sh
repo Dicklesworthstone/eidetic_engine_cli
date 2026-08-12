@@ -532,8 +532,20 @@ if [[ "${LAST_EXIT}" -eq 0 && "${SCALE_FAST_ELAPSED_MS}" -lt 1000 ]] \
         and .data.pack == null
         and (.data.fastContent.recent | length) >= 1
         and (.data.fastContent.relevant | length) >= 1
-        and all(.data.fastContent.recent[]; (.id | length) > 0 and (.snippet | length) > 0)
-        and all(.data.fastContent.relevant[]; (.id | length) > 0 and (.snippet | length) > 0)
+        and (.data.fastContent.recent | length) <= 5
+        and (.data.fastContent.relevant | length) <= 5
+        and all(.data.fastContent.recent[];
+            (.id | length) > 0 and (.snippet | length) > 0
+            and ((.snippet | split("\n") | length) <= 2)
+            and (.createdAt | length) > 0
+            and (.tags | type) == "array"
+            and (.provenance | length) > 0)
+        and all(.data.fastContent.relevant[];
+            (.id | length) > 0 and (.snippet | length) > 0
+            and ((.snippet | split("\n") | length) <= 2)
+            and (.createdAt | length) > 0
+            and (.tags | type) == "array"
+            and (.provenance | length) > 0)
         and ([.data.fastContent.relevant[]?.snippet
               | select(contains("Resume scale row 09999."))] | length) >= 1
         and ([.degraded[]? | select(.code == "orient_doctor_skipped")] | length) == 1
@@ -578,6 +590,55 @@ if [[ "${SCALE_FAST_HUMAN_HASH_BEFORE}" == "${SCALE_FAST_HUMAN_HASH_AFTER}" ]]; 
 else
     event scale_10k_fast_human_orient_preserves_db_wal_shm fail \
         "before=${SCALE_FAST_HUMAN_HASH_BEFORE//$'\n'/,}; after=${SCALE_FAST_HUMAN_HASH_AFTER//$'\n'/,}"
+fi
+
+# --- functional fast-orient probes on the same real 10k store --------------
+# These probes are deliberately UNTIMED. The <1s events above remain the sole
+# measured latency subject for the bead's bench guard; nothing below may be
+# read as latency evidence.
+run_ee --workspace "${SCALE_WS}" orient --fast "Resume scale row 09999" --json
+FAST_REPEAT_ONE_EXIT=$LAST_EXIT
+FAST_REPEAT_ONE="$(jq -cS '.data.fastContent' "${LAST_STDOUT}" 2>/dev/null)"
+run_ee --workspace "${SCALE_WS}" orient --fast "Resume scale row 09999" --json
+FAST_REPEAT_TWO_EXIT=$LAST_EXIT
+FAST_REPEAT_TWO="$(jq -cS '.data.fastContent' "${LAST_STDOUT}" 2>/dev/null)"
+if [[ "${FAST_REPEAT_ONE_EXIT}" -eq 0 && "${FAST_REPEAT_TWO_EXIT}" -eq 0 \
+    && -n "${FAST_REPEAT_ONE}" && "${FAST_REPEAT_ONE}" != "null" \
+    && "${FAST_REPEAT_ONE}" == "${FAST_REPEAT_TWO}" ]]; then
+    event scale_10k_fast_content_repeat_bytes_identical pass
+else
+    event scale_10k_fast_content_repeat_bytes_identical fail \
+        "exits=${FAST_REPEAT_ONE_EXIT}/${FAST_REPEAT_TWO_EXIT}; one=$(head -c 200 <<<"${FAST_REPEAT_ONE}"); two=$(head -c 200 <<<"${FAST_REPEAT_TWO}")"
+fi
+
+# Planted secret-shaped tag: remember-time policy scans content only, so the
+# tag persists; the fast-orient egress must apply the shared public-replay
+# redaction policy instead of leaking it, in JSON and human alike.
+SECRET_TAG="ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+run_ee --workspace "${SCALE_WS}" remember "Planted secret-shaped tag probe for fast orientation." \
+    --level episodic --kind note --tags "fastprobe,${SECRET_TAG}" --json
+SECRET_PLANT_EXIT=$LAST_EXIT
+run_ee --workspace "${SCALE_WS}" orient --fast "Planted secret-shaped tag probe" --json
+SECRET_FAST_JSON="${LAST_STDOUT}"
+SECRET_FAST_EXIT=$LAST_EXIT
+if [[ "${SECRET_PLANT_EXIT}" -eq 0 && "${SECRET_FAST_EXIT}" -eq 0 ]] \
+    && ! grep -Fq "${SECRET_TAG}" "${SECRET_FAST_JSON}" \
+    && jq -e '[.data.fastContent.recent[]?, .data.fastContent.relevant[]?
+              | select(any(.tags[]?; startswith("[REDACTED:public_replay_text:")))]
+              | length >= 1' "${SECRET_FAST_JSON}" >/dev/null 2>&1; then
+    event fast_orient_json_redacts_secret_shaped_tag pass
+else
+    event fast_orient_json_redacts_secret_shaped_tag fail \
+        "plant=${SECRET_PLANT_EXIT}; fast=${SECRET_FAST_EXIT}; $(head -c 300 "${SECRET_FAST_JSON}")"
+fi
+
+run_ee --workspace "${SCALE_WS}" orient --fast "Planted secret-shaped tag probe"
+SECRET_FAST_HUMAN="${LAST_STDOUT}"
+if [[ "${LAST_EXIT}" -eq 0 ]] && ! grep -Fq "${SECRET_TAG}" "${SECRET_FAST_HUMAN}"; then
+    event fast_orient_human_never_leaks_secret_shaped_tag pass
+else
+    event fast_orient_human_never_leaks_secret_shaped_tag fail \
+        "exit=${LAST_EXIT}; $(head -c 300 "${SECRET_FAST_HUMAN}")"
 fi
 
 finish
