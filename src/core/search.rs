@@ -813,7 +813,6 @@ impl QueryAssistReformulation {
     }
 }
 
-#[derive(Clone, Debug)]
 /// Authoritative per-response index freshness, populated from the same
 /// index-status probe that raises the stale/large-gap advisories and emitted
 /// independently of advisory-episode dedupe, so a suppressed warning never
@@ -832,6 +831,7 @@ pub struct SearchIndexFreshness {
     pub large_gap: bool,
 }
 
+#[derive(Clone, Debug)]
 pub struct SearchReport {
     pub status: SearchStatus,
     pub embed_backend: EmbedBackend,
