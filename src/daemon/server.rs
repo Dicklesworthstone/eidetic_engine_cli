@@ -3429,6 +3429,10 @@ fn validate_search_performance_redaction(value: &serde_json::Value) -> Result<()
 }
 
 fn daemon_search_human_summary(report: &SearchReport, response_data: &serde_json::Value) -> String {
+    let large_gap_active = response_data
+        .pointer("/indexFreshness/largeGap")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
     let large_gap_advisory_emitted = response_data
         .get("degraded")
         .and_then(serde_json::Value::as_array)
@@ -3443,9 +3447,10 @@ fn daemon_search_human_summary(report: &SearchReport, response_data: &serde_json
     }
 
     let mut visible_report = report.clone();
-    visible_report
-        .degraded
-        .retain(|entry| entry.code != "search_index_large_gap");
+    visible_report.degraded.retain(|entry| {
+        entry.code != "search_index_large_gap"
+            && !(large_gap_active && entry.code == "search_index_stale")
+    });
     visible_report.human_summary()
 }
 
@@ -6256,6 +6261,7 @@ mod tests {
         let repeated_result = DaemonSearchResult::from_value(repeated_value)
             .expect("repeated result must remain a valid success response");
         assert!(daemon_search_degraded_codes(&repeated_result).is_empty());
+        assert!(repeated_result.human.contains("No results for \"release\""));
         assert!(!repeated_result.human.contains("search_index_stale"));
         assert!(!repeated_result.human.contains("search_index_large_gap"));
         assert_eq!(repeated_result.response["degraded"], serde_json::json!([]));
@@ -6269,6 +6275,20 @@ mod tests {
                 "largeGap": true,
             })
         );
+    }
+
+    #[test]
+    fn daemon_human_renderer_keeps_small_gap_stale_warning() {
+        let mut report = stale_index_advisory_report(2, 1);
+        report
+            .degraded
+            .retain(|entry| entry.code != "search_index_large_gap");
+        let response_data = report.data_json();
+
+        assert_eq!(response_data["indexFreshness"]["largeGap"], false);
+        let human = daemon_search_human_summary(&report, &response_data);
+        assert!(human.contains("search_index_stale"));
+        assert!(!human.contains("search_index_large_gap"));
     }
 
     #[test]

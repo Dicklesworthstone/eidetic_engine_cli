@@ -21,8 +21,9 @@ use super::audit_lane::{
 use super::bayes::BetaPosterior;
 use super::config_surface::{ConfigSurfaceOptions, get_config};
 use super::index::{
-    DEFAULT_INDEX_SUBDIR, IndexProcessingJobReport, IndexRebuildError,
-    process_index_job_for_connection, process_pending_index_jobs_coalesced,
+    DEFAULT_INDEX_SUBDIR, IndexHealth, IndexProcessingJobReport, IndexRebuildError,
+    IndexStatusOptions, get_index_status_with_connection, process_index_job_for_connection,
+    process_pending_index_jobs_coalesced,
 };
 use super::memory_lifecycle::{
     LEVEL_TRANSITION_CONCURRENT_CONFLICT_CODE, LEVEL_TRANSITION_REQUIRES_EVIDENCE_CODE,
@@ -1770,7 +1771,7 @@ fn remember_memory_inner_with_store(
             &index_dir,
         )
     };
-    let index_status = remember_index_status(&index_report);
+    let provisional_index_status = remember_index_status(&index_report);
 
     let (curation_candidate, curation_candidate_status, curation_candidate_degradations) =
         match propose_curation_candidate_for_remember(
@@ -1800,6 +1801,16 @@ fn remember_memory_inner_with_store(
                 }],
             ),
         };
+
+    let index_status = authoritative_remember_index_status(
+        &connection,
+        &prepared.workspace_id,
+        &prepared.workspace_path,
+        &prepared.database_path,
+        &index_dir,
+        std::slice::from_ref(&index_job_id),
+        &provisional_index_status,
+    );
 
     let typed_fields =
         remember_typed_fields_value(&prepared.kind, prepared.typed_fields_json.as_deref())?;
@@ -2011,6 +2022,91 @@ fn remember_index_status(report: &IndexProcessingJobReport) -> String {
         "skipped" => "queued".to_owned(),
         "failed" => "failed".to_owned(),
         other => other.to_owned(),
+    }
+}
+
+/// Resolve the public remember posture from durable job state and the final
+/// source/index generation pair. A drain report is only provisional: another
+/// publisher may have claimed a peer job, and remember-time side effects may
+/// advance the database generation after this writer's own job completed.
+fn authoritative_remember_index_status(
+    connection: &DbConnection,
+    workspace_id: &str,
+    workspace_path: &Path,
+    database_path: &Path,
+    index_dir: &Path,
+    required_job_ids: &[String],
+    provisional_status: &str,
+) -> String {
+    if provisional_status == "failed" {
+        return "failed".to_owned();
+    }
+
+    let jobs = match connection.list_search_index_jobs(workspace_id, None) {
+        Ok(jobs) => jobs,
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::memory",
+                workspace_id,
+                error = %error,
+                "could not verify durable index jobs after remember; reporting queued"
+            );
+            return "queued".to_owned();
+        }
+    };
+    let jobs_by_id = jobs
+        .iter()
+        .map(|job| (job.id.as_str(), job))
+        .collect::<BTreeMap<_, _>>();
+    if required_job_ids
+        .iter()
+        .any(|job_id| !jobs_by_id.contains_key(job_id.as_str()))
+    {
+        return "queued".to_owned();
+    }
+
+    let mut incomplete = false;
+    for job in &jobs {
+        match job.status_enum() {
+            Some(SearchIndexJobStatus::Completed) => {}
+            Some(SearchIndexJobStatus::Failed) => return "failed".to_owned(),
+            Some(
+                SearchIndexJobStatus::Pending
+                | SearchIndexJobStatus::Running
+                | SearchIndexJobStatus::Cancelled,
+            )
+            | None => incomplete = true,
+        }
+    }
+    if incomplete {
+        return "queued".to_owned();
+    }
+
+    match get_index_status_with_connection(
+        &IndexStatusOptions {
+            workspace_path: workspace_path.to_path_buf(),
+            database_path: Some(database_path.to_path_buf()),
+            index_dir: Some(index_dir.to_path_buf()),
+        },
+        Some(connection),
+    ) {
+        Ok(status)
+            if status.health == IndexHealth::Ready
+                && status.db_generation.is_some()
+                && status.db_generation == status.index_generation =>
+        {
+            "indexed".to_owned()
+        }
+        Ok(_) => "queued".to_owned(),
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::memory",
+                workspace_id,
+                error = %error,
+                "could not verify final remember index generation; reporting queued"
+            );
+            "queued".to_owned()
+        }
     }
 }
 
@@ -4913,7 +5009,7 @@ fn finish_remember_memory_after_primary_commit(
             &index_dir,
         )
     };
-    let index_status = remember_index_status(&index_report);
+    let provisional_index_status = remember_index_status(&index_report);
 
     let (curation_candidate, curation_candidate_status, curation_candidate_degradations) =
         match propose_curation_candidate_for_remember(
@@ -4943,6 +5039,16 @@ fn finish_remember_memory_after_primary_commit(
                 }],
             ),
         };
+
+    let index_status = authoritative_remember_index_status(
+        connection,
+        &prepared.workspace_id,
+        &prepared.workspace_path,
+        &prepared.database_path,
+        &index_dir,
+        std::slice::from_ref(&index_job_id),
+        &provisional_index_status,
+    );
 
     write_replay_guard.mark_clean()?;
 
@@ -8375,6 +8481,17 @@ pub fn remember_memory_batch_stdin(
     options: &RememberBatchOptions<'_>,
     input: &str,
 ) -> Result<RememberBatchReport, DomainError> {
+    remember_memory_batch_stdin_with_reconcile_hook(options, input, |_, _| Ok(()))
+}
+
+fn remember_memory_batch_stdin_with_reconcile_hook<F>(
+    options: &RememberBatchOptions<'_>,
+    input: &str,
+    before_reconcile: F,
+) -> Result<RememberBatchReport, DomainError>
+where
+    F: FnOnce(&DbConnection, &str) -> Result<(), DomainError>,
+{
     let lines: Vec<&str> = input
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -8404,6 +8521,7 @@ pub fn remember_memory_batch_stdin(
     let mut reinforced_count = 0_usize;
     let mut already_recorded_count = 0_usize;
     let mut failed_count = 0_usize;
+    let mut expected_index_job_ids = Vec::new();
 
     for (index, line) in lines.iter().enumerate() {
         let line_number = index + 1;
@@ -8460,6 +8578,9 @@ pub fn remember_memory_batch_stdin(
         ) {
             Ok(RememberOutcome::Created(report)) => {
                 stored_count += 1;
+                if let Some(index_job_id) = &report.index_job_id {
+                    expected_index_job_ids.push(index_job_id.clone());
+                }
                 results.push(RememberBatchLineResult {
                     line: line_number,
                     status: if options.dry_run {
@@ -8538,7 +8659,8 @@ pub fn remember_memory_batch_stdin(
         let workspace_id = stable_workspace_id(&workspace_path);
         let index_dir = workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR);
         let connection = open_remember_database_with_retry(&database_path)?;
-        index_status = match reconcile_pending_remember_index_jobs(
+        before_reconcile(&connection, &workspace_id)?;
+        let provisional_index_status = match reconcile_pending_remember_index_jobs(
             &connection,
             &workspace_id,
             &index_dir,
@@ -8555,6 +8677,15 @@ pub fn remember_memory_batch_stdin(
                 "queued".to_owned()
             }
         };
+        index_status = authoritative_remember_index_status(
+            &connection,
+            &workspace_id,
+            &workspace_path,
+            &database_path,
+            &index_dir,
+            &expected_index_job_ids,
+            &provisional_index_status,
+        );
     }
 
     Ok(RememberBatchReport {
@@ -17771,6 +17902,152 @@ mod tests {
     }
 
     #[test]
+    fn remember_authority_rejects_empty_pending_probe_during_real_claim_race() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let claimed_write = remember_memory_with_index_mode(
+            &upgrade_remember_options(
+                temp.path(),
+                "Claim-race authority preserves this exact heliotrope memory.",
+                0.9,
+                None,
+                false,
+            ),
+            true,
+            &[],
+            None,
+        )
+        .map_err(|error| error.message())?;
+        ensure(
+            claimed_write.index_status.clone(),
+            "queued".to_owned(),
+            "the real writer leaves its exact durable job pending",
+        )?;
+
+        let canonical = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database_path = canonical.join(".ee").join("ee.db");
+        let index_dir = canonical.join(".ee").join(DEFAULT_INDEX_SUBDIR);
+        let workspace_id = claimed_write.workspace_id.clone();
+        let claimed_memory_id = claimed_write.memory_id.to_string();
+        let claimed_job_id = claimed_write
+            .index_job_id
+            .clone()
+            .ok_or_else(|| "real deferred remember omitted its index job id".to_owned())?;
+        let connection = open_upgrade_test_db(&canonical)?;
+
+        // A distinct connection represents the concurrent publisher and
+        // performs the real pending -> running compare-and-set claim.
+        let publisher = open_upgrade_test_db(&canonical)?;
+        ensure(
+            publisher
+                .start_search_index_job(&claimed_job_id)
+                .map_err(|error| error.to_string())?,
+            true,
+            "concurrent publisher claims the exact durable job",
+        )?;
+
+        // A second public remember can publish its own job successfully while
+        // the peer-owned row is Running. Its one successful outcome and the
+        // now-empty Pending query are still insufficient to claim `indexed`.
+        let raced_write = remember_memory(&upgrade_remember_options(
+            temp.path(),
+            "Public claim-race writer preserves this exact periwinkle memory.",
+            0.9,
+            None,
+            false,
+        ))
+        .map_err(|error| error.message())?;
+        ensure(
+            raced_write.index_status.clone(),
+            "queued".to_owned(),
+            "public remember reports queued while a concurrent publisher owns peer work",
+        )?;
+
+        let empty_pending =
+            reconcile_pending_remember_index_jobs(&connection, &workspace_id, &index_dir)
+                .map_err(|error| error.to_string())?;
+        ensure(
+            empty_pending.is_none(),
+            true,
+            "pending-only probe cannot see a concurrently running job",
+        )?;
+        let ready = get_index_status_with_connection(
+            &IndexStatusOptions {
+                workspace_path: canonical.clone(),
+                database_path: Some(database_path.clone()),
+                index_dir: Some(index_dir.clone()),
+            },
+            Some(&connection),
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            ready.health == IndexHealth::Ready
+                && ready.db_generation.is_some()
+                && ready.db_generation == ready.index_generation,
+            true,
+            "the raced writer's own publish leaves a ready, generation-equal index",
+        )?;
+
+        let durable_claimed_memory = connection
+            .get_memory(&claimed_memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "claim-race remember row disappeared".to_owned())?;
+        ensure(
+            durable_claimed_memory.id,
+            claimed_memory_id.clone(),
+            "claim race preserves the claimed writer's exact persisted memory id",
+        )?;
+        let raced_memory_id = raced_write.memory_id.to_string();
+        let durable_raced_memory = connection
+            .get_memory(&raced_memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "public claim-race remember row disappeared".to_owned())?;
+        ensure(
+            durable_raced_memory.id,
+            raced_memory_id,
+            "claim race preserves the public writer's exact persisted memory id",
+        )?;
+        let claimed_job = connection
+            .get_search_index_job(&claimed_job_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "claimed index job disappeared".to_owned())?;
+        ensure(
+            claimed_job.document_id.as_deref(),
+            Some(claimed_memory_id.as_str()),
+            "claimed job preserves the exact persisted memory id",
+        )?;
+        ensure(
+            claimed_job.status_enum(),
+            Some(SearchIndexJobStatus::Running),
+            "concurrent publisher remains visibly running",
+        )?;
+
+        ensure(
+            publisher
+                .fail_search_index_job(&claimed_job_id, "deterministic publisher failure")
+                .map_err(|error| error.to_string())?,
+            true,
+            "concurrent publisher persists the real failure outcome",
+        )?;
+        let failed_status = authoritative_remember_index_status(
+            &connection,
+            &workspace_id,
+            &canonical,
+            &database_path,
+            &index_dir,
+            &[claimed_job_id],
+            "indexed",
+        );
+        ensure(
+            failed_status,
+            "failed".to_owned(),
+            "durable publisher failure overrides provisional success",
+        )
+    }
+
+    #[test]
     fn remember_reconciliation_requeues_cancelled_job_and_restores_exact_lexical_search()
     -> TestResult {
         const CONTENT: &str =
@@ -19281,6 +19558,146 @@ mod tests {
             actual_ids,
             expected_ids,
             "every batch response memory is searchable without a manual rebuild",
+        )
+    }
+
+    #[test]
+    fn remember_batch_claim_race_cannot_promote_an_empty_pending_probe_to_indexed() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let canonical = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database_path = canonical.join(".ee").join("ee.db");
+        let workspace_id = stable_workspace_id(&canonical);
+        let publish_lock = AdvisoryLockId::index(&workspace_id);
+        let publisher_holder = format!("remember:{}:batch-claim-race", std::process::id());
+        let claimed_job_ids = std::cell::RefCell::new(Vec::new());
+        let publisher_connection = std::cell::RefCell::new(None);
+        let input = concat!(
+            "{\"content\":\"Batch claim-race row one keeps its exact identity.\"}\n",
+            "{\"content\":\"Batch claim-race row two keeps its exact identity.\"}\n",
+        );
+
+        let report = remember_memory_batch_stdin_with_reconcile_hook(
+            &upgrade_batch_options(temp.path(), false),
+            input,
+            |connection, hook_workspace_id| {
+                let publisher = DbConnection::open_file(&database_path).map_err(|error| {
+                    DomainError::Storage {
+                        message: format!("claim-race publisher open failed: {error}"),
+                        repair: None,
+                    }
+                })?;
+                let acquired = publisher
+                    .acquire_advisory_lock(
+                        &publish_lock,
+                        &publisher_holder,
+                        Some(60),
+                        Some("deterministic batch claim race"),
+                    )
+                    .map_err(|error| DomainError::Storage {
+                        message: format!("claim-race publish lock failed: {error}"),
+                        repair: None,
+                    })?;
+                if !acquired.is_acquired() {
+                    return Err(DomainError::Storage {
+                        message: "claim-race publisher did not acquire the publish lock".to_owned(),
+                        repair: None,
+                    });
+                }
+
+                let pending = connection
+                    .list_pending_search_index_jobs(hook_workspace_id, None)
+                    .map_err(|error| DomainError::Storage {
+                        message: format!("claim-race pending lookup failed: {error}"),
+                        repair: None,
+                    })?;
+                for job in &pending {
+                    let claimed = publisher.start_search_index_job(&job.id).map_err(|error| {
+                        DomainError::Storage {
+                            message: format!("claim-race job claim failed: {error}"),
+                            repair: None,
+                        }
+                    })?;
+                    if !claimed {
+                        return Err(DomainError::Storage {
+                            message: format!("claim-race job {} was not pending", job.id),
+                            repair: None,
+                        });
+                    }
+                }
+                *claimed_job_ids.borrow_mut() = pending.into_iter().map(|job| job.id).collect();
+                *publisher_connection.borrow_mut() = Some(publisher);
+                Ok(())
+            },
+        )
+        .map_err(|error| error.message())?;
+
+        ensure(report.stored_count, 2, "claim-race batch stored count")?;
+        ensure(
+            report.index_status.clone(),
+            "queued".to_owned(),
+            "running batch jobs override the empty pending probe",
+        )?;
+        let response_memory_ids = report
+            .results
+            .iter()
+            .filter_map(|result| result.memory_id.clone())
+            .collect::<BTreeSet<_>>();
+        ensure(
+            response_memory_ids.len(),
+            2,
+            "claim-race batch response exact memory ids",
+        )?;
+
+        let connection = open_upgrade_test_db(&canonical)?;
+        let claimed_ids = claimed_job_ids.borrow().clone();
+        ensure(
+            claimed_ids.len(),
+            2,
+            "concurrent publisher claimed every batch job",
+        )?;
+        let mut claimed_memory_ids = BTreeSet::new();
+        for job_id in &claimed_ids {
+            let job = connection
+                .get_search_index_job(job_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("claimed batch job {job_id} disappeared"))?;
+            ensure(
+                job.status_enum(),
+                Some(SearchIndexJobStatus::Running),
+                "claimed batch job remains visibly running",
+            )?;
+            claimed_memory_ids.insert(
+                job.document_id
+                    .ok_or_else(|| format!("claimed batch job {job_id} lost its document id"))?,
+            );
+        }
+        ensure(
+            claimed_memory_ids,
+            response_memory_ids,
+            "concurrent claims preserve every exact persisted batch memory id",
+        )?;
+        let pending = connection
+            .list_pending_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            pending.is_empty(),
+            true,
+            "the deterministic claim race leaves the pending-only probe empty",
+        )?;
+
+        let publisher = publisher_connection.borrow();
+        let publisher = publisher
+            .as_ref()
+            .ok_or_else(|| "claim-race publisher connection was not retained".to_owned())?;
+        ensure(
+            publisher
+                .release_advisory_lock(&publish_lock, &publisher_holder)
+                .map_err(|error| error.to_string())?,
+            true,
+            "claim-race publisher releases its real publish lock",
         )
     }
 

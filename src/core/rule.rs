@@ -339,7 +339,7 @@ impl RuleAddReport {
     /// Human-readable summary.
     #[must_use]
     pub fn human_summary(&self) -> String {
-        if self.dry_run {
+        let mut output = if self.dry_run {
             format!(
                 "DRY RUN: Would add procedural rule ({})\n  Content: {}\n  Evidence: {}\n",
                 self.maturity, self.content, self.evidence.status
@@ -352,7 +352,9 @@ impl RuleAddReport {
                 self.audit_id.as_deref().unwrap_or("none"),
                 self.index_job_id.as_deref().unwrap_or("none")
             )
-        }
+        };
+        append_rule_degradations_human(&mut output, &self.degraded);
+        output
     }
 
     /// Compact TOON-like summary.
@@ -505,6 +507,19 @@ fn aggregate_rule_degradations(
             entry.repair.clone(),
         )
     }))
+}
+
+fn append_rule_degradations_human(output: &mut String, degraded: &[RuleAddDegradation]) {
+    if degraded.is_empty() {
+        return;
+    }
+    output.push_str("  Degraded:\n");
+    for entry in degraded {
+        output.push_str(&format!(
+            "    - {}: {} Repair: {}\n",
+            entry.code, entry.message, entry.repair
+        ));
+    }
 }
 
 /// Result of listing procedural rules.
@@ -686,7 +701,7 @@ impl RuleMarkReport {
     #[must_use]
     pub fn human_summary(&self) -> String {
         let prefix = if self.dry_run { "DRY RUN: " } else { "" };
-        format!(
+        let mut output = format!(
             "{prefix}rule mark {status}\n  ID: {id}\n  Trigger: {trigger}\n  Maturity: {from} -> {to}\n  Changed: {changed}\n  Audit: {audit}\n",
             status = self.status,
             id = self.rule_id,
@@ -695,7 +710,9 @@ impl RuleMarkReport {
             to = self.transition.next_maturity,
             changed = self.changed,
             audit = self.audit_id.as_deref().unwrap_or("none"),
-        )
+        );
+        append_rule_degradations_human(&mut output, &self.degraded);
+        output
     }
 
     /// Compact TOON-like summary.
@@ -814,13 +831,15 @@ impl RuleUpdateReport {
         } else {
             self.changed_fields.join(", ")
         };
-        format!(
+        let mut output = format!(
             "{prefix}rule update {status}\n  ID: {id}\n  Changed: {changed}\n  Fields: {fields}\n  Audit: {audit}\n",
             status = self.status,
             id = self.rule_id,
             changed = self.changed,
             audit = self.audit_id.as_deref().unwrap_or("none"),
-        )
+        );
+        append_rule_degradations_human(&mut output, &self.degraded);
+        output
     }
 
     /// Compact TOON-like summary.
@@ -1138,7 +1157,7 @@ impl RuleProtectReport {
         } else {
             "Unprotected"
         };
-        if self.dry_run {
+        let mut output = if self.dry_run {
             format!(
                 "DRY RUN: Would set procedural rule protection\n  ID: {}\n  Protected: {}\n",
                 self.rule_id, self.protected
@@ -1151,7 +1170,9 @@ impl RuleProtectReport {
                 self.audit_id.as_deref().unwrap_or("none"),
                 self.index_job_id.as_deref().unwrap_or("none")
             )
-        }
+        };
+        append_rule_degradations_human(&mut output, &self.degraded);
+        output
     }
 
     /// Compact TOON-like summary.
@@ -5922,6 +5943,11 @@ mod tests {
             actor: None,
         })
         .map_err(|error| error.message())?;
+        let canonical_workspace = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let expected_repair = rule_index_repair_command(&canonical_workspace, None);
 
         ensure(
             report.persisted && report.status == "stored",
@@ -5933,10 +5959,25 @@ mod tests {
         )?;
         ensure(
             report.degraded.iter().any(|entry| {
-                entry.code == "rule_index_publish_failed"
-                    && entry.repair == "ee index rebuild --workspace ."
+                entry.code == "rule_index_publish_failed" && entry.repair == expected_repair
             }),
             "publish failure must surface a truthful non-fatal degradation",
+        )?;
+        let json: serde_json::Value =
+            serde_json::from_str(&report.data_json()).map_err(|error| error.to_string())?;
+        ensure(
+            json["degraded"].as_array().is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry["code"] == "rule_index_publish_failed"
+                        && entry["repair"] == expected_repair
+                })
+            }),
+            "JSON rule failure carries the canonical workspace repair",
+        )?;
+        let human = report.human_summary();
+        ensure(
+            human.contains("rule_index_publish_failed") && human.contains(&expected_repair),
+            "human rule failure carries the same code and exact repair as JSON",
         )?;
 
         let connection = DbConnection::open_file(Path::new(&report.database_path))
