@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::net::{SocketAddr, TcpListener, TcpStream};
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -15,13 +15,11 @@ use std::process::{Command, Output};
 #[cfg(unix)]
 use std::sync::Arc;
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(unix)]
 use std::thread::{self, JoinHandle};
 #[cfg(unix)]
-use std::time::Duration;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use ee::core::model::{BUNDLED_EMBEDDING_DIMENSION, BUNDLED_EMBEDDING_MODEL_ID};
 #[cfg(unix)]
@@ -36,12 +34,12 @@ use ee::models::{
 #[cfg(unix)]
 use ee::models::{ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus};
 #[cfg(unix)]
-use frankensearch::embed::{ModelManifest, verify_dir_cached};
+use frankensearch::embed::{
+    ModelManifest, is_verification_cached, verify_dir_and_record, verify_dir_cached,
+};
 use serde_json::{Map, Value, json};
 
 type TestResult<T = ()> = Result<T, String>;
-
-static WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(unix)]
 struct NetworkTripwire {
@@ -219,6 +217,7 @@ fn model_fetch_embedding_default_uses_public_embedding_dispatcher() -> TestResul
 }
 
 struct E2eWorkspace {
+    _temp_dir: tempfile::TempDir,
     path: PathBuf,
     home: PathBuf,
     xdg_data: PathBuf,
@@ -236,21 +235,21 @@ impl E2eWorkspace {
             })?,
             None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"),
         };
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| format!("clock before UNIX_EPOCH: {error}"))?
-            .as_nanos();
-        let counter = WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = base.join("ee-model-bundled-cli-e2e").join(format!(
-            "{test_name}-{}-{nanos}-{counter}",
-            std::process::id()
-        ));
+        let temp_root = base.join("ee-model-bundled-cli-e2e");
+        fs::create_dir_all(&temp_root)
+            .map_err(|error| format!("create test temp root: {error}"))?;
+        let temp_dir = tempfile::Builder::new()
+            .prefix(&format!("{test_name}-"))
+            .tempdir_in(&temp_root)
+            .map_err(|error| format!("create isolated test tempdir: {error}"))?;
+        let path = temp_dir.path().to_path_buf();
         let home = path.join("home");
         let xdg_data = path.join("xdg-data");
-        fs::create_dir_all(&home).map_err(|error| format!("create {}: {error}", home.display()))?;
+        fs::create_dir_all(&home).map_err(|error| format!("create isolated test home: {error}"))?;
         fs::create_dir_all(&xdg_data)
-            .map_err(|error| format!("create {}: {error}", xdg_data.display()))?;
+            .map_err(|error| format!("create isolated test data directory: {error}"))?;
         Ok(Self {
+            _temp_dir: temp_dir,
             log_path: path.join("model_bundled_embedding.events.jsonl"),
             path,
             home,
@@ -2122,13 +2121,49 @@ fn materialize_regular_model_fixture(
     for file in &manifest.files {
         materialize_regular_fixture_file(&canonical_source, destination_model_dir, &file.name)?;
     }
-    if canonical_source.join(".verified").is_file() {
-        materialize_regular_fixture_file(&canonical_source, destination_model_dir, ".verified")?;
+    if destination_model_dir.join(".verified").exists() {
+        return Err("model fixture receipt existed before local verification".to_string());
     }
 
+    verify_dir_and_record(manifest, destination_model_dir).map_err(|_| {
+        "materialized regular model fixture failed receipt-minting verification".to_string()
+    })?;
+    ensure_destination_local_receipt(&canonical_source, destination_model_dir)?;
+    if !is_verification_cached(manifest, destination_model_dir) {
+        return Err("destination-local model fixture receipt was not cache-admissible".to_string());
+    }
+    // `is_verification_cached` is the exact guard used by Frankensearch before
+    // `verify_dir_cached` can fall through to the full SHA-256 pass. Pin both
+    // calls here so the 531 MB fixture must take the receipt-backed fast path.
     verify_dir_cached(manifest, destination_model_dir).map_err(|_| {
-        "materialized regular model fixture failed frozen manifest verification".to_string()
+        "materialized regular model fixture failed cached receipt verification".to_string()
     })
+}
+
+#[cfg(unix)]
+fn ensure_destination_local_receipt(
+    source_model_dir: &Path,
+    destination_model_dir: &Path,
+) -> TestResult {
+    let destination_receipt = destination_model_dir.join(".verified");
+    let destination_metadata = fs::symlink_metadata(&destination_receipt)
+        .map_err(|error| format!("inspect destination-local model receipt: {error}"))?;
+    if !destination_metadata.file_type().is_file() {
+        return Err("destination-local model receipt is not a regular file".to_string());
+    }
+
+    let source_receipt = source_model_dir.join(".verified");
+    if !source_receipt.is_file() {
+        return Ok(());
+    }
+    let source_metadata = fs::symlink_metadata(&source_receipt)
+        .map_err(|error| format!("inspect source model receipt: {error}"))?;
+    if source_metadata.dev() == destination_metadata.dev()
+        && source_metadata.ino() == destination_metadata.ino()
+    {
+        return Err("destination model receipt reused the source receipt identity".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -2398,7 +2433,7 @@ fn ensure_text_absent(bytes: &[u8], needle: &str, context: &str) -> TestResult {
     if !text.contains(needle) {
         return Ok(());
     }
-    Err(format!("{context} unexpectedly contained {needle}"))
+    Err(format!("{context} unexpectedly contained redacted text"))
 }
 
 fn response_data<'a>(value: &'a Value, context: &str) -> TestResult<&'a Map<String, Value>> {
