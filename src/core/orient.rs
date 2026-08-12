@@ -1480,7 +1480,23 @@ mod tests {
             )?;
         }
 
-        let scan = discover_local_stores(temp.path(), scan_budget());
+        // This test owns traversal, skip, and ranking semantics. Keep it off
+        // the outer wall-clock wrapper so cold parallel FrankenSQLite fixture
+        // initialization cannot turn a semantic assertion into a deadline
+        // assertion. The dedicated zero-budget and blocking-operation tests
+        // below independently pin the caller-visible deadline contract.
+        let workspace_root = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let addressed_database = workspace_root.join(".ee").join("ee.db");
+        let absent_registry = temp.path().join("registry-not-present-for-ranking.db");
+        let scan = scan_nearby_stores_with_registry(
+            temp.path(),
+            &addressed_database,
+            std::time::Duration::MAX,
+            Some(&absent_registry),
+        );
         ensure_equal(&scan.stores.len(), &3_usize, "three eligible stores")?;
         ensure(
             scan.stores[0].workspace_root.ends_with("depth-three")
@@ -1701,16 +1717,31 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(".git")).map_err(|error| error.to_string())?;
         let open_child = temp.path().join("open");
         let locked = temp.path().join("locked");
+        let hidden_store = locked.join("hidden-store");
         std::fs::create_dir_all(&open_child).map_err(|error| error.to_string())?;
-        std::fs::create_dir_all(&locked).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&hidden_store).map_err(|error| error.to_string())?;
         remember_fixture(&open_child, "Reachable store rule.", "nearby", None)?;
+        remember_fixture(
+            &hidden_store,
+            "Permission-denied store must not surface.",
+            "nearby",
+            None,
+        )?;
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
             .map_err(|error| error.to_string())?;
 
+        let permission_probe = std::fs::read_dir(&locked).map(drop);
         let scan = discover_local_stores(temp.path(), scan_budget());
         // Restore permissions so tempdir cleanup succeeds.
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
             .map_err(|error| error.to_string())?;
+        ensure(
+            matches!(
+                permission_probe,
+                Err(ref error) if error.kind() == std::io::ErrorKind::PermissionDenied
+            ),
+            format!("permission fixture did not produce PermissionDenied: {permission_probe:?}"),
+        )?;
         ensure_equal(&scan.stores.len(), &1_usize, "reachable store still found")?;
         ensure(
             scan.stores[0].workspace_root.ends_with("open"),
