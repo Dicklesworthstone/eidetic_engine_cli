@@ -25,7 +25,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ee::core::model::{BUNDLED_EMBEDDING_DIMENSION, BUNDLED_EMBEDDING_MODEL_ID};
 #[cfg(unix)]
-use ee::daemon::protocol::{DAEMON_SEARCH_REQUEST_SCHEMA_V1, DaemonRequest, METHOD_SEARCH};
+use ee::daemon::protocol::{DAEMON_SEARCH_REQUEST_SCHEMA_V2, DaemonRequest, METHOD_SEARCH};
 #[cfg(unix)]
 use ee::daemon::server::{METHOD_SHUTDOWN, client_round_trip, client_round_trip_before};
 #[cfg(unix)]
@@ -401,7 +401,7 @@ impl RunningE2eDaemon {
             "model-bundled-embedding-cli-e2e",
             METHOD_SEARCH,
             json!({
-                "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+                "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
                 "query": query,
                 "workspacePath": workspace.workspace_arg()?,
                 "databasePath": path_string(&workspace.path.join(".ee/ee.db")),
@@ -1423,7 +1423,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         "index manifest storedDistanceMetric",
     )?;
 
-    let (daemon_search_first, daemon_search_second, daemon_search_third) = {
+    let (daemon_search_first, daemon_search_second, daemon_search_third, daemon_search_performance) = {
         let daemon = RunningE2eDaemon::start(&workspace, &offline_env)?;
         daemon.prewarm_search(&workspace, query)?;
         let socket_arg = daemon.socket_arg();
@@ -1502,7 +1502,104 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
                 stable_results = Some(current_results);
             }
         }
-        (first, second, third)
+        let performance = run_ee_with_env(
+            &workspace,
+            "registry_path_daemon_search_performance",
+            &[
+                "search",
+                query,
+                "--workspace",
+                workspace.workspace_arg()?,
+                "--relevance-floor",
+                "0",
+                "--use-daemon",
+                "--daemon-socket",
+                &socket_arg,
+                "--explain-performance",
+            ],
+            &offline_env,
+        )?;
+        ensure_success(&performance, "registry-path daemon performance search")?;
+        let performance_json =
+            stdout_json(&performance, "registry-path daemon performance search")?;
+        ensure_eq_str(
+            performance_json
+                .get("schema")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "daemon performance schema missing".to_string())?,
+            ee::core::search::PERFORMANCE_EXPLAIN_SCHEMA_V1,
+            "daemon performance schema",
+        )?;
+        ensure_eq_bool(
+            performance_json
+                .get("success")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| "daemon performance success missing".to_string())?,
+            true,
+            "daemon performance success",
+        )?;
+        ensure_eq_str(
+            performance_json
+                .pointer("/data/executionPath")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "daemon performance executionPath missing".to_string())?,
+            "daemon",
+            "daemon performance execution path",
+        )?;
+        ensure_eq_str(
+            performance_json
+                .pointer("/data/embedBackend")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "daemon performance embedBackend missing".to_string())?,
+            "neural_local",
+            "daemon performance embed backend",
+        )?;
+        let performance_fallbacks = performance_json
+            .pointer("/data/fallbacks")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "daemon performance canonical fallbacks array missing".to_string())?;
+        if performance_fallbacks.iter().any(|entry| {
+            entry.get("code").and_then(Value::as_str) == Some("daemon_search_fallback")
+        }) {
+            return Err("daemon performance search unexpectedly fell back in-process".to_string());
+        }
+        for field in [
+            "queryPlan",
+            "profileRuntime",
+            "dbReads",
+            "search",
+            "timings",
+            "pack",
+            "cache",
+            "graph",
+            "fallbacks",
+            "redaction",
+        ] {
+            if performance_json
+                .pointer(&format!("/data/{field}"))
+                .is_none()
+            {
+                return Err(format!(
+                    "daemon performance canonical field {field} missing"
+                ));
+            }
+        }
+        for category in ["startup", "model", "index", "query"] {
+            let timing = performance_json
+                .pointer(&format!("/data/timingBreakdown/{category}"))
+                .and_then(Value::as_object)
+                .ok_or_else(|| format!("daemon performance {category} timing missing"))?;
+            if !timing
+                .get("elapsedMs")
+                .and_then(Value::as_f64)
+                .is_some_and(|elapsed| elapsed >= 0.0)
+            {
+                return Err(format!(
+                    "daemon performance {category} elapsedMs missing or invalid"
+                ));
+            }
+        }
+        (first, second, third, performance)
     };
     let registry_after_daemon = model2vec_registry_entry(&workspace)?;
     if registry_after_daemon != registry_before_daemon {
@@ -1794,6 +1891,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         ("daemon_search_first", &daemon_search_first),
         ("daemon_search_second", &daemon_search_second),
         ("daemon_search_third", &daemon_search_third),
+        ("daemon_search_performance", &daemon_search_performance),
         ("pack", &pack),
         ("orient", &orient),
         ("why_not", &why_not),
@@ -1829,6 +1927,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         ("daemon_search_first", &daemon_search_first),
         ("daemon_search_second", &daemon_search_second),
         ("daemon_search_third", &daemon_search_third),
+        ("daemon_search_performance", &daemon_search_performance),
         ("pack", &pack),
         ("orient", &orient),
         ("why_not", &why_not),

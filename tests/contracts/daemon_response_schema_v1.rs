@@ -16,7 +16,7 @@ use ee::daemon::DAEMON_RESPONSE_SCHEMA_V1;
 use ee::daemon::protocol::{DaemonRequest, DaemonResponse};
 use ee::daemon::server::{
     DAEMON_SEARCH_EXECUTION_FAILED_CODE, DAEMON_SEARCH_PARAMS_INVALID_CODE,
-    DAEMON_SEARCH_REQUEST_SCHEMA_V1, DAEMON_SEARCH_RESPONSE_SCHEMA_V2, METHOD_CAPABILITIES,
+    DAEMON_SEARCH_REQUEST_SCHEMA_V2, DAEMON_SEARCH_RESPONSE_SCHEMA_V3, METHOD_CAPABILITIES,
     METHOD_CONTEXT, METHOD_ECHO, METHOD_SEARCH, METHOD_SHUTDOWN, METHOD_TELEMETRY, METHOD_WRITE,
     METHOD_WRITE_JOURNAL,
 };
@@ -25,8 +25,8 @@ type TestResult = Result<(), String>;
 
 const REQUEST_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.request.v1.json";
 const RESPONSE_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.response.v1.json";
-const SEARCH_REQUEST_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.search.request.v1.json";
-const SEARCH_RESPONSE_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.search.response.v2.json";
+const SEARCH_REQUEST_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.search.request.v2.json";
+const SEARCH_RESPONSE_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.search.response.v3.json";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -128,8 +128,8 @@ fn capabilities_response() -> Value {
             },
             "method_schemas": {
                 "ee.daemon.search": {
-                    "request": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
-                    "response": DAEMON_SEARCH_RESPONSE_SCHEMA_V2
+                    "request": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                    "response": DAEMON_SEARCH_RESPONSE_SCHEMA_V3
                 }
             },
             "forward_compat": {
@@ -262,9 +262,9 @@ fn daemon_search_method_schemas_pin_paths_timings_and_nested_strictness() -> Tes
     let request = read_schema(SEARCH_REQUEST_SCHEMA_PATH)?;
     let response = read_schema(SEARCH_RESPONSE_SCHEMA_PATH)?;
     if request.pointer("/$id").and_then(Value::as_str)
-        != Some("https://eidetic-engine/schemas/ee.daemon.search.request.v1.json")
+        != Some("https://eidetic-engine/schemas/ee.daemon.search.request.v2.json")
         || response.pointer("/$id").and_then(Value::as_str)
-            != Some("https://eidetic-engine/schemas/ee.daemon.search.response.v2.json")
+            != Some("https://eidetic-engine/schemas/ee.daemon.search.response.v3.json")
     {
         return Err("daemon search method schema ids drifted".to_owned());
     }
@@ -293,6 +293,16 @@ fn daemon_search_method_schemas_pin_paths_timings_and_nested_strictness() -> Tes
         ),
         (
             &response,
+            "/$defs/performance/additionalProperties",
+            "canonical performance envelope",
+        ),
+        (
+            &response,
+            "/$defs/performance/properties/data/additionalProperties",
+            "canonical performance data",
+        ),
+        (
+            &response,
             "/$defs/searchDocument/additionalProperties",
             "search document",
         ),
@@ -311,6 +321,53 @@ fn daemon_search_method_schemas_pin_paths_timings_and_nested_strictness() -> Tes
             "search timing required fields drifted; expected {expected_timing:?}, got {timing_required:?}"
         ));
     }
+    if request
+        .pointer("/required")
+        .and_then(Value::as_array)
+        .is_some_and(|required| {
+            required
+                .iter()
+                .any(|field| field.as_str() == Some("explainPerformance"))
+        })
+    {
+        return Err("search request explainPerformance must remain optional".to_owned());
+    }
+    if request
+        .pointer("/properties/explainPerformance/type")
+        .and_then(Value::as_str)
+        != Some("boolean")
+    {
+        return Err("search request explainPerformance must be a boolean".to_owned());
+    }
+    if response
+        .pointer("/required")
+        .and_then(Value::as_array)
+        .is_some_and(|required| {
+            required
+                .iter()
+                .any(|field| field.as_str() == Some("performance"))
+        })
+    {
+        return Err("search response performance must remain optional".to_owned());
+    }
+    if response
+        .pointer("/properties/performance/$ref")
+        .and_then(Value::as_str)
+        != Some("#/$defs/performance")
+        || response
+            .pointer("/$defs/performance/properties/schema/const")
+            .and_then(Value::as_str)
+            != Some("ee.explain.performance.v1")
+        || response
+            .pointer("/$defs/performance/properties/success/const")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return Err(
+            "search response performance must reference the canonical performance envelope"
+                .to_owned(),
+        );
+    }
     let request_description = request
         .pointer("/description")
         .and_then(Value::as_str)
@@ -320,6 +377,45 @@ fn daemon_search_method_schemas_pin_paths_timings_and_nested_strictness() -> Tes
             return Err(format!(
                 "search request containment contract missing {phrase:?}"
             ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn daemon_search_current_method_schemas_are_registered_and_exportable() -> TestResult {
+    for (schema_id, schema_path, expected_id) in [
+        (
+            DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+            SEARCH_REQUEST_SCHEMA_PATH,
+            "https://eidetic-engine/schemas/ee.daemon.search.request.v2.json",
+        ),
+        (
+            DAEMON_SEARCH_RESPONSE_SCHEMA_V3,
+            SEARCH_RESPONSE_SCHEMA_PATH,
+            "https://eidetic-engine/schemas/ee.daemon.search.response.v3.json",
+        ),
+    ] {
+        let registration_count = ee::output::public_schemas()
+            .iter()
+            .filter(|entry| entry.id == schema_id)
+            .count();
+        if registration_count != 1 {
+            return Err(format!(
+                "{schema_id} must be registered exactly once, got {registration_count}"
+            ));
+        }
+        let on_disk = read_schema(schema_path)?;
+        let exported: Value =
+            serde_json::from_str(&ee::output::render_schema_export_json(Some(schema_id)))
+                .map_err(|error| format!("parse exported {schema_id}: {error}"))?;
+        if on_disk != exported {
+            return Err(format!(
+                "{schema_id} export must byte-semantically match {schema_path}"
+            ));
+        }
+        if exported.pointer("/$id").and_then(Value::as_str) != Some(expected_id) {
+            return Err(format!("{schema_id} exported document id drifted"));
         }
     }
     Ok(())

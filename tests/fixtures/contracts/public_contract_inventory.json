@@ -473,6 +473,70 @@
       "forbiddenCurrentClaims": []
     },
     {
+      "schemaId": "ee.daemon.search.request.v1",
+      "status": "retired",
+      "surface": "daemon_search_method_request",
+      "owner": "src/daemon/protocol.rs",
+      "schemaFile": "docs/schemas/ee.daemon.search.request.v1.json",
+      "canonicalDocs": [
+        "docs/schemas/ee.daemon.search.request.v1.json"
+      ],
+      "currentFacingContexts": [],
+      "allowedHistoricalContexts": [
+        {
+          "pathPattern": "tests/**",
+          "reason": "Historical protocol fixtures prove that the current daemon rejects the retired request schema."
+        }
+      ],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.daemon.search.response.v2",
+      "status": "retired",
+      "surface": "daemon_search_method_response",
+      "owner": "src/daemon/protocol.rs",
+      "schemaFile": "docs/schemas/ee.daemon.search.response.v2.json",
+      "canonicalDocs": [
+        "docs/schemas/ee.daemon.search.response.v2.json"
+      ],
+      "currentFacingContexts": [],
+      "allowedHistoricalContexts": [
+        {
+          "pathPattern": "tests/**",
+          "reason": "Historical protocol fixtures preserve the retired response contract without advertising it."
+        }
+      ],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.daemon.search.request.v2",
+      "status": "experimental",
+      "surface": "daemon_search_method_request",
+      "owner": "src/daemon/protocol.rs::DAEMON_SEARCH_REQUEST_SCHEMA_V2",
+      "schemaFile": "docs/schemas/ee.daemon.search.request.v2.json",
+      "canonicalDocs": [
+        "docs/schemas/ee.daemon.search.request.v2.json",
+        "docs/schemas/ee.daemon.request.v1.json"
+      ],
+      "currentFacingContexts": [],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.daemon.search.response.v3",
+      "status": "experimental",
+      "surface": "daemon_search_method_response",
+      "owner": "src/daemon/protocol.rs::DAEMON_SEARCH_RESPONSE_SCHEMA_V3",
+      "schemaFile": "docs/schemas/ee.daemon.search.response.v3.json",
+      "canonicalDocs": [
+        "docs/schemas/ee.daemon.search.response.v3.json",
+        "docs/schemas/ee.daemon.response.v1.json"
+      ],
+      "currentFacingContexts": [],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
       "schemaId": "ee.daemon.start.v1",
       "status": "experimental",
       "surface": "daemon_start_payload",

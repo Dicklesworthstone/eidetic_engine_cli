@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.daemon.search.response.v3.json",
+  "title": "ee.daemon.search.response.v3",
+  "description": "Strict nested success result for ee.daemon.search. daemonTotal begins at method dispatch and ends after canonical machine/human rendering; daemon envelope serialization, frame writing, and transport time are excluded. embedderPreparation, indexOpen, and query aggregate named canonical SearchPerformanceTrace spans and are null when that phase did not run. The optional performance field is present only when requested through ee.daemon.search.request.v2 explainPerformance and carries the canonical redaction-safe ee.explain.performance.v1 envelope. All timings are observational and nondeterministic.",
+  "type": "object",
+  "required": ["schema", "response", "human", "reuseContract", "timing"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.daemon.search.response.v3"},
+    "human": {"type": "string"},
+    "performance": {"$ref": "#/$defs/performance"},
+    "reuseContract": {
+      "type": "object",
+      "required": ["daemonProcess", "defaultSearchEmbedder", "searchIndex"],
+      "additionalProperties": false,
+      "properties": {
+        "daemonProcess": {"type": "string", "const": "long_lived"},
+        "defaultSearchEmbedder": {"type": "string", "const": "process_scoped"},
+        "searchIndex": {"type": "string", "const": "per_request"}
+      }
+    },
+    "timing": {
+      "type": "object",
+      "required": ["daemonTotal", "embedderPreparation", "indexOpen", "query"],
+      "additionalProperties": false,
+      "properties": {
+        "daemonTotal": {"$ref": "#/$defs/timing"},
+        "embedderPreparation": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/timing"}]},
+        "indexOpen": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/timing"}]},
+        "query": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/timing"}]}
+      }
+    },
+    "response": {
+      "type": "object",
+      "required": ["schema", "success", "data", "degraded"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.response.v2"},
+        "success": {"type": "boolean", "const": true},
+        "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}},
+        "data": {
+          "type": "object",
+          "required": ["command", "status", "embed_backend", "query", "request", "scopeStats", "results", "consensus", "conflicts", "resultCount", "elapsedMs", "metrics", "rerank", "profileRuntime", "errors", "degraded"],
+          "additionalProperties": false,
+          "properties": {
+            "command": {"type": "string", "const": "search"},
+            "status": {"type": "string", "enum": ["success", "no_results", "index_not_found", "index_error"]},
+            "embed_backend": {"type": "string", "enum": ["neural_local", "hash_fallback"]},
+            "query": {"type": "string"},
+            "request": {"type": "object"},
+            "scopeStats": {"type": "object"},
+            "results": {"type": "array", "items": {"$ref": "#/$defs/searchDocument"}},
+            "consensus": {"type": "array"},
+            "conflicts": {"type": "array"},
+            "resultCount": {"type": "integer", "minimum": 0},
+            "elapsedMs": {"type": "number", "minimum": 0},
+            "metrics": {"type": "object"},
+            "rerank": {"type": "object"},
+            "profileRuntime": {"type": "object"},
+            "errors": {"type": "array"},
+            "degraded": {"type": "array"},
+            "queryAssist": {"type": "object"},
+            "resultPath": {"type": "string", "const": "data.results"}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "performance": {
+      "type": "object",
+      "required": ["schema", "success", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.explain.performance.v1"},
+        "success": {"type": "boolean", "const": true},
+        "data": {
+          "type": "object",
+          "required": ["command", "query", "queryPlan", "profileRuntime", "dbReads", "search", "timings", "pack", "cache", "graph", "fallbacks", "redaction"],
+          "additionalProperties": false,
+          "properties": {
+            "command": {"type": "string", "const": "search"},
+            "query": {
+              "type": "object",
+              "required": ["textIncluded", "lengthBytes", "fingerprint"],
+              "additionalProperties": false,
+              "properties": {
+                "textIncluded": {"type": "boolean", "const": false},
+                "lengthBytes": {"type": "integer", "minimum": 0},
+                "fingerprint": {"type": "string", "pattern": "^blake3:[0-9a-f]{64}$"}
+              }
+            },
+            "queryPlan": {
+              "type": "object",
+              "required": ["retrievalMode", "requestedLimit", "candidateBudget", "usesEmbeddings", "scoreExplanationsRequested", "sourceModeRequested", "sourceModeApplied", "strictSourceMode", "fallbackApplied", "memoryScope", "strictScope"],
+              "additionalProperties": false,
+              "properties": {
+                "retrievalMode": {"type": "string", "enum": ["instant", "default", "quality"]},
+                "requestedLimit": {"type": "integer", "minimum": 0},
+                "candidateBudget": {"type": "integer", "minimum": 0},
+                "usesEmbeddings": {"type": "boolean"},
+                "scoreExplanationsRequested": {"type": "boolean"},
+                "sourceModeRequested": {"type": "string", "enum": ["lexical_only", "semantic_only", "hybrid"]},
+                "sourceModeApplied": {"type": "string", "enum": ["lexical_only", "semantic_only", "hybrid"]},
+                "strictSourceMode": {"type": "boolean"},
+                "fallbackApplied": {"type": "boolean"},
+                "memoryScope": {"type": "string", "enum": ["self", "team", "global", "workspace", "verified", "swarm"]},
+                "strictScope": {"type": "boolean"}
+              }
+            },
+            "profileRuntime": {"type": "object"},
+            "dbReads": {
+              "type": "object",
+              "required": ["indexStatusChecks", "memoryReads", "tagReads", "artifactLinkReads"],
+              "additionalProperties": false,
+              "properties": {
+                "indexStatusChecks": {"type": "integer", "minimum": 0},
+                "memoryReads": {"type": "integer", "minimum": 0},
+                "tagReads": {"type": "integer", "minimum": 0},
+                "artifactLinkReads": {"type": "integer", "minimum": 0}
+              }
+            },
+            "search": {"type": "object"},
+            "timings": {"type": "array"},
+            "pack": {"$ref": "#/$defs/notUsed"},
+            "cache": {"$ref": "#/$defs/notUsed"},
+            "graph": {"$ref": "#/$defs/notUsed"},
+            "fallbacks": {"type": "array", "items": {"$ref": "#/$defs/degradation"}},
+            "redaction": {
+              "type": "object",
+              "required": ["memoryContentIncluded", "queryTextIncluded", "safeFields"],
+              "additionalProperties": false,
+              "properties": {
+                "memoryContentIncluded": {"type": "boolean", "const": false},
+                "queryTextIncluded": {"type": "boolean", "const": false},
+                "safeFields": {"type": "array", "items": {"type": "string"}}
+              }
+            }
+          }
+        }
+      }
+    },
+    "notUsed": {
+      "type": "object",
+      "required": ["status", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"type": "string", "const": "not_used"},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
+        "message": {"type": "string"},
+        "repair": {"type": "string"},
+        "repairKind": {"type": "string", "enum": ["actionable", "template", "placeholder", "unknown", "empty"]},
+        "sources": {"type": "array", "items": {"type": "string"}},
+        "details": {"type": "object"}
+      }
+    },
+    "timing": {
+      "type": "object",
+      "required": ["elapsedMs", "elapsedMsBucket", "nondeterministic"],
+      "additionalProperties": false,
+      "properties": {
+        "elapsedMs": {"type": "number", "minimum": 0},
+        "elapsedMsBucket": {"type": "string", "enum": ["lt_1ms", "1_9ms", "10_49ms", "50_99ms", "100_499ms", "500_999ms", "gte_1000ms"]},
+        "nondeterministic": {"type": "boolean", "const": true}
+      }
+    },
+    "searchDocument": {
+      "type": "object",
+      "required": ["docId", "score", "relevanceScore", "scoreKind", "scoreInterval", "coverageGuarantee", "calibrated", "source", "why", "provenance"],
+      "additionalProperties": false,
+      "properties": {
+        "docId": {"type": "string"},
+        "memoryId": {"type": "string"},
+        "score": {"type": "number"},
+        "relevanceScore": {"type": "number", "minimum": 0, "maximum": 1},
+        "scoreKind": {"type": "string", "enum": ["unit_normalized", "rrf_fused", "reranked"]},
+        "scoreInterval": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+        "coverageGuarantee": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "calibrated": {"type": "boolean"},
+        "source": {"type": "string", "enum": ["lexical", "semantic_fast", "semantic_quality", "hybrid", "reranked"]},
+        "why": {"type": "string"},
+        "provenance": {"type": "array"},
+        "fastScore": {"type": "number"},
+        "qualityScore": {"type": "number"},
+        "lexicalScore": {"type": "number"},
+        "rerankScore": {"type": "number"},
+        "metadata": {"type": "object"},
+        "driftHint": {},
+        "meshProvenance": {"type": "object"},
+        "meshTrustAdjustment": {},
+        "content": {"type": "string"},
+        "content_truncated": {"type": "boolean"},
+        "contentRedacted": {"type": "boolean"},
+        "redactions": {"type": "array"},
+        "tombstoned": {"type": "boolean"},
+        "tombstonedAt": {"type": "string"},
+        "validFrom": {"type": "string"},
+        "validTo": {"type": "string"},
+        "validityStatus": {"type": "string"},
+        "validityWindowKind": {"type": "string"},
+        "explanation": {"type": "object"}
+      }
+    }
+  }
+}

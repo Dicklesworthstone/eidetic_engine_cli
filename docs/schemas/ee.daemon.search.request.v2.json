@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.daemon.search.request.v2.json",
+  "title": "ee.daemon.search.request.v2",
+  "description": "Strict nested params for ee.daemon.search. workspacePath, databasePath, and indexDir are absolute daemon-host paths. The daemon canonicalizes workspacePath and the envelope workspace_id and requires equality; explicit databasePath and indexDir values must remain inside that canonical workspace. Existing symlinks are resolved before containment is checked, so a symlink escape is rejected. explainPerformance is an optional boolean that requests the canonical redaction-safe ee.explain.performance.v1 envelope in the method response without changing ordinary search rendering.",
+  "type": "object",
+  "required": ["schema", "query", "workspacePath"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.daemon.search.request.v2"},
+    "query": {"type": "string", "minLength": 1},
+    "workspacePath": {"type": "string", "minLength": 1},
+    "databasePath": {"type": "string", "minLength": 1},
+    "indexDir": {"type": "string", "minLength": 1},
+    "limit": {"type": "integer", "minimum": 0},
+    "speed": {"type": "string", "enum": ["instant", "default", "quality"]},
+    "explain": {"type": "boolean"},
+    "explainPerformance": {"type": "boolean"},
+    "includeTombstoned": {"type": "boolean"},
+    "asOf": {"type": "string", "format": "date-time"},
+    "includeExpired": {"type": "boolean"},
+    "includeFuture": {"type": "boolean"},
+    "includeStale": {"type": "boolean"},
+    "kind": {"type": "string"},
+    "fieldFilters": {"type": "array", "items": {"type": "string"}},
+    "relevanceFloor": {"type": "number", "minimum": 0, "maximum": 1},
+    "dedupe": {"type": "string", "enum": ["doc_id", "mi"]},
+    "sourceMode": {"type": "string", "enum": ["lexical_only", "semantic_only", "hybrid"]},
+    "strictSourceMode": {"type": "boolean"},
+    "memoryScope": {"type": "string", "enum": ["self", "team", "global", "workspace", "verified", "swarm"]},
+    "strictScope": {"type": "boolean"}
+  }
+}

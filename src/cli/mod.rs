@@ -8858,7 +8858,7 @@ pub struct SearchArgs {
     pub field_filters: Vec<String>,
 
     /// Emit a redaction-safe query performance report instead of search hits.
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(long, short = 'v', action = ArgAction::SetTrue)]
     pub explain_performance: bool,
 
     /// Minimum score (0.0..=1.0) for a hit to be included in `results`.
@@ -12825,6 +12825,7 @@ where
     W: Write,
     E: Write,
 {
+    let invocation_started = Instant::now();
     ACTIVE_RESPONSE_SCHEMA_VERSION.with(|version| {
         version.set(output::ResponseSchemaVersion::V1);
     });
@@ -14369,7 +14370,9 @@ where
             handle_review_workspace(&cli, args, stdout, stderr)
         }
         Some(Command::Impact(ref args)) => handle_impact(&cli, args, stdout, stderr),
-        Some(Command::Search(ref args)) => handle_search(&cli, args, stdout, stderr),
+        Some(Command::Search(ref args)) => {
+            handle_search(&cli, args, invocation_started, stdout, stderr)
+        }
         Some(Command::Similar(ref args)) => handle_similar(&cli, args, stdout, stderr),
         Some(Command::Sentinel(ref command)) => handle_sentinel(&cli, command, stdout, stderr),
         Some(Command::Shadow(ShadowCommand::Run(ref args))) => {
@@ -46166,12 +46169,6 @@ fn daemon_search_unsupported_reason(args: &SearchArgs) -> Option<DaemonSearchFal
             ),
         ),
         (
-            args.explain_performance,
-            DaemonSearchFallbackReason::UnsupportedCliOption(
-                "--explain-performance remains in-process",
-            ),
-        ),
-        (
             args.mesh_mode != MeshCommandMode::Off,
             DaemonSearchFallbackReason::UnsupportedCliOption("--mesh remains in-process"),
         ),
@@ -46188,7 +46185,7 @@ fn validate_daemon_search_capabilities(
     capabilities: &serde_json::Value,
 ) -> Result<(), DaemonSearchFallbackReason> {
     use crate::daemon::protocol::{
-        DAEMON_SEARCH_REQUEST_SCHEMA_V1, DAEMON_SEARCH_RESPONSE_SCHEMA_V2, METHOD_SEARCH,
+        DAEMON_SEARCH_REQUEST_SCHEMA_V2, DAEMON_SEARCH_RESPONSE_SCHEMA_V3, METHOD_SEARCH,
     };
     use crate::daemon::{DAEMON_REQUEST_SCHEMA_V1, DAEMON_RESPONSE_SCHEMA_V1};
 
@@ -46223,11 +46220,11 @@ fn validate_daemon_search_capabilities(
     if capabilities
         .pointer("/method_schemas/ee.daemon.search/request")
         .and_then(serde_json::Value::as_str)
-        != Some(DAEMON_SEARCH_REQUEST_SCHEMA_V1)
+        != Some(DAEMON_SEARCH_REQUEST_SCHEMA_V2)
         || capabilities
             .pointer("/method_schemas/ee.daemon.search/response")
             .and_then(serde_json::Value::as_str)
-            != Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V2)
+            != Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V3)
     {
         return Err(DaemonSearchFallbackReason::CapabilityMethodSchemaDrift);
     }
@@ -46239,7 +46236,7 @@ fn search_via_daemon(
     args: &SearchArgs,
     options: &SearchOptions,
     kind_filter: Option<&str>,
-) -> Result<(serde_json::Value, String), DaemonSearchFallbackReason> {
+) -> Result<crate::daemon::server::DaemonSearchRenderings, DaemonSearchFallbackReason> {
     if let Some(reason) = daemon_search_unsupported_reason(args) {
         return Err(reason);
     }
@@ -46253,6 +46250,7 @@ fn search_via_daemon(
     }
     let kind_filter = kind_filter.map(str::to_owned);
     let field_filters = args.field_filters.clone();
+    let explain_performance = args.explain_performance;
     let deadline = std::time::Instant::now() + DAEMON_SEARCH_ATTEMPT_TIMEOUT;
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
@@ -46261,6 +46259,7 @@ fn search_via_daemon(
             &options,
             kind_filter.as_deref(),
             &field_filters,
+            explain_performance,
             deadline,
         );
         let _ = sender.send(result);
@@ -46276,8 +46275,9 @@ fn search_via_daemon_before(
     options: &SearchOptions,
     kind_filter: Option<&str>,
     field_filters: &[String],
+    explain_performance: bool,
     deadline: std::time::Instant,
-) -> Result<(serde_json::Value, String), DaemonSearchFallbackReason> {
+) -> Result<crate::daemon::server::DaemonSearchRenderings, DaemonSearchFallbackReason> {
     use crate::daemon::protocol::DaemonRequest;
     use crate::daemon::server::{
         ClientError, DaemonSearchParams, DaemonSearchResult, METHOD_CAPABILITIES, METHOD_SEARCH,
@@ -46308,7 +46308,12 @@ fn search_via_daemon_before(
         .ok_or(DaemonSearchFallbackReason::CapabilityMethodError)?;
     validate_daemon_search_capabilities(capabilities)?;
 
-    let params = DaemonSearchParams::from_search_options(options, kind_filter, field_filters);
+    let params = DaemonSearchParams::from_search_options(
+        options,
+        kind_filter,
+        field_filters,
+        explain_performance,
+    );
     let params = serde_json::to_value(params)
         .map_err(|_| DaemonSearchFallbackReason::RequestEncodingFailed)?;
     let workspace_id = options.workspace_path.display().to_string();
@@ -46330,9 +46335,13 @@ fn search_via_daemon_before(
     let result = response
         .result
         .ok_or(DaemonSearchFallbackReason::SearchResultMissing)?;
-    DaemonSearchResult::from_value(result)
-        .map(DaemonSearchResult::into_renderings)
-        .map_err(|_| DaemonSearchFallbackReason::SearchResponseDrift)
+    let renderings = DaemonSearchResult::from_value(result)
+        .and_then(DaemonSearchResult::into_renderings)
+        .map_err(|_| DaemonSearchFallbackReason::SearchResponseDrift)?;
+    if explain_performance && renderings.performance.is_none() {
+        return Err(DaemonSearchFallbackReason::SearchResponseDrift);
+    }
+    Ok(renderings)
 }
 
 #[cfg(not(unix))]
@@ -46340,7 +46349,7 @@ fn search_via_daemon(
     args: &SearchArgs,
     _options: &SearchOptions,
     _kind_filter: Option<&str>,
-) -> Result<(serde_json::Value, String), DaemonSearchFallbackReason> {
+) -> Result<crate::daemon::server::DaemonSearchRenderings, DaemonSearchFallbackReason> {
     if let Some(reason) = daemon_search_unsupported_reason(args) {
         return Err(reason);
     }
@@ -46367,6 +46376,103 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
     }
+}
+
+fn daemon_search_performance_json(
+    renderings: &crate::daemon::server::DaemonSearchRenderings,
+    startup_elapsed: Duration,
+    daemon_round_trip_elapsed: Duration,
+    command_timings: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    let embed_backend = renderings
+        .response
+        .pointer("/data/embed_backend")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let model = renderings
+        .timing
+        .get("embedderPreparation")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let index = renderings
+        .timing
+        .get("indexOpen")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let query = renderings
+        .timing
+        .get("query")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let mut performance = renderings
+        .performance
+        .clone()
+        .unwrap_or(serde_json::Value::Null);
+    if let Some(data) = performance
+        .get_mut("data")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        data.insert(
+            "executionPath".to_owned(),
+            serde_json::Value::String("daemon".to_owned()),
+        );
+        data.insert("embedBackend".to_owned(), embed_backend);
+        data.insert(
+            "reuseContract".to_owned(),
+            renderings.reuse_contract.clone(),
+        );
+        data.insert(
+            "timingBreakdown".to_owned(),
+            serde_json::json!({
+                "startup": elapsed_timing_json(startup_elapsed.as_secs_f64() * 1_000.0),
+                "model": model,
+                "index": index,
+                "query": query,
+            }),
+        );
+        data.insert(
+            "timingSemantics".to_owned(),
+            serde_json::json!({
+                "startup": "cli_invocation_entry_to_daemon_attempt",
+                "model": "daemon_embedder_preparation",
+                "index": "daemon_index_open_and_lexical_attach",
+                "query": "daemon_search_collect",
+            }),
+        );
+        data.insert("daemonTiming".to_owned(), renderings.timing.clone());
+        data.insert(
+            "client".to_owned(),
+            serde_json::json!({
+                "daemonRoundTrip": elapsed_timing_json(
+                    daemon_round_trip_elapsed.as_secs_f64() * 1_000.0
+                ),
+            }),
+        );
+        data.insert(
+            "commandTimings".to_owned(),
+            serde_json::Value::Array(command_timings),
+        );
+    }
+    performance
+}
+
+fn write_daemon_search_performance<W>(
+    renderings: &crate::daemon::server::DaemonSearchRenderings,
+    startup_elapsed: Duration,
+    daemon_round_trip_elapsed: Duration,
+    command_timings: Vec<serde_json::Value>,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let payload = daemon_search_performance_json(
+        renderings,
+        startup_elapsed,
+        daemon_round_trip_elapsed,
+        command_timings,
+    );
+    write_stdout(stdout, &(payload.to_string() + "\n"))
 }
 
 /// Bounded workspace fan-out for `ee search --all-workspaces`.
@@ -46562,6 +46668,7 @@ where
 fn handle_search<W, E>(
     cli: &Cli,
     args: &SearchArgs,
+    invocation_started: Instant,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -46712,9 +46819,34 @@ where
     ));
 
     let daemon_fallback = if args.use_daemon {
+        let startup_elapsed = invocation_started.elapsed();
+        let daemon_round_trip_start = Instant::now();
         match search_via_daemon(args, &options, kind_filter.as_deref()) {
-            Ok((response, human)) => {
-                return write_daemon_search_renderings(cli, &response, &human, stdout);
+            Ok(renderings) => {
+                let daemon_round_trip_elapsed = daemon_round_trip_start.elapsed();
+                command_timings.push(cli_performance_timing_json(
+                    "command::daemonRoundTrip",
+                    daemon_round_trip_elapsed,
+                ));
+                command_timings.push(cli_performance_timing_json(
+                    "command::handlerBeforeWrite",
+                    handler_start.elapsed(),
+                ));
+                if args.explain_performance {
+                    return write_daemon_search_performance(
+                        &renderings,
+                        startup_elapsed,
+                        daemon_round_trip_elapsed,
+                        command_timings,
+                        stdout,
+                    );
+                }
+                return write_daemon_search_renderings(
+                    cli,
+                    &renderings.response,
+                    &renderings.human,
+                    stdout,
+                );
             }
             Err(reason) => Some(daemon_search_fallback_degradation(reason)),
         }
@@ -66784,6 +66916,7 @@ mod tests {
     use std::io::{self, Write};
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
+    use std::time::Duration;
 
     use asupersync::{CancelKind, CancelReason};
     use clap::{Parser, error::ErrorKind};
@@ -66819,6 +66952,7 @@ mod tests {
         WorkspaceHygieneMode, cass_import_domain_error, collect_hotset_retrieval_provenance,
         collect_hotset_signals, context_request_from_options, context_stream_header_frame,
         context_stream_options_for_request, daemon_search_fallback_degradation,
+        daemon_search_performance_json, daemon_search_unsupported_reason,
         db_inspect_redact_source_uri, diag_environment_attestation_response_json,
         doctor_fix_dispatches, doctor_runtime_error_result,
         environment_attestation_unavailable_sources, format_impact_json,
@@ -83546,6 +83680,158 @@ mod tests {
         }
     }
 
+    #[test]
+    fn daemon_search_performance_stays_on_warm_path_and_accepts_short_alias() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "search", "release", "--use-daemon", "-v"])
+            .map_err(|error| format!("failed to parse warm performance search: {error}"))?;
+        let Some(Command::Search(args)) = parsed.command else {
+            return Err("expected Search command".to_owned());
+        };
+        ensure_equal(&args.explain_performance, &true, "short performance alias")?;
+        ensure_equal(
+            &daemon_search_unsupported_reason(&args),
+            &None,
+            "performance diagnostics must not plant a daemon fallback",
+        )
+    }
+
+    #[test]
+    fn daemon_search_performance_preserves_reuse_and_all_timing_categories() -> TestResult {
+        let renderings = crate::daemon::server::DaemonSearchRenderings {
+            response: serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": {
+                    "status": "success",
+                    "embed_backend": "neural_local",
+                    "resultCount": 2,
+                    "elapsedMs": 8.0,
+                    "query": "planted secret query",
+                    "results": [{"docId": "planted-secret-result"}],
+                },
+                "degraded": [],
+            }),
+            performance: Some(serde_json::json!({
+                "schema": crate::core::search::PERFORMANCE_EXPLAIN_SCHEMA_V1,
+                "success": true,
+                "data": {
+                    "command": "search",
+                    "query": {"textIncluded": false},
+                    "queryPlan": {"retrievalMode": "default"},
+                    "profileRuntime": {},
+                    "dbReads": {},
+                    "search": {"status": "success"},
+                    "timings": [],
+                    "pack": {"status": "not_used"},
+                    "cache": {"status": "not_used"},
+                    "graph": {"status": "not_used"},
+                    "fallbacks": [],
+                    "redaction": {"memoryContentIncluded": false},
+                },
+            })),
+            human: "unused human rendering\n".to_owned(),
+            reuse_contract: serde_json::json!({
+                "daemonProcess": "long_lived",
+                "defaultSearchEmbedder": "process_scoped",
+                "searchIndex": "per_request",
+            }),
+            timing: serde_json::json!({
+                "daemonTotal": {
+                    "elapsedMs": 8.0,
+                    "elapsedMsBucket": "1_9ms",
+                    "nondeterministic": true,
+                },
+                "embedderPreparation": {
+                    "elapsedMs": 1.0,
+                    "elapsedMsBucket": "1_9ms",
+                    "nondeterministic": true,
+                },
+                "indexOpen": {
+                    "elapsedMs": 2.0,
+                    "elapsedMsBucket": "1_9ms",
+                    "nondeterministic": true,
+                },
+                "query": {
+                    "elapsedMs": 3.0,
+                    "elapsedMsBucket": "1_9ms",
+                    "nondeterministic": true,
+                },
+            }),
+        };
+        let payload = daemon_search_performance_json(
+            &renderings,
+            Duration::from_millis(4),
+            Duration::from_millis(9),
+            Vec::new(),
+        );
+        let rendered = payload.to_string();
+
+        ensure_equal(
+            &payload["schema"],
+            &serde_json::json!(crate::core::search::PERFORMANCE_EXPLAIN_SCHEMA_V1),
+            "daemon performance schema",
+        )?;
+        ensure_equal(
+            &payload["data"]["executionPath"],
+            &serde_json::json!("daemon"),
+            "daemon performance execution path",
+        )?;
+        ensure_equal(
+            &payload["data"]["embedBackend"],
+            &serde_json::json!("neural_local"),
+            "daemon performance backend",
+        )?;
+        for category in ["startup", "model", "index", "query"] {
+            ensure(
+                payload["data"]["timingBreakdown"][category]
+                    .get("elapsedMs")
+                    .and_then(serde_json::Value::as_f64)
+                    .is_some(),
+                format!("timingBreakdown.{category} must be measured"),
+            )?;
+        }
+        ensure_equal(
+            &payload["data"]["reuseContract"],
+            &renderings.reuse_contract,
+            "daemon reuse contract preservation",
+        )?;
+        ensure_equal(
+            &payload["data"]["daemonTiming"],
+            &renderings.timing,
+            "daemon timing preservation",
+        )?;
+        let canonical_data = renderings
+            .performance
+            .as_ref()
+            .and_then(|performance| performance.get("data"))
+            .ok_or_else(|| "canonical performance data missing".to_owned())?;
+        for field in [
+            "command",
+            "query",
+            "queryPlan",
+            "profileRuntime",
+            "dbReads",
+            "search",
+            "timings",
+            "pack",
+            "cache",
+            "graph",
+            "fallbacks",
+            "redaction",
+        ] {
+            ensure_equal(
+                &payload["data"][field],
+                &canonical_data[field],
+                &format!("canonical performance field {field}"),
+            )?;
+        }
+        ensure(
+            !rendered.contains("planted secret query")
+                && !rendered.contains("planted-secret-result"),
+            "performance rendering must omit query text and result identifiers",
+        )
+    }
+
     fn daemon_search_capabilities_fixture() -> serde_json::Value {
         serde_json::json!({
             "protocol": "ee.daemon",
@@ -83557,8 +83843,8 @@ mod tests {
             },
             "method_schemas": {
                 "ee.daemon.search": {
-                    "request": crate::daemon::protocol::DAEMON_SEARCH_REQUEST_SCHEMA_V1,
-                    "response": crate::daemon::protocol::DAEMON_SEARCH_RESPONSE_SCHEMA_V2
+                    "request": crate::daemon::protocol::DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                    "response": crate::daemon::protocol::DAEMON_SEARCH_RESPONSE_SCHEMA_V3
                 }
             }
         })
@@ -83720,8 +84006,8 @@ mod tests {
                     },
                     "method_schemas": {
                         "ee.daemon.search": {
-                            "request": crate::daemon::server::DAEMON_SEARCH_REQUEST_SCHEMA_V1,
-                            "response": crate::daemon::server::DAEMON_SEARCH_RESPONSE_SCHEMA_V2
+                            "request": crate::daemon::server::DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                            "response": crate::daemon::server::DAEMON_SEARCH_RESPONSE_SCHEMA_V3
                         }
                     }
                 }),
@@ -83764,6 +84050,7 @@ mod tests {
             &options,
             None,
             &[],
+            false,
             started + std::time::Duration::from_millis(600),
         );
         let elapsed = started.elapsed();

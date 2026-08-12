@@ -42,7 +42,7 @@ use ee::core::model::{
 #[cfg(unix)]
 use ee::daemon::protocol::DaemonRequest;
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-use ee::daemon::protocol::{DAEMON_SEARCH_REQUEST_SCHEMA_V1, METHOD_SEARCH};
+use ee::daemon::protocol::{DAEMON_SEARCH_REQUEST_SCHEMA_V2, METHOD_SEARCH};
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 use ee::daemon::server::{
     DaemonSearchResult, METHOD_SHUTDOWN, client_round_trip, client_round_trip_before,
@@ -743,7 +743,7 @@ fn run_daemon_deep_timing_probe(
         BENCH_AGENT_ID,
         METHOD_SEARCH,
         json!({
-            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
             "query": SEARCH_QUERY,
             "workspacePath": workspace_id,
             "databasePath": fixture.database.display().to_string(),

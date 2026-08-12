@@ -44,9 +44,9 @@ use crate::core::context::{
     run_context_pack_with_performance_controlled,
 };
 use crate::core::search::{
-    SearchAdvisorySession, SearchDedupMode, SearchOptions, SearchPerformanceTrace, SearchReport,
-    SearchSourceMode, TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
-    run_search_with_performance_and_filters,
+    PERFORMANCE_EXPLAIN_SCHEMA_V1, SearchAdvisorySession, SearchDedupMode, SearchOptions,
+    SearchPerformanceTrace, SearchReport, SearchSourceMode, TypedMemoryFieldFilter,
+    elapsed_timing_json, normalize_memory_kind_filter, run_search_with_performance_and_filters,
 };
 use crate::models::{MemoryScope, QueryFilters, RedactionLevel};
 use crate::output::{ContextJsonRenderOptions, render_context_response_json_with_options};
@@ -54,7 +54,7 @@ use crate::pack::{ContextPackProfile, DEFAULT_COORDINATION_STALE_AFTER_MS, PackR
 use crate::search::SpeedMode;
 
 pub use super::protocol::{
-    DAEMON_SEARCH_REQUEST_SCHEMA_V1, DAEMON_SEARCH_RESPONSE_SCHEMA_V2, METHOD_SEARCH,
+    DAEMON_SEARCH_REQUEST_SCHEMA_V2, DAEMON_SEARCH_RESPONSE_SCHEMA_V3, METHOD_SEARCH,
 };
 use super::protocol::{
     DaemonRequest, DaemonResponse, FrameReadError, read_request, write_response,
@@ -1979,6 +1979,8 @@ pub struct DaemonSearchParams {
     #[serde(default)]
     explain: bool,
     #[serde(default)]
+    explain_performance: bool,
+    #[serde(default)]
     include_tombstoned: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     as_of: Option<String>,
@@ -2013,9 +2015,10 @@ impl DaemonSearchParams {
         options: &SearchOptions,
         kind: Option<&str>,
         field_filters: &[String],
+        explain_performance: bool,
     ) -> Self {
         Self {
-            schema: DAEMON_SEARCH_REQUEST_SCHEMA_V1.to_owned(),
+            schema: DAEMON_SEARCH_REQUEST_SCHEMA_V2.to_owned(),
             query: options.query.clone(),
             workspace_path: options.workspace_path.clone(),
             database_path: options.database_path.clone(),
@@ -2023,6 +2026,7 @@ impl DaemonSearchParams {
             limit: options.limit,
             speed: options.speed.as_str().to_owned(),
             explain: options.explain,
+            explain_performance,
             include_tombstoned: options.include_tombstoned,
             as_of: options.as_of.as_ref().map(chrono::DateTime::to_rfc3339),
             include_expired: options.include_expired,
@@ -2041,16 +2045,24 @@ impl DaemonSearchParams {
 
     fn from_value(value: &serde_json::Value) -> Result<Self, String> {
         serde_json::from_value(value.clone())
-            .map_err(|_| "params do not match ee.daemon.search.request.v1".to_owned())
+            .map_err(|_| "params do not match ee.daemon.search.request.v2".to_owned())
     }
 
     fn into_search_parts(
         self,
         authorized_workspace_id: &str,
-    ) -> Result<(SearchOptions, Option<String>, Vec<TypedMemoryFieldFilter>), String> {
-        if self.schema != DAEMON_SEARCH_REQUEST_SCHEMA_V1 {
+    ) -> Result<
+        (
+            SearchOptions,
+            Option<String>,
+            Vec<TypedMemoryFieldFilter>,
+            bool,
+        ),
+        String,
+    > {
+        if self.schema != DAEMON_SEARCH_REQUEST_SCHEMA_V2 {
             return Err(format!(
-                "field `schema` must equal `{DAEMON_SEARCH_REQUEST_SCHEMA_V1}`"
+                "field `schema` must equal `{DAEMON_SEARCH_REQUEST_SCHEMA_V2}`"
             ));
         }
         if self.query.trim().is_empty() {
@@ -2132,6 +2144,7 @@ impl DaemonSearchParams {
             },
             kind,
             field_filters,
+            self.explain_performance,
         ))
     }
 }
@@ -2323,9 +2336,25 @@ fn aggregate_search_timings(
 pub struct DaemonSearchResult {
     schema: String,
     response: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    performance: Option<serde_json::Value>,
     human: String,
     reuse_contract: DaemonSearchReuseContract,
     timing: DaemonSearchTiming,
+}
+
+/// Validated public renderings plus daemon-only performance diagnostics.
+///
+/// Ordinary search output uses `response` and `human`. The explicit
+/// `--explain-performance` surface also consumes the exact negotiated reuse
+/// contract and timing objects instead of discarding them after validation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DaemonSearchRenderings {
+    pub response: serde_json::Value,
+    pub performance: Option<serde_json::Value>,
+    pub human: String,
+    pub reuse_contract: serde_json::Value,
+    pub timing: serde_json::Value,
 }
 
 impl DaemonSearchResult {
@@ -2335,6 +2364,7 @@ impl DaemonSearchResult {
         workspace_id: &str,
         advisory_session: &mut SearchAdvisorySession,
         timing: DaemonSearchTiming,
+        performance: Option<serde_json::Value>,
     ) -> Self {
         let mut data =
             report.data_json_with_advisory_session_for_workspace(advisory_session, workspace_id);
@@ -2353,8 +2383,9 @@ impl DaemonSearchResult {
             "degraded": degraded,
         });
         Self {
-            schema: DAEMON_SEARCH_RESPONSE_SCHEMA_V2.to_owned(),
+            schema: DAEMON_SEARCH_RESPONSE_SCHEMA_V3.to_owned(),
             response,
+            performance,
             human,
             reuse_contract: DaemonSearchReuseContract::default(),
             timing,
@@ -2364,15 +2395,15 @@ impl DaemonSearchResult {
     /// Decode and validate the complete method-specific response contract.
     pub fn from_value(value: serde_json::Value) -> Result<Self, String> {
         let result: Self = serde_json::from_value(value)
-            .map_err(|_| "result does not match ee.daemon.search.response.v2".to_owned())?;
+            .map_err(|_| "result does not match ee.daemon.search.response.v3".to_owned())?;
         result.validate()?;
         Ok(result)
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.schema != DAEMON_SEARCH_RESPONSE_SCHEMA_V2 {
+        if self.schema != DAEMON_SEARCH_RESPONSE_SCHEMA_V3 {
             return Err(format!(
-                "result schema must equal `{DAEMON_SEARCH_RESPONSE_SCHEMA_V2}`"
+                "result schema must equal `{DAEMON_SEARCH_RESPONSE_SCHEMA_V3}`"
             ));
         }
         if self.reuse_contract != DaemonSearchReuseContract::default() {
@@ -2414,14 +2445,75 @@ impl DaemonSearchResult {
                 .get("data")
                 .ok_or_else(|| "canonical daemon search data missing".to_owned())?,
         )?;
+        if let Some(performance) = self.performance.as_ref() {
+            validate_search_performance_explain(performance)?;
+        }
         self.timing.validate()
     }
 
-    /// Split the validated payload into canonical machine and human renderings.
-    #[must_use]
-    pub fn into_renderings(self) -> (serde_json::Value, String) {
-        (self.response, self.human)
+    /// Split the validated payload into canonical renderings and diagnostics.
+    pub fn into_renderings(self) -> Result<DaemonSearchRenderings, String> {
+        Ok(DaemonSearchRenderings {
+            response: self.response,
+            performance: self.performance,
+            human: self.human,
+            reuse_contract: serde_json::to_value(self.reuse_contract).map_err(|error| {
+                format!("daemon search reuse contract could not encode: {error}")
+            })?,
+            timing: serde_json::to_value(self.timing)
+                .map_err(|error| format!("daemon search timing could not encode: {error}"))?,
+        })
     }
+}
+
+fn validate_search_performance_explain(value: &serde_json::Value) -> Result<(), String> {
+    validate_exact_object_fields(
+        value,
+        "daemon search performance",
+        &["schema", "success", "data"],
+        &[],
+    )?;
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        != Some(PERFORMANCE_EXPLAIN_SCHEMA_V1)
+        || value.get("success").and_then(serde_json::Value::as_bool) != Some(true)
+    {
+        return Err("daemon search performance envelope drifted".to_owned());
+    }
+    let data = value
+        .get("data")
+        .ok_or_else(|| "daemon search performance data missing".to_owned())?;
+    validate_exact_object_fields(
+        data,
+        "daemon search performance data",
+        &[
+            "command",
+            "query",
+            "queryPlan",
+            "profileRuntime",
+            "dbReads",
+            "search",
+            "timings",
+            "pack",
+            "cache",
+            "graph",
+            "fallbacks",
+            "redaction",
+        ],
+        &[],
+    )?;
+    if data.get("command").and_then(serde_json::Value::as_str) != Some("search")
+        || data
+            .pointer("/query/textIncluded")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+        || data
+            .pointer("/redaction/memoryContentIncluded")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+    {
+        return Err("daemon search performance redaction contract drifted".to_owned());
+    }
+    Ok(())
 }
 
 fn daemon_search_human_summary(report: &SearchReport, response_data: &serde_json::Value) -> String {
@@ -2738,10 +2830,11 @@ fn dispatch_search(
             "authorized envelope `workspace_id` is missing",
         );
     };
-    let (options, kind, field_filters) = match params.into_search_parts(authorized_workspace_id) {
-        Ok(parts) => parts,
-        Err(message) => return daemon_search_params_error(request, &message),
-    };
+    let (options, kind, field_filters, explain_performance) =
+        match params.into_search_parts(authorized_workspace_id) {
+            Ok(parts) => parts,
+            Err(message) => return daemon_search_params_error(request, &message),
+        };
     let search_run =
         match run_search_with_performance_and_filters(&options, kind.as_deref(), &field_filters) {
             Ok(run) => run,
@@ -2755,6 +2848,13 @@ fn dispatch_search(
                 );
             }
         };
+    let performance = explain_performance.then(|| {
+        search_run.report.performance_explain_json_with_trace(
+            options.speed,
+            options.explain,
+            &search_run.performance,
+        )
+    });
     let report = search_run.report;
     for _attempt in 0..DAEMON_ADVISORY_COMMIT_MAX_ATTEMPTS {
         let base_advisory_session = search_advisory_session
@@ -2770,6 +2870,7 @@ fn dispatch_search(
             authorized_workspace_id,
             &mut staged_advisory_session,
             timing,
+            performance.clone(),
         );
         method_result.timing.daemon_total =
             DaemonSearchTimingMeasurement::from_duration(daemon_total_start.elapsed());
@@ -4212,8 +4313,8 @@ fn daemon_capabilities_result() -> serde_json::Value {
         },
         "method_schemas": {
             "ee.daemon.search": {
-                "request": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
-                "response": DAEMON_SEARCH_RESPONSE_SCHEMA_V2
+                "request": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+                "response": DAEMON_SEARCH_RESPONSE_SCHEMA_V3
             }
         },
         "forward_compat": {
@@ -4555,6 +4656,7 @@ mod tests {
                 Duration::from_millis(1),
                 &SearchPerformanceTrace::default(),
             ),
+            None,
         ))
         .expect("encode method result");
         let response = DaemonResponse::ok(
@@ -4750,6 +4852,7 @@ mod tests {
                 Duration::from_millis(1),
                 &SearchPerformanceTrace::default(),
             ),
+            None,
         );
         assert_eq!(
             daemon_search_degraded_codes(&repeated_result),
@@ -4823,12 +4926,12 @@ mod tests {
     fn dispatch_search_rejects_method_schema_drift_and_unknown_fields() {
         for params in [
             serde_json::json!({
-                "schema": "ee.daemon.search.request.v2",
+                "schema": "ee.daemon.search.request.v1",
                 "query": "release",
                 "workspacePath": "/tmp/ee-daemon-search-contract"
             }),
             serde_json::json!({
-                "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+                "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
                 "query": "release",
                 "workspacePath": "/tmp/ee-daemon-search-contract",
                 "unknownField": true
@@ -4844,9 +4947,28 @@ mod tests {
     }
 
     #[test]
+    fn daemon_search_request_v2_carries_explicit_performance_bit() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let params = DaemonSearchParams::from_value(&serde_json::json!({
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+            "query": "release",
+            "workspacePath": workspace.path(),
+            "explainPerformance": true
+        }))
+        .expect("request v2 must accept its explicit performance bit");
+        let (_, _, _, explain_performance) = params
+            .into_search_parts(&workspace.path().display().to_string())
+            .expect("valid request v2 must map to canonical search options");
+        assert!(
+            explain_performance,
+            "performance request bit must survive strict wire decoding"
+        );
+    }
+
+    #[test]
     fn dispatch_search_binds_params_to_authorized_workspace() {
         let response = dispatch(&search_request(serde_json::json!({
-            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
             "query": "release",
             "workspacePath": "/tmp/a-different-workspace"
         })));
@@ -4867,7 +4989,7 @@ mod tests {
         std::os::unix::fs::symlink(&workspace, &workspace_alias).expect("workspace symlink");
 
         let params = DaemonSearchParams::from_value(&serde_json::json!({
-            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
             "query": "release",
             "workspacePath": workspace_alias,
             "databasePath": workspace.join(".ee/ee.db"),
@@ -4902,7 +5024,7 @@ mod tests {
             ("indexDir", escape.clone()),
         ] {
             let mut value = serde_json::json!({
-                "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+                "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
                 "query": "release",
                 "workspacePath": workspace
             });
@@ -4927,7 +5049,7 @@ mod tests {
             .expect("dangling database symlink");
 
         let params = DaemonSearchParams::from_value(&serde_json::json!({
-            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
             "query": "release",
             "workspacePath": workspace,
             "databasePath": dangling
@@ -4965,7 +5087,7 @@ mod tests {
             "degraded": []
         });
         let base = serde_json::json!({
-            "schema": DAEMON_SEARCH_RESPONSE_SCHEMA_V2,
+            "schema": DAEMON_SEARCH_RESPONSE_SCHEMA_V3,
             "response": canonical.clone(),
             "human": "Search results\n",
             "reuseContract": {
@@ -4984,7 +5106,18 @@ mod tests {
                 "query": null
             }
         });
-        assert!(DaemonSearchResult::from_value(base.clone()).is_ok());
+        let renderings = DaemonSearchResult::from_value(base.clone())
+            .expect("valid daemon search result")
+            .into_renderings()
+            .expect("validated daemon search diagnostics must remain serializable");
+        assert_eq!(
+            renderings.reuse_contract, base["reuseContract"],
+            "validated reuse contract must survive CLI rendering conversion"
+        );
+        assert_eq!(
+            renderings.timing, base["timing"],
+            "validated timing must survive CLI rendering conversion"
+        );
 
         let mut degradation_drift = base.clone();
         degradation_drift["response"]["degraded"] = serde_json::json!([{
@@ -5004,7 +5137,7 @@ mod tests {
         assert!(DaemonSearchResult::from_value(unknown_field).is_err());
 
         let mut nested_drift = serde_json::json!({
-            "schema": DAEMON_SEARCH_RESPONSE_SCHEMA_V2,
+            "schema": DAEMON_SEARCH_RESPONSE_SCHEMA_V3,
             "response": canonical,
             "human": "Search results\n",
             "reuseContract": {
@@ -5025,6 +5158,39 @@ mod tests {
         });
         nested_drift["response"]["data"]["unknown"] = serde_json::json!(true);
         assert!(DaemonSearchResult::from_value(nested_drift).is_err());
+    }
+
+    #[test]
+    fn daemon_search_performance_preserves_canonical_in_process_report() {
+        let report = permanent_reranker_advisory_report();
+        let trace = SearchPerformanceTrace::default();
+        let canonical =
+            report.performance_explain_json_with_trace(SpeedMode::Default, false, &trace);
+        let timing = DaemonSearchTiming::from_trace(Duration::from_millis(2), &trace);
+        let mut advisory_session = SearchAdvisorySession::default();
+        let encoded = serde_json::to_value(DaemonSearchResult::from_report(
+            &report,
+            false,
+            TEST_WORKSPACE_ID,
+            &mut advisory_session,
+            timing,
+            Some(canonical.clone()),
+        ))
+        .expect("daemon search result must encode");
+
+        assert_eq!(
+            encoded["performance"], canonical,
+            "daemon transport must carry the in-process canonical performance payload unchanged"
+        );
+        let renderings = DaemonSearchResult::from_value(encoded)
+            .expect("canonical performance response must validate")
+            .into_renderings()
+            .expect("validated performance response must remain serializable");
+        assert_eq!(
+            renderings.performance.as_ref(),
+            Some(&canonical),
+            "client decoding must preserve every canonical performance field"
+        );
     }
 
     fn read_framed_daemon_response(stream: &mut UnixStream) -> DaemonResponse {
@@ -5350,13 +5516,13 @@ mod tests {
             result
                 .pointer("/method_schemas/ee.daemon.search/request")
                 .and_then(serde_json::Value::as_str),
-            Some(DAEMON_SEARCH_REQUEST_SCHEMA_V1)
+            Some(DAEMON_SEARCH_REQUEST_SCHEMA_V2)
         );
         assert_eq!(
             result
                 .pointer("/method_schemas/ee.daemon.search/response")
                 .and_then(serde_json::Value::as_str),
-            Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V2)
+            Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V3)
         );
         assert_eq!(
             result

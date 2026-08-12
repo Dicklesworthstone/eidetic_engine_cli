@@ -13,9 +13,11 @@
 //! JSON shape: pin the field set canonically through this module's
 //! `DaemonRequest` / `DaemonResponse` types. The matching JSON Schemas
 //! at `docs/schemas/ee.daemon.{request,response}.v1.json` are the
-//! agent-facing contract; agents that don't speak Rust read those
-//! schemas directly, but the Rust types here are the source of truth
-//! for what `ee daemon` accepts/emits.
+//! agent-facing envelope contract. Method-specific search payloads are pinned
+//! separately by `ee.daemon.search.request.v2` and
+//! `ee.daemon.search.response.v3`. Agents that don't speak Rust read those
+//! schemas directly, but the Rust types here are the source of truth for what
+//! `ee daemon` accepts/emits.
 
 use std::io::{self, Read, Write};
 
@@ -31,10 +33,10 @@ use super::{
 pub const METHOD_SEARCH: &str = "ee.daemon.search";
 
 /// Strict method-specific request schema for [`METHOD_SEARCH`].
-pub const DAEMON_SEARCH_REQUEST_SCHEMA_V1: &str = "ee.daemon.search.request.v1";
+pub const DAEMON_SEARCH_REQUEST_SCHEMA_V2: &str = "ee.daemon.search.request.v2";
 
 /// Strict method-specific response schema for [`METHOD_SEARCH`].
-pub const DAEMON_SEARCH_RESPONSE_SCHEMA_V2: &str = "ee.daemon.search.response.v2";
+pub const DAEMON_SEARCH_RESPONSE_SCHEMA_V3: &str = "ee.daemon.search.response.v3";
 
 fn deserialize_present_json_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
 where

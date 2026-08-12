@@ -11306,6 +11306,20 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: perf_live_schema_definition,
         },
         SchemaEntry {
+            id: crate::daemon::protocol::DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+            version: "2",
+            description: "Strict method-specific daemon search request with optional canonical performance diagnostics.",
+            category: "ops",
+            definition: daemon_search_request_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::daemon::protocol::DAEMON_SEARCH_RESPONSE_SCHEMA_V3,
+            version: "3",
+            description: "Strict daemon search result with optional ee.explain.performance.v1 payload.",
+            category: "ops",
+            definition: daemon_search_response_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.prompt_budget_report.v1",
             version: "1",
             description: "Read-only prompt-budget bookkeeping report.",
@@ -12855,6 +12869,14 @@ fn peer_conflict_schema_definition() -> String {
 
 fn perf_live_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.perf.live.v1.json").to_string()
+}
+
+fn daemon_search_request_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.daemon.search.request.v2.json").to_string()
+}
+
+fn daemon_search_response_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.daemon.search.response.v3.json").to_string()
 }
 
 fn prompt_budget_report_schema_definition() -> String {

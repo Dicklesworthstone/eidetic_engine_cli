@@ -609,9 +609,11 @@ pub const BACKUP_SCHEMAS: &[SchemaEntry] = &[
 
 /// Daemon UDS RPC schemas (bd-oja31 SRR1 hot-mode skeleton + bd-2oxdj / bd-3q19d
 /// registration). Covers both the wire-framing envelopes spoken on the UDS
-/// (`ee.daemon.request.v1`, `ee.daemon.response.v1`) and the CLI `data` payload
-/// envelopes returned by `ee daemon start` / `ee daemon stop`
-/// (`ee.daemon.start.v1`, `ee.daemon.stop.v1`).
+/// (`ee.daemon.request.v1`, `ee.daemon.response.v1`), the currently advertised
+/// strict search method pair (`ee.daemon.search.request.v2`,
+/// `ee.daemon.search.response.v3`), and the CLI `data` payload envelopes
+/// returned by `ee daemon start` / `ee daemon stop` (`ee.daemon.start.v1`,
+/// `ee.daemon.stop.v1`).
 pub const DAEMON_SCHEMAS: &[SchemaEntry] = &[
     SchemaEntry::new(
         "daemon_request",
@@ -621,6 +623,16 @@ pub const DAEMON_SCHEMAS: &[SchemaEntry] = &[
     SchemaEntry::new(
         "daemon_response",
         "ee.daemon.response.v1",
+        SchemaCategory::Daemon,
+    ),
+    SchemaEntry::new(
+        "daemon_search_request",
+        "ee.daemon.search.request.v2",
+        SchemaCategory::Daemon,
+    ),
+    SchemaEntry::new(
+        "daemon_search_response",
+        "ee.daemon.search.response.v3",
         SchemaCategory::Daemon,
     ),
     SchemaEntry::new("daemon_start", "ee.daemon.start.v1", SchemaCategory::Daemon),

@@ -109,7 +109,7 @@ case "$PROFILE" in
     daemon-search-slo)
         BENCHMARKS=""
         BENCH_ARGS=""
-        PROFILE_CLASS="stable_self_hosted_linux_x64"
+        PROFILE_CLASS="github_hosted_linux_x64"
         WORKLOAD_TIER="10k_search"
         RELEASE_BLOCKING=true
         BUDGET_MODE="hard"
@@ -400,7 +400,7 @@ json_timing_ms() {
 
 workload_json() {
     if [ "$PROFILE" = "daemon-search-slo" ]; then
-        printf '%s' '{"schema":"ee.perf.workload_ref.v1","manifest":"benches/daemon_round_trip.rs","tier":"10k_search","ci_suitability":"stable_self_hosted_linux_x64","memory_count":10000,"agent_count":1}'
+        printf '%s' '{"schema":"ee.perf.workload_ref.v1","manifest":"benches/daemon_round_trip.rs","tier":"10k_search","ci_suitability":"github_hosted_linux_x64","memory_count":10000,"agent_count":1}'
         return
     fi
     if [ "$AUTO_ENROLL_BASELINE_ONLY" = "true" ]; then

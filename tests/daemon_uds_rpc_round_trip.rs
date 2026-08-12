@@ -42,8 +42,8 @@ use ee::daemon::{
     server::{
         ClientError, DAEMON_CONTEXT_DEADLINE_EXCEEDED_CODE, DAEMON_CONTEXT_PARAMS_INVALID_CODE,
         DAEMON_ECHO_DISABLED_CODE, DAEMON_REQUEST_DECODE_FAILED_CODE,
-        DAEMON_REQUEST_SCHEMA_MISMATCH_CODE, DAEMON_SEARCH_REQUEST_SCHEMA_V1,
-        DAEMON_SEARCH_RESPONSE_SCHEMA_V2, DAEMON_UNKNOWN_METHOD_CODE, DaemonSearchResult,
+        DAEMON_REQUEST_SCHEMA_MISMATCH_CODE, DAEMON_SEARCH_REQUEST_SCHEMA_V2,
+        DAEMON_SEARCH_RESPONSE_SCHEMA_V3, DAEMON_UNKNOWN_METHOD_CODE, DaemonSearchResult,
         METHOD_CAPABILITIES, METHOD_CONTEXT, METHOD_ECHO, METHOD_SEARCH, METHOD_SHUTDOWN,
         METHOD_TELEMETRY, METHOD_WRITE, METHOD_WRITE_JOURNAL, client_round_trip, start_server,
         start_server_for_workspace,
@@ -122,7 +122,7 @@ fn search_request(
         TEST_AGENT_ID,
         METHOD_SEARCH,
         serde_json::json!({
-            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V1,
+            "schema": DAEMON_SEARCH_REQUEST_SCHEMA_V2,
             "query": "release provenance",
             "workspacePath": workspace_id,
             "databasePath": database.display().to_string(),
@@ -678,14 +678,14 @@ fn daemon_capabilities_advertises_schema_and_method_contract_over_wire() -> Test
         result
             .pointer("/method_schemas/ee.daemon.search/request")
             .and_then(serde_json::Value::as_str)
-            == Some(DAEMON_SEARCH_REQUEST_SCHEMA_V1),
+            == Some(DAEMON_SEARCH_REQUEST_SCHEMA_V2),
         format!("search request schema capability wrong; got {result}"),
     )?;
     ensure(
         result
             .pointer("/method_schemas/ee.daemon.search/response")
             .and_then(serde_json::Value::as_str)
-            == Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V2),
+            == Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V3),
         format!("search response schema capability wrong; got {result}"),
     )?;
     ensure(
@@ -794,7 +794,7 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
             result
                 .pointer("/schema")
                 .and_then(serde_json::Value::as_str)
-                == Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V2),
+                == Some(DAEMON_SEARCH_RESPONSE_SCHEMA_V3),
             format!("method response schema drifted: {result}"),
         )?;
         ensure(
