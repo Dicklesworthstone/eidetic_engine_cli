@@ -39813,6 +39813,10 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
                         .get("workspaceRoot")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("-");
+                    let store_dir = store
+                        .get("storeDir")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("-");
                     let documents = store
                         .get("documents")
                         .and_then(serde_json::Value::as_u64)
@@ -39822,10 +39826,24 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("-");
                     out.push_str(&format!(
-                        "  {path} ({documents} docs, last write {last_write})\n"
+                        "  {path} (store {store_dir}; {documents} docs, last write {last_write})\n"
                     ));
                 }
-                out.push_str("The first Next command below is retargeted at the best candidate.\n");
+                // A truncated scan only ranked the candidates it reached, so
+                // it must never claim a global best.
+                if data
+                    .pointer("/storeDiscovery/truncated")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                {
+                    out.push_str(
+                        "The first Next command below is retargeted at the leading candidate from a partial scan; richer stores may exist beyond the time budget.\n",
+                    );
+                } else {
+                    out.push_str(
+                        "The first Next command below is retargeted at the best candidate.\n",
+                    );
+                }
             }
             _ => {}
         }
@@ -67351,8 +67369,10 @@ mod tests {
         );
         for expected in [
             "/fixture/best-campaign",
+            "store /fixture/best-campaign/.ee-campaign;",
             "17 docs",
             "last write 2026-08-10T14:15:16Z",
+            "The first Next command below is retargeted at the leading candidate from a partial scan; richer stores may exist beyond the time budget.",
         ] {
             ensure_contains(
                 &orient,
@@ -67360,6 +67380,45 @@ mod tests {
                 "orient populated truncated nearby-store scan",
             )?;
         }
+        ensure(
+            !orient.contains("retargeted at the best candidate"),
+            "a truncated scan must never claim a global best candidate",
+        )?;
+
+        let complete = super::render_orient_human(
+            &serde_json::json!({
+                "task": "resume campaign",
+                "workspace": "/fixture/empty-root",
+                "mode": "fast",
+                "embed_backend": "hash_fallback",
+                "storeDiscovery": {
+                    "storeEmpty": true,
+                    "scanned": true,
+                    "truncated": false,
+                    "nearbyStores": [{
+                        "workspaceRoot": "/fixture/best-campaign",
+                        "storeDir": "/fixture/best-campaign/.ee-campaign",
+                        "documents": 17,
+                        "lastWrite": "2026-08-10T14:15:16Z"
+                    }]
+                }
+            }),
+            &[],
+        );
+        for expected in [
+            "store /fixture/best-campaign/.ee-campaign;",
+            "The first Next command below is retargeted at the best candidate.",
+        ] {
+            ensure_contains(
+                &complete,
+                expected,
+                "orient complete nearby-store scan keeps the global-best claim",
+            )?;
+        }
+        ensure(
+            !complete.contains("partial scan"),
+            "a complete scan must not describe itself as partial",
+        )?;
         Ok(())
     }
 

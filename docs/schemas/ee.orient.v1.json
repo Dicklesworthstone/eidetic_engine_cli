@@ -179,7 +179,7 @@
         "workspaceRoot": { "type": "string" },
         "storeDir": { "type": "string" },
         "documents": { "type": "integer", "minimum": 1 },
-        "lastWrite": { "type": ["string", "null"] }
+        "lastWrite": { "type": ["string", "null"], "format": "date-time" }
       }
     },
     "storeDiscovery": {
