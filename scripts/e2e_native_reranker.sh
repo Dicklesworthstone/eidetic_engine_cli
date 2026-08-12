@@ -549,8 +549,8 @@ run_degradation_lane() {
             "severity": "low",
             "permanent": true,
             "message": "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.",
-            "repair": "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst",
-            "resolution": "verified_offline_import_available"
+            "repair": null,
+            "resolution": "automatic_repair_unavailable"
         }
         and all(.data.degraded[]; .code != "rerank_model_unavailable")
     ' "missing model degrades explicitly to fusion-only"
@@ -578,8 +578,8 @@ run_degradation_lane() {
             "severity": "low",
             "permanent": true,
             "message": "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.",
-            "repair": "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst",
-            "resolution": "verified_offline_import_available"
+            "repair": null,
+            "resolution": "automatic_repair_unavailable"
         }
         and .data.rerank.rerankScoreCount == 0
         and all(.data.results[]; (has("rerankScore") | not))
@@ -654,7 +654,7 @@ run_model_backed_lane() {
             and .tier == "advisory"
             and .severity == "warning"
             and (.message | startswith("Permanent capability gap:"))
-            and .repair == "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst")
+            and (has("repair") | not))
     ' "doctor observes the public pre-registration reranker capability gap"
 
     run_ee_json "fetch_native_reranker" 0 "${home_dir}" "${workspace}" \

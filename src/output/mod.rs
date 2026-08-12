@@ -24277,9 +24277,7 @@ mod tests {
                 severity: CheckSeverity::Warning,
                 message: "Permanent capability gap: fusion-only ranking.".to_owned(),
                 error_code: None,
-                repair: Some(
-                    "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst",
-                ),
+                repair: None,
                 tier: CheckTier::Advisory,
             },
             CheckResult::ok("rch_worker_pressure", "worker pressure ok").advisory(),
@@ -24374,17 +24372,13 @@ mod tests {
             &serde_json::json!(true),
             "concise permanent marker",
         )?;
-        ensure_equal(
-            &data["permanentCapabilityGaps"][0]["repair"],
-            &serde_json::json!(
-                "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst"
-            ),
-            "concise permanent capability gap repair",
+        ensure(
+            data["permanentCapabilityGaps"][0].get("repair").is_none(),
+            "concise permanent capability gap omits unavailable automatic repair",
         )?;
-        ensure_contains(
-            &concise_human,
-            "    repair: ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst",
-            "concise human doctor prints exact permanent capability gap repair",
+        ensure(
+            !concise_human.contains("--from-file /path/to/"),
+            "concise human doctor omits placeholder repair",
         )?;
         ensure_equal(
             &full_value["data"]["advisories"][0].get("permanent"),

@@ -26,7 +26,6 @@ expression: doctor
       {
         "message": "Permanent capability gap: no usable local reranker is registered. Search uses fusion-only ranking. Network download and bundled installation are unavailable, but a verified offline artifact can be imported explicitly.",
         "name": "reranker_posture",
-        "repair": "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst",
         "severity": "warning",
         "tier": "advisory"
       },

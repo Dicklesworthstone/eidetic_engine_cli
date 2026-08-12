@@ -58,6 +58,11 @@
     "repair_present": {
       "type": "boolean"
     },
+    "repair_unavailable_reason": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional explanation used when repair_present is false because this build has no executable automatic recovery."
+    },
     "retired": {
       "type": "boolean",
       "default": false

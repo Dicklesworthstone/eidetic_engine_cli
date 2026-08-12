@@ -232,12 +232,12 @@ fn doctor_default_json_is_concise_and_full_json_keeps_diagnostics() -> TestResul
         permanent_capability_gaps.iter().any(|gap| {
             gap["name"].as_str() == Some("reranker_posture")
                 && gap["permanent"].as_bool() == Some(true)
-                && gap["repair"].as_str()
-                    == Some(
-                        "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst",
-                    )
+                && gap.get("repair").is_none()
+                && gap["message"].as_str().is_some_and(|message| {
+                    message.contains("Network download and bundled installation are unavailable")
+                })
         }),
-        "default doctor lists the permanent reranker capability gap with exact offline repair",
+        "default doctor lists the permanent reranker capability gap without a fake automatic repair",
         json!({
             "permanentCapabilityGaps": permanent_capability_gaps,
         }),
@@ -264,12 +264,11 @@ fn doctor_default_json_is_concise_and_full_json_keeps_diagnostics() -> TestResul
     )?;
     let concise_human = String::from_utf8(concise_human_output.stdout)
         .map_err(|error| format!("default human doctor stdout must be UTF-8: {error}"))?;
-    const EXACT_RERANK_REPAIR_LINE: &str = "    repair: ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst";
     ensure(
-        concise_human.matches(EXACT_RERANK_REPAIR_LINE).count() == 1,
-        "default human doctor prints the exact offline reranker repair once",
+        !concise_human.contains("--from-file /path/to/")
+            && concise_human.contains("Network download and bundled installation are unavailable"),
+        "default human doctor states the permanent gap without a placeholder repair",
         json!({
-            "expectedRepairLine": EXACT_RERANK_REPAIR_LINE,
             "stdout": concise_human,
         }),
     )?;

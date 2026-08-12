@@ -2980,7 +2980,7 @@ fn reranker_posture_check_result(available: Option<bool>, reason: Option<&str>) 
             message: "Permanent capability gap: no usable local reranker is registered. Search uses fusion-only ranking. Network download and bundled installation are unavailable, but a verified offline artifact can be imported explicitly."
                 .to_owned(),
             error_code: None,
-            repair: Some(crate::core::search::RERANK_MODEL_UNAVAILABLE_REPAIR),
+            repair: None,
             tier: CheckTier::Advisory,
         },
         None => CheckResult::ok(
@@ -4371,7 +4371,7 @@ mod tests {
     }
 
     #[test]
-    fn reranker_posture_reports_exact_offline_import_repair() -> TestResult {
+    fn reranker_posture_reports_unavailable_automatic_repair_honestly() -> TestResult {
         let check = reranker_posture_check_result(Some(false), None);
 
         ensure(check.name, "reranker_posture", "check name")?;
@@ -4382,9 +4382,9 @@ mod tests {
         )?;
         ensure(check.tier, CheckTier::Advisory, "check tier")?;
         ensure(
-            check.repair.as_deref(),
-            Some(crate::core::search::RERANK_MODEL_UNAVAILABLE_REPAIR),
-            "exact offline import repair command",
+            check.repair.is_none(),
+            true,
+            "automatic repair is unavailable",
         )?;
         ensure(
             check.message.contains("Permanent capability gap"),

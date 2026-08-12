@@ -130,10 +130,10 @@ assert_jq "$search_one" '.data.rerank.advisory.permanent == true' \
     "structured rerank advisory is permanent"
 assert_jq "$search_one" '.data.rerank.advisory.message == "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly."' \
     "rerank advisory carries the canonical permanent message"
-assert_jq "$search_one" '.data.rerank.advisory.repair == "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst"' \
-    "rerank advisory carries the exact offline-import repair command"
-assert_jq "$search_one" '.data.rerank.advisory.resolution == "verified_offline_import_available"' \
-    "rerank advisory names the verified offline-import resolution"
+assert_jq "$search_one" '.data.rerank.advisory.repair == null' \
+    "rerank advisory does not present a path template as automatic repair"
+assert_jq "$search_one" '.data.rerank.advisory.resolution == "automatic_repair_unavailable"' \
+    "rerank advisory names the unavailable automatic-repair posture"
 assert_jq "$search_one" '.data.rerank.rerankScoreCount == 0' "no rerank scores are counted"
 assert_jq "$search_one" '.data.metrics.sourceCounts.reranked == 0' "metrics do not fake reranked source hits"
 assert_jq "$search_one" '.data.metrics.fieldCoverage.rerankScoreCount == 0' "field coverage does not fake rerankScore"
@@ -168,8 +168,8 @@ assert_jq "$search_two" '.data.rerank == {
         "severity": "low",
         "permanent": true,
         "message": "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.",
-        "repair": "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst",
-        "resolution": "verified_offline_import_available"
+        "repair": null,
+        "resolution": "automatic_repair_unavailable"
     },
     "advisorySummary": {
         "scope": "process",

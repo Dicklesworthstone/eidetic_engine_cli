@@ -147,6 +147,7 @@ HEADER
         trigger_desc="$(jq -r '.trigger.description // "(no description provided)"' "$fixture")"
         invocation="$(jq -r '.trigger.invocation // ""' "$fixture")"
         repair_present="$(jq -r '.repair_present // false' "$fixture")"
+        repair_unavailable_reason="$(jq -r '.repair_unavailable_reason // ""' "$fixture")"
         repair_contains="$(jq -r '.expected_emission.repair_contains // ""' "$fixture")"
         repair_string="$(jq -r '.expected_emission.repair_string // ""' "$fixture")"
         message_contains="$(jq -r '(.expected_emission.message_contains // []) | join(" ... ")' "$fixture")"
@@ -179,6 +180,9 @@ HEADER
             fi
             echo ""
             echo "**Historical trigger.** $trigger_desc"
+        elif [ -n "$repair_unavailable_reason" ] && [ "$repair_unavailable_reason" != "null" ]; then
+            echo ""
+            echo "**Repair hint.** $repair_unavailable_reason"
         else
             echo "**Trigger.** $trigger_desc"
         fi

@@ -157,8 +157,8 @@ expression: search
         "code": "rerank_model_unavailable",
         "message": "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.",
         "permanent": true,
-        "repair": "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst",
-        "resolution": "verified_offline_import_available",
+        "repair": null,
+        "resolution": "automatic_repair_unavailable",
         "severity": "low"
       },
       "advisorySummary": {

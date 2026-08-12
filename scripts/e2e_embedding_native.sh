@@ -666,9 +666,9 @@ case "${rerank_mode}" in
             "severity": "low",
             "permanent": true,
             "message": "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.",
-            "repair": "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst",
-            "resolution": "verified_offline_import_available"
-        }' "missing reranker exposes the canonical permanent advisory and exact offline-import repair"
+            "repair": null,
+            "resolution": "automatic_repair_unavailable"
+        }' "missing reranker exposes the canonical permanent advisory without a fake repair"
         assert_jq_file "${hybrid_file}" '[.data.degraded[]? | select(.code == "rerank_model_unavailable")] | length == 0' "permanent reranker gap stays out of query degradations"
         assert_jq_file "${hybrid_file}" '((.data.results // []) | map(select(.scoreKind == "reranked" or has("rerankScore"))) | length) == 0' "fusion-only degraded omits rerankScore"
         run_ee_json_env "rerank_degraded_replay" "${HASH_ENV[@]}" -- \
@@ -683,9 +683,9 @@ case "${rerank_mode}" in
             "severity": "low",
             "permanent": true,
             "message": "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.",
-            "repair": "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst",
-            "resolution": "verified_offline_import_available"
-        }' "permanent reranker advisory and exact repair are deterministic"
+            "repair": null,
+            "resolution": "automatic_repair_unavailable"
+        }' "permanent reranker advisory and unavailable-repair posture are deterministic"
         observe_search_order "rerank_degraded_replay" "${replay_file}" "${RERANK_TARGET_ID}"
         ;;
     fusion_only)

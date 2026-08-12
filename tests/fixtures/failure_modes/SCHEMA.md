@@ -65,6 +65,11 @@ lists alphabetically and so the contract test can cross-check
   // is purely informational).
   "repair_present": true,
 
+  // Optional. When repair_present is false because no executable recovery
+  // exists, explain that limitation without presenting a command template as
+  // actionable repair. The generated catalog prints this text verbatim.
+  "repair_unavailable_reason": "No automatic repair is available in this build.",
+
   // Optional. True only for a legacy code intentionally kept in the
   // catalog as a tombstone after production stopped emitting it. Retired
   // fixtures keep the historical `code` and `expected_emission` shape so

@@ -1,9 +1,8 @@
 use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::core::search::{
-    RERANK_MODEL_UNAVAILABLE_ADVISORY, RERANK_MODEL_UNAVAILABLE_REPAIR,
-    SEARCH_ADVISORY_SCOPE_INVOCATION, SEARCH_ADVISORY_SCOPE_PROCESS, ScoreSource,
-    SearchAdvisorySession, SearchDegradation, SearchHit, SearchReport, SearchSourceMode,
-    SearchStatus,
+    RERANK_MODEL_UNAVAILABLE_ADVISORY, SEARCH_ADVISORY_SCOPE_INVOCATION,
+    SEARCH_ADVISORY_SCOPE_PROCESS, ScoreSource, SearchAdvisorySession, SearchDegradation,
+    SearchHit, SearchReport, SearchSourceMode, SearchStatus,
 };
 use ee::models::{EmbedBackend, MemoryScope, MemoryScopeStats};
 
@@ -19,12 +18,10 @@ fn scope_stats() -> MemoryScopeStats {
 }
 
 #[test]
-fn generated_catalog_preserves_the_exact_offline_reranker_repair() {
+fn generated_catalog_reports_unavailable_automatic_reranker_repair() {
     assert!(
-        DEGRADED_CODES_DOC.contains(&format!(
-            "**Repair hint.** {RERANK_MODEL_UNAVAILABLE_REPAIR}"
-        )),
-        "the agent-facing catalog must publish the exact actionable offline repair"
+        DEGRADED_CODES_DOC.contains("No automatic repair is available in this build."),
+        "the catalog must not present a caller-supplied path template as executable repair"
     );
     assert!(
         DEGRADED_CODES_DOC_BUILDER.contains(
@@ -73,13 +70,13 @@ fn ordinary_search_json_is_pure_and_structural() {
                 code: "rerank_model_unavailable".to_string(),
                 severity: "low".to_string(),
                 message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-                repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+                repair: None,
             },
             SearchDegradation {
                 code: "rerank_model_unavailable".to_string(),
                 severity: "low".to_string(),
                 message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-                repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+                repair: None,
             },
         ],
         false,
@@ -107,9 +104,10 @@ fn ordinary_search_json_is_pure_and_structural() {
         "rerank_model_unavailable"
     );
     assert_eq!(json["rerank"]["advisory"]["permanent"], true);
+    assert!(json["rerank"]["advisory"]["repair"].is_null());
     assert_eq!(
-        json["rerank"]["advisory"]["repair"],
-        RERANK_MODEL_UNAVAILABLE_REPAIR
+        json["rerank"]["advisory"]["resolution"],
+        "automatic_repair_unavailable"
     );
     assert!(json["rerank"]["advisorySummary"].get("schema").is_none());
     assert_eq!(
@@ -125,7 +123,7 @@ fn ordinary_search_json_is_pure_and_structural() {
         "permanent capability posture must not repeat in per-query degraded output"
     );
     assert!(!human.contains(RERANK_MODEL_UNAVAILABLE_ADVISORY));
-    assert!(!human.contains(RERANK_MODEL_UNAVAILABLE_REPAIR));
+    assert!(!human.contains("--from-file /path/to/"));
 }
 
 #[test]
@@ -135,7 +133,7 @@ fn explicit_long_lived_session_emits_permanent_advisory_once() {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
             message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+            repair: None,
         }],
         false,
     );
@@ -183,7 +181,7 @@ fn structural_session_keeps_permanent_advisory_consumed_after_recovery() {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
             message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+            repair: None,
         }],
         false,
     );
@@ -266,7 +264,7 @@ fn explicit_session_emits_each_distinct_permanent_advisory_once() {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
             message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+            repair: None,
         }],
         false,
     );
@@ -275,7 +273,7 @@ fn explicit_session_emits_each_distinct_permanent_advisory_once() {
             code: "rerank_model_unavailable".to_string(),
             severity: "warning".to_string(),
             message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+            repair: None,
         }],
         false,
     );
@@ -307,7 +305,7 @@ fn transient_reranker_load_failure_remains_a_query_degradation() {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
             message: RERANK_MODEL_UNAVAILABLE_ADVISORY.to_string(),
-            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+            repair: None,
         }],
         false,
     );

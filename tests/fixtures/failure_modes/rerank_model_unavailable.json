@@ -9,7 +9,8 @@
     "search"
   ],
   "severity": "low",
-  "repair_present": true,
+  "repair_present": false,
+  "repair_unavailable_reason": "No automatic repair is available in this build. Search remains fusion-only unless the operator supplies a verified local artifact to --from-file.",
   "trigger": {
     "description": "The search pipeline is in rerank auto mode, semantic retrieval is available, but the workspace has no available local cross-encoder reranker registry entry.",
     "setup_commands": [
@@ -26,7 +27,6 @@
       "fusion-only ranking",
       "verified offline reranker artifact"
     ],
-    "repair_contains": "ee model fetch rerank-default",
-    "repair_string": "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst"
+    "repair": null
   }
 }

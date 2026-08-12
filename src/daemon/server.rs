@@ -3697,7 +3697,7 @@ fn validate_canonical_search_rerank(value: &serde_json::Value) -> Result<(), Str
                 advisory
                     .get("resolution")
                     .and_then(serde_json::Value::as_str),
-                Some("verified_offline_import_available" | "retry_or_inspect_local_registry")
+                Some("automatic_repair_unavailable" | "retry_or_inspect_local_registry")
             )
         {
             return Err(
@@ -5623,7 +5623,7 @@ mod tests {
                 code: "rerank_model_unavailable".to_owned(),
                 severity: "warning".to_owned(),
                 message: crate::core::search::RERANK_MODEL_UNAVAILABLE_ADVISORY.to_owned(),
-                repair: Some(crate::core::search::RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
+                repair: None,
             }],
             runtime_profile: crate::core::profile::RuntimeProfileReport::for_profile(
                 crate::core::profile::OperatingProfile::Workstation,

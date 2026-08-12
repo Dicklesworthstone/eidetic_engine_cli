@@ -119,7 +119,7 @@
         "permanent": {"type": "boolean"},
         "message": {"type": "string"},
         "repair": {"type": ["string", "null"]},
-        "resolution": {"type": "string", "enum": ["verified_offline_import_available", "retry_or_inspect_local_registry"]}
+        "resolution": {"type": "string", "enum": ["automatic_repair_unavailable", "retry_or_inspect_local_registry"]}
       }
     },
     "rerankAdvisorySummary": {

@@ -13546,7 +13546,7 @@ ee search 'release verification' --workspace . --json
 
 **Expected emission.** Message contains: `No usable local reranker is registered ... fusion-only ranking ... verified offline reranker artifact`
 
-**Repair hint.** ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst
+**Repair hint.** No automatic repair is available in this build. Search remains fusion-only unless the operator supplies a verified local artifact to --from-file.
 
 **Fixture.** [`tests/fixtures/failure_modes/rerank_model_unavailable.json`](../tests/fixtures/failure_modes/rerank_model_unavailable.json)
 
