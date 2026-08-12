@@ -2991,6 +2991,18 @@ pub struct Migration {
     checksum_label: &'static str,
 }
 
+// V084 was rewritten in place after the pinned FrankenSQLite batch executor
+// proved unable to resolve TEMP CTAS snapshots later in the same migration
+// batch. Databases that applied the original SQLite-valid definition remain
+// trustworthy: the data-preserving main-schema rewrite is physically
+// equivalent and later migrations do not depend on which snapshot namespace
+// was used. Keep the historical computed checksum and audit label exact so
+// those source-of-truth stores remain readable while all unknown drift stays a
+// hard error.
+const V084_TEMP_SNAPSHOT_SQL_CHECKSUM: &str =
+    "blake3:ffea90ef2f3bacda2d1a8042f84c3c3136e933ff8ae159bd2d99bb44e44c9081";
+const V084_TEMP_SNAPSHOT_CHECKSUM_LABEL: &str = "blake3:v084_pack_record_profile_domain_2026_07_11";
+
 // V088 was briefly rewritten in place to add config-bound lane consent. Some
 // databases may therefore contain either the computed checksum or the audit
 // label from that accidental definition. Keep this allowlist exact: V089
@@ -3041,6 +3053,9 @@ impl Migration {
     fn checksum_matches_applied_record(&self, applied_checksum: &str) -> bool {
         text_matches(applied_checksum, &self.checksum())
             || text_matches(applied_checksum, self.checksum_label())
+            || (self.version == V084_PACK_RECORD_PROFILE_DOMAIN.version()
+                && (text_matches(applied_checksum, V084_TEMP_SNAPSHOT_SQL_CHECKSUM)
+                    || text_matches(applied_checksum, V084_TEMP_SNAPSHOT_CHECKSUM_LABEL)))
             || (self.version == V088_MESH_LANE_GRANT_STATES.version()
                 && (text_matches(applied_checksum, V088_ACCIDENTAL_CONFIG_BOUND_SQL_CHECKSUM)
                     || text_matches(
@@ -35875,6 +35890,29 @@ mod tests {
         ensure(
             super::is_pack_trust_class("peer_human_attested"),
             "pack writer accepts peer_human_attested",
+        )
+    }
+
+    #[test]
+    fn v084_accepts_only_the_exact_historical_temp_snapshot_checksums() -> TestResult {
+        for historical_checksum in [
+            super::V084_TEMP_SNAPSHOT_SQL_CHECKSUM,
+            super::V084_TEMP_SNAPSHOT_CHECKSUM_LABEL,
+        ] {
+            let connection = DbConnection::open_memory()?;
+            connection.ensure_migration_table()?;
+            connection.record_migration(&MigrationRecord::new(
+                84,
+                super::V084_PACK_RECORD_PROFILE_DOMAIN.name(),
+                historical_checksum,
+                "2026-08-12T00:00:00Z",
+            )?)?;
+            connection.validate_applied_migrations()?;
+        }
+        ensure(
+            !super::V084_PACK_RECORD_PROFILE_DOMAIN
+                .checksum_matches_applied_record("blake3:unknown_v084_checksum"),
+            "unknown V084 checksum drift remains rejected",
         )
     }
 
