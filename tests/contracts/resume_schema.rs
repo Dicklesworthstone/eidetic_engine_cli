@@ -664,16 +664,28 @@ fn real_binary_resume_suppresses_retarget_when_discovery_is_globally_unavailable
 }
 
 #[test]
-#[ignore = "real-binary resume script acceptance; run as a focused pinned RCH proof"]
+#[ignore = "full real-binary resume/orient acceptance; run with cargo test --release as a focused pinned RCH proof"]
 fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
+    ensure(
+        !cfg!(debug_assertions),
+        "the real-binary resume/orient bridge must run under cargo test --release so CARGO_BIN_EXE_ee is the public release binary",
+    )?;
     let temp = resume_test_tempdir("ee-resume-e2e-bridge.")?;
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/e2e_resume.sh");
     let ee_bin = env!("CARGO_BIN_EXE_ee");
+    ensure(
+        Path::new(ee_bin)
+            .components()
+            .any(|component| component.as_os_str() == std::ffi::OsStr::new("release")),
+        format!(
+            "the real-binary resume/orient bridge requires the public release binary, got {ee_bin}"
+        ),
+    )?;
     let output = Command::new(&script)
         .env("EE_BIN", ee_bin)
         .env("EE_BINARY", ee_bin)
         .env("EE_E2E_TMPDIR", temp.path())
-        .env("EE_RESUME_E2E_SCOPE", "functional")
+        .env("EE_RESUME_E2E_SCOPE", "all")
         .output()
         .map_err(|error| format!("launch {}: {error}", script.display()))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -767,6 +779,14 @@ fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
         "open_loop_totals_are_exact",
         "requested_sessions_plus_every_open_loop_in_one_resume",
         "requested_two_newest_sessions_only",
+        "scale_10k_fast_content_repeat_bytes_identical",
+        "scale_10k_fast_human_orient_preserves_db_wal_shm",
+        "scale_10k_fast_human_orient_under_1s_with_queried_content",
+        "scale_10k_fast_orient_preserves_db_wal_shm",
+        "scale_10k_fast_orient_sampled_p99_under_1s",
+        "scale_10k_fast_orient_under_1s_with_content",
+        "scale_10k_index_ready_for_fast_orient",
+        "scale_10k_seeded",
         "resume_items_carry_public_posture",
         "resume_human_redacts_planted_secret",
         "resume_json_redacts_planted_secret",
@@ -792,6 +812,8 @@ fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
         "nearby_store_seeded",
         "untagged_four_hour_boundary_and_sessions_one_truncation",
         "untagged_sessions_two_returns_both_real_groups",
+        "fast_orient_human_never_leaks_secret_shaped_tag",
+        "fast_orient_json_redacts_secret_shaped_tag",
         "zero_sessions_structured_nonzero_no_mutation",
     ]
     .into_iter()

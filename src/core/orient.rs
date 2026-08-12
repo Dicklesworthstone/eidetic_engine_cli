@@ -146,6 +146,7 @@ pub struct OrientFastContentItem {
     pub created_at: String,
     pub tags: Vec<String>,
     pub provenance: Vec<RenderedPackProvenance>,
+    pub why: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -183,6 +184,7 @@ pub fn orient_fast_content(options: &OrientFastContentOptions<'_>) -> OrientFast
                 created_at: admitted.created_at,
                 tags: orient_fast_public_tags(admitted.tags),
                 provenance: admitted.item.rendered_provenance(),
+                why: admitted.item.why.clone(),
             })
             .collect(),
         Err(error) => {
@@ -314,7 +316,7 @@ fn orient_fast_relevant_content(
             query: options.task.to_owned(),
             limit: candidate_limit,
             speed: SpeedMode::Instant,
-            explain: false,
+            explain: true,
             as_of: None,
             include_tombstoned: false,
             include_expired: false,
@@ -381,6 +383,25 @@ fn orient_fast_relevant_content(
             });
             continue;
         };
+        let Some(why) = hit
+            .explanation
+            .as_ref()
+            .map(|explanation| explanation.summary.trim())
+            .filter(|summary| !summary.is_empty())
+        else {
+            issues.push(OrientFastContentIssue {
+                component: "relevant",
+                status: "metadata_unavailable",
+                code: ORIENT_FAST_RELEVANT_UNAVAILABLE_CODE.to_owned(),
+                severity: "warning".to_owned(),
+                message: format!(
+                    "Bounded lexical retrieval omitted explanation evidence for {}.",
+                    hit.doc_id
+                ),
+                repair: Some("Run `ee search --source-mode lexical_only --strict-source-mode --explain --json` to inspect retrieval evidence.".to_owned()),
+            });
+            continue;
+        };
         // Fast orientation is fail-closed for secret-bearing and sealed
         // bodies. Search has already admitted scope, lifecycle, and source
         // mode; this final screen prevents identifiers or placeholders from
@@ -406,6 +427,7 @@ fn orient_fast_relevant_content(
             created_at: memory.created_at.clone(),
             tags: orient_fast_public_tags(orient_fast_search_hit_tags(hit)),
             provenance: vec![provenance],
+            why: why.to_owned(),
         });
     }
     Ok((rendered, issues))
@@ -1784,9 +1806,9 @@ mod tests {
             ));
         }
         for item in report.recent.iter().chain(&report.relevant) {
-            if item.created_at.is_empty() || item.provenance.is_empty() {
+            if item.created_at.is_empty() || item.provenance.is_empty() || item.why.is_empty() {
                 return Err(format!(
-                    "item must bind created_at and provenance: {item:?}"
+                    "item must bind created_at, provenance, and why: {item:?}"
                 ));
             }
             if item.snippet.lines().count() > 2 || item.snippet.contains("\n\n") {
@@ -1830,6 +1852,46 @@ mod tests {
             .iter()
             .find(|item| item.id == positive_id)
             .ok_or_else(|| "positive relevant item missing".to_owned())?;
+        let recent_positive = report
+            .recent
+            .iter()
+            .find(|item| item.id == positive_id)
+            .ok_or_else(|| "positive recent item missing".to_owned())?;
+        ensure_equal(
+            &recent_positive.why,
+            &"Selected by the bounded orient-fast recency strategy after context admission."
+                .to_owned(),
+            "exact admitted-recency why",
+        )?;
+        ensure(
+            positive.why.starts_with("Score ")
+                && positive.why.contains("lexical match")
+                && positive.why != positive.provenance[0].note,
+            format!(
+                "relevant why must preserve search explanation evidence independently of provenance: {positive:?}"
+            ),
+        )?;
+        let encoded_value = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+        for (section, expected) in [
+            ("recent", recent_positive.why.as_str()),
+            ("relevant", positive.why.as_str()),
+        ] {
+            let encoded_why = encoded_value[section]
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        item.get("id").and_then(JsonValue::as_str) == Some(positive_id.as_str())
+                    })
+                })
+                .and_then(|item| item.get("why"))
+                .and_then(JsonValue::as_str);
+            ensure(
+                encoded_why == Some(expected),
+                format!(
+                    "fast-content JSON must preserve the exact {section} why; expected={expected:?}, encoded={encoded_why:?}"
+                ),
+            )?;
+        }
         if !positive.snippet.contains("Release checksum verification")
             || !positive.tags.iter().any(|tag| tag == "orient-positive")
         {
@@ -1877,7 +1939,7 @@ mod tests {
                 return Err(format!("ineligible memory surfaced: {forbidden_id}"));
             }
         }
-        let encoded = serde_json::to_string(&report).map_err(|error| error.to_string())?;
+        let encoded = encoded_value.to_string();
         if encoded.contains("orient_fast_must_not_emit") {
             return Err("secret-shaped content leaked through fast content".to_owned());
         }
@@ -1901,8 +1963,10 @@ mod tests {
         for required in [
             "DbConnection::open_file_read_only",
             "run_context_search_with_preloaded_memories",
+            "explain: true",
             "source_mode: SearchSourceMode::LexicalOnly",
             "strict_source_mode: true",
+            ".explanation",
             ".min(ORIENT_FAST_CANDIDATE_POOL_LIMIT)",
         ] {
             ensure(

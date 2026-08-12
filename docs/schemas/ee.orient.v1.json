@@ -103,7 +103,7 @@
     },
     "fastContentItem": {
       "type": "object",
-      "required": ["id", "snippet", "createdAt", "tags", "provenance"],
+      "required": ["id", "snippet", "createdAt", "tags", "provenance", "why"],
       "additionalProperties": false,
       "properties": {
         "id": { "type": "string" },
@@ -116,7 +116,8 @@
         "provenance": {
           "type": "array",
           "items": { "$ref": "#/$defs/provenance" }
-        }
+        },
+        "why": { "type": "string", "minLength": 1 }
       }
     },
     "fastContentIssue": {

@@ -471,6 +471,7 @@ fn assert_orient_fast_whole_command_output(success: bool, stdout: &[u8], stderr:
                 && item["provenance"]
                     .as_array()
                     .is_some_and(|value| !value.is_empty())
+                && item["why"].as_str().is_some_and(|value| !value.is_empty())
         }));
     }
     let degraded = envelope["degraded"]

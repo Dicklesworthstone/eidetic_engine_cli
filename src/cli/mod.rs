@@ -40137,8 +40137,12 @@ fn render_orient_fast_content_human(out: &mut String, fast_content: &serde_json:
                         .join(",")
                 })
                 .unwrap_or_default();
+            let why = item
+                .get("why")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
             out.push_str(&format!(
-                "  - {id} | created_at={created_at} | tags={tags} | provenance={provenance}\n    {snippet}\n"
+                "  - {id} | created_at={created_at} | tags={tags} | provenance={provenance}\n    {snippet}\n    Why: {why}\n"
             ));
         }
     }
@@ -71316,6 +71320,27 @@ mod tests {
                 )?;
             }
         }
+        let recent_why = envelope["data"]["fastContent"]["recent"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["id"] == memory_id))
+            .and_then(|item| item["why"].as_str())
+            .ok_or_else(|| "recent item missing why".to_owned())?;
+        ensure_equal(
+            &recent_why,
+            &"Selected by the bounded orient-fast recency strategy after context admission.",
+            "exact JSON admitted-recency why",
+        )?;
+        let relevant_why = envelope["data"]["fastContent"]["relevant"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["id"] == memory_id))
+            .and_then(|item| item["why"].as_str())
+            .ok_or_else(|| "relevant item missing why".to_owned())?;
+        ensure(
+            relevant_why.starts_with("Score ") && relevant_why.contains("lexical match"),
+            &format!(
+                "relevant JSON why must preserve lexical explanation evidence: {relevant_why:?}"
+            ),
+        )?;
         let forbidden_ids = [
             tombstoned.memory_id.to_string(),
             future.memory_id.to_string(),
@@ -71366,6 +71391,15 @@ mod tests {
             ensure(
                 human_output.contains(expected),
                 &format!("human fast output missing {expected:?}: {human_output}"),
+            )?;
+        }
+        for (section, why) in [("recent", recent_why), ("relevant", relevant_why)] {
+            let rendered = format!("    Why: {why}");
+            ensure(
+                human_output.lines().any(|line| line == rendered),
+                &format!(
+                    "human fast {section} item must preserve exact JSON why {why:?}: {human_output}"
+                ),
             )?;
         }
         ensure(

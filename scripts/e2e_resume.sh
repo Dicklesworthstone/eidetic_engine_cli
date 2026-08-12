@@ -108,6 +108,40 @@ now_ms() {
     python3 -c 'import time; print(time.monotonic_ns() // 1000000)'
 }
 
+fast_orient_10k_json_accepts() {
+    local response="$1"
+    jq -e '
+        .schema == "ee.response.v2"
+        and .success == true
+        and .data.mode == "fast"
+        and .data.pack == null
+        and (.data.fastContent.recent | length) >= 1
+        and (.data.fastContent.relevant | length) >= 1
+        and (.data.fastContent.recent | length) <= 5
+        and (.data.fastContent.relevant | length) <= 5
+        and all(.data.fastContent.recent[];
+            (.id | length) > 0 and (.snippet | length) > 0
+            and ((.snippet | split("\n") | length) <= 2)
+            and (.createdAt | length) > 0
+            and (.tags | type) == "array"
+            and (.provenance | length) > 0
+            and .why == "Selected by the bounded orient-fast recency strategy after context admission.")
+        and all(.data.fastContent.relevant[];
+            (.id | length) > 0 and (.snippet | length) > 0
+            and ((.snippet | split("\n") | length) <= 2)
+            and (.createdAt | length) > 0
+            and (.tags | type) == "array"
+            and (.provenance | length) > 0
+            and (.why | startswith("Score ") and contains("lexical match")))
+        and ([.data.fastContent.relevant[]?
+              | select(.snippet | contains("Resume scale row 09999."))
+              | select(.why | startswith("Score ") and contains("lexical match"))]
+             | length) >= 1
+        and ([.degraded[]? | select(.code == "orient_doctor_skipped")] | length) == 1
+        and ([.degraded[]? | select(.code == "orient_pack_skipped")] | length) == 0
+    ' "${response}" >/dev/null 2>&1
+}
+
 run_ee init --workspace "${WS}" --json
 if [[ "${LAST_EXIT}" -eq 0 ]]; then
     event init_ok pass
@@ -963,36 +997,51 @@ SCALE_FAST_ELAPSED_MS=$(( $(now_ms) - SCALE_FAST_STARTED_MS ))
 SCALE_FAST_JSON="${LAST_STDOUT}"
 SCALE_FAST_HASH_AFTER="$(store_fingerprint "${SCALE_DATABASE}")"
 if [[ "${LAST_EXIT}" -eq 0 && "${SCALE_FAST_ELAPSED_MS}" -lt 1000 ]] \
-    && jq -e '
-        .schema == "ee.response.v2"
-        and .success == true
-        and .data.mode == "fast"
-        and .data.pack == null
-        and (.data.fastContent.recent | length) >= 1
-        and (.data.fastContent.relevant | length) >= 1
-        and (.data.fastContent.recent | length) <= 5
-        and (.data.fastContent.relevant | length) <= 5
-        and all(.data.fastContent.recent[];
-            (.id | length) > 0 and (.snippet | length) > 0
-            and ((.snippet | split("\n") | length) <= 2)
-            and (.createdAt | length) > 0
-            and (.tags | type) == "array"
-            and (.provenance | length) > 0)
-        and all(.data.fastContent.relevant[];
-            (.id | length) > 0 and (.snippet | length) > 0
-            and ((.snippet | split("\n") | length) <= 2)
-            and (.createdAt | length) > 0
-            and (.tags | type) == "array"
-            and (.provenance | length) > 0)
-        and ([.data.fastContent.relevant[]?.snippet
-              | select(contains("Resume scale row 09999."))] | length) >= 1
-        and ([.degraded[]? | select(.code == "orient_doctor_skipped")] | length) == 1
-        and ([.degraded[]? | select(.code == "orient_pack_skipped")] | length) == 0
-    ' "${SCALE_FAST_JSON}" >/dev/null 2>&1; then
+    && fast_orient_10k_json_accepts "${SCALE_FAST_JSON}"; then
     event scale_10k_fast_orient_under_1s_with_content pass
 else
     event scale_10k_fast_orient_under_1s_with_content fail \
         "exit=${LAST_EXIT}; elapsedMs=${SCALE_FAST_ELAPSED_MS}; $(head -c 400 "${SCALE_FAST_JSON}")"
+fi
+
+# Match the Criterion release gate's 30-sample nearest-rank p99. With 30
+# observations the 99th percentile is the slowest sample, so this cannot hide
+# a single over-budget public-command invocation. The first accepted command
+# above is sample one; every additional sample must retain the exact task hit,
+# bounded sections, explanation evidence, doctor-only skip truth, and store
+# immutability.
+SCALE_FAST_SAMPLE_COUNT=30
+SCALE_FAST_SAMPLE_ELAPSED=("${SCALE_FAST_ELAPSED_MS}")
+SCALE_FAST_SAMPLES_VALID=1
+SCALE_FAST_SAMPLES_HASH_BEFORE="$(store_fingerprint "${SCALE_DATABASE}")"
+for ((sample = 2; sample <= SCALE_FAST_SAMPLE_COUNT; sample++)); do
+    SCALE_FAST_SAMPLE_STARTED_MS="$(now_ms)"
+    run_ee --workspace "${SCALE_WS}" orient --fast "Resume scale row 09999" --json
+    SCALE_FAST_SAMPLE_MS=$(( $(now_ms) - SCALE_FAST_SAMPLE_STARTED_MS ))
+    SCALE_FAST_SAMPLE_ELAPSED+=("${SCALE_FAST_SAMPLE_MS}")
+    if [[ "${LAST_EXIT}" -ne 0 ]] \
+        || ! fast_orient_10k_json_accepts "${LAST_STDOUT}"; then
+        SCALE_FAST_SAMPLES_VALID=0
+    fi
+done
+SCALE_FAST_SAMPLES_HASH_AFTER="$(store_fingerprint "${SCALE_DATABASE}")"
+SCALE_FAST_P99_RANK=$((
+    (SCALE_FAST_SAMPLE_COUNT * 99 + 99) / 100
+))
+SCALE_FAST_P99_MS="$(
+    printf '%s\n' "${SCALE_FAST_SAMPLE_ELAPSED[@]}" \
+        | sort -n \
+        | sed -n "${SCALE_FAST_P99_RANK}p"
+)"
+if [[ "${SCALE_FAST_SAMPLES_VALID}" -eq 1 \
+    && "${#SCALE_FAST_SAMPLE_ELAPSED[@]}" -eq "${SCALE_FAST_SAMPLE_COUNT}" \
+    && "${SCALE_FAST_P99_MS}" =~ ^[0-9]+$ \
+    && "${SCALE_FAST_P99_MS}" -lt 1000 \
+    && "${SCALE_FAST_SAMPLES_HASH_BEFORE}" == "${SCALE_FAST_SAMPLES_HASH_AFTER}" ]]; then
+    event scale_10k_fast_orient_sampled_p99_under_1s pass
+else
+    event scale_10k_fast_orient_sampled_p99_under_1s fail \
+        "valid=${SCALE_FAST_SAMPLES_VALID}; samples=${#SCALE_FAST_SAMPLE_ELAPSED[@]}/${SCALE_FAST_SAMPLE_COUNT}; p99Ms=${SCALE_FAST_P99_MS}; before=${SCALE_FAST_SAMPLES_HASH_BEFORE//$'\n'/,}; after=${SCALE_FAST_SAMPLES_HASH_AFTER//$'\n'/,}"
 fi
 if [[ "${SCALE_FAST_HASH_BEFORE}" == "${SCALE_FAST_HASH_AFTER}" ]]; then
     event scale_10k_fast_orient_preserves_db_wal_shm pass
@@ -1018,27 +1067,79 @@ SCALE_FAST_HUMAN_RELEVANT="$(awk '
     capture { print }
 ' "${SCALE_FAST_HUMAN}")"
 SCALE_FAST_HUMAN_RECENT_SNIPPETS="$(awk '
-    /^    / { sub(/^    /, ""); if (length > 0) print }
+    /^  - / { want_snippet = 1; next }
+    want_snippet && /^    / {
+        sub(/^    /, "")
+        if (length > 0) print
+        want_snippet = 0
+    }
 ' <<<"${SCALE_FAST_HUMAN_RECENT}")"
 SCALE_FAST_HUMAN_RELEVANT_SNIPPETS="$(awk '
-    /^    / { sub(/^    /, ""); if (length > 0) print }
+    /^  - / { want_snippet = 1; next }
+    want_snippet && /^    / {
+        sub(/^    /, "")
+        if (length > 0) print
+        want_snippet = 0
+    }
+' <<<"${SCALE_FAST_HUMAN_RELEVANT}")"
+SCALE_FAST_HUMAN_RECENT_WHYS="$(awk '
+    /^    Why: / { sub(/^    Why: /, ""); if (length > 0) print }
+' <<<"${SCALE_FAST_HUMAN_RECENT}")"
+SCALE_FAST_HUMAN_RELEVANT_WHYS="$(awk '
+    /^    Why: / { sub(/^    Why: /, ""); if (length > 0) print }
 ' <<<"${SCALE_FAST_HUMAN_RELEVANT}")"
 SCALE_FAST_HUMAN_RECENT_COUNT="$(awk 'NF { count++ } END { print count + 0 }' \
     <<<"${SCALE_FAST_HUMAN_RECENT_SNIPPETS}")"
 SCALE_FAST_HUMAN_RELEVANT_COUNT="$(awk 'NF { count++ } END { print count + 0 }' \
     <<<"${SCALE_FAST_HUMAN_RELEVANT_SNIPPETS}")"
+SCALE_FAST_HUMAN_RECENT_WHY_COUNT="$(awk 'NF { count++ } END { print count + 0 }' \
+    <<<"${SCALE_FAST_HUMAN_RECENT_WHYS}")"
+SCALE_FAST_HUMAN_RELEVANT_WHY_COUNT="$(awk 'NF { count++ } END { print count + 0 }' \
+    <<<"${SCALE_FAST_HUMAN_RELEVANT_WHYS}")"
+SCALE_FAST_HUMAN_RECENT_WHY_MISMATCHES="$(awk '
+    $0 != "Selected by the bounded orient-fast recency strategy after context admission." {
+        count++
+    }
+    END { print count + 0 }
+' <<<"${SCALE_FAST_HUMAN_RECENT_WHYS}")"
+SCALE_FAST_HUMAN_RELEVANT_LEXICAL_WHY_COUNT="$(awk '
+    index($0, "Score ") == 1 && index($0, "lexical match") > 0 { count++ }
+    END { print count + 0 }
+' <<<"${SCALE_FAST_HUMAN_RELEVANT_WHYS}")"
+SCALE_FAST_HUMAN_TASK_LEXICAL_WHY_COUNT="$(awk '
+    /^  - / { task_hit = 0; next }
+    /^    Why: / {
+        why = $0
+        sub(/^    Why: /, "", why)
+        if (task_hit && index(why, "Score ") == 1 && index(why, "lexical match") > 0) {
+            count++
+        }
+        next
+    }
+    /^    / {
+        snippet = $0
+        sub(/^    /, "", snippet)
+        task_hit = snippet == "Resume scale row 09999."
+    }
+    END { print count + 0 }
+' <<<"${SCALE_FAST_HUMAN_RELEVANT}")"
 if [[ "${LAST_EXIT}" -eq 0 && "${SCALE_FAST_HUMAN_ELAPSED_MS}" -lt 1000 ]] \
     && [[ "${SCALE_FAST_HUMAN_RECENT_COUNT}" -ge 1 \
         && "${SCALE_FAST_HUMAN_RECENT_COUNT}" -le 5 ]] \
     && [[ "${SCALE_FAST_HUMAN_RELEVANT_COUNT}" -ge 1 \
         && "${SCALE_FAST_HUMAN_RELEVANT_COUNT}" -le 5 ]] \
+    && [[ "${SCALE_FAST_HUMAN_RECENT_WHY_COUNT}" -eq "${SCALE_FAST_HUMAN_RECENT_COUNT}" \
+        && "${SCALE_FAST_HUMAN_RECENT_WHY_MISMATCHES}" -eq 0 ]] \
+    && [[ "${SCALE_FAST_HUMAN_RELEVANT_WHY_COUNT}" -eq "${SCALE_FAST_HUMAN_RELEVANT_COUNT}" \
+        && "${SCALE_FAST_HUMAN_RELEVANT_LEXICAL_WHY_COUNT}" -eq "${SCALE_FAST_HUMAN_RELEVANT_COUNT}" ]] \
+    && [[ "${SCALE_FAST_HUMAN_TASK_LEXICAL_WHY_COUNT}" -ge 1 ]] \
     && grep -Fxq "Resume scale row 09999." <<<"${SCALE_FAST_HUMAN_RELEVANT_SNIPPETS}" \
     && grep -Fq "orient_doctor_skipped" "${SCALE_FAST_HUMAN}" \
     && ! grep -Fq "orient_pack_skipped" "${SCALE_FAST_HUMAN}"; then
     event scale_10k_fast_human_orient_under_1s_with_queried_content pass
 else
     event scale_10k_fast_human_orient_under_1s_with_queried_content fail \
-        "exit=${LAST_EXIT}; elapsedMs=${SCALE_FAST_HUMAN_ELAPSED_MS}; recentCount=${SCALE_FAST_HUMAN_RECENT_COUNT}; relevantCount=${SCALE_FAST_HUMAN_RELEVANT_COUNT}; recent=$(head -c 180 <<<"${SCALE_FAST_HUMAN_RECENT_SNIPPETS}"); relevant=$(head -c 180 <<<"${SCALE_FAST_HUMAN_RELEVANT_SNIPPETS}")"
+        "exit=${LAST_EXIT}; elapsedMs=${SCALE_FAST_HUMAN_ELAPSED_MS}; recentCount=${SCALE_FAST_HUMAN_RECENT_COUNT}; recentWhyCount=${SCALE_FAST_HUMAN_RECENT_WHY_COUNT}; recentWhyMismatches=${SCALE_FAST_HUMAN_RECENT_WHY_MISMATCHES}; relevantCount=${SCALE_FAST_HUMAN_RELEVANT_COUNT}; relevantWhyCount=${SCALE_FAST_HUMAN_RELEVANT_WHY_COUNT}; relevantLexicalWhyCount=${SCALE_FAST_HUMAN_RELEVANT_LEXICAL_WHY_COUNT}; taskLexicalWhyCount=${SCALE_FAST_HUMAN_TASK_LEXICAL_WHY_COUNT}; recent=$(head -c 180 <<<"${SCALE_FAST_HUMAN_RECENT_SNIPPETS}"); relevant=$(head -c 180 <<<"${SCALE_FAST_HUMAN_RELEVANT_SNIPPETS}")"
 fi
 if [[ "${SCALE_FAST_HUMAN_HASH_BEFORE}" == "${SCALE_FAST_HUMAN_HASH_AFTER}" ]]; then
     event scale_10k_fast_human_orient_preserves_db_wal_shm pass

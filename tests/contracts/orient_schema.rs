@@ -146,6 +146,7 @@ fn orient_fast_and_full_instances_validate_and_unknown_fields_fail() -> TestResu
                 "snippet": "Use the adjacent populated store.",
                 "createdAt": "2026-08-12T12:00:00Z",
                 "tags": ["orientation"],
+                "why": "Selected by the bounded orient-fast recency strategy after context admission.",
                 "provenance": [{
                     "uri": "memory://mem_01",
                     "scheme": "memory",
@@ -159,6 +160,7 @@ fn orient_fast_and_full_instances_validate_and_unknown_fields_fail() -> TestResu
                 "snippet": "Retain the selected store identity.",
                 "createdAt": "2026-08-12T11:00:00Z",
                 "tags": ["orientation", "store-identity"],
+                "why": "Score 4.1250 via lexical match (4.12)",
                 "provenance": [{
                     "uri": "memory://mem_02",
                     "scheme": "memory",
@@ -344,6 +346,23 @@ fn orient_fast_and_full_instances_validate_and_unknown_fields_fail() -> TestResu
             ee::testing::validate_json_schema_instance(&above_limit, &schema).is_err(),
             format!("orient schema must reject more than the runtime limit in {section}"),
         )?;
+
+        let mut missing_why = fast.clone();
+        missing_why["fastContent"][section][0]
+            .as_object_mut()
+            .ok_or_else(|| format!("fastContent.{section}[0] must be an object"))?
+            .remove("why");
+        ensure(
+            ee::testing::validate_json_schema_instance(&missing_why, &schema).is_err(),
+            format!("orient schema must reject fastContent.{section} items missing why"),
+        )?;
+
+        let mut empty_why = fast.clone();
+        empty_why["fastContent"][section][0]["why"] = json!("");
+        ensure(
+            ee::testing::validate_json_schema_instance(&empty_why, &schema).is_err(),
+            format!("orient schema must reject an empty fastContent.{section} why"),
+        )?;
     }
     for (field, invalid_limit) in [("recentLimit", 4), ("relevantLimit", 6)] {
         let mut invalid = fast.clone();
@@ -360,6 +379,13 @@ fn orient_fast_and_full_instances_validate_and_unknown_fields_fail() -> TestResu
             .and_then(Value::as_u64)
             == Some(480),
         "fast-content snippets must remain contractually capped at 480 characters",
+    )?;
+    ensure(
+        schema
+            .pointer("/$defs/fastContentItem/properties/why/minLength")
+            .and_then(Value::as_u64)
+            == Some(1),
+        "fast-content why must remain required and non-empty",
     )?;
     let mut oversized_snippet = fast;
     oversized_snippet["fastContent"]["recent"][0]["snippet"] = json!("λ".repeat(481));
