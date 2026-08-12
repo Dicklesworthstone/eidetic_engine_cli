@@ -70682,7 +70682,7 @@ mod tests {
                         "label": "AGENTS.md:L1",
                         "locator": "L1",
                         "note": format!(
-                            "Memory {memory_id} selected by bounded direct lexical orientation retrieval."
+                            "Memory {memory_id} selected by bounded direct lexical orientation retrieval; evidenceFreshness=missing_source."
                         ),
                     }]),
                     "exact JSON direct-lexical provenance",

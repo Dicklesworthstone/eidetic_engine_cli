@@ -33,29 +33,23 @@
     "nextCommands"
   ],
   "additionalProperties": false,
-  "allOf": [
+  "oneOf": [
     {
-      "if": {
-        "properties": { "mode": { "const": "fast" } },
-        "required": ["mode"]
-      },
-      "then": {
-        "properties": {
-          "pack": { "type": "null" },
-          "fastContent": { "$ref": "#/$defs/fastContent" }
-        }
+      "type": "object",
+      "required": ["mode", "pack", "fastContent"],
+      "properties": {
+        "mode": { "type": "string", "const": "fast" },
+        "pack": { "type": "null" },
+        "fastContent": { "$ref": "#/$defs/fastContent" }
       }
     },
     {
-      "if": {
-        "properties": { "mode": { "const": "full" } },
-        "required": ["mode"]
-      },
-      "then": {
-        "properties": {
-          "pack": { "type": "object" },
-          "fastContent": { "type": "null" }
-        }
+      "type": "object",
+      "required": ["mode", "pack", "fastContent"],
+      "properties": {
+        "mode": { "type": "string", "const": "full" },
+        "pack": { "type": "object" },
+        "fastContent": { "type": "null" }
       }
     }
   ],
