@@ -1360,14 +1360,66 @@ pub fn add_rule(options: &RuleAddOptions<'_>) -> Result<RuleAddReport, DomainErr
             repair: Some("ee doctor".to_string()),
         })?;
 
-    Ok(rule_add_report(
+    let mut report = rule_add_report(
         &prepared,
         "stored",
         true,
         Some(audit_id),
         Some(index_job_id),
         true,
-    ))
+    );
+    // bd-index-auto-freshness-m5kwf: a rule write is an ordinary write path.
+    // Converge the derived index post-commit the same way remember and JSONL
+    // import do. The rule row above is already durable, so any publication
+    // failure downgrades to a truthful non-fatal degradation while the
+    // durable index job stays pending and retryable.
+    let index_dir = prepared
+        .workspace_path
+        .join(".ee")
+        .join(crate::core::index::DEFAULT_INDEX_SUBDIR);
+    let drain = crate::core::index::process_pending_index_jobs_coalesced(
+        &connection,
+        &prepared.workspace_id,
+        &index_dir,
+        None,
+    );
+    match drain {
+        Ok(job_reports)
+            if job_reports
+                .iter()
+                .all(|job_report| job_report.outcome == "completed") =>
+        {
+            report.index_status = "indexed".to_owned();
+        }
+        Ok(job_reports) => {
+            let first_error = job_reports
+                .iter()
+                .find(|job_report| job_report.outcome != "completed")
+                .and_then(|job_report| job_report.error.clone())
+                .unwrap_or_else(|| "index job did not complete".to_owned());
+            report.degraded.push(RuleAddDegradation {
+                code: "rule_index_publish_failed".to_owned(),
+                severity: "medium".to_owned(),
+                message: format!(
+                    "Rule {} is durably stored, but derived index publication failed and its index job remains retryable: {first_error}",
+                    report.rule_id
+                ),
+                repair: "ee index rebuild --workspace .".to_owned(),
+            });
+        }
+        Err(error) => {
+            report.degraded.push(RuleAddDegradation {
+                code: "rule_index_publish_failed".to_owned(),
+                severity: "medium".to_owned(),
+                message: format!(
+                    "Rule {} is durably stored, but derived index publication failed and its index job remains pending: {error}",
+                    report.rule_id
+                ),
+                repair: "ee index rebuild --workspace .".to_owned(),
+            });
+        }
+    }
+    Ok(report)
 }
 
 /// List procedural rules for the selected workspace.
@@ -5630,6 +5682,174 @@ mod tests {
         ensure(
             err.message().contains("regular file"),
             "error should mention regular file",
+        )
+    }
+
+    #[test]
+    fn rule_add_leaves_index_fresh_and_content_searchable() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let report = add_rule(&RuleAddOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Freshness proof rule about coalesced convergence.",
+            scope: "workspace",
+            scope_pattern: None,
+            maturity: "candidate",
+            confidence: None,
+            utility: 0.5,
+            importance: 0.5,
+            trust_class: "human_explicit",
+            protected: false,
+            tags: &[],
+            source_memory_ids: &[],
+            dry_run: false,
+            actor: None,
+        })
+        .map_err(|error| error.message())?;
+        ensure(report.persisted, "rule add must persist")?;
+        ensure(
+            report.index_status == "indexed",
+            "post-commit drain must report indexed",
+        )?;
+        ensure(report.degraded.is_empty(), "healthy drain must not degrade")?;
+
+        let status =
+            crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                workspace_path: temp.path().to_path_buf(),
+                database_path: None,
+                index_dir: None,
+            })
+            .map_err(|error| format!("index status: {error:?}"))?;
+        ensure(
+            status.health == crate::core::index::IndexHealth::Ready,
+            "index ready after rule add without rebuild",
+        )?;
+        ensure(
+            status.db_generation.is_some() && status.db_generation == status.index_generation,
+            "rule add leaves database and index generations equal",
+        )?;
+
+        let search = crate::core::search::run_search_with_filters(
+            &crate::core::search::SearchOptions {
+                workspace_path: temp.path().to_path_buf(),
+                database_path: None,
+                index_dir: None,
+                query: "coalesced convergence".to_owned(),
+                limit: 5,
+                speed: crate::search::SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Workspace,
+                strict_scope: false,
+            },
+            None,
+            &[],
+        )
+        .map_err(|error| format!("post-rule-add search: {error:?}"))?;
+        ensure(
+            search
+                .results
+                .iter()
+                .any(|hit| hit.doc_id == report.rule_id),
+            "exact rule content searchable immediately without rebuild",
+        )?;
+        ensure(
+            !search
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "search_index_stale"),
+            "no stale advisory after rule add",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rule_add_survives_index_publish_failure_with_retryable_job() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        // Plant a real filesystem publication failure: the active index path
+        // is a symlink, which the publisher refuses after claiming the job.
+        let index_dir = temp
+            .path()
+            .join(".ee")
+            .join(crate::core::index::DEFAULT_INDEX_SUBDIR);
+        let blocked_target = temp.path().join(".ee").join("index-publish-blocker");
+        std::fs::create_dir_all(&blocked_target).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&blocked_target, &index_dir)
+            .map_err(|error| error.to_string())?;
+
+        let report = add_rule(&RuleAddOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Publish-failure rule must stay durable.",
+            scope: "workspace",
+            scope_pattern: None,
+            maturity: "candidate",
+            confidence: None,
+            utility: 0.5,
+            importance: 0.5,
+            trust_class: "human_explicit",
+            protected: false,
+            tags: &[],
+            source_memory_ids: &[],
+            dry_run: false,
+            actor: None,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            report.persisted && report.status == "stored",
+            "the source-of-truth rule write must survive publish failure",
+        )?;
+        ensure(
+            report.index_status == "queued",
+            "failed publication must not claim an indexed status",
+        )?;
+        ensure(
+            report.degraded.iter().any(|entry| {
+                entry.code == "rule_index_publish_failed"
+                    && entry.repair == "ee index rebuild --workspace ."
+            }),
+            "publish failure must surface a truthful non-fatal degradation",
+        )?;
+
+        let connection = DbConnection::open_file(Path::new(&report.database_path))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .get_procedural_rule(&report.rule_id)
+                .map_err(|error| error.to_string())?
+                .is_some(),
+            "durable rule row must remain readable",
+        )?;
+        let jobs = connection
+            .list_search_index_jobs(&report.workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        let retryable = jobs
+            .iter()
+            .filter(|job| {
+                matches!(
+                    job.status_enum(),
+                    Some(
+                        crate::db::SearchIndexJobStatus::Pending
+                            | crate::db::SearchIndexJobStatus::Failed
+                    )
+                )
+            })
+            .count();
+        ensure(
+            retryable >= 1,
+            "publish failure must leave durable retryable index work",
         )
     }
 
