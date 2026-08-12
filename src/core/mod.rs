@@ -591,10 +591,18 @@ fn shell_quote_repair_arg(value: &str) -> String {
 /// store that discovery then finds forever).
 #[must_use]
 pub fn storeless_workspace_repair(database_path: &std::path::Path) -> String {
-    let workspace_dir = database_path
-        .parent()
-        .and_then(std::path::Path::parent)
-        .map(std::path::Path::to_path_buf);
+    let database_parent = database_path.parent();
+    let is_default_workspace_database = database_path
+        .file_name()
+        .is_some_and(|name| name == "ee.db")
+        && database_parent
+            .and_then(std::path::Path::file_name)
+            .is_some_and(|name| name == ".ee");
+    let workspace_dir = if is_default_workspace_database {
+        database_parent.and_then(std::path::Path::parent)
+    } else {
+        database_parent
+    };
     let nearby = workspace_dir.as_deref().map(|dir| {
         crate::core::orient::discover_nearby_stores(
             dir,
@@ -628,6 +636,57 @@ pub fn storeless_workspace_error(database_path: &std::path::Path) -> crate::mode
     crate::models::DomainError::WorkspaceStoreMissing {
         message: format!("Database not found at {}", database_path.display()),
         repair: Some(storeless_workspace_repair(database_path)),
+    }
+}
+
+/// Require an already-addressed database path to exist without opening it.
+///
+/// `DbConnection::open_file` is create-capable because `ee init` owns store
+/// creation. Lookup and ordinary write surfaces must preflight the exact path
+/// first so a typo cannot plant a new store. Only a genuine `NotFound` is an
+/// addressing miss; permission and other inspection failures remain storage
+/// errors rather than being misreported as an absent workspace.
+pub fn ensure_addressed_database_exists(
+    database_path: &std::path::Path,
+) -> Result<(), crate::models::DomainError> {
+    match std::fs::symlink_metadata(database_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            match std::fs::metadata(database_path) {
+                Ok(target) if target.file_type().is_file() => Ok(()),
+                Ok(_) => Err(crate::models::DomainError::Storage {
+                    message: format!(
+                        "Addressed database symlink does not target a regular file: {}",
+                        database_path.display()
+                    ),
+                    repair: Some("ee doctor --workspace . --json".to_owned()),
+                }),
+                Err(error) => Err(crate::models::DomainError::Storage {
+                    message: format!(
+                        "Failed to inspect addressed database symlink target {}: {error}",
+                        database_path.display()
+                    ),
+                    repair: Some("ee doctor --workspace . --json".to_owned()),
+                }),
+            }
+        }
+        Ok(_) => Err(crate::models::DomainError::Storage {
+            message: format!(
+                "Addressed database path is not a regular file: {}",
+                database_path.display()
+            ),
+            repair: Some("ee doctor --workspace . --json".to_owned()),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(storeless_workspace_error(database_path))
+        }
+        Err(error) => Err(crate::models::DomainError::Storage {
+            message: format!(
+                "Failed to inspect addressed database {}: {error}",
+                database_path.display()
+            ),
+            repair: Some("ee doctor --workspace . --json".to_owned()),
+        }),
     }
 }
 

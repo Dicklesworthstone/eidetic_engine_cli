@@ -1476,7 +1476,7 @@ fn remember_memory_inner_with_store(
         });
     }
 
-    ensure_database_parent_exists(&prepared.database_path)?;
+    crate::core::ensure_addressed_database_exists(&prepared.database_path)?;
     let connection = open_remember_database_with_retry(&prepared.database_path)?;
     migrate_remember_database_with_retry(&connection)?;
     ensure_workspace(
@@ -2994,10 +2994,16 @@ fn prepare_remember_memory_with_store(
     typed_field_assignments: &[String],
     attempt_family: Option<&RememberAttemptFamily<'_>>,
 ) -> Result<PreparedRememberMemory, DomainError> {
-    let caller_workspace_path = resolve_workspace_path(options.workspace_path, options.dry_run)?;
+    let caller_workspace_path = if options.database_path.is_some() {
+        // An explicit database is allowed to live outside `<workspace>/.ee`,
+        // but it does not authorize inventing a nonexistent workspace path.
+        resolve_workspace_path(options.workspace_path, options.dry_run)?
+    } else {
+        resolve_memory_write_workspace_path(options.workspace_path, options.dry_run)?
+    };
     let default_database_path = options
         .database_path
-        .map(Path::to_path_buf)
+        .map(absolute_path_from_cwd)
         .unwrap_or_else(|| caller_workspace_path.join(".ee").join("ee.db"));
     let workspace_path = store_override
         .map(|store| store.workspace_path.clone())
@@ -4283,14 +4289,18 @@ fn mask_allow_match_spans(content: &str, matches: &[RememberPolicyBypassMatch]) 
     out
 }
 
-fn resolve_workspace_path(path: &Path, dry_run: bool) -> Result<PathBuf, DomainError> {
-    let absolute = if path.is_absolute() {
+fn absolute_path_from_cwd(path: &Path) -> PathBuf {
+    if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
-    };
+    }
+}
+
+fn resolve_workspace_path(path: &Path, dry_run: bool) -> Result<PathBuf, DomainError> {
+    let absolute = absolute_path_from_cwd(path);
 
     match absolute.canonicalize() {
         Ok(canonical) => Ok(canonical),
@@ -4305,19 +4315,27 @@ fn resolve_workspace_path(path: &Path, dry_run: bool) -> Result<PathBuf, DomainE
     }
 }
 
-fn ensure_database_parent_exists(database_path: &Path) -> Result<(), DomainError> {
-    let Some(parent) = database_path.parent() else {
-        return Ok(());
-    };
-    if parent.exists() {
-        return Ok(());
+/// Resolve the workspace for a memory write without turning a genuinely
+/// absent addressed store into an initialization hint. The exact database
+/// path is checked separately before any write-side guard or connection can
+/// create state (bd-workspace-miss-init-suggestion-sfjvq).
+fn resolve_memory_write_workspace_path(path: &Path, dry_run: bool) -> Result<PathBuf, DomainError> {
+    let absolute = absolute_path_from_cwd(path);
+    match absolute.canonicalize() {
+        Ok(canonical) => Ok(canonical),
+        Err(error) if dry_run || error.kind() == std::io::ErrorKind::NotFound => Ok(absolute),
+        Err(error) => Err(DomainError::Configuration {
+            message: format!(
+                "Failed to resolve workspace {}: {error}",
+                absolute.display()
+            ),
+            repair: Some("Re-check --workspace addressing and permissions.".to_owned()),
+        }),
     }
-    Err(DomainError::Storage {
-        message: format!("Database directory not found at {}", parent.display()),
-        repair: Some(crate::core::storeless_workspace_repair(database_path)),
-    })
 }
 
+/// Ensure the canonical workspace row exists after the already-addressed
+/// database has been opened and migrated.
 fn ensure_workspace(
     connection: &DbConnection,
     workspace_id: &str,
@@ -4484,8 +4502,8 @@ pub(crate) fn prepare_remember_txn_write_for_connection(
             repair: Some("submit dry-run remember requests through the direct CLI path".to_owned()),
         });
     }
+    crate::core::ensure_addressed_database_exists(&prepared.database_path)?;
     let write_replay_guard = RememberWriteReplayGuard::arm(&prepared.workspace_path)?;
-    ensure_database_parent_exists(&prepared.database_path)?;
     migrate_remember_database_with_retry(connection)?;
     ensure_workspace(connection, &prepared.workspace_id, &prepared.workspace_path)?;
     // The daemon write-owner is already the per-process serializer for this
@@ -7563,10 +7581,14 @@ pub fn remember_memory_with_controls_typed_fields_and_family(
             .map_err(|error| remember_usage_error(error.to_string()))?
             .as_str()
             .to_owned();
-        let workspace_path = resolve_workspace_path(options.workspace_path, options.dry_run)?;
+        let workspace_path = if options.database_path.is_some() {
+            resolve_workspace_path(options.workspace_path, options.dry_run)?
+        } else {
+            resolve_memory_write_workspace_path(options.workspace_path, options.dry_run)?
+        };
         let database_path = options
             .database_path
-            .map(Path::to_path_buf)
+            .map(absolute_path_from_cwd)
             .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
         let workspace_id = stable_workspace_id(&workspace_path);
         let content_hash = remember_content_hash(&canonical_content);
@@ -8456,10 +8478,14 @@ pub fn remember_memory_batch_stdin(
     // the per-line full rebuild that made batch ingest O(n²).
     let mut index_status = "not_applicable".to_owned();
     if !options.dry_run && (stored_count > 0 || reinforced_count > 0) {
-        let workspace_path = resolve_workspace_path(options.workspace_path, false)?;
+        let workspace_path = if options.database_path.is_some() {
+            resolve_workspace_path(options.workspace_path, false)?
+        } else {
+            resolve_memory_write_workspace_path(options.workspace_path, false)?
+        };
         let database_path = options
             .database_path
-            .map(Path::to_path_buf)
+            .map(absolute_path_from_cwd)
             .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
         let workspace_id = stable_workspace_id(&workspace_path);
         let index_dir = workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR);

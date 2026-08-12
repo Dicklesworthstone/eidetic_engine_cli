@@ -3407,6 +3407,11 @@ fn execute_daemon_txn_batch(
             return Err(error);
         }
     }
+    // The daemon owns batching, not store creation. Preflight the exact path
+    // before the create-capable database open so a queued write addressed at
+    // a misspelled workspace cannot plant a new store as a side effect
+    // (bd-workspace-miss-init-suggestion-sfjvq).
+    crate::core::ensure_addressed_database_exists(&database_path)?;
     let connection = crate::db::DbConnection::open_file(&database_path).map_err(|error| {
         crate::models::DomainError::Storage {
             message: format!(
@@ -5509,6 +5514,41 @@ mod tests {
     }
 
     #[test]
+    fn valid_daemon_remember_batch_requires_an_initialized_store() {
+        let dir = tempfile::Builder::new()
+            .prefix("daemon-storeless-remember-batch")
+            .tempdir_in(std::env::temp_dir())
+            .expect("tempdir");
+        let workspace_path = dir.path().join("addressed-but-uninitialized");
+        let database_path = workspace_path.join(".ee").join("ee.db");
+        let operation = crate::core::write_owner::WriteOperation::Custom {
+            operation_type: DaemonWriteParams::ACTOR_OPERATION_TYPE.to_string(),
+            payload: serde_json::to_value(DaemonWriteParams {
+                workspace_path: workspace_path.clone(),
+                content: "A valid daemon write must not initialize its own store.".to_string(),
+                level: "episodic".to_string(),
+                kind: "fact".to_string(),
+                tags: None,
+                confidence: 0.8,
+                source: Some("manual://daemon-storeless-remember-batch".to_string()),
+                workflow_id: None,
+                auto_link: false,
+                propose_candidates: false,
+            })
+            .expect("remember payload"),
+        };
+
+        let error = execute_daemon_txn_batch(&[operation])
+            .expect_err("a daemon write must reject an uninitialized addressed store");
+        assert!(matches!(
+            error,
+            crate::models::DomainError::WorkspaceStoreMissing { .. }
+        ));
+        assert!(!workspace_path.exists());
+        assert!(!database_path.exists());
+    }
+
+    #[test]
     fn daemon_remember_batch_commits_memories_and_drains_index_jobs() {
         let dir = tempfile::Builder::new()
             .prefix("daemon-remember-batch")
@@ -5517,6 +5557,12 @@ mod tests {
         let workspace_path = dir.path().canonicalize().expect("canonical workspace");
         let database_path = workspace_path.join(".ee").join("ee.db");
         std::fs::create_dir_all(workspace_path.join(".ee")).expect("create .ee");
+        let initialized = crate::db::DbConnection::open_file(&database_path)
+            .expect("initialize daemon fixture database");
+        initialized
+            .migrate()
+            .expect("migrate daemon fixture database");
+        initialized.close().expect("close daemon fixture database");
 
         let remember_op = |content: &str| crate::core::write_owner::WriteOperation::Custom {
             operation_type: DaemonWriteParams::ACTOR_OPERATION_TYPE.to_string(),

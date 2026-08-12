@@ -1,5 +1,6 @@
+use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 type TestResult = Result<(), String>;
 
@@ -31,6 +32,32 @@ fn run_ee_with_registry(args: &[String], registry: &Path) -> Result<Output, Stri
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
+fn run_ee_with_stdin(args: &[String], input: &[u8]) -> Result<Output, String> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .env(
+            "EE_WORKSPACE_REGISTRY",
+            std::env::temp_dir().join(format!(
+                "ee-error-recovery-stdin-registry-{}.db",
+                std::process::id()
+            )),
+        )
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("failed to spawn ee {}: {error}", args.join(" ")))?;
+    child
+        .stdin
+        .take()
+        .ok_or("ee stdin pipe was unavailable")?
+        .write_all(input)
+        .map_err(|error| format!("failed to write ee stdin: {error}"))?;
+    child
+        .wait_with_output()
+        .map_err(|error| format!("failed to collect ee {}: {error}", args.join(" ")))
 }
 
 fn split_emitted_command(command: &str) -> Result<Vec<String>, String> {
@@ -406,6 +433,219 @@ fn storage_database_not_found_recovery_contract() -> TestResult {
     }
 
     Ok(())
+}
+
+/// Remember and search must preflight the exact addressed database before
+/// any create-capable open. Cover both an entirely nonexistent workspace and
+/// a pre-existing `.ee/` directory whose database is absent; neither miss may
+/// create directories, a database, or SQLite sidecars.
+#[test]
+fn remember_and_search_storeless_address_variants_do_not_create_state() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let nonexistent_workspace = tempdir.path().join("never-created-workspace-sfjvq");
+    let empty_ee_workspace = tempdir.path().join("existing-empty-ee-sfjvq");
+    let empty_ee_dir = empty_ee_workspace.join(".ee");
+    std::fs::create_dir_all(&empty_ee_dir).map_err(|error| error.to_string())?;
+    let invalid_database_workspace = tempdir.path().join("directory-shaped-db-sfjvq");
+    let invalid_database = invalid_database_workspace.join(".ee").join("ee.db");
+    std::fs::create_dir_all(&invalid_database).map_err(|error| error.to_string())?;
+
+    for workspace in [&nonexistent_workspace, &empty_ee_workspace] {
+        let workspace_text = workspace.to_string_lossy().to_string();
+        let expected_database = workspace.join(".ee").join("ee.db");
+        for (surface, args) in [
+            (
+                "remember",
+                vec![
+                    "--workspace".to_owned(),
+                    workspace_text.clone(),
+                    "remember".to_owned(),
+                    "storeless preflight must not create state".to_owned(),
+                    "--json".to_owned(),
+                ],
+            ),
+            (
+                "search",
+                vec![
+                    "--workspace".to_owned(),
+                    workspace_text.clone(),
+                    "search".to_owned(),
+                    "storeless preflight".to_owned(),
+                    "--json".to_owned(),
+                ],
+            ),
+            (
+                "search family",
+                vec![
+                    "--workspace".to_owned(),
+                    workspace_text.clone(),
+                    "search".to_owned(),
+                    "--family".to_owned(),
+                    "storeless-family-sfjvq".to_owned(),
+                    "--json".to_owned(),
+                ],
+            ),
+            (
+                "search all workspaces",
+                vec![
+                    "--workspace".to_owned(),
+                    workspace_text.clone(),
+                    "search".to_owned(),
+                    "storeless fanout".to_owned(),
+                    "--all-workspaces".to_owned(),
+                    "--json".to_owned(),
+                ],
+            ),
+        ] {
+            let output = run_ee(&args)?;
+            ensure(
+                output.status.code() == Some(10),
+                format!(
+                    "{surface} against {} must exit 10, got {:?}: stdout={} stderr={}",
+                    workspace.display(),
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                ),
+            )?;
+            let json = stdout_json(&output, surface)?;
+            ensure(
+                string_at(&json, "/error/code", surface)? == "workspace_store_missing",
+                format!("{surface}: missing store must retain the canonical error code"),
+            )?;
+            ensure(
+                string_at(&json, "/error/message", surface)?
+                    == format!("Database not found at {}", expected_database.display()),
+                format!(
+                    "{surface}: error must name the exact absolute database path {}",
+                    expected_database.display()
+                ),
+            )?;
+        }
+
+        let batch = run_ee_with_stdin(
+            &[
+                "--workspace".to_owned(),
+                workspace_text.clone(),
+                "remember".to_owned(),
+                "--batch".to_owned(),
+                "--stdin".to_owned(),
+                "--json".to_owned(),
+            ],
+            br#"{"content":"storeless batch preflight must not create state"}
+"#,
+        )?;
+        ensure(
+            batch.status.code() == Some(10),
+            format!(
+                "remember batch against {} must preserve workspace-store-missing exit 10, got {:?}: stdout={} stderr={}",
+                workspace.display(),
+                batch.status.code(),
+                String::from_utf8_lossy(&batch.stdout),
+                String::from_utf8_lossy(&batch.stderr),
+            ),
+        )?;
+        let batch_json = stdout_json(&batch, "remember batch")?;
+        ensure(
+            string_at(&batch_json, "/error/code", "remember batch")? == "workspace_store_missing",
+            "remember batch must not collapse a storeless address into an import error".to_owned(),
+        )?;
+    }
+
+    let custom_database = tempdir.path().join("custom-store-sfjvq.db");
+    let custom_database_text = custom_database.to_string_lossy().to_string();
+    let custom_search = run_ee(&[
+        "--workspace".to_owned(),
+        empty_ee_workspace.to_string_lossy().to_string(),
+        "search".to_owned(),
+        "custom addressed database".to_owned(),
+        "--database".to_owned(),
+        custom_database_text.clone(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        custom_search.status.code() == Some(10),
+        format!(
+            "a missing explicit search database must exit 10, got {:?}",
+            custom_search.status.code()
+        ),
+    )?;
+    let custom_search_json = stdout_json(&custom_search, "custom search database")?;
+    ensure(
+        string_at(
+            &custom_search_json,
+            "/error/message",
+            "custom search database",
+        )? == format!("Database not found at {custom_database_text}"),
+        "a custom search miss must print the exact absolute database path".to_owned(),
+    )?;
+    ensure(
+        !custom_database.exists(),
+        "a custom search miss must not create the addressed database".to_owned(),
+    )?;
+
+    let invalid_workspace_text = invalid_database_workspace.to_string_lossy().to_string();
+    for (surface, args) in [
+        (
+            "remember invalid database",
+            vec![
+                "--workspace".to_owned(),
+                invalid_workspace_text.clone(),
+                "remember".to_owned(),
+                "present invalid stores are not addressing misses".to_owned(),
+                "--json".to_owned(),
+            ],
+        ),
+        (
+            "search invalid database",
+            vec![
+                "--workspace".to_owned(),
+                invalid_workspace_text.clone(),
+                "search".to_owned(),
+                "present invalid store".to_owned(),
+                "--json".to_owned(),
+            ],
+        ),
+    ] {
+        let output = run_ee(&args)?;
+        ensure(
+            output.status.code() == Some(3),
+            format!(
+                "{surface}: a present directory-shaped database must remain a storage error, got {:?}: stdout={} stderr={}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ),
+        )?;
+        let json = stdout_json(&output, surface)?;
+        ensure(
+            string_at(&json, "/error/code", surface)? == "storage",
+            format!("{surface}: present-invalid stores must not be mislabeled as absent"),
+        )?;
+    }
+
+    ensure(
+        !nonexistent_workspace.exists(),
+        "a nonexistent addressed workspace must remain nonexistent".to_owned(),
+    )?;
+    ensure(
+        !empty_ee_dir.join("ee.db").exists()
+            && !sqlite_sidecar_path(&empty_ee_dir.join("ee.db"), "-wal").exists()
+            && !sqlite_sidecar_path(&empty_ee_dir.join("ee.db"), "-shm").exists()
+            && std::fs::read_dir(&empty_ee_dir)
+                .map_err(|error| error.to_string())?
+                .next()
+                .is_none(),
+        "an existing empty .ee directory must remain byte-for-byte empty after misses".to_owned(),
+    )?;
+    ensure(
+        invalid_database.is_dir()
+            && std::fs::read_dir(&invalid_database)
+                .map_err(|error| error.to_string())?
+                .next()
+                .is_none(),
+        "present-invalid database directories must not be populated or replaced".to_owned(),
+    )
 }
 
 /// bd-sfjvq: a storeless miss next to a populated store must point the
@@ -842,6 +1082,45 @@ fn storeless_miss_quotes_spaced_nearby_workspace_and_command_executes() -> TestR
     ensure(
         !leaf.join(".ee").exists(),
         "the storeless miss must not initialize the leaf before explicit init".to_owned(),
+    )?;
+
+    let retarget_fragment = repair
+        .split_once("retarget with ")
+        .and_then(|(_, rest)| rest.split_once(". Only if"))
+        .map(|(fragment, _)| fragment)
+        .ok_or_else(|| {
+            format!("repair did not contain an executable retarget fragment: {repair}")
+        })?;
+    let emitted_retarget = format!("ee {retarget_fragment} search \"{seed_content}\" --json");
+    let retargeted = run_emitted_ee_command_with_registry(
+        &emitted_retarget,
+        &tempdir.path().join("repair-retarget-registry.db"),
+    )?;
+    ensure(
+        retargeted.status.success(),
+        format!(
+            "the workspace fragment taken from the actual repair must execute: stdout={} stderr={}",
+            String::from_utf8_lossy(&retargeted.stdout),
+            String::from_utf8_lossy(&retargeted.stderr),
+        ),
+    )?;
+    let retargeted_json = stdout_json(&retargeted, "repair-derived retarget search")?;
+    let retargeted_results = array_at(
+        &retargeted_json,
+        "/data/results",
+        "repair-derived retarget search",
+    )?;
+    ensure(
+        retargeted_results.iter().any(|result| {
+            result.get("content").and_then(serde_json::Value::as_str) == Some(seed_content)
+        }),
+        format!(
+            "repair-derived search must read the nearby store's seeded content: {retargeted_results:?}"
+        ),
+    )?;
+    ensure(
+        !leaf.join(".ee").exists(),
+        "executing the repair-derived retarget must not initialize the misspelled leaf".to_owned(),
     )?;
 
     let leaf_init = run_ee(&[

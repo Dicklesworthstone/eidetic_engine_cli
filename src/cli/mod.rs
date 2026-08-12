@@ -36454,13 +36454,11 @@ fn resolve_memory_store_target(
             database_path: paths.database_path,
         });
     }
-    let workspace = cli.resolve_workspace();
+    let workspace = resolve_cli_workspace_path(&cli.resolve_workspace());
     let database_path = database
-        .cloned()
+        .map(|path| resolve_cli_workspace_path(path))
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
-    if !database_path.exists() {
-        return Err(crate::core::storeless_workspace_error(&database_path));
-    }
+    crate::core::ensure_addressed_database_exists(&database_path)?;
     Ok(MemoryStoreTarget {
         workspace,
         database_path,
@@ -46049,10 +46047,18 @@ where
     if let Err(error) = validate_family_search_args(args) {
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
-    let workspace_path = cli.resolve_workspace();
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
+    let database_path = args
+        .database
+        .as_deref()
+        .map(resolve_cli_workspace_path)
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    if let Err(error) = crate::core::ensure_addressed_database_exists(&database_path) {
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
     let options = FamilyRetrievalOptions {
         workspace_path: &workspace_path,
-        database_path: args.database.as_deref(),
+        database_path: Some(&database_path),
         family_id,
         memory_scope: args.memory_scope,
         strict_scope: args.strict_scope,
@@ -46375,7 +46381,7 @@ where
     let MemoryStoreTarget {
         workspace,
         database_path,
-    } = match resolve_memory_store_target(cli, false, None) {
+    } = match resolve_memory_store_target(cli, false, args.database.as_ref()) {
         Ok(target) => target,
         Err(domain_error) => {
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
@@ -46573,14 +46579,30 @@ where
     let handler_start = Instant::now();
     let mut command_timings = Vec::new();
     let workspace_start = Instant::now();
-    let workspace_path = cli.resolve_workspace();
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     command_timings.push(cli_performance_timing_json(
         "command::workspaceResolve",
         workspace_start.elapsed(),
     ));
+    let addressed_database_path = args
+        .database
+        .as_deref()
+        .map(resolve_cli_workspace_path)
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    if let Err(error) = crate::core::ensure_addressed_database_exists(&addressed_database_path) {
+        return write_domain_error(
+            &error,
+            cli.wants_json() || args.explain_performance,
+            stdout,
+            stderr,
+        );
+    }
     let recalibration_start = Instant::now();
     let recalibration = if args.recalibrate_now {
-        match recalibrate_search_score_calibration(&workspace_path, args.database.as_deref()) {
+        match recalibrate_search_score_calibration(
+            &workspace_path,
+            Some(addressed_database_path.as_path()),
+        ) {
             Ok(report) => Some(report),
             Err(error) => {
                 return write_search_error(
@@ -46601,7 +46623,7 @@ where
     let options_start = Instant::now();
     let options = SearchOptions {
         workspace_path,
-        database_path: args.database.clone(),
+        database_path: Some(addressed_database_path),
         index_dir: args.index_dir.clone(),
         query: query.clone(),
         limit: args.limit,
@@ -54926,10 +54948,16 @@ where
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
 
-    let workspace_path = cli.resolve_workspace();
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !args.dry_run
+        && let Err(error) = crate::core::ensure_addressed_database_exists(&database_path)
+    {
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
     let options = RememberBatchOptions {
         workspace_path: &workspace_path,
-        database_path: None,
+        database_path: Some(&database_path),
         reinforce: args.reinforce,
         dry_run: args.dry_run,
         auto_link: !args.no_auto_link,
