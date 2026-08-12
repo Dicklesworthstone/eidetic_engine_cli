@@ -16,7 +16,7 @@
 //! }
 //! ```
 
-use ee::models::DomainError;
+use ee::models::{DomainError, RecoveryAction, RecoveryKind};
 use ee::output::error_response_json;
 use insta::assert_json_snapshot;
 use serde_json::Value;
@@ -207,6 +207,69 @@ fn error_envelope_migration_drift() -> TestResult {
     verify_error_envelope(&json)?;
     let value: Value = parse_error_json(&json)?;
     assert_json_snapshot!("error_envelope_migration_drift", value);
+    Ok(())
+}
+
+#[test]
+fn error_envelope_workspace_store_missing_matches_required_fixture() -> TestResult {
+    let mut addressed_workspace = RecoveryAction::flag(
+        1,
+        "--workspace",
+        "/workspace/missing",
+        "Re-check the exact addressed workspace before selecting another store.",
+    );
+    addressed_workspace.example = Some("--workspace /workspace/missing".to_owned());
+    let mut addressed_store = RecoveryAction::env(
+        2,
+        "EE_DATABASE_PATH",
+        "/workspace/missing/.ee/ee.db",
+        "Re-check the exact addressed database override before initializing a new store.",
+    );
+    addressed_store.example = Some("EE_DATABASE_PATH=/workspace/missing/.ee/ee.db".to_owned());
+    let initialize = RecoveryAction {
+        priority: 3,
+        kind: RecoveryKind::Seed,
+        rationale:
+            "Only initialize when this exact addressed workspace was intentionally chosen for a new store."
+                .to_owned(),
+        env_name: None,
+        value_hint: None,
+        config_path: None,
+        config_key: None,
+        flag_name: None,
+        command: Some("ee init --workspace /workspace/missing".to_owned()),
+        results_in: None,
+        example: None,
+    };
+    let error = DomainError::WorkspaceStoreMissing {
+        message: "Database not found at /workspace/missing/.ee/ee.db".to_owned(),
+        repair: Some(
+            "Re-check --workspace addressing with --workspace /workspace/missing (looked for /workspace/missing/.ee/ee.db). Nearby-store discovery completed and found no populated stores. Only if you intended to create a NEW store here: ee init --workspace /workspace/missing"
+                .to_owned(),
+        ),
+        details_json: serde_json::json!({
+            "addressedStorePath": "/workspace/missing/.ee/ee.db",
+            "addressedWorkspacePath": "/workspace/missing",
+            "storeDiscovery": {
+                "outcome": "complete",
+                "nearbyStores": [],
+            },
+        })
+        .to_string(),
+        recovery_actions: vec![addressed_workspace, addressed_store, initialize],
+    };
+
+    let json = error_response_json(&error);
+    verify_error_envelope(&json)?;
+    let actual = parse_error_json(&json)?;
+    let expected = parse_error_json(include_str!(
+        "fixtures/golden/error/workspace_store_missing.golden"
+    ))?;
+    if actual != expected {
+        return Err(format!(
+            "workspace_store_missing error fixture drifted:\nexpected={expected:#}\nactual={actual:#}"
+        ));
+    }
     Ok(())
 }
 

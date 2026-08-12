@@ -2475,6 +2475,73 @@ fn remember_level_kind_cross_wire_errors_match_error_schema() -> TestResult {
 }
 
 #[test]
+fn workspace_store_missing_error_schema_requires_address_and_discovery_details() -> TestResult {
+    let schema = schema_doc("ee.error.v2")?;
+    let fixture = read_json(&fixture_path("golden/error/workspace_store_missing.golden"))?;
+
+    validate_json_schema(&fixture, &schema, &schema, "$")?;
+    ensure_json_str(&fixture, "/error/code", "workspace_store_missing")?;
+    ensure_json_str(
+        &fixture,
+        "/error/details/addressedWorkspacePath",
+        "/workspace/missing",
+    )?;
+    ensure_json_str(
+        &fixture,
+        "/error/details/addressedStorePath",
+        "/workspace/missing/.ee/ee.db",
+    )?;
+    ensure_json_str(
+        &fixture,
+        "/error/details/storeDiscovery/outcome",
+        "complete",
+    )?;
+
+    let required = schema
+        .pointer("/properties/error/allOf/0/then/properties/details/required")
+        .ok_or("workspace_store_missing schema condition is missing details.required")?;
+    if required
+        != &json!([
+            "addressedWorkspacePath",
+            "addressedStorePath",
+            "storeDiscovery"
+        ])
+    {
+        return Err(format!(
+            "workspace_store_missing conditional required fields drifted: {required}"
+        ));
+    }
+
+    for field in [
+        "addressedWorkspacePath",
+        "addressedStorePath",
+        "storeDiscovery",
+    ] {
+        let mut missing = fixture.clone();
+        missing["error"]["details"]
+            .as_object_mut()
+            .ok_or("workspace_store_missing fixture details must be an object")?
+            .remove(field);
+        if validate_json_schema(&missing, &schema, &schema, "$").is_ok() {
+            return Err(format!(
+                "ee.error.v2 accepted workspace_store_missing without error.details.{field}"
+            ));
+        }
+    }
+
+    let mut other_error = fixture;
+    other_error["error"]["code"] = json!("storage");
+    let details = other_error["error"]["details"]
+        .as_object_mut()
+        .ok_or("storage fixture details must be an object")?;
+    details.remove("addressedWorkspacePath");
+    details.remove("addressedStorePath");
+    details.remove("storeDiscovery");
+    validate_json_schema(&other_error, &schema, &schema, "$")
+        .map_err(|error| format!("workspace detail requirements must be conditional: {error}"))
+}
+
+#[test]
 fn pack_schema_preserves_canonical_command_for_deprecated_context_alias() -> TestResult {
     let schema = schema_doc("ee.pack.v2")?;
     ensure_json_str(&schema, "/properties/data/properties/command/const", "pack")?;
@@ -3225,6 +3292,23 @@ fn validate_json_schema(
     if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
         let target = resolve_local_ref(root_schema, reference)?;
         return validate_json_schema(value, target, root_schema, path);
+    }
+
+    if let Some(branches) = schema.get("allOf").and_then(Value::as_array) {
+        for branch in branches {
+            validate_json_schema(value, branch, root_schema, path)?;
+        }
+    }
+
+    if let Some(condition) = schema.get("if") {
+        let condition_matches = validate_json_schema(value, condition, root_schema, path).is_ok();
+        if condition_matches {
+            if let Some(then_schema) = schema.get("then") {
+                validate_json_schema(value, then_schema, root_schema, path)?;
+            }
+        } else if let Some(else_schema) = schema.get("else") {
+            validate_json_schema(value, else_schema, root_schema, path)?;
+        }
     }
 
     if let Some(options) = schema.get("oneOf").and_then(Value::as_array) {

@@ -15,6 +15,27 @@
       "type": "object",
       "required": ["code", "message", "severity", "details"],
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "code": {"const": "workspace_store_missing"}
+            },
+            "required": ["code"]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "required": [
+                  "addressedWorkspacePath",
+                  "addressedStorePath",
+                  "storeDiscovery"
+                ]
+              }
+            }
+          }
+        }
+      ],
       "properties": {
         "code": {"type": "string"},
         "message": {"type": "string"},

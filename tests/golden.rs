@@ -217,6 +217,24 @@ mod tests {
             .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
     }
 
+    fn run_ee_with_isolated_workspace_discovery(
+        args: &[&str],
+        current_dir: &Path,
+        registry_path: &Path,
+    ) -> Result<Output, String> {
+        let mut command = Command::new(ee_binary_path()?);
+        command.args(args).current_dir(current_dir);
+        for (name, _) in env::vars_os() {
+            if name.to_string_lossy().starts_with("EE_") {
+                command.env_remove(name);
+            }
+        }
+        command
+            .env("EE_WORKSPACE_REGISTRY", registry_path)
+            .output()
+            .map_err(|error| format!("failed to run isolated ee {}: {error}", args.join(" ")))
+    }
+
     fn run_ee_offline(args: &[&str]) -> Result<Output, String> {
         Command::new(ee_binary_path()?)
             .env("EE_EMBED_DOWNLOAD", "off")
@@ -5288,17 +5306,89 @@ mod tests {
 
     #[test]
     fn agent_context_unavailable_json_matches_golden() -> TestResult {
-        assert_agent_stdout_golden(
-            &[
-                "--json",
-                "--workspace",
-                "tests/fixtures/missing-ee-workspace",
-                "pack",
-                "prepare-release",
-            ],
-            "context_unavailable.json",
-            false,
-        )
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::create_dir_all(tempdir.path().join(".git"))
+            .map_err(|error| format!("create isolated git marker: {error}"))?;
+        let registry_path = tempdir.path().join("registry-must-stay-absent.db");
+        let raw_workspace = "never-created/../missing-ee-workspace";
+        let args = [
+            "--json",
+            "--workspace",
+            raw_workspace,
+            "pack",
+            "prepare-release",
+        ];
+        let output =
+            run_ee_with_isolated_workspace_discovery(&args, tempdir.path(), &registry_path)?;
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|error| format!("isolated pack stdout was not UTF-8: {error}"))?;
+        let stderr = String::from_utf8(output.stderr)
+            .map_err(|error| format!("isolated pack stderr was not UTF-8: {error}"))?;
+        ensure(
+            output.status.code() == Some(10),
+            format!(
+                "isolated workspace miss must exit 10, got {:?}: {stderr}",
+                output.status.code()
+            ),
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "isolated JSON miss must keep stderr empty",
+        )?;
+
+        let mut value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("isolated workspace miss was not JSON: {error}"))?;
+        let isolated_root = tempdir
+            .path()
+            .canonicalize()
+            .map_err(|error| format!("canonicalize isolated golden root: {error}"))?;
+        let expected_workspace = isolated_root.join("missing-ee-workspace");
+        let expected_store = expected_workspace.join(".ee").join("ee.db");
+        ensure(
+            value.pointer("/error/code") == Some(&serde_json::json!("workspace_store_missing"))
+                && value.pointer("/error/details/addressedWorkspacePath")
+                    == Some(&serde_json::json!(expected_workspace))
+                && value.pointer("/error/details/addressedStorePath")
+                    == Some(&serde_json::json!(expected_store))
+                && value.pointer("/error/details/storeDiscovery/outcome")
+                    == Some(&serde_json::json!("complete"))
+                && value
+                    .pointer("/error/details/storeDiscovery/nearbyStores")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(Vec::is_empty),
+            format!("isolated workspace miss contract drifted: {value}"),
+        )?;
+        let recovery = value
+            .pointer("/error/details/recovery")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("isolated workspace miss must include recovery actions")?;
+        ensure(
+            recovery.len() == 3
+                && recovery[0]["kind"] == serde_json::json!("flag")
+                && recovery[1]["kind"] == serde_json::json!("env")
+                && recovery[2]["command"]
+                    == serde_json::json!(format!(
+                        "ee init --workspace {}",
+                        expected_workspace.display()
+                    )),
+            format!("isolated workspace miss recovery ordering drifted: {recovery:?}"),
+        )?;
+        ensure(
+            !expected_workspace.exists() && !registry_path.exists(),
+            "real-binary golden must not create the addressed workspace or registry",
+        )?;
+
+        scrub_string_leaves(
+            &mut value,
+            &[(
+                isolated_root.to_string_lossy().into_owned(),
+                "<isolatedRoot>",
+            )],
+        );
+        let normalized = serde_json::to_string_pretty(&value)
+            .map_err(|error| format!("serialize normalized workspace miss: {error}"))?
+            + "\n";
+        assert_golden("agent", "context_unavailable.json", &normalized)
     }
 
     #[test]

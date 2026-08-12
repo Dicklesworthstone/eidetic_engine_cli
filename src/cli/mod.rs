@@ -36183,7 +36183,7 @@ fn resolve_cli_workspace_path(path: &Path) -> PathBuf {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
     };
-    absolute.canonicalize().unwrap_or(absolute)
+    crate::config::workspace::canonical_workspace_root_or_lexical(&absolute)
 }
 
 fn resolve_graph_export_workspace_id(
@@ -39114,10 +39114,11 @@ where
         }
     };
 
-    let workspace_path = cli.resolve_workspace();
+    let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
     let addressed_database_path = args
         .database
-        .clone()
+        .as_deref()
+        .map(resolve_cli_workspace_path)
         .unwrap_or_else(|| crate::core::orient::resolved_addressed_database_path(&workspace_path));
     if matches!(
         std::fs::symlink_metadata(&addressed_database_path),

@@ -2,13 +2,13 @@
   "schema": "ee.error.v2",
   "error": {
     "code": "workspace_store_missing",
-    "message": "Database not found at <isolatedRoot>/missing-ee-workspace/.ee/ee.db",
+    "message": "Database not found at /workspace/missing/.ee/ee.db",
     "severity": "high",
-    "repair": "Re-check --workspace addressing with --workspace <isolatedRoot>/missing-ee-workspace (looked for <isolatedRoot>/missing-ee-workspace/.ee/ee.db). Nearby-store discovery completed and found no populated stores. Only if you intended to create a NEW store here: ee init --workspace <isolatedRoot>/missing-ee-workspace",
+    "repair": "Re-check --workspace addressing with --workspace /workspace/missing (looked for /workspace/missing/.ee/ee.db). Nearby-store discovery completed and found no populated stores. Only if you intended to create a NEW store here: ee init --workspace /workspace/missing",
     "repairKind": "unknown",
     "details": {
-      "addressedStorePath": "<isolatedRoot>/missing-ee-workspace/.ee/ee.db",
-      "addressedWorkspacePath": "<isolatedRoot>/missing-ee-workspace",
+      "addressedStorePath": "/workspace/missing/.ee/ee.db",
+      "addressedWorkspacePath": "/workspace/missing",
       "storeDiscovery": {
         "outcome": "complete",
         "nearbyStores": []
@@ -26,9 +26,9 @@
           "evidence": [
             "recovery_kind_without_command"
           ],
-          "valueHint": "<isolatedRoot>/missing-ee-workspace",
+          "valueHint": "/workspace/missing",
           "flagName": "--workspace",
-          "example": "--workspace <isolatedRoot>/missing-ee-workspace"
+          "example": "--workspace /workspace/missing"
         },
         {
           "priority": 2,
@@ -43,15 +43,15 @@
             "recovery_kind_without_command"
           ],
           "envName": "EE_DATABASE_PATH",
-          "valueHint": "<isolatedRoot>/missing-ee-workspace/.ee/ee.db",
-          "example": "EE_DATABASE_PATH=<isolatedRoot>/missing-ee-workspace/.ee/ee.db"
+          "valueHint": "/workspace/missing/.ee/ee.db",
+          "example": "EE_DATABASE_PATH=/workspace/missing/.ee/ee.db"
         },
         {
           "priority": 3,
           "kind": "seed",
           "rationale": "Only initialize when this exact addressed workspace was intentionally chosen for a new store.",
           "riskClass": "mutating_local_repair",
-          "preflightCommand": "ee preflight check --cmd 'ee init --workspace <isolatedRoot>/missing-ee-workspace' --workspace . --json",
+          "preflightCommand": "ee preflight check --cmd 'ee init --workspace /workspace/missing' --workspace . --json",
           "requiresHumanApproval": false,
           "mutatesExternalState": false,
           "mutatesTrackerState": false,
@@ -63,7 +63,7 @@
           "preconditions": [
             "workspace_must_be_explicit"
           ],
-          "command": "ee init --workspace <isolatedRoot>/missing-ee-workspace"
+          "command": "ee init --workspace /workspace/missing"
         }
       ]
     }

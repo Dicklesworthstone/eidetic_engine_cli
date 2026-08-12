@@ -447,6 +447,84 @@ fn storage_database_not_found_recovery_contract() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn orient_relative_missing_workspace_reports_normalized_absolute_address() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(tempdir.path().join(".git"))
+        .map_err(|error| format!("create isolated git marker: {error}"))?;
+    let registry = tempdir.path().join("registry-must-stay-absent.db");
+    let relative_workspace = "never-created-parent/../missing-orient-sfjvq";
+    let expected_workspace = tempdir
+        .path()
+        .canonicalize()
+        .map_err(|error| format!("canonicalize isolated root: {error}"))?
+        .join("missing-orient-sfjvq");
+    let expected_store = expected_workspace.join(".ee").join("ee.db");
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    command.current_dir(tempdir.path()).args([
+        "--workspace",
+        relative_workspace,
+        "orient",
+        "relative missing workspace",
+        "--fast",
+        "--json",
+    ]);
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("EE_") {
+            command.env_remove(name);
+        }
+    }
+    let output = command
+        .env("EE_WORKSPACE_REGISTRY", &registry)
+        .output()
+        .map_err(|error| format!("run isolated orient miss: {error}"))?;
+
+    ensure(
+        output.status.code() == Some(10),
+        format!(
+            "relative orient miss must exit 10, got {:?}: stdout={} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ),
+    )?;
+    let json = stdout_json(&output, "relative orient miss")?;
+    ensure(
+        string_at(&json, "/error/details/addressedWorkspacePath", "orient")?
+            == expected_workspace.to_string_lossy(),
+        format!(
+            "orient must report the normalized absolute workspace path {}",
+            expected_workspace.display()
+        ),
+    )?;
+    ensure(
+        string_at(&json, "/error/details/addressedStorePath", "orient")?
+            == expected_store.to_string_lossy()
+            && string_at(&json, "/error/message", "orient")?
+                == format!("Database not found at {}", expected_store.display()),
+        format!(
+            "orient must report the exact normalized absolute looked-for path {}",
+            expected_store.display()
+        ),
+    )?;
+    ensure(
+        json.pointer("/error/details/storeDiscovery/outcome")
+            == Some(&serde_json::json!("complete"))
+            && json
+                .pointer("/error/details/storeDiscovery/nearbyStores")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(Vec::is_empty),
+        format!("isolated orient discovery must truthfully report a complete empty scan: {json}"),
+    )?;
+    ensure(
+        !expected_workspace.exists()
+            && !tempdir.path().join("never-created-parent").exists()
+            && !registry.exists(),
+        "orient lookup miss must not create the workspace, lexical parent, or registry",
+    )
+}
+
 /// Remember and search must preflight the exact addressed database before
 /// any create-capable open. Cover both an entirely nonexistent workspace and
 /// a pre-existing `.ee/` directory whose database is absent; neither miss may
