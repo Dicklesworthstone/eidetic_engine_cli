@@ -322,11 +322,10 @@ fn orient_fast_and_full_instances_validate_and_unknown_fields_fail() -> TestResu
     for section in ["recent", "relevant"] {
         let item = fast["fastContent"][section][0].clone();
         let mut at_limit = fast.clone();
-        at_limit["fastContent"][section] =
-            Value::Array(vec![
-                item.clone();
-                ee::core::orient::ORIENT_FAST_CONTENT_LIMIT
-            ]);
+        at_limit["fastContent"][section] = Value::Array(vec![
+            item.clone();
+            ee::core::orient::ORIENT_FAST_CONTENT_LIMIT
+        ]);
         ee::testing::validate_json_schema_instance(&at_limit, &schema)?;
 
         let mut above_limit = at_limit;
