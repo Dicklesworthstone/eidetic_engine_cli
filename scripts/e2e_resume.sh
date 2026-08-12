@@ -129,50 +129,55 @@ fi
 # decisions, one next-tagged item, and a superseded stale note -------------
 run_ee remember "Session A wrapped the parser refactor." \
     --workspace "${WS}" --level episodic --kind note --tags "session-20260801" --json
+SESSION_A_ONE_EXIT=$LAST_EXIT
 run_ee remember "Session A left the lexer half-done." \
     --workspace "${WS}" --level episodic --kind note --tags "session-20260801" --json
+SESSION_A_TWO_EXIT=$LAST_EXIT
 run_ee remember "Session B finished the lexer and started codegen." \
     --workspace "${WS}" --level episodic --kind note --tags "session-20260808" --json
+SESSION_B_EXIT=$LAST_EXIT
 run_ee remember "Session C prepared the resume handoff." \
     --workspace "${WS}" --level episodic --kind note --tags "session-20260809" --json
-run_ee remember "Next: wire codegen into the driver." \
-    --workspace "${WS}" --level episodic --kind note --tags "session-20260809,next,arc4" --json
+SESSION_C_EXIT=$LAST_EXIT
+run_ee remember "Arc 4 driver wiring remains unfinished." \
+    --workspace "${WS}" --level episodic --kind note --tags "session-20260809,arc4" --json
 STALE_OLD_EXIT=$LAST_EXIT
 STALE_OLD_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
-run_ee remember "Next: codegen driver wiring landed; next is optimization passes." \
-    --workspace "${WS}" --level semantic --kind note --tags "session-20260809,next,arc4" --json
+run_ee remember "Arc 4 driver wiring landed." \
+    --workspace "${WS}" --level semantic --kind note --tags "arc4" --json
 STALE_NEW_EXIT=$LAST_EXIT
 STALE_NEW_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
-run_ee remember "Next-only older control-tag candidate." \
-    --workspace "${WS}" --level semantic --kind note --tags "next" --json
-NEXT_ONLY_OLD_EXIT=$LAST_EXIT
-NEXT_ONLY_OLD_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
-run_ee remember "Next-only newer control-tag candidate." \
-    --workspace "${WS}" --level semantic --kind note --tags "next" --json
-NEXT_ONLY_NEW_EXIT=$LAST_EXIT
-NEXT_ONLY_NEW_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
-if [[ "${STALE_OLD_EXIT}" -eq 0 && "${STALE_NEW_EXIT}" -eq 0 \
-    && "${NEXT_ONLY_OLD_EXIT}" -eq 0 && "${NEXT_ONLY_NEW_EXIT}" -eq 0 \
-    && -n "${STALE_OLD_ID}" && -n "${STALE_NEW_ID}" \
-    && -n "${NEXT_ONLY_OLD_ID}" && -n "${NEXT_ONLY_NEW_ID}" ]]; then
+run_ee remember "Next: begin optimization passes." \
+    --workspace "${WS}" --level semantic --kind note --tags "next,optimization" --json
+NEXT_EXIT=$LAST_EXIT
+NEXT_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
+if [[ "${SESSION_A_ONE_EXIT}" -eq 0 && "${SESSION_A_TWO_EXIT}" -eq 0 \
+    && "${SESSION_B_EXIT}" -eq 0 && "${SESSION_C_EXIT}" -eq 0 \
+    && "${STALE_OLD_EXIT}" -eq 0 && "${STALE_NEW_EXIT}" -eq 0 \
+    && "${NEXT_EXIT}" -eq 0 && -n "${STALE_OLD_ID}" \
+    && -n "${STALE_NEW_ID}" && -n "${NEXT_ID}" ]]; then
     event corpus_seeded pass
 else
     event corpus_seeded fail \
-        "remember exits ${STALE_OLD_EXIT}/${STALE_NEW_EXIT}/${NEXT_ONLY_OLD_EXIT}/${NEXT_ONLY_NEW_EXIT}; ids=${STALE_OLD_ID}/${STALE_NEW_ID}/${NEXT_ONLY_OLD_ID}/${NEXT_ONLY_NEW_ID}"
+        "remember exits ${SESSION_A_ONE_EXIT}/${SESSION_A_TWO_EXIT}/${SESSION_B_EXIT}/${SESSION_C_EXIT}/${STALE_OLD_EXIT}/${STALE_NEW_EXIT}/${NEXT_EXIT}; ids=${STALE_OLD_ID}/${STALE_NEW_ID}/${NEXT_ID}"
 fi
 
 run_ee decide record "resume e2e revisit decision" --chosen "ship now" \
     --alternative "wait for perf pass" --rationale "deadline wins" \
     --revisit-by "+30d" --workspace "${WS}" --json
 DECIDE_ONE=$LAST_EXIT
+DECIDE_ONE_ID="$(jq -r '.data.decision.memoryId // empty' "${LAST_STDOUT}")"
 run_ee decide record "resume e2e second decision" --chosen "keep sqlite" \
     --alternative "switch stores" --rationale "franken-stack rule" \
     --revisit-by "+90d" --workspace "${WS}" --json
 DECIDE_TWO=$LAST_EXIT
-if [[ "${DECIDE_ONE}" -eq 0 && "${DECIDE_TWO}" -eq 0 ]]; then
+DECIDE_TWO_ID="$(jq -r '.data.decision.memoryId // empty' "${LAST_STDOUT}")"
+if [[ "${DECIDE_ONE}" -eq 0 && "${DECIDE_TWO}" -eq 0 \
+    && -n "${DECIDE_ONE_ID}" && -n "${DECIDE_TWO_ID}" ]]; then
     event decisions_recorded pass
 else
-    event decisions_recorded fail "decide exits ${DECIDE_ONE}/${DECIDE_TWO}"
+    event decisions_recorded fail \
+        "decide exits ${DECIDE_ONE}/${DECIDE_TWO}; ids=${DECIDE_ONE_ID}/${DECIDE_TWO_ID}"
 fi
 
 # --- the bundle -----------------------------------------------------------
@@ -209,17 +214,21 @@ else
 fi
 
 if jq -e '[.data.report.sessions[]?.label]
-          | length == 3
-            and index("session-20260809") != null
-            and index("session-20260808") != null
-            and index("session-20260801") != null' \
+          == ["session-20260809", "session-20260808", "session-20260801"]' \
     "${R}" >/dev/null 2>&1; then
     event three_tagged_sessions_grouped pass
 else
     event three_tagged_sessions_grouped fail "$(jq -c '[.data.report.sessions[]?.label]' "${R}" 2>/dev/null)"
 fi
 
-if jq -e '[.data.report.openLoops.revisitDecisions[]? | select(.revisitBy != null)] | length == 2' \
+if jq -e --arg decision_one "${DECIDE_ONE_ID}" --arg decision_two "${DECIDE_TWO_ID}" \
+    '(.data.report.openLoops.revisitDecisions
+      | all(.revisitBy != null))
+     and ([.data.report.openLoops.revisitDecisions[]?
+           | {memoryId, topic}] | sort_by(.memoryId))
+         == ([{memoryId: $decision_one, topic: "resume e2e revisit decision"},
+              {memoryId: $decision_two, topic: "resume e2e second decision"}]
+             | sort_by(.memoryId))' \
     "${R}" >/dev/null 2>&1; then
     event revisit_decisions_surfaced pass
 else
@@ -228,51 +237,44 @@ fi
 
 if jq -e '.data.report.openLoops.revisitDecisionsTotal == 2
         and .data.report.openLoops.revisitDecisionsTruncated == false
-        and .data.report.openLoops.taggedItemsTotal == 4
-        and .data.report.openLoops.taggedItemsTruncated == false' \
+        and (.data.report.openLoops.revisitDecisions | length) == 2
+        and .data.report.openLoops.taggedItemsTotal == 1
+        and .data.report.openLoops.taggedItemsTruncated == false
+        and (.data.report.openLoops.taggedItems | length) == 1' \
     "${R}" >/dev/null 2>&1; then
     event open_loop_totals_are_exact pass
 else
     event open_loop_totals_are_exact fail "$(jq -c '.data.report.openLoops' "${R}" 2>/dev/null | head -c 350)"
 fi
 
-if jq -e --arg stale_old "${STALE_OLD_ID}" --arg stale_new "${STALE_NEW_ID}" \
-    --arg next_only_old "${NEXT_ONLY_OLD_ID}" --arg next_only_new "${NEXT_ONLY_NEW_ID}" \
-    '[.data.report.openLoops.taggedItems[]? | select(.tags | index("next")) | .memoryId]
-     | sort == ([$stale_old, $stale_new, $next_only_old, $next_only_new] | sort)' \
+if jq -e --arg next_id "${NEXT_ID}" \
+    '.data.report.openLoops.taggedItems
+     | length == 1
+       and .[0].memoryId == $next_id
+       and .[0].content == "Next: begin optimization passes."
+       and .[0].tags == ["next", "optimization"]
+       and .[0].stale == null' \
     "${R}" >/dev/null 2>&1; then
     event next_tagged_item_surfaced pass
 else
     event next_tagged_item_surfaced fail "$(jq -c '.data.report.openLoops.taggedItems' "${R}" 2>/dev/null | head -c 250)"
 fi
 
-# The older note shares subject tag arc4 with the newer one. Its next and
-# session tags are control tags. It appears in both report projections but
-# staleCount counts its memory ID exactly once.
+# The older session note and newer semantic note share only the non-control
+# subject tag arc4. The stale item appears in the session lane only.
 if jq -e --arg stale_old "${STALE_OLD_ID}" --arg stale_new "${STALE_NEW_ID}" \
     '.data.report.staleCount == 1
      and ([.. | objects | select(.memoryId? == $stale_old and .stale? != null)]
-          | length == 2
-            and all(.[];
-                .stale.supersededBy == $stale_new
-                and .stale.sharedTags == ["arc4"]))' \
+          | length == 1
+            and .[0].selectionReason == "recent_session_member"
+            and .[0].stale.supersededBy == $stale_new
+            and .[0].stale.sharedTags == ["arc4"])
+     and ([.data.report.openLoops.taggedItems[]?
+           | select(.memoryId == $stale_old or .memoryId == $stale_new)] | length == 0)' \
     "${R}" >/dev/null 2>&1; then
     event superseded_note_carries_stale_marker pass
 else
     event superseded_note_carries_stale_marker fail "staleCount=$(jq -r '.data.report.staleCount' "${R}" 2>/dev/null); $(head -c 250 "${R}")"
-fi
-
-# Sharing only the open-loop control tag `next` never establishes subject
-# identity, even when the candidate is same-kind and strictly newer.
-if jq -e --arg next_only_old "${NEXT_ONLY_OLD_ID}" --arg next_only_new "${NEXT_ONLY_NEW_ID}" \
-    '([.. | objects | select(.memoryId? == $next_only_old)]
-      | length == 1 and all(.[]; .stale == null))
-     and ([.. | objects | select(.stale?.supersededBy? == $next_only_new)] | length == 0)' \
-    "${R}" >/dev/null 2>&1; then
-    event next_only_overlap_does_not_mark_stale pass
-else
-    event next_only_overlap_does_not_mark_stale fail \
-        "$(jq -c --arg id "${NEXT_ONLY_OLD_ID}" '[.. | objects | select(.memoryId? == $id)]' "${R}" 2>/dev/null | head -c 350)"
 fi
 
 # --- human contract: every declared section remains visible ---------------
@@ -294,9 +296,14 @@ else
     event human_declared_sections_visible fail "exit ${LAST_EXIT}; $(head -c 250 "${H}")"
 fi
 
-if grep -Fq "queued " "${H}" \
-    && grep -Fq "Next: wire codegen into the driver." "${H}" \
-    && grep -Fq "[STALE]" "${H}"; then
+if grep -Fq "resume: 5 episodic memories, 3 sessions shown, 2/2 open decisions, 1/1 queued items, 1 stale flags" "${H}" \
+    && grep -Fq "[session-20260809]" "${H}" \
+    && grep -Fq "[session-20260808]" "${H}" \
+    && grep -Fq "[session-20260801]" "${H}" \
+    && grep -Fq "decision ${DECIDE_ONE_ID}: resume e2e revisit decision (revisit " "${H}" \
+    && grep -Fq "decision ${DECIDE_TWO_ID}: resume e2e second decision (revisit " "${H}" \
+    && grep -Fq "queued ${NEXT_ID}: Next: begin optimization passes." "${H}" \
+    && grep -Fq "${STALE_OLD_ID} [STALE]: Arc 4 driver wiring remains unfinished." "${H}"; then
     event human_open_loop_and_staleness_visible pass
 else
     event human_open_loop_and_staleness_visible fail "$(head -c 500 "${H}")"
