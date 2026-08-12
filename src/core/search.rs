@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 
 use crate::config::MeshCommandMode;
 use crate::config::env_registry::{EnvVar, read};
