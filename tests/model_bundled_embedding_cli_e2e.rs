@@ -2190,13 +2190,81 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         &offline_env,
         &network_tripwire,
     )?;
-    let malformed_metadata_with_override = run_offline_registry_fallback_search(
+    let model_cache_root = workspace.xdg_data.join("ee/models");
+    let override_cache_before = model_cache_artifact_state(&model_cache_root)?;
+    let malformed_metadata_with_override = run_ee_with_env(
         &workspace,
         "registry_path_malformed_metadata_with_override",
-        query,
+        &[
+            "search",
+            query,
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--source-mode",
+            "semantic_only",
+            "--strict-source-mode",
+            "--relevance-floor",
+            "0",
+            "--json",
+        ],
         &bootstrap_env,
-        &network_tripwire,
     )?;
+    ensure_success(
+        &malformed_metadata_with_override,
+        "malformed registry with explicit model override",
+    )?;
+    ensure_response_embed_backend(
+        &malformed_metadata_with_override,
+        "malformed registry with explicit model override",
+        "neural_local",
+    )?;
+    let malformed_metadata_with_override_json = stdout_json(
+        &malformed_metadata_with_override,
+        "malformed registry with explicit model override",
+    )?;
+    ensure_eq_str(
+        malformed_metadata_with_override_json
+            .pointer("/data/metrics/sourceModeApplied")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                "malformed registry with explicit override sourceModeApplied missing".to_string()
+            })?,
+        "semantic_only",
+        "malformed registry with explicit override applied source mode",
+    )?;
+    ensure_eq_bool(
+        malformed_metadata_with_override_json
+            .pointer("/data/metrics/fallbackApplied")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                "malformed registry with explicit override fallbackApplied missing".to_string()
+            })?,
+        false,
+        "malformed registry with explicit override source-mode fallback",
+    )?;
+    ensure_u64_at_least(
+        malformed_metadata_with_override_json
+            .pointer("/data/metrics/fastScoreCount")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                "malformed registry with explicit override fastScoreCount missing".to_string()
+            })?,
+        1,
+        "malformed registry with explicit override neural score count",
+    )?;
+    ensure_degraded_code_count(
+        &malformed_metadata_with_override,
+        "malformed registry with explicit model override",
+        "embed_model_unavailable",
+        0,
+    )?;
+    network_tripwire.assert_unused()?;
+    let override_cache_after = model_cache_artifact_state(&model_cache_root)?;
+    if override_cache_after != override_cache_before {
+        return Err(format!(
+            "explicit model override mutated the model cache while bypassing a malformed registry row: before={override_cache_before:?} after={override_cache_after:?}"
+        ));
+    }
     let malformed_metadata_pack = run_offline_registry_fallback_surface(
         &workspace,
         "registry_path_malformed_metadata_pack",
