@@ -604,21 +604,38 @@ pub fn storeless_workspace_repair(database_path: &std::path::Path) -> String {
         database_parent
     };
     let nearby = workspace_dir.as_deref().map(|dir| {
-        crate::core::orient::discover_nearby_stores(
+        crate::core::orient::discover_nearby_stores_for_database(
             dir,
+            database_path,
             std::time::Duration::from_millis(crate::core::orient::NEARBY_STORE_SCAN_BUDGET_MS),
         )
     });
     let looked_for = database_path.display();
     if let Some(scan) = nearby
-        && let Some(best) = scan.stores.first()
+        && let Some((best, additional)) = scan.stores.split_first()
     {
-        return format!(
-            "Re-check --workspace addressing (looked for {looked_for}); a populated store exists at {} ({} docs) — retarget with --workspace {}. Only if you intended to create a NEW store here: ee init --workspace .",
+        let mut repair = format!(
+            "Re-check --workspace addressing (looked for {looked_for}); a populated store exists at {} ({} docs) — retarget with --workspace {}",
             best.workspace_root,
             best.documents,
             shell_quote_repair_arg(&best.workspace_root),
         );
+        if !additional.is_empty() {
+            repair.push_str(". Other nearby populated stores:");
+            for (index, store) in additional.iter().enumerate() {
+                if index > 0 {
+                    repair.push(';');
+                }
+                repair.push_str(&format!(
+                    " {} ({} docs) — retarget with --workspace {}",
+                    store.workspace_root,
+                    store.documents,
+                    shell_quote_repair_arg(&store.workspace_root),
+                ));
+            }
+        }
+        repair.push_str(". Only if you intended to create a NEW store here: ee init --workspace .");
+        return repair;
     }
     format!(
         "Re-check --workspace addressing (looked for {looked_for}). Only if you intended to create a NEW store here: ee init --workspace ."

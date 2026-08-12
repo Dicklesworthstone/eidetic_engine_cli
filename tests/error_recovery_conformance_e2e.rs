@@ -998,6 +998,140 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
     Ok(())
 }
 
+/// A custom missing database address must remain the exact excluded identity,
+/// while every bounded nearby populated store is reported in rank order with
+/// an independently shell-safe retarget and conditional initialization last.
+#[test]
+fn storeless_custom_address_reports_all_ranked_nearby_stores() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let root = tempdir.path().join("multi nearby sfjvq");
+    let best = root.join("best store's sfjvq");
+    let second = root.join("second store sfjvq");
+    let missing_database = root.join("missing addressed store.db");
+    let registry = tempdir.path().join("multi-nearby-registry.db");
+    std::fs::create_dir_all(root.join(".git")).map_err(|error| error.to_string())?;
+
+    for store in [&best, &second] {
+        let init = run_ee_with_registry(
+            &[
+                "init".to_owned(),
+                "--workspace".to_owned(),
+                store.to_string_lossy().to_string(),
+                "--json".to_owned(),
+            ],
+            &registry,
+        )?;
+        ensure(
+            init.status.success(),
+            format!(
+                "init of nearby store {} failed: {}",
+                store.display(),
+                String::from_utf8_lossy(&init.stdout)
+            ),
+        )?;
+    }
+
+    for content in ["best nearby fact one", "best nearby fact two"] {
+        let remember = run_ee_with_registry(
+            &[
+                "--workspace".to_owned(),
+                best.to_string_lossy().to_string(),
+                "remember".to_owned(),
+                content.to_owned(),
+                "--json".to_owned(),
+            ],
+            &registry,
+        )?;
+        ensure(
+            remember.status.success(),
+            format!(
+                "seeding best nearby store failed: {}",
+                String::from_utf8_lossy(&remember.stdout)
+            ),
+        )?;
+    }
+    let remember_second = run_ee_with_registry(
+        &[
+            "--workspace".to_owned(),
+            second.to_string_lossy().to_string(),
+            "remember".to_owned(),
+            "second nearby fact".to_owned(),
+            "--json".to_owned(),
+        ],
+        &registry,
+    )?;
+    ensure(
+        remember_second.status.success(),
+        format!(
+            "seeding second nearby store failed: {}",
+            String::from_utf8_lossy(&remember_second.stdout)
+        ),
+    )?;
+
+    let miss = run_ee_with_registry(
+        &[
+            "--workspace".to_owned(),
+            root.to_string_lossy().to_string(),
+            "search".to_owned(),
+            "nearby facts".to_owned(),
+            "--database".to_owned(),
+            missing_database.to_string_lossy().to_string(),
+            "--json".to_owned(),
+        ],
+        &registry,
+    )?;
+    ensure(
+        miss.status.code() == Some(10),
+        format!(
+            "custom storeless address must exit 10, got {:?}",
+            miss.status.code()
+        ),
+    )?;
+    let json = stdout_json(&miss, "custom storeless address")?;
+    ensure(
+        string_at(&json, "/error/message", "custom storeless address")?
+            == format!("Database not found at {}", missing_database.display()),
+        "custom storeless miss must name the exact addressed database".to_owned(),
+    )?;
+
+    let canonical_best = best.canonicalize().map_err(|error| error.to_string())?;
+    let canonical_second = second.canonicalize().map_err(|error| error.to_string())?;
+    let quoted_best = format!(
+        "'{}'",
+        canonical_best.to_string_lossy().replace('\'', "'\\''")
+    );
+    let quoted_second = format!(
+        "'{}'",
+        canonical_second.to_string_lossy().replace('\'', "'\\''")
+    );
+    let repair = string_at(&json, "/error/repair", "custom storeless address")?;
+    let best_at = repair
+        .find(canonical_best.to_string_lossy().as_ref())
+        .ok_or_else(|| format!("best nearby store missing from repair: {repair}"))?;
+    let second_at = repair
+        .find(canonical_second.to_string_lossy().as_ref())
+        .ok_or_else(|| format!("second nearby store missing from repair: {repair}"))?;
+    let init_at = repair
+        .find("Only if you intended to create a NEW store here: ee init --workspace .")
+        .ok_or_else(|| format!("conditional init missing from repair: {repair}"))?;
+    ensure(
+        repair.contains(&format!("retarget with --workspace {quoted_best}"))
+            && repair.contains(&format!("retarget with --workspace {quoted_second}"))
+            && best_at < second_at
+            && second_at < init_at
+            && repair.ends_with(
+                "Only if you intended to create a NEW store here: ee init --workspace .",
+            ),
+        format!(
+            "all nearby stores must be ranked, shell-quoted, and precede conditional init: {repair}"
+        ),
+    )?;
+    ensure(
+        !missing_database.exists(),
+        "custom storeless search must not create the addressed database".to_owned(),
+    )
+}
+
 /// bd-workspace-miss-init-suggestion-sfjvq quoting follow-up: when the
 /// nearby populated store lives at a path with spaces AND an apostrophe,
 /// the storeless repair hint must shell-quote (and escape) its retarget
@@ -1959,19 +2093,25 @@ fn ordinary_storage_failure_keeps_exit_three_and_init_preserves_agent_docs() -> 
         .map_err(|error| error.to_string())?;
     std::fs::write(docs_root.join("CLAUDE.md"), claude_sentinel)
         .map_err(|error| error.to_string())?;
-    let init = run_ee(&[
-        "init".to_owned(),
-        "--workspace".to_owned(),
-        docs_root.to_string_lossy().to_string(),
-        "--json".to_owned(),
-    ])?;
-    ensure(
-        init.status.success(),
-        format!(
-            "init beside existing agent docs must succeed: {}",
-            String::from_utf8_lossy(&init.stdout)
-        ),
-    )?;
+    for extra in [None, Some("--force")] {
+        let mut args = vec![
+            "init".to_owned(),
+            "--workspace".to_owned(),
+            docs_root.to_string_lossy().to_string(),
+            "--json".to_owned(),
+        ];
+        if let Some(flag) = extra {
+            args.push(flag.to_owned());
+        }
+        let init = run_ee(&args)?;
+        ensure(
+            init.status.success(),
+            format!(
+                "init beside existing agent docs must succeed with extra flag {extra:?}: {}",
+                String::from_utf8_lossy(&init.stdout)
+            ),
+        )?;
+    }
     let agents_after =
         std::fs::read_to_string(docs_root.join("AGENTS.md")).map_err(|error| error.to_string())?;
     let claude_after =
