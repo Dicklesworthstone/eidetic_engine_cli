@@ -7105,27 +7105,33 @@ ON CONFLICT(workspace_id) DO UPDATE SET
 /// V084: expand persisted pack profiles to the complete canonical profile set.
 ///
 /// SQLite cannot alter a CHECK constraint in place. All four tables with an
-/// inbound foreign key to `pack_records` are copied into FK-free temporary
-/// snapshots and removed before the parent rebuild, then recreated and restored
-/// in the same migration transaction. This avoids ALTER TABLE RENAME retargeting
-/// child FKs to the legacy table and avoids ON DELETE CASCADE data loss.
+/// inbound foreign key to `pack_records` are copied into FK-free
+/// transaction-scoped snapshot tables and removed before the parent rebuild,
+/// then recreated and restored in the same migration transaction. The snapshots
+/// intentionally live in the main schema: the pinned FrankenSQLite generation
+/// does not expose a TEMP table created earlier in this multi-statement migration
+/// batch to a later restore statement. Transactional DDL still guarantees that a
+/// failed or interrupted migration leaves neither the rebuild nor the snapshots
+/// behind.
+/// This avoids ALTER TABLE RENAME retargeting child FKs to the legacy table and
+/// avoids ON DELETE CASCADE data loss.
 pub const V084_PACK_RECORD_PROFILE_DOMAIN: Migration = Migration::new(
     84,
     "pack_record_profile_domain",
     r#"
-CREATE TEMP TABLE v084_pack_items AS
+CREATE TABLE v084_pack_items AS
 SELECT pack_id, memory_id, rank, section, estimated_tokens, relevance, utility,
        why, diversity_key, provenance_json, trust_class, trust_subclass
 FROM pack_items;
-CREATE TEMP TABLE v084_pack_omissions AS
+CREATE TABLE v084_pack_omissions AS
 SELECT pack_id, memory_id, estimated_tokens, reason
 FROM pack_omissions;
-CREATE TEMP TABLE v084_pack_candidate_impressions AS
+CREATE TABLE v084_pack_candidate_impressions AS
 SELECT pack_id, memory_id, workspace_id, query_hash, lens_hash, rank, section,
        token_estimate, selected, omission_reason, db_generation,
        index_generation, graph_generation, created_at
 FROM pack_candidate_impressions;
-CREATE TEMP TABLE v084_pack_baselines AS
+CREATE TABLE v084_pack_baselines AS
 SELECT workspace_id, agent_name, task_key, pack_id, pack_hash, created_at
 FROM pack_baselines;
 
@@ -7273,12 +7279,12 @@ FROM v084_pack_baselines;
 CREATE INDEX pack_baselines_resolution
     ON pack_baselines(workspace_id, agent_name, created_at);
 
-DROP TABLE temp.v084_pack_items;
-DROP TABLE temp.v084_pack_omissions;
-DROP TABLE temp.v084_pack_candidate_impressions;
-DROP TABLE temp.v084_pack_baselines;
+DROP TABLE v084_pack_items;
+DROP TABLE v084_pack_omissions;
+DROP TABLE v084_pack_candidate_impressions;
+DROP TABLE v084_pack_baselines;
 "#,
-    "blake3:v084_pack_record_profile_domain_2026_07_11",
+    "blake3:v084_pack_record_profile_domain_main_snapshots_2026_08_12",
 );
 
 /// V085: Fail-closed evidence security posture and workspace integrity.
