@@ -155,6 +155,7 @@ pub struct DaemonResponseError {
 pub(crate) struct DaemonResponseDelivery {
     workspace_id: String,
     search_advisory_token: u64,
+    search_large_gap_capacity_busy: bool,
 }
 
 impl DaemonResponseDelivery {
@@ -166,6 +167,11 @@ impl DaemonResponseDelivery {
     #[must_use]
     pub(crate) const fn search_advisory_token(&self) -> u64 {
         self.search_advisory_token
+    }
+
+    #[must_use]
+    pub(crate) const fn search_large_gap_capacity_busy(&self) -> bool {
+        self.search_large_gap_capacity_busy
     }
 }
 
@@ -310,10 +316,12 @@ impl DaemonResponse {
         mut self,
         workspace_id: impl Into<String>,
         search_advisory_token: u64,
+        search_large_gap_capacity_busy: bool,
     ) -> Self {
         self.delivery = Some(DaemonResponseDelivery {
             workspace_id: workspace_id.into(),
             search_advisory_token,
+            search_large_gap_capacity_busy,
         });
         self
     }
@@ -555,11 +563,12 @@ mod tests {
             Some("workspace-delivery-test".to_owned()),
             serde_json::json!({"success": true}),
         )
-        .with_search_advisory_delivery("workspace-delivery-test", 41);
+        .with_search_advisory_delivery("workspace-delivery-test", 41, true);
 
         let encoded = serde_json::to_value(&response).expect("response must serialize");
         assert!(encoded.get("delivery").is_none());
         assert!(encoded.get("search_advisory_token").is_none());
+        assert!(encoded.get("search_large_gap_capacity_busy").is_none());
 
         let decoded: DaemonResponse =
             serde_json::from_value(encoded).expect("wire response must deserialize");

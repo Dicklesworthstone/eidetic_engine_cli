@@ -884,7 +884,35 @@ struct SearchAdvisoryObservation {
 }
 
 const DEFAULT_SEARCH_ADVISORY_WORKSPACE: &str = "process-default";
-const MAX_SEARCH_ADVISORY_WORKSPACES: usize = 64;
+pub(crate) const MAX_SEARCH_ADVISORY_WORKSPACES: usize = 64;
+const MAX_SEARCH_ADVISORY_CAPACITY_BUSY_DELIVERIES: usize = 64;
+
+/// Result of consulting the bounded transient-advisory ledger.
+///
+/// `CapacityBusy` is deliberately distinct from `Suppress`: the advisory must
+/// remain on the response while every tracked workspace has an in-flight
+/// delivery reservation. Socket settlement can then retry admission after a
+/// reservation is released without ever turning capacity pressure into silent
+/// warning loss.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SearchAdvisoryEmission {
+    Emit,
+    Suppress,
+    CapacityBusy,
+}
+
+impl SearchAdvisoryEmission {
+    #[must_use]
+    pub(crate) const fn should_emit(self) -> bool {
+        !matches!(self, Self::Suppress)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SearchAdvisorySettlement {
+    Complete,
+    RetryCapacityBusy,
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct SearchAdvisoryPermanentState {
@@ -908,6 +936,7 @@ pub(crate) struct SearchAdvisoryDeliveryReservation {
     workspace_id: String,
     token: u64,
     emitted: bool,
+    large_gap_capacity_busy: bool,
 }
 
 impl SearchAdvisoryDeliveryReservation {
@@ -925,6 +954,11 @@ impl SearchAdvisoryDeliveryReservation {
     pub(crate) const fn emitted(&self) -> bool {
         self.emitted
     }
+
+    #[must_use]
+    pub(crate) const fn large_gap_capacity_busy(&self) -> bool {
+        self.large_gap_capacity_busy
+    }
 }
 
 /// Process-lifetime permanent-advisory ledger plus bounded, workspace-
@@ -941,6 +975,7 @@ pub struct SearchAdvisorySession {
     permanent_occurrences: BTreeMap<SearchAdvisoryIdentity, SearchAdvisoryPermanentState>,
     permanent_suppressed_count: u64,
     workspaces: BTreeMap<String, SearchAdvisoryWorkspaceState>,
+    capacity_busy_deliveries: BTreeMap<u64, String>,
     observation_clock: u64,
     delivery_clock: u64,
 }
@@ -980,6 +1015,7 @@ impl SearchAdvisorySession {
                 .workspaces
                 .values()
                 .any(|state| state.large_gap_reserved_delivery == Some(token))
+            || self.capacity_busy_deliveries.contains_key(&token)
     }
 
     fn next_delivery_token(&mut self) -> u64 {
@@ -999,6 +1035,7 @@ impl SearchAdvisorySession {
             workspace_id: workspace_id.to_owned(),
             token: self.next_delivery_token(),
             emitted: false,
+            large_gap_capacity_busy: false,
         }
     }
 
@@ -1060,7 +1097,11 @@ impl SearchAdvisorySession {
         // that was already delivered stays consumed for this process lifetime.
     }
 
-    pub(crate) fn emit_large_gap_while_active(&mut self, workspace_id: &str, active: bool) -> bool {
+    pub(crate) fn emit_large_gap_while_active(
+        &mut self,
+        workspace_id: &str,
+        active: bool,
+    ) -> SearchAdvisoryEmission {
         self.emit_large_gap_while_active_inner(workspace_id, active, None)
     }
 
@@ -1069,7 +1110,7 @@ impl SearchAdvisorySession {
         workspace_id: &str,
         active: bool,
         reservation: &mut SearchAdvisoryDeliveryReservation,
-    ) -> bool {
+    ) -> SearchAdvisoryEmission {
         self.emit_large_gap_while_active_inner(workspace_id, active, Some(reservation))
     }
 
@@ -1078,17 +1119,30 @@ impl SearchAdvisorySession {
         workspace_id: &str,
         active: bool,
         reservation: Option<&mut SearchAdvisoryDeliveryReservation>,
-    ) -> bool {
+    ) -> SearchAdvisoryEmission {
         if !active {
+            self.capacity_busy_deliveries
+                .retain(|_, pending_workspace_id| pending_workspace_id != workspace_id);
             if let Some(state) = self.workspaces.get_mut(workspace_id) {
                 state.large_gap_occurrence_count = 0;
                 state.large_gap_delivered = false;
                 state.large_gap_reserved_delivery = None;
             }
-            return false;
+            return SearchAdvisoryEmission::Suppress;
         }
         let Some(state) = self.workspace_mut(workspace_id) else {
-            return false;
+            if let Some(reservation) = reservation {
+                debug_assert_eq!(reservation.workspace_id, workspace_id);
+                reservation.emitted = true;
+                reservation.large_gap_capacity_busy = true;
+                if self.capacity_busy_deliveries.len()
+                    < MAX_SEARCH_ADVISORY_CAPACITY_BUSY_DELIVERIES
+                {
+                    self.capacity_busy_deliveries
+                        .insert(reservation.token, workspace_id.to_owned());
+                }
+            }
+            return SearchAdvisoryEmission::CapacityBusy;
         };
         state.large_gap_occurrence_count = state.large_gap_occurrence_count.saturating_add(1);
         let emitted = !state.large_gap_delivered && state.large_gap_reserved_delivery.is_none();
@@ -1101,7 +1155,11 @@ impl SearchAdvisorySession {
                 state.large_gap_delivered = true;
             }
         }
-        emitted
+        if emitted {
+            SearchAdvisoryEmission::Emit
+        } else {
+            SearchAdvisoryEmission::Suppress
+        }
     }
 
     fn suppressed_count(&self, workspace_id: &str) -> u64 {
@@ -1109,7 +1167,13 @@ impl SearchAdvisorySession {
         self.permanent_suppressed_count
     }
 
-    pub(crate) fn settle_delivery(&mut self, workspace_id: &str, token: u64, delivered: bool) {
+    pub(crate) fn settle_delivery(
+        &mut self,
+        workspace_id: &str,
+        token: u64,
+        delivered: bool,
+        large_gap_capacity_busy: bool,
+    ) -> SearchAdvisorySettlement {
         for entry in self.permanent_occurrences.values_mut() {
             if entry.reserved_delivery == Some(token) {
                 entry.reserved_delivery = None;
@@ -1126,6 +1190,33 @@ impl SearchAdvisorySession {
                 state.large_gap_delivered = true;
             }
         }
+        if large_gap_capacity_busy && !delivered {
+            self.capacity_busy_deliveries.remove(&token);
+        }
+        if delivered
+            && large_gap_capacity_busy
+            && self
+                .capacity_busy_deliveries
+                .get(&token)
+                .is_some_and(|pending_workspace_id| pending_workspace_id == workspace_id)
+        {
+            if self.workspace_mut(workspace_id).is_none() {
+                return SearchAdvisorySettlement::RetryCapacityBusy;
+            }
+            self.capacity_busy_deliveries.remove(&token);
+            let Some(state) = self.workspaces.get_mut(workspace_id) else {
+                return SearchAdvisorySettlement::RetryCapacityBusy;
+            };
+            state.large_gap_occurrence_count = state.large_gap_occurrence_count.saturating_add(1);
+            state.large_gap_delivered = true;
+            state.large_gap_reserved_delivery = None;
+        }
+        SearchAdvisorySettlement::Complete
+    }
+
+    #[must_use]
+    pub(crate) fn tracked_workspace_count(&self) -> usize {
+        self.workspaces.len()
     }
 }
 
@@ -3108,7 +3199,8 @@ fn search_degraded_data_json_with_advisory_session_inner(
             reservation,
         ),
         None => session.emit_large_gap_while_active(workspace_id, has_large_gap),
-    };
+    }
+    .should_emit();
     aggregated.retain(|entry| {
         let Some(code) = entry.get("code").and_then(serde_json::Value::as_str) else {
             return true;
@@ -18276,11 +18368,25 @@ mod tests {
             false,
         );
         first.rerank_configured_mode = crate::config::SearchRerankMode::Off;
+        first.index_freshness = Some(SearchIndexFreshness {
+            stale: true,
+            db_generation: Some(102),
+            index_generation: Some(1),
+            generation_gap: Some(101),
+            large_gap: true,
+        });
         let mut changed_generation = first.clone();
         changed_generation.degraded = vec![
             SearchDegradation::stale_index(Some(108), Some(2)),
             SearchDegradation::large_index_gap(108, 2),
         ];
+        changed_generation.index_freshness = Some(SearchIndexFreshness {
+            stale: true,
+            db_generation: Some(108),
+            index_generation: Some(2),
+            generation_gap: Some(106),
+            large_gap: true,
+        });
         let mut session = SearchAdvisorySession::default();
 
         let first_json = first.data_json_with_advisory_session(&mut session);
@@ -18298,8 +18404,12 @@ mod tests {
                 .iter()
                 .any(|entry| entry["code"] == "search_index_large_gap")
         );
-        assert_eq!(repeated_json["degraded"].as_array().map(Vec::len), Some(1));
-        assert_eq!(repeated_json["degraded"][0]["code"], "search_index_stale");
+        assert_eq!(repeated_json["degraded"], serde_json::json!([]));
+        assert_eq!(repeated_json["indexFreshness"]["stale"], true);
+        assert_eq!(repeated_json["indexFreshness"]["dbGeneration"], 108);
+        assert_eq!(repeated_json["indexFreshness"]["indexGeneration"], 2);
+        assert_eq!(repeated_json["indexFreshness"]["generationGap"], 106);
+        assert_eq!(repeated_json["indexFreshness"]["largeGap"], true);
     }
 
     #[test]
@@ -18476,42 +18586,134 @@ mod tests {
     }
 
     #[test]
-    fn advisory_session_defers_workspace_tracking_when_every_partition_is_reserved() {
+    fn advisory_session_fails_open_and_retries_when_every_partition_is_reserved() {
         let mut session = SearchAdvisorySession::default();
         let mut reservations = Vec::new();
 
         for index in 0..MAX_SEARCH_ADVISORY_WORKSPACES {
             let workspace_id = format!("reserved-workspace-{index:03}");
             let mut reservation = session.reserve_delivery(&workspace_id);
-            assert!(session.emit_large_gap_while_active_for_delivery(
-                &workspace_id,
-                true,
-                &mut reservation,
-            ));
+            assert_eq!(
+                session.emit_large_gap_while_active_for_delivery(
+                    &workspace_id,
+                    true,
+                    &mut reservation,
+                ),
+                SearchAdvisoryEmission::Emit
+            );
             reservations.push(reservation);
         }
         assert_eq!(session.workspaces.len(), MAX_SEARCH_ADVISORY_WORKSPACES);
 
         let overflow_workspace = "reserved-workspace-overflow";
         let mut overflow = session.reserve_delivery(overflow_workspace);
-        assert!(!session.emit_large_gap_while_active_for_delivery(
-            overflow_workspace,
-            true,
-            &mut overflow,
-        ));
+        assert_eq!(
+            session.emit_large_gap_while_active_for_delivery(
+                overflow_workspace,
+                true,
+                &mut overflow,
+            ),
+            SearchAdvisoryEmission::CapacityBusy
+        );
         assert_eq!(session.workspaces.len(), MAX_SEARCH_ADVISORY_WORKSPACES);
-        assert!(!overflow.emitted());
+        assert!(overflow.emitted());
+        assert!(overflow.large_gap_capacity_busy());
+        assert_eq!(
+            session.settle_delivery(
+                overflow.workspace_id(),
+                overflow.token(),
+                true,
+                overflow.large_gap_capacity_busy(),
+            ),
+            SearchAdvisorySettlement::RetryCapacityBusy
+        );
 
         let released = reservations.pop().expect("one reservation to release");
-        session.settle_delivery(released.workspace_id(), released.token(), true);
-        let mut retry = session.reserve_delivery(overflow_workspace);
-        assert!(session.emit_large_gap_while_active_for_delivery(
-            overflow_workspace,
-            true,
-            &mut retry,
-        ));
+        assert_eq!(
+            session.settle_delivery(
+                released.workspace_id(),
+                released.token(),
+                true,
+                released.large_gap_capacity_busy(),
+            ),
+            SearchAdvisorySettlement::Complete
+        );
+        assert_eq!(
+            session.settle_delivery(
+                overflow.workspace_id(),
+                overflow.token(),
+                true,
+                overflow.large_gap_capacity_busy(),
+            ),
+            SearchAdvisorySettlement::Complete
+        );
         assert_eq!(session.workspaces.len(), MAX_SEARCH_ADVISORY_WORKSPACES);
-        assert!(retry.emitted());
+        assert!(session.workspaces.contains_key(overflow_workspace));
+        assert_eq!(
+            session.emit_large_gap_while_active(overflow_workspace, true),
+            SearchAdvisoryEmission::Suppress
+        );
+    }
+
+    #[test]
+    fn ready_observation_invalidates_capacity_busy_delivery_before_settlement() {
+        let mut session = SearchAdvisorySession::default();
+        let mut reservations = Vec::new();
+        for index in 0..MAX_SEARCH_ADVISORY_WORKSPACES {
+            let workspace_id = format!("ready-race-workspace-{index:03}");
+            let mut reservation = session.reserve_delivery(&workspace_id);
+            assert_eq!(
+                session.emit_large_gap_while_active_for_delivery(
+                    &workspace_id,
+                    true,
+                    &mut reservation,
+                ),
+                SearchAdvisoryEmission::Emit
+            );
+            reservations.push(reservation);
+        }
+
+        let overflow_workspace = "ready-race-overflow";
+        let mut overflow = session.reserve_delivery(overflow_workspace);
+        assert_eq!(
+            session.emit_large_gap_while_active_for_delivery(
+                overflow_workspace,
+                true,
+                &mut overflow,
+            ),
+            SearchAdvisoryEmission::CapacityBusy
+        );
+        assert_eq!(session.capacity_busy_deliveries.len(), 1);
+        assert_eq!(
+            session.emit_large_gap_while_active(overflow_workspace, false),
+            SearchAdvisoryEmission::Suppress
+        );
+        assert!(session.capacity_busy_deliveries.is_empty());
+        assert_eq!(
+            session.settle_delivery(
+                overflow.workspace_id(),
+                overflow.token(),
+                true,
+                overflow.large_gap_capacity_busy(),
+            ),
+            SearchAdvisorySettlement::Complete
+        );
+        assert!(!session.workspaces.contains_key(overflow_workspace));
+
+        let released = reservations.pop().expect("one reservation to release");
+        assert_eq!(
+            session.settle_delivery(
+                released.workspace_id(),
+                released.token(),
+                true,
+                released.large_gap_capacity_busy(),
+            ),
+            SearchAdvisorySettlement::Complete
+        );
+        assert_eq!(
+            session.emit_large_gap_while_active(overflow_workspace, true),
+            SearchAdvisoryEmission::Emit
+        );
     }
 
     #[test]

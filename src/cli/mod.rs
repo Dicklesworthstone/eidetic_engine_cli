@@ -239,11 +239,11 @@ use crate::core::rule::{
     protect_rule, show_rule, update_rule,
 };
 use crate::core::search::{
-    FamilyRetrievalOptions, SearchDedupMode, SearchDegradation, SearchError, SearchFamilyReport,
-    SearchOptions, SearchReport, SearchScoreRecalibrationReport, SearchSourceMode, SimilarError,
-    SimilarOptions, SimilarReport, TypedMemoryFieldFilter, elapsed_timing_json,
-    normalize_memory_kind_filter, recalibrate_search_score_calibration, run_diag_search,
-    run_family_retrieval, run_search, run_search_with_filters,
+    FamilyRetrievalOptions, SearchAdvisorySession, SearchDedupMode, SearchDegradation, SearchError,
+    SearchFamilyReport, SearchOptions, SearchReport, SearchScoreRecalibrationReport,
+    SearchSourceMode, SimilarError, SimilarOptions, SimilarReport, TypedMemoryFieldFilter,
+    elapsed_timing_json, normalize_memory_kind_filter, recalibrate_search_score_calibration,
+    run_diag_search, run_family_retrieval, run_search, run_search_with_filters,
     run_search_with_performance_and_filters, run_similar,
 };
 use crate::core::sentinel::{SentinelCheckContext, observe_sentinel, observe_sentinel_explicit};
@@ -12823,7 +12823,42 @@ pub fn run_from_env() -> ProcessExitCode {
     run(std::env::args_os(), &mut stdout, &mut stderr)
 }
 
+/// Reusable owner for CLI calls made inside one long-lived process.
+///
+/// Standalone `ee` execution constructs one owner and invokes it once. An
+/// embedder that issues multiple CLI queries in the same process retains this
+/// value so process-scoped advisories are not repeated between renders.
+#[derive(Debug, Default)]
+pub struct CliProcess {
+    search_advisory_session: SearchAdvisorySession,
+}
+
+impl CliProcess {
+    pub fn run<I, W, E>(&mut self, args: I, stdout: &mut W, stderr: &mut E) -> ProcessExitCode
+    where
+        I: IntoIterator<Item = OsString>,
+        W: Write,
+        E: Write,
+    {
+        run_in_process(self, args, stdout, stderr)
+    }
+}
+
 pub fn run<I, W, E>(args: I, stdout: &mut W, stderr: &mut E) -> ProcessExitCode
+where
+    I: IntoIterator<Item = OsString>,
+    W: Write,
+    E: Write,
+{
+    CliProcess::default().run(args, stdout, stderr)
+}
+
+fn run_in_process<I, W, E>(
+    process: &mut CliProcess,
+    args: I,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
 where
     I: IntoIterator<Item = OsString>,
     W: Write,
@@ -14375,7 +14410,7 @@ where
         }
         Some(Command::Impact(ref args)) => handle_impact(&cli, args, stdout, stderr),
         Some(Command::Search(ref args)) => {
-            handle_search(&cli, args, invocation_started, stdout, stderr)
+            handle_search(process, &cli, args, invocation_started, stdout, stderr)
         }
         Some(Command::Similar(ref args)) => handle_similar(&cli, args, stdout, stderr),
         Some(Command::Sentinel(ref command)) => handle_sentinel(&cli, command, stdout, stderr),
@@ -46774,6 +46809,7 @@ where
 }
 
 fn handle_search<W, E>(
+    process: &mut CliProcess,
     cli: &Cli,
     args: &SearchArgs,
     invocation_started: Instant,
@@ -46810,6 +46846,7 @@ where
     let mut command_timings = Vec::new();
     let workspace_start = Instant::now();
     let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
+    let advisory_workspace_id = crate::core::workspace::stable_workspace_id(&workspace_path);
     command_timings.push(cli_performance_timing_json(
         "command::workspaceResolve",
         workspace_start.elapsed(),
@@ -47021,18 +47058,25 @@ where
                 }
                 output::Renderer::Toon => write_stdout(
                     stdout,
-                    &(format_search_toon_with_mesh(&report, args.mesh_mode) + "\n"),
+                    &(format_search_toon_with_mesh_in_process(
+                        &report,
+                        args.mesh_mode,
+                        &mut process.search_advisory_session,
+                        &advisory_workspace_id,
+                    ) + "\n"),
                 ),
                 output::Renderer::Json
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact
                 | output::Renderer::Hook => write_stdout(
                     stdout,
-                    &(format_search_json_with_mesh_and_recalibration(
+                    &(format_search_json_with_mesh_and_recalibration_in_process(
                         &report,
                         args.mesh_mode,
                         recalibration.as_ref(),
                         args.explain.then_some("data.results"),
+                        &mut process.search_advisory_session,
+                        &advisory_workspace_id,
                     ) + "\n"),
                 ),
             }
@@ -47149,7 +47193,39 @@ fn format_search_json_with_mesh_and_recalibration(
     recalibration: Option<&SearchScoreRecalibrationReport>,
     result_path_hint: Option<&'static str>,
 ) -> String {
-    let mut data = report.data_json();
+    format_search_json_data_with_mesh_and_recalibration(
+        report,
+        report.data_json(),
+        mesh_mode,
+        recalibration,
+        result_path_hint,
+    )
+}
+
+fn format_search_json_with_mesh_and_recalibration_in_process(
+    report: &SearchReport,
+    mesh_mode: MeshCommandMode,
+    recalibration: Option<&SearchScoreRecalibrationReport>,
+    result_path_hint: Option<&'static str>,
+    advisory_session: &mut SearchAdvisorySession,
+    workspace_id: &str,
+) -> String {
+    format_search_json_data_with_mesh_and_recalibration(
+        report,
+        report.data_json_with_advisory_session_for_workspace(advisory_session, workspace_id),
+        mesh_mode,
+        recalibration,
+        result_path_hint,
+    )
+}
+
+fn format_search_json_data_with_mesh_and_recalibration(
+    report: &SearchReport,
+    mut data: serde_json::Value,
+    mesh_mode: MeshCommandMode,
+    recalibration: Option<&SearchScoreRecalibrationReport>,
+    result_path_hint: Option<&'static str>,
+) -> String {
     if let Some(result_path) = result_path_hint
         && let Some(data_object) = data.as_object_mut()
     {
@@ -47185,6 +47261,22 @@ fn format_search_toon(report: &SearchReport) -> String {
 
 fn format_search_toon_with_mesh(report: &SearchReport, mesh_mode: MeshCommandMode) -> String {
     output::render_toon_from_json(&format_search_json_with_mesh(report, mesh_mode))
+}
+
+fn format_search_toon_with_mesh_in_process(
+    report: &SearchReport,
+    mesh_mode: MeshCommandMode,
+    advisory_session: &mut SearchAdvisorySession,
+    workspace_id: &str,
+) -> String {
+    output::render_toon_from_json(&format_search_json_with_mesh_and_recalibration_in_process(
+        report,
+        mesh_mode,
+        None,
+        None,
+        advisory_session,
+        workspace_id,
+    ))
 }
 
 const PACK_LEDGER_MISSING_CODE: &str = "pack_ledger_missing";
@@ -67036,19 +67128,19 @@ mod tests {
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, AttestCommand, AuditCommand, BackupCommand,
         BackupRedaction, BootstrapCommand, BootstrapDocGlob,
-        COORDINATION_FALLBACK_INGEST_SCHEMA_V1, COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command,
-        ContextPackError, ContextPackOptions, ContextPackOutputOptions, ContextPackProfile,
-        CurateCommand, DAEMON_SEARCH_FALLBACK_CODE, DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
-        DaemonCommand, DaemonSearchFallbackReason, DiagCommand, DiagQuarantineCommand,
-        DiagResourceBudgetArg, DiagResourceCommandClassArg, DiagResourceCostClassArg,
-        DiagResourceDaemonArg, DiagResourceHostCalibrationArg, DiagResourceLanePressureArg,
-        DiagResourceLocalCargoArg, DiagResourceOperatingProfileArg, DiagResourceRchPostureArg,
-        DiagResourceReplayArg, DiagResourceSurfaceArg, DiagResourceWorkloadPressureArg,
-        DomainError, ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES, EconomyCommand,
-        EffectiveRedactionLevel, FieldsLevel, FocusCommand, GraphCommand, GraphSnapshotCommand,
-        HandoffCommand, HookCommand, HotsetCollectOptions, LabCommand, LabSwarmCommand,
-        LabSwarmWorkloadProfile, LearnCommand, LearnExperimentCommand, LensCommand,
-        MIGRATION_REPAIR_COMMAND, MaintenanceCommand, MaintenanceWalCheckpointArgs,
+        COORDINATION_FALLBACK_INGEST_SCHEMA_V1, COORDINATION_FALLBACK_LEDGER_FILE, Cli, CliProcess,
+        Command, ContextPackError, ContextPackOptions, ContextPackOutputOptions,
+        ContextPackProfile, CurateCommand, DAEMON_SEARCH_FALLBACK_CODE,
+        DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, DaemonCommand, DaemonSearchFallbackReason,
+        DiagCommand, DiagQuarantineCommand, DiagResourceBudgetArg, DiagResourceCommandClassArg,
+        DiagResourceCostClassArg, DiagResourceDaemonArg, DiagResourceHostCalibrationArg,
+        DiagResourceLanePressureArg, DiagResourceLocalCargoArg, DiagResourceOperatingProfileArg,
+        DiagResourceRchPostureArg, DiagResourceReplayArg, DiagResourceSurfaceArg,
+        DiagResourceWorkloadPressureArg, DomainError, ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES,
+        EconomyCommand, EffectiveRedactionLevel, FieldsLevel, FocusCommand, GraphCommand,
+        GraphSnapshotCommand, HandoffCommand, HookCommand, HotsetCollectOptions, LabCommand,
+        LabSwarmCommand, LabSwarmWorkloadProfile, LearnCommand, LearnExperimentCommand,
+        LensCommand, MIGRATION_REPAIR_COMMAND, MaintenanceCommand, MaintenanceWalCheckpointArgs,
         MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat, PackCommand,
         PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, ReflectCommand,
         ReflectRequestLedgerCommand, RegressCommand, RegressExplainArgs, RegressionSurfaceArg,
@@ -67064,10 +67156,12 @@ mod tests {
         db_inspect_redact_source_uri, diag_environment_attestation_response_json,
         doctor_fix_dispatches, doctor_runtime_error_result,
         environment_attestation_unavailable_sources, format_impact_json,
-        format_search_json_with_mesh_and_recalibration, hook_git_readiness_response_json,
-        hook_status_response_json, hotset_bounded_regular_file_read,
-        hotset_bv_signals_from_robot_json, init_report_exit_code, json_with_data_result_path, mesh,
-        orient_next_commands, parse_completion_audit_evidence_input, parse_context_profile,
+        format_search_json_with_mesh_and_recalibration,
+        format_search_json_with_mesh_and_recalibration_in_process,
+        hook_git_readiness_response_json, hook_status_response_json,
+        hotset_bounded_regular_file_read, hotset_bv_signals_from_robot_json, init_report_exit_code,
+        json_with_data_result_path, mesh, orient_next_commands,
+        parse_completion_audit_evidence_input, parse_context_profile,
         parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
         plan_cache_diag_degraded, plan_cache_diag_response_json,
@@ -67085,8 +67179,9 @@ mod tests {
     use crate::core::index::IndexRebuildError;
     use crate::core::lab::{InterventionType, SwapRevisionMode};
     use crate::core::search::{
-        ScoreExplanation, ScoreFactor, ScoreSource, SearchDedupMode, SearchError, SearchHit,
-        SearchOptions, SearchReport, SearchSourceMode, SearchStatus,
+        ScoreExplanation, ScoreFactor, ScoreSource, SearchDedupMode, SearchDegradation,
+        SearchError, SearchHit, SearchIndexFreshness, SearchOptions, SearchReport,
+        SearchSourceMode, SearchStatus,
     };
     use crate::core::why::{
         AgentProfileSelectionExplanation, CoordinationFallbackEvidenceSummary,
@@ -71168,6 +71263,126 @@ mod tests {
         )
     }
 
+    #[test]
+    fn reusable_cli_process_suppresses_repeated_large_gap_prose_but_standalone_warns() {
+        let stale_report = |db_generation: u64| {
+            let mut report = search_report_fixture();
+            report.rerank_configured_mode = crate::config::SearchRerankMode::Off;
+            report.degraded = vec![
+                SearchDegradation::stale_index(Some(db_generation), Some(1)),
+                SearchDegradation::large_index_gap(db_generation, 1),
+            ];
+            report.index_freshness = Some(SearchIndexFreshness {
+                stale: true,
+                db_generation: Some(db_generation),
+                index_generation: Some(1),
+                generation_gap: Some(db_generation.saturating_sub(1)),
+                large_gap: true,
+            });
+            report
+        };
+        let warning_count = |rendered: &str| {
+            let envelope: serde_json::Value =
+                serde_json::from_str(rendered).expect("search response JSON");
+            envelope["data"]["degraded"]
+                .as_array()
+                .expect("search degraded array")
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry["code"].as_str(),
+                        Some("search_index_stale" | "search_index_large_gap")
+                    )
+                })
+                .count()
+        };
+
+        let mut reusable = CliProcess::default();
+        let first = format_search_json_with_mesh_and_recalibration_in_process(
+            &stale_report(120),
+            MeshCommandMode::Off,
+            None,
+            None,
+            &mut reusable.search_advisory_session,
+            "workspace-reusable",
+        );
+        let repeated = format_search_json_with_mesh_and_recalibration_in_process(
+            &stale_report(130),
+            MeshCommandMode::Off,
+            None,
+            None,
+            &mut reusable.search_advisory_session,
+            "workspace-reusable",
+        );
+        assert_eq!(warning_count(&first), 2);
+        assert_eq!(warning_count(&repeated), 0);
+        let repeated_json: serde_json::Value =
+            serde_json::from_str(&repeated).expect("repeated search response JSON");
+        assert_eq!(repeated_json["data"]["indexFreshness"]["dbGeneration"], 130);
+        assert_eq!(repeated_json["data"]["indexFreshness"]["largeGap"], true);
+
+        for _ in 0..2 {
+            let mut standalone = CliProcess::default();
+            let rendered = format_search_json_with_mesh_and_recalibration_in_process(
+                &stale_report(120),
+                MeshCommandMode::Off,
+                None,
+                None,
+                &mut standalone.search_advisory_session,
+                "workspace-standalone",
+            );
+            assert_eq!(warning_count(&rendered), 2);
+        }
+    }
+
+    #[test]
+    fn reusable_cli_process_emits_permanent_warning_once_per_process() {
+        let report = || {
+            let mut report = search_report_fixture();
+            report.results.clear();
+            report.rerank_runtime_available = false;
+            report.degraded = vec![SearchDegradation::rerank_model_absent()];
+            report
+        };
+        let render = |process: &mut CliProcess| {
+            let rendered = format_search_json_with_mesh_and_recalibration_in_process(
+                &report(),
+                MeshCommandMode::Off,
+                None,
+                None,
+                &mut process.search_advisory_session,
+                "workspace-permanent",
+            );
+            serde_json::from_str::<serde_json::Value>(&rendered)
+                .expect("permanent advisory search response JSON")
+        };
+
+        let mut reusable = CliProcess::default();
+        let first = render(&mut reusable);
+        let repeated = render(&mut reusable);
+        assert_eq!(
+            first["data"]["rerank"]["advisory"]["code"],
+            "rerank_model_unavailable"
+        );
+        assert_eq!(
+            first["data"]["rerank"]["advisorySummary"]["scope"],
+            "process"
+        );
+        assert!(repeated["data"]["rerank"]["advisory"].is_null());
+        assert_eq!(
+            repeated["data"]["rerank"]["advisorySummary"]["sessionSuppressedCount"],
+            1
+        );
+
+        for _ in 0..2 {
+            let standalone = render(&mut CliProcess::default());
+            assert_eq!(
+                standalone["data"]["rerank"]["advisory"]["code"],
+                "rerank_model_unavailable"
+            );
+        }
+    }
+
     fn why_rationale_trace_fixture() -> WhyReport {
         WhyReport::not_found("mem_release_rule".to_string()).with_rationale_traces(vec![
             RationaleTraceSummary {
@@ -71242,6 +71457,7 @@ mod tests {
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
             scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+            index_freshness: None,
         }
     }
 

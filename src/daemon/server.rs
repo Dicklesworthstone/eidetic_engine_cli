@@ -44,8 +44,9 @@ use crate::core::context::{
     run_context_pack_with_performance_controlled,
 };
 use crate::core::search::{
-    PERFORMANCE_EXPLAIN_SCHEMA_V1, PERFORMANCE_FALLBACK_REDACTED_MESSAGE,
-    SearchAdvisoryDeliveryReservation, SearchAdvisorySession, SearchDedupMode, SearchOptions,
+    MAX_SEARCH_ADVISORY_WORKSPACES, PERFORMANCE_EXPLAIN_SCHEMA_V1,
+    PERFORMANCE_FALLBACK_REDACTED_MESSAGE, SearchAdvisoryDeliveryReservation,
+    SearchAdvisorySession, SearchAdvisorySettlement, SearchDedupMode, SearchOptions,
     SearchPerformanceTrace, SearchReport, SearchSourceMode, TypedMemoryFieldFilter,
     elapsed_timing_json, normalize_memory_kind_filter, run_search_with_performance_and_filters,
 };
@@ -169,6 +170,7 @@ pub const DAEMON_HANDLER_PANIC_CODE: &str = "daemon_handler_panic";
 const DAEMON_PANIC_LOG_MAX_BYTES: usize = 512;
 const DAEMON_WORKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_SCHEDULER_JOIN_TIMEOUT: Duration = Duration::from_millis(750);
+const SEARCH_ADVISORY_SETTLEMENT_RETRY_LIMIT: usize = 64;
 
 /// Per-daemon dispatch policy that is resolved at daemon start and
 /// then shared by every accepted connection. Connection-level peer
@@ -252,13 +254,19 @@ impl<'a> PendingSearchAdvisoryDelivery<'a> {
             return response;
         }
         if defer_until_socket_write {
-            return response
-                .with_search_advisory_delivery(reservation.workspace_id(), reservation.token());
+            return response.with_search_advisory_delivery(
+                reservation.workspace_id(),
+                reservation.token(),
+                reservation.large_gap_capacity_busy(),
+            );
         }
-        self.session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .settle_delivery(reservation.workspace_id(), reservation.token(), true);
+        settle_search_advisory_delivery(
+            self.session,
+            reservation.workspace_id(),
+            reservation.token(),
+            true,
+            reservation.large_gap_capacity_busy(),
+        );
         response
     }
 }
@@ -269,10 +277,13 @@ impl Drop for PendingSearchAdvisoryDelivery<'_> {
             return;
         };
         if reservation.emitted() {
-            self.session
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .settle_delivery(reservation.workspace_id(), reservation.token(), false);
+            settle_search_advisory_delivery(
+                self.session,
+                reservation.workspace_id(),
+                reservation.token(),
+                false,
+                reservation.large_gap_capacity_busy(),
+            );
         }
     }
 }
@@ -1773,15 +1784,43 @@ fn settle_daemon_response_delivery(
     let Some(delivery) = response.take_delivery() else {
         return;
     };
-    dispatch_policy
-        .search_advisory_session()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .settle_delivery(
-            delivery.workspace_id(),
-            delivery.search_advisory_token(),
-            delivered,
-        );
+    settle_search_advisory_delivery(
+        dispatch_policy.search_advisory_session(),
+        delivery.workspace_id(),
+        delivery.search_advisory_token(),
+        delivered,
+        delivery.search_large_gap_capacity_busy(),
+    );
+}
+
+fn settle_search_advisory_delivery(
+    session: &Mutex<SearchAdvisorySession>,
+    workspace_id: &str,
+    token: u64,
+    delivered: bool,
+    large_gap_capacity_busy: bool,
+) {
+    for attempt in 0..=SEARCH_ADVISORY_SETTLEMENT_RETRY_LIMIT {
+        let settlement = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .settle_delivery(workspace_id, token, delivered, large_gap_capacity_busy);
+        if settlement == SearchAdvisorySettlement::Complete {
+            return;
+        }
+        if attempt == SEARCH_ADVISORY_SETTLEMENT_RETRY_LIMIT {
+            // The advisory was already delivered fail-open. Leaving it
+            // unconsumed can cause duplicate prose later, but can never hide a
+            // first affected response under sustained capacity pressure.
+            tracing::warn!(
+                workspace_id,
+                token,
+                "search advisory capacity remained busy after bounded settlement retries"
+            );
+            return;
+        }
+        std::thread::yield_now();
+    }
 }
 
 /// Construct the structured envelope returned to a client whose
@@ -5042,7 +5081,8 @@ fn filter_context_large_gap_advisory_inner(
             reservation,
         ),
         None => session.emit_large_gap_while_active(workspace_id, has_large_gap),
-    };
+    }
+    .should_emit();
     if emit_large_gap {
         return;
     }
@@ -5798,6 +5838,179 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_socket_capacity_fail_open_settles_all_first_advisories() {
+        const WORKSPACES: usize = 65;
+
+        let report = stale_index_advisory_report(200, 1);
+        let policy = DaemonDispatchPolicy::default();
+        let barrier = Arc::new(std::sync::Barrier::new(WORKSPACES + 1));
+        let workers = (0..WORKSPACES)
+            .map(|index| {
+                let report = report.clone();
+                let policy = policy.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    let workspace_id = format!("capacity-workspace-{index:03}");
+                    let (response, result) =
+                        advisory_delivery_candidate(&report, &policy, &workspace_id);
+                    (workspace_id, response, result)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let mut outcomes = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("capacity reservation worker"))
+            .collect::<Vec<_>>();
+
+        for (_, response, result) in &outcomes {
+            assert!(response.delivery.is_some());
+            let codes = result["response"]["data"]["degraded"]
+                .as_array()
+                .expect("first response degraded array")
+                .iter()
+                .filter_map(|entry| entry["code"].as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert!(codes.contains("search_index_stale"));
+            assert!(codes.contains("search_index_large_gap"));
+            assert_eq!(
+                result["response"]["data"]["indexFreshness"]["largeGap"],
+                true
+            );
+        }
+
+        let capacity_busy_indices = outcomes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (_, response, _))| {
+                response
+                    .delivery
+                    .as_ref()
+                    .is_some_and(DaemonResponseDelivery::search_large_gap_capacity_busy)
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(capacity_busy_indices.len(), 1);
+        let capacity_busy_index = capacity_busy_indices[0];
+        let capacity_busy_workspace = outcomes[capacity_busy_index].0.clone();
+
+        let release_index = outcomes
+            .iter()
+            .enumerate()
+            .find(|(index, _)| *index != capacity_busy_index)
+            .map(|(index, _)| index)
+            .expect("one ordinary reservation to settle first");
+        let (_, mut release_response, release_result) = outcomes.swap_remove(release_index);
+        let (mut release_server, mut release_client) = UnixStream::pair().expect("socketpair");
+        let release_reader =
+            thread::spawn(move || read_framed_daemon_response(&mut release_client));
+        assert!(write_and_settle_daemon_response(
+            &mut release_server,
+            &policy,
+            &mut release_response,
+        ));
+        assert_eq!(
+            release_reader.join().expect("release socket reader").result,
+            Some(release_result)
+        );
+
+        let failed_workspace = outcomes
+            .iter()
+            .find(|(workspace_id, response, _)| {
+                workspace_id != &capacity_busy_workspace
+                    && response
+                        .delivery
+                        .as_ref()
+                        .is_some_and(|delivery| !delivery.search_large_gap_capacity_busy())
+            })
+            .map(|(workspace_id, _, _)| workspace_id.clone())
+            .expect("one ordinary reservation must exercise failed delivery");
+        let delivery_workers = outcomes
+            .into_iter()
+            .map(|(workspace_id, mut response, expected_result)| {
+                let policy = policy.clone();
+                let failed_workspace = failed_workspace.clone();
+                thread::spawn(move || {
+                    let (mut server_side, mut client_side) =
+                        UnixStream::pair().expect("socketpair");
+                    if workspace_id == failed_workspace {
+                        drop(client_side);
+                        let delivered = write_and_settle_daemon_response(
+                            &mut server_side,
+                            &policy,
+                            &mut response,
+                        );
+                        return (workspace_id, delivered);
+                    }
+                    let reader =
+                        thread::spawn(move || read_framed_daemon_response(&mut client_side));
+                    let delivered =
+                        write_and_settle_daemon_response(&mut server_side, &policy, &mut response);
+                    let wire = reader.join().expect("capacity socket reader");
+                    assert_eq!(wire.result, Some(expected_result));
+                    (workspace_id, delivered)
+                })
+            })
+            .collect::<Vec<_>>();
+        let deliveries = delivery_workers
+            .into_iter()
+            .map(|worker| worker.join().expect("capacity delivery worker"))
+            .collect::<Vec<_>>();
+        assert!(deliveries.iter().all(|(workspace_id, delivered)| {
+            *delivered == (workspace_id != &failed_workspace)
+        }));
+
+        let (mut retry_response, retry_result) =
+            advisory_delivery_candidate(&report, &policy, &failed_workspace);
+        assert!(retry_response.delivery.is_some());
+        assert!(
+            retry_result["response"]["data"]["degraded"]
+                .as_array()
+                .expect("failed-delivery retry degraded array")
+                .iter()
+                .any(|entry| entry["code"] == "search_index_large_gap")
+        );
+        let (mut retry_server, mut retry_client) = UnixStream::pair().expect("socketpair");
+        let retry_reader = thread::spawn(move || read_framed_daemon_response(&mut retry_client));
+        assert!(write_and_settle_daemon_response(
+            &mut retry_server,
+            &policy,
+            &mut retry_response,
+        ));
+        assert_eq!(
+            retry_reader.join().expect("retry socket reader").result,
+            Some(retry_result)
+        );
+
+        for workspace_id in [&capacity_busy_workspace, &failed_workspace] {
+            let (repeated_response, repeated_result) =
+                advisory_delivery_candidate(&report, &policy, workspace_id);
+            assert!(repeated_response.delivery.is_none());
+            assert!(
+                repeated_result["response"]["data"]["degraded"]
+                    .as_array()
+                    .expect("settled workspace repeat degraded array")
+                    .iter()
+                    .all(|entry| {
+                        !matches!(
+                            entry["code"].as_str(),
+                            Some("search_index_stale" | "search_index_large_gap")
+                        )
+                    })
+            );
+        }
+        assert_eq!(
+            policy
+                .search_advisory_session()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .tracked_workspace_count(),
+            MAX_SEARCH_ADVISORY_WORKSPACES
+        );
+    }
+
+    #[test]
     fn unbound_daemon_concurrent_workspace_reservations_share_one_process_winner() {
         const THREADS_PER_WORKSPACE: usize = 8;
 
@@ -5998,7 +6211,7 @@ mod tests {
     }
 
     #[test]
-    fn large_gap_repair_is_once_but_daemon_stale_truth_remains() {
+    fn large_gap_warning_is_once_but_daemon_structured_freshness_remains() {
         let first_report = stale_index_advisory_report(108, 1);
         let changed_generation_report = stale_index_advisory_report(112, 2);
         let policy = DaemonDispatchPolicy::for_workspace(TEST_WORKSPACE_ID);
@@ -6042,15 +6255,19 @@ mod tests {
             advisory_delivery_candidate(&changed_generation_report, &policy, TEST_WORKSPACE_ID);
         let repeated_result = DaemonSearchResult::from_value(repeated_value)
             .expect("repeated result must remain a valid success response");
-        assert_eq!(
-            daemon_search_degraded_codes(&repeated_result),
-            vec!["search_index_stale"]
-        );
-        assert!(repeated_result.human.contains("search_index_stale"));
+        assert!(daemon_search_degraded_codes(&repeated_result).is_empty());
+        assert!(!repeated_result.human.contains("search_index_stale"));
         assert!(!repeated_result.human.contains("search_index_large_gap"));
+        assert_eq!(repeated_result.response["degraded"], serde_json::json!([]));
         assert_eq!(
-            repeated_result.response["degraded"][0]["code"],
-            "search_index_stale"
+            repeated_result.response["data"]["indexFreshness"],
+            serde_json::json!({
+                "stale": true,
+                "dbGeneration": 112,
+                "indexGeneration": 2,
+                "generationGap": 110,
+                "largeGap": true,
+            })
         );
     }
 
