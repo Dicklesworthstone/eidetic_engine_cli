@@ -4,7 +4,7 @@
 //! it composes several public commands. This module holds reusable read-only
 //! data providers that should not be duplicated by the CLI renderer.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -45,6 +45,11 @@ pub const ORIENT_FAST_RELEVANT_UNAVAILABLE_CODE: &str = "orient_fast_relevant_un
 pub const NEARBY_STORE_CHILD_DEPTH: usize = 3;
 /// Maximum nearby stores reported (ranked by document count).
 pub const NEARBY_STORE_REPORT_LIMIT: usize = 5;
+/// Stores with fewer live memory heads than this remain thin enough to warrant
+/// bounded nearby-store discovery. Three live heads are enough to distinguish
+/// an intentionally populated store from incidental orientation state while
+/// keeping the recovery scan small and predictable.
+pub const NEARBY_STORE_THIN_LIVE_MEMORY_THRESHOLD: u64 = 3;
 /// Default wall-clock budget for one discovery scan.
 pub const NEARBY_STORE_SCAN_BUDGET_MS: u64 = 200;
 /// Blocking filesystem/database probes are soft-cancellable. Retain a hard
@@ -722,8 +727,14 @@ pub enum AddressedStoreState {
     /// The resolved store is missing or has zero memory rows. The path
     /// identifies the exact empty store agents addressed.
     Empty { database: PathBuf },
-    /// The resolved store has durable memory rows.
-    Populated,
+    /// The resolved store has some durable memory, but not enough to suppress
+    /// nearby-store discovery. The exact count is retained for truthful output.
+    Thin {
+        database: PathBuf,
+        live_memories: u64,
+    },
+    /// The resolved store has enough durable memory to suppress discovery.
+    Populated { live_memories: u64 },
     /// A present store could not be inspected safely. Discovery must not call
     /// it empty because an unreadable store is not evidence of zero rows.
     Unavailable,
@@ -780,7 +791,13 @@ pub fn addressed_store_state(database: &Path) -> AddressedStoreState {
             Some(0) => AddressedStoreState::Empty {
                 database: database.to_path_buf(),
             },
-            Some(_) => AddressedStoreState::Populated,
+            Some(live_memories) if live_memories < NEARBY_STORE_THIN_LIVE_MEMORY_THRESHOLD => {
+                AddressedStoreState::Thin {
+                    database: database.to_path_buf(),
+                    live_memories,
+                }
+            }
+            Some(live_memories) => AddressedStoreState::Populated { live_memories },
             None => AddressedStoreState::Unavailable,
         },
     }
@@ -963,50 +980,11 @@ fn scan_nearby_stores_with_registry(
         );
     }
 
-    // (a) registered workspaces. Registry failures are deliberately quiet:
-    // discovery is a best-effort recovery hint, and inability to inspect one
-    // candidate must never be reported as evidence that its store is empty.
-    if !nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
-        if let Ok(registry) = crate::core::workspace::list_workspace_registry(
-            &crate::core::workspace::WorkspaceListOptions {
-                registry_path: registry_path.map(Path::to_path_buf),
-            },
-        ) {
-            if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
-                return scan;
-            }
-            for workspace in registry.workspaces {
-                if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
-                    break;
-                }
-                let identity = NearbyStoreRegistryIdentity {
-                    workspace_id: workspace.workspace_id,
-                    repository_fingerprint: workspace.repository_fingerprint,
-                };
-                if let Some(candidate) = add_nearby_store_candidate(
-                    PathBuf::from(workspace.path),
-                    Some(identity),
-                    &mut seen_candidates,
-                ) {
-                    inspect_nearby_store_candidate(
-                        cx,
-                        &candidate,
-                        addressed_database,
-                        addressed_database_canonical.as_deref(),
-                        started,
-                        budget,
-                        &mut seen_databases,
-                        &mut scan,
-                        publish,
-                    );
-                }
-            }
-        }
-    }
-
-    // (b) children, breadth-first, bounded depth.
-    let mut frontier = vec![(scan_root.clone(), 0_usize)];
-    while let Some((dir, depth)) = frontier.pop() {
+    // (a) local children, breadth-first and bounded by depth. Local candidates
+    // are inspected before the machine registry so a large global registry
+    // cannot consume the entire budget ahead of an adjacent workspace.
+    let mut frontier = VecDeque::from([(scan_root.clone(), 0_usize)]);
+    while let Some((dir, depth)) = frontier.pop_front() {
         if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
             break;
         }
@@ -1065,11 +1043,11 @@ fn scan_nearby_stores_with_registry(
             if NEARBY_STORE_SKIP_DIRS.contains(&name) || NEARBY_STORE_MARKERS.contains(&name) {
                 continue;
             }
-            frontier.push((path, depth + 1));
+            frontier.push_back((path, depth + 1));
         }
     }
 
-    // (c) parents up to (and including) the git root.
+    // (b) local parents up to (and including) the git root.
     let mut parent = if scan_root.join(".git").exists() {
         None
     } else {
@@ -1098,6 +1076,47 @@ fn scan_nearby_stores_with_registry(
             break;
         }
         parent = dir.parent();
+    }
+
+    // (c) registered workspaces. Registry failures are deliberately quiet:
+    // discovery is a best-effort recovery hint, and inability to inspect one
+    // candidate must never be reported as evidence that its store is empty.
+    if !nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
+        if let Ok(registry) = crate::core::workspace::list_workspace_registry(
+            &crate::core::workspace::WorkspaceListOptions {
+                registry_path: registry_path.map(Path::to_path_buf),
+            },
+        ) {
+            if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
+                return scan;
+            }
+            for workspace in registry.workspaces {
+                if nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
+                    break;
+                }
+                let identity = NearbyStoreRegistryIdentity {
+                    workspace_id: workspace.workspace_id,
+                    repository_fingerprint: workspace.repository_fingerprint,
+                };
+                if let Some(candidate) = add_nearby_store_candidate(
+                    PathBuf::from(workspace.path),
+                    Some(identity),
+                    &mut seen_candidates,
+                ) {
+                    inspect_nearby_store_candidate(
+                        cx,
+                        &candidate,
+                        addressed_database,
+                        addressed_database_canonical.as_deref(),
+                        started,
+                        budget,
+                        &mut seen_databases,
+                        &mut scan,
+                        publish,
+                    );
+                }
+            }
+        }
     }
 
     // Account for the final completed operation too. Without this terminal
@@ -1228,23 +1247,30 @@ fn nearby_store_database_is_safe_regular_file(database: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Read the source-of-truth live-memory count from a store without opening it
-/// for writes. `None` means the count could not be established and must never
-/// be interpreted as an empty store.
+/// Read the source-of-truth live-memory count for the workspace addressed by
+/// this store without opening it for writes. `None` means the exact workspace
+/// count could not be established and must never be interpreted as empty.
 #[must_use]
 pub(crate) fn store_memory_row_count(database: &Path) -> Option<u64> {
     let connection = DbConnection::open_file_read_only(database).ok()?;
-    connection
+    let store_dir = database.parent()?;
+    let workspace_root = if store_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| NEARBY_STORE_MARKERS.contains(&name))
+    {
+        store_dir.parent()?
+    } else {
+        store_dir
+    };
+    let workspace = connection
         .list_workspaces()
         .ok()?
         .into_iter()
-        .try_fold(0_u64, |total, workspace| {
-            total.checked_add(
-                connection
-                    .count_live_memories_for_workspace(&workspace.id)
-                    .ok()?,
-            )
-        })
+        .find(|workspace| nearby_store_workspace_path_matches(workspace, workspace_root))?;
+    connection
+        .count_live_memories_for_workspace(&workspace.id)
+        .ok()
 }
 
 /// Read `(live workspace memory heads, newest db/WAL mtime)` from a candidate
@@ -2334,6 +2360,130 @@ mod tests {
     }
 
     #[test]
+    fn discovery_visits_all_depth_one_children_before_depth_two() -> TestResult {
+        let temp = orient_test_tempdir()?;
+        std::fs::create_dir_all(temp.path().join(".git")).map_err(|error| error.to_string())?;
+        let adjacent = temp.path().join("z-adjacent-store");
+        let nested = temp.path().join("a-branch").join("depth-two-store");
+        remember_fixture(&adjacent, "Adjacent breadth-first store.", "nearby", None)?;
+        remember_fixture(&nested, "Nested depth-two store.", "nearby", None)?;
+
+        let addressed_database = temp.path().join(".ee").join("ee.db");
+        let absent_registry = temp.path().join("absent-fifo-registry.db");
+        let cx = Cx::detached_cancel_context();
+        let mut first_published = None;
+        let mut publish = |snapshot: &NearbyStoreScan| {
+            if first_published.is_none() {
+                first_published = snapshot
+                    .stores
+                    .first()
+                    .map(|store| store.workspace_root.clone());
+            }
+        };
+        let scan = scan_nearby_stores_with_registry(
+            &cx,
+            temp.path(),
+            &addressed_database,
+            std::time::Duration::MAX,
+            Some(&absent_registry),
+            &mut publish,
+        );
+
+        ensure_equal(&scan.stores.len(), &2_usize, "two FIFO candidates")?;
+        ensure(
+            first_published
+                .as_deref()
+                .is_some_and(|path| path.ends_with("z-adjacent-store")),
+            format!(
+                "breadth-first traversal must publish the depth-one store before depth two; first={first_published:?}"
+            ),
+        )
+    }
+
+    #[test]
+    fn discovery_publishes_local_child_before_registry_candidates() -> TestResult {
+        let temp = orient_test_tempdir()?;
+        let addressed = temp.path().join("addressed");
+        let local = addressed.join("local-child");
+        let registered = temp.path().join("registered-remote");
+        std::fs::create_dir_all(addressed.join(".git")).map_err(|error| error.to_string())?;
+        remember_fixture(
+            &local,
+            "Local child must be inspected first.",
+            "nearby",
+            None,
+        )?;
+        remember_fixture(
+            &registered,
+            "Registered remote must remain discoverable.",
+            "nearby",
+            None,
+        )?;
+
+        let registered_database = registered.join(".ee").join("ee.db");
+        let registered_connection = DbConnection::open_file_read_only(&registered_database)
+            .map_err(|error| error.to_string())?;
+        let registered_workspace = registered_connection
+            .list_workspaces()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "registered fixture workspace missing".to_owned())?;
+        registered_connection
+            .close()
+            .map_err(|error| error.to_string())?;
+
+        let registry_path = temp.path().join("workspace-registry.db");
+        let registry =
+            DbConnection::open_file(&registry_path).map_err(|error| error.to_string())?;
+        registry.migrate().map_err(|error| error.to_string())?;
+        registry
+            .insert_workspace(
+                &registered_workspace.id,
+                &CreateWorkspaceInput {
+                    path: registered_workspace.path,
+                    name: Some("registered-remote".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        registry.close().map_err(|error| error.to_string())?;
+
+        let addressed_database = addressed.join(".ee").join("ee.db");
+        let cx = Cx::detached_cancel_context();
+        let mut first_published = None;
+        let mut publish = |snapshot: &NearbyStoreScan| {
+            if first_published.is_none() {
+                first_published = snapshot
+                    .stores
+                    .first()
+                    .map(|store| store.workspace_root.clone());
+            }
+        };
+        let scan = scan_nearby_stores_with_registry(
+            &cx,
+            &addressed,
+            &addressed_database,
+            std::time::Duration::MAX,
+            Some(&registry_path),
+            &mut publish,
+        );
+
+        ensure_equal(
+            &scan.stores.len(),
+            &2_usize,
+            "local and registered candidates",
+        )?;
+        ensure(
+            first_published
+                .as_deref()
+                .is_some_and(|path| path.ends_with("local-child")),
+            format!(
+                "local discovery must publish before consulting registry candidates; first={first_published:?}"
+            ),
+        )
+    }
+
+    #[test]
     fn discovery_parent_scan_stops_at_nearest_git_root_and_not_above_workspace_git_root()
     -> TestResult {
         let temp = orient_test_tempdir()?;
@@ -2529,12 +2679,14 @@ mod tests {
     #[test]
     fn addressed_campaign_store_with_rows_is_not_empty() -> TestResult {
         let temp = orient_test_tempdir()?;
-        remember_fixture(
-            temp.path(),
-            "Addressed campaign store has durable content.",
-            "campaign",
-            None,
-        )?;
+        for index in 1..=NEARBY_STORE_THIN_LIVE_MEMORY_THRESHOLD {
+            remember_fixture(
+                temp.path(),
+                &format!("Addressed campaign store durable content {index}."),
+                "campaign",
+                None,
+            )?;
+        }
         std::fs::rename(temp.path().join(".ee"), temp.path().join(".ee-campaign"))
             .map_err(|error| error.to_string())?;
 
@@ -2548,8 +2700,45 @@ mod tests {
         ensure_equal(&database, &expected, "resolved addressed campaign database")?;
         ensure_equal(
             &addressed_store_state(&database),
-            &AddressedStoreState::Populated,
+            &AddressedStoreState::Populated {
+                live_memories: NEARBY_STORE_THIN_LIVE_MEMORY_THRESHOLD,
+            },
             "populated addressed .ee-campaign store",
+        )
+    }
+
+    #[test]
+    fn addressed_store_state_retains_exact_thin_count_and_threshold() -> TestResult {
+        let temp = orient_test_tempdir()?;
+        let database = temp.path().join(".ee").join("ee.db");
+        for expected in 1..NEARBY_STORE_THIN_LIVE_MEMORY_THRESHOLD {
+            remember_fixture(
+                temp.path(),
+                &format!("Thin addressed-store fact {expected}."),
+                "thin-store",
+                None,
+            )?;
+            ensure_equal(
+                &addressed_store_state(&database),
+                &AddressedStoreState::Thin {
+                    database: database.clone(),
+                    live_memories: expected,
+                },
+                "exact thin addressed-store count",
+            )?;
+        }
+        remember_fixture(
+            temp.path(),
+            "Threshold-crossing addressed-store fact.",
+            "thin-store",
+            None,
+        )?;
+        ensure_equal(
+            &addressed_store_state(&database),
+            &AddressedStoreState::Populated {
+                live_memories: NEARBY_STORE_THIN_LIVE_MEMORY_THRESHOLD,
+            },
+            "threshold-populated addressed-store count",
         )
     }
 

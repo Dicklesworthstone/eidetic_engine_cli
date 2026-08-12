@@ -39568,10 +39568,11 @@ fn orient_next_commands(workspace: &Path, task: &str, max_tokens: u32) -> Vec<St
 }
 
 /// Scan for nearby populated stores only when the addressed source-of-truth
-/// store is missing or has zero memory rows (bd-orient-store-discovery-ft1z5).
-/// Retrieval content is deliberately irrelevant: a populated store with no
-/// match for this task is not empty. If the row count cannot be established,
-/// omit discovery rather than claim `storeEmpty: true`.
+/// store is missing or remains below the explicit live-memory threshold
+/// (bd-orient-store-discovery-ft1z5). Retrieval content is deliberately
+/// irrelevant: a threshold-populated store with no match for this task is not
+/// thin. If the exact count cannot be established, omit discovery rather than
+/// claim an empty or thin addressed state.
 fn orient_store_discovery(
     workspace: &Path,
     addressed_database: &Path,
@@ -39579,12 +39580,18 @@ fn orient_store_discovery(
     Option<serde_json::Value>,
     Option<crate::core::orient::NearbyStore>,
 ) {
-    let addressed_store_path = match crate::core::orient::addressed_store_state(addressed_database)
-    {
-        crate::core::orient::AddressedStoreState::Empty { database } => database,
-        crate::core::orient::AddressedStoreState::Populated
-        | crate::core::orient::AddressedStoreState::Unavailable => return (None, None),
-    };
+    let (addressed_store_path, addressed_state, addressed_documents, store_empty) =
+        match crate::core::orient::addressed_store_state(addressed_database) {
+            crate::core::orient::AddressedStoreState::Empty { database } => {
+                (database, "empty", 0_u64, true)
+            }
+            crate::core::orient::AddressedStoreState::Thin {
+                database,
+                live_memories,
+            } => (database, "thin", live_memories, false),
+            crate::core::orient::AddressedStoreState::Populated { .. }
+            | crate::core::orient::AddressedStoreState::Unavailable => return (None, None),
+        };
     let scan = crate::core::orient::discover_nearby_stores_for_database(
         workspace,
         addressed_database,
@@ -39593,7 +39600,10 @@ fn orient_store_discovery(
     let best = scan.stores.first().cloned();
     let value = serde_json::json!({
         "addressedStorePath": addressed_store_path,
-        "storeEmpty": true,
+        "addressedState": addressed_state,
+        "addressedDocuments": addressed_documents,
+        "thinStoreThreshold": crate::core::orient::NEARBY_STORE_THIN_LIVE_MEMORY_THRESHOLD,
+        "storeEmpty": store_empty,
         "scanned": true,
         "truncated": scan.truncated,
         "nearbyStores": scan.stores,
@@ -39730,24 +39740,45 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
         render_orient_fast_content_human(&mut out, fast_content);
     }
     if data
-        .pointer("/storeDiscovery/storeEmpty")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
+        .get("storeDiscovery")
+        .is_some_and(serde_json::Value::is_object)
     {
+        let store_empty = data
+            .pointer("/storeDiscovery/storeEmpty")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         if let Some(addressed_store_path) = data
             .pointer("/storeDiscovery/addressedStorePath")
             .and_then(serde_json::Value::as_str)
         {
-            out.push_str(&format!(
-                "\nAddressed store: {addressed_store_path} (empty or missing).\n"
-            ));
+            if store_empty {
+                out.push_str(&format!(
+                    "\nAddressed store: {addressed_store_path} (empty or missing; 0 live memories).\n"
+                ));
+            } else {
+                let documents = data
+                    .pointer("/storeDiscovery/addressedDocuments")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                let threshold = data
+                    .pointer("/storeDiscovery/thinStoreThreshold")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(crate::core::orient::NEARBY_STORE_THIN_LIVE_MEMORY_THRESHOLD);
+                out.push_str(&format!(
+                    "\nAddressed store: {addressed_store_path} (thin: {documents} live memories; discovery threshold {threshold}).\n"
+                ));
+            }
         }
         let nearby = data
             .pointer("/storeDiscovery/nearbyStores")
             .and_then(serde_json::Value::as_array);
         match nearby {
             Some(stores) if !stores.is_empty() => {
-                out.push_str("\nThis store is empty, but populated stores exist nearby:\n");
+                if store_empty {
+                    out.push_str("\nThis store is empty, but populated stores exist nearby:\n");
+                } else {
+                    out.push_str("\nThis store is thin, and richer stores exist nearby:\n");
+                }
                 for store in stores {
                     let path = store
                         .get("workspaceRoot")

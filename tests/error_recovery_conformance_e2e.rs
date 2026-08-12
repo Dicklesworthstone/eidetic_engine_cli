@@ -1436,8 +1436,8 @@ fn storeless_miss_quotes_spaced_nearby_workspace_and_command_executes() -> TestR
     )
 }
 
-/// bd-orient-store-discovery-ft1z5 literal acceptance, empty-root flavor: an
-/// INITIALIZED root store with zero documents must discover a populated child
+/// bd-orient-store-discovery-ft1z5 literal acceptance, empty/thin-root flavor:
+/// an INITIALIZED root store below the live-memory threshold must discover a populated child
 /// store below it, surface it in `--json` `data.storeDiscovery`
 /// (workspaceRoot/documents/lastWrite plus the bounded-scan `truncated` flag)
 /// and in the human render, and retarget `nextCommands[0]` at the best
@@ -1471,20 +1471,26 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
             ),
         )?;
     }
-    let seeded = run_ee(&[
-        "--workspace".to_owned(),
-        child_str.clone(),
-        "remember".to_owned(),
-        candidate_content.to_owned(),
-        "--json".to_owned(),
-    ])?;
-    ensure(
-        seeded.status.success(),
-        format!(
-            "seeding the child store failed: {}",
-            String::from_utf8_lossy(&seeded.stdout)
-        ),
-    )?;
+    for content in [
+        candidate_content,
+        "campaign continuation fact for nearby discovery",
+        "campaign recovery fact for nearby discovery",
+    ] {
+        let seeded = run_ee(&[
+            "--workspace".to_owned(),
+            child_str.clone(),
+            "remember".to_owned(),
+            content.to_owned(),
+            "--json".to_owned(),
+        ])?;
+        ensure(
+            seeded.status.success(),
+            format!(
+                "seeding the child store failed: {}",
+                String::from_utf8_lossy(&seeded.stdout)
+            ),
+        )?;
+    }
     std::fs::rename(child.join(".ee"), child.join(".ee-campaign"))
         .map_err(|error| error.to_string())?;
     let campaign_store = child
@@ -1539,6 +1545,9 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         .ok_or("orient empty root: missing storeDiscovery block")?;
     ensure(
         discovery["storeEmpty"] == serde_json::json!(true)
+            && discovery["addressedState"] == serde_json::json!("empty")
+            && discovery["addressedDocuments"] == serde_json::json!(0)
+            && discovery["thinStoreThreshold"] == serde_json::json!(3)
             && discovery["scanned"] == serde_json::json!(true),
         format!("orient must scan on an initialized empty root, got: {discovery}"),
     )?;
@@ -1571,8 +1580,8 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         format!("orient must preserve the exact .ee-campaign store directory: {best:?}"),
     )?;
     ensure(
-        best_documents == 1,
-        format!("orient best nearby child must report the one seeded document, got: {best:?}"),
+        best_documents == 3,
+        format!("orient best nearby child must report all three seeded documents, got: {best:?}"),
     )?;
     ensure(
         !best_last_write.is_empty(),
@@ -1804,10 +1813,9 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         ),
     )?;
 
-    // A populated root must omit discovery entirely even when the task has no
-    // matching orient content, and must not retarget a next command away from
-    // the root. This is the planted negative for the source-of-truth count:
-    // retrieval emptiness must never be mistaken for store emptiness.
+    // One unrelated live memory leaves the addressed root truthfully thin.
+    // Discovery must still report and retarget the richer child rather than
+    // treating any positive row count as sufficient orientation state.
     let root_seed = run_ee(&[
         "--workspace".to_owned(),
         root_str.clone(),
@@ -1823,6 +1831,81 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         ),
     )?;
     let nonmatching_task = "zzzz_ft1z5_no_matching_orient_content_zzzz";
+    let thin = run_ee(&[
+        "--workspace".to_owned(),
+        root_str.clone(),
+        "orient".to_owned(),
+        nonmatching_task.to_owned(),
+        "--json".to_owned(),
+    ])?;
+    let thin_json = stdout_json(&thin, "nonmatching orient against thin root")?;
+    let thin_items = thin_json
+        .pointer("/data/pack/pack/items")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("thin nonmatching orient: missing pack items")?;
+    ensure(
+        thin_items.is_empty(),
+        format!(
+            "planted thin-store case requires empty/nonmatching orient content, got: {thin_items:?}"
+        ),
+    )?;
+    let thin_discovery = thin_json
+        .pointer("/data/storeDiscovery")
+        .ok_or("a one-memory root must retain thin-store discovery")?;
+    ensure(
+        thin_discovery["addressedState"] == serde_json::json!("thin")
+            && thin_discovery["addressedDocuments"] == serde_json::json!(1)
+            && thin_discovery["thinStoreThreshold"] == serde_json::json!(3)
+            && thin_discovery["storeEmpty"] == serde_json::json!(false)
+            && thin_discovery["nearbyStores"][0]["workspaceRoot"] == serde_json::json!(best_path)
+            && thin_discovery["nearbyStores"][0]["documents"] == serde_json::json!(best_documents)
+            && thin_json["data"]["nextCommands"][0] == serde_json::json!(first_next_command),
+        format!(
+            "a one-memory root must report exact thin posture and retarget the richer child: {thin_discovery}"
+        ),
+    )?;
+
+    let thin_human = run_ee(&[
+        "--workspace".to_owned(),
+        root_str.clone(),
+        "orient".to_owned(),
+        nonmatching_task.to_owned(),
+    ])?;
+    ensure(
+        thin_human.status.success(),
+        format!(
+            "human orient against thin root failed: {}",
+            String::from_utf8_lossy(&thin_human.stderr)
+        ),
+    )?;
+    let thin_human = String::from_utf8(thin_human.stdout)
+        .map_err(|error| format!("thin-root human orient stdout was not UTF-8: {error}"))?;
+    ensure(
+        thin_human.contains("thin: 1 live memories; discovery threshold 3")
+            && thin_human.contains("This store is thin, and richer stores exist nearby")
+            && thin_human.contains(first_next_command),
+        format!("thin-root human output must retain posture and retarget: {thin_human}"),
+    )?;
+
+    // At the explicit threshold the root is genuinely populated. It must omit
+    // discovery even when the task has no matching content and keep its Next
+    // commands addressed to itself.
+    for index in 2..=3 {
+        let seeded = run_ee(&[
+            "--workspace".to_owned(),
+            root_str.clone(),
+            "remember".to_owned(),
+            format!("root store unrelated fact {index}"),
+            "--json".to_owned(),
+        ])?;
+        ensure(
+            seeded.status.success(),
+            format!(
+                "seeding threshold root fact {index} failed: {}",
+                String::from_utf8_lossy(&seeded.stdout)
+            ),
+        )?;
+    }
     let populated = run_ee(&[
         "--workspace".to_owned(),
         root_str,
@@ -1836,15 +1919,9 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         .and_then(serde_json::Value::as_array)
         .ok_or("populated nonmatching orient: missing pack items")?;
     ensure(
-        populated_items.is_empty(),
+        populated_items.is_empty() && populated_json.pointer("/data/storeDiscovery").is_none(),
         format!(
-            "planted negative requires empty/nonmatching orient content, got: {populated_items:?}"
-        ),
-    )?;
-    ensure(
-        populated_json.pointer("/data/storeDiscovery").is_none(),
-        format!(
-            "a populated root must omit storeDiscovery entirely, got: {}",
+            "a threshold-populated root with no matching content must omit storeDiscovery entirely, got: {}",
             populated_json["data"]
         ),
     )?;
