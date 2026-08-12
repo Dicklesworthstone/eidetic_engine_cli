@@ -563,13 +563,64 @@ fn file_write_owner_depth_for_test(location: &DatabaseLocation) -> usize {
     FILE_WRITE_OWNER_DEPTHS.with(|depths| depths.borrow().get(&key).copied().unwrap_or(0))
 }
 
-/// Flock-gate retry budget (bd-d67os.27 item 2). Deliberately wider than
-/// `FILE_DATABASE_OPEN_MAX_ATTEMPTS`: under an N-writer swarm the gate is
-/// the sole cross-process serializer, and the old 8-attempt (~113 ms)
-/// budget starved single-shot writers into their outer retry loops. With
-/// 32 attempts the in-gate budget is ~1.4 s before jitter, which one
-/// depth-one flock holder comfortably fits inside.
-const FLOCK_GATE_MAX_ATTEMPTS: usize = 32;
+/// Progress-aware flock budgets. The 38-second stagnant-holder window matches
+/// the pre-existing deepest journal execute envelope (16 outer retries around
+/// the former ~2-second jittered gate), but applies that patience to one
+/// unchanged holder instead of spending it across a changing live queue. A
+/// mechanically observed epoch turnover resets only the stagnant-holder clock;
+/// the five-minute absolute ceiling and ambient `Cx` cancellation still bound
+/// the whole wait.
+#[cfg(unix)]
+const FLOCK_GATE_STAGNANT_MAX_WAIT: Duration = Duration::from_secs(38);
+#[cfg(unix)]
+const FLOCK_GATE_MAX_WAIT: Duration = Duration::from_secs(300);
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FlockGateWaitDecision {
+    Retry {
+        delay_attempt: usize,
+        total_polls: usize,
+    },
+    Stagnant,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Default)]
+struct FlockGateWaitState {
+    observed_epoch: Option<u64>,
+    last_progress_at: Duration,
+    no_progress_polls: usize,
+    total_polls: usize,
+}
+
+#[cfg(unix)]
+impl FlockGateWaitState {
+    fn observe_contention(
+        &mut self,
+        epoch: Option<u64>,
+        elapsed: Duration,
+        stagnant_max_wait: Duration,
+    ) -> FlockGateWaitDecision {
+        self.total_polls = self.total_polls.saturating_add(1);
+        if self.observed_epoch != epoch {
+            self.observed_epoch = epoch;
+            self.last_progress_at = elapsed;
+            self.no_progress_polls = 0;
+        } else {
+            self.no_progress_polls = self.no_progress_polls.saturating_add(1);
+        }
+
+        if elapsed.saturating_sub(self.last_progress_at) >= stagnant_max_wait {
+            FlockGateWaitDecision::Stagnant
+        } else {
+            FlockGateWaitDecision::Retry {
+                delay_attempt: self.no_progress_polls,
+                total_polls: self.total_polls,
+            }
+        }
+    }
+}
 
 /// Determinism-safe additive jitter for flock-gate retries (bd-d67os.27
 /// item 2): `advisory_lock_retry_delay` is identical in every process, so
@@ -662,7 +713,48 @@ fn atomic_saturating_add(counter: &std::sync::atomic::AtomicU64, increment: u64)
     }
 }
 
-fn lock_database_write_file(database_path: &Path) -> Result<File> {
+#[cfg(unix)]
+fn read_flock_gate_epoch(lock_file: &mut File) -> std::io::Result<Option<u64>> {
+    use std::io::{Read as _, Seek as _};
+
+    lock_file.seek(std::io::SeekFrom::Start(0))?;
+    let mut encoded = [0_u8; 21];
+    let read = lock_file.read(&mut encoded)?;
+    if read != encoded.len()
+        || encoded[20] != b'\n'
+        || !encoded[..20].iter().all(u8::is_ascii_digit)
+    {
+        return Ok(None);
+    }
+    let Ok(text) = std::str::from_utf8(&encoded[..20]) else {
+        return Ok(None);
+    };
+    Ok(text.parse::<u64>().ok())
+}
+
+#[cfg(unix)]
+fn advance_flock_gate_epoch(lock_file: &mut File) -> std::io::Result<()> {
+    use std::io::{Seek as _, Write as _};
+
+    let current = read_flock_gate_epoch(lock_file)?.unwrap_or(0);
+    let next = current.wrapping_add(1).max(1);
+    let encoded = format!("{next:020}\n");
+    lock_file.seek(std::io::SeekFrom::Start(0))?;
+    lock_file.write_all(encoded.as_bytes())
+}
+
+#[cfg(unix)]
+fn observe_flock_gate_epoch(lock_file: &mut File, previous: Option<u64>) -> Option<u64> {
+    read_flock_gate_epoch(lock_file).ok().flatten().or(previous)
+}
+
+#[cfg(unix)]
+fn lock_database_write_file_with_wait_observer(
+    database_path: &Path,
+    stagnant_max_wait: Duration,
+    max_wait: Duration,
+    mut on_contention: impl FnMut(Option<u64>),
+) -> Result<File> {
     let lock_path = database_path.with_extension("write.lock");
     ensure_database_write_lock_path_has_no_symlink_components(&lock_path)?;
     ensure_database_write_lock_path_is_regular_or_missing(&lock_path)?;
@@ -674,52 +766,108 @@ fn lock_database_write_file(database_path: &Path) -> Result<File> {
             message: format!("could not open database write lock: {error}"),
         })?;
 
-    #[cfg(unix)]
+    let mut lock_file = lock_file;
+
     {
         use rustix::io::Errno;
         let gate_wait_started = std::time::Instant::now();
-        let mut acquired = false;
         let mut retried = false;
-        for attempt in 0..FLOCK_GATE_MAX_ATTEMPTS {
+        let mut wait_state = FlockGateWaitState::default();
+        loop {
             match flock(&lock_file, FlockOperation::NonBlockingLockExclusive) {
                 Ok(_) => {
-                    acquired = true;
+                    advance_flock_gate_epoch(&mut lock_file).map_err(|error| {
+                        DbError::InvalidPath {
+                            operation: DbOperation::BeginTransaction,
+                            path: lock_path.clone(),
+                            message: format!(
+                                "could not publish database write lock holder epoch: {error}"
+                            ),
+                        }
+                    })?;
                     break;
                 }
-                Err(error) => {
-                    if (error == Errno::WOULDBLOCK || error == Errno::AGAIN)
-                        && attempt + 1 < FLOCK_GATE_MAX_ATTEMPTS
-                    {
-                        retried = true;
-                        sleep_retry_delay_or_cancel(
-                            DbOperation::BeginTransaction,
-                            advisory_lock_retry_delay(attempt)
-                                .saturating_add(flock_gate_retry_jitter(attempt)),
-                        )?;
-                        continue;
-                    }
+                Err(error) if error != Errno::WOULDBLOCK && error != Errno::AGAIN => {
                     record_flock_gate_timeout(gate_wait_started.elapsed());
                     return Err(DbError::InvalidPath {
                         operation: DbOperation::BeginTransaction,
                         path: lock_path.clone(),
-                        message: format!("could not acquire database write lock: {error}"),
+                        message: format!("database write lock acquisition failed: {error}"),
                     });
+                }
+                Err(error) => {
+                    let elapsed = gate_wait_started.elapsed();
+                    if elapsed >= max_wait {
+                        record_flock_gate_timeout(elapsed);
+                        return Err(DbError::InvalidPath {
+                            operation: DbOperation::BeginTransaction,
+                            path: lock_path.clone(),
+                            message: format!(
+                                "database write lock wait deadline exceeded after {}ms: {error}",
+                                max_wait.as_millis()
+                            ),
+                        });
+                    }
+
+                    let observed_epoch =
+                        observe_flock_gate_epoch(&mut lock_file, wait_state.observed_epoch);
+                    on_contention(observed_epoch);
+                    match wait_state.observe_contention(observed_epoch, elapsed, stagnant_max_wait)
+                    {
+                        FlockGateWaitDecision::Retry {
+                            delay_attempt,
+                            total_polls,
+                        } => {
+                            retried = true;
+                            sleep_retry_delay_or_cancel(
+                                DbOperation::BeginTransaction,
+                                advisory_lock_retry_delay(delay_attempt)
+                                    .saturating_add(flock_gate_retry_jitter(total_polls)),
+                            )?;
+                        }
+                        FlockGateWaitDecision::Stagnant => {
+                            record_flock_gate_timeout(elapsed);
+                            return Err(DbError::InvalidPath {
+                                operation: DbOperation::BeginTransaction,
+                                path: lock_path.clone(),
+                                message: format!(
+                                    "database write lock holder made no progress for {}ms: {error}",
+                                    stagnant_max_wait.as_millis()
+                                ),
+                            });
+                        }
+                    }
                 }
             }
         }
-        if !acquired {
-            record_flock_gate_timeout(gate_wait_started.elapsed());
-            return Err(DbError::InvalidPath {
-                operation: DbOperation::BeginTransaction,
-                path: lock_path,
-                message: "could not acquire database write lock: contention timeout".to_string(),
-            });
-        }
         record_flock_gate_wait(gate_wait_started.elapsed(), retried);
     }
-    #[cfg(not(unix))]
-    record_flock_gate_wait(std::time::Duration::ZERO, false);
 
+    Ok(lock_file)
+}
+
+#[cfg(unix)]
+fn lock_database_write_file(database_path: &Path) -> Result<File> {
+    lock_database_write_file_with_wait_observer(
+        database_path,
+        FLOCK_GATE_STAGNANT_MAX_WAIT,
+        FLOCK_GATE_MAX_WAIT,
+        |_| {},
+    )
+}
+
+#[cfg(not(unix))]
+fn lock_database_write_file(database_path: &Path) -> Result<File> {
+    let lock_path = database_path.with_extension("write.lock");
+    ensure_database_write_lock_path_has_no_symlink_components(&lock_path)?;
+    ensure_database_write_lock_path_is_regular_or_missing(&lock_path)?;
+    let lock_file =
+        open_database_write_lock_file(&lock_path).map_err(|error| DbError::InvalidPath {
+            operation: DbOperation::BeginTransaction,
+            path: lock_path,
+            message: format!("could not open database write lock: {error}"),
+        })?;
+    record_flock_gate_wait(std::time::Duration::ZERO, false);
     Ok(lock_file)
 }
 
@@ -52094,22 +52242,283 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
-    fn flock_gate_budget_is_wider_than_open_retry_budget() -> TestResult {
-        // bd-d67os.27 item 2: the gate is the sole cross-process write
-        // serializer; its in-gate budget must comfortably exceed the old
-        // 8-attempt (~113ms) budget that starved single-shot writers.
+    fn flock_gate_progress_budgets_bound_stagnation_and_total_wait() -> TestResult {
         ensure(
-            super::FLOCK_GATE_MAX_ATTEMPTS >= 24,
-            "flock gate retries at least 24 attempts",
+            super::FLOCK_GATE_STAGNANT_MAX_WAIT >= Duration::from_secs(30),
+            "one live holder retains the former deepest journal wait envelope",
         )?;
-        let total: Duration = (0..super::FLOCK_GATE_MAX_ATTEMPTS)
-            .map(super::advisory_lock_retry_delay)
-            .sum();
         ensure(
-            total >= Duration::from_millis(1_000),
-            "base in-gate budget is at least one second",
+            super::FLOCK_GATE_MAX_WAIT > super::FLOCK_GATE_STAGNANT_MAX_WAIT,
+            "holder turnover can extend the wait without removing its absolute ceiling",
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flock_gate_wait_survives_holder_turnover_beyond_legacy_retry_cliffs() -> TestResult {
+        let mut state = super::FlockGateWaitState::default();
+        let mut observed_polls = 0usize;
+
+        // Seventeen distinct holders, each observed long enough to exceed the
+        // old 8-open / 16-execute outer cliffs in aggregate. Every epoch change
+        // is mechanical progress, while each individual holder remains below
+        // the unchanged-holder budget.
+        let mut elapsed = Duration::ZERO;
+        for epoch in 1_u64..=17 {
+            for _ in 0..32 {
+                elapsed = elapsed.saturating_add(Duration::from_millis(1));
+                let decision = state.observe_contention(
+                    Some(epoch),
+                    elapsed,
+                    super::FLOCK_GATE_STAGNANT_MAX_WAIT,
+                );
+                ensure(
+                    matches!(decision, super::FlockGateWaitDecision::Retry { .. }),
+                    format!("live holder epoch {epoch} must keep the wait retryable"),
+                )?;
+                observed_polls += 1;
+            }
+        }
+
+        ensure(
+            observed_polls > 32 * 16,
+            "holder turnover survives beyond both legacy outer retry cliffs",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flock_gate_wait_rejects_one_stagnant_holder_at_existing_bound() -> TestResult {
+        let mut state = super::FlockGateWaitState::default();
+        ensure(
+            matches!(
+                state.observe_contention(
+                    Some(7),
+                    Duration::ZERO,
+                    super::FLOCK_GATE_STAGNANT_MAX_WAIT,
+                ),
+                super::FlockGateWaitDecision::Retry { .. }
+            ),
+            "first observation establishes the holder epoch",
+        )?;
+        ensure(
+            matches!(
+                state.observe_contention(
+                    Some(7),
+                    super::FLOCK_GATE_STAGNANT_MAX_WAIT - Duration::from_millis(1),
+                    super::FLOCK_GATE_STAGNANT_MAX_WAIT,
+                ),
+                super::FlockGateWaitDecision::Retry { .. }
+            ),
+            "unchanged holder remains retryable before the stagnant deadline",
+        )?;
+        ensure(
+            matches!(
+                state.observe_contention(
+                    Some(7),
+                    super::FLOCK_GATE_STAGNANT_MAX_WAIT,
+                    super::FLOCK_GATE_STAGNANT_MAX_WAIT,
+                ),
+                super::FlockGateWaitDecision::Stagnant
+            ),
+            "unchanged holder exhausts the bounded no-progress window",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flock_gate_epoch_is_fixed_width_and_monotonic() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let lock_path = tempdir.path().join("epoch.write.lock");
+        let mut lock_file = super::open_database_write_lock_file(&lock_path)
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+
+        super::advance_flock_gate_epoch(&mut lock_file)
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        ensure_equal(
+            &super::read_flock_gate_epoch(&mut lock_file)
+                .map_err(|error| TestFailure::new(error.to_string()))?,
+            &Some(1),
+            "first holder epoch",
+        )?;
+        super::advance_flock_gate_epoch(&mut lock_file)
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        ensure_equal(
+            &super::read_flock_gate_epoch(&mut lock_file)
+                .map_err(|error| TestFailure::new(error.to_string()))?,
+            &Some(2),
+            "successor holder epoch",
+        )?;
+        ensure_equal(
+            &std::fs::metadata(&lock_path)
+                .map_err(|error| TestFailure::new(error.to_string()))?
+                .len(),
+            &21,
+            "fixed-width epoch bytes",
+        )?;
+
+        std::fs::write(&lock_path, b"000000")
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        ensure_equal(
+            &super::observe_flock_gate_epoch(&mut lock_file, Some(2)),
+            &Some(2),
+            "partial epoch retains the last valid observation",
+        )?;
+        std::fs::write(&lock_path, b"0000000000000000000x\n")
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        ensure_equal(
+            &super::observe_flock_gate_epoch(&mut lock_file, Some(2)),
+            &Some(2),
+            "malformed epoch retains the last valid observation",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_flock_waiter_observes_successive_holder_epochs_and_acquires() -> TestResult {
+        use std::sync::mpsc;
+
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let database_path = tempdir.path().join("turnover.db");
+        let first_holder = super::lock_database_write_file(&database_path)
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let waiter_path = database_path.clone();
+        let waiter = std::thread::spawn(move || {
+            super::lock_database_write_file_with_wait_observer(
+                &waiter_path,
+                Duration::from_secs(2),
+                Duration::from_secs(10),
+                move |epoch| {
+                    assert!(observed_tx.send(epoch).is_ok());
+                    assert!(continue_rx.recv().is_ok());
+                },
+            )
+        });
+
+        ensure_equal(
+            &observed_rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|error| TestFailure::new(error.to_string()))?,
+            &Some(1),
+            "waiter observes first real holder",
+        )?;
+        drop(first_holder);
+        let second_holder = super::lock_database_write_file(&database_path)
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        continue_tx
+            .send(())
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+
+        ensure_equal(
+            &observed_rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|error| TestFailure::new(error.to_string()))?,
+            &Some(2),
+            "waiter observes second real holder",
+        )?;
+        drop(second_holder);
+        let third_holder = super::lock_database_write_file(&database_path)
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        continue_tx
+            .send(())
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+
+        ensure_equal(
+            &observed_rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|error| TestFailure::new(error.to_string()))?,
+            &Some(3),
+            "waiter observes third real holder",
+        )?;
+        drop(third_holder);
+        continue_tx
+            .send(())
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+
+        let mut acquired = waiter
+            .join()
+            .map_err(|_| TestFailure::new("real flock waiter thread panicked"))?
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        ensure_equal(
+            &super::read_flock_gate_epoch(&mut acquired)
+                .map_err(|error| TestFailure::new(error.to_string()))?,
+            &Some(4),
+            "waiter becomes the fourth real holder",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_flock_owner_thread_termination_releases_gate() -> TestResult {
+        use std::sync::mpsc;
+
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let database_path = tempdir.path().join("thread-exit.db");
+        let owner_path = database_path.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let owner = std::thread::spawn(move || -> super::Result<()> {
+            let _owned_lock = super::lock_database_write_file(&owner_path)?;
+            let _ = ready_tx.send(());
+            let _ = finish_rx.recv();
+            Ok(())
+        });
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        finish_tx
+            .send(())
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        owner
+            .join()
+            .map_err(|_| TestFailure::new("real flock owner thread panicked"))?
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+
+        let mut successor = super::lock_database_write_file_with_wait_observer(
+            &database_path,
+            Duration::from_millis(200),
+            Duration::from_secs(1),
+            |_| {},
+        )
+        .map_err(|error| TestFailure::new(error.to_string()))?;
+        ensure_equal(
+            &super::read_flock_gate_epoch(&mut successor)
+                .map_err(|error| TestFailure::new(error.to_string()))?,
+            &Some(2),
+            "successor acquires after owner thread termination",
+        )
+    }
+
+    #[test]
+    fn flock_gate_deadline_and_permanent_errors_do_not_reenter_outer_retries() -> TestResult {
+        let lock_path = std::path::PathBuf::from("/tmp/ee.db.write.lock");
+        for message in [
+            "database write lock wait deadline exceeded after 300000ms: Resource temporarily unavailable",
+            "database write lock holder made no progress for 38000ms: Resource temporarily unavailable",
+            "database write lock acquisition failed: bad file descriptor",
+            "could not publish database write lock holder epoch: input/output error",
+        ] {
+            let error = DbError::InvalidPath {
+                operation: DbOperation::BeginTransaction,
+                path: lock_path.clone(),
+                message: message.to_owned(),
+            };
+            ensure(
+                !super::database_open_error_is_retryable(&error),
+                format!("bounded/permanent gate error must not reenter open retry: {message}"),
+            )?;
+            ensure(
+                !super::db_error_is_transient_sqlite_contention(&error),
+                format!("bounded/permanent gate error must not reenter execute retry: {message}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
