@@ -2649,6 +2649,7 @@ fn canonicalize_daemon_search_uint64s(value: &mut serde_json::Value) -> Result<(
 }
 
 impl DaemonSearchResult {
+    #[cfg(test)]
     fn from_report(
         report: &SearchReport,
         explain: bool,

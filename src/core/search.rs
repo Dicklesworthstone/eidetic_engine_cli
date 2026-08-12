@@ -3053,6 +3053,7 @@ pub(crate) fn search_degraded_data_json(
     .collect()
 }
 
+#[cfg(test)]
 fn search_degraded_data_json_with_advisory_session(
     source: &'static str,
     degraded: &[SearchDegradation],
@@ -5515,6 +5516,7 @@ pub fn elapsed_timing_json(elapsed_ms: f64) -> serde_json::Value {
     })
 }
 
+#[cfg(test)]
 fn search_rerank_posture_json(
     hits: &[&SearchHit],
     degraded: &[SearchDegradation],
