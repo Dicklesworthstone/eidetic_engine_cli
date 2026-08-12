@@ -466,7 +466,9 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
         }
         Ok(_) => {}
     }
-    if addressed_store_state(options.database_path) == AddressedStoreState::Unavailable {
+    if addressed_store_state(options.workspace_path, options.database_path)
+        == AddressedStoreState::Unavailable
+    {
         return Err(DomainError::Storage {
             message: format!(
                 "Addressed workspace database {} exists but is unsafe, unreadable, or incompatible.",
@@ -998,6 +1000,67 @@ mod tests {
         .map_err(|error| error.to_string())?;
         assert_eq!(report.open_loops.revisit_decisions_total, 0);
         assert!(!report.open_loops.revisit_decisions_truncated);
+        Ok(())
+    }
+
+    #[test]
+    fn external_custom_database_uses_explicit_resume_workspace_identity() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("recorded resume workspace");
+        let external_store = temp.path().join("external stores");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&external_store).map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database = external_store.join("custom-resume.db");
+        let workspace_id = crate::core::workspace::stable_workspace_id(&workspace);
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("external resume store".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x52534d99)).to_string();
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "episodic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "External custom resume state.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.9,
+                    importance: 0.9,
+                    provenance_uri: Some("test://external-resume".to_owned()),
+                    trust_class: "agent_assertion".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["session-external-resume".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = build_resume_report(&ResumeOptions {
+            workspace_path: &workspace,
+            database_path: &database,
+            sessions: 3,
+        })
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.workspace_id, workspace_id);
+        assert_eq!(report.episodic_total, 1);
+        assert_eq!(report.sessions.len(), 1);
+        assert_eq!(report.sessions[0].items[0].memory_id, memory_id);
         Ok(())
     }
 

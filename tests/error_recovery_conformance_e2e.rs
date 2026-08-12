@@ -1448,15 +1448,18 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
     let root = tempdir.path().join("empty_root_ft1z5");
     let child = root.join("campaign").join("copulattice_ft1z5");
+    let poorer_child = root.join("campaign").join("smaller_ft1z5");
     std::fs::create_dir_all(&child).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&poorer_child).map_err(|error| error.to_string())?;
     // Bound the parent walk so discovery never escapes the fixture.
     std::fs::create_dir_all(root.join(".git")).map_err(|error| error.to_string())?;
     let root_str = root.to_string_lossy().to_string();
     let child_str = child.to_string_lossy().to_string();
+    let poorer_child_str = poorer_child.to_string_lossy().to_string();
     let candidate_content = "campaign seed fact for nearby discovery";
     let candidate_query = "campaign seed nearby discovery";
 
-    for workspace in [&root_str, &child_str] {
+    for workspace in [&root_str, &child_str, &poorer_child_str] {
         let init = run_ee(&[
             "init".to_owned(),
             "--workspace".to_owned(),
@@ -1471,6 +1474,20 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
             ),
         )?;
     }
+    let poorer_seed = run_ee(&[
+        "--workspace".to_owned(),
+        poorer_child_str,
+        "remember".to_owned(),
+        "single poorer nearby fact".to_owned(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        poorer_seed.status.success(),
+        format!(
+            "seeding the poorer child store failed: {}",
+            String::from_utf8_lossy(&poorer_seed.stdout)
+        ),
+    )?;
     for content in [
         candidate_content,
         "campaign continuation fact for nearby discovery",
@@ -1813,7 +1830,7 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         ),
     )?;
 
-    // One unrelated live memory leaves the addressed root truthfully thin.
+    // Two unrelated live memories leave the addressed root truthfully thin.
     // Discovery must still report and retarget the richer child rather than
     // treating any positive row count as sufficient orientation state.
     let root_seed = run_ee(&[
@@ -1828,6 +1845,20 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         format!(
             "seeding the root store failed: {}",
             String::from_utf8_lossy(&root_seed.stdout)
+        ),
+    )?;
+    let second_root_seed = run_ee(&[
+        "--workspace".to_owned(),
+        root_str.clone(),
+        "remember".to_owned(),
+        "second root store unrelated fact".to_owned(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        second_root_seed.status.success(),
+        format!(
+            "seeding the second root fact failed: {}",
+            String::from_utf8_lossy(&second_root_seed.stdout)
         ),
     )?;
     let nonmatching_task = "zzzz_ft1z5_no_matching_orient_content_zzzz";
@@ -1851,17 +1882,21 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
     )?;
     let thin_discovery = thin_json
         .pointer("/data/storeDiscovery")
-        .ok_or("a one-memory root must retain thin-store discovery")?;
+        .ok_or("a two-memory root must retain thin-store discovery")?;
+    let thin_nearby = thin_discovery["nearbyStores"]
+        .as_array()
+        .ok_or("thin-store nearbyStores must be an array")?;
     ensure(
         thin_discovery["addressedState"] == serde_json::json!("thin")
-            && thin_discovery["addressedDocuments"] == serde_json::json!(1)
+            && thin_discovery["addressedDocuments"] == serde_json::json!(2)
             && thin_discovery["thinStoreThreshold"] == serde_json::json!(3)
             && thin_discovery["storeEmpty"] == serde_json::json!(false)
+            && thin_nearby.len() == 1
             && thin_discovery["nearbyStores"][0]["workspaceRoot"] == serde_json::json!(best_path)
             && thin_discovery["nearbyStores"][0]["documents"] == serde_json::json!(best_documents)
             && thin_json["data"]["nextCommands"][0] == serde_json::json!(first_next_command),
         format!(
-            "a one-memory root must report exact thin posture and retarget the richer child: {thin_discovery}"
+            "a two-memory root must exclude the one-document child and retarget only the three-document child: {thin_discovery}"
         ),
     )?;
 
@@ -1881,8 +1916,9 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
     let thin_human = String::from_utf8(thin_human.stdout)
         .map_err(|error| format!("thin-root human orient stdout was not UTF-8: {error}"))?;
     ensure(
-        thin_human.contains("thin: 1 live memories; discovery threshold 3")
+        thin_human.contains("thin: 2 live memories; discovery threshold 3")
             && thin_human.contains("This store is thin, and richer stores exist nearby")
+            && !thin_human.contains("smaller_ft1z5")
             && thin_human.contains(first_next_command),
         format!("thin-root human output must retain posture and retarget: {thin_human}"),
     )?;
@@ -1890,22 +1926,20 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
     // At the explicit threshold the root is genuinely populated. It must omit
     // discovery even when the task has no matching content and keep its Next
     // commands addressed to itself.
-    for index in 2..=3 {
-        let seeded = run_ee(&[
-            "--workspace".to_owned(),
-            root_str.clone(),
-            "remember".to_owned(),
-            format!("root store unrelated fact {index}"),
-            "--json".to_owned(),
-        ])?;
-        ensure(
-            seeded.status.success(),
-            format!(
-                "seeding threshold root fact {index} failed: {}",
-                String::from_utf8_lossy(&seeded.stdout)
-            ),
-        )?;
-    }
+    let threshold_seed = run_ee(&[
+        "--workspace".to_owned(),
+        root_str.clone(),
+        "remember".to_owned(),
+        "third root store unrelated fact".to_owned(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        threshold_seed.status.success(),
+        format!(
+            "seeding the threshold root fact failed: {}",
+            String::from_utf8_lossy(&threshold_seed.stdout)
+        ),
+    )?;
     let populated = run_ee(&[
         "--workspace".to_owned(),
         root_str,

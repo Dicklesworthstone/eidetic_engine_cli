@@ -772,13 +772,13 @@ pub fn resolved_addressed_database_path(workspace_path: &Path) -> PathBuf {
     }
 }
 
-/// Inspect exactly the resolved database addressed by the request.
+/// Inspect exactly the database and workspace identity addressed by the request.
 ///
 /// `None` from the row-count probe is deliberately unavailable, never empty:
 /// unreadable, symlinked, broken, or schema-incompatible stores cannot justify
 /// scanning and retargeting away from the caller's selected store.
 #[must_use]
-pub fn addressed_store_state(database: &Path) -> AddressedStoreState {
+pub fn addressed_store_state(workspace_path: &Path, database: &Path) -> AddressedStoreState {
     match std::fs::symlink_metadata(database) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => AddressedStoreState::Empty {
             database: database.to_path_buf(),
@@ -787,7 +787,7 @@ pub fn addressed_store_state(database: &Path) -> AddressedStoreState {
         Ok(_) if !nearby_store_database_is_safe_regular_file(database) => {
             AddressedStoreState::Unavailable
         }
-        Ok(_) => match store_memory_row_count(database) {
+        Ok(_) => match store_memory_row_count(workspace_path, database) {
             Some(0) => AddressedStoreState::Empty {
                 database: database.to_path_buf(),
             },
@@ -1251,23 +1251,16 @@ fn nearby_store_database_is_safe_regular_file(database: &Path) -> bool {
 /// this store without opening it for writes. `None` means the exact workspace
 /// count could not be established and must never be interpreted as empty.
 #[must_use]
-pub(crate) fn store_memory_row_count(database: &Path) -> Option<u64> {
+pub(crate) fn store_memory_row_count(workspace_path: &Path, database: &Path) -> Option<u64> {
     let connection = DbConnection::open_file_read_only(database).ok()?;
-    let store_dir = database.parent()?;
-    let workspace_root = if store_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| NEARBY_STORE_MARKERS.contains(&name))
-    {
-        store_dir.parent()?
-    } else {
-        store_dir
-    };
+    let workspace_root = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
     let workspace = connection
         .list_workspaces()
         .ok()?
         .into_iter()
-        .find(|workspace| nearby_store_workspace_path_matches(workspace, workspace_root))?;
+        .find(|workspace| nearby_store_workspace_path_matches(workspace, &workspace_root))?;
     connection
         .count_live_memories_for_workspace(&workspace.id)
         .ok()
@@ -2699,7 +2692,7 @@ mod tests {
             .join("ee.db");
         ensure_equal(&database, &expected, "resolved addressed campaign database")?;
         ensure_equal(
-            &addressed_store_state(&database),
+            &addressed_store_state(temp.path(), &database),
             &AddressedStoreState::Populated {
                 live_memories: NEARBY_STORE_THIN_LIVE_MEMORY_THRESHOLD,
             },
@@ -2719,7 +2712,7 @@ mod tests {
                 None,
             )?;
             ensure_equal(
-                &addressed_store_state(&database),
+                &addressed_store_state(temp.path(), &database),
                 &AddressedStoreState::Thin {
                     database: database.clone(),
                     live_memories: expected,
@@ -2734,11 +2727,69 @@ mod tests {
             None,
         )?;
         ensure_equal(
-            &addressed_store_state(&database),
+            &addressed_store_state(temp.path(), &database),
             &AddressedStoreState::Populated {
                 live_memories: NEARBY_STORE_THIN_LIVE_MEMORY_THRESHOLD,
             },
             "threshold-populated addressed-store count",
+        )
+    }
+
+    #[test]
+    fn addressed_store_state_counts_explicit_workspace_in_external_database() -> TestResult {
+        let temp = orient_test_tempdir()?;
+        let workspace = temp.path().join("recorded-workspace");
+        let external_store = temp.path().join("external-stores");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&external_store).map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database = external_store.join("custom.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = WorkspaceId::from_uuid(uuid::Uuid::from_u128(0x741)).to_string();
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("external custom database".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for index in 1_u128..=2 {
+            connection
+                .insert_memory(
+                    &MemoryId::from_uuid(uuid::Uuid::from_u128(0x741 + index)).to_string(),
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: format!("External custom database fact {index}."),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.9,
+                        importance: 0.9,
+                        provenance_uri: None,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: vec!["external-store".to_owned()],
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection.close().map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &addressed_store_state(&workspace, &database),
+            &AddressedStoreState::Thin {
+                database,
+                live_memories: 2,
+            },
+            "explicit workspace identity in external custom database",
         )
     }
 
@@ -2779,7 +2830,7 @@ mod tests {
             .join("ee.db");
         ensure_equal(&database, &expected, "resolved addressed default database")?;
         ensure_equal(
-            &addressed_store_state(&database),
+            &addressed_store_state(temp.path(), &database),
             &AddressedStoreState::Empty { database: expected },
             "only the resolved addressed database determines emptiness",
         )?;

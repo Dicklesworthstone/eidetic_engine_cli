@@ -39581,7 +39581,7 @@ fn orient_store_discovery(
     Option<crate::core::orient::NearbyStore>,
 ) {
     let (addressed_store_path, addressed_state, addressed_documents, store_empty) =
-        match crate::core::orient::addressed_store_state(addressed_database) {
+        match crate::core::orient::addressed_store_state(workspace, addressed_database) {
             crate::core::orient::AddressedStoreState::Empty { database } => {
                 (database, "empty", 0_u64, true)
             }
@@ -39592,11 +39592,16 @@ fn orient_store_discovery(
             crate::core::orient::AddressedStoreState::Populated { .. }
             | crate::core::orient::AddressedStoreState::Unavailable => return (None, None),
         };
-    let scan = crate::core::orient::discover_nearby_stores_for_database(
+    let mut scan = crate::core::orient::discover_nearby_stores_for_database(
         workspace,
         addressed_database,
         std::time::Duration::from_millis(crate::core::orient::NEARBY_STORE_SCAN_BUDGET_MS),
     );
+    // Empty stores admit every positive candidate. Thin stores retain only
+    // candidates that are mechanically richer than the exact addressed count;
+    // this keeps both the retarget and human "richer" wording truthful.
+    scan.stores
+        .retain(|store| store.documents > addressed_documents);
     let best = scan.stores.first().cloned();
     let value = serde_json::json!({
         "addressedStorePath": addressed_store_path,
