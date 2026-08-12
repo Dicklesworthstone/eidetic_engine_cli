@@ -284,7 +284,7 @@ fn seed_rerank_candidates(workspace: &Path, database: &Path) -> TestResult {
                     importance: 0.7,
                     provenance_uri: Some(format!("test://daemon-reranker/{offset}")),
                     trust_class: "agent_validated".to_owned(),
-                    trust_subclass: Some("verified-archive-uds-reranker".to_owned()),
+                    trust_subclass: Some("daemon-uds-rerank-candidate".to_owned()),
                     tags: vec!["daemon".to_owned(), "reranker".to_owned()],
                     valid_from: None,
                     valid_to: None,
@@ -1475,12 +1475,12 @@ fn daemon_advisory_active_episode_lifecycle_is_real_and_workspace_partitioned() 
 }
 
 #[test]
-#[ignore = "requires EE_E2E_RERANK_MODEL_ARCHIVE with the verified native reranker archive"]
-fn daemon_verified_reranker_archive_rearms_permanent_episode_over_uds() -> TestResult {
+#[ignore = "requires EE_E2E_RERANK_MODEL_ARCHIVE accepted by production manifest verification"]
+fn daemon_manifest_verified_reranker_archive_rearms_permanent_episode_over_uds() -> TestResult {
     let archive = std::env::var_os("EE_E2E_RERANK_MODEL_ARCHIVE")
         .map(PathBuf::from)
         .ok_or_else(|| {
-            "EE_E2E_RERANK_MODEL_ARCHIVE must point to the verified rerank-default-v1 archive"
+            "EE_E2E_RERANK_MODEL_ARCHIVE must point to an archive accepted by production manifest verification"
                 .to_owned()
         })?;
     ensure(
@@ -1569,7 +1569,7 @@ fn daemon_verified_reranker_archive_rearms_permanent_episode_over_uds() -> TestR
         from_file: Some(&archive),
         model_store_root: Some(&model_store),
     })
-    .map_err(|error| format!("verified reranker import: {error}"))?;
+    .map_err(|error| format!("manifest-verified reranker import: {error}"))?;
 
     let available = successful_result(
         client_round_trip(
@@ -1620,7 +1620,7 @@ fn daemon_verified_reranker_archive_rearms_permanent_episode_over_uds() -> TestR
         .map_err(|error| error.to_string())?
         .into_iter()
         .find(|entry| entry.purpose == ModelPurpose::Reranker)
-        .ok_or_else(|| "verified import did not register a reranker row".to_owned())?;
+        .ok_or_else(|| "manifest-verified import did not register a reranker row".to_owned())?;
     let disabled_input = CreateModelRegistryInput {
         workspace_id: reranker_entry.workspace_id.clone(),
         provider: reranker_entry.provider,
@@ -1638,7 +1638,7 @@ fn daemon_verified_reranker_archive_rearms_permanent_episode_over_uds() -> TestR
     ensure(
         connection
             .update_model_registry_entry(&reranker_entry.id, &disabled_input)
-            .map_err(|error| format!("disable verified reranker row: {error}"))?,
+            .map_err(|error| format!("disable manifest-verified reranker row: {error}"))?,
         "reranker transition back to unavailable affected no row",
     )?;
     connection.close().map_err(|error| error.to_string())?;
