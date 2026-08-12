@@ -300,11 +300,12 @@ impl JsonlImportReport {
             .iter()
             .filter(|issue| issue.code == "import_index_publish_failed")
         {
+            let message = crate::output::escape_json_string(&issue.message);
             summary.push_str(&format!(
                 "  [{}] {}: {}\n",
                 issue.severity.as_str(),
                 issue.code,
-                issue.message
+                message
             ));
             if let Some(repair) = issue.repair.as_deref() {
                 summary.push_str(&format!("    Repair: {repair}\n"));
@@ -723,7 +724,7 @@ pub fn import_jsonl_records(
         // job, while legacy duplicates that predate this lane receive their
         // missing deterministic job before the post-commit drain.
         for memory_id in &publication_memory_ids {
-            let job_id = import_search_index_job_id(memory_id);
+            let job_id = import_search_index_job_id(&workspace_id, memory_id);
             if connection.get_search_index_job(&job_id)?.is_none() {
                 connection.insert_search_index_job(
                     &job_id,
@@ -757,51 +758,28 @@ pub fn import_jsonl_records(
         let index_dir = workspace_path
             .join(".ee")
             .join(crate::core::index::DEFAULT_INDEX_SUBDIR);
+        let expected_job_ids = publication_memory_ids
+            .iter()
+            .map(|memory_id| import_search_index_job_id(&workspace_id, memory_id))
+            .collect::<Vec<_>>();
+        if !jsonl_import_index_is_ready(&workspace_path, &database_path) {
+            for job_id in &expected_job_ids {
+                connection.requeue_completed_search_index_job_for_repair(job_id)?;
+            }
+        }
         let publication = crate::core::index::process_pending_index_jobs_coalesced(
             &connection,
             &workspace_id,
             &index_dir,
             None,
         );
-        let failure = match publication {
-            Ok(job_reports) => {
-                let non_completed = job_reports
-                    .iter()
-                    .find(|job_report| job_report.outcome != "completed")
-                    .map(|job_report| {
-                        job_report.error.clone().unwrap_or_else(|| {
-                            format!("index job outcome was {}", job_report.outcome)
-                        })
-                    });
-                if let Some(failure) = non_completed {
-                    Some(failure)
-                } else {
-                    match crate::core::index::get_index_status(
-                        &crate::core::index::IndexStatusOptions {
-                            workspace_path: workspace_path.clone(),
-                            database_path: Some(database_path.clone()),
-                            index_dir: None,
-                        },
-                    ) {
-                        Ok(status)
-                            if status.health == crate::core::index::IndexHealth::Ready
-                                && status.db_generation.is_some()
-                                && status.db_generation == status.index_generation =>
-                        {
-                            None
-                        }
-                        Ok(status) => Some(format!(
-                            "post-drain index status was {:?} (database generation {:?}, index generation {:?})",
-                            status.health, status.db_generation, status.index_generation
-                        )),
-                        Err(error) => Some(format!(
-                            "post-drain index status could not be verified: {error}"
-                        )),
-                    }
-                }
-            }
-            Err(error) => Some(error.to_string()),
-        };
+        let failure = jsonl_import_publication_failure(
+            &connection,
+            &expected_job_ids,
+            &workspace_path,
+            &database_path,
+            publication,
+        )?;
         if let Some(failure) = failure {
             let repair = jsonl_import_index_repair_command(
                 &workspace_path,
@@ -821,11 +799,83 @@ pub fn import_jsonl_records(
     Ok(report)
 }
 
+fn jsonl_import_index_is_ready(workspace_path: &Path, database_path: &Path) -> bool {
+    crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+        workspace_path: workspace_path.to_path_buf(),
+        database_path: Some(database_path.to_path_buf()),
+        index_dir: None,
+    })
+    .is_ok_and(|status| {
+        status.health == crate::core::index::IndexHealth::Ready
+            && status.db_generation.is_some()
+            && status.db_generation == status.index_generation
+    })
+}
+
+fn jsonl_import_publication_failure(
+    connection: &DbConnection,
+    expected_job_ids: &[String],
+    workspace_path: &Path,
+    database_path: &Path,
+    publication: Result<
+        Vec<crate::core::index::IndexProcessingJobReport>,
+        crate::core::index::IndexRebuildError,
+    >,
+) -> Result<Option<String>, JsonlImportError> {
+    let publication_error = publication.as_ref().err().map(ToString::to_string);
+    let job_reports = publication.as_ref().ok();
+    for job_id in expected_job_ids {
+        let Some(job) = connection.get_search_index_job(job_id)? else {
+            return Ok(Some(format!(
+                "durable search-index job {job_id} disappeared before final verification"
+            )));
+        };
+        if job.status_enum() != Some(crate::db::SearchIndexJobStatus::Completed) {
+            let detail = job_reports
+                .and_then(|reports| {
+                    reports
+                        .iter()
+                        .find(|report| report.job_id.as_str() == job_id.as_str())
+                })
+                .and_then(|report| report.error.as_deref())
+                .map(str::to_owned)
+                .or_else(|| job.error_message.clone())
+                .or_else(|| publication_error.clone())
+                .unwrap_or_else(|| "publisher did not complete the durable job".to_owned());
+            return Ok(Some(format!(
+                "durable search-index job {job_id} ended with status {}: {detail}",
+                job.status
+            )));
+        }
+    }
+
+    match crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+        workspace_path: workspace_path.to_path_buf(),
+        database_path: Some(database_path.to_path_buf()),
+        index_dir: None,
+    }) {
+        Ok(status)
+            if status.health == crate::core::index::IndexHealth::Ready
+                && status.db_generation.is_some()
+                && status.db_generation == status.index_generation =>
+        {
+            Ok(None)
+        }
+        Ok(status) => Ok(Some(format!(
+            "post-drain index status was {:?} (database generation {:?}, index generation {:?})",
+            status.health, status.db_generation, status.index_generation
+        ))),
+        Err(error) => Ok(Some(format!(
+            "post-drain index status could not be verified: {error}"
+        ))),
+    }
+}
+
 /// Deterministic import-lane index-job id. Namespaced so a reimport replays
 /// the same durable job and can never collide with the remember-lane job id
 /// minted for the same memory.
-fn import_search_index_job_id(memory_id: &str) -> String {
-    let hash = blake3::hash(format!("jsonl_import|{memory_id}").as_bytes())
+fn import_search_index_job_id(workspace_id: &str, memory_id: &str) -> String {
+    let hash = blake3::hash(format!("jsonl_import|{workspace_id}|{memory_id}").as_bytes())
         .to_hex()
         .to_string();
     format!("sidx_{}", &hash[..26])
@@ -866,6 +916,34 @@ fn jsonl_import_shell_quote_arg(value: &str) -> String {
         )
     }) {
         value.to_owned()
+    } else if value.chars().any(char::is_control) {
+        // A literal control byte inside ordinary single quotes would remain
+        // shell-valid but could inject terminal lines/sequences into human
+        // output. ANSI-C quoting keeps the command copy/pasteable in the
+        // supported zsh/bash environments while rendering every control byte
+        // visibly and preserving the exact path value when executed.
+        let mut quoted = String::with_capacity(value.len() + 3);
+        quoted.push_str("$'");
+        for character in value.chars() {
+            match character {
+                '\'' => quoted.push_str("\\'"),
+                '\\' => quoted.push_str("\\\\"),
+                '\n' => quoted.push_str("\\n"),
+                '\r' => quoted.push_str("\\r"),
+                '\t' => quoted.push_str("\\t"),
+                character if character.is_control() => {
+                    let codepoint = character as u32;
+                    if codepoint <= u16::MAX.into() {
+                        quoted.push_str(&format!("\\u{codepoint:04x}"));
+                    } else {
+                        quoted.push_str(&format!("\\U{codepoint:08x}"));
+                    }
+                }
+                character => quoted.push(character),
+            }
+        }
+        quoted.push('\'');
+        quoted
     } else {
         format!("'{}'", value.replace('\'', "'\\''"))
     }
@@ -2070,6 +2148,69 @@ mod tests {
     }
 
     #[test]
+    fn import_human_summary_escapes_terminal_control_bytes_in_publication_failures() -> TestResult {
+        let mut report = import_report_fixture("/source.jsonl", "source-id");
+        report.issues.push(JsonlImportIssue {
+            line: None,
+            code: "import_index_publish_failed".to_owned(),
+            severity: JsonlImportIssueSeverity::Warning,
+            message: "publisher said \u{1b}[31mred\nnext".to_owned(),
+            repair: Some(format!(
+                "ee index rebuild --workspace {}",
+                jsonl_import_shell_quote_arg("/tmp/project\nnext")
+            )),
+        });
+
+        let human = report.human_summary();
+        ensure(
+            human.contains("publisher said \\u001b[31mred\\nnext")
+                && human.contains("Repair: ee index rebuild --workspace $'/tmp/project\\nnext'"),
+            true,
+            "human output renders terminal controls as visible escapes",
+        )?;
+        ensure(
+            human.contains('\u{1b}')
+                || human.contains("red\nnext")
+                || human.contains("project\nnext"),
+            false,
+            "human output never emits raw terminal controls or injected lines",
+        )
+    }
+
+    #[test]
+    fn import_index_job_identity_is_workspace_scoped() -> TestResult {
+        let memory_id = "mem_01234567890123456789012345";
+        let first = import_search_index_job_id("wsp_first", memory_id);
+        let second = import_search_index_job_id("wsp_second", memory_id);
+
+        ensure(
+            first == second,
+            false,
+            "the same imported memory id in two workspaces must not alias one durable job",
+        )?;
+        ensure(
+            first.starts_with("sidx_") && first.len() == 31,
+            true,
+            "workspace-scoped import job ids preserve the canonical opaque shape",
+        )
+    }
+
+    #[test]
+    fn import_repair_shell_quote_preserves_special_paths_without_raw_controls() -> TestResult {
+        ensure(
+            jsonl_import_shell_quote_arg("/tmp/a 'quoted' path"),
+            "'/tmp/a '\\''quoted'\\'' path'".to_owned(),
+            "ordinary special paths retain portable single-quote escaping",
+        )?;
+        let control_path = jsonl_import_shell_quote_arg("/tmp/a 'quoted'\nline\\tail");
+        ensure(
+            control_path,
+            "$'/tmp/a \\'quoted\\'\\nline\\\\tail'".to_owned(),
+            "control-bearing paths use copy/pasteable visible ANSI-C quoting",
+        )
+    }
+
+    #[test]
     fn parse_jsonl_header_accepts_header_record_only() -> TestResult {
         let header_line = sample_jsonl()
             .lines()
@@ -3049,7 +3190,7 @@ mod tests {
         let retry = import_jsonl_records(&JsonlImportOptions {
             workspace_path: workspace.clone(),
             database_path: None,
-            source_path: source,
+            source_path: source.clone(),
             dry_run: false,
         })
         .map_err(|error| error.to_string())?;
@@ -3069,6 +3210,7 @@ mod tests {
         )?;
         let retried_job = connection
             .get_search_index_job(&import_search_index_job_id(
+                &workspace_id,
                 "mem_01234567890123456789012345",
             ))
             .map_err(|error| error.to_string())?
@@ -3094,7 +3236,7 @@ mod tests {
         )?;
         let search = crate::core::search::run_search_with_filters(
             &crate::core::search::SearchOptions {
-                workspace_path: workspace,
+                workspace_path: workspace.clone(),
                 database_path: None,
                 index_dir: None,
                 query: "cargo fmt release".to_owned(),
@@ -3124,6 +3266,79 @@ mod tests {
                 .any(|hit| hit.doc_id == "mem_01234567890123456789012345"),
             true,
             "retried import memory is immediately searchable",
+        )?;
+
+        let job_id = import_search_index_job_id(&workspace_id, "mem_01234567890123456789012345");
+        let skipped_report = crate::core::index::IndexProcessingJobReport {
+            job_id: job_id.clone(),
+            job_type: crate::db::SearchIndexJobType::SingleDocument
+                .as_str()
+                .to_owned(),
+            document_source: Some("memory".to_owned()),
+            document_id: Some("mem_01234567890123456789012345".to_owned()),
+            outcome: "skipped".to_owned(),
+            processing_mode: "concurrent_claim".to_owned(),
+            fallback_to_full: None,
+            documents_total: 1,
+            documents_indexed: 0,
+            error: Some("another publisher held the claim".to_owned()),
+        };
+        ensure(
+            jsonl_import_publication_failure(
+                &connection,
+                std::slice::from_ref(&job_id),
+                &workspace,
+                &workspace.join(".ee/ee.db"),
+                Ok(vec![skipped_report]),
+            )
+            .map_err(|error| error.to_string())?,
+            None,
+            "authoritative completed job and ready index override a local skipped report",
+        )?;
+
+        // A completed job is re-armed only when authoritative index state is
+        // missing/stale. Preserve the published directory, then prove the
+        // identical import reuses the same logical job to restore it.
+        fs::rename(
+            &index_dir,
+            workspace.join(".ee/index-completed-but-missing"),
+        )
+        .map_err(|error| error.to_string())?;
+        let recovered = import_jsonl_records(&JsonlImportOptions {
+            workspace_path: workspace.clone(),
+            database_path: None,
+            source_path: source,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(
+            recovered
+                .issues
+                .iter()
+                .any(|issue| issue.code == "import_index_publish_failed"),
+            false,
+            "completed-job reimport restores a missing derived index",
+        )?;
+        let import_jobs = connection
+            .list_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|job| job.id == job_id)
+            .collect::<Vec<_>>();
+        ensure(
+            import_jobs.len(),
+            1,
+            "missing-index recovery reuses one deterministic logical job",
+        )?;
+        ensure(
+            import_jobs[0].status_enum(),
+            Some(crate::db::SearchIndexJobStatus::Completed),
+            "re-armed completed job returns to completed",
+        )?;
+        ensure(
+            jsonl_import_index_is_ready(&workspace, &workspace.join(".ee/ee.db")),
+            true,
+            "completed-job recovery restores ready generation equality",
         )
     }
 

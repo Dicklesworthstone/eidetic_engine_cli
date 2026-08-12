@@ -22919,7 +22919,10 @@ where
             }
             output::Renderer::Toon => {
                 let json = jsonl_import_response_v2(&report);
-                write_stdout(stdout, &output::render_toon_from_json(&json.to_string()))
+                write_stdout(
+                    stdout,
+                    &(output::render_toon_from_json(&json.to_string()) + "\n"),
+                )
             }
             output::Renderer::Json
             | output::Renderer::Jsonl

@@ -25786,6 +25786,24 @@ impl DbConnection {
         Ok(u32::try_from(affected).unwrap_or(u32::MAX))
     }
 
+    /// Re-arm one completed logical job when authoritative index inspection
+    /// proves its derived publication is no longer present/current. This is a
+    /// targeted repair primitive, not part of the ordinary drain: callers
+    /// must first prove stale/missing index state, so completed jobs do not
+    /// cycle back to pending during healthy processing ticks.
+    pub fn requeue_completed_search_index_job_for_repair(&self, id: &str) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE search_index_jobs SET status = ?1, started_at = NULL, completed_at = NULL, error_message = NULL, documents_indexed = 0 WHERE id = ?2 AND status = ?3",
+            &[
+                Value::Text(SearchIndexJobStatus::Pending.as_str().to_string()),
+                Value::Text(id.to_string()),
+                Value::Text(SearchIndexJobStatus::Completed.as_str().to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
     /// Get the latest search index job for a workspace (regardless of status).
     pub fn latest_search_index_job(
         &self,

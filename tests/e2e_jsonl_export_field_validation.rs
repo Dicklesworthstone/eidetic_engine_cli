@@ -89,6 +89,24 @@ fn run_ee(workspace: &Path, args: &[&str]) -> Result<(i32, Value, String), Strin
     Ok((exit_code, parsed, stderr.into_owned()))
 }
 
+fn run_ee_text(workspace: &Path, args: &[&str]) -> Result<(i32, String, String), String> {
+    let mut full_args = vec!["--workspace", path_arg(workspace)?];
+    full_args.extend(args);
+
+    let output = Command::new(ee_bin())
+        .args(&full_args)
+        .env_remove("EE_WORKSPACE")
+        .env("NO_COLOR", "1")
+        .output()
+        .map_err(|error| format!("spawn ee: {error}"))?;
+
+    Ok((
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
+}
+
 /// Create a JSONL file with a valid header but a memory record missing its ID.
 fn write_jsonl_with_blank_memory_id(path: &Path) -> TestResult {
     let header = json!({
@@ -363,6 +381,73 @@ fn import_jsonl_public_response_exposes_and_retries_index_publication_failure() 
         "data issue and response degradation share one repair",
     )?;
 
+    let (exit_code, human, stderr) = run_ee_text(
+        &workspace,
+        &["import", "jsonl", "--source", path_arg(&source)?],
+    )?;
+    ensure_equal(
+        &exit_code,
+        &EXIT_SUCCESS,
+        "human publication failure exit code",
+    )?;
+    ensure(
+        stderr.is_empty(),
+        format!("human import must keep stderr empty: {stderr}"),
+    )?;
+    ensure(
+        human.contains("[warning] import_index_publish_failed")
+            && human.contains(&format!("Repair: {expected_repair}")),
+        format!("human output omitted publication failure or repair: {human}"),
+    )?;
+
+    let (exit_code, toon, stderr) = run_ee_text(
+        &workspace,
+        &[
+            "--format",
+            "toon",
+            "import",
+            "jsonl",
+            "--source",
+            path_arg(&source)?,
+        ],
+    )?;
+    ensure_equal(
+        &exit_code,
+        &EXIT_SUCCESS,
+        "TOON publication failure exit code",
+    )?;
+    ensure(
+        stderr.is_empty(),
+        format!("TOON import must keep stderr empty: {stderr}"),
+    )?;
+    ensure(
+        toon.ends_with('\n'),
+        format!("TOON output must end with one record newline: {toon:?}"),
+    )?;
+    let decoded = toon::try_decode(toon.trim_end_matches('\n'), None)
+        .map_err(|error| format!("decode TOON import response: {error}"))?;
+    let decoded: Value = serde_json::from_str(&decoded)
+        .map_err(|error| format!("parse decoded TOON JSON: {error}\ndecoded: {decoded}"))?;
+    ensure_equal(
+        &decoded.pointer("/schema"),
+        &Some(&json!("ee.response.v2")),
+        "TOON response envelope schema",
+    )?;
+    let toon_degradation = decoded
+        .pointer("/degraded")
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries.iter().find(|entry| {
+                entry.get("code").and_then(Value::as_str) == Some("import_index_publish_failed")
+            })
+        })
+        .ok_or_else(|| format!("TOON response omitted publication degradation: {decoded}"))?;
+    ensure_equal(
+        &toon_degradation.get("repair"),
+        &Some(&json!(expected_repair)),
+        "TOON publication degradation exact repair",
+    )?;
+
     // Keep the failed symlink as evidence. Once the canonical path is free,
     // the same public import must retry its existing deterministic job.
     fs::rename(&index_dir, workspace.join(".ee/index-failed-link"))
@@ -443,5 +528,60 @@ fn import_jsonl_public_response_exposes_and_retries_index_publication_failure() 
             result.get("docId").and_then(Value::as_str) == Some("mem_01234567890123456789012345")
         }),
         format!("retried imported memory is not searchable: {search}"),
+    )?;
+
+    // Simulate loss of a derived index after the logical job completed. The
+    // next identical import must re-arm that completed job instead of claiming
+    // success while the index remains absent.
+    fs::rename(
+        &index_dir,
+        workspace.join(".ee/index-completed-but-missing"),
+    )
+    .map_err(|error| format!("preserve completed index: {error}"))?;
+    let (exit_code, recovered, stderr) = run_ee(
+        &workspace,
+        &["import", "jsonl", "--source", path_arg(&source)?],
+    )?;
+    ensure_equal(
+        &exit_code,
+        &EXIT_SUCCESS,
+        "completed-job index recovery exit code",
+    )?;
+    ensure(
+        stderr.is_empty(),
+        format!("completed-job recovery must keep stderr empty: {stderr}"),
+    )?;
+    ensure_equal(
+        &recovered.pointer("/data/memoriesImported"),
+        &Some(&json!(0)),
+        "completed-job recovery remains idempotent",
+    )?;
+    ensure_equal(
+        &recovered.pointer("/degraded"),
+        &Some(&json!([])),
+        "completed-job recovery restores the index without degradation",
+    )?;
+    let (exit_code, status, stderr) = run_ee(&workspace, &["index", "status"])?;
+    ensure_equal(
+        &exit_code,
+        &EXIT_SUCCESS,
+        "recovered index status exit code",
+    )?;
+    ensure(
+        stderr.is_empty(),
+        format!("recovered index status must keep stderr empty: {stderr}"),
+    )?;
+    let db_generation = status
+        .pointer("/data/dbGeneration")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("recovered status omitted database generation: {status}"))?;
+    let index_generation = status
+        .pointer("/data/indexGeneration")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("recovered status omitted index generation: {status}"))?;
+    ensure(
+        status.pointer("/data/health") == Some(&json!("ready"))
+            && index_generation == db_generation,
+        format!("completed-job recovery did not restore ready equality: {status}"),
     )
 }
