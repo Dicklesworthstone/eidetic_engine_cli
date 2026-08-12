@@ -1628,7 +1628,7 @@ mod tests {
                 label: "AGENTS.md:L1".to_owned(),
                 locator: Some("L1".to_owned()),
                 note: format!(
-                    "Memory {positive_id} selected by bounded direct lexical orientation retrieval; evidenceFreshness=unknown."
+                    "Memory {positive_id} selected by bounded direct lexical orientation retrieval; evidenceFreshness=missing_source."
                 ),
             }],
             "exact direct-lexical provenance",

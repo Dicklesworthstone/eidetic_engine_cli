@@ -154,8 +154,27 @@ fn orient_fast_and_full_instances_validate_and_unknown_fields_fail() -> TestResu
                     "note": "explicit memory"
                 }]
             }],
-            "relevant": [],
-            "issues": []
+            "relevant": [{
+                "id": "mem_02",
+                "snippet": "Retain the selected store identity.",
+                "createdAt": "2026-08-12T11:00:00Z",
+                "tags": ["orientation", "store-identity"],
+                "provenance": [{
+                    "uri": "memory://mem_02",
+                    "scheme": "memory",
+                    "label": "mem_02",
+                    "locator": null,
+                    "note": "explicit relevant memory"
+                }]
+            }],
+            "issues": [{
+                "component": "relevant",
+                "status": "degraded",
+                "code": "context_evidence_freshness_missing_source",
+                "severity": "low",
+                "message": "Evidence source is missing.",
+                "repair": null
+            }]
         },
         "primer": null,
         "decisions": {},
@@ -204,13 +223,64 @@ fn orient_fast_and_full_instances_validate_and_unknown_fields_fail() -> TestResu
     });
     ee::testing::validate_json_schema_instance(&full, &schema)?;
 
-    let mut invalid = fast;
-    invalid
+    let mut root_unknown = fast.clone();
+    root_unknown
         .as_object_mut()
         .ok_or("fast fixture must be an object")?
         .insert("uncontractedField".to_owned(), Value::Bool(true));
     ensure(
-        ee::testing::validate_json_schema_instance(&invalid, &schema).is_err(),
+        ee::testing::validate_json_schema_instance(&root_unknown, &schema).is_err(),
         "strict orient schema must reject an uncontracted root field",
-    )
+    )?;
+
+    let fast_content = fast
+        .pointer("/fastContent")
+        .cloned()
+        .ok_or("fast fixture is missing fastContent")?;
+    let mut invalid_mode = fast.clone();
+    invalid_mode["mode"] = json!("turbo");
+    let mut fast_without_content = fast.clone();
+    fast_without_content["fastContent"] = Value::Null;
+    let mut fast_with_pack = fast.clone();
+    fast_with_pack["pack"] = json!({});
+    let mut full_without_pack = full.clone();
+    full_without_pack["pack"] = Value::Null;
+    let mut full_with_fast_content = full;
+    full_with_fast_content["fastContent"] = fast_content;
+    for (case, invalid) in [
+        ("unknown mode", invalid_mode),
+        ("fast mode with null fastContent", fast_without_content),
+        ("fast mode with object pack", fast_with_pack),
+        ("full mode with null pack", full_without_pack),
+        ("full mode with object fastContent", full_with_fast_content),
+    ] {
+        ensure(
+            ee::testing::validate_json_schema_instance(&invalid, &schema).is_err(),
+            format!("orient schema must reject {case}"),
+        )?;
+    }
+
+    for pointer in [
+        "/fastContent",
+        "/fastContent/strategy",
+        "/fastContent/recent/0",
+        "/fastContent/recent/0/provenance/0",
+        "/fastContent/relevant/0",
+        "/fastContent/relevant/0/provenance/0",
+        "/fastContent/issues/0",
+        "/storeDiscovery",
+        "/storeDiscovery/nearbyStores/0",
+    ] {
+        let mut nested_unknown = fast.clone();
+        nested_unknown
+            .pointer_mut(pointer)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| format!("fixture path {pointer} must be an object"))?
+            .insert("uncontractedField".to_owned(), Value::Bool(true));
+        ensure(
+            ee::testing::validate_json_schema_instance(&nested_unknown, &schema).is_err(),
+            format!("strict orient schema must reject an unknown field at {pointer}"),
+        )?;
+    }
+    Ok(())
 }

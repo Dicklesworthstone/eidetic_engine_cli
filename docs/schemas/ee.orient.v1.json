@@ -33,6 +33,32 @@
     "nextCommands"
   ],
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": { "mode": { "const": "fast" } },
+        "required": ["mode"]
+      },
+      "then": {
+        "properties": {
+          "pack": { "type": "null" },
+          "fastContent": { "$ref": "#/$defs/fastContent" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "mode": { "const": "full" } },
+        "required": ["mode"]
+      },
+      "then": {
+        "properties": {
+          "pack": { "type": "object" },
+          "fastContent": { "type": "null" }
+        }
+      }
+    }
+  ],
   "properties": {
     "schema": { "type": "string", "const": "ee.orient.v1" },
     "command": { "type": "string", "const": "orient" },

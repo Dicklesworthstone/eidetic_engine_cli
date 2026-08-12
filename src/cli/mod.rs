@@ -39240,7 +39240,13 @@ where
                     format!("Read-only context pack could not be assembled: {error}"),
                     Some(format!(
                         "Run `{}` to isolate lexical retrieval posture.",
-                        orient_pack_command(&workspace_path, &args.task, args.max_tokens)
+                        orient_pack_command(
+                            &workspace_path,
+                            &addressed_database_path,
+                            &addressed_index_dir,
+                            &args.task,
+                            args.max_tokens,
+                        )
                     )),
                 ));
                 serde_json::Value::Null
@@ -39312,7 +39318,13 @@ where
     // first orient reports nothing.
     let (store_discovery, nearby_best) =
         orient_store_discovery(&workspace_path, &addressed_database_path);
-    let mut next_commands = orient_next_commands(&workspace_path, &args.task, args.max_tokens);
+    let mut next_commands = orient_next_commands(
+        &workspace_path,
+        &addressed_database_path,
+        &addressed_index_dir,
+        &args.task,
+        args.max_tokens,
+    );
     if let Some(best_store) = &nearby_best {
         next_commands.insert(
             0,
@@ -39562,12 +39574,18 @@ fn orient_workspace_hygiene_summary(
     })
 }
 
-fn orient_next_commands(workspace: &Path, task: &str, max_tokens: u32) -> Vec<String> {
+fn orient_next_commands(
+    workspace: &Path,
+    database: &Path,
+    index_dir: &Path,
+    task: &str,
+    max_tokens: u32,
+) -> Vec<String> {
     vec![
-        orient_pack_command(workspace, task, max_tokens),
-        orient_search_command(workspace, task),
+        orient_pack_command(workspace, database, index_dir, task, max_tokens),
+        orient_search_command(workspace, database, index_dir, task),
         orient_learn_gaps_command(workspace),
-        orient_decide_revisit_command(workspace),
+        orient_decide_revisit_command(workspace, database),
         orient_workspace_hygiene_command(workspace),
         orient_doctor_command(workspace),
     ]
@@ -39622,11 +39640,19 @@ fn orient_store_discovery(
     (Some(value), best)
 }
 
-fn orient_pack_command(workspace: &Path, task: &str, max_tokens: u32) -> String {
+fn orient_pack_command(
+    workspace: &Path,
+    database: &Path,
+    index_dir: &Path,
+    task: &str,
+    max_tokens: u32,
+) -> String {
     let workspace = shell_quote_cli_arg(&workspace.display().to_string());
+    let database = shell_quote_cli_arg(&database.display().to_string());
+    let index_dir = shell_quote_cli_arg(&index_dir.display().to_string());
     let task = shell_quote_cli_arg(task);
     format!(
-        "ee pack --workspace {workspace} --read-only --source-mode lexical_only --max-tokens {max_tokens} --json -- {task}"
+        "ee pack --workspace {workspace} --database {database} --index-dir {index_dir} --read-only --source-mode lexical_only --max-tokens {max_tokens} --json -- {task}"
     )
 }
 
@@ -39645,10 +39671,19 @@ fn orient_pack_command_for_store(
     )
 }
 
-fn orient_search_command(workspace: &Path, task: &str) -> String {
+fn orient_search_command(
+    workspace: &Path,
+    database: &Path,
+    index_dir: &Path,
+    task: &str,
+) -> String {
     let workspace = shell_quote_cli_arg(&workspace.display().to_string());
+    let database = shell_quote_cli_arg(&database.display().to_string());
+    let index_dir = shell_quote_cli_arg(&index_dir.display().to_string());
     let task = shell_quote_cli_arg(task);
-    format!("ee search --workspace {workspace} --json -- {task}")
+    format!(
+        "ee search --workspace {workspace} --database {database} --index-dir {index_dir} --json -- {task}"
+    )
 }
 
 fn orient_learn_gaps_command(workspace: &Path) -> String {
@@ -39661,9 +39696,10 @@ fn orient_workspace_hygiene_command(workspace: &Path) -> String {
     format!("ee workspace hygiene --workspace {workspace} --json")
 }
 
-fn orient_decide_revisit_command(workspace: &Path) -> String {
+fn orient_decide_revisit_command(workspace: &Path, database: &Path) -> String {
     let workspace = shell_quote_cli_arg(&workspace.display().to_string());
-    format!("ee decide revisit --workspace {workspace} --json")
+    let database = shell_quote_cli_arg(&database.display().to_string());
+    format!("ee decide revisit --workspace {workspace} --database {database} --json")
 }
 
 fn orient_doctor_command(workspace: &Path) -> String {
@@ -70250,17 +70286,30 @@ mod tests {
 
     #[test]
     fn orient_next_commands_put_task_after_option_sentinel() -> TestResult {
-        let commands = orient_next_commands(Path::new("/tmp/ws"), "-fix quoted task", 1234);
+        let commands = orient_next_commands(
+            Path::new("/tmp/ws"),
+            Path::new("/tmp/store's files/ee.db"),
+            Path::new("/tmp/store's files/index"),
+            "-fix quoted task",
+            1234,
+        );
         ensure_equal(
             &commands[0],
-            &"ee pack --workspace /tmp/ws --read-only --source-mode lexical_only --max-tokens 1234 --json -- '-fix quoted task'"
+            &"ee pack --workspace /tmp/ws --database '/tmp/store'\\''s files/ee.db' --index-dir '/tmp/store'\\''s files/index' --read-only --source-mode lexical_only --max-tokens 1234 --json -- '-fix quoted task'"
                 .to_string(),
             "orient pack next command",
         )?;
         ensure_equal(
             &commands[1],
-            &"ee search --workspace /tmp/ws --json -- '-fix quoted task'".to_string(),
+            &"ee search --workspace /tmp/ws --database '/tmp/store'\\''s files/ee.db' --index-dir '/tmp/store'\\''s files/index' --json -- '-fix quoted task'"
+                .to_string(),
             "orient search next command",
+        )?;
+        ensure_equal(
+            &commands[3],
+            &"ee decide revisit --workspace /tmp/ws --database '/tmp/store'\\''s files/ee.db' --json"
+                .to_string(),
+            "orient decision next command",
         )?;
 
         let pack = Cli::try_parse_from([
@@ -70268,6 +70317,10 @@ mod tests {
             "pack",
             "--workspace",
             "/tmp/ws",
+            "--database",
+            "/tmp/store's files/ee.db",
+            "--index-dir",
+            "/tmp/store's files/index",
             "--read-only",
             "--source-mode",
             "lexical_only",
@@ -70287,6 +70340,16 @@ mod tests {
                 )?;
                 ensure_equal(&args.read_only, &true, "orient pack read-only")?;
                 ensure_equal(
+                    &args.database.as_deref(),
+                    &Some(Path::new("/tmp/store's files/ee.db")),
+                    "orient pack database",
+                )?;
+                ensure_equal(
+                    &args.index_dir.as_deref(),
+                    &Some(Path::new("/tmp/store's files/index")),
+                    "orient pack index",
+                )?;
+                ensure_equal(
                     &args.source_mode,
                     &Some(SearchSourceMode::LexicalOnly),
                     "orient pack source mode",
@@ -70300,6 +70363,10 @@ mod tests {
             "search",
             "--workspace",
             "/tmp/ws",
+            "--database",
+            "/tmp/store's files/ee.db",
+            "--index-dir",
+            "/tmp/store's files/index",
             "--json",
             "--",
             "-fix quoted task",
@@ -70311,11 +70378,23 @@ mod tests {
             )
         })?;
         match search.command {
-            Some(Command::Search(args)) => ensure_equal(
-                &args.query.as_deref(),
-                &Some("-fix quoted task"),
-                "orient search task",
-            ),
+            Some(Command::Search(args)) => {
+                ensure_equal(
+                    &args.query.as_deref(),
+                    &Some("-fix quoted task"),
+                    "orient search task",
+                )?;
+                ensure_equal(
+                    &args.database.as_deref(),
+                    &Some(Path::new("/tmp/store's files/ee.db")),
+                    "orient search database",
+                )?;
+                ensure_equal(
+                    &args.index_dir.as_deref(),
+                    &Some(Path::new("/tmp/store's files/index")),
+                    "orient search index",
+                )
+            }
             other => Err(format!("expected search command, got {other:?}")),
         }
     }

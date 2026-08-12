@@ -1442,8 +1442,8 @@ fn storeless_miss_quotes_spaced_nearby_workspace_and_command_executes() -> TestR
 #[test]
 fn orient_explicit_external_database_uses_recorded_workspace_identity() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let workspace = tempdir.path().join("external-db-workspace-ft1z5");
-    let external_store = tempdir.path().join("stores");
+    let workspace = tempdir.path().join("external db workspace's root-ft1z5");
+    let external_store = tempdir.path().join("selected external store's files");
     std::fs::create_dir_all(workspace.join(".git")).map_err(|error| error.to_string())?;
     std::fs::create_dir_all(&external_store).map_err(|error| error.to_string())?;
     let workspace = workspace
@@ -1497,6 +1497,26 @@ fn orient_explicit_external_database_uses_recorded_workspace_identity() -> TestR
             .map_err(|error| format!("insert external orient memory {index}: {error}"))?;
     }
     drop(connection);
+    let index_dir = external_store.join("index");
+    let rebuilt = run_ee(&[
+        "--workspace".to_owned(),
+        workspace.display().to_string(),
+        "index".to_owned(),
+        "rebuild".to_owned(),
+        "--database".to_owned(),
+        database.display().to_string(),
+        "--index-dir".to_owned(),
+        index_dir.display().to_string(),
+        "--json".to_owned(),
+    ])?;
+    ensure(
+        rebuilt.status.success(),
+        format!(
+            "rebuilding the explicit external index failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&rebuilt.stdout),
+            String::from_utf8_lossy(&rebuilt.stderr)
+        ),
+    )?;
 
     let output = run_ee(&[
         "--workspace".to_owned(),
@@ -1572,6 +1592,69 @@ fn orient_explicit_external_database_uses_recorded_workspace_identity() -> TestR
     )
     .map_err(|error| format!("parse {}: {error}", schema_path.display()))?;
     ee::testing::validate_json_schema_instance(data, &schema)?;
+    let next_commands = array_at(
+        &response,
+        "/data/nextCommands",
+        "external database orient next commands",
+    )?;
+    let database_text = database.to_string_lossy().to_string();
+    let index_text = index_dir.to_string_lossy().to_string();
+    for (index, command) in next_commands.iter().enumerate() {
+        let command = command
+            .as_str()
+            .ok_or_else(|| format!("nextCommands[{index}] must be a string"))?;
+        if command.starts_with("ee pack ") || command.starts_with("ee search ") {
+            ensure(
+                command.contains("--database")
+                    && command.contains("--index-dir")
+                    && command.contains(&database_text.replace('\'', "'\\''"))
+                    && command.contains(&index_text.replace('\'', "'\\''")),
+                format!(
+                    "store-reading nextCommands[{index}] must preserve the shell-quoted external database and index: {command:?}"
+                ),
+            )?;
+        }
+        if command.starts_with("ee decide revisit ") {
+            ensure(
+                command.contains("--database")
+                    && command.contains(&database_text.replace('\'', "'\\''")),
+                format!(
+                    "decision nextCommands[{index}] must preserve the shell-quoted external database: {command:?}"
+                ),
+            )?;
+        }
+    }
+    let follow_up = string_at(
+        &response,
+        "/data/nextCommands/0",
+        "external database pack follow-up",
+    )?;
+    let followed = run_emitted_ee_command_with_registry(
+        follow_up,
+        &tempdir.path().join("external-follow-up-registry.db"),
+    )?;
+    ensure(
+        followed.status.success(),
+        format!(
+            "external database follow-up failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&followed.stdout),
+            String::from_utf8_lossy(&followed.stderr)
+        ),
+    )?;
+    let followed_json = stdout_json(&followed, "external database pack follow-up")?;
+    let followed_items = array_at(
+        &followed_json,
+        "/data/pack/items",
+        "external database pack follow-up",
+    )?;
+    ensure(
+        followed_items.iter().any(|item| {
+            item.pointer("/content").and_then(serde_json::Value::as_str) == Some(expected_content)
+        }),
+        format!(
+            "executing the emitted follow-up must read the intended external store: {followed_items:?}"
+        ),
+    )?;
     ensure(
         !workspace.join(".ee").join("ee.db").exists(),
         "orient must not create or fall back to the workspace-default database",
@@ -1824,6 +1907,70 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
         format!(
             "a populated addressed .ee-campaign store may suppress discovery only when fast recent and relevant providers read its content: {}",
             addressed_campaign_json["data"]
+        ),
+    )?;
+    let addressed_next_commands = array_at(
+        &addressed_campaign_json,
+        "/data/nextCommands",
+        "addressed .ee-campaign next commands",
+    )?;
+    for (index, command) in addressed_next_commands.iter().enumerate() {
+        let command = command
+            .as_str()
+            .ok_or_else(|| format!("nextCommands[{index}] must be a string"))?;
+        if command.starts_with("ee pack ") || command.starts_with("ee search ") {
+            ensure(
+                command.contains("--database")
+                    && command.contains("--index-dir")
+                    && command.contains(&campaign_database.to_string_lossy().to_string())
+                    && command.contains(&campaign_index.to_string_lossy().to_string()),
+                format!(
+                    "store-reading nextCommands[{index}] must preserve the selected .ee-campaign database and index: {command:?}"
+                ),
+            )?;
+        }
+        if command.starts_with("ee decide revisit ") {
+            ensure(
+                command.contains("--database")
+                    && command.contains(&campaign_database.to_string_lossy().to_string()),
+                format!(
+                    "decision nextCommands[{index}] must preserve the selected .ee-campaign database: {command:?}"
+                ),
+            )?;
+        }
+    }
+    let addressed_follow_up = string_at(
+        &addressed_campaign_json,
+        "/data/nextCommands/0",
+        "addressed .ee-campaign pack follow-up",
+    )?;
+    let addressed_followed = run_emitted_ee_command_with_registry(
+        addressed_follow_up,
+        &tempdir
+            .path()
+            .join("addressed-campaign-follow-up-registry.db"),
+    )?;
+    ensure(
+        addressed_followed.status.success(),
+        format!(
+            "addressed .ee-campaign follow-up failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&addressed_followed.stdout),
+            String::from_utf8_lossy(&addressed_followed.stderr)
+        ),
+    )?;
+    let addressed_followed_json =
+        stdout_json(&addressed_followed, "addressed .ee-campaign pack follow-up")?;
+    let addressed_followed_items = array_at(
+        &addressed_followed_json,
+        "/data/pack/items",
+        "addressed .ee-campaign pack follow-up",
+    )?;
+    ensure(
+        addressed_followed_items.iter().any(|item| {
+            item.pointer("/content").and_then(serde_json::Value::as_str) == Some(candidate_content)
+        }),
+        format!(
+            "executing the emitted follow-up must read the selected .ee-campaign store: {addressed_followed_items:?}"
         ),
     )?;
 
