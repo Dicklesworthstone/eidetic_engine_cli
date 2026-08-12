@@ -4,8 +4,8 @@
 //!
 //! Drives the built `ee` binary through the full seal lifecycle the feature
 //! promises: seal a protocol (content withheld, commitment recorded), fail a
-//! reveal with wrong bytes (zero mutation, honest error), succeed with the
-//! exact bytes (published through the revise path), refuse a second reveal,
+//! reveal with wrong bytes (zero memory/seal mutation, audited error), succeed
+//! with the exact bytes (published through the revise path), refuse a second reveal,
 //! surface seal state on `ee why`, and keep sealed placeholders out of the
 //! real index, search results, and packs.
 
@@ -14,11 +14,18 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
+use ee::db::DbConnection;
+use ee::models::MEMORY_SEAL_PLACEHOLDER_CONTENT;
+
 type TestResult = Result<(), String>;
 
 const PROTOCOL: &str = "PRE-REGISTERED PROTOCOL v1: measure retrieval precision on fixture set A before reading any outcome labels.";
-const PLACEHOLDER: &str =
-    "[sealed memory: content committed by hash; reveal with `ee memory reveal`]";
+
+struct SealStorageSnapshot {
+    revision_count: u32,
+    workspace_id: String,
+    audits: Vec<ee::db::StoredAuditEntry>,
+}
 
 fn temp_workspace() -> Result<tempfile::TempDir, String> {
     tempfile::Builder::new()
@@ -160,6 +167,30 @@ fn why_seal(workspace: &str, memory_id: &str) -> Result<serde_json::Value, Strin
         .ok_or_else(|| format!("why: no seal object for {memory_id}: {envelope}"))
 }
 
+fn seal_storage_snapshot(workspace: &Path, memory_id: &str) -> Result<SealStorageSnapshot, String> {
+    let connection = DbConnection::open_file(&workspace.join(".ee").join("ee.db"))
+        .map_err(|error| error.to_string())?;
+    let memory = connection
+        .get_memory(memory_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("memory {memory_id} missing from process E2E database"))?;
+    let logical_id = connection
+        .get_memory_logical_id(memory_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("memory {memory_id} has no logical revision id"))?;
+    let revision_count = connection
+        .count_memory_chain(&logical_id)
+        .map_err(|error| error.to_string())?;
+    let audits = connection
+        .list_audit_by_target("memory", memory_id, None)
+        .map_err(|error| error.to_string())?;
+    Ok(SealStorageSnapshot {
+        revision_count,
+        workspace_id: memory.workspace_id,
+        audits,
+    })
+}
+
 #[test]
 fn seal_reveal_lifecycle_end_to_end() -> TestResult {
     let workspace = temp_workspace()?;
@@ -173,7 +204,9 @@ fn seal_reveal_lifecycle_end_to_end() -> TestResult {
         format!("why must report sealed=true before reveal: {seal}"),
     )?;
 
-    // Mismatched reveal: refused, nothing mutated.
+    // Mismatched reveal: refused, no revision or seal mutation; the failed
+    // attempt itself is recorded in the audit log.
+    let before_mismatch = seal_storage_snapshot(workspace.path(), &memory_id)?;
     let wrong = workspace.path().join("wrong.txt");
     fs::write(&wrong, "a different protocol entirely").map_err(|error| error.to_string())?;
     let mismatch = run_ee(
@@ -201,6 +234,23 @@ fn seal_reveal_lifecycle_end_to_end() -> TestResult {
     ensure(
         seal.get("sealed") == Some(&serde_json::Value::Bool(true)),
         "failed reveal must not unseal",
+    )?;
+    let after_mismatch = seal_storage_snapshot(workspace.path(), &memory_id)?;
+    ensure(
+        after_mismatch.revision_count == before_mismatch.revision_count,
+        format!(
+            "mismatched reveal changed revision count from {} to {}",
+            before_mismatch.revision_count, after_mismatch.revision_count
+        ),
+    )?;
+    let failed_audit = after_mismatch
+        .audits
+        .iter()
+        .find(|audit| audit.action == "memory.reveal_failed")
+        .ok_or_else(|| "mismatched reveal did not record memory.reveal_failed".to_owned())?;
+    ensure(
+        failed_audit.workspace_id.as_deref() == Some(after_mismatch.workspace_id.as_str()),
+        format!("mismatched reveal audit did not carry the true workspace: {failed_audit:?}"),
     )?;
 
     // Correct reveal: verified, published through revise.
@@ -260,6 +310,14 @@ fn seal_reveal_lifecycle_end_to_end() -> TestResult {
         content.contains("retrieval precision"),
         format!("revealed memory must carry the protocol content, got: {content}"),
     )?;
+    let revealed_seal = seal_object(&new_envelope)
+        .ok_or_else(|| format!("why revealed omitted seal lineage: {new_envelope}"))?;
+    ensure(
+        revealed_seal == &seal,
+        format!(
+            "original and revealed why surfaces must carry the same verified seal: original={seal}, revealed={revealed_seal}"
+        ),
+    )?;
 
     // Second reveal: refused.
     let again = run_ee(
@@ -305,7 +363,10 @@ fn sealed_memory_stays_out_of_search_and_packs() -> TestResult {
     // The bytes alone do not confer seal status. This exact-content control
     // catches the former false-positive where index/search treated the public
     // placeholder string as authoritative instead of consulting memory_seals.
-    let placeholder_control = run_ee(&ws, &["remember", PLACEHOLDER, "--json"])?;
+    let placeholder_control = run_ee(
+        &ws,
+        &["remember", MEMORY_SEAL_PLACEHOLDER_CONTENT, "--json"],
+    )?;
     ensure_success(&placeholder_control, "remember exact-placeholder control")?;
     let placeholder_control_id =
         stdout_json(&placeholder_control, "remember exact-placeholder control")?
@@ -355,7 +416,7 @@ fn sealed_memory_stays_out_of_search_and_packs() -> TestResult {
         "search must not return the sealed memory",
     )?;
     ensure(
-        search_stdout.contains(PLACEHOLDER),
+        search_stdout.contains(MEMORY_SEAL_PLACEHOLDER_CONTENT),
         "search must preserve exact placeholder bytes on an ordinary memory",
     )?;
     ensure(
@@ -376,7 +437,7 @@ fn sealed_memory_stays_out_of_search_and_packs() -> TestResult {
         "pack must admit the ordinary exact-placeholder control",
     )?;
     ensure(
-        stdout.contains(PLACEHOLDER),
+        stdout.contains(MEMORY_SEAL_PLACEHOLDER_CONTENT),
         "pack must preserve ordinary exact-placeholder content",
     )?;
     ensure(

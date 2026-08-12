@@ -180,8 +180,9 @@ use crate::core::memory::{
     build_memory_timeline, close_workflow, create_workflow, expire_memory, get_memory_details,
     list_memories, remember_git_capture_candidate_from_repo,
     remember_global_memory_with_controls_and_typed_fields, remember_memory_batch_stdin,
-    remember_memory_with_controls_and_typed_fields, revise_memory, update_memory_level,
-    update_memory_link, update_memory_tags,
+    remember_memory_with_controls_and_typed_fields, revise_memory,
+    revise_memory_with_transaction_hook, update_memory_level, update_memory_link,
+    update_memory_tags,
 };
 use crate::core::orient::{
     OrientDecisionOptions, OrientFastContentOptions, orient_decisions, orient_fast_content,
@@ -37222,8 +37223,9 @@ where
 /// `ee memory reveal`: verify supplied bytes against a sealed memory's
 /// commitment and, on match, publish the content through the canonical
 /// revise machinery (bd-sealed-preregistration-memory-b67be). A mismatch
-/// mutates nothing and leaves a memory.reveal_failed audit row — auditing
-/// failed reveal attempts is part of the feature's contract.
+/// leaves memory and seal state unchanged and records a memory.reveal_failed
+/// audit row — auditing failed reveal attempts is part of the feature's
+/// contract.
 fn handle_memory_reveal<W, E>(
     cli: &Cli,
     args: &MemoryRevealArgs,
@@ -37289,6 +37291,26 @@ where
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
     };
+    let memory = match connection.get_memory(&args.memory_id) {
+        Ok(Some(memory)) => memory,
+        Ok(None) => {
+            let domain_error = DomainError::Storage {
+                message: format!(
+                    "Memory {} disappeared while loading its seal.",
+                    args.memory_id
+                ),
+                repair: Some("ee doctor --workspace . --json".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to load sealed memory: {error}"),
+                repair: Some("ee doctor --workspace . --json".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
     if !seal.is_sealed() {
         let domain_error = DomainError::Usage {
             message: format!(
@@ -37306,7 +37328,7 @@ where
         // Failed attempts are audit-only: the seal row and memory stay
         // byte-identical, and the mismatch itself becomes evidence.
         let audit = crate::db::CreateAuditInput {
-            workspace_id: None,
+            workspace_id: Some(memory.workspace_id.clone()),
             actor: args.actor.clone(),
             action: "memory.reveal_failed".to_owned(),
             target_type: Some("memory".to_owned()),
@@ -37321,7 +37343,13 @@ where
                 .to_string(),
             ),
         };
-        let _ = connection.insert_audit(&crate::db::generate_audit_id(), &audit);
+        if let Err(error) = connection.insert_audit(&crate::db::generate_audit_id(), &audit) {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to record mismatched reveal attempt: {error}"),
+                repair: Some("ee doctor --workspace . --json".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
         let domain_error = DomainError::Usage {
             message: format!(
                 "supplied content does not match the sealed commitment for {} (expected {}..., got {}...)",
@@ -37348,55 +37376,82 @@ where
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
     };
-    // Publish through the canonical revise machinery so content hashing,
-    // provenance chains, and reindexing follow the one blessed path.
-    let report = revise_memory(&ReviseMemoryOptions {
-        database_path: &database_path,
-        original_memory_id: &args.memory_id,
-        content: Some(&content_text),
-        level: None,
-        kind: None,
-        confidence: None,
-        tags: None,
-        provenance_uri: None,
-        reason: crate::core::memory::ReviseReason::Custom("seal_reveal".to_owned()),
-        actor: args.actor.as_deref(),
-        dry_run: false,
-    });
+    // Publish through the canonical revise machinery and extend that exact
+    // transaction with the seal compare-and-set and reveal audit. A racing
+    // reveal or either audit failure therefore rolls the revision back too.
+    drop(connection);
+    let mut revealed_at = None;
+    let reveal_audit_id = crate::db::generate_audit_id();
+    let report = revise_memory_with_transaction_hook(
+        &ReviseMemoryOptions {
+            database_path: &database_path,
+            original_memory_id: &args.memory_id,
+            content: Some(&content_text),
+            level: None,
+            kind: None,
+            confidence: None,
+            tags: None,
+            provenance_uri: None,
+            reason: crate::core::memory::ReviseReason::Custom("seal_reveal".to_owned()),
+            actor: args.actor.as_deref(),
+            dry_run: false,
+        },
+        |transaction_connection, context| {
+            if !transaction_connection
+                .mark_memory_seal_revealed(&context.original_id, &context.revised_at)?
+            {
+                return Err(crate::db::DbError::MalformedRow {
+                    operation: crate::db::DbOperation::Execute,
+                    message: "Memory seal was already revealed; reveal transaction aborted."
+                        .to_owned(),
+                });
+            }
+            transaction_connection.insert_audit(
+                &reveal_audit_id,
+                &crate::db::CreateAuditInput {
+                    workspace_id: Some(context.workspace_id.clone()),
+                    actor: args.actor.clone(),
+                    action: "memory.reveal".to_owned(),
+                    target_type: Some("memory".to_owned()),
+                    target_id: Some(context.original_id.clone()),
+                    details: Some(
+                        serde_json::json!({
+                            "schema": crate::models::MEMORY_SEAL_SCHEMA_V1,
+                            "contentCommitment": seal.content_commitment,
+                            "sealedAt": seal.sealed_at,
+                            "revealedAt": context.revised_at,
+                            "revealedMemoryId": context.new_id,
+                            "logicalId": context.logical_id,
+                            "revisionNumber": context.revision_number,
+                        })
+                        .to_string(),
+                    ),
+                },
+            )?;
+            revealed_at = Some(context.revised_at.clone());
+            Ok(())
+        },
+    );
     if !report.success {
         let domain_error = memory_revise_error_to_domain(&report, &args.memory_id);
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
-    let marked = connection
-        .mark_memory_seal_revealed(&args.memory_id, &now)
-        .unwrap_or(false);
-    let audit = crate::db::CreateAuditInput {
-        workspace_id: None,
-        actor: args.actor.clone(),
-        action: "memory.reveal".to_owned(),
-        target_type: Some("memory".to_owned()),
-        target_id: Some(args.memory_id.clone()),
-        details: Some(
-            serde_json::json!({
-                "schema": crate::models::MEMORY_SEAL_SCHEMA_V1,
-                "contentCommitment": seal.content_commitment,
-                "sealedAt": seal.sealed_at,
-                "revealedAt": now,
-                "revealedMemoryId": report.new_id,
-            })
-            .to_string(),
-        ),
+    let Some(revealed_at) = revealed_at else {
+        let domain_error = DomainError::Storage {
+            message: "Reveal transaction committed without a reveal timestamp.".to_owned(),
+            repair: Some("ee doctor --workspace . --json".to_owned()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     };
-    let _ = connection.insert_audit(&crate::db::generate_audit_id(), &audit);
     let data = serde_json::json!({
         "schema": crate::models::MEMORY_SEAL_SCHEMA_V1,
         "command": "memory reveal",
         "memoryId": args.memory_id,
         "contentCommitment": seal.content_commitment,
         "sealedAt": seal.sealed_at,
-        "revealedAt": now,
+        "revealedAt": revealed_at,
         "revealVerified": true,
-        "sealRowUpdated": marked,
+        "sealRowUpdated": true,
         "revealedMemoryId": report.new_id,
         "revisionGroupId": report.revision_group_id,
         "revisionNumber": report.revision_number,

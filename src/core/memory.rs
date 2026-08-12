@@ -43,8 +43,8 @@ use crate::db::{
 };
 use crate::models::{
     DomainError, GLOBAL_MEMORY_SCOPE_TAG, KNOWN_MEMORY_KINDS, KNOWN_MEMORY_LEVELS, MAX_TAG_BYTES,
-    MemoryContent, MemoryId, MemoryKind, MemoryLevel, MemoryValidationError, ProducerMetadata,
-    ProducerSourceSystem, ProvenanceUri, Tag, TrustClass, UnitScore, WorkspaceId,
+    MemoryContent, MemoryId, MemoryKind, MemoryLevel, MemorySeal, MemoryValidationError,
+    ProducerMetadata, ProducerSourceSystem, ProvenanceUri, Tag, TrustClass, UnitScore, WorkspaceId,
 };
 use crate::obs::{AuditEvent, AuditOutcome, now_rfc3339_nanos};
 use crate::runtime::determinism::{Deterministic, Seed};
@@ -11079,6 +11079,35 @@ impl MemoryReviseReport {
     }
 }
 
+/// Resolve the one seal attached to a memory's immutable revision lineage.
+///
+/// Seals are anchored to the original row. A successful reveal publishes a
+/// new live revision with the same logical id, so readers must validate that
+/// lineage before following it back to the root seal.
+pub(crate) fn resolve_memory_seal_lineage(
+    connection: &DbConnection,
+    memory: &StoredMemory,
+) -> crate::db::Result<Option<MemorySeal>> {
+    if let Some(seal) = connection.get_memory_seal(&memory.id)? {
+        return Ok(Some(seal));
+    }
+    let Some(logical_id) = connection.get_memory_logical_id(&memory.id)? else {
+        return Ok(None);
+    };
+    if logical_id == memory.id {
+        return Ok(None);
+    }
+    let Some(root) = connection.get_memory(&logical_id)? else {
+        return Ok(None);
+    };
+    if root.workspace_id != memory.workspace_id
+        || connection.get_memory_logical_id(&root.id)?.as_deref() != Some(logical_id.as_str())
+    {
+        return Ok(None);
+    }
+    connection.get_memory_seal(&root.id)
+}
+
 /// Revise an existing memory by creating a new immutable version.
 ///
 /// This function:
@@ -11090,6 +11119,31 @@ impl MemoryReviseReport {
 ///
 /// If `dry_run` is true, no changes are made but the report shows what would happen.
 pub fn revise_memory(options: &ReviseMemoryOptions<'_>) -> MemoryReviseReport {
+    revise_memory_with_transaction_hook(options, |_, _| Ok(()))
+}
+
+/// Transaction context exposed only to crate-internal revision extensions.
+///
+/// The hook runs after the immutable revision, original expiry, and
+/// `memory.revise` audit have been written, but before the transaction commits.
+pub(crate) struct RevisionTransactionContext {
+    pub(crate) original_id: String,
+    pub(crate) new_id: String,
+    pub(crate) logical_id: String,
+    pub(crate) workspace_id: String,
+    pub(crate) revision_number: u32,
+    pub(crate) revised_at: String,
+}
+
+/// Execute the canonical immutable-revision algorithm with one additional
+/// operation in the same database transaction.
+pub(crate) fn revise_memory_with_transaction_hook<F>(
+    options: &ReviseMemoryOptions<'_>,
+    transaction_hook: F,
+) -> MemoryReviseReport
+where
+    F: FnOnce(&DbConnection, &RevisionTransactionContext) -> crate::db::Result<()>,
+{
     let conn = match open_migrated_memory_database(options.database_path) {
         Ok(c) => c,
         Err(message) => {
@@ -11266,6 +11320,14 @@ pub fn revise_memory(options: &ReviseMemoryOptions<'_>) -> MemoryReviseReport {
         "actor": options.actor.unwrap_or("ee memory revise"),
         "revised_at": revised_at,
     });
+    let transaction_context = RevisionTransactionContext {
+        original_id: options.original_memory_id.to_owned(),
+        new_id: new_id.clone(),
+        logical_id: logical_id.clone(),
+        workspace_id: original.workspace_id.clone(),
+        revision_number,
+        revised_at: revised_at.clone(),
+    };
 
     let result: Result<(), String> = conn
         .with_transaction(|| {
@@ -11298,6 +11360,7 @@ pub fn revise_memory(options: &ReviseMemoryOptions<'_>) -> MemoryReviseReport {
                     details: Some(audit_details.to_string()),
                 },
             )?;
+            transaction_hook(&conn, &transaction_context)?;
             Ok(())
         })
         .map_err(|error| format!("Failed to commit revision: {error}"));
@@ -16387,6 +16450,124 @@ mod tests {
             revised.valid_to.is_none(),
             true,
             "new revision remains live",
+        )
+    }
+
+    #[test]
+    fn revision_transaction_hook_rolls_back_on_planted_reveal_race() -> TestResult {
+        let (_temp, created) = remember_revisable_memory("sealed placeholder")?;
+        let memory_id = created.memory_id.to_string();
+        let connection = crate::db::DbConnection::open_file(&created.database_path)
+            .map_err(|error| error.to_string())?;
+        let original = connection
+            .get_memory(&memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "sealed fixture memory missing".to_owned())?;
+        connection
+            .insert_memory_seal(
+                &memory_id,
+                &crate::models::memory_seal_commitment(b"revealed protocol"),
+                "2026-08-11T00:00:00Z",
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let reveal_audit_id = generate_audit_id();
+        let report = revise_memory_with_transaction_hook(
+            &ReviseMemoryOptions {
+                database_path: &created.database_path,
+                original_memory_id: &memory_id,
+                content: Some("revealed protocol"),
+                level: None,
+                kind: None,
+                confidence: None,
+                tags: None,
+                provenance_uri: None,
+                reason: ReviseReason::Custom("seal_reveal".to_owned()),
+                actor: Some("transaction-regression"),
+                dry_run: false,
+            },
+            |transaction_connection, context| {
+                if !transaction_connection
+                    .mark_memory_seal_revealed(&context.original_id, &context.revised_at)?
+                {
+                    return Err(crate::db::DbError::MalformedRow {
+                        operation: crate::db::DbOperation::Execute,
+                        message: "planted reveal setup mark failed".to_owned(),
+                    });
+                }
+                transaction_connection.insert_audit(
+                    &reveal_audit_id,
+                    &CreateAuditInput {
+                        workspace_id: Some(context.workspace_id.clone()),
+                        actor: Some("transaction-regression".to_owned()),
+                        action: "memory.reveal".to_owned(),
+                        target_type: Some("memory".to_owned()),
+                        target_id: Some(context.original_id.clone()),
+                        details: None,
+                    },
+                )?;
+                if transaction_connection
+                    .mark_memory_seal_revealed(&context.original_id, &context.revised_at)?
+                {
+                    return Err(crate::db::DbError::MalformedRow {
+                        operation: crate::db::DbOperation::Execute,
+                        message: "planted reveal race unexpectedly won twice".to_owned(),
+                    });
+                }
+                Err(crate::db::DbError::MalformedRow {
+                    operation: crate::db::DbOperation::Execute,
+                    message: "planted reveal race lost compare-and-set".to_owned(),
+                })
+            },
+        );
+
+        ensure(report.success, false, "planted transaction fails")?;
+        ensure(
+            report
+                .error
+                .as_deref()
+                .is_some_and(|message| message.contains("planted reveal race")),
+            true,
+            "planted race is surfaced",
+        )?;
+        let connection = crate::db::DbConnection::open_file(&created.database_path)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .count_memory_chain(&memory_id)
+                .map_err(|error| error.to_string())?,
+            1,
+            "failed reveal leaves no partial revision",
+        )?;
+        let original_after = connection
+            .get_memory(&memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "original memory missing after rollback".to_owned())?;
+        ensure(
+            original_after.valid_to.is_none(),
+            true,
+            "failed reveal leaves original live",
+        )?;
+        let seal_after = connection
+            .get_memory_seal(&memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "seal missing after rollback".to_owned())?;
+        ensure(seal_after.is_sealed(), true, "seal mark rolled back")?;
+        ensure(
+            seal_after.reveal_verified,
+            None,
+            "seal verification rolled back",
+        )?;
+        let audits = connection
+            .list_audit_entries(Some(&original.workspace_id), None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            audits.iter().any(|audit| {
+                audit.action == audit_actions::MEMORY_REVISE || audit.action == "memory.reveal"
+            }),
+            false,
+            "revision and reveal audits rolled back",
         )
     }
 

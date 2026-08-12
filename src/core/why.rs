@@ -27,6 +27,7 @@ use crate::core::influence::{
 };
 use crate::core::memory::{
     EvidenceFreshness, EvidenceFreshnessStatus, assess_memory_evidence_freshness, memory_validity,
+    resolve_memory_seal_lineage,
 };
 use crate::core::provenance_health::{
     MemoryProvenanceHealth, ProvenancePointerStatus, assess_memory_provenance_health,
@@ -1370,7 +1371,7 @@ pub fn explain_memory_with_connection(options: &WhyOptions<'_>, conn: &DbConnect
                     degraded: evidence_degradations,
                     agent_profile,
                     dedup_link: find_embed_dedup_link(&conn, memory_id),
-                    seal: fetch_seal(&conn, memory_id),
+                    seal: fetch_seal(&conn, &memory),
                 },
             )
             .with_content(memory.content.clone())
@@ -1414,7 +1415,7 @@ pub fn explain_memory_with_connection(options: &WhyOptions<'_>, conn: &DbConnect
             degraded: evidence_degradations,
             agent_profile,
             dedup_link: find_embed_dedup_link(&conn, memory_id),
-            seal: fetch_seal(&conn, memory_id),
+            seal: fetch_seal(&conn, &memory),
         },
     )
     .with_content(memory.content.clone())
@@ -2107,8 +2108,8 @@ fn build_report(
 /// Load the seal-state block for `ee why` when the memory was written
 /// sealed (bd-sealed-preregistration-memory-b67be). Read-only; storage
 /// errors degrade to `None` rather than failing the explanation.
-fn fetch_seal(conn: &DbConnection, memory_id: &str) -> Option<JsonValue> {
-    let seal = conn.get_memory_seal(memory_id).ok().flatten()?;
+fn fetch_seal(conn: &DbConnection, memory: &crate::db::StoredMemory) -> Option<JsonValue> {
+    let seal = resolve_memory_seal_lineage(conn, memory).ok().flatten()?;
     Some(serde_json::json!({
         "schema": crate::models::MEMORY_SEAL_SCHEMA_V1,
         "contentCommitment": seal.content_commitment,
