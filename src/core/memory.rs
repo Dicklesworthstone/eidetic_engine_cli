@@ -14653,6 +14653,7 @@ mod tests {
             "Freshness proof row two about clippy waivers.",
             "Freshness proof row three about index posture.",
         ];
+        let mut expected_ids = BTreeSet::new();
         for content in contents {
             let report = remember_memory(&RememberMemoryOptions {
                 workspace_path: temp.path(),
@@ -14674,6 +14675,11 @@ mod tests {
             .map_err(|error| error.message())?;
             ensure(report.persisted, true, "remember persisted")?;
             ensure(report.index_status, "indexed".to_string(), "index status")?;
+            ensure(
+                expected_ids.insert(report.memory_id.to_string()),
+                true,
+                "remember responses have unique memory ids",
+            )?;
         }
 
         let status =
@@ -14719,10 +14725,15 @@ mod tests {
             &[],
         )
         .map_err(|error| format!("post-write search: {error:?}"))?;
+        let actual_ids = search
+            .results
+            .iter()
+            .map(|hit| hit.doc_id.clone())
+            .collect::<BTreeSet<_>>();
         ensure(
-            search.results.len() >= contents.len(),
-            true,
-            "all three new memories searchable immediately",
+            actual_ids,
+            expected_ids,
+            "strict lexical search returns exactly the three new memory ids",
         )?;
         ensure(
             search
@@ -14885,7 +14896,7 @@ mod tests {
             status.health == crate::core::index::IndexHealth::Ready
                 && status.db_generation.is_some(),
             true,
-            "revision leaves a measurable ready index",
+            "single remember leaves a measurable ready index",
         )?;
         ensure(
             status.health == crate::core::index::IndexHealth::Ready,
