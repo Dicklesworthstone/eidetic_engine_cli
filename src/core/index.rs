@@ -5426,27 +5426,6 @@ pub(crate) fn active_embed_backend() -> EmbedBackend {
     }
 }
 
-/// Resolve the ready embedding backend for a specific workspace without
-/// enabling downloads. A verified persisted registry source outranks the
-/// process-default cache whenever no explicit model directory was requested.
-#[must_use]
-pub(crate) fn active_embed_backend_for_workspace(
-    workspace_path: &Path,
-    database_path: &Path,
-) -> EmbedBackend {
-    if configured_embedder_model_root().is_none()
-        && database_path.exists()
-        && let Ok(db) = DbConnection::open_file_read_only(database_path)
-        && let Ok(Some(workspace_id)) = workspace_id_for_index_status(&db, workspace_path)
-        && let Ok(Some(stack)) = registered_model2vec_stack(&db, &workspace_id)
-        && stack.fast().is_semantic()
-    {
-        return EmbedBackend::NeuralLocal;
-    }
-
-    active_embed_backend()
-}
-
 fn configured_embedder_model_root() -> Option<PathBuf> {
     crate::config::env_registry::read_os(crate::config::env_registry::EnvVar::EmbedModelDir)
         .filter(|value| !value.is_empty())

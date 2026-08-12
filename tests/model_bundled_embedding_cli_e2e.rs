@@ -1319,22 +1319,6 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
     let mut offline_env = network_tripwire.proxy_env();
     offline_env.push(("EE_EMBED_DOWNLOAD".to_string(), "off".to_string()));
     let query = "offline canonical semantic registry path";
-    let fast_orient = run_ee_with_env(
-        &workspace,
-        "registry_path_fast_orient",
-        &[
-            "orient",
-            query,
-            "--workspace",
-            workspace.workspace_arg()?,
-            "--fast",
-            "--json",
-        ],
-        &offline_env,
-    )?;
-    ensure_success(&fast_orient, "registry-path fast ee orient")?;
-    ensure_response_embed_backend(&fast_orient, "registry-path fast ee orient", "neural_local")?;
-
     let search = run_ee_with_env(
         &workspace,
         "registry_path_search",
@@ -1812,7 +1796,6 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         ("daemon_search_second", &daemon_search_second),
         ("daemon_search_third", &daemon_search_third),
         ("pack", &pack),
-        ("fast_orient", &fast_orient),
         ("orient", &orient),
         ("why_not", &why_not),
         ("missing", &missing),
@@ -1848,7 +1831,6 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         ("daemon_search_second", &daemon_search_second),
         ("daemon_search_third", &daemon_search_third),
         ("pack", &pack),
-        ("fast_orient", &fast_orient),
         ("orient", &orient),
         ("why_not", &why_not),
         ("missing", &missing),

@@ -39030,10 +39030,7 @@ where
         || workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR),
         |store_dir| store_dir.join(DEFAULT_INDEX_SUBDIR),
     );
-    let orient_start_backend = crate::core::index::active_embed_backend_for_workspace(
-        &workspace_path,
-        &addressed_database_path,
-    );
+    let orient_start_backend = crate::core::index::active_embed_backend();
     let mut degraded = Vec::new();
 
     let mut swarm_sources = if args.fast {
