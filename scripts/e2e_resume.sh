@@ -438,6 +438,106 @@ else
         "unexpected ${COLD_WS}/.ee after executing ${FIRST_COMMAND}"
 fi
 
+# --- isolated staleness proofs: preserve the literal main corpus counts -----
+# Sharing only the open-loop control tag `next` must not establish subject
+# identity, even for a same-kind replacement written strictly later. Both
+# memories are episodic so the isolated store has session evidence and does not
+# invoke nearby-store discovery during this focused production-path check.
+CONTROL_WS="${ROOT}/isolated-control-tags"
+mkdir -p "${CONTROL_WS}"
+run_ee init --workspace "${CONTROL_WS}" --json
+CONTROL_INIT_EXIT=$LAST_EXIT
+run_ee remember "Next-only older control-tag candidate." \
+    --workspace "${CONTROL_WS}" --level episodic --kind note --tags "next" --json
+CONTROL_OLD_EXIT=$LAST_EXIT
+CONTROL_OLD_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
+sleep 1
+run_ee remember "Next-only newer control-tag candidate." \
+    --workspace "${CONTROL_WS}" --level episodic --kind note --tags "next" --json
+CONTROL_NEW_EXIT=$LAST_EXIT
+CONTROL_NEW_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
+run_ee resume --workspace "${CONTROL_WS}" --json
+CONTROL_RESUME_EXIT=$LAST_EXIT
+CONTROL_JSON="${LAST_STDOUT}"
+if [[ "${CONTROL_INIT_EXIT}" -eq 0 && "${CONTROL_OLD_EXIT}" -eq 0 \
+    && "${CONTROL_NEW_EXIT}" -eq 0 && "${CONTROL_RESUME_EXIT}" -eq 0 \
+    && -n "${CONTROL_OLD_ID}" && -n "${CONTROL_NEW_ID}" ]] \
+    && jq -e --arg old "${CONTROL_OLD_ID}" --arg new "${CONTROL_NEW_ID}" '
+        def epoch:
+            (if contains(".") then split(".")[0] + "Z"
+             else sub("\\+00:00$"; "Z") end)
+            | fromdateiso8601;
+        .data.report.staleCount == 0
+        and .data.report.openLoops.taggedItemsTotal == 2
+        and .data.report.openLoops.taggedItemsTruncated == false
+        and ([.. | objects | select(.memoryId? == $old)]
+             | length == 2
+               and all(.[];
+                   .kind == "note" and .tags == ["next"] and .stale == null))
+        and ([.. | objects | select(.memoryId? == $new)]
+             | length == 2
+               and all(.[];
+                   .kind == "note" and .tags == ["next"] and .stale == null))
+        and (([.. | objects | select(.memoryId? == $old) | .createdAt]
+              | unique | .[0] | epoch)
+             < ([.. | objects | select(.memoryId? == $new) | .createdAt]
+                | unique | .[0] | epoch))
+        and ([.. | objects | select(.stale?.supersededBy? == $new)] | length == 0)
+    ' "${CONTROL_JSON}" >/dev/null 2>&1; then
+    event next_only_overlap_does_not_mark_stale pass
+else
+    event next_only_overlap_does_not_mark_stale fail \
+        "init/old/new/resume exits=${CONTROL_INIT_EXIT}/${CONTROL_OLD_EXIT}/${CONTROL_NEW_EXIT}/${CONTROL_RESUME_EXIT}; ids=${CONTROL_OLD_ID}/${CONTROL_NEW_ID}; $(head -c 400 "${CONTROL_JSON}")"
+fi
+
+# A stale open-loop session member is rendered in both production projections,
+# but staleCount counts its memory ID once and both flags identify the same
+# strictly newer same-kind replacement through the non-control `arc4` tag.
+DEDUP_WS="${ROOT}/isolated-stale-dedup"
+mkdir -p "${DEDUP_WS}"
+run_ee init --workspace "${DEDUP_WS}" --json
+DEDUP_INIT_EXIT=$LAST_EXIT
+run_ee remember "Arc 4 dedup candidate remains unfinished." \
+    --workspace "${DEDUP_WS}" --level episodic --kind note \
+    --tags "session-stale-dedup,next,arc4" --json
+DEDUP_OLD_EXIT=$LAST_EXIT
+DEDUP_OLD_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
+sleep 1
+run_ee remember "Arc 4 dedup candidate landed." \
+    --workspace "${DEDUP_WS}" --level semantic --kind note --tags "arc4" --json
+DEDUP_NEW_EXIT=$LAST_EXIT
+DEDUP_NEW_ID="$(jq -r '.data.memoryId // .data.memory_id // .data.id // empty' "${LAST_STDOUT}")"
+run_ee resume --workspace "${DEDUP_WS}" --json
+DEDUP_RESUME_EXIT=$LAST_EXIT
+DEDUP_JSON="${LAST_STDOUT}"
+if [[ "${DEDUP_INIT_EXIT}" -eq 0 && "${DEDUP_OLD_EXIT}" -eq 0 \
+    && "${DEDUP_NEW_EXIT}" -eq 0 && "${DEDUP_RESUME_EXIT}" -eq 0 \
+    && -n "${DEDUP_OLD_ID}" && -n "${DEDUP_NEW_ID}" ]] \
+    && jq -e --arg old "${DEDUP_OLD_ID}" --arg new "${DEDUP_NEW_ID}" '
+        def epoch:
+            (if contains(".") then split(".")[0] + "Z"
+             else sub("\\+00:00$"; "Z") end)
+            | fromdateiso8601;
+        .data.report.staleCount == 1
+        and .data.report.openLoops.taggedItemsTotal == 1
+        and ([.. | objects | select(.memoryId? == $old and .stale? != null)]
+             | length == 2
+               and ([.[].selectionReason] | sort)
+                   == ["open_loop_tag", "recent_session_member"]
+               and all(.[];
+                   .kind == "note"
+                   and .stale.supersededBy == $new
+                   and .stale.sharedTags == ["arc4"]
+                   and ((.stale.supersededByCreatedAt | epoch)
+                        > (.createdAt | epoch))))
+        and ([.. | objects | select(.stale?.supersededBy? == $new)] | length == 2)
+    ' "${DEDUP_JSON}" >/dev/null 2>&1; then
+    event stale_count_deduplicates_open_loop_and_session_projections pass
+else
+    event stale_count_deduplicates_open_loop_and_session_projections fail \
+        "init/old/new/resume exits=${DEDUP_INIT_EXIT}/${DEDUP_OLD_EXIT}/${DEDUP_NEW_EXIT}/${DEDUP_RESUME_EXIT}; ids=${DEDUP_OLD_ID}/${DEDUP_NEW_ID}; $(head -c 400 "${DEDUP_JSON}")"
+fi
+
 if [[ "${EE_RESUME_E2E_SCOPE}" == "functional" ]]; then
     finish
     exit $?
