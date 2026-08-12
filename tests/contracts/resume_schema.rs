@@ -271,10 +271,15 @@ fn resume_required_fields_and_staleness_contract_are_pinned() -> TestResult {
         format!("nearbyStores required set drifted: {nearby_required:?}"),
     )?;
     let outcomes = string_set(&schema, "/properties/nearbyStores/properties/outcome/enum")?;
-    let expected_outcomes: BTreeSet<String> = ["complete", "truncated", "unavailable"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
+    let expected_outcomes: BTreeSet<String> = [
+        "complete",
+        "truncated",
+        "truncated_registry_unavailable",
+        "unavailable",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
     ensure(
         outcomes == expected_outcomes,
         format!("nearbyStores outcome vocabulary drifted: {outcomes:?}"),

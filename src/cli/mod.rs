@@ -17400,6 +17400,11 @@ fn render_resume_human(report: &crate::core::resume::ResumeReport) -> String {
                     crate::core::resume::RESUME_NEARBY_SCAN_BUDGET_MS
                 ));
             }
+            crate::core::orient::NearbyStoreScanOutcome::TruncatedRegistryUnavailable => {
+                text.push_str(
+                    "Nearby-store discovery outcome: truncated because the optional workspace registry was unavailable; locally proved candidates remain actionable.\n",
+                );
+            }
             crate::core::orient::NearbyStoreScanOutcome::Unavailable => {
                 text.push_str(
                     "Nearby-store discovery outcome: unavailable; an empty candidate list is not evidence that no populated store exists.\n",
@@ -39927,6 +39932,9 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
                     "truncated" => out.push_str(
                         "The first Next command below targets the leading candidate from a partial scan; richer stores may exist beyond the time budget.\n",
                     ),
+                    "truncated_registry_unavailable" => out.push_str(
+                        "The first Next command below targets the top-ranked locally proved candidate from the partial scan.\n",
+                    ),
                     _ => out.push_str(
                         "No automatic retarget was selected because nearby-store discovery was unavailable.\n",
                     ),
@@ -39939,6 +39947,9 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
                 "Nearby-store scan hit its {} ms time budget; the candidate list may be incomplete.\n",
                 crate::core::orient::NEARBY_STORE_SCAN_BUDGET_MS
             )),
+            "truncated_registry_unavailable" => out.push_str(
+                "Nearby-store discovery is partial because the optional workspace registry was unavailable; locally proved child and parent candidates remain actionable.\n",
+            ),
             "unavailable" => out.push_str(
                 "Nearby-store discovery was unavailable; the candidate list is incomplete, and no-candidate output does not prove that no populated store exists. Run `ee doctor --workspace . --json`.\n",
             ),
@@ -67569,6 +67580,43 @@ mod tests {
             "a complete scan must not describe itself as partial",
         )?;
 
+        let registry_partial = super::render_orient_human(
+            &serde_json::json!({
+                "task": "resume campaign",
+                "workspace": "/fixture/empty-root",
+                "mode": "fast",
+                "embed_backend": "hash_fallback",
+                "storeDiscovery": {
+                    "storeEmpty": true,
+                    "outcome": "truncated_registry_unavailable",
+                    "nearbyStores": [{
+                        "workspaceRoot": "/fixture/proved-candidate",
+                        "storeDir": "/fixture/proved-candidate/.ee",
+                        "documents": 5,
+                        "lastWrite": "2026-08-10T14:15:16Z",
+                        "provenance": "child_scan"
+                    }]
+                }
+            }),
+            &[],
+        );
+        for expected in [
+            "The first Next command below targets the top-ranked locally proved candidate from the partial scan.",
+            "optional workspace registry was unavailable",
+            "locally proved child and parent candidates remain actionable",
+        ] {
+            ensure_contains(
+                &registry_partial,
+                expected,
+                "orient partial registry discovery posture",
+            )?;
+        }
+        ensure(
+            !registry_partial.contains("No automatic retarget was selected")
+                && !registry_partial.contains("hit its 200 ms time budget"),
+            "a registry-only failure must not suppress a proved retarget or claim a timeout",
+        )?;
+
         let unavailable = super::render_orient_human(
             &serde_json::json!({
                 "task": "resume campaign",
@@ -67579,10 +67627,11 @@ mod tests {
                     "storeEmpty": true,
                     "outcome": "unavailable",
                     "nearbyStores": [{
-                        "workspaceRoot": "/fixture/proved-candidate",
-                        "storeDir": "/fixture/proved-candidate/.ee",
+                        "workspaceRoot": "/fixture/proved-before-worker-failure",
+                        "storeDir": "/fixture/proved-before-worker-failure/.ee",
                         "documents": 5,
-                        "lastWrite": "2026-08-10T14:15:16Z"
+                        "lastWrite": "2026-08-10T14:15:16Z",
+                        "provenance": "child_scan"
                     }]
                 }
             }),
@@ -67596,13 +67645,13 @@ mod tests {
             ensure_contains(
                 &unavailable,
                 expected,
-                "orient unavailable discovery posture",
+                "orient globally unavailable discovery posture",
             )?;
         }
         ensure(
-            !unavailable.contains("targets the top-ranked candidate")
+            !unavailable.contains("targets the top-ranked locally proved candidate")
                 && !unavailable.contains("targets the leading candidate from a partial scan"),
-            "unavailable discovery must not claim a best or leading retarget",
+            "a globally unavailable scan must not claim a best or leading retarget",
         )?;
         Ok(())
     }

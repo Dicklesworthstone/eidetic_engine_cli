@@ -695,6 +695,9 @@ pub enum NearbyStoreScanOutcome {
     Complete,
     /// Discovery began but its bounded wall-clock budget expired.
     Truncated,
+    /// Local discovery evidence is usable, but the optional workspace
+    /// registry could not be read, so the aggregate result is partial.
+    TruncatedRegistryUnavailable,
     /// A required discovery source or worker could not be read or started.
     Unavailable,
 }
@@ -720,6 +723,10 @@ impl NearbyStoreScanAssessment {
 
     fn mark_unavailable(&mut self) {
         self.outcome = NearbyStoreScanOutcome::Unavailable;
+    }
+
+    fn mark_registry_unavailable(&mut self) {
+        self.outcome = NearbyStoreScanOutcome::TruncatedRegistryUnavailable;
     }
 }
 
@@ -1199,9 +1206,9 @@ fn scan_nearby_stores_with_registry(
         parent = dir.parent();
     }
 
-    // (c) registered workspaces. A registry failure does not fail the caller,
-    // but it does make discovery unavailable as a completeness claim. Keep
-    // any locally proved candidates while preserving that source failure.
+    // (c) registered workspaces. A registry failure does not fail the caller
+    // or invalidate candidates proved by the local scans. Preserve both that
+    // usable subset and the optional-source degradation in the typed outcome.
     if !nearby_store_scan_should_stop(cx, started, budget, &mut scan) {
         match crate::core::workspace::list_workspace_registry(
             &crate::core::workspace::WorkspaceListOptions {
@@ -1240,7 +1247,7 @@ fn scan_nearby_stores_with_registry(
                     }
                 }
             }
-            Err(_) => scan.mark_unavailable(),
+            Err(_) => scan.mark_registry_unavailable(),
         }
     }
 
@@ -2756,10 +2763,14 @@ mod tests {
     }
 
     #[test]
-    fn discovery_registry_read_failure_is_unavailable_without_creating_state() -> TestResult {
+    fn discovery_registry_read_failure_preserves_local_evidence_without_creating_state()
+    -> TestResult {
         let temp = orient_test_tempdir()?;
         let workspace = temp.path().join("registry-unavailable-workspace");
         std::fs::create_dir_all(workspace.join(".git")).map_err(|error| error.to_string())?;
+        let child = workspace.join("proved-child");
+        std::fs::create_dir_all(&child).map_err(|error| error.to_string())?;
+        remember_fixture(&child, "Locally proved child store.", "nearby", None)?;
         let addressed_database = workspace.join(".ee").join("ee.db");
         let invalid_registry = temp.path().join("invalid-workspace-registry.db");
         let original_registry = b"not a sqlite registry";
@@ -2774,10 +2785,18 @@ mod tests {
 
         ensure_equal(
             &scan.outcome,
-            &NearbyStoreScanOutcome::Unavailable,
+            &NearbyStoreScanOutcome::TruncatedRegistryUnavailable,
             "registry-read failure outcome",
         )?;
-        ensure_equal(&scan.stores.len(), &0_usize, "no locally proved stores")?;
+        ensure_equal(&scan.stores.len(), &1_usize, "locally proved stores")?;
+        ensure(
+            scan.stores[0].workspace_root.ends_with("proved-child")
+                && scan.stores[0].provenance == NearbyStoreProvenance::ChildScan,
+            format!(
+                "registry failure must preserve the locally proved child candidate: {:?}",
+                scan.stores
+            ),
+        )?;
         ensure(
             !workspace.join(".ee").exists() && !addressed_database.exists(),
             "read-only discovery must not create the addressed store".to_owned(),

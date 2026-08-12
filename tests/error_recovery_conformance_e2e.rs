@@ -1531,13 +1531,51 @@ fn storeless_same_root_default_and_campaign_retargets_are_database_exact() -> Te
     )
 }
 
-/// A real binary miss against an unreadable registry must retain that source
-/// failure as `unavailable`; an empty candidate list is not a no-nearby claim.
+/// A real binary miss against an unreadable optional registry must retain
+/// locally proved child evidence, expose the partial source failure, and keep
+/// the safe retarget ahead of conditional initialization.
 #[test]
-fn storeless_unavailable_registry_is_honest_and_read_only() -> TestResult {
+fn storeless_registry_failure_preserves_local_retarget_and_is_read_only() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
     let workspace = tempdir.path().join("unavailable registry workspace sfjvq");
     std::fs::create_dir_all(workspace.join(".git")).map_err(|error| error.to_string())?;
+    let candidate = workspace.join("locally proved child sfjvq");
+    let seed_registry = tempdir.path().join("seed-registry.db");
+    let candidate_text = candidate.to_string_lossy().to_string();
+    for args in [
+        vec![
+            "init".to_owned(),
+            "--workspace".to_owned(),
+            candidate_text.clone(),
+            "--json".to_owned(),
+        ],
+        vec![
+            "--workspace".to_owned(),
+            candidate_text,
+            "remember".to_owned(),
+            "locally proved registry-failure retarget".to_owned(),
+            "--json".to_owned(),
+        ],
+    ] {
+        let seeded = run_ee_with_registry(&args, &seed_registry)?;
+        ensure(
+            seeded.status.success(),
+            format!(
+                "seeding the locally proved child failed: stdout={} stderr={}",
+                String::from_utf8_lossy(&seeded.stdout),
+                String::from_utf8_lossy(&seeded.stderr)
+            ),
+        )?;
+    }
+    let canonical_candidate = candidate
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let candidate_database = canonical_candidate.join(".ee").join("ee.db");
+    let expected_retarget = format!(
+        "--workspace {} --database {}",
+        shell_quote_cli_arg(canonical_candidate.to_string_lossy().as_ref()),
+        shell_quote_cli_arg(candidate_database.to_string_lossy().as_ref())
+    );
     let registry = tempdir.path().join("unavailable-registry.db");
     let registry_bytes = b"not a sqlite registry";
     std::fs::write(&registry, registry_bytes).map_err(|error| error.to_string())?;
@@ -1556,16 +1594,19 @@ fn storeless_unavailable_registry_is_honest_and_read_only() -> TestResult {
         "unavailable-registry miss must exit 10",
     )?;
     let json = stdout_json(&miss, "unavailable-registry miss")?;
+    let nearby = array_at(
+        &json,
+        "/error/details/storeDiscovery/nearbyStores",
+        "unavailable-registry miss",
+    )?;
     ensure(
         json.pointer("/error/details/storeDiscovery/outcome")
-            == Some(&serde_json::json!("unavailable"))
-            && array_at(
-                &json,
-                "/error/details/storeDiscovery/nearbyStores",
-                "unavailable-registry miss",
-            )?
-            .is_empty(),
-        format!("registry failure must propagate as unavailable: {json}"),
+            == Some(&serde_json::json!("truncated_registry_unavailable"))
+            && nearby.len() == 1
+            && string_at(&nearby[0], "/workspaceRoot", "registry partial candidate")?
+                == canonical_candidate.to_string_lossy()
+            && nearby[0]["documents"].as_u64() == Some(1),
+        format!("registry failure must preserve locally proved evidence: {json}"),
     )?;
     let repair = string_at(&json, "/error/repair", "unavailable-registry miss")?;
     let canonical_workspace = workspace
@@ -1576,13 +1617,26 @@ fn storeless_unavailable_registry_is_honest_and_read_only() -> TestResult {
         shell_quote_cli_arg(canonical_workspace.to_string_lossy().as_ref())
     );
     ensure(
-        repair.contains("discovery was unavailable")
-            && repair.contains("no complete nearby-store conclusion is available")
+        repair.contains("discovery was truncated")
+            && repair.contains("optional workspace registry was unavailable")
+            && repair.contains("locally proved results remain actionable")
+            && repair.contains(&format!("retarget with {expected_retarget}"))
             && !repair.contains("discovery completed and found no populated stores")
             && repair.ends_with(&format!(
                 "Only if you intended to create a NEW store here: {exact_init}"
             )),
-        format!("unavailable repair must be honest and exact: {repair}"),
+        format!("partial registry repair must be honest and exact: {repair}"),
+    )?;
+    let recovery = array_at(
+        &json,
+        "/error/details/recovery",
+        "unavailable-registry miss",
+    )?;
+    ensure(
+        recovery.len() == 3
+            && recovery[1]["example"].as_str() == Some(expected_retarget.as_str())
+            && recovery[2]["command"].as_str() == Some(exact_init.as_str()),
+        format!("proved retarget must precede conditional init: {recovery:?}"),
     )?;
 
     let human_args = [
@@ -1594,13 +1648,13 @@ fn storeless_unavailable_registry_is_honest_and_read_only() -> TestResult {
     let human_miss = run_ee_with_registry(&human_args, &registry)?;
     ensure(
         human_miss.status.code() == Some(10) && human_miss.stdout.is_empty(),
-        "human unavailable-registry miss must preserve exit/stderr semantics",
+        "human partial-registry miss must preserve exit/stderr semantics",
     )?;
     let human = String::from_utf8(human_miss.stderr)
-        .map_err(|error| format!("unavailable human stderr was not UTF-8: {error}"))?;
+        .map_err(|error| format!("partial-registry human stderr was not UTF-8: {error}"))?;
     ensure(
         human.contains(repair),
-        format!("human and JSON unavailable recovery must match: {human}"),
+        format!("human and JSON partial-registry recovery must match: {human}"),
     )?;
     ensure(
         !workspace.join(".ee").exists()
@@ -1608,7 +1662,7 @@ fn storeless_unavailable_registry_is_honest_and_read_only() -> TestResult {
                 .map_err(|error| error.to_string())?
                 .as_slice()
                 == registry_bytes,
-        "unavailable scans must not initialize a store or mutate the invalid registry",
+        "partial scans must not initialize the addressed store or mutate the invalid registry",
     )
 }
 
@@ -2244,6 +2298,93 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
             "orient nextCommands[0] must retarget pack at the exact populated .ee-campaign database and index, got: {first_next_command:?}"
         ),
     )?;
+
+    let invalid_registry = tempdir.path().join("invalid-orient-registry-ft1z5.db");
+    let invalid_registry_bytes = b"not a sqlite registry";
+    std::fs::write(&invalid_registry, invalid_registry_bytes).map_err(|error| error.to_string())?;
+    let registry_partial = run_ee_with_registry(
+        &[
+            "--workspace".to_owned(),
+            root_str.clone(),
+            "orient".to_owned(),
+            candidate_query.to_owned(),
+            "--fast".to_owned(),
+            "--json".to_owned(),
+        ],
+        &invalid_registry,
+    )?;
+    ensure(
+        registry_partial.status.success(),
+        format!(
+            "JSON orient with unreadable registry failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&registry_partial.stdout),
+            String::from_utf8_lossy(&registry_partial.stderr)
+        ),
+    )?;
+    let registry_partial_json = stdout_json(&registry_partial, "orient with unreadable registry")?;
+    let registry_partial_discovery = registry_partial_json
+        .pointer("/data/storeDiscovery")
+        .ok_or("orient registry failure must retain storeDiscovery")?;
+    ensure(
+        registry_partial_discovery["outcome"]
+            == serde_json::json!("truncated_registry_unavailable")
+            && string_at(
+                registry_partial_discovery,
+                "/nearbyStores/0/workspaceRoot",
+                "orient registry-partial candidate",
+            )? == best_path
+            && string_at(
+                registry_partial_discovery,
+                "/nearbyStores/0/provenance",
+                "orient registry-partial provenance",
+            )? == "child_scan"
+            && string_at(
+                &registry_partial_json,
+                "/data/nextCommands/0",
+                "orient registry-partial retarget",
+            )? == first_next_command,
+        format!(
+            "an optional registry failure must keep the top-ranked locally proved retarget: {registry_partial_discovery}"
+        ),
+    )?;
+    let registry_partial_human = run_ee_with_registry(
+        &[
+            "--workspace".to_owned(),
+            root_str.clone(),
+            "orient".to_owned(),
+            candidate_query.to_owned(),
+            "--fast".to_owned(),
+        ],
+        &invalid_registry,
+    )?;
+    ensure(
+        registry_partial_human.status.success(),
+        format!(
+            "human orient with unreadable registry failed: stderr={}",
+            String::from_utf8_lossy(&registry_partial_human.stderr)
+        ),
+    )?;
+    let registry_partial_human = String::from_utf8(registry_partial_human.stdout)
+        .map_err(|error| format!("registry-partial orient stdout was not UTF-8: {error}"))?;
+    ensure(
+        registry_partial_human.contains(
+            "The first Next command below targets the top-ranked locally proved candidate from the partial scan.",
+        ) && registry_partial_human.contains("optional workspace registry was unavailable")
+            && registry_partial_human.contains(first_next_command)
+            && !registry_partial_human.contains("No automatic retarget was selected")
+            && !registry_partial_human.contains("hit its 200 ms time budget"),
+        format!(
+            "human orient must match the JSON partial-registry retarget: {registry_partial_human}"
+        ),
+    )?;
+    ensure(
+        std::fs::read(&invalid_registry)
+            .map_err(|error| error.to_string())?
+            .as_slice()
+            == invalid_registry_bytes,
+        "orient discovery must not mutate the unreadable optional registry",
+    )?;
+
     let emitted = run_emitted_ee_command_with_registry(
         first_next_command,
         &tempdir.path().join("emitted-command-registry.db"),

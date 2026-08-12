@@ -118,7 +118,7 @@
     },
     "nearbyStores": {
       "type": ["object", "null"],
-      "description": "Populated only when the store has nothing episodic. Outcome is exact: unavailable never means a complete scan or proof that no populated store exists.",
+      "description": "Populated only when the store has nothing episodic. Outcome is exact: truncated_registry_unavailable preserves locally proved candidates while exposing the optional registry failure; unavailable never means a complete scan or proof that no populated store exists.",
       "required": ["stores", "outcome"],
       "additionalProperties": false,
       "properties": {
@@ -139,7 +139,7 @@
         },
         "outcome": {
           "type": "string",
-          "enum": ["complete", "truncated", "unavailable"]
+          "enum": ["complete", "truncated", "truncated_registry_unavailable", "unavailable"]
         }
       }
     },

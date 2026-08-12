@@ -208,8 +208,8 @@
         "storeEmpty": { "type": "boolean" },
         "outcome": {
           "type": "string",
-          "enum": ["complete", "truncated", "unavailable"],
-          "description": "Completeness of the bounded discovery attempt. unavailable never means that no populated store exists."
+          "enum": ["complete", "truncated", "truncated_registry_unavailable", "unavailable"],
+          "description": "Completeness of the bounded discovery attempt. truncated_registry_unavailable preserves locally proved candidates while exposing the optional registry failure; unavailable never means that no populated store exists."
         },
         "nearbyStores": {
           "type": "array",

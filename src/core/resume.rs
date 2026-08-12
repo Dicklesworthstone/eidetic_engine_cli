@@ -916,6 +916,11 @@ fn resume_next_commands(nearby_stores: Option<&NearbyStoreScanAssessment>) -> Ve
                 "ee workspace list --json  # nearby-store discovery truncated; inspect registered stores"
                     .to_owned(),
             ),
+            NearbyStoreScanOutcome::TruncatedRegistryUnavailable => commands.insert(
+                0,
+                "ee doctor --workspace . --json  # optional workspace registry unavailable; local nearby stores remain actionable"
+                    .to_owned(),
+            ),
             NearbyStoreScanOutcome::Unavailable => commands.insert(
                 0,
                 "ee doctor --workspace . --json  # diagnose unavailable nearby-store discovery"

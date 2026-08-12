@@ -679,6 +679,9 @@ impl StorelessWorkspaceAssessment {
             crate::core::orient::NearbyStoreScanOutcome::Truncated => repair.push_str(
                 ". Nearby-store discovery was truncated; listed results are partial, and an empty list is not evidence that no populated store exists",
             ),
+            crate::core::orient::NearbyStoreScanOutcome::TruncatedRegistryUnavailable => repair.push_str(
+                ". Nearby-store discovery was truncated because the optional workspace registry was unavailable; locally proved results remain actionable, and an empty list is not evidence that no populated store exists",
+            ),
             crate::core::orient::NearbyStoreScanOutcome::Unavailable => repair.push_str(
                 ". Nearby-store discovery was unavailable; listed results, if any, are partial, and no complete nearby-store conclusion is available",
             ),
@@ -1345,7 +1348,8 @@ mod tests {
     }
 
     #[test]
-    fn storeless_assessment_propagates_unavailable_registry_without_creating_state() -> TestResult {
+    fn storeless_assessment_reports_partial_registry_failure_without_creating_state() -> TestResult
+    {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = temp.path().join("unavailable workspace");
         std::fs::create_dir_all(workspace.join(".git")).map_err(|error| error.to_string())?;
@@ -1365,14 +1369,15 @@ mod tests {
 
         ensure_equal(
             &details.pointer("/storeDiscovery/outcome"),
-            &Some(&serde_json::json!("unavailable")),
-            "unavailable store-discovery outcome",
+            &Some(&serde_json::json!("truncated_registry_unavailable")),
+            "partial registry-unavailable store-discovery outcome",
         )?;
         ensure(
-            repair.contains("discovery was unavailable")
-                && repair.contains("no complete nearby-store conclusion is available")
+            repair.contains("discovery was truncated")
+                && repair.contains("optional workspace registry was unavailable")
+                && repair.contains("locally proved results remain actionable")
                 && !repair.contains("discovery completed and found no populated stores"),
-            format!("unavailable recovery must not claim complete/no-nearby truth: {repair}"),
+            format!("partial recovery must retain the registry degradation: {repair}"),
         )?;
         ensure(
             !workspace.join(".ee").exists()
@@ -1381,27 +1386,41 @@ mod tests {
                     .map_err(|error| error.to_string())?
                     .as_slice()
                     == registry_bytes,
-            "unavailable read-only assessment must not create a store or mutate its registry",
+            "partial read-only assessment must not create a store or mutate its registry",
         )
     }
 
     #[test]
-    fn unavailable_discovery_never_creates_retarget_recovery_actions() -> TestResult {
+    fn registry_failure_keeps_locally_proved_retarget_recovery_actions() -> TestResult {
         let discovery = crate::core::orient::NearbyStoreScanAssessment {
             stores: vec![crate::core::orient::NearbyStore {
-                workspace_root: "/tmp/unverified foreign workspace".to_owned(),
-                store_dir: "/tmp/unverified foreign workspace/.ee".to_owned(),
+                workspace_root: "/tmp/locally proved workspace".to_owned(),
+                store_dir: "/tmp/locally proved workspace/.ee".to_owned(),
                 documents: 99,
                 last_write: Some("2026-08-10T14:15:16Z".to_owned()),
-                provenance: crate::core::orient::NearbyStoreProvenance::WorkspaceRegistry,
+                provenance: crate::core::orient::NearbyStoreProvenance::ChildScan,
             }],
-            outcome: crate::core::orient::NearbyStoreScanOutcome::Unavailable,
+            outcome: crate::core::orient::NearbyStoreScanOutcome::TruncatedRegistryUnavailable,
         };
 
         let retargets = storeless_workspace_candidate_retargets(&discovery);
         ensure(
-            retargets.is_empty(),
-            "unavailable discovery candidates are observations, not retarget authority",
+            retargets.len() == 1
+                && retargets[0].store.provenance
+                    == crate::core::orient::NearbyStoreProvenance::ChildScan
+                && retargets[0]
+                    .arguments
+                    .contains("--workspace '/tmp/locally proved workspace'"),
+            "a registry failure must keep the locally proved retarget actionable".to_owned(),
+        )?;
+
+        let unavailable = crate::core::orient::NearbyStoreScanAssessment {
+            outcome: crate::core::orient::NearbyStoreScanOutcome::Unavailable,
+            ..discovery
+        };
+        ensure(
+            storeless_workspace_candidate_retargets(&unavailable).is_empty(),
+            "a globally unavailable scan must not create retarget authority".to_owned(),
         )
     }
 }

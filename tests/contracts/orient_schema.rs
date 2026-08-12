@@ -288,8 +288,14 @@ fn orient_fast_and_full_instances_validate_and_unknown_fields_fail() -> TestResu
         .and_then(Value::as_array)
         .ok_or("storeDiscovery outcome enum must be present")?;
     ensure(
-        outcomes == &vec![json!("complete"), json!("truncated"), json!("unavailable")],
-        "storeDiscovery must preserve complete, truncated, and unavailable as distinct outcomes",
+        outcomes
+            == &vec![
+                json!("complete"),
+                json!("truncated"),
+                json!("truncated_registry_unavailable"),
+                json!("unavailable"),
+            ],
+        "storeDiscovery must preserve complete, deadline-truncated, registry-partial, and unavailable as distinct outcomes",
     )?;
     ensure(
         schema
@@ -301,7 +307,7 @@ fn orient_fast_and_full_instances_validate_and_unknown_fields_fail() -> TestResu
         "orient schema must not retain legacy booleans that collapse discovery outcomes",
     )?;
 
-    for outcome in ["truncated", "unavailable"] {
+    for outcome in ["truncated", "truncated_registry_unavailable", "unavailable"] {
         let mut typed_outcome = fast.clone();
         typed_outcome["storeDiscovery"]["outcome"] = json!(outcome);
         ee::testing::validate_json_schema_instance(&typed_outcome, &schema)?;

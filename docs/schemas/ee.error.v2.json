@@ -162,8 +162,8 @@
       "properties": {
         "outcome": {
           "type": "string",
-          "enum": ["complete", "truncated", "unavailable"],
-          "description": "Truthful bounded-discovery result; truncated and unavailable never imply that no nearby store exists."
+          "enum": ["complete", "truncated", "truncated_registry_unavailable", "unavailable"],
+          "description": "Truthful bounded-discovery result; truncated_registry_unavailable preserves locally proved candidates while exposing the optional registry failure, and partial or unavailable outcomes never imply that no nearby store exists."
         },
         "nearbyStores": {
           "type": "array",
