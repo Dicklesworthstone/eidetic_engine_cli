@@ -7,12 +7,15 @@
 #   EE_BIN / EE_BINARY  Path to the ee binary (default: `ee` on PATH)
 #   EE_E2E_TMPDIR       Temp base (default /private/tmp)
 #   EE_EMBED_DOWNLOAD   Model download policy (default: off for deterministic E2E)
+#   EE_RESUME_E2E_SCOPE functional skips the expensive shared 10k resume/orient
+#                       gates; default `all` retains the standalone full script.
 
 set -uo pipefail
 
 TEST_ID="resume_e2e"
 FAILURES=0
 STEP=0
+EE_RESUME_E2E_SCOPE="${EE_RESUME_E2E_SCOPE:-all}"
 
 if ! command -v jq >/dev/null 2>&1; then
     echo "jq missing" >&2
@@ -54,6 +57,25 @@ event() {
         FAILURES=$((FAILURES + 1))
     fi
 }
+
+finish() {
+    echo
+    echo "resume e2e (${EE_RESUME_E2E_SCOPE}): ${STEP} steps, ${FAILURES} failures; root ${ROOT}"
+    if [[ "${FAILURES}" -gt 0 ]]; then
+        return 2
+    fi
+    return 0
+}
+
+case "${EE_RESUME_E2E_SCOPE}" in
+    all|functional) ;;
+    *)
+        event invalid_e2e_scope fail \
+            "scope=${EE_RESUME_E2E_SCOPE}; expected all or functional"
+        finish
+        exit 3
+        ;;
+esac
 
 run_ee() {
     STEP=$((STEP + 1))
@@ -157,6 +179,21 @@ else
     event resume_returns_schema fail "exit ${LAST_EXIT}; $(head -c 250 "${R}")"
 fi
 
+if jq -e '
+    all(.data.report.sessions[]?.items[]?;
+        .selectionReason == "recent_session_member"
+        and (.provenance | has("uri") and has("trustClass") and has("verificationStatus"))
+        and (.redaction | has("applied") and has("reasons")))
+    and all(.data.report.openLoops.taggedItems[]?;
+        .selectionReason == "open_loop_tag"
+        and (.provenance | has("uri") and has("trustClass") and has("verificationStatus"))
+        and (.redaction | has("applied") and has("reasons")))
+' "${R}" >/dev/null 2>&1; then
+    event resume_items_carry_public_posture pass
+else
+    event resume_items_carry_public_posture fail "$(head -c 350 "${R}")"
+fi
+
 if jq -e '[.data.report.sessions[]?.label]
           | length == 3
             and index("session-20260809") != null
@@ -173,6 +210,16 @@ if jq -e '[.data.report.openLoops.revisitDecisions[]? | select(.revisitBy != nul
     event revisit_decisions_surfaced pass
 else
     event revisit_decisions_surfaced fail "$(jq -c '.data.report.openLoops.revisitDecisions' "${R}" 2>/dev/null | head -c 250)"
+fi
+
+if jq -e '.data.report.openLoops.revisitDecisionsTotal == 2
+        and .data.report.openLoops.revisitDecisionsTruncated == false
+        and .data.report.openLoops.taggedItemsTotal == 2
+        and .data.report.openLoops.taggedItemsTruncated == false' \
+    "${R}" >/dev/null 2>&1; then
+    event open_loop_totals_are_exact pass
+else
+    event open_loop_totals_are_exact fail "$(jq -c '.data.report.openLoops' "${R}" 2>/dev/null | head -c 350)"
 fi
 
 if jq -e '[.data.report.openLoops.taggedItems[]?
@@ -349,6 +396,11 @@ if [[ ! -e "${COLD_WS}/.ee" ]]; then
 else
     event emitted_resume_leaves_cold_root_uninitialized fail \
         "unexpected ${COLD_WS}/.ee after executing ${FIRST_COMMAND}"
+fi
+
+if [[ "${EE_RESUME_E2E_SCOPE}" == "functional" ]]; then
+    finish
+    exit $?
 fi
 
 # --- bounded 10k corpus: real store, bounded output, <2s command ----------
@@ -528,9 +580,5 @@ else
         "before=${SCALE_FAST_HUMAN_HASH_BEFORE//$'\n'/,}; after=${SCALE_FAST_HUMAN_HASH_AFTER//$'\n'/,}"
 fi
 
-echo
-echo "resume e2e: ${STEP} steps, ${FAILURES} failures; root ${ROOT}"
-if [[ "${FAILURES}" -gt 0 ]]; then
-    exit 2
-fi
-exit 0
+finish
+exit $?

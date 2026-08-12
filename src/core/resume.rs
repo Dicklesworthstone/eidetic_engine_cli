@@ -21,6 +21,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::core::orient::{
@@ -44,6 +45,26 @@ pub const STALE_SHARED_TAG_MIN: usize = 2;
 pub const RESUME_NEARBY_SCAN_BUDGET_MS: u64 = 250;
 /// Cap on open-loop tagged items and staleness flags.
 const OPEN_LOOP_CAP: usize = 32;
+/// Page size for resume storage reads and the single-pass decision projection.
+/// This stays below ordinary SQLite bind limits and prevents per-row queries.
+const RESUME_STORAGE_PAGE_SIZE: usize = 256;
+
+/// Redaction-safe provenance carried by every surfaced memory.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeProvenance {
+    pub uri: Option<String>,
+    pub trust_class: String,
+    pub verification_status: String,
+}
+
+/// Public-egress redaction posture for a surfaced memory.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeRedactionPosture {
+    pub applied: bool,
+    pub reasons: Vec<String>,
+}
 
 /// One surfaced memory.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -55,6 +76,9 @@ pub struct ResumeItem {
     pub content: String,
     pub tags: Vec<String>,
     pub created_at: String,
+    pub selection_reason: &'static str,
+    pub provenance: ResumeProvenance,
+    pub redaction: ResumeRedactionPosture,
     /// Set when the staleness heuristic flagged this item.
     pub stale: Option<StaleFlag>,
 }
@@ -99,7 +123,11 @@ pub struct ResumeDecision {
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenLoops {
+    pub revisit_decisions_total: usize,
+    pub revisit_decisions_truncated: bool,
     pub revisit_decisions: Vec<ResumeDecision>,
+    pub tagged_items_total: usize,
+    pub tagged_items_truncated: bool,
     pub tagged_items: Vec<ResumeItem>,
 }
 
@@ -124,22 +152,63 @@ fn parse_ts(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         .map(|ts| ts.with_timezone(&chrono::Utc))
 }
 
-fn item(memory: &StoredMemory, tags: &BTreeMap<String, Vec<String>>) -> ResumeItem {
+fn public_resume_text(value: &str, field: &str, reasons: &mut Vec<String>) -> String {
+    let report = crate::policy::redact_public_replay_text(value);
+    if report.redacted {
+        reasons.extend(
+            report
+                .redacted_reasons
+                .into_iter()
+                .map(|reason| format!("{field}:{reason}")),
+        );
+    }
+    report.content
+}
+
+fn item(
+    memory: &StoredMemory,
+    tags: &BTreeMap<String, Vec<String>>,
+    selection_reason: &'static str,
+) -> ResumeItem {
+    let mut redaction_reasons = Vec::new();
+    let content = public_resume_text(&memory.content, "content", &mut redaction_reasons);
+    let safe_tags = tags
+        .get(&memory.id)
+        .into_iter()
+        .flatten()
+        .map(|tag| public_resume_text(tag, "tag", &mut redaction_reasons))
+        .collect();
+    let provenance_uri = memory
+        .provenance_uri
+        .as_deref()
+        .map(|uri| public_resume_text(uri, "provenanceUri", &mut redaction_reasons));
+    redaction_reasons.sort();
+    redaction_reasons.dedup();
     ResumeItem {
         memory_id: memory.id.clone(),
         level: memory.level.clone(),
         kind: memory.kind.clone(),
-        content: memory.content.clone(),
-        tags: tags.get(&memory.id).cloned().unwrap_or_default(),
+        content,
+        tags: safe_tags,
         created_at: memory.created_at.clone(),
+        selection_reason,
+        provenance: ResumeProvenance {
+            uri: provenance_uri,
+            trust_class: memory.trust_class.clone(),
+            verification_status: memory.provenance_verification_status.clone(),
+        },
+        redaction: ResumeRedactionPosture {
+            applied: !redaction_reasons.is_empty(),
+            reasons: redaction_reasons,
+        },
         stale: None,
     }
 }
 
 /// Group episodic memories (pre-sorted newest first) into sessions.
 ///
-/// A `session-*` tag names the session; consecutive same-tag runs group
-/// together. Untagged runs cluster by write-time gap.
+/// A `session-*` tag is a stable session identity even when later imports
+/// interleave or backfill its rows. Untagged rows cluster by write-time gap.
 fn group_sessions(
     memories: &[&StoredMemory],
     tags: &BTreeMap<String, Vec<String>>,
@@ -149,45 +218,50 @@ fn group_sessions(
         tags.get(&memory.id).and_then(|memory_tags| {
             memory_tags
                 .iter()
-                .find(|tag| tag.starts_with("session-"))
+                .filter(|tag| tag.starts_with("session-"))
+                .min()
                 .cloned()
         })
     };
 
     let mut sessions: Vec<(Option<String>, Vec<&StoredMemory>)> = Vec::new();
+    let mut tagged_session_indexes = BTreeMap::<String, usize>::new();
+    let mut last_untagged_index: Option<usize> = None;
     for memory in memories {
-        let tag = session_tag(memory);
-        let start_new = match sessions.last() {
-            None => true,
-            Some((last_tag, members)) => {
-                if tag.is_some() || last_tag.is_some() {
-                    tag != *last_tag
-                } else {
-                    // Both untagged: cluster by write-time gap.
-                    let previous = members
-                        .last()
-                        .and_then(|previous| parse_ts(&previous.created_at));
-                    let current = parse_ts(&memory.created_at);
-                    match (previous, current) {
-                        (Some(previous), Some(current)) => {
-                            (previous - current).num_seconds().abs() > SESSION_GAP_SECONDS
-                        }
-                        _ => false,
-                    }
+        if let Some(tag) = session_tag(memory) {
+            if let Some(index) = tagged_session_indexes.get(&tag).copied() {
+                sessions[index].1.push(memory);
+            } else {
+                let index = sessions.len();
+                sessions.push((Some(tag.clone()), vec![memory]));
+                tagged_session_indexes.insert(tag, index);
+            }
+            continue;
+        }
+
+        let append_to = last_untagged_index.filter(|index| {
+            let previous = sessions[*index]
+                .1
+                .last()
+                .and_then(|previous| parse_ts(&previous.created_at));
+            let current = parse_ts(&memory.created_at);
+            match (previous, current) {
+                (Some(previous), Some(current)) => {
+                    (previous - current).num_seconds().abs() <= SESSION_GAP_SECONDS
                 }
+                _ => true,
             }
-        };
-        if start_new {
-            if sessions.len() >= limit {
-                break;
-            }
-            sessions.push((tag, vec![memory]));
-        } else if let Some(last) = sessions.last_mut() {
-            last.1.push(memory);
+        });
+        if let Some(index) = append_to {
+            sessions[index].1.push(memory);
+        } else {
+            let index = sessions.len();
+            sessions.push((None, vec![memory]));
+            last_untagged_index = Some(index);
         }
     }
 
-    sessions
+    let mut grouped: Vec<ResumeSession> = sessions
         .into_iter()
         .map(|(tag, members)| {
             let newest_at = members
@@ -198,15 +272,21 @@ fn group_sessions(
                 .last()
                 .map(|memory| memory.created_at.clone())
                 .unwrap_or_default();
-            let label = tag.unwrap_or_else(|| {
-                let date = newest_at.get(..10).unwrap_or("unknown");
-                format!("inferred-{date}")
-            });
-            let mut items: Vec<ResumeItem> = members
+            let label = tag.map_or_else(
+                || {
+                    let date = newest_at.get(..10).unwrap_or("unknown");
+                    format!("inferred-{date}")
+                },
+                |tag| {
+                    let mut reasons = Vec::new();
+                    public_resume_text(&tag, "session.label", &mut reasons)
+                },
+            );
+            let items: Vec<ResumeItem> = members
                 .iter()
-                .map(|memory| item(memory, &BTreeMap::new()))
+                .take(SESSION_ITEM_CAP)
+                .map(|memory| item(memory, tags, "recent_session_member"))
                 .collect();
-            items.truncate(SESSION_ITEM_CAP);
             ResumeSession {
                 label,
                 member_count: members.len(),
@@ -215,7 +295,15 @@ fn group_sessions(
                 items,
             }
         })
-        .collect()
+        .collect();
+    grouped.sort_by(|left, right| {
+        right
+            .newest_at
+            .cmp(&left.newest_at)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    grouped.truncate(limit);
+    grouped
 }
 
 /// Flag surfaced items superseded by a newer live memory on the same
@@ -228,7 +316,11 @@ fn apply_staleness(
 ) -> usize {
     let mut flagged = 0usize;
     for surfaced in items.iter_mut() {
-        if surfaced.tags.is_empty() {
+        let surfaced_tags = tags
+            .get(&surfaced.memory_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if surfaced_tags.is_empty() {
             continue;
         }
         let mut best: Option<StaleFlag> = None;
@@ -243,8 +335,7 @@ fn apply_staleness(
             let Some(candidate_tags) = candidate_tags else {
                 continue;
             };
-            let shared: Vec<String> = surfaced
-                .tags
+            let shared: Vec<String> = surfaced_tags
                 .iter()
                 .filter(|tag| !tag.starts_with("session-") && candidate_tags.contains(tag))
                 .cloned()
@@ -264,12 +355,89 @@ fn apply_staleness(
                 });
             }
         }
-        if let Some(flag) = best {
+        if let Some(mut flag) = best {
+            flag.shared_tags = flag
+                .shared_tags
+                .iter()
+                .map(|tag| {
+                    public_resume_text(tag, "stale.sharedTag", &mut surfaced.redaction.reasons)
+                })
+                .collect();
+            surfaced.redaction.reasons.sort();
+            surfaced.redaction.reasons.dedup();
+            surfaced.redaction.applied = !surfaced.redaction.reasons.is_empty();
             surfaced.stale = Some(flag);
             flagged += 1;
         }
     }
     flagged
+}
+
+fn decision_line(content: &str, prefix: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(prefix)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn revisit_status(revisit_by: &str, now: &DateTime<Utc>) -> String {
+    let Some(revisit_by) = parse_ts(revisit_by) else {
+        return "unknown".to_owned();
+    };
+    if &revisit_by < now {
+        "overdue".to_owned()
+    } else if &revisit_by == now {
+        "due".to_owned()
+    } else {
+        "future".to_owned()
+    }
+}
+
+/// Project every current decision carrying a revisit condition in one bounded,
+/// chunked pass over the already-loaded newest-first memory rows. This avoids
+/// the decide list's presentation limit, performs no per-decision storage
+/// queries, and only redacts/materializes the public output page.
+fn collect_revisit_decisions(
+    memories: &[StoredMemory],
+    now: DateTime<Utc>,
+) -> (Vec<ResumeDecision>, usize, bool) {
+    let mut decisions = Vec::new();
+    let mut total = 0usize;
+    for page in memories.chunks(RESUME_STORAGE_PAGE_SIZE) {
+        for memory in page {
+            if memory.kind != "decision" {
+                continue;
+            }
+            let Some(revisit_by) = decision_line(&memory.content, "Revisit by:") else {
+                continue;
+            };
+            total = total.saturating_add(1);
+            if decisions.len() >= OPEN_LOOP_CAP {
+                continue;
+            }
+            let mut redaction_reasons = Vec::new();
+            let topic = decision_line(&memory.content, "Topic:")
+                .map(|value| public_resume_text(&value, "decision.topic", &mut redaction_reasons))
+                .unwrap_or_default();
+            let chosen = decision_line(&memory.content, "Chosen:")
+                .map(|value| public_resume_text(&value, "decision.chosen", &mut redaction_reasons))
+                .unwrap_or_default();
+            let safe_revisit_by =
+                public_resume_text(&revisit_by, "decision.revisitBy", &mut redaction_reasons);
+            decisions.push(ResumeDecision {
+                memory_id: memory.id.clone(),
+                topic,
+                chosen,
+                revisit_status: revisit_status(&revisit_by, &now),
+                revisit_by: Some(safe_revisit_by),
+                created_at: memory.created_at.clone(),
+            });
+        }
+    }
+    (decisions, total, total > OPEN_LOOP_CAP)
 }
 
 /// Options for [`build_resume_report`].
@@ -324,25 +492,37 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
         .canonicalize()
         .unwrap_or_else(|_| options.workspace_path.to_path_buf());
     let workspace_id = crate::core::workspace::stable_workspace_id(&canonical_workspace);
-    let all_live = connection
-        .list_memories(&workspace_id, None, false)
+    let now = Utc::now();
+    let current_memories = connection
+        .list_recent_current_memories_for_retrieval(&workspace_id, &now.to_rfc3339(), u32::MAX)
         .map_err(|error| DomainError::Storage {
-            message: format!("Failed to list memories: {error}"),
+            message: format!("Failed to list current resume memories: {error}"),
             repair: Some("ee doctor --workspace . --json".to_owned()),
         })?;
+    // The exact placeholder is reserved for commit-reveal memories. Exclude it
+    // fail closed without a sidecar lookup, so even a placeholder-heavy store
+    // cannot turn admission into an unbounded N+1 query pattern.
+    let all_live: Vec<StoredMemory> = current_memories
+        .into_iter()
+        .filter(|memory| memory.content != crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT)
+        .collect();
 
     let ids: Vec<&str> = all_live.iter().map(|memory| memory.id.as_str()).collect();
-    let tags = connection
-        .get_memory_tags_batch(&ids)
-        .map_err(|error| DomainError::Storage {
-            message: format!(
-                "Failed to load memory tags required for resume session grouping, open-loop detection, and staleness: {error}"
-            ),
-            repair: Some(
-                "Run `ee doctor --workspace . --json`, repair the reported storage failure, then retry `ee resume`."
-                    .to_owned(),
-            ),
-        })?;
+    let mut tags = BTreeMap::new();
+    for page in ids.chunks(RESUME_STORAGE_PAGE_SIZE) {
+        let page_tags = connection
+            .get_memory_tags_batch(page)
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to load memory tags required for resume session grouping, open-loop detection, and staleness: {error}"
+                ),
+                repair: Some(
+                    "Run `ee doctor --workspace . --json`, repair the reported storage failure, then retry `ee resume`."
+                        .to_owned(),
+                ),
+            })?;
+        tags.extend(page_tags);
+    }
 
     // Recent end-state: episodic memories, newest first (created_at desc, id
     // desc as the deterministic tie-break).
@@ -358,48 +538,13 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
     let episodic_total = episodic.len();
 
     let mut sessions = group_sessions(&episodic, &tags, options.sessions.max(1));
-    // group_sessions built items without the tag map (borrow simplicity);
-    // hydrate tags now.
-    for session in &mut sessions {
-        for session_item in &mut session.items {
-            session_item.tags = tags
-                .get(&session_item.memory_id)
-                .cloned()
-                .unwrap_or_default();
-        }
-    }
 
-    // Open loops: revisit-conditioned decisions via the decide surface.
-    let decide = crate::core::decide::decide_list(&crate::core::decide::DecideListOptions {
-        workspace_path: options.workspace_path,
-        database_path: Some(options.database_path),
-        about: None,
-        include_superseded: false,
-        limit: 200,
-        now: None,
-    })
-    .map_err(|error| DomainError::Storage {
-        message: format!("Failed to load revisit decisions required for resume open loops: {error}"),
-        repair: Some(
-            "Run `ee doctor --workspace . --json`, repair the reported storage failure, then retry `ee resume`."
-                .to_owned(),
-        ),
-    })?;
-    let revisit_decisions = decide
-        .decisions
-        .into_iter()
-        .filter(|decision| decision.revisit_by.is_some() && !decision.superseded)
-        .map(|decision| ResumeDecision {
-            memory_id: decision.memory_id,
-            topic: decision.topic,
-            chosen: decision.chosen,
-            revisit_by: decision.revisit_by,
-            revisit_status: decision.revisit_status,
-            created_at: decision.created_at,
-        })
-        .collect();
+    // Open loops: all current revisit-conditioned decisions, then a bounded
+    // public page with exact total/truncation posture.
+    let (revisit_decisions, revisit_decisions_total, revisit_decisions_truncated) =
+        collect_revisit_decisions(&all_live, now);
 
-    let mut tagged_items: Vec<ResumeItem> = all_live
+    let mut tagged_memories: Vec<&StoredMemory> = all_live
         .iter()
         .filter(|memory| {
             tags.get(&memory.id).is_some_and(|memory_tags| {
@@ -408,14 +553,19 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
                     .any(|tag| OPEN_LOOP_TAGS.contains(&tag.as_str()))
             })
         })
-        .map(|memory| item(memory, &tags))
         .collect();
-    tagged_items.sort_by(|a, b| {
+    tagged_memories.sort_by(|a, b| {
         b.created_at
             .cmp(&a.created_at)
-            .then_with(|| b.memory_id.cmp(&a.memory_id))
+            .then_with(|| b.id.cmp(&a.id))
     });
-    tagged_items.truncate(OPEN_LOOP_CAP);
+    let tagged_items_total = tagged_memories.len();
+    let tagged_items_truncated = tagged_items_total > OPEN_LOOP_CAP;
+    let mut tagged_items: Vec<ResumeItem> = tagged_memories
+        .into_iter()
+        .take(OPEN_LOOP_CAP)
+        .map(|memory| item(memory, &tags, "open_loop_tag"))
+        .collect();
 
     // Staleness pass over everything surfaced.
     let mut stale_count = apply_staleness(&mut tagged_items, &all_live, &tags);
@@ -441,7 +591,11 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
         episodic_total,
         sessions,
         open_loops: OpenLoops {
+            revisit_decisions_total,
+            revisit_decisions_truncated,
             revisit_decisions,
+            tagged_items_total,
+            tagged_items_truncated,
             tagged_items,
         },
         stale_count,
@@ -511,8 +665,10 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        OPEN_LOOP_TAGS, ResumeItem, ResumeOptions, STALE_SHARED_TAG_MIN, StaleFlag,
-        apply_staleness, build_resume_report, group_sessions, resume_next_commands,
+        OPEN_LOOP_CAP, OPEN_LOOP_TAGS, ResumeItem, ResumeOptions, ResumeProvenance,
+        ResumeRedactionPosture, STALE_SHARED_TAG_MIN, StaleFlag, apply_staleness,
+        build_resume_report, collect_revisit_decisions, group_sessions, item, parse_ts,
+        resume_next_commands,
     };
     use crate::core::orient::{NearbyStore, NearbyStoreScan};
     use crate::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection, StoredMemory};
@@ -628,6 +784,29 @@ mod tests {
     }
 
     #[test]
+    fn interleaved_tagged_rows_group_by_stable_session_identity() {
+        let tagged_a_new = memory("mem_a_new", "episodic", "note", "2026-08-09T20:00:00Z");
+        let tagged_b = memory("mem_b", "episodic", "note", "2026-08-09T19:30:00Z");
+        let tagged_a_backfill =
+            memory("mem_a_backfill", "episodic", "note", "2026-08-09T19:00:00Z");
+        let mut tags = BTreeMap::new();
+        tags.insert("mem_a_new".to_owned(), vec!["session-stable-a".to_owned()]);
+        tags.insert("mem_b".to_owned(), vec!["session-stable-b".to_owned()]);
+        tags.insert(
+            "mem_a_backfill".to_owned(),
+            vec!["session-stable-a".to_owned()],
+        );
+
+        let ordered = vec![&tagged_a_new, &tagged_b, &tagged_a_backfill];
+        let sessions = group_sessions(&ordered, &tags, 3);
+        assert_eq!(sessions.len(), 2, "stable identities: {sessions:?}");
+        assert_eq!(sessions[0].label, "session-stable-a");
+        assert_eq!(sessions[0].member_count, 2);
+        assert_eq!(sessions[1].label, "session-stable-b");
+        assert_eq!(sessions[1].member_count, 1);
+    }
+
+    #[test]
     fn session_limit_bounds_output() {
         let one = memory("mem_1", "episodic", "note", "2026-08-09T20:00:00Z");
         let two = memory("mem_2", "episodic", "note", "2026-08-08T02:00:00Z");
@@ -635,6 +814,71 @@ mod tests {
         let ordered = vec![&one, &two, &three];
         let sessions = group_sessions(&ordered, &BTreeMap::new(), 2);
         assert_eq!(sessions.len(), 2, "limit honored: {sessions:?}");
+    }
+
+    #[test]
+    fn resume_item_applies_public_redaction_and_safe_provenance() {
+        let secret = format!("sk_live_{}", "1234567890abcdef1234567890abcdef");
+        let mut stored = memory("mem_secret", "episodic", "note", "2026-08-09T20:00:00Z");
+        stored.content = format!("Use token={secret} only for the fixture.");
+        stored.provenance_uri = Some("/Users/alice/private/session.jsonl".to_owned());
+        stored.trust_class = "agent_assertion".to_owned();
+        stored.provenance_verification_status = "unverified".to_owned();
+        let mut tags = BTreeMap::new();
+        tags.insert(
+            stored.id.clone(),
+            vec![format!("credential-{secret}"), "session-safe".to_owned()],
+        );
+
+        let projected = item(&stored, &tags, "recent_session_member");
+        assert!(projected.redaction.applied);
+        assert!(!projected.content.contains(&secret));
+        assert!(projected.tags.iter().all(|tag| !tag.contains(&secret)));
+        assert_eq!(projected.provenance.trust_class, "agent_assertion");
+        assert_eq!(projected.provenance.verification_status, "unverified");
+        assert!(
+            projected
+                .provenance
+                .uri
+                .as_deref()
+                .is_some_and(|uri| !uri.contains("/Users/alice"))
+        );
+        assert!(
+            projected
+                .redaction
+                .reasons
+                .iter()
+                .any(|reason| reason.starts_with("content:"))
+        );
+        assert!(
+            projected
+                .redaction
+                .reasons
+                .iter()
+                .any(|reason| reason.starts_with("provenanceUri:"))
+        );
+    }
+
+    #[test]
+    fn revisit_decision_scan_has_no_200_row_prefilter_and_reports_exact_bound() {
+        let mut memories = Vec::new();
+        for index in 0..225 {
+            let mut decision = memory(
+                &format!("mem_decision_{index:03}"),
+                "semantic",
+                "decision",
+                "2026-08-09T20:00:00Z",
+            );
+            decision.content = format!(
+                "Topic: decision {index}\nChosen: keep {index}\nRevisit by: 2026-12-31T00:00:00Z"
+            );
+            memories.push(decision);
+        }
+        let now = parse_ts("2026-08-10T00:00:00Z").unwrap();
+        let (decisions, total, truncated) = collect_revisit_decisions(&memories, now);
+        assert_eq!(total, 225);
+        assert!(truncated);
+        assert_eq!(decisions.len(), OPEN_LOOP_CAP);
     }
 
     #[test]
@@ -646,6 +890,16 @@ mod tests {
             content: "Next: run arc 4".to_owned(),
             tags: vec!["next".to_owned(), "arc4".to_owned()],
             created_at: "2026-08-01T00:00:00Z".to_owned(),
+            selection_reason: "open_loop_tag",
+            provenance: ResumeProvenance {
+                uri: None,
+                trust_class: "agent_assertion".to_owned(),
+                verification_status: "unverified".to_owned(),
+            },
+            redaction: ResumeRedactionPosture {
+                applied: false,
+                reasons: Vec::new(),
+            },
             stale: None,
         }];
         let newer = memory("mem_new", "episodic", "note", "2026-08-09T00:00:00Z");
@@ -674,6 +928,16 @@ mod tests {
             content: "note".to_owned(),
             tags: vec!["next".to_owned(), "arc4".to_owned()],
             created_at: "2026-08-05T00:00:00Z".to_owned(),
+            selection_reason: "open_loop_tag",
+            provenance: ResumeProvenance {
+                uri: None,
+                trust_class: "agent_assertion".to_owned(),
+                verification_status: "unverified".to_owned(),
+            },
+            redaction: ResumeRedactionPosture {
+                applied: false,
+                reasons: Vec::new(),
+            },
             stale: None,
         }];
         let single_overlap = memory("mem_s", "episodic", "note", "2026-08-09T00:00:00Z");
@@ -718,7 +982,7 @@ mod tests {
     }
 
     #[test]
-    fn decision_storage_failure_is_not_reported_as_zero_revisit_decisions() -> Result<(), String> {
+    fn revisit_decisions_do_not_depend_on_per_row_link_queries() -> Result<(), String> {
         let (_temp, workspace, database) = resume_storage_fixture("decision", &[])?;
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
         connection
@@ -726,24 +990,47 @@ mod tests {
             .map_err(|error| error.to_string())?;
         drop(connection);
 
-        match build_resume_report(&ResumeOptions {
+        let report = build_resume_report(&ResumeOptions {
             workspace_path: &workspace,
             database_path: &database,
             sessions: 3,
-        }) {
-            Err(DomainError::Storage { message, repair }) => {
-                assert!(message.contains("Failed to load revisit decisions required for resume"));
-                assert!(
-                    repair
-                        .as_deref()
-                        .is_some_and(|value| value.contains("ee doctor --workspace . --json"))
-                );
-                Ok(())
-            }
-            other => Err(format!(
-                "expected resume revisit-decision storage error, got {other:?}"
-            )),
-        }
+        })
+        .map_err(|error| error.to_string())?;
+        assert_eq!(report.open_loops.revisit_decisions_total, 0);
+        assert!(!report.open_loops.revisit_decisions_truncated);
+        Ok(())
+    }
+
+    #[test]
+    fn sealed_placeholder_is_not_admitted_to_public_resume() -> Result<(), String> {
+        let (_temp, workspace, database) = resume_storage_fixture("note", &["session-sealed"])?;
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x52534d45)).to_string();
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(&format!(
+                "UPDATE memories SET content = '{}' WHERE id = '{}'",
+                crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+                memory_id
+            ))
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory_seal(
+                &memory_id,
+                &crate::models::memory_seal_commitment(b"withheld resume fixture"),
+                "2026-08-09T20:00:00Z",
+            )
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let report = build_resume_report(&ResumeOptions {
+            workspace_path: &workspace,
+            database_path: &database,
+            sessions: 3,
+        })
+        .map_err(|error| error.to_string())?;
+        assert_eq!(report.episodic_total, 0);
+        assert!(report.sessions.is_empty());
+        Ok(())
     }
 
     #[test]

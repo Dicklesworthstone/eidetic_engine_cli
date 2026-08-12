@@ -17261,11 +17261,13 @@ where
 
 fn render_resume_human(report: &crate::core::resume::ResumeReport) -> String {
     let mut text = format!(
-        "resume: {} episodic memories, {} sessions shown, {} open decisions, {} queued items, {} stale flags\n",
+        "resume: {} episodic memories, {} sessions shown, {}/{} open decisions, {}/{} queued items, {} stale flags\n",
         report.episodic_total,
         report.sessions.len(),
         report.open_loops.revisit_decisions.len(),
+        report.open_loops.revisit_decisions_total,
         report.open_loops.tagged_items.len(),
+        report.open_loops.tagged_items_total,
         report.stale_count,
     );
     text.push_str("\nRecent end-state:\n");
@@ -17303,6 +17305,24 @@ fn render_resume_human(report: &crate::core::resume::ResumeReport) -> String {
         text.push_str(&format!(
             "  - queued {}{marker}: {head}\n",
             queued.memory_id
+        ));
+    }
+    if report.open_loops.revisit_decisions_truncated {
+        text.push_str(&format!(
+            "  - {} additional revisit decisions omitted by the bounded resume view\n",
+            report
+                .open_loops
+                .revisit_decisions_total
+                .saturating_sub(report.open_loops.revisit_decisions.len())
+        ));
+    }
+    if report.open_loops.tagged_items_truncated {
+        text.push_str(&format!(
+            "  - {} additional queued items omitted by the bounded resume view\n",
+            report
+                .open_loops
+                .tagged_items_total
+                .saturating_sub(report.open_loops.tagged_items.len())
         ));
     }
     if let Some(scan) = &report.nearby_stores {
@@ -67316,6 +67336,38 @@ mod tests {
             "ee resume --workspace '/fixture/best campaign' --database '/fixture/best campaign/.ee-campaign/ee.db' --json",
         ] {
             ensure_contains(&human, expected, "resume nearby-store human posture")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resume_human_reports_exact_open_loop_totals_and_truncation() -> TestResult {
+        let report = crate::core::resume::ResumeReport {
+            schema: crate::core::resume::RESUME_SCHEMA_V1,
+            workspace_id: "wsp_fixture".to_owned(),
+            episodic_total: 0,
+            sessions: Vec::new(),
+            open_loops: crate::core::resume::OpenLoops {
+                revisit_decisions_total: 40,
+                revisit_decisions_truncated: true,
+                revisit_decisions: Vec::new(),
+                tagged_items_total: 48,
+                tagged_items_truncated: true,
+                tagged_items: Vec::new(),
+            },
+            stale_count: 0,
+            nearby_stores: None,
+            next_commands: Vec::new(),
+        };
+
+        let human = super::render_resume_human(&report);
+        for expected in [
+            "0/40 open decisions",
+            "0/48 queued items",
+            "40 additional revisit decisions omitted",
+            "48 additional queued items omitted",
+        ] {
+            ensure_contains(&human, expected, "resume open-loop truncation posture")?;
         }
         Ok(())
     }

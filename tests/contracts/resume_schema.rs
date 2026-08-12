@@ -2,8 +2,8 @@
 //! (`ee.resume.v1`).
 //!
 //! Pins schema identity, `public_schemas()` registry wiring, the report's
-//! required field set, the open-loops shape, and the per-item staleness
-//! contract, so surface drift fails loudly. Follows
+//! required field set, bounded open-loop accounting, and per-item
+//! provenance/redaction/staleness posture, so surface drift fails loudly. Follows
 //! `graph_suggest_links_schema.rs`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -123,14 +123,30 @@ fn resume_required_fields_and_staleness_contract_are_pinned() -> TestResult {
     )?;
 
     let open_loops = string_set(&schema, "/properties/openLoops/required")?;
-    let expected_loops: BTreeSet<String> = ["revisitDecisions", "taggedItems"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
+    let expected_loops: BTreeSet<String> = [
+        "revisitDecisionsTotal",
+        "revisitDecisionsTruncated",
+        "revisitDecisions",
+        "taggedItemsTotal",
+        "taggedItemsTruncated",
+        "taggedItems",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
     ensure(
         open_loops == expected_loops,
         format!("openLoops required set drifted: {open_loops:?}"),
     )?;
+    for pointer in [
+        "/properties/openLoops/properties/revisitDecisions/maxItems",
+        "/properties/openLoops/properties/taggedItems/maxItems",
+    ] {
+        ensure(
+            schema.pointer(pointer).and_then(Value::as_u64) == Some(32),
+            format!("resume open-loop bound drifted at {pointer}"),
+        )?;
+    }
 
     // Every surfaced item must carry the stale field (nullable), and the
     // flag itself must name what superseded the item and why.
@@ -138,6 +154,30 @@ fn resume_required_fields_and_staleness_contract_are_pinned() -> TestResult {
     ensure(
         item_required.contains("stale"),
         "item.stale must be a required (nullable) field",
+    )?;
+    ensure(
+        item_required.contains("selectionReason")
+            && item_required.contains("provenance")
+            && item_required.contains("redaction"),
+        "every resume item must carry selection, safe provenance, and redaction posture",
+    )?;
+    let provenance_required = string_set(&schema, "/$defs/item/properties/provenance/required")?;
+    let expected_provenance: BTreeSet<String> = ["uri", "trustClass", "verificationStatus"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    ensure(
+        provenance_required == expected_provenance,
+        format!("resume provenance contract drifted: {provenance_required:?}"),
+    )?;
+    let redaction_required = string_set(&schema, "/$defs/item/properties/redaction/required")?;
+    let expected_redaction: BTreeSet<String> = ["applied", "reasons"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    ensure(
+        redaction_required == expected_redaction,
+        format!("resume redaction contract drifted: {redaction_required:?}"),
     )?;
     let stale_required = string_set(&schema, "/$defs/item/properties/stale/required")?;
     let expected_stale: BTreeSet<String> = ["supersededBy", "supersededByCreatedAt", "sharedTags"]
@@ -160,6 +200,7 @@ fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
         .env("EE_BIN", ee_bin)
         .env("EE_BINARY", ee_bin)
         .env("EE_E2E_TMPDIR", temp.path())
+        .env("EE_RESUME_E2E_SCOPE", "functional")
         .output()
         .map_err(|error| format!("launch {}: {error}", script.display()))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -217,6 +258,8 @@ fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
         "decisions_recorded",
         "empty_store_reports_no_evidence",
         "human_resume_preserves_db_wal_shm",
+        "open_loop_totals_are_exact",
+        "resume_items_carry_public_posture",
         "resume_returns_schema",
         "three_tagged_sessions_grouped",
         "revisit_decisions_surfaced",
@@ -235,16 +278,6 @@ fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
         "missing_db_returns_empty_resume_without_initializing",
         "nearby_store_prepends_quoted_database_resume",
         "nearby_store_seeded",
-        "scale_10k_seeded",
-        "scale_10k_resume_under_2s_and_bounded",
-        "scale_10k_human_resume_under_2s_and_bounded",
-        "scale_10k_resume_preserves_db_wal_shm",
-        "scale_10k_human_resume_preserves_db_wal_shm",
-        "scale_10k_index_ready_for_fast_orient",
-        "scale_10k_fast_orient_under_1s_with_content",
-        "scale_10k_fast_orient_preserves_db_wal_shm",
-        "scale_10k_fast_human_orient_under_1s_with_queried_content",
-        "scale_10k_fast_human_orient_preserves_db_wal_shm",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -292,10 +325,9 @@ fn resume_real_binary_completes_under_two_seconds_on_10k_store() -> TestResult {
         .map_err(|error| format!("insert acceptance workspace: {error}"))?;
 
     for index in 0..CORPUS_SIZE {
-        let session = index < 3;
         let input = CreateMemoryInput {
             workspace_id: workspace_id.clone(),
-            level: if session { "episodic" } else { "semantic" }.to_owned(),
+            level: "episodic".to_owned(),
             kind: "note".to_owned(),
             content: format!("Resume 10k acceptance memory {index:05}"),
             workflow_id: None,
@@ -305,10 +337,7 @@ fn resume_real_binary_completes_under_two_seconds_on_10k_store() -> TestResult {
             provenance_uri: Some("test://resume/10k-acceptance".to_owned()),
             trust_class: "agent_assertion".to_owned(),
             trust_subclass: None,
-            tags: session
-                .then(|| format!("session-202608{index:02}"))
-                .into_iter()
-                .collect(),
+            tags: vec!["session-resume-10k".to_owned()],
             valid_from: None,
             valid_to: None,
         };
@@ -318,8 +347,29 @@ fn resume_real_binary_completes_under_two_seconds_on_10k_store() -> TestResult {
     }
     drop(connection);
 
-    let started = Instant::now();
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let fingerprint = |label: &str| -> Result<Vec<(String, String)>, String> {
+        [
+            ("db", database.clone()),
+            ("wal", PathBuf::from(format!("{}-wal", database.display()))),
+            ("shm", PathBuf::from(format!("{}-shm", database.display()))),
+        ]
+        .into_iter()
+        .map(|(suffix, path)| {
+            let digest = if path.exists() {
+                let bytes = std::fs::read(&path)
+                    .map_err(|error| format!("read {label} {}: {error}", path.display()))?;
+                format!("blake3:{}", blake3::hash(&bytes).to_hex())
+            } else {
+                "missing".to_owned()
+            };
+            Ok((suffix.to_owned(), digest))
+        })
+        .collect()
+    };
+    let baseline = fingerprint("baseline")?;
+
+    let json_started = Instant::now();
+    let json_output = Command::new(env!("CARGO_BIN_EXE_ee"))
         .args([
             "resume",
             "--workspace",
@@ -335,18 +385,18 @@ fn resume_real_binary_completes_under_two_seconds_on_10k_store() -> TestResult {
             "--json",
         ])
         .output()
-        .map_err(|error| format!("launch real ee resume: {error}"))?;
-    let elapsed = started.elapsed();
+        .map_err(|error| format!("launch real JSON ee resume: {error}"))?;
+    let json_elapsed = json_started.elapsed();
 
     ensure(
-        output.status.success(),
+        json_output.status.success(),
         format!(
-            "real ee resume failed with {:?}: {}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
+            "real JSON ee resume failed with {:?}: {}",
+            json_output.status.code(),
+            String::from_utf8_lossy(&json_output.stderr)
         ),
     )?;
-    let response: Value = serde_json::from_slice(&output.stdout)
+    let response: Value = serde_json::from_slice(&json_output.stdout)
         .map_err(|error| format!("parse real ee resume response: {error}"))?;
     ensure(
         response.pointer("/schema").and_then(Value::as_str) == Some("ee.response.v2")
@@ -358,14 +408,76 @@ fn resume_real_binary_completes_under_two_seconds_on_10k_store() -> TestResult {
             && response
                 .pointer("/data/report/episodicTotal")
                 .and_then(Value::as_u64)
-                == Some(3),
+                == Some(CORPUS_SIZE as u64)
+            && response
+                .pointer("/data/report/sessions/0/memberCount")
+                .and_then(Value::as_u64)
+                == Some(CORPUS_SIZE as u64)
+            && response
+                .pointer("/data/report/sessions/0/items")
+                .and_then(Value::as_array)
+                .is_some_and(|items| items.len() == 20),
         format!("real ee resume response contract drifted: {response}"),
     )?;
     ensure(
-        elapsed < Duration::from_secs(2),
+        json_elapsed < Duration::from_secs(2),
         format!(
-            "ee resume took {:.3}s on a {CORPUS_SIZE}-document real store; acceptance requires <2s",
-            elapsed.as_secs_f64()
+            "JSON ee resume took {:.3}s on a {CORPUS_SIZE}-document real store; acceptance requires <2s",
+            json_elapsed.as_secs_f64()
         ),
+    )?;
+    ensure(
+        fingerprint("after JSON resume")? == baseline,
+        "JSON ee resume changed ee.db, ee.db-wal, or ee.db-shm",
+    )?;
+
+    let human_started = Instant::now();
+    let human_output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args([
+            "resume",
+            "--workspace",
+            canonical_workspace
+                .to_str()
+                .ok_or("acceptance workspace path is not UTF-8")?,
+            "--database",
+            database
+                .to_str()
+                .ok_or("acceptance database path is not UTF-8")?,
+            "--sessions",
+            "3",
+        ])
+        .output()
+        .map_err(|error| format!("launch real human ee resume: {error}"))?;
+    let human_elapsed = human_started.elapsed();
+    ensure(
+        human_output.status.success(),
+        format!(
+            "real human ee resume failed with {:?}: {}",
+            human_output.status.code(),
+            String::from_utf8_lossy(&human_output.stderr)
+        ),
+    )?;
+    let human = String::from_utf8(human_output.stdout)
+        .map_err(|error| format!("human ee resume output was not UTF-8: {error}"))?;
+    ensure(
+        human.contains("resume: 10000 episodic memories, 1 sessions shown")
+            && human.contains("[session-resume-10k] 10000 memories")
+            && human
+                .lines()
+                .filter(|line| line.starts_with("  - mem_"))
+                .count()
+                == 20,
+        format!("human ee resume response contract drifted: {human}"),
+    )?;
+    ensure(
+        human_elapsed < Duration::from_secs(2),
+        format!(
+            "human ee resume took {:.3}s on a {CORPUS_SIZE}-document real store; acceptance requires <2s",
+            human_elapsed.as_secs_f64()
+        ),
+    )?;
+    ensure(
+        fingerprint("after human resume")? == baseline,
+        "human ee resume changed ee.db, ee.db-wal, or ee.db-shm",
     )
 }
