@@ -580,11 +580,14 @@ read-only. Only the negative fixture matrix rewrites the registry row directly
 through missing-source, missing source URI, unavailable, unverified,
 mismatched-name, malformed-metadata, malformed-hash, mismatched-hash,
 mismatched-dimension, mismatched-distance, nonlocal, symlink, and
-permission-denied states. Each rejected registration must execute lexical-only
-retrieval with `fallbackApplied=true`, `fastScoreCount=0`, and an explicit
-`hash_fallback` backend posture, including when an explicit valid model-path
-override is present; pack performance exposes the same source-mode and
-score-coverage truth, while full orient exposes the backend and degradation.
+permission-denied states. Without an explicit model-path override, each
+rejected registration must execute lexical-only retrieval with
+`fallbackApplied=true`, `fastScoreCount=0`, and an explicit `hash_fallback`
+backend posture. A separate planted case requires a verified
+`EE_EMBED_MODEL_DIR` to retain highest precedence and execute `neural_local`
+despite the malformed registry row. Pack performance exposes the same
+source-mode and score-coverage truth, while full orient exposes the backend and
+degradation.
 The harness snapshots the complete model-cache tree around every rejected
 surface and runs behind both a proxy tripwire and the CI route-free network
 namespace, proving that fallback neither mutates cache artifacts nor attempts
