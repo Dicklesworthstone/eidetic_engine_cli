@@ -27,10 +27,15 @@ precedence, followed by an available workspace model-registry row whose local
 content hash all verify. The manifest-verified machine registry layout at
 `models/model2vec/potion-multilingual-128M/`, the legacy/default
 `models/potion-multilingual-128M/` cache, and an optional first-use download
-follow in that order. `EE_EMBED_DOWNLOAD=off` disables only that last network
-step; it does not disable a verified local neural model. Search, pack, and full
-orient expose the actually executed `embed_backend` token as either
-`neural_local` or `hash_fallback`.
+follow in that order only when no workspace registration is present. A present
+but invalid registration fails closed: the typed resolver records
+`source=registry_rejected`, selects the `hash_fallback` backend, and never falls
+through to another cache or download.
+`EE_EMBED_DOWNLOAD=off` disables only the network step; it does not disable a
+verified local neural model. Search, pack, and full orient expose the actually
+executed `embed_backend` token as either `neural_local` or `hash_fallback`;
+fast orient is explicitly lexical-only and therefore does not claim neural
+execution.
 
 ## Runtime variables
 

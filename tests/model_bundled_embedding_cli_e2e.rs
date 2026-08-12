@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::net::{SocketAddr, TcpListener, TcpStream};
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -1304,6 +1304,17 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         ));
     }
 
+    // Seed a second, fully valid default-cache copy. Every invalid-present
+    // registry case below must still fail closed to the hash backend instead
+    // of silently falling through to this neural model. Its metadata snapshot
+    // also proves that rejection performs no cache writes or download staging.
+    let fallback_cache_model_dir = workspace
+        .xdg_data
+        .join("ee/models/potion-multilingual-128M");
+    materialize_regular_model_fixture(&fixture_model_dir, &fallback_cache_model_dir, &manifest)?;
+    let fallback_cache_before =
+        model_installation_metadata_state(&fallback_cache_model_dir, &manifest)?;
+
     let mut offline_env = network_tripwire.proxy_env();
     offline_env.push(("EE_EMBED_DOWNLOAD".to_string(), "off".to_string()));
     let query = "offline canonical semantic registry path";
@@ -1650,6 +1661,26 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         0,
     )?;
 
+    let fast_orient = run_ee_with_env(
+        &workspace,
+        "registry_path_fast_orient",
+        &[
+            "orient",
+            query,
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--fast",
+            "--json",
+        ],
+        &offline_env,
+    )?;
+    ensure_success(&fast_orient, "registry-path fast ee orient")?;
+    ensure_response_embed_backend(
+        &fast_orient,
+        "registry-path fast ee orient",
+        "hash_fallback",
+    )?;
+
     let database_state_before_why_not = database_artifact_state(&workspace)?;
     let why_not = run_ee_with_env(
         &workspace,
@@ -1768,6 +1799,22 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         BUNDLED_EMBEDDING_MODEL_ID,
         ModelRegistryStatus::Available,
         Some(path_string(&canonical_registered_model_dir)),
+        Some("blake3:not-a-valid-digest".to_string()),
+        Some(BUNDLED_EMBEDDING_DIMENSION),
+        Some(ModelDistanceMetric::Cosine),
+    )?;
+    let malformed_hash = run_offline_registry_fallback_search(
+        &workspace,
+        "registry_path_malformed_hash",
+        query,
+        &offline_env,
+    )?;
+
+    update_model2vec_registry_entry(
+        &workspace,
+        BUNDLED_EMBEDDING_MODEL_ID,
+        ModelRegistryStatus::Available,
+        Some(path_string(&canonical_registered_model_dir)),
         Some(format!("blake3:{}", "0".repeat(64))),
         Some(BUNDLED_EMBEDDING_DIMENSION),
         Some(ModelDistanceMetric::Cosine),
@@ -1828,6 +1875,55 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         &offline_env,
     )?;
 
+    let symlinked_model_dir = corruption_parent.join("symlinked-model-source");
+    symlink(&canonical_registered_model_dir, &symlinked_model_dir).map_err(|error| {
+        format!(
+            "create model-registry symlink {}: {error}",
+            symlinked_model_dir.display()
+        )
+    })?;
+    update_model2vec_registry_entry(
+        &workspace,
+        BUNDLED_EMBEDDING_MODEL_ID,
+        ModelRegistryStatus::Available,
+        Some(path_string(&symlinked_model_dir)),
+        Some(verified_hash.clone()),
+        Some(BUNDLED_EMBEDDING_DIMENSION),
+        Some(ModelDistanceMetric::Cosine),
+    )?;
+    let symlinked = run_offline_registry_fallback_search(
+        &workspace,
+        "registry_path_symlinked_source",
+        query,
+        &offline_env,
+    )?;
+
+    let original_permissions = fs::metadata(&canonical_registered_model_dir)
+        .map_err(|error| format!("inspect registered-model permissions: {error}"))?
+        .permissions();
+    update_model2vec_registry_entry(
+        &workspace,
+        BUNDLED_EMBEDDING_MODEL_ID,
+        ModelRegistryStatus::Available,
+        Some(path_string(&canonical_registered_model_dir)),
+        Some(verified_hash.clone()),
+        Some(BUNDLED_EMBEDDING_DIMENSION),
+        Some(ModelDistanceMetric::Cosine),
+    )?;
+    let mut denied_permissions = original_permissions.clone();
+    denied_permissions.set_mode(0o000);
+    fs::set_permissions(&canonical_registered_model_dir, denied_permissions)
+        .map_err(|error| format!("deny registered-model permissions: {error}"))?;
+    let permission_result = run_offline_registry_fallback_search(
+        &workspace,
+        "registry_path_permission_denied_source",
+        query,
+        &offline_env,
+    );
+    fs::set_permissions(&canonical_registered_model_dir, original_permissions)
+        .map_err(|error| format!("restore registered-model permissions: {error}"))?;
+    let permission_denied = permission_result?;
+
     // Restore exclusively through the public writer after the negative DB
     // corruption cases, then prove the override-free offline resolver uses it.
     let restore = run_ee_with_env(
@@ -1883,16 +1979,20 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         ("daemon_search_performance", &daemon_search_performance),
         ("pack", &pack),
         ("orient", &orient),
+        ("fast_orient", &fast_orient),
         ("why_not", &why_not),
         ("missing", &missing),
         ("unregistered", &unregistered),
         ("unavailable", &unavailable),
         ("unverified", &unverified),
         ("mismatched_name", &mismatched_name),
+        ("malformed_hash", &malformed_hash),
         ("mismatched_hash", &mismatched_hash),
         ("mismatched_dimension", &mismatched_dimension),
         ("mismatched_distance", &mismatched_distance),
         ("nonlocal", &nonlocal),
+        ("symlinked", &symlinked),
+        ("permission_denied", &permission_denied),
         ("restore", &restore),
     ] {
         ensure_text_absent(
@@ -1908,6 +2008,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         path_string(&bootstrap_model_dir),
         path_string(&missing_source),
         path_string(&unverified_model_dir),
+        path_string(&symlinked_model_dir),
         nonlocal_source.to_string(),
     ];
     for (name, output) in [
@@ -1919,16 +2020,20 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         ("daemon_search_performance", &daemon_search_performance),
         ("pack", &pack),
         ("orient", &orient),
+        ("fast_orient", &fast_orient),
         ("why_not", &why_not),
         ("missing", &missing),
         ("unregistered", &unregistered),
         ("unavailable", &unavailable),
         ("unverified", &unverified),
         ("mismatched_name", &mismatched_name),
+        ("malformed_hash", &malformed_hash),
         ("mismatched_hash", &mismatched_hash),
         ("mismatched_dimension", &mismatched_dimension),
         ("mismatched_distance", &mismatched_distance),
         ("nonlocal", &nonlocal),
+        ("symlinked", &symlinked),
+        ("permission_denied", &permission_denied),
         ("restore", &restore),
         ("settled", &settled),
     ] {
@@ -1939,20 +2044,21 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         )?;
     }
 
-    for unexpected_cache_path in [
-        workspace
-            .xdg_data
-            .join("ee/models/model2vec/potion-multilingual-128M"),
-        workspace
-            .xdg_data
-            .join("ee/models/potion-multilingual-128M"),
-    ] {
-        if unexpected_cache_path.exists() {
-            return Err(format!(
-                "offline registry resolution created cache path {}",
-                unexpected_cache_path.display()
-            ));
-        }
+    let unexpected_registry_cache = workspace
+        .xdg_data
+        .join("ee/models/model2vec/potion-multilingual-128M");
+    if unexpected_registry_cache.exists() {
+        return Err(format!(
+            "offline registry resolution created cache path {}",
+            unexpected_registry_cache.display()
+        ));
+    }
+    let fallback_cache_after =
+        model_installation_metadata_state(&fallback_cache_model_dir, &manifest)?;
+    if fallback_cache_after != fallback_cache_before {
+        return Err(format!(
+            "invalid registry resolution mutated the fallback cache: before={fallback_cache_before:?} after={fallback_cache_after:?}"
+        ));
     }
     network_tripwire.assert_unused()
 }
@@ -2076,6 +2182,29 @@ fn database_artifact_state(workspace: &E2eWorkspace) -> TestResult<Vec<(String, 
         Ok((name, Some(blake3::hash(&bytes).to_hex().to_string())))
     })
     .collect()
+}
+
+#[cfg(unix)]
+fn model_installation_metadata_state(
+    model_dir: &Path,
+    manifest: &ModelManifest,
+) -> TestResult<Vec<(String, u64, u32)>> {
+    let mut relative_paths = manifest
+        .files
+        .iter()
+        .map(|file| file.name.clone())
+        .collect::<Vec<_>>();
+    relative_paths.push(".verified".to_string());
+    relative_paths.sort_unstable();
+    relative_paths
+        .into_iter()
+        .map(|relative_path| {
+            let path = model_dir.join(&relative_path);
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("inspect model cache {}: {error}", path.display()))?;
+            Ok((relative_path, metadata.len(), metadata.permissions().mode()))
+        })
+        .collect()
 }
 
 #[cfg(unix)]

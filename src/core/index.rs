@@ -19,8 +19,9 @@ use crate::db::{
     SearchIndexJobStatus, SearchIndexJobType, StoredModelRegistryEntry, StoredSearchIndexJob,
 };
 use crate::models::model_registry::{
-    EmbeddingMetadataRecord, EmbeddingPooling, EmbeddingVectorDtype, ModelDistanceMetric,
-    ModelProvider, ModelPurpose, ModelRegistryStatus,
+    EmbedModelResolution, EmbedModelSource, EmbedRegistryRejectionReason, EmbeddingMetadataRecord,
+    EmbeddingPooling, EmbeddingVectorDtype, ModelDistanceMetric, ModelProvider, ModelPurpose,
+    ModelRegistryStatus,
 };
 use crate::models::{CorpusRevision, INDEX_INTAKE_FALLBACK_CORPUS_REVISION_MISMATCH, MemoryId};
 use crate::models::{
@@ -5070,27 +5071,61 @@ impl RegisteredModel2VecCache {
 struct DefaultSearchEmbedder {
     stack: EmbedderStack,
     lazy_model2vec: Option<Arc<EeLazyModel2VecEmbedder>>,
+    source: EmbedModelSource,
 }
 
 impl DefaultSearchEmbedder {
-    fn ready(stack: EmbedderStack) -> Self {
+    fn ready(stack: EmbedderStack, source: EmbedModelSource) -> Self {
         Self {
             stack,
             lazy_model2vec: None,
+            source,
         }
     }
 }
 
 pub(crate) struct EmbedderPreparation {
     pub(crate) backend: EmbedBackend,
+    pub(crate) model_resolution: EmbedModelResolution,
     pub(crate) elapsed: Duration,
     pub(crate) fast_embedder: Arc<dyn crate::search::Embedder>,
+}
+
+impl EmbedderPreparation {
+    fn new(
+        backend: EmbedBackend,
+        model_resolution: EmbedModelResolution,
+        elapsed: Duration,
+        fast_embedder: Arc<dyn crate::search::Embedder>,
+    ) -> Self {
+        let preparation = Self {
+            backend,
+            model_resolution,
+            elapsed,
+            fast_embedder,
+        };
+        debug_assert!(
+            preparation
+                .model_resolution
+                .is_valid_for_backend(preparation.backend),
+            "embedding resolution source/outcome must agree with the executed backend"
+        );
+        tracing::info!(
+            target: "ee::index::embedder",
+            backend = preparation.backend.as_str(),
+            source = preparation.model_resolution.source.as_str(),
+            outcome = preparation.model_resolution.outcome.as_str(),
+            "embedding backend resolution completed"
+        );
+        preparation
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct EeEmbedderSettings {
     model_root: PathBuf,
     download_mode: EeEmbedDownloadMode,
+    local_source: EmbedModelSource,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5147,7 +5182,10 @@ fn default_search_embedder_for_settings(settings: &EeEmbedderSettings) -> Defaul
                         detected_fast = stack.fast().id(),
                         "EE_EMBED_DOWNLOAD=off; using verified on-disk semantic model"
                     );
-                    return DefaultSearchEmbedder::ready(stack_with_hash_quality_fallback(stack));
+                    return DefaultSearchEmbedder::ready(
+                        stack_with_hash_quality_fallback(stack),
+                        settings.local_source,
+                    );
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -5163,13 +5201,17 @@ fn default_search_embedder_for_settings(settings: &EeEmbedderSettings) -> Defaul
                 "EE_EMBED_DOWNLOAD=off and no verified on-disk semantic model; using deterministic hash fallback"
             );
         }
-        return DefaultSearchEmbedder::ready(hash_fallback_embedder_stack());
+        return DefaultSearchEmbedder::ready(
+            hash_fallback_embedder_stack(),
+            EmbedModelSource::DeterministicHash,
+        );
     }
 
     match EmbedderStack::auto_detect_with(Some(&settings.model_root)) {
-        Ok(stack) if stack.fast().is_semantic() => {
-            DefaultSearchEmbedder::ready(stack_with_hash_quality_fallback(stack))
-        }
+        Ok(stack) if stack.fast().is_semantic() => DefaultSearchEmbedder::ready(
+            stack_with_hash_quality_fallback(stack),
+            settings.local_source,
+        ),
         Ok(stack) => {
             tracing::info!(
                 target: "ee::index::embedder",
@@ -5216,13 +5258,22 @@ fn ee_auto_download_embedder(model_root: PathBuf) -> DefaultSearchEmbedder {
     DefaultSearchEmbedder {
         stack: EmbedderStack::from_parts(fast_embedder, None),
         lazy_model2vec: Some(lazy_model2vec),
+        source: EmbedModelSource::Downloaded,
     }
 }
 
 fn default_embedder_settings() -> EeEmbedderSettings {
+    let configured_model_root = configured_embedder_model_root();
     EeEmbedderSettings {
-        model_root: default_embedder_model_root(),
+        model_root: configured_model_root
+            .clone()
+            .unwrap_or_else(default_embedder_model_root),
         download_mode: default_embed_download_mode(),
+        local_source: if configured_model_root.is_some() {
+            EmbedModelSource::Configured
+        } else {
+            EmbedModelSource::Cache
+        },
     }
 }
 
@@ -5262,65 +5313,164 @@ fn registry_source_is_local(source: &str) -> bool {
 fn registered_model2vec_source_path(
     db: &DbConnection,
     entry: &StoredModelRegistryEntry,
-) -> Result<Option<PathBuf>, DbError> {
+) -> Result<PathBuf, EmbedRegistryRejectionReason> {
     let Some(source) = entry
         .source_uri
         .as_deref()
-        .filter(|source| registry_source_is_local(source))
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
     else {
-        return Ok(None);
+        return Err(EmbedRegistryRejectionReason::SourceMissing);
     };
+    if !registry_source_is_local(source) {
+        return Err(EmbedRegistryRejectionReason::SourceNonLocal);
+    }
     let path = Path::new(source);
     if path.is_absolute() {
-        return Ok(Some(path.to_path_buf()));
+        return Ok(path.to_path_buf());
     }
-    Ok(db
-        .get_workspace(&entry.workspace_id)?
-        .map(|workspace| PathBuf::from(workspace.path).join(path)))
+    db.get_workspace(&entry.workspace_id)
+        .ok()
+        .flatten()
+        .map(|workspace| PathBuf::from(workspace.path).join(path))
+        .ok_or(EmbedRegistryRejectionReason::SourceWorkspaceMissing)
 }
 
-fn registered_model2vec_stack(
+enum RegisteredModel2VecResolution {
+    NotRegistered,
+    Ready(EmbedderStack),
+    Rejected(EmbedModelResolution),
+}
+
+fn rejected_registered_model2vec(
+    entry: &StoredModelRegistryEntry,
+    reason: EmbedRegistryRejectionReason,
+) -> RegisteredModel2VecResolution {
+    tracing::warn!(
+        target: "ee::index::embedder",
+        registry_id = entry.id,
+        reason = reason.as_str(),
+        "rejecting unusable registered Model2Vec entry"
+    );
+    RegisteredModel2VecResolution::Rejected(EmbedModelResolution::registry_rejected(
+        entry.id.clone(),
+        reason,
+    ))
+}
+
+fn model_registry_hash_is_well_formed(value: &str) -> bool {
+    value.len() == "blake3:".len() + 64
+        && value.starts_with("blake3:")
+        && value["blake3:".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn source_io_rejection(error: &io::Error) -> EmbedRegistryRejectionReason {
+    match error.kind() {
+        io::ErrorKind::NotFound => EmbedRegistryRejectionReason::SourceNotFound,
+        io::ErrorKind::PermissionDenied => EmbedRegistryRejectionReason::SourcePermissionDenied,
+        _ => EmbedRegistryRejectionReason::SourceUnreadable,
+    }
+}
+
+fn registered_model2vec_resolution(
     db: &DbConnection,
     workspace_id: &str,
-) -> Result<Option<EmbedderStack>, DbError> {
-    let Some(entry) = db.find_model_registry_entry(
-        workspace_id,
-        ModelProvider::Model2Vec,
-        POTION_MODEL_NAME,
-        ModelPurpose::Embedding,
-    )?
-    else {
-        return Ok(None);
+) -> Result<RegisteredModel2VecResolution, DbError> {
+    let mut entries = db
+        .list_model_registry_entries(workspace_id)?
+        .into_iter()
+        .filter(|entry| {
+            entry.provider == ModelProvider::Model2Vec && entry.purpose == ModelPurpose::Embedding
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.id.cmp(&right.id));
+    let Some(entry) = entries.first() else {
+        return Ok(RegisteredModel2VecResolution::NotRegistered);
     };
-    if entry.status != ModelRegistryStatus::Available {
-        return Ok(None);
+    if entries.len() != 1 {
+        return Ok(rejected_registered_model2vec(
+            entry,
+            EmbedRegistryRejectionReason::AmbiguousEntries,
+        ));
     }
-    let Some(model_dir) = registered_model2vec_source_path(db, &entry)? else {
-        tracing::warn!(
-            target: "ee::index::embedder",
-            registry_id = entry.id,
-            reason = "nonlocal_or_missing_source_uri",
-            "skipping unusable registered Model2Vec entry"
-        );
-        return Ok(None);
+    if entry.model_name != POTION_MODEL_NAME {
+        return Ok(rejected_registered_model2vec(
+            entry,
+            EmbedRegistryRejectionReason::ModelNameMismatch,
+        ));
+    }
+    if entry.status != ModelRegistryStatus::Available {
+        return Ok(rejected_registered_model2vec(
+            entry,
+            EmbedRegistryRejectionReason::StatusNotAvailable,
+        ));
+    }
+    let model_dir = match registered_model2vec_source_path(db, entry) {
+        Ok(model_dir) => model_dir,
+        Err(reason) => return Ok(rejected_registered_model2vec(entry, reason)),
     };
-    let Ok(canonical_source) = std::fs::canonicalize(&model_dir) else {
-        tracing::warn!(
-            target: "ee::index::embedder",
-            registry_id = entry.id,
-            reason = "source_canonicalization_failed",
-            "skipping unusable registered Model2Vec entry"
-        );
-        return Ok(None);
+    let source_metadata = match std::fs::symlink_metadata(&model_dir) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return Ok(rejected_registered_model2vec(
+                entry,
+                source_io_rejection(&error),
+            ));
+        }
     };
-    if !verified_potion_model_dir(&canonical_source) {
-        tracing::warn!(
-            target: "ee::index::embedder",
-            registry_id = entry.id,
-            reason = "manifest_verification_failed",
-            "skipping unusable registered Model2Vec entry"
-        );
-        return Ok(None);
+    if source_metadata.file_type().is_symlink() {
+        return Ok(rejected_registered_model2vec(
+            entry,
+            EmbedRegistryRejectionReason::SourceSymlink,
+        ));
+    }
+    if !source_metadata.is_dir() {
+        return Ok(rejected_registered_model2vec(
+            entry,
+            EmbedRegistryRejectionReason::SourceNotDirectory,
+        ));
+    }
+    let canonical_source = match std::fs::canonicalize(&model_dir) {
+        Ok(path) => path,
+        Err(error) => {
+            return Ok(rejected_registered_model2vec(
+                entry,
+                source_io_rejection(&error),
+            ));
+        }
+    };
+    let manifest = ModelManifest::potion_128m();
+    for file in &manifest.files {
+        let file_path = canonical_source.join(&file.name);
+        let file_metadata = match std::fs::symlink_metadata(&file_path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return Ok(rejected_registered_model2vec(
+                    entry,
+                    source_io_rejection(&error),
+                ));
+            }
+        };
+        if file_metadata.file_type().is_symlink() {
+            return Ok(rejected_registered_model2vec(
+                entry,
+                EmbedRegistryRejectionReason::SourceSymlink,
+            ));
+        }
+        if let Err(error) = std::fs::File::open(&file_path) {
+            return Ok(rejected_registered_model2vec(
+                entry,
+                source_io_rejection(&error),
+            ));
+        }
+    }
+    if verify_dir_cached(&manifest, &canonical_source).is_err() {
+        return Ok(rejected_registered_model2vec(
+            entry,
+            EmbedRegistryRejectionReason::ManifestVerificationFailed,
+        ));
     }
     let Some(content_hash) = entry
         .content_hash
@@ -5329,22 +5479,55 @@ fn registered_model2vec_stack(
         .filter(|hash| !hash.is_empty())
         .map(str::to_ascii_lowercase)
     else {
-        return Ok(None);
+        return Ok(rejected_registered_model2vec(
+            entry,
+            EmbedRegistryRejectionReason::ContentHashMissing,
+        ));
     };
+    if !model_registry_hash_is_well_formed(&content_hash) {
+        return Ok(rejected_registered_model2vec(
+            entry,
+            EmbedRegistryRejectionReason::ContentHashMalformed,
+        ));
+    }
     let Some(dimension) = entry.dimension else {
-        return Ok(None);
+        return Ok(rejected_registered_model2vec(
+            entry,
+            EmbedRegistryRejectionReason::DimensionMissing,
+        ));
     };
     let Some(distance_metric) = entry.distance_metric else {
-        return Ok(None);
+        return Ok(rejected_registered_model2vec(
+            entry,
+            EmbedRegistryRejectionReason::DistanceMetricMissing,
+        ));
     };
     if distance_metric != ModelDistanceMetric::Cosine {
-        tracing::warn!(
-            target: "ee::index::embedder",
-            registry_id = entry.id,
-            reason = "registry_identity_or_hash_mismatch",
-            "skipping unusable registered Model2Vec entry"
-        );
-        return Ok(None);
+        return Ok(rejected_registered_model2vec(
+            entry,
+            EmbedRegistryRejectionReason::DistanceMetricUnsupported,
+        ));
+    }
+    let Some(metadata_json) = entry.metadata_json.as_deref() else {
+        return Ok(rejected_registered_model2vec(
+            entry,
+            EmbedRegistryRejectionReason::MetadataMissing,
+        ));
+    };
+    let metadata = match EmbeddingMetadataRecord::from_json(metadata_json) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return Ok(rejected_registered_model2vec(
+                entry,
+                EmbedRegistryRejectionReason::MetadataMalformed,
+            ));
+        }
+    };
+    if metadata.dimension != dimension || metadata.distance_metric != distance_metric {
+        return Ok(rejected_registered_model2vec(
+            entry,
+            EmbedRegistryRejectionReason::MetadataMismatch,
+        ));
     }
     let identity = RegisteredModel2VecIdentity {
         canonical_source: canonical_source.clone(),
@@ -5358,44 +5541,49 @@ fn registered_model2vec_stack(
             let Ok(embedder) =
                 Model2VecEmbedder::load_with_name(&canonical_source, POTION_MODEL_NAME)
             else {
-                tracing::warn!(
-                    target: "ee::index::embedder",
-                    registry_id = entry.id,
-                    reason = "model_load_failed",
-                    "skipping unusable registered Model2Vec entry"
-                );
                 return None;
             };
             let fingerprint = active_embedder_fingerprint(&embedder, ModelProvider::Model2Vec);
             let hash_matches = content_hash.eq_ignore_ascii_case(&fingerprint.content_hash);
             let dimension_matches = Some(dimension) == u32::try_from(embedder.dimension()).ok();
             if !hash_matches || !dimension_matches {
-                tracing::warn!(
-                    target: "ee::index::embedder",
-                    registry_id = entry.id,
-                    reason = "registry_identity_or_hash_mismatch",
-                    "skipping unusable registered Model2Vec entry"
-                );
                 return None;
             }
             Some(Arc::new(embedder) as Arc<dyn crate::search::Embedder>)
         });
     let Some(fast) = fast else {
-        return Ok(None);
+        let reason = match Model2VecEmbedder::load_with_name(&canonical_source, POTION_MODEL_NAME) {
+            Ok(embedder) => {
+                let fingerprint = active_embedder_fingerprint(&embedder, ModelProvider::Model2Vec);
+                if !content_hash.eq_ignore_ascii_case(&fingerprint.content_hash) {
+                    EmbedRegistryRejectionReason::ContentHashMismatch
+                } else if Some(dimension) != u32::try_from(embedder.dimension()).ok() {
+                    EmbedRegistryRejectionReason::DimensionMismatch
+                } else {
+                    EmbedRegistryRejectionReason::ModelLoadFailed
+                }
+            }
+            Err(_) => EmbedRegistryRejectionReason::ModelLoadFailed,
+        };
+        return Ok(rejected_registered_model2vec(entry, reason));
     };
-    Ok(Some(stack_with_hash_quality_fallback(
-        EmbedderStack::from_parts(fast, None),
-    )))
+    Ok(RegisteredModel2VecResolution::Ready(
+        stack_with_hash_quality_fallback(EmbedderStack::from_parts(fast, None)),
+    ))
 }
 
 fn workspace_embedder_stack(
     db: &DbConnection,
     workspace_id: &str,
 ) -> Result<EmbedderStack, DbError> {
-    if configured_embedder_model_root().is_none()
-        && let Some(stack) = registered_model2vec_stack(db, workspace_id)?
-    {
-        return Ok(stack);
+    if configured_embedder_model_root().is_none() {
+        match registered_model2vec_resolution(db, workspace_id)? {
+            RegisteredModel2VecResolution::NotRegistered => {}
+            RegisteredModel2VecResolution::Ready(stack) => return Ok(stack),
+            RegisteredModel2VecResolution::Rejected(_) => {
+                return Ok(hash_fallback_embedder_stack());
+            }
+        }
     }
     Ok(default_embedder_stack())
 }
@@ -5405,9 +5593,8 @@ fn verified_potion_model_dir(model_dir: &Path) -> bool {
 }
 
 /// Stable, deliberately small backend vocabulary shared by search, pack, and
-/// orient. This reports the backend that is ready for the current process; if
-/// the stack has not been initialized yet, it performs only manifest-cached
-/// local availability checks and never starts a download.
+/// orient. This reports only a backend that has executed in the current
+/// process; local model availability alone is not execution evidence.
 #[must_use]
 pub(crate) fn active_embed_backend() -> EmbedBackend {
     if let Some(selection) = DEFAULT_SEARCH_EMBEDDER.get() {
@@ -5418,12 +5605,11 @@ pub(crate) fn active_embed_backend() -> EmbedBackend {
         };
     }
 
-    let settings = default_embedder_settings();
-    if verified_potion_model_dir(&potion_model_destination_dir(&settings.model_root)) {
-        EmbedBackend::NeuralLocal
-    } else {
-        EmbedBackend::HashFallback
-    }
+    // No process-default embedder has executed yet. Reporting a locally
+    // discoverable neural model here would describe availability, not the
+    // backend that served this response. This distinction is load-bearing for
+    // `ee orient --fast`, whose explicit strategy is lexical-only.
+    EmbedBackend::HashFallback
 }
 
 fn configured_embedder_model_root() -> Option<PathBuf> {
@@ -5644,11 +5830,17 @@ pub(crate) async fn prepare_default_search_embedder(
     } else {
         EmbedBackend::HashFallback
     };
-    Ok(EmbedderPreparation {
+    let model_resolution = if backend == EmbedBackend::NeuralLocal {
+        EmbedModelResolution::ready(selection.source)
+    } else {
+        EmbedModelResolution::deterministic_hash()
+    };
+    Ok(EmbedderPreparation::new(
         backend,
-        elapsed: started.elapsed(),
-        fast_embedder: selection.stack.fast_arc(),
-    })
+        model_resolution,
+        started.elapsed(),
+        selection.stack.fast_arc(),
+    ))
 }
 
 pub(crate) async fn prepare_search_embedder_for_workspace(
@@ -5671,19 +5863,44 @@ pub(crate) async fn prepare_search_embedder_for_workspace(
                     source: Box::new(error),
                 }
             })?
-            && let Some(stack) =
-                registered_model2vec_stack(&db, &workspace_id).map_err(|error| {
-                    SearchError::SubsystemError {
-                        subsystem: "model registry",
-                        source: Box::new(error),
-                    }
-                })?
         {
-            return Ok(EmbedderPreparation {
-                backend: EmbedBackend::NeuralLocal,
-                elapsed: started.elapsed(),
-                fast_embedder: stack.fast_arc(),
-            });
+            match registered_model2vec_resolution(&db, &workspace_id).map_err(|error| {
+                SearchError::SubsystemError {
+                    subsystem: "model registry",
+                    source: Box::new(error),
+                }
+            })? {
+                RegisteredModel2VecResolution::NotRegistered => {}
+                RegisteredModel2VecResolution::Ready(stack) => {
+                    return Ok(EmbedderPreparation::new(
+                        EmbedBackend::NeuralLocal,
+                        EmbedModelResolution::ready(EmbedModelSource::Registered),
+                        started.elapsed(),
+                        stack.fast_arc(),
+                    ));
+                }
+                RegisteredModel2VecResolution::Rejected(model_resolution) => {
+                    let stack = hash_fallback_embedder_stack();
+                    // The search source-mode resolver still consults the
+                    // process-default stack when deciding whether to emit its
+                    // semantic-unavailable degradation. Pin an as-yet
+                    // uninitialized default to the same fail-closed backend so
+                    // a valid machine cache cannot contradict the workspace
+                    // rejection and make hash execution look neural.
+                    let _ = DEFAULT_SEARCH_EMBEDDER.get_or_init(|| {
+                        DefaultSearchEmbedder::ready(
+                            stack.clone(),
+                            EmbedModelSource::RegistryRejected,
+                        )
+                    });
+                    return Ok(EmbedderPreparation::new(
+                        EmbedBackend::HashFallback,
+                        model_resolution,
+                        started.elapsed(),
+                        stack.fast_arc(),
+                    ));
+                }
+            }
         }
     }
 
@@ -6003,7 +6220,7 @@ fn active_embedding_model_source_dir(
         ModelProvider::Model2Vec,
         POTION_MODEL_NAME,
         ModelPurpose::Embedding,
-    )? && let Some(existing_path) = registered_model2vec_source_path(db, &existing)?
+    )? && let Ok(existing_path) = registered_model2vec_source_path(db, &existing)
         && let Some(canonical) = canonical_verified_potion_model_dir(&existing_path)
     {
         return Ok(Some(canonical));
@@ -7856,6 +8073,50 @@ mod tests {
     }
 
     #[test]
+    fn registry_rejection_preparation_is_explicit_hash_truth() -> TestResult {
+        let stack = hash_fallback_embedder_stack();
+        let preparation = EmbedderPreparation::new(
+            EmbedBackend::HashFallback,
+            EmbedModelResolution::registry_rejected(
+                "mdl_rejected_fixture",
+                EmbedRegistryRejectionReason::SourceSymlink,
+            ),
+            Duration::ZERO,
+            stack.fast_arc(),
+        );
+        ensure(
+            preparation.backend == EmbedBackend::HashFallback,
+            "rejected registration must execute the hash backend",
+        )?;
+        ensure(
+            preparation.model_resolution.source == EmbedModelSource::RegistryRejected,
+            "rejected registration must preserve registry_rejected source truth",
+        )?;
+        ensure(
+            preparation.fast_embedder.id() == HashEmbedder::default_256().id(),
+            "rejected registration must serve the real deterministic hash embedder",
+        )
+    }
+
+    #[test]
+    fn registry_hash_validation_rejects_malformed_values() {
+        assert!(model_registry_hash_is_well_formed(&format!(
+            "blake3:{}",
+            "a".repeat(64)
+        )));
+        assert!(!model_registry_hash_is_well_formed(""));
+        assert!(!model_registry_hash_is_well_formed("blake3:not-a-digest"));
+        assert!(!model_registry_hash_is_well_formed(&format!(
+            "sha256:{}",
+            "a".repeat(64)
+        )));
+        assert!(!model_registry_hash_is_well_formed(&format!(
+            "blake3:{}g",
+            "a".repeat(63)
+        )));
+    }
+
+    #[test]
     fn hash_fallback_embedding_is_byte_identical_for_fixed_input() -> TestResult {
         let embedder = HashEmbedder::default_256();
         let first = crate::core::run_cli_future(async {
@@ -8254,6 +8515,7 @@ mod tests {
         let settings = EeEmbedderSettings {
             model_root: unique_test_dir("embed-download-off"),
             download_mode: EeEmbedDownloadMode::Off,
+            local_source: EmbedModelSource::Cache,
         };
         let stack = search_embedder_stack_for_settings(&settings);
 
@@ -8279,6 +8541,7 @@ mod tests {
         let settings = EeEmbedderSettings {
             model_root: unique_test_dir("embed-download-off-no-lazy"),
             download_mode: EeEmbedDownloadMode::Off,
+            local_source: EmbedModelSource::Cache,
         };
         let stack = search_embedder_stack_for_settings(&settings);
 
@@ -8301,6 +8564,7 @@ mod tests {
         let settings = EeEmbedderSettings {
             model_root: unique_test_dir("embed-download-auto-empty"),
             download_mode: EeEmbedDownloadMode::Auto,
+            local_source: EmbedModelSource::Cache,
         };
         let stack = search_embedder_stack_for_settings(&settings);
 

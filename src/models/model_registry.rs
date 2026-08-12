@@ -32,6 +32,248 @@ pub enum EmbedBackend {
     HashFallback,
 }
 
+/// Redaction-safe origin of the embedding backend selected for one response.
+///
+/// Backend and source are intentionally separate: `neural_local` describes
+/// what executed, while this enum explains how that implementation was
+/// selected. A rejected workspace registration is its own source so callers
+/// can distinguish an intentional fail-closed hash fallback from an ordinary
+/// machine with no local neural model.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbedModelSource {
+    Registered,
+    Configured,
+    Cache,
+    Downloaded,
+    #[default]
+    DeterministicHash,
+    RegistryRejected,
+}
+
+impl EmbedModelSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Registered => "registered",
+            Self::Configured => "configured",
+            Self::Cache => "cache",
+            Self::Downloaded => "downloaded",
+            Self::DeterministicHash => "deterministic_hash",
+            Self::RegistryRejected => "registry_rejected",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_valid_for_backend(self, backend: EmbedBackend) -> bool {
+        match backend {
+            EmbedBackend::NeuralLocal => matches!(
+                self,
+                Self::Registered | Self::Configured | Self::Cache | Self::Downloaded
+            ),
+            EmbedBackend::HashFallback => {
+                matches!(self, Self::DeterministicHash | Self::RegistryRejected)
+            }
+        }
+    }
+}
+
+impl fmt::Display for EmbedModelSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for EmbedModelSource {
+    type Err = ParseModelRegistryValueError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match normalized_model_registry_token(input).as_str() {
+            "registered" => Ok(Self::Registered),
+            "configured" => Ok(Self::Configured),
+            "cache" => Ok(Self::Cache),
+            "downloaded" => Ok(Self::Downloaded),
+            "deterministic_hash" => Ok(Self::DeterministicHash),
+            "registry_rejected" => Ok(Self::RegistryRejected),
+            _ => Err(ParseModelRegistryValueError::new(
+                "embed_model_source",
+                input,
+                "registered, configured, cache, downloaded, deterministic_hash, registry_rejected",
+            )),
+        }
+    }
+}
+
+/// Typed result of resolving the embedding implementation for one response.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbedModelResolutionOutcome {
+    Ready,
+    #[default]
+    Fallback,
+    Rejected,
+}
+
+impl EmbedModelResolutionOutcome {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Fallback => "fallback",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+impl fmt::Display for EmbedModelResolutionOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Stable, redaction-safe reason a present workspace registration was refused.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbedRegistryRejectionReason {
+    AmbiguousEntries,
+    ModelNameMismatch,
+    StatusNotAvailable,
+    SourceMissing,
+    SourceNonLocal,
+    SourceWorkspaceMissing,
+    SourceSymlink,
+    SourceNotDirectory,
+    SourceNotFound,
+    SourcePermissionDenied,
+    SourceUnreadable,
+    MetadataMissing,
+    MetadataMalformed,
+    MetadataMismatch,
+    ContentHashMissing,
+    ContentHashMalformed,
+    DimensionMissing,
+    DistanceMetricMissing,
+    DistanceMetricUnsupported,
+    ManifestVerificationFailed,
+    ModelLoadFailed,
+    ContentHashMismatch,
+    DimensionMismatch,
+}
+
+impl EmbedRegistryRejectionReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AmbiguousEntries => "ambiguous_entries",
+            Self::ModelNameMismatch => "model_name_mismatch",
+            Self::StatusNotAvailable => "status_not_available",
+            Self::SourceMissing => "source_missing",
+            Self::SourceNonLocal => "source_non_local",
+            Self::SourceWorkspaceMissing => "source_workspace_missing",
+            Self::SourceSymlink => "source_symlink",
+            Self::SourceNotDirectory => "source_not_directory",
+            Self::SourceNotFound => "source_not_found",
+            Self::SourcePermissionDenied => "source_permission_denied",
+            Self::SourceUnreadable => "source_unreadable",
+            Self::MetadataMissing => "metadata_missing",
+            Self::MetadataMalformed => "metadata_malformed",
+            Self::MetadataMismatch => "metadata_mismatch",
+            Self::ContentHashMissing => "content_hash_missing",
+            Self::ContentHashMalformed => "content_hash_malformed",
+            Self::DimensionMissing => "dimension_missing",
+            Self::DistanceMetricMissing => "distance_metric_missing",
+            Self::DistanceMetricUnsupported => "distance_metric_unsupported",
+            Self::ManifestVerificationFailed => "manifest_verification_failed",
+            Self::ModelLoadFailed => "model_load_failed",
+            Self::ContentHashMismatch => "content_hash_mismatch",
+            Self::DimensionMismatch => "dimension_mismatch",
+        }
+    }
+}
+
+impl fmt::Display for EmbedRegistryRejectionReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Structured rejection attached to affected retrieval responses.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbedRegistryRejection {
+    pub registry_id: String,
+    pub reason: EmbedRegistryRejectionReason,
+}
+
+/// Complete per-response resolver truth.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbedModelResolution {
+    pub outcome: EmbedModelResolutionOutcome,
+    pub source: EmbedModelSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry_rejection: Option<EmbedRegistryRejection>,
+}
+
+impl Default for EmbedModelResolution {
+    fn default() -> Self {
+        Self::deterministic_hash()
+    }
+}
+
+impl EmbedModelResolution {
+    #[must_use]
+    pub const fn ready(source: EmbedModelSource) -> Self {
+        Self {
+            outcome: EmbedModelResolutionOutcome::Ready,
+            source,
+            registry_rejection: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn deterministic_hash() -> Self {
+        Self {
+            outcome: EmbedModelResolutionOutcome::Fallback,
+            source: EmbedModelSource::DeterministicHash,
+            registry_rejection: None,
+        }
+    }
+
+    #[must_use]
+    pub fn registry_rejected(
+        registry_id: impl Into<String>,
+        reason: EmbedRegistryRejectionReason,
+    ) -> Self {
+        Self {
+            outcome: EmbedModelResolutionOutcome::Rejected,
+            source: EmbedModelSource::RegistryRejected,
+            registry_rejection: Some(EmbedRegistryRejection {
+                registry_id: registry_id.into(),
+                reason,
+            }),
+        }
+    }
+
+    #[must_use]
+    pub const fn is_valid_for_backend(&self, backend: EmbedBackend) -> bool {
+        self.source.is_valid_for_backend(backend)
+            && matches!(
+                (backend, self.outcome),
+                (
+                    EmbedBackend::NeuralLocal,
+                    EmbedModelResolutionOutcome::Ready
+                ) | (
+                    EmbedBackend::HashFallback,
+                    EmbedModelResolutionOutcome::Fallback
+                ) | (
+                    EmbedBackend::HashFallback,
+                    EmbedModelResolutionOutcome::Rejected
+                )
+            )
+    }
+}
+
 impl EmbedBackend {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -1508,10 +1750,11 @@ mod tests {
     use serde::Serialize;
 
     use super::{
-        EMBEDDING_METADATA_SCHEMA_V1, EmbedBackend, EmbeddingMetadataRecord,
-        EmbeddingMetadataValidationError, EmbeddingPooling, EmbeddingVectorDtype,
-        ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
-        ParseModelRegistryValueError, SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1,
+        EMBEDDING_METADATA_SCHEMA_V1, EmbedBackend, EmbedModelResolution,
+        EmbedModelResolutionOutcome, EmbedModelSource, EmbedRegistryRejectionReason,
+        EmbeddingMetadataRecord, EmbeddingMetadataValidationError, EmbeddingPooling,
+        EmbeddingVectorDtype, ModelDistanceMetric, ModelProvider, ModelPurpose,
+        ModelRegistryStatus, ParseModelRegistryValueError, SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1,
         SemanticModelAdmissibilityBudget, SemanticModelAdmissibilityReport,
         SemanticModelAdmissionMode, SemanticModelCandidate, embedding_metadata_schema_catalog_json,
         embedding_metadata_schemas,
@@ -1543,6 +1786,64 @@ mod tests {
             EmbedBackend::NeuralLocal
         );
         assert!(EmbedBackend::from_str("remote_api").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn embed_model_resolution_preserves_backend_and_source_truth() -> TestResult {
+        let registered = EmbedModelResolution::ready(EmbedModelSource::Registered);
+        assert!(registered.is_valid_for_backend(EmbedBackend::NeuralLocal));
+        assert!(!registered.is_valid_for_backend(EmbedBackend::HashFallback));
+        assert_eq!(registered.outcome, EmbedModelResolutionOutcome::Ready);
+        assert_eq!(registered.source, EmbedModelSource::Registered);
+        assert!(registered.registry_rejection.is_none());
+
+        let fallback = EmbedModelResolution::deterministic_hash();
+        assert!(fallback.is_valid_for_backend(EmbedBackend::HashFallback));
+        assert!(!fallback.is_valid_for_backend(EmbedBackend::NeuralLocal));
+        assert_eq!(fallback.outcome, EmbedModelResolutionOutcome::Fallback);
+        assert_eq!(fallback.source, EmbedModelSource::DeterministicHash);
+
+        let rejected = EmbedModelResolution::registry_rejected(
+            "mdl_registry_fixture",
+            EmbedRegistryRejectionReason::ContentHashMalformed,
+        );
+        assert!(rejected.is_valid_for_backend(EmbedBackend::HashFallback));
+        assert!(!rejected.is_valid_for_backend(EmbedBackend::NeuralLocal));
+        assert_eq!(rejected.outcome, EmbedModelResolutionOutcome::Rejected);
+        assert_eq!(rejected.source, EmbedModelSource::RegistryRejected);
+        assert_eq!(
+            serde_json::to_value(&rejected)?,
+            serde_json::json!({
+                "outcome": "rejected",
+                "source": "registry_rejected",
+                "registryRejection": {
+                    "registryId": "mdl_registry_fixture",
+                    "reason": "content_hash_malformed"
+                }
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn embed_model_source_round_trips_as_redaction_safe_tokens() -> TestResult {
+        for source in [
+            EmbedModelSource::Registered,
+            EmbedModelSource::Configured,
+            EmbedModelSource::Cache,
+            EmbedModelSource::Downloaded,
+            EmbedModelSource::DeterministicHash,
+            EmbedModelSource::RegistryRejected,
+        ] {
+            assert_eq!(EmbedModelSource::from_str(source.as_str())?, source);
+            assert_eq!(source.to_string(), source.as_str());
+            assert_eq!(
+                serde_json::from_str::<EmbedModelSource>(&serde_json::to_string(&source)?)?,
+                source
+            );
+        }
+        assert!(EmbedModelSource::from_str("remote_api").is_err());
         Ok(())
     }
 
