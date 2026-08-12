@@ -1435,14 +1435,6 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         ));
     }
 
-    // Seed a second, fully valid default-cache copy. Every invalid-present
-    // registry case below must still fail closed to the hash backend instead
-    // of silently falling through to this neural model. Its metadata snapshot
-    // also proves that rejection performs no cache writes or download staging.
-    let fallback_cache_model_dir = workspace
-        .xdg_data
-        .join("ee/models/potion-multilingual-128M");
-    materialize_regular_model_fixture(&fixture_model_dir, &fallback_cache_model_dir, &manifest)?;
     let mut offline_env = network_tripwire.proxy_env();
     offline_env.push(("EE_EMBED_DOWNLOAD".to_string(), "off".to_string()));
     let query = "offline canonical semantic registry path";
@@ -1729,6 +1721,45 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
                 })?,
             1,
             "registry-order valid-after-rejected neural score count",
+        )?;
+
+        let valid_lexical_after_neural = daemon.search(
+            &workspace,
+            query,
+            "valid-lexical-after-neural",
+            "lexical_only",
+            true,
+        )?;
+        ensure_eq_str(
+            valid_lexical_after_neural
+                .pointer("/response/data/embed_backend")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    "registry-order valid-lexical-after-neural embed_backend missing".to_string()
+                })?,
+            "hash_fallback",
+            "registry-order valid-lexical-after-neural backend",
+        )?;
+        ensure_eq_str(
+            valid_lexical_after_neural
+                .pointer("/response/data/metrics/sourceModeApplied")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    "registry-order valid-lexical-after-neural sourceModeApplied missing"
+                        .to_string()
+                })?,
+            "lexical_only",
+            "registry-order valid-lexical-after-neural source mode",
+        )?;
+        ensure_eq_u64(
+            valid_lexical_after_neural
+                .pointer("/response/data/metrics/fastScoreCount")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    "registry-order valid-lexical-after-neural fastScoreCount missing".to_string()
+                })?,
+            0,
+            "registry-order valid-lexical-after-neural neural score count",
         )?;
 
         let rejected_after_valid = daemon.search(
@@ -2040,6 +2071,17 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
             "registry-path why-not mutated database artifacts: before={database_state_before_why_not:?} after={database_state_after_why_not:?}"
         ));
     }
+
+    // Only after the positive search/daemon/pack/full-orient sequence has
+    // proved the workspace registry path do we seed a second, fully valid
+    // default-cache copy. Every invalid-present registry case below must still
+    // fail closed to the hash backend instead of silently falling through to
+    // this neural model. Its metadata snapshot also proves that rejection
+    // performs no cache writes or download staging.
+    let fallback_cache_model_dir = workspace
+        .xdg_data
+        .join("ee/models/potion-multilingual-128M");
+    materialize_regular_model_fixture(&fixture_model_dir, &fallback_cache_model_dir, &manifest)?;
 
     let missing_source = workspace.path.join("missing-model-source");
     update_model2vec_registry_entry(

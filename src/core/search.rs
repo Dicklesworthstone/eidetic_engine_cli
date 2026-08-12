@@ -7717,16 +7717,6 @@ async fn run_search_inner_with_performance(
     let mut trace = SearchPerformanceTrace::default();
     let setup_start = Instant::now();
     let index_dir = options.resolve_index_dir();
-    let embed_backend = fast_embedder_override.as_ref().map_or_else(
-        crate::core::index::active_embed_backend,
-        |embedder| {
-            if embedder.is_semantic() {
-                EmbedBackend::NeuralLocal
-            } else {
-                EmbedBackend::HashFallback
-            }
-        },
-    );
     trace.record_elapsed("search::setup", setup_start);
     // Runtime-profile resolution gets its own stable phase so a regression
     // that reintroduces blocking host probes on this shared pre-query path
@@ -7778,6 +7768,23 @@ async fn run_search_inner_with_performance(
         &mut degraded,
         fast_embedder_override.as_deref(),
     )?;
+    let embed_backend = if source_mode.applied.uses_embeddings() {
+        fast_embedder_override.as_ref().map_or_else(
+            crate::core::index::active_embed_backend,
+            |embedder| {
+                if embedder.is_semantic() {
+                    EmbedBackend::NeuralLocal
+                } else {
+                    EmbedBackend::HashFallback
+                }
+            },
+        )
+    } else {
+        // `embed_backend` describes this response's execution, not semantic
+        // capability left warm by an earlier request in the same process.
+        // Lexical-only retrieval executes no neural backend.
+        EmbedBackend::HashFallback
+    };
     push_model_lifecycle_search_degradation(options, read_connection, &mut degraded);
     trace.record_elapsed("search::sourceModeResolve", source_mode_start);
     let rerank_resolve_start = Instant::now();
