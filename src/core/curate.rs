@@ -20,6 +20,8 @@ use serde::{Serialize, Serializer};
 use crate::config::env_registry::{EnvVar, read};
 use crate::config::{ConfigFile, GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
+use crate::core::index::DEFAULT_INDEX_SUBDIR;
+use crate::core::memory::reconcile_committed_memory_index_job;
 use crate::curate::{
     CandidateInput, CandidateSource, CandidateStatus, CandidateType, CandidateValidationError,
     DerivationMemorySpec, DerivationMetadata, DerivationProducerMetadata, DerivationSourceKind,
@@ -66,6 +68,7 @@ pub const CURATE_CANDIDATES_SCHEMA_V1: &str = "ee.curate.candidates.v1";
 pub const CURATE_VALIDATE_SCHEMA_V1: &str = "ee.curate.validate.v1";
 /// Stable schema for `ee curate apply` response data.
 pub const CURATE_APPLY_SCHEMA_V1: &str = "ee.curate.apply.v1";
+const CURATE_APPLY_INDEX_PUBLISH_FAILED_CODE: &str = "curate_apply_index_publish_failed";
 /// Stable schema for `ee curate show` response data (bd-18z8x).
 pub const CURATE_SHOW_SCHEMA_V1: &str = "ee.curate.show.v1";
 /// Stable schema for peer-origin evidence folded into curation candidates.
@@ -5568,6 +5571,10 @@ pub fn apply_curation_candidate(
         })?;
     let now = Utc::now().to_rfc3339();
     let parsed_candidate_type = CandidateType::from_str(&stored.candidate_type);
+    let is_create_derived = matches!(
+        &parsed_candidate_type,
+        Ok(CandidateType::CreateDerivedMemory)
+    );
     let decision = match parsed_candidate_type {
         Ok(CandidateType::LinkProposal | CandidateType::ContradictionReview) => {
             evaluate_link_candidate_for_apply(&connection, &stored)
@@ -5662,6 +5669,38 @@ pub fn apply_curation_candidate(
         applied_at = Some(now.clone());
     }
 
+    let create_derived_index_job_id = if !options.dry_run
+        && is_create_derived
+        && decision.application.errors.is_empty()
+        && (persisted || decision.application.status == "already_applied")
+    {
+        decision
+            .derived_create
+            .as_ref()
+            .map(|derived| derived.index_job_id.clone())
+            .or_else(|| {
+                decision
+                    .application
+                    .created_memory_id
+                    .as_deref()
+                    .map(generate_memory_search_index_job_id)
+            })
+    } else {
+        None
+    };
+    let degraded = create_derived_index_job_id
+        .as_deref()
+        .and_then(|index_job_id| {
+            reconcile_create_derived_index_job(
+                &connection,
+                &prepared.workspace_id,
+                &prepared.workspace_path,
+                index_job_id,
+            )
+        })
+        .into_iter()
+        .collect();
+
     let mut candidate = candidate_summary_from_stored(stored, &prepared.workspace_path);
     if persisted {
         candidate.status = CandidateStatus::Applied.as_str().to_owned();
@@ -5715,9 +5754,63 @@ pub fn apply_curation_candidate(
         target_after: decision.target_after,
         dry_run: options.dry_run,
         durable_mutation: persisted,
-        degraded: Vec::new(),
+        degraded,
         next_action,
     })
+}
+
+fn reconcile_create_derived_index_job(
+    connection: &DbConnection,
+    workspace_id: &str,
+    workspace_path: &Path,
+    index_job_id: &str,
+) -> Option<CurateCandidatesDegradation> {
+    match connection.get_search_index_job(index_job_id) {
+        Ok(Some(job)) if job.status == "completed" => return None,
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::curate",
+                workspace_id,
+                index_job_id,
+                error = %error,
+                "create-derived memory committed but its durable index job could not be inspected"
+            );
+            return Some(curate_apply_index_publish_failed(
+                index_job_id,
+                "status_unavailable",
+            ));
+        }
+    }
+
+    let index_dir = workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR);
+    let report =
+        reconcile_committed_memory_index_job(connection, workspace_id, index_job_id, &index_dir);
+    if matches!(
+        report.outcome.as_str(),
+        "completed" | "completed_no_documents"
+    ) {
+        return None;
+    }
+
+    Some(curate_apply_index_publish_failed(
+        index_job_id,
+        &report.outcome,
+    ))
+}
+
+fn curate_apply_index_publish_failed(
+    index_job_id: &str,
+    outcome: &str,
+) -> CurateCandidatesDegradation {
+    CurateCandidatesDegradation {
+        code: CURATE_APPLY_INDEX_PUBLISH_FAILED_CODE.to_owned(),
+        severity: "medium".to_owned(),
+        message: format!(
+            "The create-derived memory was committed, but automatic publication of durable search-index job {index_job_id} did not complete (outcome: {outcome}). Search may omit the new memory until queued index work is retried."
+        ),
+        repair: "ee index rebuild --workspace .".to_owned(),
+    }
 }
 
 /// Execute an explicit curation review lifecycle command.
@@ -15819,6 +15912,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::Path;
+    use std::str::FromStr;
     use std::sync::{Arc, Mutex};
 
     use tracing::subscriber::with_default;
@@ -15859,6 +15953,10 @@ mod tests {
         run_review_workspace, show_curation_candidate, stable_workspace_id,
         validate_curation_candidate,
     };
+    use crate::core::index::{IndexHealth, IndexStatusOptions, get_index_status};
+    use crate::core::search::{
+        SearchDedupMode, SearchOptions, SearchSourceMode, run_search_with_filters,
+    };
     use crate::curate::{
         CandidateSource, DerivationSourceKind, DerivationSourceRef, PreparedReflectionRequest,
         REFLECTION_REQUEST_SCHEMA, REFLECTION_RESULT_SCHEMA, ReflectionHmacKeyConfig,
@@ -15871,19 +15969,20 @@ mod tests {
         build_reflection_source_package, reflection_request_ledger_material,
     };
     use crate::db::{
-        CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateFeedbackEventInput,
-        CreateMemoryInput, CreateMemoryLinkInput, CreateProceduralRuleInput, CreateSessionInput,
-        CreateWorkspaceInput, DbConnection, EvidenceProducerKind, EvidenceSpanMemoryAttachResult,
-        MemoryLinkRelation, MemoryLinkSource, ReflectionRequestReplayStatus,
-        StoredCurationCandidate, StoredEvidenceSpan, StoredReflectionRequestLedger, StoredSession,
-        audit_actions,
+        AdvisoryLockId, CreateCurationCandidateInput, CreateEvidenceSpanInput,
+        CreateFeedbackEventInput, CreateMemoryInput, CreateMemoryLinkInput,
+        CreateProceduralRuleInput, CreateSessionInput, CreateWorkspaceInput, DbConnection,
+        EvidenceProducerKind, EvidenceSpanMemoryAttachResult, MemoryLinkRelation, MemoryLinkSource,
+        ReflectionRequestReplayStatus, SearchIndexJobStatus, StoredCurationCandidate,
+        StoredEvidenceSpan, StoredReflectionRequestLedger, StoredSession, audit_actions,
     };
     use crate::models::degradation::{
         ADVISORY_LOCK_TIMEOUT_CODE, GRAPH_CURATE_DISCONNECTED_GRAPH_CODE,
     };
     use crate::models::{
-        CandidateId, DomainError, EvidenceId, MemoryId, RuleId, SessionId, TrustClass,
+        CandidateId, DomainError, EvidenceId, MemoryId, MemoryScope, RuleId, SessionId, TrustClass,
     };
+    use crate::search::SpeedMode;
     use crate::testing::ensure;
 
     type TestResult = Result<(), String>;
@@ -20471,7 +20570,7 @@ mod tests {
                 "provenanceUri": "ee-reflect://reflect_req_validator_source",
                 "trustClass": "agent_assertion",
                 "trustSubclass": "reflection",
-                "tags": ["reflection"]
+                "tags": ["reflection", "source.lock"]
             },
             "producer": {
                 "producer": "test-reflector",
@@ -21723,6 +21822,7 @@ mod tests {
     fn apply_curation_candidate_creates_derived_memory_with_provenance() -> TestResult {
         let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
+        fs::create_dir_all(workspace_path.join(".ee")).map_err(|error| error.to_string())?;
         let database_path = workspace_path.join("ee.db");
         let workspace_id = test_workspace_id(workspace_path);
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x5101)).to_string();
@@ -21736,7 +21836,7 @@ mod tests {
             &evidence_source_id,
             &candidate_id,
             None,
-            None,
+            Some(create_derived_valid_metadata_json()),
             None,
         )?;
 
@@ -21809,14 +21909,106 @@ mod tests {
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "attached evidence span missing".to_owned())?;
         assert_eq!(evidence.memory_id.as_deref(), Some(created_memory_id));
+        let created_memory_id = MemoryId::from_str(created_memory_id)
+            .map_err(|error| format!("created memory id must stay typed: {error}"))?
+            .to_string();
+        let index_job_id = super::generate_memory_search_index_job_id(&created_memory_id);
         let jobs = connection
             .list_search_index_jobs(&workspace_id, None)
             .map_err(|error| error.to_string())?;
-        assert!(jobs.iter().any(|job| {
-            job.document_source.as_deref() == Some("memory")
-                && job.document_id.as_deref() == Some(created_memory_id)
-                && job.status == "pending"
-        }));
+        let job = jobs
+            .iter()
+            .find(|job| job.id == index_job_id)
+            .ok_or_else(|| "create-derived index job missing".to_owned())?;
+        assert_eq!(job.status_enum(), Some(SearchIndexJobStatus::Completed));
+        assert_eq!(job.document_source.as_deref(), Some("memory"));
+        assert_eq!(job.document_id.as_deref(), Some(created_memory_id.as_str()));
+        assert_eq!(
+            report
+                .application
+                .changes
+                .iter()
+                .find(|change| change.field == "searchIndexJobId")
+                .and_then(|change| change.after.as_deref()),
+            Some(index_job_id.as_str())
+        );
+        assert!(report.degraded.is_empty());
+        let retryable_jobs = jobs
+            .iter()
+            .filter(|job| {
+                matches!(
+                    job.status_enum(),
+                    Some(
+                        SearchIndexJobStatus::Pending
+                            | SearchIndexJobStatus::Cancelled
+                            | SearchIndexJobStatus::Failed
+                    )
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            retryable_jobs.is_empty(),
+            "exact create-derived publication must leave zero retryable jobs: {retryable_jobs:?}"
+        );
+
+        let index_dir = workspace_path.join(".ee").join("index");
+        let status = get_index_status(&IndexStatusOptions {
+            workspace_path: workspace_path.to_path_buf(),
+            database_path: Some(database_path.clone()),
+            index_dir: Some(index_dir.clone()),
+        })
+        .map_err(|error| error.to_string())?;
+        assert_eq!(status.health, IndexHealth::Ready);
+        assert!(status.db_generation.is_some());
+        assert_eq!(status.db_generation, status.index_generation);
+        assert_eq!(status.db_memory_count, 2);
+        assert_eq!(status.db_session_count, 1);
+        assert_eq!(status.db_artifact_count, 0);
+        assert_eq!(status.db_rule_count, 0);
+        assert_eq!(status.db_evidence_admitted_count, 1);
+        let counts = status
+            .index_document_counts
+            .as_ref()
+            .ok_or_else(|| "ready create-derived index omitted exact counts".to_owned())?;
+        assert_eq!(counts.memories, 2);
+        assert_eq!(counts.sessions, 1);
+        assert_eq!(counts.artifacts, 0);
+        assert_eq!(counts.rules, 0);
+        assert_eq!(counts.evidence, 1);
+        assert_eq!(status.index_document_count, Some(4));
+
+        let search = run_search_with_filters(
+            &SearchOptions {
+                workspace_path: workspace_path.to_path_buf(),
+                database_path: Some(database_path.clone()),
+                index_dir: Some(index_dir),
+                query: "create-derived memory apply revalidates locked source hashes".to_owned(),
+                limit: 10,
+                speed: SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: SearchDedupMode::DocId,
+                source_mode: SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: MemoryScope::Workspace,
+                strict_scope: false,
+            },
+            None,
+            &[],
+        )
+        .map_err(|error| format!("create-derived lexical search failed: {error:?}"))?;
+        assert!(
+            search
+                .results
+                .iter()
+                .any(|hit| hit.doc_id == created_memory_id),
+            "strict lexical search must retrieve the exact created typed memory id before read repair"
+        );
 
         let stored = connection
             .get_curation_candidate(&workspace_id, &candidate_id)
@@ -21835,7 +22027,7 @@ mod tests {
             .ok_or_else(|| "derived memory audit entry missing".to_owned())?;
         assert_eq!(audit.action, audit_actions::MEMORY_CREATE);
         assert_eq!(audit.target_type.as_deref(), Some("memory"));
-        assert_eq!(audit.target_id.as_deref(), Some(created_memory_id));
+        assert_eq!(audit.target_id.as_deref(), Some(created_memory_id.as_str()));
         let details: serde_json::Value = serde_json::from_str(
             audit
                 .details
@@ -21848,7 +22040,10 @@ mod tests {
             Some("ee.audit.derived_memory_created.v1")
         );
         assert_eq!(details["candidateId"].as_str(), Some(candidate_id.as_str()));
-        assert_eq!(details["createdMemoryId"].as_str(), Some(created_memory_id));
+        assert_eq!(
+            details["createdMemoryId"].as_str(),
+            Some(created_memory_id.as_str())
+        );
         assert_eq!(details["producer"].as_str(), Some("test-reflector"));
         assert_eq!(details["sourceRefs"].as_array().map(Vec::len), Some(2));
 
@@ -21866,7 +22061,7 @@ mod tests {
         assert_eq!(replay.application.decision, "idempotent_replay");
         assert_eq!(
             replay.application.created_memory_id.as_deref(),
-            Some(created_memory_id)
+            Some(created_memory_id.as_str())
         );
         assert_eq!(
             replay
@@ -21874,7 +22069,7 @@ mod tests {
                 .created_memory
                 .as_ref()
                 .map(|memory| memory.id.as_str()),
-            Some(created_memory_id)
+            Some(created_memory_id.as_str())
         );
         assert!(replay.application.changes.is_empty());
         assert!(!replay.mutation.persisted);
@@ -21901,7 +22096,7 @@ mod tests {
                 .iter()
                 .filter(|job| {
                     job.document_source.as_deref() == Some("memory")
-                        && job.document_id.as_deref() == Some(created_memory_id)
+                        && job.document_id.as_deref() == Some(created_memory_id.as_str())
                 })
                 .count(),
             1
@@ -21925,6 +22120,178 @@ mod tests {
             })
             .count();
         assert_eq!(candidate_create_audit_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn apply_curation_candidate_retries_same_derived_index_job_after_publish_contention()
+    -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        fs::create_dir_all(workspace_path.join(".ee")).map_err(|error| error.to_string())?;
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x5_111)).to_string();
+        let evidence_source_id = evidence_id(0x5_112);
+        let candidate_id = curate_id(0x5_113);
+        let connection = seed_create_derived_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &memory_id,
+            &evidence_source_id,
+            &candidate_id,
+            None,
+            Some(create_derived_valid_metadata_json()),
+            None,
+        )?;
+
+        validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let publish_lock = AdvisoryLockId::index(&workspace_id);
+        let fixture_holder = "curate:publish-contention-fixture";
+        let held = connection
+            .acquire_advisory_lock(
+                &publish_lock,
+                fixture_holder,
+                Some(60),
+                Some("plant create-derived post-commit publish contention"),
+            )
+            .map_err(|error| error.to_string())?;
+        assert!(
+            held.is_acquired(),
+            "fixture must hold the real publish lock"
+        );
+
+        let first = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(first.application.status, "applied");
+        assert_eq!(first.application.decision, "create_derived_memory");
+        assert!(first.durable_mutation);
+        let created_memory_id = first
+            .application
+            .created_memory_id
+            .as_deref()
+            .ok_or_else(|| "contended apply omitted created memory id".to_owned())?
+            .to_owned();
+        let index_job_id = super::generate_memory_search_index_job_id(&created_memory_id);
+        assert_eq!(first.degraded.len(), 1);
+        assert_eq!(
+            first.degraded[0].code,
+            super::CURATE_APPLY_INDEX_PUBLISH_FAILED_CODE
+        );
+        assert!(first.degraded[0].message.contains(index_job_id.as_str()));
+
+        let stored = connection
+            .get_curation_candidate(&workspace_id, &candidate_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "contended apply lost its durable candidate".to_owned())?;
+        assert_eq!(stored.status, "applied");
+        let created = connection
+            .get_memory(&created_memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "contended apply lost its durable derived memory".to_owned())?;
+        assert_eq!(created.id, created_memory_id);
+        let pending_job = connection
+            .get_search_index_job(&index_job_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "contended apply lost its durable index job".to_owned())?;
+        assert_eq!(
+            pending_job.status_enum(),
+            Some(SearchIndexJobStatus::Pending),
+            "real publish-lock contention must preserve retryable durable work"
+        );
+
+        assert!(
+            connection
+                .release_advisory_lock(&publish_lock, fixture_holder)
+                .map_err(|error| error.to_string())?,
+            "fixture must release the real publish lock before retry"
+        );
+        let retry = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(retry.application.status, "already_applied");
+        assert_eq!(retry.application.decision, "idempotent_replay");
+        assert_eq!(
+            retry.application.created_memory_id.as_deref(),
+            Some(created_memory_id.as_str())
+        );
+        assert!(!retry.durable_mutation);
+        assert!(retry.degraded.is_empty());
+        let jobs = connection
+            .list_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(jobs.len(), 1, "retry must not clone the durable job");
+        assert_eq!(jobs[0].id, index_job_id);
+        assert_eq!(
+            jobs[0].status_enum(),
+            Some(SearchIndexJobStatus::Completed),
+            "retry must complete the original logical job"
+        );
+        assert_eq!(
+            jobs[0].document_id.as_deref(),
+            Some(created_memory_id.as_str())
+        );
+        let retryable_count = jobs
+            .iter()
+            .filter(|job| {
+                matches!(
+                    job.status_enum(),
+                    Some(
+                        SearchIndexJobStatus::Pending
+                            | SearchIndexJobStatus::Cancelled
+                            | SearchIndexJobStatus::Failed
+                    )
+                )
+            })
+            .count();
+        assert_eq!(retryable_count, 0);
+
+        let memories = connection
+            .list_memories(&workspace_id, None, true)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            memories
+                .iter()
+                .filter(|memory| memory.id == created_memory_id)
+                .count(),
+            1,
+            "same-job retry must preserve the exactly-once derived memory"
+        );
+        let memory_create_audits = connection
+            .list_audit_by_action(audit_actions::MEMORY_CREATE, None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            memory_create_audits
+                .iter()
+                .filter(|audit| audit.target_id.as_deref() == Some(created_memory_id.as_str()))
+                .count(),
+            1,
+            "same-job retry must not duplicate the durable curation audit"
+        );
         Ok(())
     }
 
