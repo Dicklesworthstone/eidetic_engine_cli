@@ -570,6 +570,16 @@ struct McpCliRunResult {
     truncated: bool,
 }
 
+/// Process-owned state shared by every request on one MCP stdio session.
+///
+/// The CLI owner carries advisory-delivery history across tool and resource
+/// calls. Standalone helpers construct a fresh owner, while the real stdio
+/// loop retains one until shutdown or EOF.
+#[derive(Debug, Default)]
+struct McpProcess {
+    cli: crate::cli::CliProcess,
+}
+
 fn handle_initialize(id: Value) -> Value {
     let info = McpServerInfo::new();
     json_rpc_result(
@@ -2605,11 +2615,11 @@ fn build_cli_args_for_resource(uri: &str) -> Result<Vec<OsString>, String> {
     Ok(args)
 }
 
-fn run_cli_tool(args: Vec<OsString>) -> McpCliRunResult {
+fn run_cli_tool(process: &mut McpProcess, args: Vec<OsString>) -> McpCliRunResult {
     let max_bytes = mcp_stdio_byte_limit();
     let mut stdout = LimitedCapture::new(max_bytes);
     let mut stderr = LimitedCapture::new(max_bytes);
-    let exit = crate::cli::run(args, &mut stdout, &mut stderr);
+    let exit = process.cli.run(args, &mut stdout, &mut stderr);
     let stdout_bytes_seen = stdout.bytes_seen;
     let stderr_bytes_seen = stderr.bytes_seen;
     let truncated = stdout.truncated || stderr.truncated;
@@ -2675,7 +2685,16 @@ fn resource_read_result(
     )
 }
 
+#[cfg(test)]
 fn handle_resources_read(id: Value, params: Option<&Value>) -> Value {
+    handle_resources_read_in_process(&mut McpProcess::default(), id, params)
+}
+
+fn handle_resources_read_in_process(
+    process: &mut McpProcess,
+    id: Value,
+    params: Option<&Value>,
+) -> Value {
     let Some(params) = params else {
         return json_rpc_error(Some(id), -32602, "Missing params");
     };
@@ -2687,7 +2706,7 @@ fn handle_resources_read(id: Value, params: Option<&Value>) -> Value {
         Ok(args) => args,
         Err(message) => return json_rpc_error(Some(id), -32602, &message),
     };
-    let run = run_cli_tool(cli_args);
+    let run = run_cli_tool(process, cli_args);
     if let Some(error) = cli_output_size_limit_error(id.clone(), &run) {
         return error;
     }
@@ -2732,7 +2751,16 @@ fn extract_mcp_tool_payload(tool_name: &str, stdout: &str) -> Result<Option<Stri
         .map_err(|error| format!("Tool {tool_name} failed to serialize {pointer}: {error}"))
 }
 
+#[cfg(test)]
 fn handle_tools_call(id: Value, params: Option<&Value>) -> Value {
+    handle_tools_call_in_process(&mut McpProcess::default(), id, params)
+}
+
+fn handle_tools_call_in_process(
+    process: &mut McpProcess,
+    id: Value,
+    params: Option<&Value>,
+) -> Value {
     let Some(params) = params else {
         return json_rpc_error(Some(id), -32602, "Missing params");
     };
@@ -2757,7 +2785,7 @@ fn handle_tools_call(id: Value, params: Option<&Value>) -> Value {
         Ok(args) => args,
         Err(message) => return json_rpc_error(Some(id), -32602, &message),
     };
-    let run = run_cli_tool(cli_args);
+    let run = run_cli_tool(process, cli_args);
     if let Some(error) = cli_output_size_limit_error(id.clone(), &run) {
         return error;
     }
@@ -2838,6 +2866,10 @@ fn validate_json_rpc_request(request: &Value) -> Result<&str, Value> {
 
 #[must_use]
 pub fn handle_json_rpc_message(request: &Value) -> Option<Value> {
+    handle_json_rpc_message_in_process(&mut McpProcess::default(), request)
+}
+
+fn handle_json_rpc_message_in_process(process: &mut McpProcess, request: &Value) -> Option<Value> {
     trace_mcp_top_level("input", 0, &[]);
     // Per JSON-RPC 2.0 §4.1: "Notifications ... MUST be processed by
     // the Server without reply or response." This applies even when
@@ -2860,12 +2892,17 @@ pub fn handle_json_rpc_message(request: &Value) -> Option<Value> {
     }
 
     trace_mcp_top_level("dispatch", 0, &[]);
-    let response = handle_request(request);
+    let response = handle_request_in_process(process, request);
     trace_mcp_top_level("response", 0, &[]);
     Some(response)
 }
 
+#[cfg(test)]
 fn handle_request(request: &Value) -> Value {
+    handle_request_in_process(&mut McpProcess::default(), request)
+}
+
+fn handle_request_in_process(process: &mut McpProcess, request: &Value) -> Value {
     let id = request.get("id").cloned();
     let method = match validate_json_rpc_request(request) {
         Ok(method) => method,
@@ -2902,7 +2939,7 @@ fn handle_request(request: &Value) -> Value {
             let Some(id) = id else {
                 return json_rpc_error(None, -32600, "resources/read requires id");
             };
-            handle_resources_read(id, params)
+            handle_resources_read_in_process(process, id, params)
         }
         McpMethod::ResourcesTemplatesList => {
             let Some(id) = id else {
@@ -2920,7 +2957,7 @@ fn handle_request(request: &Value) -> Value {
             let Some(id) = id else {
                 return json_rpc_error(None, -32600, "tools/call requires id");
             };
-            handle_tools_call(id, params)
+            handle_tools_call_in_process(process, id, params)
         }
         McpMethod::NotificationsCancelled => json_rpc_error(
             id,
@@ -3012,7 +3049,16 @@ struct StdioLineOutcome {
     shutdown: bool,
 }
 
+#[cfg(test)]
 fn handle_stdio_line(line: &str, max_bytes: usize) -> StdioLineOutcome {
+    handle_stdio_line_in_process(&mut McpProcess::default(), line, max_bytes)
+}
+
+fn handle_stdio_line_in_process(
+    process: &mut McpProcess,
+    line: &str,
+    max_bytes: usize,
+) -> StdioLineOutcome {
     if line.as_bytes().len() > max_bytes {
         return StdioLineOutcome {
             response: Some(mcp_size_limit_exceeded_error(
@@ -3044,7 +3090,7 @@ fn handle_stdio_line(line: &str, max_bytes: usize) -> StdioLineOutcome {
             };
         }
     };
-    let response = handle_json_rpc_message(&request);
+    let response = handle_json_rpc_message_in_process(process, &request);
     let shutdown = should_stop_stdio_loop_after_response(&request, response.as_ref());
     StdioLineOutcome { response, shutdown }
 }
@@ -3094,6 +3140,7 @@ pub fn run_stdio_server() -> Result<(), String> {
     let mut stdout = std::io::stdout();
     let mut reader = BufReader::new(stdin.lock());
     let max_bytes = mcp_stdio_byte_limit();
+    let mut process = McpProcess::default();
 
     eprintln!("[ee-mcp] Server starting, protocol version {MCP_PROTOCOL_VERSION}");
 
@@ -3112,7 +3159,7 @@ pub fn run_stdio_server() -> Result<(), String> {
             }
         };
 
-        let outcome = handle_stdio_line(&line, max_bytes);
+        let outcome = handle_stdio_line_in_process(&mut process, &line, max_bytes);
         if let Some(response) = outcome.response {
             write_json_rpc_response(&mut stdout, &response, max_bytes)?;
         }
@@ -4068,6 +4115,118 @@ mod tests {
                 .and_then(|data| data.get("command"))
                 .and_then(Value::as_str),
             Some("status")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stdio_process_reuses_cli_advisory_state_across_real_search_calls() -> Result<(), String> {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_text = workspace.path().to_string_lossy().into_owned();
+        let mut process = McpProcess::default();
+        for args in [
+            vec!["ee", "--json", "--workspace", &workspace_text, "init"],
+            vec![
+                "ee",
+                "--json",
+                "--workspace",
+                &workspace_text,
+                "remember",
+                "MCP process advisory production-path evidence.",
+                "--level",
+                "semantic",
+                "--kind",
+                "fact",
+            ],
+            vec![
+                "ee",
+                "--json",
+                "--workspace",
+                &workspace_text,
+                "index",
+                "rebuild",
+            ],
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = process.cli.run(
+                args.into_iter().map(OsString::from),
+                &mut stdout,
+                &mut stderr,
+            );
+            if exit != ProcessExitCode::Success {
+                return Err(format!(
+                    "MCP search setup failed with exit {}: {}",
+                    exit as u8,
+                    String::from_utf8_lossy(&stderr)
+                ));
+            }
+        }
+
+        let request = |id: u64, query: &str| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {
+                    "name": "ee_search",
+                    "arguments": {
+                        "query": query,
+                        "workspace": workspace_text.as_str()
+                    }
+                }
+            })
+        };
+        let first_outcome = handle_stdio_line_in_process(
+            &mut process,
+            &request(1, "MCP advisory first search").to_string(),
+            DEFAULT_MCP_MAX_REQUEST_BYTES,
+        );
+        let repeated_outcome = handle_stdio_line_in_process(
+            &mut process,
+            &request(2, "MCP advisory repeated search").to_string(),
+            DEFAULT_MCP_MAX_REQUEST_BYTES,
+        );
+        assert!(!first_outcome.shutdown && !repeated_outcome.shutdown);
+        let first_response = first_outcome
+            .response
+            .ok_or_else(|| "first MCP search response missing".to_owned())?;
+        let repeated_response = repeated_outcome
+            .response
+            .ok_or_else(|| "repeated MCP search response missing".to_owned())?;
+        let first: Value = serde_json::from_str(first_tool_text(&first_response)?)
+            .map_err(|error| format!("first MCP search returned invalid JSON: {error}"))?;
+        let repeated: Value = serde_json::from_str(first_tool_text(&repeated_response)?)
+            .map_err(|error| format!("repeated MCP search returned invalid JSON: {error}"))?;
+
+        assert_eq!(
+            first
+                .pointer("/data/rerank/advisory/code")
+                .and_then(Value::as_str),
+            Some("rerank_model_unavailable")
+        );
+        assert_eq!(
+            first
+                .pointer("/data/rerank/advisorySummary/scope")
+                .and_then(Value::as_str),
+            Some(crate::core::search::SEARCH_ADVISORY_SCOPE_PROCESS)
+        );
+        assert!(
+            repeated
+                .pointer("/data/rerank/advisory")
+                .is_some_and(Value::is_null)
+        );
+        assert_eq!(
+            repeated
+                .pointer("/data/rerank/advisorySummary/sessionOccurrenceCount")
+                .and_then(Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            repeated
+                .pointer("/data/rerank/advisorySummary/sessionSuppressedCount")
+                .and_then(Value::as_u64),
+            Some(1)
         );
         Ok(())
     }

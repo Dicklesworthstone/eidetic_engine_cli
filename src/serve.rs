@@ -1775,7 +1775,7 @@ fn serve_search_payload_json(
     advisory_state: &ServeSearchAdvisoryState,
 ) -> Result<ServeDispatchPayload, DomainError> {
     let workspace_path = serve_current_workspace_path()?;
-    let advisory_workspace_key = workspace_path.to_string_lossy().into_owned();
+    let advisory_workspace_key = crate::core::workspace::stable_workspace_id(&workspace_path);
     let query = require_single_query_value(request, "q", "/v1/search")?;
     let report = run_search(&SearchOptions {
         workspace_path,
@@ -1861,12 +1861,9 @@ fn serve_context_payload_json(
     let Some(search_report) = run.search_report.as_ref() else {
         return Ok(ServeDispatchPayload::without_delivery(payload));
     };
-    let workspace_key = options.workspace_path.to_string_lossy();
-    let (payload, advisory_delivery) = advisory_state.render_context_for_delivery(
-        payload,
-        search_report,
-        workspace_key.as_ref(),
-    )?;
+    let workspace_key = crate::core::workspace::stable_workspace_id(&options.workspace_path);
+    let (payload, advisory_delivery) =
+        advisory_state.render_context_for_delivery(payload, search_report, &workspace_key)?;
     Ok(ServeDispatchPayload {
         payload,
         advisory_delivery,

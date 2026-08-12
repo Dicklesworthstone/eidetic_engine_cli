@@ -3898,6 +3898,8 @@ fn dispatch_search(
                 );
             }
         };
+    let advisory_workspace_id =
+        crate::core::workspace::stable_workspace_id(&options.workspace_path);
     let performance = explain_performance.then(|| {
         search_run.report.performance_explain_json_with_trace(
             options.speed,
@@ -3907,7 +3909,7 @@ fn dispatch_search(
     });
     let report = search_run.report;
     let mut pending_delivery =
-        PendingSearchAdvisoryDelivery::new(search_advisory_session, authorized_workspace_id);
+        PendingSearchAdvisoryDelivery::new(search_advisory_session, &advisory_workspace_id);
     let timing =
         DaemonSearchTiming::from_trace(daemon_total_start.elapsed(), &search_run.performance);
     let mut method_result = {
@@ -3917,7 +3919,7 @@ fn dispatch_search(
         DaemonSearchResult::from_report_for_delivery(
             &report,
             options.explain,
-            authorized_workspace_id,
+            &advisory_workspace_id,
             &mut advisory_session,
             pending_delivery.reservation_mut(),
             timing,
@@ -4914,6 +4916,8 @@ fn dispatch_context(
     }
 
     let options = params.context_options();
+    let advisory_workspace_id =
+        crate::core::workspace::stable_workspace_id(Path::new(authorized_workspace_id));
     let deadline = params.timeout_ms.map(Duration::from_millis);
     let context_run = match run_context_pack_with_performance_controlled(
         &options,
@@ -5002,7 +5006,7 @@ fn dispatch_context(
         }
     };
     let mut pending_delivery =
-        PendingSearchAdvisoryDelivery::new(search_advisory_session, authorized_workspace_id);
+        PendingSearchAdvisoryDelivery::new(search_advisory_session, &advisory_workspace_id);
     let mut result = result;
     {
         let mut advisory_session = search_advisory_session
@@ -5013,14 +5017,14 @@ fn dispatch_context(
                 &mut result,
                 search_report,
                 &mut advisory_session,
-                authorized_workspace_id,
+                &advisory_workspace_id,
                 pending_delivery.reservation_mut(),
             );
         } else {
             filter_context_large_gap_advisory_for_delivery(
                 &mut result,
                 &mut advisory_session,
-                authorized_workspace_id,
+                &advisory_workspace_id,
                 pending_delivery.reservation_mut(),
             );
         }
