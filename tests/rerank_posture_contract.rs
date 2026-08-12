@@ -1,8 +1,9 @@
 use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::core::search::{
     RERANK_MODEL_UNAVAILABLE_ADVISORY, RERANK_MODEL_UNAVAILABLE_REPAIR,
-    SEARCH_ADVISORY_SCOPE_PROCESS, ScoreSource, SearchAdvisorySession, SearchDegradation,
-    SearchHit, SearchReport, SearchSourceMode, SearchStatus,
+    SEARCH_ADVISORY_SCOPE_INVOCATION, SEARCH_ADVISORY_SCOPE_PROCESS, ScoreSource,
+    SearchAdvisorySession, SearchDegradation, SearchHit, SearchReport, SearchSourceMode,
+    SearchStatus,
 };
 use ee::models::{EmbedBackend, MemoryScope, MemoryScopeStats};
 
@@ -112,7 +113,7 @@ fn ordinary_search_json_is_pure_and_structural() {
     assert!(json["rerank"]["advisorySummary"].get("schema").is_none());
     assert_eq!(
         json["rerank"]["advisorySummary"]["scope"],
-        SEARCH_ADVISORY_SCOPE_PROCESS
+        SEARCH_ADVISORY_SCOPE_INVOCATION
     );
     assert_eq!(json["rerank"]["advisorySummary"]["emittedCount"], 1);
     assert_eq!(json["rerank"]["advisorySummary"]["suppressedCount"], 0);

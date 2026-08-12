@@ -165,7 +165,7 @@ expression: search
         "distinctCount": 1,
         "emittedCount": 1,
         "permanent": true,
-        "scope": "process",
+        "scope": "invocation",
         "sessionOccurrenceCount": 1,
         "sessionSuppressedCount": 0,
         "suppressedCount": 0

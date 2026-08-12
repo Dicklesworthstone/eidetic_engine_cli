@@ -124,6 +124,10 @@ pub const RERANK_MODEL_UNAVAILABLE_REPAIR: &str =
 /// lifetime of one process. Transient degradations retain their own response-
 /// or episode-scoped contracts.
 pub const SEARCH_ADVISORY_SCOPE_PROCESS: &str = "process";
+/// Stable wire token for a one-shot renderer that owns no retained advisory
+/// state. A normal CLI invocation renders once, while long-lived owners must
+/// use [`SearchReport::data_json_with_advisory_session`] and report `process`.
+pub const SEARCH_ADVISORY_SCOPE_INVOCATION: &str = "invocation";
 const RERANK_MODEL_TOKENIZER: &str = "tokenizer.json";
 const RERANK_MODEL_SAFETENSORS_PRIMARY: &str = "model_f32.safetensors";
 const RERANK_MODEL_SAFETENSORS_FALLBACK: &str = "model.safetensors";
@@ -2566,7 +2570,12 @@ impl SearchReport {
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         let mut session = SearchAdvisorySession::default();
-        self.data_json_with_advisory_session(&mut session)
+        self.data_json_with_advisory_session_inner(
+            &mut session,
+            DEFAULT_SEARCH_ADVISORY_WORKSPACE,
+            SEARCH_ADVISORY_SCOPE_INVOCATION,
+            None,
+        )
     }
 
     /// Render JSON while recording permanent advisories in the supplied
@@ -2595,7 +2604,12 @@ impl SearchReport {
         session: &mut SearchAdvisorySession,
         workspace_id: &str,
     ) -> serde_json::Value {
-        self.data_json_with_advisory_session_inner(session, workspace_id, None)
+        self.data_json_with_advisory_session_inner(
+            session,
+            workspace_id,
+            SEARCH_ADVISORY_SCOPE_PROCESS,
+            None,
+        )
     }
 
     #[must_use]
@@ -2605,13 +2619,19 @@ impl SearchReport {
         workspace_id: &str,
         reservation: &mut SearchAdvisoryDeliveryReservation,
     ) -> serde_json::Value {
-        self.data_json_with_advisory_session_inner(session, workspace_id, Some(reservation))
+        self.data_json_with_advisory_session_inner(
+            session,
+            workspace_id,
+            SEARCH_ADVISORY_SCOPE_PROCESS,
+            Some(reservation),
+        )
     }
 
     fn data_json_with_advisory_session_inner(
         &self,
         session: &mut SearchAdvisorySession,
         workspace_id: &str,
+        advisory_scope: &'static str,
         mut reservation: Option<&mut SearchAdvisoryDeliveryReservation>,
     ) -> serde_json::Value {
         let output_redaction_enabled = self.output_redaction_enabled();
@@ -2796,6 +2816,7 @@ impl SearchReport {
             self.rerank_runtime_available,
             session,
             workspace_id,
+            advisory_scope,
             reservation.as_deref_mut(),
         );
         let degraded = search_degraded_data_json_with_advisory_session_inner(
@@ -5494,6 +5515,7 @@ fn search_rerank_posture_json(
         runtime_available,
         advisory_session,
         workspace_id,
+        SEARCH_ADVISORY_SCOPE_PROCESS,
         None,
     )
 }
@@ -5506,6 +5528,7 @@ fn search_rerank_posture_json_inner(
     runtime_available: bool,
     advisory_session: &mut SearchAdvisorySession,
     workspace_id: &str,
+    advisory_scope: &'static str,
     reservation: Option<&mut SearchAdvisoryDeliveryReservation>,
 ) -> serde_json::Value {
     let rerank_score_count = hits.iter().filter(|hit| hit.rerank_score.is_some()).count();
@@ -5541,7 +5564,7 @@ fn search_rerank_posture_json_inner(
                 })
             });
             let summary = serde_json::json!({
-                "scope": SEARCH_ADVISORY_SCOPE_PROCESS,
+                "scope": advisory_scope,
                 "permanent": true,
                 "distinctCount": observation.distinct_count,
                 "emittedCount": if observation.emitted { 1 } else { 0 },

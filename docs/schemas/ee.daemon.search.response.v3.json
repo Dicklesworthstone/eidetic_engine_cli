@@ -113,14 +113,13 @@
       "required": ["scope", "permanent", "distinctCount", "emittedCount", "suppressedCount", "sessionOccurrenceCount", "sessionSuppressedCount"],
       "additionalProperties": false,
       "properties": {
-        "scope": {"type": "string", "enum": ["process", "response"]},
+        "scope": {"type": "string", "enum": ["invocation", "process", "response"]},
         "permanent": {"type": ["boolean", "null"]},
         "distinctCount": {"$ref": "#/$defs/uint64"},
         "emittedCount": {"$ref": "#/$defs/uint64"},
         "suppressedCount": {"$ref": "#/$defs/uint64"},
         "sessionOccurrenceCount": {"$ref": "#/$defs/uint64"},
-        "sessionSuppressedCount": {"$ref": "#/$defs/uint64"},
-        "tracking": {"type": "string", "const": "capacity_deferred"}
+        "sessionSuppressedCount": {"$ref": "#/$defs/uint64"}
       }
     },
     "performance": {
