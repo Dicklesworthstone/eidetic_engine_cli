@@ -27,7 +27,7 @@ use sqlmodel_core::Value as SqlValue;
 
 use crate::core::orient::{
     AddressedStoreState, NearbyStoreScanAssessment, NearbyStoreScanOutcome, addressed_store_state,
-    assess_nearby_stores_for_database,
+    discover_nearby_stores_for_database,
 };
 use crate::db::{DbConnection, StoredMemory};
 use crate::models::memory::typed_memory_fields_from_json;
@@ -707,7 +707,7 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
     let stale_count = apply_report_staleness(&mut tagged_items, &mut sessions, &all_live, &tags);
 
     let nearby_stores = if episodic_total == 0 {
-        Some(assess_nearby_stores_for_database(
+        Some(discover_nearby_stores_for_database(
             options.workspace_path,
             options.database_path,
             std::time::Duration::from_millis(RESUME_NEARBY_SCAN_BUDGET_MS),
@@ -742,7 +742,7 @@ fn empty_resume_report(options: &ResumeOptions<'_>) -> ResumeReport {
         .workspace_path
         .canonicalize()
         .unwrap_or_else(|_| options.workspace_path.to_path_buf());
-    let nearby_stores = Some(assess_nearby_stores_for_database(
+    let nearby_stores = Some(discover_nearby_stores_for_database(
         options.workspace_path,
         options.database_path,
         std::time::Duration::from_millis(RESUME_NEARBY_SCAN_BUDGET_MS),

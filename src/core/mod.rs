@@ -618,7 +618,7 @@ impl StorelessWorkspaceAssessment {
             "--workspace {}",
             shell_quote_repair_arg(&addressed_workspace_path)
         );
-        let discovery = crate::core::orient::assess_nearby_stores_for_database_with_registry(
+        let discovery = crate::core::orient::discover_nearby_stores_for_database_with_registry(
             &addressed_workspace,
             database_path,
             budget,

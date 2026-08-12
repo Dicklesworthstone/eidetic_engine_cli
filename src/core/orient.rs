@@ -695,30 +695,6 @@ impl NearbyStoreScanAssessment {
     fn mark_unavailable(&mut self) {
         self.outcome = NearbyStoreScanOutcome::Unavailable;
     }
-
-    fn into_legacy_scan(self) -> NearbyStoreScan {
-        NearbyStoreScan {
-            stores: self.stores,
-            // Residual orient/resume projections still expose this boolean.
-            // Treat unavailable as incomplete so they cannot claim a complete
-            // scan while their schemas are migrated to `outcome`.
-            truncated: self.outcome != NearbyStoreScanOutcome::Complete,
-        }
-    }
-}
-
-/// Legacy bounded discovery projection used by orient/resume schemas that
-/// still expose `truncated`. New recovery logic must consume
-/// [`NearbyStoreScanAssessment`] so worker and registry failure truth is not
-/// collapsed into a boolean.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
-pub struct NearbyStoreScan {
-    /// Ranked by document count (desc), then path; capped at
-    /// [`NEARBY_STORE_REPORT_LIMIT`].
-    pub stores: Vec<NearbyStore>,
-    /// True when the scan hit its wall-clock budget before covering every
-    /// candidate directory.
-    pub truncated: bool,
 }
 
 #[derive(Debug)]
@@ -897,7 +873,7 @@ pub fn addressed_store_state(workspace_path: &Path, database: &Path) -> Addresse
 pub fn discover_nearby_stores(
     workspace_path: &Path,
     budget: std::time::Duration,
-) -> NearbyStoreScan {
+) -> NearbyStoreScanAssessment {
     // Generic callers still address the conventional `.ee` store. Orient is
     // the one surface that resolves `.ee-campaign` as a provider fallback and
     // therefore calls `discover_nearby_stores_for_database` explicitly.
@@ -905,8 +881,7 @@ pub fn discover_nearby_stores(
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
     let addressed_database = workspace_root.join(".ee").join("ee.db");
-    assess_nearby_stores_with_registry(workspace_path, &addressed_database, budget, None)
-        .into_legacy_scan()
+    discover_nearby_stores_with_registry(workspace_path, &addressed_database, budget, None)
 }
 
 /// Scan while preserving the exact database already resolved by the caller.
@@ -918,31 +893,20 @@ pub fn discover_nearby_stores_for_database(
     workspace_path: &Path,
     addressed_database: &Path,
     budget: std::time::Duration,
-) -> NearbyStoreScan {
-    assess_nearby_stores_for_database(workspace_path, addressed_database, budget).into_legacy_scan()
-}
-
-/// Scan while retaining explicit completion, truncation, and unavailability
-/// truth for callers that make recovery decisions.
-#[must_use]
-pub fn assess_nearby_stores_for_database(
-    workspace_path: &Path,
-    addressed_database: &Path,
-    budget: std::time::Duration,
 ) -> NearbyStoreScanAssessment {
-    assess_nearby_stores_with_registry(workspace_path, addressed_database, budget, None)
+    discover_nearby_stores_with_registry(workspace_path, addressed_database, budget, None)
 }
 
-pub(crate) fn assess_nearby_stores_for_database_with_registry(
+pub(crate) fn discover_nearby_stores_for_database_with_registry(
     workspace_path: &Path,
     addressed_database: &Path,
     budget: std::time::Duration,
     registry_path: Option<&Path>,
 ) -> NearbyStoreScanAssessment {
-    assess_nearby_stores_with_registry(workspace_path, addressed_database, budget, registry_path)
+    discover_nearby_stores_with_registry(workspace_path, addressed_database, budget, registry_path)
 }
 
-fn assess_nearby_stores_with_registry(
+fn discover_nearby_stores_with_registry(
     workspace_path: &Path,
     addressed_database: &Path,
     budget: std::time::Duration,
@@ -2253,7 +2217,7 @@ mod tests {
             .canonicalize()
             .unwrap_or_else(|_| workspace.to_path_buf());
         let addressed_database = workspace_root.join(".ee").join("ee.db");
-        assess_nearby_stores_with_registry(
+        discover_nearby_stores_with_registry(
             workspace,
             &addressed_database,
             budget,
@@ -2750,7 +2714,7 @@ mod tests {
         let original_registry = b"not a sqlite registry";
         std::fs::write(&invalid_registry, original_registry).map_err(|error| error.to_string())?;
 
-        let scan = assess_nearby_stores_for_database_with_registry(
+        let scan = discover_nearby_stores_for_database_with_registry(
             &workspace,
             &addressed_database,
             scan_budget(),

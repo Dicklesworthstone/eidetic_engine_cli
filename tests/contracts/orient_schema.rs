@@ -187,8 +187,7 @@ fn orient_fast_and_full_instances_validate_and_unknown_fields_fail() -> TestResu
             "addressedDocuments": 1,
             "thinStoreThreshold": 3,
             "storeEmpty": false,
-            "scanned": true,
-            "truncated": false,
+            "outcome": "complete",
             "nearbyStores": [{
                 "workspaceRoot": "/repo/child",
                 "storeDir": "/repo/child/.ee",
@@ -281,6 +280,30 @@ fn orient_fast_and_full_instances_validate_and_unknown_fields_fail() -> TestResu
             ee::testing::validate_json_schema_instance(&nested_unknown, &schema).is_err(),
             format!("strict orient schema must reject an unknown field at {pointer}"),
         )?;
+    }
+
+    let outcomes = schema
+        .pointer("/$defs/storeDiscovery/properties/outcome/enum")
+        .and_then(Value::as_array)
+        .ok_or("storeDiscovery outcome enum must be present")?;
+    ensure(
+        outcomes == &vec![json!("complete"), json!("truncated"), json!("unavailable")],
+        "storeDiscovery must preserve complete, truncated, and unavailable as distinct outcomes",
+    )?;
+    ensure(
+        schema
+            .pointer("/$defs/storeDiscovery/properties/scanned")
+            .is_none()
+            && schema
+                .pointer("/$defs/storeDiscovery/properties/truncated")
+                .is_none(),
+        "orient schema must not retain legacy booleans that collapse discovery outcomes",
+    )?;
+
+    for outcome in ["truncated", "unavailable"] {
+        let mut typed_outcome = fast.clone();
+        typed_outcome["storeDiscovery"]["outcome"] = json!(outcome);
+        ee::testing::validate_json_schema_instance(&typed_outcome, &schema)?;
     }
 
     ensure(

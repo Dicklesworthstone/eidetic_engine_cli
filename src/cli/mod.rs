@@ -39679,15 +39679,19 @@ fn orient_store_discovery(
     // this keeps both the retarget and human "richer" wording truthful.
     scan.stores
         .retain(|store| store.documents > addressed_documents);
-    let best = scan.stores.first().cloned();
+    let outcome = scan.outcome;
+    let best = if outcome == crate::core::orient::NearbyStoreScanOutcome::Unavailable {
+        None
+    } else {
+        scan.stores.first().cloned()
+    };
     let value = serde_json::json!({
         "addressedStorePath": addressed_store_path,
         "addressedState": addressed_state,
         "addressedDocuments": addressed_documents,
         "thinStoreThreshold": crate::core::orient::NEARBY_STORE_THIN_LIVE_MEMORY_THRESHOLD,
         "storeEmpty": store_empty,
-        "scanned": true,
-        "truncated": scan.truncated,
+        "outcome": outcome,
         "nearbyStores": scan.stores,
     });
     (Some(value), best)
@@ -39872,6 +39876,10 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
         let nearby = data
             .pointer("/storeDiscovery/nearbyStores")
             .and_then(serde_json::Value::as_array);
+        let discovery_outcome = data
+            .pointer("/storeDiscovery/outcome")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unavailable");
         match nearby {
             Some(stores) if !stores.is_empty() => {
                 if store_empty {
@@ -39900,33 +39908,29 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
                         "  {path} (store {store_dir}; {documents} docs, last write {last_write})\n"
                     ));
                 }
-                // A truncated scan only ranked the candidates it reached, so
-                // it must never claim a global best.
-                if data
-                    .pointer("/storeDiscovery/truncated")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-                {
-                    out.push_str(
-                        "The first Next command below is retargeted at the leading candidate from a partial scan; richer stores may exist beyond the time budget.\n",
-                    );
-                } else {
-                    out.push_str(
+                match discovery_outcome {
+                    "complete" => out.push_str(
                         "The first Next command below is retargeted at the best candidate.\n",
-                    );
+                    ),
+                    "truncated" => out.push_str(
+                        "The first Next command below is retargeted at the leading candidate from a partial scan; richer stores may exist beyond the time budget.\n",
+                    ),
+                    _ => out.push_str(
+                        "No automatic retarget was selected because nearby-store discovery was unavailable.\n",
+                    ),
                 }
             }
             _ => {}
         }
-        if data
-            .pointer("/storeDiscovery/truncated")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
-        {
-            out.push_str(&format!(
+        match discovery_outcome {
+            "truncated" => out.push_str(&format!(
                 "Nearby-store scan hit its {} ms time budget; the candidate list may be incomplete.\n",
                 crate::core::orient::NEARBY_STORE_SCAN_BUDGET_MS
-            ));
+            )),
+            "unavailable" => out.push_str(
+                "Nearby-store discovery was unavailable; the candidate list is incomplete, and no-candidate output does not prove that no populated store exists. Run `ee doctor --workspace . --json`.\n",
+            ),
+            _ => {}
         }
     }
     if let Some(revivals) = data.get("revivals").filter(|value| value.is_object()) {
@@ -67448,7 +67452,7 @@ mod tests {
     }
 
     #[test]
-    fn orient_human_reports_truncated_nearby_store_scan_with_or_without_candidates() -> TestResult {
+    fn orient_human_reports_typed_nearby_store_scan_outcomes() -> TestResult {
         let nearby_store = serde_json::json!({
             "workspaceRoot": "/fixture/best-campaign",
             "storeDir": "/fixture/best-campaign/.ee-campaign",
@@ -67464,8 +67468,7 @@ mod tests {
                     "embed_backend": "hash_fallback",
                     "storeDiscovery": {
                         "storeEmpty": true,
-                        "scanned": true,
-                        "truncated": true,
+                        "outcome": "truncated",
                         "nearbyStores": nearby_stores
                     }
                 }),
@@ -67486,8 +67489,7 @@ mod tests {
                 "embed_backend": "hash_fallback",
                 "storeDiscovery": {
                     "storeEmpty": true,
-                    "scanned": true,
-                    "truncated": true,
+                    "outcome": "truncated",
                     "nearbyStores": [{
                         "workspaceRoot": "/fixture/best-campaign",
                         "storeDir": "/fixture/best-campaign/.ee-campaign",
@@ -67524,8 +67526,7 @@ mod tests {
                 "embed_backend": "hash_fallback",
                 "storeDiscovery": {
                     "storeEmpty": true,
-                    "scanned": true,
-                    "truncated": false,
+                    "outcome": "complete",
                     "nearbyStores": [{
                         "workspaceRoot": "/fixture/best-campaign",
                         "storeDir": "/fixture/best-campaign/.ee-campaign",
@@ -67549,6 +67550,42 @@ mod tests {
         ensure(
             !complete.contains("partial scan"),
             "a complete scan must not describe itself as partial",
+        )?;
+
+        let unavailable = super::render_orient_human(
+            &serde_json::json!({
+                "task": "resume campaign",
+                "workspace": "/fixture/empty-root",
+                "mode": "fast",
+                "embed_backend": "hash_fallback",
+                "storeDiscovery": {
+                    "storeEmpty": true,
+                    "outcome": "unavailable",
+                    "nearbyStores": [{
+                        "workspaceRoot": "/fixture/proved-candidate",
+                        "storeDir": "/fixture/proved-candidate/.ee",
+                        "documents": 5,
+                        "lastWrite": "2026-08-10T14:15:16Z"
+                    }]
+                }
+            }),
+            &[],
+        );
+        for expected in [
+            "No automatic retarget was selected because nearby-store discovery was unavailable.",
+            "no-candidate output does not prove that no populated store exists",
+            "ee doctor --workspace . --json",
+        ] {
+            ensure_contains(
+                &unavailable,
+                expected,
+                "orient unavailable discovery posture",
+            )?;
+        }
+        ensure(
+            !unavailable.contains("retargeted at the best candidate")
+                && !unavailable.contains("leading candidate from a partial scan"),
+            "unavailable discovery must not claim a best or leading retarget",
         )?;
         Ok(())
     }

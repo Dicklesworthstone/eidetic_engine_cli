@@ -2179,14 +2179,13 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
             && discovery["addressedState"] == serde_json::json!("empty")
             && discovery["addressedDocuments"] == serde_json::json!(0)
             && discovery["thinStoreThreshold"] == serde_json::json!(3)
-            && discovery["scanned"] == serde_json::json!(true),
+            && matches!(
+                discovery["outcome"].as_str(),
+                Some("complete" | "truncated")
+            )
+            && discovery.get("scanned").is_none()
+            && discovery.get("truncated").is_none(),
         format!("orient must scan on an initialized empty root, got: {discovery}"),
-    )?;
-    ensure(
-        discovery["truncated"].as_bool().is_some(),
-        format!(
-            "orient storeDiscovery must report the bounded-scan truncated flag, got: {discovery}"
-        ),
     )?;
     let nearby = discovery["nearbyStores"]
         .as_array()
@@ -2496,7 +2495,12 @@ fn empty_initialized_root_discovers_populated_child_and_populated_root_skips() -
     )?;
     ensure(
         full_discovery["storeEmpty"] == serde_json::json!(true)
-            && full_discovery["scanned"] == serde_json::json!(true)
+            && matches!(
+                full_discovery["outcome"].as_str(),
+                Some("complete" | "truncated")
+            )
+            && full_discovery.get("scanned").is_none()
+            && full_discovery.get("truncated").is_none()
             && string_at(full_best, "/workspaceRoot", "full orient best nearby child")?
                 == best_path
             && full_best["documents"].as_u64() == Some(best_documents)

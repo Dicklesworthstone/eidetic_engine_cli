@@ -190,8 +190,7 @@
         "addressedDocuments",
         "thinStoreThreshold",
         "storeEmpty",
-        "scanned",
-        "truncated",
+        "outcome",
         "nearbyStores"
       ],
       "additionalProperties": false,
@@ -201,8 +200,11 @@
         "addressedDocuments": { "type": "integer", "minimum": 0 },
         "thinStoreThreshold": { "type": "integer", "minimum": 1 },
         "storeEmpty": { "type": "boolean" },
-        "scanned": { "type": "boolean", "const": true },
-        "truncated": { "type": "boolean" },
+        "outcome": {
+          "type": "string",
+          "enum": ["complete", "truncated", "unavailable"],
+          "description": "Completeness of the bounded discovery attempt. unavailable never means that no populated store exists."
+        },
         "nearbyStores": {
           "type": "array",
           "items": { "$ref": "#/$defs/nearbyStore" }
