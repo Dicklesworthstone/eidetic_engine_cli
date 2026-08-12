@@ -740,7 +740,8 @@ fn advance_flock_gate_epoch(lock_file: &mut File) -> std::io::Result<()> {
     let next = current.wrapping_add(1).max(1);
     let encoded = format!("{next:020}\n");
     lock_file.seek(std::io::SeekFrom::Start(0))?;
-    lock_file.write_all(encoded.as_bytes())
+    lock_file.write_all(encoded.as_bytes())?;
+    lock_file.set_len(21)
 }
 
 #[cfg(unix)]
@@ -52372,6 +52373,27 @@ mod tests {
             &super::observe_flock_gate_epoch(&mut lock_file, Some(2)),
             &Some(2),
             "malformed epoch retains the last valid observation",
+        )?;
+
+        std::fs::write(
+            &lock_path,
+            b"oversized malformed epoch bytes that must be truncated",
+        )
+        .map_err(|error| TestFailure::new(error.to_string()))?;
+        super::advance_flock_gate_epoch(&mut lock_file)
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        ensure_equal(
+            &super::read_flock_gate_epoch(&mut lock_file)
+                .map_err(|error| TestFailure::new(error.to_string()))?,
+            &Some(1),
+            "a new holder repairs an unreadable epoch",
+        )?;
+        ensure_equal(
+            &std::fs::metadata(&lock_path)
+                .map_err(|error| TestFailure::new(error.to_string()))?
+                .len(),
+            &21,
+            "epoch publication truncates oversized malformed content",
         )
     }
 
@@ -52495,6 +52517,195 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn real_flock_stagnant_holder_stops_without_outer_retry() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let database_path = tempdir.path().join("stagnant.db");
+        let _holder = super::lock_database_write_file(&database_path)
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        let mut observed_polls = 0usize;
+
+        let error = match super::lock_database_write_file_with_wait_observer(
+            &database_path,
+            Duration::from_millis(5),
+            Duration::from_secs(1),
+            |_| observed_polls = observed_polls.saturating_add(1),
+        ) {
+            Ok(_) => {
+                return Err(TestFailure::new(
+                    "unchanged real flock holder unexpectedly survived the stagnant budget",
+                ));
+            }
+            Err(error) => error,
+        };
+
+        let DbError::InvalidPath {
+            operation, message, ..
+        } = &error
+        else {
+            return Err(TestFailure::new(format!(
+                "expected stagnant-holder InvalidPath, got {error:?}"
+            )));
+        };
+        ensure_equal(
+            operation,
+            &DbOperation::BeginTransaction,
+            "stagnant-holder operation",
+        )?;
+        ensure(
+            message.contains("database write lock holder made no progress"),
+            format!("stagnant-holder message: {message}"),
+        )?;
+        ensure(
+            observed_polls >= 2,
+            "stagnation requires repeated observation of one real holder epoch",
+        )?;
+        ensure(
+            !super::database_open_error_is_retryable(&error),
+            "stagnant-holder exhaustion must not reenter open retries",
+        )?;
+        ensure(
+            !super::db_error_is_transient_sqlite_contention(&error),
+            "stagnant-holder exhaustion must not reenter execute retries",
+        )?;
+        ensure(
+            !super::advisory_lock_error_is_retryable(&error),
+            "stagnant-holder exhaustion must not reenter advisory-lock retries",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_flock_absolute_deadline_stops_without_outer_retry() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let database_path = tempdir.path().join("deadline.db");
+        let _holder = super::lock_database_write_file(&database_path)
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        let mut observed_polls = 0usize;
+
+        let error = match super::lock_database_write_file_with_wait_observer(
+            &database_path,
+            Duration::from_secs(1),
+            Duration::from_millis(5),
+            |_| observed_polls = observed_polls.saturating_add(1),
+        ) {
+            Ok(_) => {
+                return Err(TestFailure::new(
+                    "real flock wait unexpectedly survived its absolute deadline",
+                ));
+            }
+            Err(error) => error,
+        };
+
+        let DbError::InvalidPath {
+            operation, message, ..
+        } = &error
+        else {
+            return Err(TestFailure::new(format!(
+                "expected deadline InvalidPath, got {error:?}"
+            )));
+        };
+        ensure_equal(
+            operation,
+            &DbOperation::BeginTransaction,
+            "absolute-deadline operation",
+        )?;
+        ensure(
+            message.contains("database write lock wait deadline exceeded"),
+            format!("absolute-deadline message: {message}"),
+        )?;
+        ensure(
+            observed_polls >= 1,
+            "deadline follows at least one observation of the real holder epoch",
+        )?;
+        ensure(
+            !super::database_open_error_is_retryable(&error),
+            "absolute deadline must not reenter open retries",
+        )?;
+        ensure(
+            !super::db_error_is_transient_sqlite_contention(&error),
+            "absolute deadline must not reenter execute retries",
+        )?;
+        ensure(
+            !super::advisory_lock_error_is_retryable(&error),
+            "absolute deadline must not reenter advisory-lock retries",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_flock_wait_honors_ambient_cancellation_without_outer_retry() -> TestResult {
+        use std::sync::mpsc;
+
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let database_path = tempdir.path().join("cancelled.db");
+        let _holder = super::lock_database_write_file(&database_path)
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        let cx = asupersync::Cx::for_testing();
+        let waiter_cx = cx.clone();
+        let waiter_path = database_path.clone();
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let _ambient = asupersync::Cx::set_current(Some(waiter_cx));
+            let mut observed_polls = 0usize;
+            let result = super::lock_database_write_file_with_wait_observer(
+                &waiter_path,
+                Duration::from_millis(100),
+                Duration::from_millis(250),
+                |_| {
+                    observed_polls = observed_polls.saturating_add(1);
+                    if observed_polls == 1 {
+                        let _ = observed_tx.send(());
+                        let _ = continue_rx.recv();
+                    }
+                },
+            );
+            (result, observed_polls)
+        });
+
+        observed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        cx.set_cancel_reason(
+            asupersync::CancelReason::timeout().with_message("real flock wait cancelled"),
+        );
+        continue_tx
+            .send(())
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+
+        let (result, observed_polls) = waiter
+            .join()
+            .map_err(|_| TestFailure::new("real flock cancellation thread panicked"))?;
+        ensure_equal(
+            &observed_polls,
+            &1,
+            "cancellation stops before another flock poll",
+        )?;
+        let error = match result {
+            Ok(_) => {
+                return Err(TestFailure::new(
+                    "cancelled real flock wait unexpectedly acquired the lock",
+                ));
+            }
+            Err(error) => error,
+        };
+        ensure(
+            !super::database_open_error_is_retryable(&error),
+            "cancellation must not reenter open retries",
+        )?;
+        ensure(
+            !super::db_error_is_transient_sqlite_contention(&error),
+            "cancellation must not reenter execute retries",
+        )?;
+        ensure(
+            !super::advisory_lock_error_is_retryable(&error),
+            "cancellation must not reenter advisory-lock retries",
+        )?;
+        ensure_cancelled_retry_error(Err::<(), _>(error), DbOperation::BeginTransaction)
+    }
+
     #[test]
     fn flock_gate_deadline_and_permanent_errors_do_not_reenter_outer_retries() -> TestResult {
         let lock_path = std::path::PathBuf::from("/tmp/ee.db.write.lock");
@@ -52516,6 +52727,10 @@ mod tests {
             ensure(
                 !super::db_error_is_transient_sqlite_contention(&error),
                 format!("bounded/permanent gate error must not reenter execute retry: {message}"),
+            )?;
+            ensure(
+                !super::advisory_lock_error_is_retryable(&error),
+                format!("bounded/permanent gate error must not reenter advisory retry: {message}"),
             )?;
         }
         Ok(())
