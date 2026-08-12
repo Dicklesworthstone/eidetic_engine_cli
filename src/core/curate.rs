@@ -22159,7 +22159,9 @@ mod tests {
         // its advisory lock and claims the durable job before rejecting this
         // symlinked active index path, so the failure evidence is post-claim
         // rather than pre-claim contention.
-        let index_dir = workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR);
+        let index_dir = workspace_path
+            .join(".ee")
+            .join(crate::core::index::DEFAULT_INDEX_SUBDIR);
         let preserved_index_dir = workspace_path.join(".ee").join("index-before-failure");
         fs::create_dir_all(&index_dir).map_err(|error| {
             format!(
