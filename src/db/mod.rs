@@ -1731,6 +1731,32 @@ impl DbConnection {
         Ok(count)
     }
 
+    /// Count current, non-tombstoned memory heads for exactly one workspace.
+    ///
+    /// Nearby-store discovery uses this instead of a whole-table row count so
+    /// a multi-workspace database, an expired revision, or a tombstone cannot
+    /// make the candidate workspace look populated.
+    pub fn count_live_memories_for_workspace(&self, workspace_id: &str) -> Result<u64> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT COUNT(*) FROM memories WHERE workspace_id = ?1 AND tombstoned_at IS NULL AND valid_to IS NULL",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        let first = rows.first().ok_or_else(|| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: format!(
+                "live-memory count for workspace {workspace_id:?} returned no result row"
+            ),
+        })?;
+        let count = required_i64(first, 0, DbOperation::Query, "live_memory_count")?;
+        u64::try_from(count).map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: format!(
+                "live-memory count for workspace {workspace_id:?} returned negative count"
+            ),
+        })
+    }
+
     /// Return the list of compiled migration versions that have not yet been
     /// applied to this database.
     pub fn pending_migrations(&self) -> Result<Vec<u32>> {
@@ -46798,6 +46824,72 @@ mod tests {
             "second by path order",
         )?;
 
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn live_workspace_memory_count_excludes_other_workspaces_tombstones_and_revisions() -> TestResult
+    {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_a = "wsp_livecountaaaaaaaaaaaaaaaaa";
+        let workspace_b = "wsp_livecountbbbbbbbbbbbbbbbbb";
+        connection.insert_workspace(
+            workspace_a,
+            &super::CreateWorkspaceInput {
+                path: "/tmp/live-count-a".to_owned(),
+                name: None,
+            },
+        )?;
+        connection.insert_workspace(
+            workspace_b,
+            &super::CreateWorkspaceInput {
+                path: "/tmp/live-count-b".to_owned(),
+                name: None,
+            },
+        )?;
+
+        let ids = (1_u128..=4)
+            .map(|value| {
+                crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(value)).to_string()
+            })
+            .collect::<Vec<_>>();
+        connection.insert_memory(
+            &ids[0],
+            &test_memory_input(workspace_a, "Current live memory for workspace A."),
+        )?;
+        connection.insert_memory(
+            &ids[1],
+            &test_memory_input(workspace_a, "Tombstoned memory for workspace A."),
+        )?;
+        let mut superseded =
+            test_memory_input(workspace_a, "Superseded historical memory for workspace A.");
+        superseded.valid_to = Some("2026-08-12T00:00:00Z".to_owned());
+        connection.insert_memory(&ids[2], &superseded)?;
+        connection.insert_memory(
+            &ids[3],
+            &test_memory_input(workspace_b, "Current live memory for workspace B."),
+        )?;
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET tombstoned_at = ?1 WHERE id = ?2",
+            &[
+                Value::Text("2026-08-12T00:00:00Z".to_owned()),
+                Value::Text(ids[1].clone()),
+            ],
+        )?;
+
+        ensure_equal(
+            &connection.count_live_memories_for_workspace(workspace_a)?,
+            &1_u64,
+            "workspace A live heads",
+        )?;
+        ensure_equal(
+            &connection.count_live_memories_for_workspace(workspace_b)?,
+            &1_u64,
+            "workspace B live heads",
+        )?;
         connection.close()?;
         Ok(())
     }

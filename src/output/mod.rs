@@ -15389,7 +15389,8 @@ fn domain_error_details(
         DomainError::UsageWithDetails { details_json, .. }
         | DomainError::UsageCodeWithDetails { details_json, .. }
         | DomainError::ImportWithDetails { details_json, .. }
-        | DomainError::PolicyDeniedWithDetails { details_json, .. } => {
+        | DomainError::PolicyDeniedWithDetails { details_json, .. }
+        | DomainError::WorkspaceStoreMissing { details_json, .. } => {
             append_domain_error_details(details, details_json);
         }
         _ => {}
@@ -21014,6 +21015,52 @@ mod tests {
         )?;
         ensure_contains(&json, "\"severity\":\"low\"", "error severity")?;
         ensure_contains(&json, "\"repair\":\"ee --help\"", "error repair")
+    }
+
+    #[test]
+    fn workspace_store_missing_merges_discovery_details_and_exact_recovery() -> TestResult {
+        let error = DomainError::WorkspaceStoreMissing {
+            message: "Database not found at /tmp/missing/.ee/ee.db".to_owned(),
+            repair: Some("Re-check --workspace addressing".to_owned()),
+            details_json: serde_json::json!({
+                "addressedStorePath": "/tmp/missing/.ee/ee.db",
+                "storeDiscovery": {
+                    "scanned": true,
+                    "truncated": false,
+                    "nearbyStores": [{
+                        "workspaceRoot": "/tmp/populated",
+                        "storeDir": "/tmp/populated/.ee",
+                        "documents": 4,
+                        "lastWrite": null,
+                    }],
+                },
+            })
+            .to_string(),
+            recovery_actions: vec![crate::models::RecoveryAction::flag(
+                1,
+                "--workspace",
+                "/tmp/populated",
+                "Retarget to the populated workspace.",
+            )],
+        };
+
+        let parsed: serde_json::Value = serde_json::from_str(&error_response_json(&error))
+            .map_err(|error| format!("workspace-store error JSON must parse: {error}"))?;
+        ensure_equal(
+            &parsed["error"]["details"]["addressedStorePath"],
+            &serde_json::json!("/tmp/missing/.ee/ee.db"),
+            "addressed store detail",
+        )?;
+        ensure_equal(
+            &parsed["error"]["details"]["storeDiscovery"]["nearbyStores"][0]["documents"],
+            &serde_json::json!(4),
+            "live nearby-store count",
+        )?;
+        ensure_equal(
+            &parsed["error"]["details"]["recovery"][0]["valueHint"],
+            &serde_json::json!("/tmp/populated"),
+            "exact recovery value",
+        )
     }
 
     #[test]

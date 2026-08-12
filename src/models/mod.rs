@@ -609,6 +609,8 @@ pub enum DomainError {
     WorkspaceStoreMissing {
         message: String,
         repair: Option<String>,
+        details_json: String,
+        recovery_actions: Vec<RecoveryAction>,
     },
     SearchIndex {
         message: String,
@@ -1916,13 +1918,17 @@ impl DomainError {
     /// well-known recovery paths (cass binary, search index, migration).
     /// Agents iterate the result and pick actions by `priority`.
     ///
-    /// This is intentionally heuristic — it does NOT require every error
-    /// site to be plumbed with extra fields. Specific error sites that
-    /// want richer recovery should add a `recovery_overrides` field in a
-    /// follow-up; for now the canonical cases below cover the surfaces
-    /// exercised in the 2026-05-10 walkthrough.
+    /// Most legacy errors remain heuristic. Errors whose recovery depends on
+    /// inspected runtime state carry exact actions directly; those actions
+    /// take precedence over message matching.
     #[must_use]
     pub fn recovery_actions(&self) -> Vec<RecoveryAction> {
+        if let Self::WorkspaceStoreMissing {
+            recovery_actions, ..
+        } = self
+        {
+            return recovery_actions.clone();
+        }
         let message = self.message().to_lowercase();
         let derivation_reflection_actions =
             derivation_reflection_recovery_actions_for_message(self, &message);
@@ -2082,9 +2088,7 @@ impl DomainError {
             // intended to create a new one. Agents follow recovery actions
             // mechanically, so point at an existing workspace first and
             // keep state creation last and explicitly conditional.
-            Self::Storage { .. } | Self::WorkspaceStoreMissing { .. }
-                if message.contains("database not found") =>
-            {
+            Self::Storage { .. } if message.contains("database not found") => {
                 vec![
                 RecoveryAction::flag(
                     1,
@@ -2786,6 +2790,32 @@ mod tests {
         let error = super::DomainError::WorkspaceStoreMissing {
             message: "Database not found at /tmp/x/.ee/ee.db".to_owned(),
             repair: Some("Re-check --workspace addressing".to_owned()),
+            details_json: serde_json::json!({
+                "addressedStorePath": "/tmp/x/.ee/ee.db",
+                "storeDiscovery": {"scanned": true, "truncated": false, "nearbyStores": []}
+            })
+            .to_string(),
+            recovery_actions: vec![
+                super::RecoveryAction::flag(
+                    1,
+                    "--workspace",
+                    "/tmp/x",
+                    "Re-check the exact addressed workspace.",
+                ),
+                super::RecoveryAction {
+                    priority: 2,
+                    kind: super::RecoveryKind::Seed,
+                    rationale: "Only initialize an intentionally new store.".to_owned(),
+                    env_name: None,
+                    value_hint: None,
+                    config_path: None,
+                    config_key: None,
+                    flag_name: None,
+                    command: Some("ee init --workspace /tmp/x".to_owned()),
+                    results_in: None,
+                    example: None,
+                },
+            ],
         };
         assert_eq!(error.code(), "workspace_store_missing");
         assert_eq!(error.exit_code(), ProcessExitCode::WorkspaceStoreMissing);
@@ -2803,11 +2833,19 @@ mod tests {
         // The safe recovery ordering carries over: addressing corrections
         // first, `ee init` last and conditional.
         let actions = error.recovery_actions();
-        assert_eq!(actions.len(), 3, "expected 3 options, got {actions:?}");
+        assert_eq!(
+            actions.len(),
+            2,
+            "expected 2 exact options, got {actions:?}"
+        );
         assert_eq!(actions[0].kind, super::RecoveryKind::Flag);
         assert_eq!(actions[0].flag_name.as_deref(), Some("--workspace"));
-        assert_eq!(actions[2].kind, super::RecoveryKind::Seed);
-        assert_eq!(actions[2].command.as_deref(), Some("ee init --workspace ."));
+        assert_eq!(actions[0].value_hint.as_deref(), Some("/tmp/x"));
+        assert_eq!(actions[1].kind, super::RecoveryKind::Seed);
+        assert_eq!(
+            actions[1].command.as_deref(),
+            Some("ee init --workspace /tmp/x")
+        );
     }
 
     #[test]

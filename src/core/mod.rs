@@ -582,15 +582,79 @@ fn shell_quote_repair_arg(value: &str) -> String {
     }
 }
 
-/// Repair guidance for a storeless-workspace miss with safe ordering
-/// (bd-workspace-miss-init-suggestion-sfjvq): re-check the addressing
-/// first, point at nearby populated stores when any exist, and mention
-/// `ee init` LAST and conditionally — state creation must never read as
-/// the first remedy for a lookup miss (agents follow error hints
-/// mechanically, and a mechanical `ee init` at a wrong path plants a junk
-/// store that discovery then finds forever).
-#[must_use]
-pub fn storeless_workspace_repair(database_path: &std::path::Path) -> String {
+struct StorelessWorkspaceAssessment {
+    addressed_store_path: String,
+    discovery_scanned: bool,
+    discovery: crate::core::orient::NearbyStoreScan,
+    recovery_actions: Vec<crate::models::RecoveryAction>,
+}
+
+impl StorelessWorkspaceAssessment {
+    fn inspect(database_path: &std::path::Path) -> Self {
+        let addressed_store_path = database_path.display().to_string();
+        let addressed_workspace = storeless_workspace_root(database_path);
+        let discovery = crate::core::orient::discover_nearby_stores_for_database(
+            &addressed_workspace,
+            database_path,
+            std::time::Duration::from_millis(crate::core::orient::NEARBY_STORE_SCAN_BUDGET_MS),
+        );
+        let recovery_actions =
+            storeless_workspace_recovery_actions(&addressed_workspace, &discovery.stores);
+        Self {
+            addressed_store_path,
+            discovery_scanned: true,
+            discovery,
+            recovery_actions,
+        }
+    }
+
+    fn repair(&self) -> String {
+        let looked_for = &self.addressed_store_path;
+        if let Some((best, additional)) = self.discovery.stores.split_first() {
+            let mut repair = format!(
+                "Re-check --workspace addressing (looked for {looked_for}); a populated store exists at {} ({} docs) — retarget with --workspace {}",
+                best.workspace_root,
+                best.documents,
+                shell_quote_repair_arg(&best.workspace_root),
+            );
+            if !additional.is_empty() {
+                repair.push_str(". Other nearby populated stores:");
+                for (index, store) in additional.iter().enumerate() {
+                    if index > 0 {
+                        repair.push(';');
+                    }
+                    repair.push_str(&format!(
+                        " {} ({} docs) — retarget with --workspace {}",
+                        store.workspace_root,
+                        store.documents,
+                        shell_quote_repair_arg(&store.workspace_root),
+                    ));
+                }
+            }
+            repair.push_str(
+                ". Only if you intended to create a NEW store here: ee init --workspace .",
+            );
+            return repair;
+        }
+        format!(
+            "Re-check --workspace addressing (looked for {looked_for}). Only if you intended to create a NEW store here: ee init --workspace ."
+        )
+    }
+
+    fn details_json(&self) -> String {
+        serde_json::json!({
+            "addressedStorePath": self.addressed_store_path,
+            "storeDiscovery": {
+                "scanned": self.discovery_scanned,
+                "truncated": self.discovery.truncated,
+                "nearbyStores": self.discovery.stores,
+            }
+        })
+        .to_string()
+    }
+}
+
+fn storeless_workspace_root(database_path: &std::path::Path) -> std::path::PathBuf {
     let database_parent = database_path.parent();
     let is_default_workspace_database = database_path
         .file_name()
@@ -598,48 +662,79 @@ pub fn storeless_workspace_repair(database_path: &std::path::Path) -> String {
         && database_parent
             .and_then(std::path::Path::file_name)
             .is_some_and(|name| name == ".ee");
-    let workspace_dir = if is_default_workspace_database {
+    (if is_default_workspace_database {
         database_parent.and_then(std::path::Path::parent)
     } else {
         database_parent
-    };
-    let nearby = workspace_dir.as_deref().map(|dir| {
-        crate::core::orient::discover_nearby_stores_for_database(
-            dir,
-            database_path,
-            std::time::Duration::from_millis(crate::core::orient::NEARBY_STORE_SCAN_BUDGET_MS),
-        )
-    });
-    let looked_for = database_path.display();
-    if let Some(scan) = nearby
-        && let Some((best, additional)) = scan.stores.split_first()
-    {
-        let mut repair = format!(
-            "Re-check --workspace addressing (looked for {looked_for}); a populated store exists at {} ({} docs) — retarget with --workspace {}",
-            best.workspace_root,
-            best.documents,
-            shell_quote_repair_arg(&best.workspace_root),
+    })
+    .unwrap_or_else(|| std::path::PathBuf::from("."))
+    .to_path_buf()
+}
+
+fn storeless_workspace_recovery_actions(
+    addressed_workspace: &std::path::Path,
+    stores: &[crate::core::orient::NearbyStore],
+) -> Vec<crate::models::RecoveryAction> {
+    let addressed_workspace_text = addressed_workspace.display().to_string();
+    let mut addressed = crate::models::RecoveryAction::flag(
+        1,
+        "--workspace",
+        addressed_workspace_text.clone(),
+        "Re-check the exact addressed workspace before selecting another store.",
+    );
+    addressed.example = Some(format!(
+        "--workspace {}",
+        shell_quote_repair_arg(&addressed_workspace_text)
+    ));
+    let mut actions = vec![addressed];
+    for (index, store) in stores.iter().enumerate() {
+        let priority = u8::try_from(index.saturating_add(2)).unwrap_or(u8::MAX - 1);
+        let database = std::path::Path::new(&store.store_dir).join("ee.db");
+        let mut action = crate::models::RecoveryAction::flag(
+            priority,
+            "--workspace",
+            store.workspace_root.clone(),
+            format!(
+                "Retarget to this ranked populated workspace ({} live memories).",
+                store.documents
+            ),
         );
-        if !additional.is_empty() {
-            repair.push_str(". Other nearby populated stores:");
-            for (index, store) in additional.iter().enumerate() {
-                if index > 0 {
-                    repair.push(';');
-                }
-                repair.push_str(&format!(
-                    " {} ({} docs) — retarget with --workspace {}",
-                    store.workspace_root,
-                    store.documents,
-                    shell_quote_repair_arg(&store.workspace_root),
-                ));
-            }
-        }
-        repair.push_str(". Only if you intended to create a NEW store here: ee init --workspace .");
-        return repair;
+        action.example = Some(format!(
+            "--workspace {} --database {}",
+            shell_quote_repair_arg(&store.workspace_root),
+            shell_quote_repair_arg(&database.display().to_string())
+        ));
+        actions.push(action);
     }
-    format!(
-        "Re-check --workspace addressing (looked for {looked_for}). Only if you intended to create a NEW store here: ee init --workspace ."
-    )
+    let init_priority = u8::try_from(stores.len().saturating_add(2)).unwrap_or(u8::MAX);
+    actions.push(crate::models::RecoveryAction {
+        priority: init_priority,
+        kind: crate::models::RecoveryKind::Seed,
+        rationale:
+            "Only initialize when this exact addressed workspace was intentionally chosen for a new store."
+                .to_owned(),
+        env_name: None,
+        value_hint: None,
+        config_path: None,
+        config_key: None,
+        flag_name: None,
+        command: Some(format!(
+            "ee init --workspace {}",
+            shell_quote_repair_arg(&addressed_workspace_text)
+        )),
+        results_in: None,
+        example: None,
+    });
+    actions
+}
+
+/// Repair guidance for a storeless-workspace miss with safe ordering:
+/// re-check addressing first, rank populated stores next, and mention `ee
+/// init` last and only conditionally. A lookup miss must not mechanically
+/// plant a new empty store at a mistyped path.
+#[must_use]
+pub fn storeless_workspace_repair(database_path: &std::path::Path) -> String {
+    StorelessWorkspaceAssessment::inspect(database_path).repair()
 }
 
 /// Canonical storeless-workspace miss error
@@ -650,9 +745,14 @@ pub fn storeless_workspace_repair(database_path: &std::path::Path) -> String {
 /// populated stores second, `ee init` last and explicitly conditional.
 #[must_use]
 pub fn storeless_workspace_error(database_path: &std::path::Path) -> crate::models::DomainError {
+    let assessment = StorelessWorkspaceAssessment::inspect(database_path);
+    let repair = assessment.repair();
+    let details_json = assessment.details_json();
     crate::models::DomainError::WorkspaceStoreMissing {
         message: format!("Database not found at {}", database_path.display()),
-        repair: Some(storeless_workspace_repair(database_path)),
+        repair: Some(repair),
+        details_json,
+        recovery_actions: assessment.recovery_actions,
     }
 }
 

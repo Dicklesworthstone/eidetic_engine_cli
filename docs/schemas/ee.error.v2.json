@@ -37,6 +37,13 @@
             "attemptedPaths": {
               "type": "array",
               "items": {"type": "string"}
+            },
+            "addressedStorePath": {
+              "type": "string",
+              "description": "Exact absolute database path checked by a workspace_store_missing failure."
+            },
+            "storeDiscovery": {
+              "$ref": "#/$defs/storeDiscovery"
             }
           },
           "additionalProperties": {"$ref": "#/$defs/jsonValue"}
@@ -141,6 +148,41 @@
         "command": {"type": "string"},
         "resultsIn": {"type": "string"},
         "example": {"type": "string"}
+      }
+    },
+    "storeDiscovery": {
+      "type": "object",
+      "description": "Bounded read-only discovery evidence attached to workspace_store_missing errors.",
+      "required": ["scanned", "truncated", "nearbyStores"],
+      "additionalProperties": false,
+      "properties": {
+        "scanned": {"type": "boolean"},
+        "truncated": {"type": "boolean"},
+        "nearbyStores": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/nearbyStore"},
+          "maxItems": 5
+        }
+      }
+    },
+    "nearbyStore": {
+      "type": "object",
+      "required": ["workspaceRoot", "storeDir", "documents", "lastWrite"],
+      "additionalProperties": false,
+      "properties": {
+        "workspaceRoot": {"type": "string"},
+        "storeDir": {"type": "string"},
+        "documents": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Current non-tombstoned memory heads for this exact workspace."
+        },
+        "lastWrite": {
+          "oneOf": [
+            {"type": "string", "format": "date-time"},
+            {"type": "null"}
+          ]
+        }
       }
     },
     "jsonValue": {

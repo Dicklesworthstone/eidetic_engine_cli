@@ -60,74 +60,59 @@ fn run_ee_with_stdin(args: &[String], input: &[u8]) -> Result<Output, String> {
         .map_err(|error| format!("failed to collect ee {}: {error}", args.join(" ")))
 }
 
-fn split_emitted_command(command: &str) -> Result<Vec<String>, String> {
-    #[derive(Copy, Clone, Eq, PartialEq)]
-    enum Quote {
-        None,
-        Single,
-        Double,
-    }
-
-    let mut args = Vec::new();
-    let mut current = String::new();
-    let mut quote = Quote::None;
-    let mut chars = command.chars();
-    while let Some(ch) = chars.next() {
-        match quote {
-            Quote::None => match ch {
-                '\'' => quote = Quote::Single,
-                '"' => quote = Quote::Double,
-                '\\' => {
-                    let next = chars.next().ok_or("emitted command ends with an escape")?;
-                    current.push(next);
-                }
-                ch if ch.is_whitespace() => {
-                    if !current.is_empty() {
-                        args.push(std::mem::take(&mut current));
-                    }
-                }
-                _ => current.push(ch),
-            },
-            Quote::Single => {
-                if ch == '\'' {
-                    quote = Quote::None;
-                } else {
-                    current.push(ch);
-                }
-            }
-            Quote::Double => match ch {
-                '"' => quote = Quote::None,
-                '\\' => {
-                    let next = chars
-                        .next()
-                        .ok_or("emitted double-quoted command ends with an escape")?;
-                    current.push(next);
-                }
-                _ => current.push(ch),
-            },
-        }
-    }
-    if quote != Quote::None {
-        return Err("emitted command has an unterminated quote".to_owned());
-    }
-    if !current.is_empty() {
-        args.push(current);
-    }
-    Ok(args)
-}
-
 fn run_emitted_ee_command_with_registry(command: &str, registry: &Path) -> Result<Output, String> {
-    let args = split_emitted_command(command)?;
-    if args.first().map(String::as_str) != Some("ee") {
+    if !command.starts_with("ee ") {
         return Err(format!("emitted command must start with ee: {command:?}"));
     }
-    run_ee_with_registry(&args[1..], registry)
+    let binary_dir = Path::new(env!("CARGO_BIN_EXE_ee"))
+        .parent()
+        .ok_or("compiled ee binary has no parent directory")?;
+    let mut path_entries = vec![binary_dir.to_path_buf()];
+    if let Some(existing) = std::env::var_os("PATH") {
+        path_entries.extend(std::env::split_paths(&existing));
+    }
+    let shell_path = std::env::join_paths(path_entries)
+        .map_err(|error| format!("failed to construct shell PATH: {error}"))?;
+    Command::new("/bin/sh")
+        .arg("-c")
+        .arg(command)
+        .env("PATH", shell_path)
+        .env("EE_WORKSPACE_REGISTRY", registry)
+        .output()
+        .map_err(|error| format!("failed to execute emitted command through /bin/sh: {error}"))
 }
 
 fn sqlite_sidecar_path(database: &Path, suffix: &str) -> std::path::PathBuf {
     let mut path = database.as_os_str().to_os_string();
     path.push(suffix);
     path.into()
+}
+
+fn worker_materialized_path(path: &Path) -> Result<std::path::PathBuf, String> {
+    let mut cursor = path;
+    let mut missing = Vec::new();
+    while !cursor.exists() {
+        let component = cursor.file_name().ok_or_else(|| {
+            format!(
+                "cannot resolve a materialized path ancestor for {}",
+                path.display()
+            )
+        })?;
+        missing.push(component.to_os_string());
+        cursor = cursor.parent().ok_or_else(|| {
+            format!(
+                "cannot resolve a materialized path parent for {}",
+                path.display()
+            )
+        })?;
+    }
+    let mut resolved = cursor
+        .canonicalize()
+        .map_err(|error| format!("canonicalize {}: {error}", cursor.display()))?;
+    for component in missing.iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -452,7 +437,7 @@ fn remember_and_search_storeless_address_variants_do_not_create_state() -> TestR
 
     for workspace in [&nonexistent_workspace, &empty_ee_workspace] {
         let workspace_text = workspace.to_string_lossy().to_string();
-        let expected_database = workspace.join(".ee").join("ee.db");
+        let expected_database = worker_materialized_path(&workspace.join(".ee").join("ee.db"))?;
         for (surface, args) in [
             (
                 "remember",
@@ -521,6 +506,14 @@ fn remember_and_search_storeless_address_variants_do_not_create_state() -> TestR
                     expected_database.display()
                 ),
             )?;
+            ensure(
+                string_at(&json, "/error/details/addressedStorePath", surface)?
+                    == expected_database.to_string_lossy(),
+                format!(
+                    "{surface}: structured addressedStorePath must equal the worker-materialized path {}",
+                    expected_database.display()
+                ),
+            )?;
         }
 
         let batch = run_ee_with_stdin(
@@ -571,13 +564,25 @@ fn remember_and_search_storeless_address_variants_do_not_create_state() -> TestR
         ),
     )?;
     let custom_search_json = stdout_json(&custom_search, "custom search database")?;
+    let custom_database_materialized = worker_materialized_path(&custom_database)?;
     ensure(
         string_at(
             &custom_search_json,
             "/error/message",
             "custom search database",
-        )? == format!("Database not found at {custom_database_text}"),
+        )? == format!(
+            "Database not found at {}",
+            custom_database_materialized.display()
+        ),
         "a custom search miss must print the exact absolute database path".to_owned(),
+    )?;
+    ensure(
+        string_at(
+            &custom_search_json,
+            "/error/details/addressedStorePath",
+            "custom search database",
+        )? == custom_database_materialized.to_string_lossy(),
+        "custom search structured path must match the exact checked database".to_owned(),
     )?;
     ensure(
         !custom_database.exists(),
@@ -777,6 +782,43 @@ fn storeless_miss_surfaces_nearby_populated_store() -> TestResult {
             ),
             format!(
                 "{}: conditional init guidance must be last, got: {repair}",
+                verb.join(" ")
+            ),
+        )?;
+        ensure(
+            string_at(&json, "/error/details/addressedStorePath", &verb.join(" "))?
+                == addressed_store_str,
+            format!("{}: structured addressed path drifted", verb.join(" ")),
+        )?;
+        let nearby = array_at(
+            &json,
+            "/error/details/storeDiscovery/nearbyStores",
+            &verb.join(" "),
+        )?;
+        ensure(
+            json.pointer("/error/details/storeDiscovery/scanned") == Some(&serde_json::json!(true))
+                && nearby.len() == 1
+                && string_at(&nearby[0], "/workspaceRoot", &verb.join(" "))?
+                    == canonical_store_root.to_string_lossy()
+                && nearby[0]["documents"].as_u64() == Some(1),
+            format!(
+                "{}: structured discovery evidence drifted: {nearby:?}",
+                verb.join(" ")
+            ),
+        )?;
+        let recovery = array_at(&json, "/error/details/recovery", &verb.join(" "))?;
+        ensure(
+            recovery.len() == 3
+                && recovery[0]["priority"].as_u64() == Some(1)
+                && recovery[0]["flagName"].as_str() == Some("--workspace")
+                && recovery[1]["valueHint"].as_str()
+                    == Some(canonical_store_root.to_string_lossy().as_ref())
+                && recovery[2]["kind"].as_str() == Some("seed")
+                && recovery[2]["command"]
+                    .as_str()
+                    .is_some_and(|command| command.contains("storeless_leaf_sfjvq")),
+            format!(
+                "{}: exact ranked recovery actions drifted: {recovery:?}",
                 verb.join(" ")
             ),
         )?;
@@ -1072,6 +1114,7 @@ fn storeless_custom_address_reports_all_ranked_nearby_stores() -> TestResult {
             missing_database.display(),
         ),
     )?;
+    let missing_database_materialized = worker_materialized_path(&missing_database)?;
 
     let miss = run_ee_with_registry(
         &[
@@ -1096,7 +1139,10 @@ fn storeless_custom_address_reports_all_ranked_nearby_stores() -> TestResult {
     ensure(
         string_at(&json, "/error/code", "custom storeless address")? == "workspace_store_missing"
             && string_at(&json, "/error/message", "custom storeless address")?
-                == format!("Database not found at {}", missing_database.display()),
+                == format!(
+                    "Database not found at {}",
+                    missing_database_materialized.display()
+                ),
         "custom storeless miss must retain its code and name the exact addressed database"
             .to_owned(),
     )?;
@@ -1111,7 +1157,7 @@ fn storeless_custom_address_reports_all_ranked_nearby_stores() -> TestResult {
     let repair = string_at(&json, "/error/repair", "custom storeless address")?;
     let looked_for = format!(
         "Re-check --workspace addressing (looked for {})",
-        missing_database.display()
+        missing_database_materialized.display()
     );
     let init_at = repair
         .find("Only if you intended to create a NEW store here: ee init --workspace .")
@@ -1149,6 +1195,40 @@ fn storeless_custom_address_reports_all_ranked_nearby_stores() -> TestResult {
             ),
         format!(
             "repair must contain the exact custom address, exactly three unique retargets, and conditional init last: {repair}"
+        ),
+    )?;
+    ensure(
+        string_at(
+            &json,
+            "/error/details/addressedStorePath",
+            "custom storeless address",
+        )? == missing_database_materialized.to_string_lossy(),
+        "custom structured details must retain the exact addressed database".to_owned(),
+    )?;
+    let structured_stores = array_at(
+        &json,
+        "/error/details/storeDiscovery/nearbyStores",
+        "custom storeless address",
+    )?;
+    let structured_recovery =
+        array_at(&json, "/error/details/recovery", "custom storeless address")?;
+    let expected_paths = [&canonical_root, &canonical_middle, &canonical_lowest];
+    ensure(
+        structured_stores.len() == 3
+            && structured_recovery.len() == 5
+            && expected_paths.iter().enumerate().all(|(index, expected)| {
+                structured_stores[index]["workspaceRoot"].as_str()
+                    == Some(expected.to_string_lossy().as_ref())
+                    && structured_recovery[index + 1]["valueHint"].as_str()
+                        == Some(expected.to_string_lossy().as_ref())
+                    && structured_recovery[index + 1]["priority"].as_u64()
+                        == Some(u64::try_from(index + 2).unwrap_or(u64::MAX))
+            })
+            && structured_recovery.last().is_some_and(|action| {
+                action["kind"].as_str() == Some("seed") && action["priority"].as_u64() == Some(5)
+            }),
+        format!(
+            "custom details must expose all ranked stores once and init last: stores={structured_stores:?} recovery={structured_recovery:?}"
         ),
     )?;
     ensure(
@@ -2140,6 +2220,23 @@ fn ordinary_storage_failure_keeps_exit_three_and_init_preserves_agent_docs() -> 
                 String::from_utf8_lossy(&init.stdout)
             ),
         )?;
+        let init_json = stdout_json(&init, label)?;
+        let actions = array_at(&init_json, "/data/actions", label)?;
+        for expected_path in [&agents_path, &claude_path] {
+            let expected_materialized = worker_materialized_path(expected_path)?;
+            let expected_materialized_text = expected_materialized.to_string_lossy().to_string();
+            ensure(
+                actions.iter().any(|action| {
+                    action["action"].as_str() == Some("check_file")
+                        && action["status"].as_str() == Some("exists")
+                        && action["path"].as_str() == Some(expected_materialized_text.as_str())
+                }),
+                format!(
+                    "{label} must report the preserved file as exists: path={} actions={actions:?}",
+                    expected_materialized.display()
+                ),
+            )?;
+        }
         let agents_after = snapshot_file(&agents_path)?
             .ok_or_else(|| format!("AGENTS.md disappeared after {label}"))?;
         let claude_after = snapshot_file(&claude_path)?

@@ -448,7 +448,7 @@ fn assert_orient_fast_whole_command_output(success: bool, stdout: &[u8], stderr:
     );
     assert_eq!(
         envelope.pointer("/data/fastContent/strategy/relevant"),
-        Some(&serde_json::json!("context_pack_lexical_only_v1"))
+        Some(&serde_json::json!("direct_lexical_admitted_v1"))
     );
     for section in ["recent", "relevant"] {
         let items = envelope
