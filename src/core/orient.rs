@@ -922,9 +922,19 @@ mod tests {
         .map_err(|error| format!("remember fixture failed: {error:?}"))
     }
 
+    fn orient_test_tempdir() -> Result<tempfile::TempDir, String> {
+        let canonical_temp_root = std::env::temp_dir()
+            .canonicalize()
+            .map_err(|error| format!("canonicalize test temp root: {error}"))?;
+        tempfile::Builder::new()
+            .prefix("ee-orient-test.")
+            .tempdir_in(canonical_temp_root)
+            .map_err(|error| error.to_string())
+    }
+
     #[test]
     fn orient_fast_content_returns_admitted_recent_and_lexical_items() -> TestResult {
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let temp = orient_test_tempdir()?;
         let workspace = temp.path();
         let positive_id = remember_fixture(
             workspace,
@@ -1120,7 +1130,7 @@ mod tests {
             return orient_fast_content_hydrates_isolated_global_store_child(&root);
         }
 
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let temp = orient_test_tempdir()?;
         let output =
             std::process::Command::new(std::env::current_exe().map_err(|error| error.to_string())?)
                 .arg("--exact")
@@ -1251,7 +1261,7 @@ mod tests {
 
     #[test]
     fn orient_decisions_reuses_due_decision_query() -> TestResult {
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let temp = orient_test_tempdir()?;
         let init_report = init_workspace(&InitOptions {
             workspace_path: temp.path().to_path_buf(),
             dry_run: false,
@@ -1325,7 +1335,7 @@ mod tests {
 
     #[test]
     fn discovery_finds_populated_child_store() -> TestResult {
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let temp = orient_test_tempdir()?;
         std::fs::create_dir_all(temp.path().join(".git")).map_err(|error| error.to_string())?;
         let child = temp.path().join("campaign");
         std::fs::create_dir_all(&child).map_err(|error| error.to_string())?;
@@ -1349,7 +1359,7 @@ mod tests {
 
     #[test]
     fn discovery_last_write_uses_newer_wal_and_ignores_shm() -> TestResult {
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let temp = orient_test_tempdir()?;
         let database = temp.path().join("ee.db");
         let wal = temp.path().join("ee.db-wal");
         let shm = temp.path().join("ee.db-shm");
@@ -1419,7 +1429,7 @@ mod tests {
             "bounded discovery skip list",
         )?;
 
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let temp = orient_test_tempdir()?;
         std::fs::create_dir_all(temp.path().join(".git")).map_err(|error| error.to_string())?;
         let small = temp.path().join("small");
         let campaign = temp.path().join("campaign-marker");
@@ -1500,7 +1510,7 @@ mod tests {
     #[test]
     fn discovery_parent_scan_stops_at_nearest_git_root_and_not_above_workspace_git_root()
     -> TestResult {
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let temp = orient_test_tempdir()?;
         let git_root = temp.path().join("nearest-git-root");
         let workspace = git_root.join("subdir").join("workspace");
         std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
@@ -1535,7 +1545,7 @@ mod tests {
 
     #[test]
     fn discovery_zero_budget_truncates_before_scanning() -> TestResult {
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let temp = orient_test_tempdir()?;
         let child = temp.path().join("populated-child");
         std::fs::create_dir_all(&child).map_err(|error| error.to_string())?;
         remember_fixture(&child, "Unscanned store rule.", "nearby", None)?;
@@ -1586,7 +1596,7 @@ mod tests {
 
     #[test]
     fn discovery_excludes_own_store_and_empty_dirs() -> TestResult {
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let temp = orient_test_tempdir()?;
         std::fs::create_dir_all(temp.path().join(".git")).map_err(|error| error.to_string())?;
         // The addressed workspace has its own populated store: it must not
         // report itself, and an empty sibling dir contributes nothing.
@@ -1600,7 +1610,7 @@ mod tests {
 
     #[test]
     fn addressed_campaign_store_with_rows_is_not_empty() -> TestResult {
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let temp = orient_test_tempdir()?;
         remember_fixture(
             temp.path(),
             "Addressed campaign store has durable content.",
@@ -1627,7 +1637,7 @@ mod tests {
 
     #[test]
     fn addressed_store_state_inspects_only_the_resolved_database() -> TestResult {
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let temp = orient_test_tempdir()?;
         remember_fixture(
             temp.path(),
             "Alternate campaign content must not mask an empty addressed default store.",
@@ -1687,7 +1697,7 @@ mod tests {
     fn discovery_skips_permission_denied_children_without_error() -> TestResult {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let temp = orient_test_tempdir()?;
         std::fs::create_dir_all(temp.path().join(".git")).map_err(|error| error.to_string())?;
         let open_child = temp.path().join("open");
         let locked = temp.path().join("locked");
@@ -1713,10 +1723,10 @@ mod tests {
     fn discovery_does_not_follow_directory_symlinks_outside_workspace() -> TestResult {
         use std::os::unix::fs::symlink;
 
-        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = orient_test_tempdir()?;
         std::fs::create_dir_all(workspace.path().join(".git"))
             .map_err(|error| error.to_string())?;
-        let outside = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside = orient_test_tempdir()?;
         remember_fixture(
             outside.path(),
             "External store must not be discovered through a symlink.",
