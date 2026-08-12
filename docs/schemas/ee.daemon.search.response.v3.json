@@ -61,6 +61,7 @@
             "errors": {"type": "array"},
             "degraded": {"type": "array"},
             "queryAssist": {"type": "object"},
+            "indexFreshness": {"$ref": "#/$defs/indexFreshness"},
             "resultPath": {"type": "string", "const": "data.results"}
           }
         }
@@ -68,6 +69,19 @@
     }
   },
   "$defs": {
+    "indexFreshness": {
+      "description": "Authoritative per-response index freshness truth, present whenever the index-status probe observed a stale index; emitted independently of advisory-episode dedupe so suppressed warnings never hide staleness (bd-index-auto-freshness-m5kwf).",
+      "type": "object",
+      "required": ["stale", "largeGap"],
+      "additionalProperties": false,
+      "properties": {
+        "stale": {"type": "boolean"},
+        "dbGeneration": {"$ref": "#/$defs/uint64"},
+        "indexGeneration": {"$ref": "#/$defs/uint64"},
+        "generationGap": {"$ref": "#/$defs/uint64"},
+        "largeGap": {"type": "boolean"}
+      }
+    },
     "uint64": {
       "type": "integer",
       "minimum": 0,

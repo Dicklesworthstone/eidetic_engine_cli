@@ -128,12 +128,6 @@ const SEARCH_INDEX_STALE_WARNING_PREFIX: &str =
 /// Trailing advice prose of the stale-index advisory (see prefix above).
 const SEARCH_INDEX_STALE_WARNING_SUFFIX: &str =
     " Newer memories may be omitted until the index is rebuilt.";
-/// Compact per-response stale marker used once a large-gap episode has already
-/// delivered the full warning: authoritative generation numbers and the
-/// rebuild repair stay per-response while the repeated warning prose dedupes
-/// (bd-index-auto-freshness-m5kwf).
-const SEARCH_INDEX_STALE_EPISODE_COMPACT_PREFIX: &str =
-    "Search index remains stale in an already-reported episode.";
 /// Stable wire token for permanent advisories emitted at most once during the
 /// lifetime of one process. Transient degradations retain their own response-
 /// or episode-scoped contracts.
@@ -820,6 +814,24 @@ impl QueryAssistReformulation {
 }
 
 #[derive(Clone, Debug)]
+/// Authoritative per-response index freshness, populated from the same
+/// index-status probe that raises the stale/large-gap advisories and emitted
+/// independently of advisory-episode dedupe, so a suppressed warning never
+/// hides stale/generation/gap truth (bd-index-auto-freshness-m5kwf). Never
+/// reconstructed from advisory prose.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchIndexFreshness {
+    pub stale: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub db_generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_gap: Option<u64>,
+    pub large_gap: bool,
+}
+
 pub struct SearchReport {
     pub status: SearchStatus,
     pub embed_backend: EmbedBackend,
@@ -850,6 +862,9 @@ pub struct SearchReport {
     pub memory_scope: MemoryScope,
     pub strict_scope: bool,
     pub scope_stats: MemoryScopeStats,
+    /// `Some` whenever the index-status probe observed a stale index for this
+    /// response; carries the authoritative generations and gap classification.
+    pub index_freshness: Option<SearchIndexFreshness>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -2872,6 +2887,17 @@ impl SearchReport {
                 query_assist.data_json(output_redaction_enabled),
             );
         }
+        // Authoritative freshness truth is emitted on every affected response,
+        // independent of advisory-episode dedupe, so suppressed warnings never
+        // hide stale/generation/gap state (bd-index-auto-freshness-m5kwf).
+        if let Some(index_freshness) = self.index_freshness
+            && let Some(data_object) = data.as_object_mut()
+        {
+            data_object.insert(
+                "indexFreshness".to_owned(),
+                serde_json::json!(index_freshness),
+            );
+        }
         data
     }
 
@@ -3087,33 +3113,20 @@ fn search_degraded_data_json_with_advisory_session_inner(
         let Some(code) = entry.get("code").and_then(serde_json::Value::as_str) else {
             return true;
         };
-        code != "search_index_large_gap" || emit_large_gap
-    });
-    // Within an already-reported large-gap episode, the stale advisory keeps
-    // its code, severity, authoritative generation numbers, and rebuild
-    // repair on every response, while the repeated warning prose dedupes to a
-    // compact episode marker. Small-gap and episode-first responses keep the
-    // full warning; any unexpected message shape fails open to the full
-    // prose rather than hiding truth (bd-index-auto-freshness-m5kwf).
-    if has_large_gap && !emit_large_gap {
-        for entry in &mut aggregated {
-            if entry.get("code").and_then(serde_json::Value::as_str) != Some("search_index_stale") {
-                continue;
-            }
-            let Some(generation_detail) = entry
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|message| message.strip_prefix(SEARCH_INDEX_STALE_WARNING_PREFIX))
-                .and_then(|rest| rest.strip_suffix(SEARCH_INDEX_STALE_WARNING_SUFFIX))
-                .map(str::to_owned)
-            else {
-                continue;
-            };
-            entry["message"] = serde_json::Value::String(format!(
-                "{SEARCH_INDEX_STALE_EPISODE_COMPACT_PREFIX}{generation_detail}"
-            ));
+        match code {
+            // The large-gap stale warning is once per active workspace
+            // episode: the first affected response carries both the stale
+            // warning and the large-gap repair notice, and every later
+            // response in the same episode carries neither. Authoritative
+            // stale/generation/gap truth stays per-response in the structured
+            // `indexFreshness` field, built from the index-status probe
+            // rather than advisory prose. Small-gap staleness keeps the
+            // canonical per-response warning (bd-index-auto-freshness-m5kwf).
+            "search_index_large_gap" => emit_large_gap,
+            "search_index_stale" => !has_large_gap || emit_large_gap,
+            _ => true,
         }
-    }
+    });
     aggregated
 }
 
@@ -7652,7 +7665,8 @@ async fn run_search_inner_with_performance(
         || crate::config::workspace_output_redaction_enabled(&options.workspace_path),
         |state| state.output_redaction_enabled,
     );
-    let mut degraded = search_degradations_with_connection(options, &index_dir, read_connection);
+    let (mut degraded, index_freshness) =
+        search_degradations_with_connection(options, &index_dir, read_connection);
     let lexical_ram_tier = pin_lexical_ram_tier_for_search(&options.workspace_path, &index_dir);
     push_lexical_ram_tier_search_degradations(&mut degraded, &lexical_ram_tier);
     if !output_redaction_enabled {
@@ -7696,6 +7710,7 @@ async fn run_search_inner_with_performance(
         trace.record_elapsed("search::total", start);
         return Ok(SearchPerformanceRun {
             report: SearchReport {
+                index_freshness,
                 status: SearchStatus::NoResults,
                 embed_backend,
                 query: options.query.clone(),
@@ -8087,6 +8102,7 @@ async fn run_search_inner_with_performance(
                     memory_scope: options.memory_scope,
                     strict_scope: options.strict_scope,
                     scope_stats,
+                    index_freshness,
                 },
                 performance: trace,
             })
@@ -8132,6 +8148,7 @@ async fn run_search_inner_with_performance(
                         options.strict_scope,
                     )
                     .stats(),
+                    index_freshness,
                 },
                 performance: trace,
             })
@@ -8188,7 +8205,7 @@ async fn run_diag_search_with_cx_and_embedder(
         return Err(SearchError::NoIndex);
     }
 
-    let mut degraded = search_degradations(options, &index_dir);
+    let (mut degraded, index_freshness) = search_degradations(options, &index_dir);
     push_model_lifecycle_search_degradation(options, None, &mut degraded);
     if limit_capped {
         degraded.push(SearchDegradation::profile_search_limit_capped(
@@ -8320,6 +8337,7 @@ async fn run_diag_search_with_cx_and_embedder(
         memory_scope: options.memory_scope,
         strict_scope: options.strict_scope,
         scope_stats,
+        index_freshness,
     };
 
     Ok(SearchDiagnosticReport {
@@ -8333,7 +8351,10 @@ async fn run_diag_search_with_cx_and_embedder(
     })
 }
 
-fn search_degradations(options: &SearchOptions, index_dir: &Path) -> Vec<SearchDegradation> {
+fn search_degradations(
+    options: &SearchOptions,
+    index_dir: &Path,
+) -> (Vec<SearchDegradation>, Option<SearchIndexFreshness>) {
     search_degradations_with_connection(options, index_dir, None)
 }
 
@@ -8347,33 +8368,54 @@ fn search_degradations_with_connection(
     options: &SearchOptions,
     index_dir: &Path,
     connection: Option<&DbConnection>,
-) -> Vec<SearchDegradation> {
+) -> (Vec<SearchDegradation>, Option<SearchIndexFreshness>) {
     let Ok(index_status) = cached_index_status_for_search(options, index_dir, connection) else {
-        return vec![SearchDegradation::index_status_probe_failed()];
+        return (vec![SearchDegradation::index_status_probe_failed()], None);
     };
 
     match index_status.health {
-        IndexHealth::Ready => Vec::new(),
+        IndexHealth::Ready => (Vec::new(), None),
         IndexHealth::Stale => {
             let mut degraded = vec![SearchDegradation::stale_index(
                 index_status.db_generation,
                 index_status.index_generation,
             )];
-            if let (Some(db_generation), Some(index_generation)) =
-                (index_status.db_generation, index_status.index_generation)
-                && search_index_gap_is_large(db_generation, index_generation)
+            let generation_gap = match (index_status.db_generation, index_status.index_generation) {
+                (Some(db_generation), Some(index_generation)) => {
+                    Some(db_generation.saturating_sub(index_generation))
+                }
+                _ => None,
+            };
+            let large_gap = matches!(
+                (index_status.db_generation, index_status.index_generation),
+                (Some(db_generation), Some(index_generation))
+                    if search_index_gap_is_large(db_generation, index_generation)
+            );
+            if large_gap
+                && let (Some(db_generation), Some(index_generation)) =
+                    (index_status.db_generation, index_status.index_generation)
             {
                 degraded.push(SearchDegradation::large_index_gap(
                     db_generation,
                     index_generation,
                 ));
             }
-            degraded
+            let freshness = SearchIndexFreshness {
+                stale: true,
+                db_generation: index_status.db_generation,
+                index_generation: index_status.index_generation,
+                generation_gap,
+                large_gap,
+            };
+            (degraded, Some(freshness))
         }
-        IndexHealth::Missing => vec![SearchDegradation::missing_index()],
-        IndexHealth::Corrupt => vec![SearchDegradation::corrupt_index(
-            index_status.last_check_error.as_deref(),
-        )],
+        IndexHealth::Missing => (vec![SearchDegradation::missing_index()], None),
+        IndexHealth::Corrupt => (
+            vec![SearchDegradation::corrupt_index(
+                index_status.last_check_error.as_deref(),
+            )],
+            None,
+        ),
     }
 }
 
@@ -12078,6 +12120,7 @@ mod tests {
     #[test]
     fn similar_report_data_json_reuses_search_result_shape() {
         let mut report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "mem_00000000000000000000000001".to_string(),
@@ -12153,6 +12196,7 @@ mod tests {
     #[test]
     fn similar_removes_seed_memory_and_truncates_neighbors() {
         let mut report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "release checks".to_string(),
@@ -12412,6 +12456,7 @@ mod tests {
     #[test]
     fn search_revision_metadata_is_absent_by_default_and_stable_when_revisable() {
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "format before release".to_string(),
@@ -12472,6 +12517,7 @@ mod tests {
     #[test]
     fn search_report_data_json_has_required_fields() {
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "test query".to_string(),
@@ -13443,6 +13489,7 @@ mod tests {
     #[test]
     fn search_report_data_json_exposes_allowed_mesh_provenance() {
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "mesh query".to_string(),
@@ -13733,6 +13780,7 @@ mod tests {
         );
 
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "mesh query".to_string(),
@@ -13776,6 +13824,7 @@ mod tests {
     #[test]
     fn search_report_data_json_blocks_non_allowed_mesh_hits_defensively() {
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "mesh query".to_string(),
@@ -14304,6 +14353,7 @@ mod tests {
         assert_eq!(degraded[0].code, "tombstoned_in_results");
 
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "cargo fmt".to_string(),
@@ -14420,6 +14470,7 @@ mod tests {
         assert_eq!(degraded[0].code, "memory_drift_source_changed");
 
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "stale provenance".to_string(),
@@ -14586,6 +14637,7 @@ mod tests {
         );
 
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "provenance drift".to_string(),
@@ -14756,6 +14808,7 @@ mod tests {
         let visible = apply_tombstone_visibility(&include_options, vec![hit], &mut degraded, None);
         assert_eq!(visible.len(), 1);
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "stale validity".to_string(),
@@ -14872,6 +14925,7 @@ mod tests {
         let visible = apply_tombstone_visibility(&include_options, vec![hit], &mut degraded, None);
         assert_eq!(visible.len(), 1);
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "stale validity window".to_string(),
@@ -14906,6 +14960,7 @@ mod tests {
     fn search_performance_explain_report_is_redaction_safe_and_pins_fallbacks() {
         const SECRET_QUERY: &str = "rotate secret sk_live_do_not_emit";
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: SECRET_QUERY.to_string(),
@@ -14980,6 +15035,7 @@ mod tests {
     #[test]
     fn search_report_degraded_entries_are_aggregated() {
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "format before release".to_string(),
@@ -15223,6 +15279,7 @@ mod tests {
     fn search_data_json_redacts_public_content_metadata() {
         let raw_value = concat!("sk", "_", "search", "_", "secret", "_", "123");
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "rotate output secrets".to_string(),
@@ -15284,6 +15341,7 @@ mod tests {
     fn search_data_json_respects_output_redaction_disabled_degradation() {
         let raw_value = concat!("sk", "_", "search", "_", "disabled", "_", "123");
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "rotate output secrets".to_string(),
@@ -15345,6 +15403,7 @@ mod tests {
     fn search_data_json_disabled_output_redaction_returns_raw_content() {
         let raw_value = concat!("sk", "_", "search", "_", "raw", "_", "123");
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "inspect raw output policy".to_string(),
@@ -15405,6 +15464,7 @@ mod tests {
     fn search_data_json_redacts_hidden_analysis_content_as_public_content() {
         let raw_value = concat!("sk", "_", "search", "_", "hidden", "_", "123");
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "rotate hidden output secrets".to_string(),
@@ -15488,7 +15548,7 @@ mod tests {
             strict_scope: false,
         };
 
-        let degraded = search_degradations(&options, &index_dir);
+        let (degraded, _freshness) = search_degradations(&options, &index_dir);
 
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0].code, "index_missing");
@@ -15528,7 +15588,7 @@ mod tests {
             strict_scope: false,
         };
 
-        let degraded = search_degradations(&options, &index_dir);
+        let (degraded, _freshness) = search_degradations(&options, &index_dir);
 
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0].code, "index_corrupt");
@@ -15602,7 +15662,7 @@ mod tests {
             strict_scope: false,
         };
 
-        let degraded = search_degradations(&options, &index_dir);
+        let (degraded, _freshness) = search_degradations(&options, &index_dir);
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0].code, "index_missing");
 
@@ -16282,6 +16342,7 @@ mod tests {
     #[test]
     fn search_json_includes_score_breakdown() {
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "hybrid query".to_string(),
@@ -16349,6 +16410,7 @@ mod tests {
         hit.explanation = Some(ScoreExplanation::generate(&hit));
 
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "provenance".to_string(),
@@ -16414,6 +16476,7 @@ mod tests {
         hit.explanation = Some(ScoreExplanation::generate(&hit));
 
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "provenance".to_string(),
@@ -16480,6 +16543,7 @@ mod tests {
     #[test]
     fn search_json_omits_null_scores() {
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "minimal".to_string(),
@@ -16541,6 +16605,7 @@ mod tests {
         explained_hit.explanation = Some(ScoreExplanation::generate(&explained_hit));
 
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "metrics".to_string(),
@@ -16611,6 +16676,7 @@ mod tests {
     #[test]
     fn retrieval_metrics_are_stable_for_empty_results() {
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::NoResults,
             embed_backend: EmbedBackend::HashFallback,
             query: "empty".to_string(),
@@ -16745,6 +16811,7 @@ mod tests {
         hit.explanation = Some(ScoreExplanation::generate(&hit));
 
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "explained".to_string(),
@@ -16813,6 +16880,7 @@ mod tests {
         hit.explanation = Some(ScoreExplanation::generate(&hit));
 
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "human test".to_string(),
@@ -17207,6 +17275,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
 
         let mut report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "prefetch regression".to_owned(),
@@ -17247,6 +17316,7 @@ mod tests {
         assert_eq!(report.results[0].doc_id, "mem_11000000000000000000000001");
 
         let mut contains_report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "contains operator".to_owned(),
@@ -17288,6 +17358,7 @@ mod tests {
         );
 
         let mut prefix_report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "prefix operator".to_owned(),
@@ -17329,6 +17400,7 @@ mod tests {
         );
 
         let mut empty_report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "missing family".to_owned(),
@@ -17364,6 +17436,7 @@ mod tests {
         assert!(empty_report.results.is_empty());
 
         let mut list_value_report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "decision options".to_owned(),
@@ -17850,6 +17923,7 @@ mod tests {
         rerank_runtime_available: bool,
     ) -> SearchReport {
         SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "release formatting policy".to_string(),
@@ -18229,11 +18303,13 @@ mod tests {
     }
 
     #[test]
-    fn large_gap_episode_dedupes_stale_prose_but_keeps_generation_truth() {
-        let full_message = |db: u64, index: u64| {
-            format!(
-                "{SEARCH_INDEX_STALE_WARNING_PREFIX} Database generation is {db}; index generation is {index}.{SEARCH_INDEX_STALE_WARNING_SUFFIX}"
-            )
+    fn large_gap_episode_emits_warning_once_and_keeps_structured_truth() {
+        let freshness = |db: u64, index: u64| SearchIndexFreshness {
+            stale: true,
+            db_generation: Some(db),
+            index_generation: Some(index),
+            generation_gap: Some(db.saturating_sub(index)),
+            large_gap: db.saturating_sub(index) > SEARCH_INDEX_LARGE_GAP_THRESHOLD,
         };
         let stale_report = |db: u64, index: u64, with_gap: bool| {
             let mut degraded = vec![SearchDegradation::stale_index(Some(db), Some(index))];
@@ -18242,84 +18318,91 @@ mod tests {
             }
             let mut report = rerank_test_report(Vec::new(), degraded, false);
             report.rerank_configured_mode = crate::config::SearchRerankMode::Off;
+            report.index_freshness = Some(freshness(db, index));
             report
         };
-        let stale_entry = |json: &serde_json::Value| -> serde_json::Value {
+        let codes = |json: &serde_json::Value| -> Vec<String> {
             json["degraded"]
                 .as_array()
                 .expect("degraded array")
+                .iter()
+                .filter_map(|entry| entry["code"].as_str().map(str::to_owned))
+                .collect()
+        };
+        let assert_full_warning = |json: &serde_json::Value, db: u64, index: u64| {
+            let entries = json["degraded"].as_array().expect("degraded array");
+            let stale = entries
                 .iter()
                 .find(|entry| entry["code"] == "search_index_stale")
-                .cloned()
-                .expect("stale entry present")
+                .expect("stale warning present");
+            let message = stale["message"].as_str().expect("stale message");
+            assert!(message.starts_with(SEARCH_INDEX_STALE_WARNING_PREFIX));
+            assert!(message.contains(&format!(
+                "Database generation is {db}; index generation is {index}."
+            )));
+            assert_eq!(stale["repair"], "ee index rebuild --workspace .");
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry["code"] == "search_index_large_gap")
+            );
         };
-        let has_large_gap = |json: &serde_json::Value| {
-            json["degraded"]
-                .as_array()
-                .expect("degraded array")
-                .iter()
-                .any(|entry| entry["code"] == "search_index_large_gap")
+        let assert_freshness = |json: &serde_json::Value, db: u64, index: u64, large: bool| {
+            assert_eq!(json["indexFreshness"]["stale"], true);
+            assert_eq!(json["indexFreshness"]["dbGeneration"], db);
+            assert_eq!(json["indexFreshness"]["indexGeneration"], index);
+            assert_eq!(json["indexFreshness"]["largeGap"], large);
         };
 
         let mut session = SearchAdvisorySession::default();
 
-        // Episode-first response: full warning prose, rebuild repair, and the
-        // large-gap notice all emit.
-        let first = stale_report(12, 4, true)
+        // First affected response: both warnings, full prose, rebuild repair,
+        // plus the structured truth.
+        let first = stale_report(120, 4, true)
             .data_json_with_advisory_session_for_workspace(&mut session, "wsp-a");
-        let first_stale = stale_entry(&first);
-        assert_eq!(first_stale["message"], full_message(12, 4).as_str());
-        assert_eq!(first_stale["repair"], "ee index rebuild --workspace .");
-        assert!(has_large_gap(&first));
+        assert_full_warning(&first, 120, 4);
+        assert_freshness(&first, 120, 4, true);
 
-        // Same-episode repeat: the warning prose dedupes to the compact
-        // marker while code, severity, per-response generation truth, and the
-        // rebuild repair all remain.
-        let second = stale_report(13, 4, true)
+        // Same active episode: neither warning appears, while fresh
+        // authoritative generations stay structurally visible per-response.
+        let second = stale_report(130, 4, true)
             .data_json_with_advisory_session_for_workspace(&mut session, "wsp-a");
-        let second_stale = stale_entry(&second);
-        let second_message = second_stale["message"].as_str().expect("stale message");
-        assert!(second_message.starts_with(SEARCH_INDEX_STALE_EPISODE_COMPACT_PREFIX));
-        assert!(second_message.contains("Database generation is 13; index generation is 4."));
-        assert!(!second_message.contains(SEARCH_INDEX_STALE_WARNING_SUFFIX));
-        assert_eq!(second_stale["severity"], "medium");
-        assert_eq!(second_stale["repair"], "ee index rebuild --workspace .");
-        assert!(!has_large_gap(&second));
+        let second_codes = codes(&second);
+        assert!(!second_codes.iter().any(|code| code == "search_index_stale"));
+        assert!(
+            !second_codes
+                .iter()
+                .any(|code| code == "search_index_large_gap")
+        );
+        assert_freshness(&second, 130, 4, true);
 
-        // A different workspace cannot be suppressed by wsp-a's episode.
-        let other = stale_report(9, 2, true)
+        // Another workspace is isolated from wsp-a's episode.
+        let other = stale_report(90, 2, true)
             .data_json_with_advisory_session_for_workspace(&mut session, "wsp-b");
-        assert_eq!(stale_entry(&other)["message"], full_message(9, 2).as_str());
-        assert!(has_large_gap(&other));
+        assert_full_warning(&other, 90, 2);
 
-        // Small-gap staleness keeps the canonical full warning per response
-        // and ends wsp-a's large-gap episode.
+        // Small-gap staleness keeps the canonical per-response warning and
+        // ends wsp-a's large-gap episode.
         let small = stale_report(14, 13, false)
             .data_json_with_advisory_session_for_workspace(&mut session, "wsp-a");
-        assert_eq!(
-            stale_entry(&small)["message"],
-            full_message(14, 13).as_str()
+        let small_entries = small["degraded"].as_array().expect("degraded array");
+        assert!(
+            small_entries
+                .iter()
+                .any(|entry| entry["code"] == "search_index_stale")
         );
-        assert!(!has_large_gap(&small));
+        assert_freshness(&small, 14, 13, false);
 
-        // A new large gap after recovery rearms the full warning and notice.
-        let rearmed = stale_report(40, 2, true)
+        // A later large gap rearms the full warning pair.
+        let rearmed = stale_report(400, 2, true)
             .data_json_with_advisory_session_for_workspace(&mut session, "wsp-a");
-        assert_eq!(
-            stale_entry(&rearmed)["message"],
-            full_message(40, 2).as_str()
-        );
-        assert!(has_large_gap(&rearmed));
+        assert_full_warning(&rearmed, 400, 2);
 
-        // Ordinary one-shot renders stay invocation-scoped: a fresh session
-        // per call always emits the full warning, never a falsely
-        // process-scoped suppression.
+        // One-shot invocation-scoped renders always get their one warning.
         for _ in 0..2 {
-            let one_shot = stale_report(12, 4, true).data_json();
-            assert_eq!(
-                stale_entry(&one_shot)["message"],
-                full_message(12, 4).as_str()
-            );
+            let one_shot = stale_report(120, 4, true).data_json();
+            assert_full_warning(&one_shot, 120, 4);
+            assert_freshness(&one_shot, 120, 4, true);
         }
     }
 
@@ -19270,6 +19353,7 @@ mod tests {
         );
 
         let report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "cargo fmt release".to_string(),

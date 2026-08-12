@@ -5571,6 +5571,7 @@ mod tests {
 
     fn permanent_reranker_advisory_report() -> SearchReport {
         SearchReport {
+            index_freshness: None,
             status: crate::core::search::SearchStatus::NoResults,
             embed_backend: crate::models::EmbedBackend::HashFallback,
             query: "release".to_owned(),
@@ -5606,6 +5607,14 @@ mod tests {
 
     fn stale_index_advisory_report(db_generation: u64, index_generation: u64) -> SearchReport {
         let mut report = permanent_reranker_advisory_report();
+        report.index_freshness = Some(crate::core::search::SearchIndexFreshness {
+            stale: true,
+            db_generation: Some(db_generation),
+            index_generation: Some(index_generation),
+            generation_gap: Some(db_generation.saturating_sub(index_generation)),
+            large_gap: db_generation.saturating_sub(index_generation)
+                > crate::core::search::SEARCH_INDEX_LARGE_GAP_THRESHOLD,
+        });
         report.degraded = vec![
             crate::core::search::SearchDegradation {
                 code: "search_index_stale".to_owned(),

@@ -3882,6 +3882,7 @@ fn missing_index_search_report(
     runtime_profile: RuntimeProfileReport,
 ) -> SearchReport {
     SearchReport {
+        index_freshness: None,
         status: SearchStatus::IndexNotFound,
         embed_backend: crate::core::index::active_embed_backend(),
         query: query.to_owned(),
@@ -13390,6 +13391,7 @@ pub fn unrelated_context() -> u64 {{
 
     fn ppr_search_report(hits: Vec<SearchHit>) -> SearchReport {
         SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "release graph".to_string(),
@@ -14590,6 +14592,7 @@ pub fn unrelated_context() -> u64 {{
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(70));
         let search_report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "prepare release".to_string(),
@@ -14727,6 +14730,7 @@ pub fn unrelated_context() -> u64 {{
         }
 
         let search_report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "release mesh context guard".to_string(),
@@ -14864,6 +14868,7 @@ pub fn unrelated_context() -> u64 {{
         }
 
         let search_report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "mesh human explicit guard".to_string(),
@@ -15028,6 +15033,7 @@ pub fn unrelated_context() -> u64 {{
         }
 
         let search_report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "freshness ordering".to_string(),
@@ -15188,6 +15194,7 @@ pub fn unrelated_context() -> u64 {{
         )
         .map_err(|error| error.to_string())?;
         let search_report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: request.query.clone(),
@@ -17021,6 +17028,7 @@ pub fn unrelated_context() -> u64 {{
         );
 
         let search_report = SearchReport {
+            index_freshness: None,
             status: SearchStatus::Success,
             embed_backend: EmbedBackend::HashFallback,
             query: "snapshot provenance release original".to_owned(),

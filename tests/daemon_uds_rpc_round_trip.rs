@@ -334,6 +334,127 @@ fn degraded_codes_at<'a>(
         })
 }
 
+/// The structured per-response freshness truth must stay authoritative on
+/// every stale search response, including episode-suppressed repeats
+/// (bd-index-auto-freshness-m5kwf).
+fn assert_search_index_freshness(result: &serde_json::Value, label: &str) -> TestResult {
+    let freshness = result
+        .pointer("/response/data/indexFreshness")
+        .ok_or_else(|| format!("{label}: indexFreshness missing: {result}"))?;
+    ensure(
+        freshness
+            .pointer("/stale")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && freshness
+                .pointer("/dbGeneration")
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+            && freshness
+                .pointer("/indexGeneration")
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+            && freshness
+                .pointer("/generationGap")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|gap| gap > 0)
+            && freshness
+                .pointer("/largeGap")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true),
+        format!("{label}: structured freshness truth drifted: {freshness}"),
+    )
+}
+
+/// Send one framed daemon request over a real socket and abort the
+/// connection before reading the response, so the daemon's socket write
+/// fails and any deferred advisory delivery settles as undelivered.
+fn client_send_frame_then_abort(socket_path: &Path, request: &DaemonRequest) -> TestResult {
+    let mut stream = UnixStream::connect(socket_path)
+        .map_err(|error| format!("abort-client connect: {error}"))?;
+    let body =
+        serde_json::to_vec(request).map_err(|error| format!("abort-client encode: {error}"))?;
+    let length =
+        u32::try_from(body.len()).map_err(|error| format!("abort-client length: {error}"))?;
+    stream
+        .write_all(&length.to_be_bytes())
+        .map_err(|error| format!("abort-client length write: {error}"))?;
+    stream
+        .write_all(&body)
+        .map_err(|error| format!("abort-client body write: {error}"))?;
+    stream
+        .flush()
+        .map_err(|error| format!("abort-client flush: {error}"))?;
+    stream
+        .shutdown(Shutdown::Both)
+        .map_err(|error| format!("abort-client shutdown: {error}"))?;
+    Ok(())
+}
+
+#[test]
+fn daemon_failed_delivery_does_not_consume_stale_warning_episode() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = secure_socket_path(temp.path(), "ee-daemon-advisory-abort.sock")?;
+    let (workspace, database) = seed_context_workspace(&temp.path().join("workspace-abort"))?;
+    let index_dir = workspace.join(".ee").join("index");
+    rebuild_test_index(&workspace, &database, &index_dir)?;
+    let mut handle =
+        start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
+
+    plant_large_index_gap(&database, 400_000, "workspace-abort-search")?;
+
+    // Planted negative: the first affected response is sent to a client that
+    // aborts before reading. The daemon's socket write fails, so the
+    // reservation must settle as undelivered and the episode must NOT be
+    // consumed.
+    client_send_frame_then_abort(
+        handle.socket_path(),
+        &search_request("req-abort-first", &workspace, &database, &index_dir),
+    )?;
+    // Bounded settle window for the aborted connection's handler to finish;
+    // the daemon's failed write is what releases the reservation.
+    thread::sleep(Duration::from_millis(400));
+
+    let replay = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &search_request("req-abort-replay", &workspace, &database, &index_dir),
+        )
+        .map_err(|error| format!("replay round-trip: {error}"))?,
+        "replay after aborted delivery",
+    )?;
+    assert_stale_episode(
+        &replay,
+        "/response/data/degraded",
+        true,
+        true,
+        "replay_full_warning_after_failed_delivery",
+    )?;
+    assert_search_index_freshness(&replay, "replay_freshness")?;
+
+    // Positive observable: the successfully delivered warning consumes the
+    // episode, so the next response in the same episode emits neither
+    // warning while structured truth stays.
+    let suppressed = successful_result(
+        client_round_trip(
+            handle.socket_path(),
+            &search_request("req-abort-suppressed", &workspace, &database, &index_dir),
+        )
+        .map_err(|error| format!("suppressed round-trip: {error}"))?,
+        "suppressed response after delivered warning",
+    )?;
+    assert_stale_episode(
+        &suppressed,
+        "/response/data/degraded",
+        false,
+        false,
+        "suppressed_after_delivered_warning",
+    )?;
+    assert_search_index_freshness(&suppressed, "suppressed_freshness")?;
+
+    handle.shutdown()
+}
+
 fn assert_stale_episode(
     result: &serde_json::Value,
     degraded_pointer: &str,
@@ -1249,10 +1370,12 @@ fn daemon_advisory_active_episode_lifecycle_is_real_and_workspace_partitioned() 
     assert_stale_episode(
         &search_repeated,
         "/response/data/degraded",
-        true,
+        false,
         false,
         "search_repeated_stale",
     )?;
+    assert_search_index_freshness(&search_first, "search_first_freshness")?;
+    assert_search_index_freshness(&search_repeated, "search_repeated_freshness")?;
     ensure(
         search_first
             .pointer("/response/data/rerank/advisory/code")
