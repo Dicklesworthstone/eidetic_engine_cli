@@ -9,10 +9,11 @@ use ee::obs::{LogEnvelope, LogLevel, now_rfc3339_nanos};
 use serde_json::Value;
 use tracing_subscriber::EnvFilter;
 
-// Clap constructs the large top-level command enum on the entry thread. Keep
-// that frame off the platform-defined process main stack so the CLI behaves
-// consistently on hosts with constrained stack limits.
-const CLI_STACK_SIZE: usize = 8 * 1024 * 1024;
+// Windows' default process-entry stack is too small for Clap's large top-level
+// command enum. Unix keeps the process main stack so the host's stack policy
+// remains authoritative instead of imposing a fixed ceiling as the CLI grows.
+#[cfg(windows)]
+const WINDOWS_CLI_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 fn env_flag_truthy(value: Option<String>) -> bool {
     value.is_some_and(|raw| {
@@ -217,10 +218,11 @@ fn cli_main() -> ExitCode {
     ee::cli::run(args, &mut stdout, &mut stderr).into()
 }
 
+#[cfg(windows)]
 fn main() -> ExitCode {
     match std::thread::Builder::new()
         .name("ee-cli-main".to_owned())
-        .stack_size(CLI_STACK_SIZE)
+        .stack_size(WINDOWS_CLI_STACK_SIZE)
         .spawn(cli_main)
     {
         Ok(handle) => handle.join().unwrap_or_else(|_| ExitCode::from(101)),
@@ -230,6 +232,11 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+#[cfg(not(windows))]
+fn main() -> ExitCode {
+    cli_main()
 }
 
 #[cfg(test)]
