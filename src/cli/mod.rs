@@ -64894,6 +64894,7 @@ const COMMAND_NAMES: &[&str] = &[
     "recorder",
     "reflect",
     "remember",
+    "resume",
     "rehearse",
     "review",
     "rule",

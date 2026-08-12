@@ -13663,6 +13663,26 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
         ],
     },
     CommandEntry {
+        name: "resume",
+        description: "Resume recent session end-state, open loops, and stale next steps",
+        available: true,
+        subcommands: &[],
+        args: &[
+            CommandArg {
+                name: "--sessions",
+                description: "Maximum recent session groups to return",
+                required: false,
+                default: Some("3"),
+            },
+            CommandArg {
+                name: "--database",
+                description: "Exact database path to resume from",
+                required: false,
+                default: None,
+            },
+        ],
+    },
+    CommandEntry {
         name: "playbook",
         description: "Extract playbook rule candidates from repeated memory evidence",
         available: true,
@@ -25033,6 +25053,24 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn resume_is_registered_for_agents() -> TestResult {
+        let command = super::COMMAND_MANIFEST
+            .iter()
+            .find(|entry| entry.name == "resume")
+            .ok_or_else(|| "resume command missing from command manifest".to_string())?;
+        ensure(command.available, "resume command must be available")?;
+        ensure_equal(
+            &command
+                .args
+                .iter()
+                .map(|entry| entry.name)
+                .collect::<Vec<_>>(),
+            &vec!["--sessions", "--database"],
+            "resume command arguments",
+        )
     }
 
     #[test]

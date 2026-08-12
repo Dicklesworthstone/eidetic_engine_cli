@@ -23,6 +23,10 @@ pub struct AgentCoreCommand {
 /// Canonical agent-oriented commands, ordered for session-start discovery.
 pub const AGENT_CORE_COMMANDS: &[AgentCoreCommand] = &[
     AgentCoreCommand {
+        name: "resume",
+        description: "Resume recent session end-state, open loops, and stale next steps",
+    },
+    AgentCoreCommand {
         name: "orient",
         description: "Start a session with pack, doctor, and workspace-hygiene context",
     },
@@ -1449,6 +1453,24 @@ mod tests {
             &topics.first(),
             &Some(&AgentDocsTopic::Guide),
             "first topic",
+        )
+    }
+
+    #[test]
+    fn core_commands_front_page_session_resume() -> TestResult {
+        let names = AGENT_CORE_COMMANDS
+            .iter()
+            .map(|command| command.name)
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &names.first(),
+            &Some(&"resume"),
+            "returning-session command is first",
+        )?;
+        ensure_equal(
+            &names.iter().filter(|name| **name == "resume").count(),
+            &1,
+            "resume appears exactly once",
         )
     }
 

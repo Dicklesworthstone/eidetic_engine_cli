@@ -470,6 +470,11 @@ impl CapabilitiesReport {
                 "Fetch memories anchored to paths, symbols, or diffs",
             ),
             CommandEntry::new("remember", true, "Store memories"),
+            CommandEntry::new(
+                "resume",
+                true,
+                "Resume recent session end-state, open loops, and stale next steps",
+            ),
             CommandEntry::new("rule", true, "Manage procedural rules"),
             CommandEntry::new("schema", true, "Schema registry"),
             CommandEntry::new("search", true, "Memory search"),

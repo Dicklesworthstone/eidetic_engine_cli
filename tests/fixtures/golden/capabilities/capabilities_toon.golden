@@ -62,6 +62,7 @@ data:
     primer,true
     recall,true
     remember,true
+    resume,true
     rule,true
     schema,true
     search,true
@@ -884,6 +885,6 @@ data:
     enabledFeatures: 4
     totalFeatures: 8
     unimplementedCapabilities: 2
-    availableCommands: 58
-    totalCommands: 58
+    availableCommands: 59
+    totalCommands: 59
 degraded[0]:

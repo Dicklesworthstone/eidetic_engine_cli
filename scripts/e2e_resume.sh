@@ -114,10 +114,10 @@ run_ee remember "Session B finished the lexer and started codegen." \
 run_ee remember "Session C prepared the resume handoff." \
     --workspace "${WS}" --level episodic --kind note --tags "session-20260809" --json
 run_ee remember "Next: wire codegen into the driver." \
-    --workspace "${WS}" --level semantic --kind note --tags "next,codegen" --json
+    --workspace "${WS}" --level semantic --kind note --tags "queue,codegen" --json
 STALE_OLD_EXIT=$LAST_EXIT
 run_ee remember "Next: codegen driver wiring landed; next is optimization passes." \
-    --workspace "${WS}" --level semantic --kind note --tags "next,codegen" --json
+    --workspace "${WS}" --level semantic --kind note --tags "next,queue,codegen" --json
 STALE_NEW_EXIT=$LAST_EXIT
 if [[ "${STALE_OLD_EXIT}" -eq 0 && "${STALE_NEW_EXIT}" -eq 0 ]]; then
     event corpus_seeded pass
@@ -175,7 +175,10 @@ else
     event revisit_decisions_surfaced fail "$(jq -c '.data.report.openLoops.revisitDecisions' "${R}" 2>/dev/null | head -c 250)"
 fi
 
-if jq -e '[.data.report.openLoops.taggedItems[]? | select(.tags | index("next"))] | length >= 1' \
+if jq -e '[.data.report.openLoops.taggedItems[]?
+              | select(.tags | index("next"))]
+          | length == 1
+            and .[0].content == "Next: codegen driver wiring landed; next is optimization passes."' \
     "${R}" >/dev/null 2>&1; then
     event next_tagged_item_surfaced pass
 else
