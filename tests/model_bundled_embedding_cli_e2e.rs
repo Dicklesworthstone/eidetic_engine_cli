@@ -991,7 +991,9 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
     )?;
     ensure_eq_str(
         search_data
-            .pointer("/metrics/sourceModeApplied")
+            .get("metrics")
+            .and_then(Value::as_object)
+            .and_then(|metrics| metrics.get("sourceModeApplied"))
             .and_then(Value::as_str)
             .ok_or_else(|| "registered search sourceModeApplied missing".to_string())?,
         "semantic_only",

@@ -1861,7 +1861,7 @@ impl SearchDegradation {
     }
 
     #[must_use]
-    fn rerank_model_absent() -> Self {
+    pub(crate) fn rerank_model_absent() -> Self {
         Self {
             code: "rerank_model_unavailable".to_string(),
             severity: "low".to_string(),
@@ -1883,7 +1883,7 @@ impl SearchDegradation {
     }
 
     #[must_use]
-    fn stale_index(db_generation: Option<u64>, index_generation: Option<u64>) -> Self {
+    pub(crate) fn stale_index(db_generation: Option<u64>, index_generation: Option<u64>) -> Self {
         let generation_detail = match (db_generation, index_generation) {
             (Some(db_generation), Some(index_generation)) => format!(
                 " Database generation is {db_generation}; index generation is {index_generation}."
@@ -1908,7 +1908,7 @@ impl SearchDegradation {
     }
 
     #[must_use]
-    fn large_index_gap(db_generation: u64, index_generation: u64) -> Self {
+    pub(crate) fn large_index_gap(db_generation: u64, index_generation: u64) -> Self {
         let generation_gap = db_generation.saturating_sub(index_generation);
         Self {
             code: "search_index_large_gap".to_owned(),
@@ -15872,7 +15872,7 @@ mod tests {
 
         std::fs::write(index_dir.join("meta.json"), "{ not-json")
             .map_err(|error| error.to_string())?;
-        let cached_degraded = search_degradations(&options, &index_dir);
+        let (cached_degraded, _freshness) = search_degradations(&options, &index_dir);
 
         assert_eq!(cached_degraded.len(), 1);
         assert_eq!(cached_degraded[0].code, "index_missing");

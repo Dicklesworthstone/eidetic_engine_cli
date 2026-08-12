@@ -4621,7 +4621,7 @@ mod tests {
         .expect_err("reranker fetch without --from-file must fail");
 
         ensure(
-            error.repair_hint().is_none(),
+            error.repair().is_none(),
             "reranker fetch without an operator artifact must not invent a repair",
         )?;
         ensure(
