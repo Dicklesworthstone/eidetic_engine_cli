@@ -17693,6 +17693,7 @@ mod tests {
             None,
         )
         .map_err(|error| error.message())?;
+        let remembered_id = stored.memory_id.to_string();
         ensure(
             stored.index_status.clone(),
             "queued".to_owned(),
@@ -17714,7 +17715,7 @@ mod tests {
         let job_id = jobs[0].id.clone();
         ensure(
             jobs[0].document_id.as_deref(),
-            Some(stored.memory_id.as_str()),
+            Some(remembered_id.as_str()),
             "job owns the remembered memory",
         )?;
         ensure(
@@ -17825,7 +17826,7 @@ mod tests {
             search
                 .results
                 .iter()
-                .any(|hit| hit.doc_id == stored.memory_id.as_str()),
+                .any(|hit| hit.doc_id == remembered_id.as_str()),
             true,
             "exact remembered ID is lexically retrievable after recovery",
         )?;
