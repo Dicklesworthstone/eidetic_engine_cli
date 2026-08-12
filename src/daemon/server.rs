@@ -3689,10 +3689,7 @@ fn validate_canonical_search_rerank(value: &serde_json::Value) -> Result<(), Str
         .ok_or_else(|| "canonical search rerank advisorySummary must be an object".to_owned())?;
     if !matches!(
         summary.get("scope").and_then(serde_json::Value::as_str),
-        Some(
-            crate::core::search::SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED
-                | "response",
-        )
+        Some(crate::core::search::SEARCH_ADVISORY_SCOPE_PROCESS | "response",)
     ) || !summary
         .get("permanent")
         .is_some_and(|permanent| permanent.is_null() || permanent.is_boolean())

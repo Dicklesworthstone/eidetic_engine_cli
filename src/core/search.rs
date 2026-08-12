@@ -120,12 +120,10 @@ const DEFAULT_SEARCH_RERANK_TOP_K: usize = 50;
 pub const RERANK_MODEL_UNAVAILABLE_ADVISORY: &str = "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.";
 pub const RERANK_MODEL_UNAVAILABLE_REPAIR: &str =
     "ee model fetch rerank-default --workspace . --from-file /path/to/rerank-default-v1.tar.zst";
-/// Stable wire token for a bounded, workspace-partitioned advisory ledger.
-/// Eviction or authoritative recovery can start a later active episode, so
-/// this deliberately claims neither daemon ownership nor once-ever process
-/// scope.
-pub const SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED: &str =
-    "workspace_active_episode_bounded";
+/// Stable wire token for permanent advisories emitted at most once during the
+/// lifetime of one process. Transient degradations retain their own response-
+/// or episode-scoped contracts.
+pub const SEARCH_ADVISORY_SCOPE_PROCESS: &str = "process";
 const RERANK_MODEL_TOKENIZER: &str = "tokenizer.json";
 const RERANK_MODEL_SAFETENSORS_PRIMARY: &str = "model_f32.safetensors";
 const RERANK_MODEL_SAFETENSORS_FALLBACK: &str = "model.safetensors";
@@ -850,12 +848,10 @@ struct SearchAdvisoryObservation {
     occurrence_count: u64,
     distinct_count: usize,
     session_suppressed_count: u64,
-    tracking_capacity_deferred: bool,
 }
 
 const DEFAULT_SEARCH_ADVISORY_WORKSPACE: &str = "process-default";
 const MAX_SEARCH_ADVISORY_WORKSPACES: usize = 64;
-const MAX_PERMANENT_ADVISORY_IDENTITIES_PER_WORKSPACE: usize = 16;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct SearchAdvisoryPermanentState {
@@ -866,8 +862,6 @@ struct SearchAdvisoryPermanentState {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct SearchAdvisoryWorkspaceState {
-    permanent_occurrences: BTreeMap<SearchAdvisoryIdentity, SearchAdvisoryPermanentState>,
-    suppressed_count: u64,
     large_gap_occurrence_count: u64,
     large_gap_delivered: bool,
     large_gap_reserved_delivery: Option<u64>,
@@ -900,18 +894,19 @@ impl SearchAdvisoryDeliveryReservation {
     }
 }
 
-/// Bounded, workspace-partitioned ledger for active search-advisory episodes.
+/// Process-lifetime permanent-advisory ledger plus bounded, workspace-
+/// partitioned state for transient large-index-gap episodes.
 ///
-/// Canonical transient degradations remain visible in every affected response.
-/// The companion `search_index_large_gap` repair advisory is the sole
-/// once-per-episode transient: `search_index_stale` itself remains present for
-/// as long as retrieval is actually stale. Authoritative recovery clears the
-/// active condition so a later episode emits again. Workspace partitions are
-/// bounded to keep an exported unbound daemon from accumulating state forever
-/// or suppressing one workspace because another workspace observed the same
-/// advisory.
+/// A permanent advisory identity is retained after authoritative recovery and
+/// across workspace eviction, so it cannot reappear later in the same process.
+/// Permanent identities are source-controlled capability codes rather than
+/// caller-controlled workspace IDs. Canonical transient degradations remain
+/// visible in every affected response; only the companion
+/// `search_index_large_gap` repair notice is once per active workspace episode.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SearchAdvisorySession {
+    permanent_occurrences: BTreeMap<SearchAdvisoryIdentity, SearchAdvisoryPermanentState>,
+    permanent_suppressed_count: u64,
     workspaces: BTreeMap<String, SearchAdvisoryWorkspaceState>,
     observation_clock: u64,
     delivery_clock: u64,
@@ -927,13 +922,7 @@ impl SearchAdvisorySession {
             let oldest_workspace = self
                 .workspaces
                 .iter()
-                .filter(|(_, state)| {
-                    state.large_gap_reserved_delivery.is_none()
-                        && state
-                            .permanent_occurrences
-                            .values()
-                            .all(|entry| entry.reserved_delivery.is_none())
-                })
+                .filter(|(_, state)| state.large_gap_reserved_delivery.is_none())
                 .min_by(|(left_id, left), (right_id, right)| {
                     left.last_observed
                         .cmp(&right.last_observed)
@@ -951,13 +940,13 @@ impl SearchAdvisorySession {
     }
 
     fn delivery_token_is_reserved(&self, token: u64) -> bool {
-        self.workspaces.values().any(|state| {
-            state.large_gap_reserved_delivery == Some(token)
-                || state
-                    .permanent_occurrences
-                    .values()
-                    .any(|entry| entry.reserved_delivery == Some(token))
-        })
+        self.permanent_occurrences
+            .values()
+            .any(|entry| entry.reserved_delivery == Some(token))
+            || self
+                .workspaces
+                .values()
+                .any(|state| state.large_gap_reserved_delivery == Some(token))
     }
 
     fn next_delivery_token(&mut self) -> u64 {
@@ -992,36 +981,7 @@ impl SearchAdvisorySession {
             message: degradation.message.clone(),
             repair: degradation.repair.clone(),
         };
-        let Some(state) = self.workspace_mut(workspace_id) else {
-            return SearchAdvisoryObservation {
-                emitted: false,
-                occurrence_count: 0,
-                distinct_count: 0,
-                session_suppressed_count: 0,
-                tracking_capacity_deferred: true,
-            };
-        };
-        if !state.permanent_occurrences.contains_key(&identity)
-            && state.permanent_occurrences.len() >= MAX_PERMANENT_ADVISORY_IDENTITIES_PER_WORKSPACE
-        {
-            let evicted = state
-                .permanent_occurrences
-                .iter()
-                .find(|(_, entry)| entry.reserved_delivery.is_none())
-                .map(|(identity, _)| identity.clone());
-            let Some(evicted) = evicted else {
-                state.suppressed_count = state.suppressed_count.saturating_add(1);
-                return SearchAdvisoryObservation {
-                    emitted: false,
-                    occurrence_count: 0,
-                    distinct_count: state.permanent_occurrences.len(),
-                    session_suppressed_count: state.suppressed_count,
-                    tracking_capacity_deferred: true,
-                };
-            };
-            state.permanent_occurrences.remove(&evicted);
-        }
-        let entry = state.permanent_occurrences.entry(identity).or_default();
+        let entry = self.permanent_occurrences.entry(identity).or_default();
         entry.occurrence_count = entry.occurrence_count.saturating_add(1);
         let occurrence_count = entry.occurrence_count;
         let emitted = !entry.delivered && entry.reserved_delivery.is_none();
@@ -1035,14 +995,13 @@ impl SearchAdvisorySession {
             }
         }
         if !emitted {
-            state.suppressed_count = state.suppressed_count.saturating_add(1);
+            self.permanent_suppressed_count = self.permanent_suppressed_count.saturating_add(1);
         }
         SearchAdvisoryObservation {
             emitted,
             occurrence_count,
-            distinct_count: state.permanent_occurrences.len(),
-            session_suppressed_count: state.suppressed_count,
-            tracking_capacity_deferred: false,
+            distinct_count: self.permanent_occurrences.len(),
+            session_suppressed_count: self.permanent_suppressed_count,
         }
     }
 
@@ -1063,12 +1022,9 @@ impl SearchAdvisorySession {
         self.observe_permanent_inner(workspace_id, degradation, Some(reservation))
     }
 
-    fn recover_permanent(&mut self, workspace_id: &str, code: &str) {
-        if let Some(state) = self.workspaces.get_mut(workspace_id) {
-            state
-                .permanent_occurrences
-                .retain(|identity, _| identity.code != code);
-        }
+    fn recover_permanent(&mut self, _workspace_id: &str, _code: &str) {
+        // Recovery changes current capability posture, but a permanent advisory
+        // that was already delivered stays consumed for this process lifetime.
     }
 
     pub(crate) fn emit_large_gap_while_active(&mut self, workspace_id: &str, active: bool) -> bool {
@@ -1116,16 +1072,12 @@ impl SearchAdvisorySession {
     }
 
     fn suppressed_count(&self, workspace_id: &str) -> u64 {
-        self.workspaces
-            .get(workspace_id)
-            .map_or(0, |state| state.suppressed_count)
+        let _ = workspace_id;
+        self.permanent_suppressed_count
     }
 
     pub(crate) fn settle_delivery(&mut self, workspace_id: &str, token: u64, delivered: bool) {
-        let Some(state) = self.workspaces.get_mut(workspace_id) else {
-            return;
-        };
-        for entry in state.permanent_occurrences.values_mut() {
+        for entry in self.permanent_occurrences.values_mut() {
             if entry.reserved_delivery == Some(token) {
                 entry.reserved_delivery = None;
                 if delivered {
@@ -1133,7 +1085,9 @@ impl SearchAdvisorySession {
                 }
             }
         }
-        if state.large_gap_reserved_delivery == Some(token) {
+        if let Some(state) = self.workspaces.get_mut(workspace_id)
+            && state.large_gap_reserved_delivery == Some(token)
+        {
             state.large_gap_reserved_delivery = None;
             if delivered {
                 state.large_gap_delivered = true;
@@ -5586,8 +5540,8 @@ fn search_rerank_posture_json_inner(
                     "resolution": "verified_offline_import_available",
                 })
             });
-            let mut summary = serde_json::json!({
-                "scope": SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED,
+            let summary = serde_json::json!({
+                "scope": SEARCH_ADVISORY_SCOPE_PROCESS,
                 "permanent": true,
                 "distinctCount": observation.distinct_count,
                 "emittedCount": if observation.emitted { 1 } else { 0 },
@@ -5595,14 +5549,6 @@ fn search_rerank_posture_json_inner(
                 "sessionOccurrenceCount": observation.occurrence_count,
                 "sessionSuppressedCount": observation.session_suppressed_count,
             });
-            if observation.tracking_capacity_deferred
-                && let Some(summary) = summary.as_object_mut()
-            {
-                summary.insert(
-                    "tracking".to_owned(),
-                    serde_json::Value::String("capacity_deferred".to_owned()),
-                );
-            }
             (advisory, summary)
         }
         Some(degradation) => {
@@ -18239,17 +18185,11 @@ mod tests {
 
     #[test]
     fn advisory_session_bounds_workspace_partitions() {
-        let report = rerank_test_report(
-            Vec::new(),
-            vec![SearchDegradation::rerank_model_absent()],
-            false,
-        );
         let mut session = SearchAdvisorySession::default();
 
         for index in 0..=MAX_SEARCH_ADVISORY_WORKSPACES {
             let workspace_id = format!("workspace-{index:03}");
-            let _ =
-                report.data_json_with_advisory_session_for_workspace(&mut session, &workspace_id);
+            let _ = session.emit_large_gap_while_active(&workspace_id, true);
         }
 
         assert_eq!(session.workspaces.len(), MAX_SEARCH_ADVISORY_WORKSPACES);
@@ -18262,149 +18202,76 @@ mod tests {
     }
 
     #[test]
-    fn advisory_session_bounds_permanent_identities_per_workspace() {
-        let mut session = SearchAdvisorySession::default();
-        let workspace_id = "bounded-identities";
-
-        for index in 0..=MAX_PERMANENT_ADVISORY_IDENTITIES_PER_WORKSPACE {
-            let degradation = SearchDegradation {
-                code: "rerank_model_unavailable".to_owned(),
-                severity: "low".to_owned(),
-                message: format!("permanent identity {index:03}"),
-                repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
-            };
-            let _ = session.observe_permanent(workspace_id, &degradation);
-        }
-
-        let identities = &session.workspaces[workspace_id].permanent_occurrences;
-        assert_eq!(
-            identities.len(),
-            MAX_PERMANENT_ADVISORY_IDENTITIES_PER_WORKSPACE
-        );
-        assert!(
-            identities
-                .keys()
-                .all(|identity| identity.message != "permanent identity 000")
-        );
-        assert!(identities.keys().any(|identity| {
-            identity.message
-                == format!(
-                    "permanent identity {MAX_PERMANENT_ADVISORY_IDENTITIES_PER_WORKSPACE:03}"
-                )
-        }));
-    }
-
-    #[test]
-    fn advisory_session_defers_workspace_tracking_when_every_partition_is_reserved() {
+    fn permanent_advisory_stays_consumed_across_recovery_and_workspace_eviction() {
         let report = rerank_test_report(
             Vec::new(),
             vec![SearchDegradation::rerank_model_absent()],
             false,
         );
+        let available = rerank_test_report(Vec::new(), Vec::new(), true);
+        let mut session = SearchAdvisorySession::default();
+
+        let first =
+            report.data_json_with_advisory_session_for_workspace(&mut session, "workspace-first");
+        let _ = available
+            .data_json_with_advisory_session_for_workspace(&mut session, "workspace-first");
+        for index in 0..=MAX_SEARCH_ADVISORY_WORKSPACES {
+            let workspace_id = format!("workspace-transient-{index:03}");
+            let _ = session.emit_large_gap_while_active(&workspace_id, true);
+        }
+        let later =
+            report.data_json_with_advisory_session_for_workspace(&mut session, "workspace-later");
+
+        assert_eq!(
+            first["rerank"]["advisory"]["code"],
+            "rerank_model_unavailable"
+        );
+        assert_eq!(first["rerank"]["advisorySummary"]["scope"], "process");
+        assert!(later["rerank"]["advisory"].is_null());
+        assert_eq!(later["rerank"]["advisorySummary"]["emittedCount"], 0);
+        assert_eq!(
+            later["rerank"]["advisorySummary"]["sessionOccurrenceCount"],
+            2
+        );
+    }
+
+    #[test]
+    fn advisory_session_defers_workspace_tracking_when_every_partition_is_reserved() {
         let mut session = SearchAdvisorySession::default();
         let mut reservations = Vec::new();
 
         for index in 0..MAX_SEARCH_ADVISORY_WORKSPACES {
             let workspace_id = format!("reserved-workspace-{index:03}");
             let mut reservation = session.reserve_delivery(&workspace_id);
-            let json = report.data_json_with_advisory_delivery_reservation(
-                &mut session,
+            assert!(session.emit_large_gap_while_active_for_delivery(
                 &workspace_id,
+                true,
                 &mut reservation,
-            );
-            assert_eq!(json["rerank"]["advisorySummary"]["emittedCount"], 1);
+            ));
             reservations.push(reservation);
         }
         assert_eq!(session.workspaces.len(), MAX_SEARCH_ADVISORY_WORKSPACES);
 
         let overflow_workspace = "reserved-workspace-overflow";
         let mut overflow = session.reserve_delivery(overflow_workspace);
-        let overflow_json = report.data_json_with_advisory_delivery_reservation(
-            &mut session,
+        assert!(!session.emit_large_gap_while_active_for_delivery(
             overflow_workspace,
+            true,
             &mut overflow,
-        );
+        ));
         assert_eq!(session.workspaces.len(), MAX_SEARCH_ADVISORY_WORKSPACES);
         assert!(!overflow.emitted());
-        assert!(overflow_json["rerank"]["advisory"].is_null());
-        assert_eq!(
-            overflow_json["rerank"]["advisorySummary"]["tracking"],
-            "capacity_deferred"
-        );
 
         let released = reservations.pop().expect("one reservation to release");
         session.settle_delivery(released.workspace_id(), released.token(), true);
         let mut retry = session.reserve_delivery(overflow_workspace);
-        let retry_json = report.data_json_with_advisory_delivery_reservation(
-            &mut session,
+        assert!(session.emit_large_gap_while_active_for_delivery(
             overflow_workspace,
+            true,
             &mut retry,
-        );
+        ));
         assert_eq!(session.workspaces.len(), MAX_SEARCH_ADVISORY_WORKSPACES);
         assert!(retry.emitted());
-        assert_eq!(
-            retry_json["rerank"]["advisory"]["code"],
-            "rerank_model_unavailable"
-        );
-    }
-
-    #[test]
-    fn advisory_session_defers_identity_tracking_when_every_identity_is_reserved() {
-        let mut session = SearchAdvisorySession::default();
-        let workspace_id = "reserved-identities";
-        let mut reservations = Vec::new();
-
-        for index in 0..MAX_PERMANENT_ADVISORY_IDENTITIES_PER_WORKSPACE {
-            let degradation = SearchDegradation {
-                code: "rerank_model_unavailable".to_owned(),
-                severity: "low".to_owned(),
-                message: format!("reserved permanent identity {index:03}"),
-                repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
-            };
-            let mut reservation = session.reserve_delivery(workspace_id);
-            let observation = session.observe_permanent_for_delivery(
-                workspace_id,
-                &degradation,
-                &mut reservation,
-            );
-            assert!(observation.emitted);
-            reservations.push(reservation);
-        }
-        assert_eq!(
-            session.workspaces[workspace_id].permanent_occurrences.len(),
-            MAX_PERMANENT_ADVISORY_IDENTITIES_PER_WORKSPACE
-        );
-
-        let overflow_degradation = SearchDegradation {
-            code: "rerank_model_unavailable".to_owned(),
-            severity: "low".to_owned(),
-            message: "reserved permanent identity overflow".to_owned(),
-            repair: Some(RERANK_MODEL_UNAVAILABLE_REPAIR.to_owned()),
-        };
-        let mut overflow = session.reserve_delivery(workspace_id);
-        let overflow_observation = session.observe_permanent_for_delivery(
-            workspace_id,
-            &overflow_degradation,
-            &mut overflow,
-        );
-        assert!(!overflow_observation.emitted);
-        assert!(overflow_observation.tracking_capacity_deferred);
-        assert!(!overflow.emitted());
-        assert_eq!(
-            session.workspaces[workspace_id].permanent_occurrences.len(),
-            MAX_PERMANENT_ADVISORY_IDENTITIES_PER_WORKSPACE
-        );
-        let released = reservations.pop().expect("one reservation to release");
-        session.settle_delivery(released.workspace_id(), released.token(), true);
-        let mut retry = session.reserve_delivery(workspace_id);
-        let retry_observation =
-            session.observe_permanent_for_delivery(workspace_id, &overflow_degradation, &mut retry);
-        assert!(retry_observation.emitted);
-        assert!(!retry_observation.tracking_capacity_deferred);
-        assert_eq!(
-            session.workspaces[workspace_id].permanent_occurrences.len(),
-            MAX_PERMANENT_ADVISORY_IDENTITIES_PER_WORKSPACE
-        );
     }
 
     #[test]

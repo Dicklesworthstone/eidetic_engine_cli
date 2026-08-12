@@ -36,8 +36,7 @@ use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
 use ee::core::model::{ModelFetchOptions, fetch_rerank_model};
 use ee::core::outcome::cancel_message;
 use ee::core::search::{
-    SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED, SEARCH_INDEX_LARGE_GAP_THRESHOLD,
-    SearchSourceMode,
+    SEARCH_ADVISORY_SCOPE_PROCESS, SEARCH_INDEX_LARGE_GAP_THRESHOLD, SearchSourceMode,
 };
 use ee::daemon::{
     DAEMON_METHOD_UNAUTHORIZED_CODE, DAEMON_REQUEST_MAX_BYTES, DAEMON_REQUEST_SCHEMA_V1,
@@ -1120,7 +1119,7 @@ fn daemon_search_reuses_one_process_and_returns_stable_results() -> TestResult {
         first_result
             .pointer("/response/data/rerank/advisorySummary/scope")
             .and_then(serde_json::Value::as_str)
-            == Some(SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED),
+            == Some(SEARCH_ADVISORY_SCOPE_PROCESS),
         format!("daemon advisory scope must describe bounded workspace episodes: {first_result}"),
     )?;
     ensure(
@@ -1262,7 +1261,7 @@ fn daemon_advisory_active_episode_lifecycle_is_real_and_workspace_partitioned() 
             && search_first
                 .pointer("/response/data/rerank/advisorySummary/scope")
                 .and_then(serde_json::Value::as_str)
-                == Some(SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED)
+                == Some(SEARCH_ADVISORY_SCOPE_PROCESS)
             && search_first
                 .pointer("/response/data/rerank/advisorySummary/emittedCount")
                 .and_then(serde_json::Value::as_u64)
@@ -1456,15 +1455,14 @@ fn daemon_advisory_active_episode_lifecycle_is_real_and_workspace_partitioned() 
     )?;
     ensure(
         workspace_b_first
-            .pointer("/response/data/rerank/advisory/code")
-            .and_then(serde_json::Value::as_str)
-            == Some("rerank_model_unavailable")
+            .pointer("/response/data/rerank/advisory")
+            .is_some_and(serde_json::Value::is_null)
             && workspace_b_first
                 .pointer("/response/data/rerank/advisorySummary/emittedCount")
                 .and_then(serde_json::Value::as_u64)
-                == Some(1),
+                == Some(0),
         format!(
-            "workspace B was cross-suppressed by workspace A permanent state: {workspace_b_first}"
+            "process-lifetime permanent advisory re-emitted in workspace B: {workspace_b_first}"
         ),
     )?;
 
@@ -1476,7 +1474,8 @@ fn daemon_advisory_active_episode_lifecycle_is_real_and_workspace_partitioned() 
 
 #[test]
 #[ignore = "requires EE_E2E_RERANK_MODEL_ARCHIVE accepted by production manifest verification"]
-fn daemon_manifest_verified_reranker_archive_rearms_permanent_episode_over_uds() -> TestResult {
+fn daemon_manifest_verified_reranker_archive_keeps_permanent_advisory_consumed_over_uds()
+-> TestResult {
     let archive = std::env::var_os("EE_E2E_RERANK_MODEL_ARCHIVE")
         .map(PathBuf::from)
         .ok_or_else(|| {
@@ -1532,7 +1531,7 @@ fn daemon_manifest_verified_reranker_archive_rearms_permanent_episode_over_uds()
             && first_absent
                 .pointer("/response/data/rerank/advisorySummary/scope")
                 .and_then(serde_json::Value::as_str)
-                == Some(SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED)
+                == Some(SEARCH_ADVISORY_SCOPE_PROCESS)
             && first_absent
                 .pointer("/response/data/rerank/advisorySummary/emittedCount")
                 .and_then(serde_json::Value::as_u64)
@@ -1662,17 +1661,16 @@ fn daemon_manifest_verified_reranker_archive_rearms_permanent_episode_over_uds()
             .and_then(serde_json::Value::as_bool)
             == Some(false)
             && later_absent
-                .pointer("/response/data/rerank/advisory/code")
-                .and_then(serde_json::Value::as_str)
-                == Some("rerank_model_unavailable")
+                .pointer("/response/data/rerank/advisory")
+                .is_some_and(serde_json::Value::is_null)
             && later_absent
                 .pointer("/response/data/rerank/advisorySummary/emittedCount")
                 .and_then(serde_json::Value::as_u64)
-                == Some(1)
+                == Some(0)
             && later_absent
                 .pointer("/response/data/rerank/advisorySummary/sessionOccurrenceCount")
                 .and_then(serde_json::Value::as_u64)
-                == Some(1)
+                == Some(3)
             && later_absent
                 .pointer("/response/data/results")
                 .and_then(serde_json::Value::as_array)
@@ -1682,7 +1680,7 @@ fn daemon_manifest_verified_reranker_archive_rearms_permanent_episode_over_uds()
                             .iter()
                             .all(|result| result.get("rerankScore").is_none())
                 }),
-        format!("new permanent episode did not re-emit after real recovery: {later_absent}"),
+        format!("permanent advisory was not kept consumed after real recovery: {later_absent}"),
     )?;
 
     handle

@@ -1,8 +1,8 @@
 use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::core::search::{
     RERANK_MODEL_UNAVAILABLE_ADVISORY, RERANK_MODEL_UNAVAILABLE_REPAIR,
-    SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED, ScoreSource, SearchAdvisorySession,
-    SearchDegradation, SearchHit, SearchReport, SearchSourceMode, SearchStatus,
+    SEARCH_ADVISORY_SCOPE_PROCESS, ScoreSource, SearchAdvisorySession, SearchDegradation,
+    SearchHit, SearchReport, SearchSourceMode, SearchStatus,
 };
 use ee::models::{EmbedBackend, MemoryScope, MemoryScopeStats};
 
@@ -112,7 +112,7 @@ fn ordinary_search_json_is_pure_and_structural() {
     assert!(json["rerank"]["advisorySummary"].get("schema").is_none());
     assert_eq!(
         json["rerank"]["advisorySummary"]["scope"],
-        SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED
+        SEARCH_ADVISORY_SCOPE_PROCESS
     );
     assert_eq!(json["rerank"]["advisorySummary"]["emittedCount"], 1);
     assert_eq!(json["rerank"]["advisorySummary"]["suppressedCount"], 0);
@@ -147,7 +147,7 @@ fn explicit_long_lived_session_emits_permanent_advisory_once() {
     assert_eq!(first_json["rerank"]["advisory"]["permanent"], true);
     assert_eq!(
         first_json["rerank"]["advisorySummary"]["scope"],
-        SEARCH_ADVISORY_SCOPE_WORKSPACE_ACTIVE_EPISODE_BOUNDED
+        SEARCH_ADVISORY_SCOPE_PROCESS
     );
     assert_eq!(first_json["rerank"]["advisorySummary"]["emittedCount"], 1);
     assert_eq!(
@@ -172,7 +172,7 @@ fn explicit_long_lived_session_emits_permanent_advisory_once() {
 }
 
 #[test]
-fn structural_session_rearms_after_available_zero_result_report() {
+fn structural_session_keeps_permanent_advisory_consumed_after_recovery() {
     // This pins the pure renderer state machine only. The daemon UDS suite
     // contains the archive-gated absent -> verified import -> absent runtime
     // proof; this fixture is not evidence that the gated path executed.
@@ -201,13 +201,14 @@ fn structural_session_rearms_after_available_zero_result_report() {
     assert_eq!(recovered["rerank"]["rerankScoreCount"], 0);
     assert_eq!(recovered["rerank"]["available"], true);
     assert_eq!(recovered["rerank"]["mode"], "fusion_only");
+    assert!(second_absent["rerank"]["advisory"].is_null());
     assert_eq!(
-        second_absent["rerank"]["advisory"]["code"], "rerank_model_unavailable",
-        "absent -> available -> absent must begin a new advisory episode"
+        second_absent["rerank"]["advisorySummary"]["suppressedCount"],
+        1
     );
     assert_eq!(
         second_absent["rerank"]["advisorySummary"]["sessionOccurrenceCount"],
-        1
+        2
     );
 }
 
