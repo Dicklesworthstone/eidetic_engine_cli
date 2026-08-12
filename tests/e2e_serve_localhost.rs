@@ -5,6 +5,8 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
+use ee::db::DbConnection;
+use ee::models::{MEMORY_SEAL_PLACEHOLDER_CONTENT, memory_seal_commitment};
 use ee::serve::{SERVE_ENDPOINT_SCHEMA_V1, ServeLimits, render_serve_transport_exchange};
 use serde_json::{Value as JsonValue, json};
 
@@ -421,16 +423,20 @@ fn serve_why_endpoint_attempts_real_memory_explanation() -> TestResult {
 fn serve_why_endpoint_returns_canonical_why_payload_shape() -> TestResult {
     let token = "01234567890123456789012345678901";
     let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let remembered = remember_memory(&RememberMemoryOptions {
+    let sealed_protocol =
+        b"PRE-REGISTERED SERVER PROTOCOL: preserve the exact canonical why seal state.";
+    let sealed_at = "2026-08-12T14:30:00Z";
+    let sealed_commitment = memory_seal_commitment(sealed_protocol);
+    let sealed = remember_memory(&RememberMemoryOptions {
         workspace_path: workspace.path(),
         database_path: None,
-        content: "Serve why must preserve the canonical ee why JSON payload.",
-        workflow_id: Some("serve-why-canonical"),
+        content: MEMORY_SEAL_PLACEHOLDER_CONTENT,
+        workflow_id: Some("serve-why-canonical-sealed"),
         level: "procedural",
         kind: "rule",
-        tags: Some("serve,why,contract"),
+        tags: Some("serve,why,contract,sealed"),
         confidence: 0.91,
-        source: Some("serve://e2e/why-canonical"),
+        source: Some("serve://e2e/why-canonical-sealed"),
         allow_secret_mention: false,
         valid_from: None,
         valid_to: None,
@@ -439,10 +445,37 @@ fn serve_why_endpoint_returns_canonical_why_payload_shape() -> TestResult {
         propose_candidates: false,
     })
     .map_err(|error| error.to_string())?;
-    let memory_id = remembered.memory_id.to_string();
+    let sealed_memory_id = sealed.memory_id.to_string();
+    let connection =
+        DbConnection::open_file(&sealed.database_path).map_err(|error| error.to_string())?;
+    connection
+        .insert_memory_seal(&sealed_memory_id, &sealed_commitment, sealed_at)
+        .map_err(|error| error.to_string())?;
+    connection.close().map_err(|error| error.to_string())?;
+
+    let unsealed = remember_memory(&RememberMemoryOptions {
+        workspace_path: workspace.path(),
+        database_path: None,
+        content: "Serve why must omit seal state for an ordinary unsealed memory.",
+        workflow_id: Some("serve-why-canonical-unsealed"),
+        level: "procedural",
+        kind: "rule",
+        tags: Some("serve,why,contract,unsealed"),
+        confidence: 0.91,
+        source: Some("serve://e2e/why-canonical-unsealed"),
+        allow_secret_mention: false,
+        valid_from: None,
+        valid_to: None,
+        dry_run: false,
+        auto_link: false,
+        propose_candidates: false,
+    })
+    .map_err(|error| error.to_string())?;
+    let unsealed_memory_id = unsealed.memory_id.to_string();
+
     let _current_dir = enter_current_dir(workspace.path())?;
     let raw = format!(
-        "GET /v1/why/{memory_id} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+        "GET /v1/why/{sealed_memory_id} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
     );
     let response = render_serve_transport_exchange(
         "req-why-canonical-payload",
@@ -476,7 +509,7 @@ fn serve_why_endpoint_returns_canonical_why_payload_shape() -> TestResult {
     assert_eq!(data.get("command").and_then(JsonValue::as_str), Some("why"));
     assert_eq!(
         data.get("memoryId").and_then(JsonValue::as_str),
-        Some(memory_id.as_str())
+        Some(sealed_memory_id.as_str())
     );
     assert_eq!(data.get("found").and_then(JsonValue::as_bool), Some(true));
 
@@ -494,6 +527,7 @@ fn serve_why_endpoint_returns_canonical_why_payload_shape() -> TestResult {
         "verificationEvidence",
         "coordinationFallbackEvidence",
         "attestationBundle",
+        "seal",
         "degraded",
     ] {
         if !data.contains_key(key) {
@@ -520,6 +554,75 @@ fn serve_why_endpoint_returns_canonical_why_payload_shape() -> TestResult {
     assert!(
         payload["data"]["businessLogicExecuted"].is_null(),
         "why endpoint must not return the old dispatch-plan-only stub payload: {payload}"
+    );
+
+    let seal = data
+        .get("seal")
+        .and_then(JsonValue::as_object)
+        .ok_or_else(|| format!("sealed /v1/why omitted data.seal: {payload}"))?;
+    assert_eq!(
+        seal.get("schema").and_then(JsonValue::as_str),
+        Some(ee::models::MEMORY_SEAL_SCHEMA_V1)
+    );
+    assert_eq!(
+        seal.get("contentCommitment").and_then(JsonValue::as_str),
+        Some(sealed_commitment.as_str())
+    );
+    assert_eq!(
+        seal.get("sealedAt").and_then(JsonValue::as_str),
+        Some(sealed_at)
+    );
+    assert!(seal.get("revealedAt").is_some_and(JsonValue::is_null));
+    assert!(seal.get("revealVerified").is_some_and(JsonValue::is_null));
+    assert_eq!(seal.get("sealed").and_then(JsonValue::as_bool), Some(true));
+    assert_eq!(
+        payload["data"]["attestationBundle"]["sourceSchema"].as_str(),
+        Some(ee::models::ATTESTATION_BUNDLE_SCHEMA_V2)
+    );
+    assert!(
+        payload["data"]["attestationBundle"]["bundleHash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("blake3:"))
+    );
+    assert!(
+        !response
+            .contains(std::str::from_utf8(sealed_protocol).map_err(|error| error.to_string())?),
+        "sealed /v1/why response leaked the withheld protocol"
+    );
+
+    let unsealed_raw = format!(
+        "GET /v1/why/{unsealed_memory_id} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+    );
+    let unsealed_response = render_serve_transport_exchange(
+        "req-why-canonical-unsealed",
+        unsealed_raw.as_bytes(),
+        &ServeLimits::default(),
+        Some(token),
+        0,
+    );
+    if !unsealed_response.starts_with("HTTP/1.1 200 OK\r\n") {
+        return Err(format!(
+            "expected unsealed why 200 response, got {unsealed_response}"
+        ));
+    }
+    let unsealed_envelope = response_body_json(&unsealed_response)?;
+    let unsealed_payload = &unsealed_envelope["response"]["payload"];
+    assert_eq!(unsealed_payload["success"].as_bool(), Some(true));
+    assert_eq!(
+        unsealed_payload["data"]["memoryId"].as_str(),
+        Some(unsealed_memory_id.as_str())
+    );
+    assert!(
+        unsealed_payload["data"].get("seal").is_none(),
+        "ordinary unsealed /v1/why must omit data.seal: {unsealed_payload}"
+    );
+    assert_eq!(
+        unsealed_payload["data"]["attestationBundle"]["sourceSchema"].as_str(),
+        Some(ee::models::ATTESTATION_BUNDLE_SCHEMA_V2)
+    );
+    assert!(
+        !unsealed_response.contains(&sealed_commitment),
+        "ordinary unsealed /v1/why inherited another memory's commitment"
     );
     Ok(())
 }

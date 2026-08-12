@@ -10,10 +10,9 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const ATTESTATION_BUNDLE_SCHEMA_V1: &str = "ee.attestation.bundle.v1";
 /// v2 (bd-2ea4a): adds the optional `seal` block so a third party can verify
-/// commitment-before-outcome offline. Absent for unsealed subjects, so v1
-/// consumers see byte-identical bundles apart from the schema id.
+/// commitment-before-outcome offline. The block is absent for unsealed
+/// subjects because it has no evidence to carry there.
 pub const ATTESTATION_BUNDLE_SCHEMA_V2: &str = "ee.attestation.bundle.v2";
 pub const ATTESTATION_HASH_ALGORITHM: &str = "blake3";
 pub const ATTESTATION_LOCAL_TRUTH_STATEMENT: &str =
@@ -489,6 +488,61 @@ pub struct AttestationSeal {
     pub reveal_verified: Option<bool>,
 }
 
+/// Why persisted or externally constructed seal evidence cannot be emitted.
+///
+/// Variants intentionally carry no rejected values: validation errors may
+/// cross a public error boundary and must not echo corrupt stored content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttestationSealValidationError {
+    InvalidCommitment,
+    InvalidSealedAt,
+    InvalidRevealedAt,
+    InvalidRevealState,
+    RevealPrecedesSeal,
+}
+
+impl fmt::Display for AttestationSealValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::InvalidCommitment => "seal commitment is not canonical blake3 evidence",
+            Self::InvalidSealedAt => "seal creation timestamp is not RFC 3339",
+            Self::InvalidRevealedAt => "seal reveal timestamp is not RFC 3339",
+            Self::InvalidRevealState => "seal reveal fields describe an impossible state",
+            Self::RevealPrecedesSeal => "seal reveal timestamp precedes seal creation",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for AttestationSealValidationError {}
+
+/// Validate the public commit-reveal evidence shared by storage and export.
+///
+/// A valid seal is either unrevealed (`revealed_at` and `reveal_verified` are
+/// both absent) or is a verified reveal at or after the seal timestamp.
+pub fn validate_attestation_seal_fields(
+    content_commitment: &str,
+    sealed_at: &str,
+    revealed_at: Option<&str>,
+    reveal_verified: Option<bool>,
+) -> Result<(), AttestationSealValidationError> {
+    crate::models::memory_seal::validate_memory_seal_commitment(content_commitment)
+        .map_err(|_| AttestationSealValidationError::InvalidCommitment)?;
+    let sealed_at = chrono::DateTime::parse_from_rfc3339(sealed_at)
+        .map_err(|_| AttestationSealValidationError::InvalidSealedAt)?;
+    let revealed_at = revealed_at
+        .map(chrono::DateTime::parse_from_rfc3339)
+        .transpose()
+        .map_err(|_| AttestationSealValidationError::InvalidRevealedAt)?;
+
+    match (revealed_at, reveal_verified) {
+        (None, None) => Ok(()),
+        (Some(revealed_at), Some(true)) if revealed_at >= sealed_at => Ok(()),
+        (Some(_), Some(true)) => Err(AttestationSealValidationError::RevealPrecedesSeal),
+        _ => Err(AttestationSealValidationError::InvalidRevealState),
+    }
+}
+
 impl AttestationSeal {
     #[must_use]
     fn canonical_json_value(&self) -> Value {
@@ -748,17 +802,15 @@ mod tests {
             "unsealed bundles must not carry a seal key"
         );
 
+        let commitment = "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let sealed = unsealed.clone().with_seal(Some(AttestationSeal {
-            content_commitment: "blake3:seal-commitment".to_owned(),
+            content_commitment: commitment.to_owned(),
             sealed_at: "2026-08-10T00:00:00Z".to_owned(),
             revealed_at: None,
             reveal_verified: None,
         }));
         let sealed_value = sealed.canonical_json_value();
-        assert_eq!(
-            sealed_value["seal"]["contentCommitment"],
-            "blake3:seal-commitment"
-        );
+        assert_eq!(sealed_value["seal"]["contentCommitment"], commitment);
         assert_eq!(sealed_value["seal"]["revealedAt"], Value::Null);
         assert_ne!(
             unsealed.bundle_hash(),
@@ -773,7 +825,61 @@ mod tests {
         assert_eq!(parsed, sealed);
         let reparsed_unsealed: AttestationBundle =
             serde_json::from_str(&serde_json::to_string(&unsealed).expect("serialize"))
-                .expect("parse v1-shaped payload without a seal key");
+                .expect("parse unsealed v2 payload without a seal key");
         assert_eq!(reparsed_unsealed.seal, None);
+    }
+
+    #[test]
+    fn seal_validation_accepts_only_canonical_chronological_states_without_echoing_values() {
+        let commitment = "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            validate_attestation_seal_fields(commitment, "2026-08-10T00:00:00Z", None, None),
+            Ok(())
+        );
+        assert_eq!(
+            validate_attestation_seal_fields(
+                commitment,
+                "2026-08-10T00:00:00Z",
+                Some("2026-08-11T00:00:00+00:00"),
+                Some(true)
+            ),
+            Ok(())
+        );
+
+        let hostile_commitment = format!("blake3:{}", "S".repeat(64));
+        let cases = [
+            validate_attestation_seal_fields(
+                &hostile_commitment,
+                "2026-08-10T00:00:00Z",
+                None,
+                None,
+            ),
+            validate_attestation_seal_fields(commitment, "PRIVATE_SEALED_AT", None, None),
+            validate_attestation_seal_fields(
+                commitment,
+                "2026-08-10T00:00:00Z",
+                Some("PRIVATE_REVEALED_AT"),
+                Some(true),
+            ),
+            validate_attestation_seal_fields(
+                commitment,
+                "2026-08-10T00:00:00Z",
+                Some("2026-08-11T00:00:00Z"),
+                Some(false),
+            ),
+            validate_attestation_seal_fields(
+                commitment,
+                "2026-08-10T00:00:00Z",
+                Some("2026-08-09T23:59:59Z"),
+                Some(true),
+            ),
+        ];
+        for result in cases {
+            let error = result.expect_err("hostile seal evidence must fail validation");
+            let rendered = error.to_string();
+            assert!(!rendered.contains(&hostile_commitment));
+            assert!(!rendered.contains("PRIVATE_SEALED_AT"));
+            assert!(!rendered.contains("PRIVATE_REVEALED_AT"));
+        }
     }
 }

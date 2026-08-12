@@ -40,7 +40,7 @@ use crate::models::{
     extract_precision_memory_anchors,
 };
 use crate::models::{MemoryKind, MemoryValidationError, canonicalize_typed_memory_fields_json};
-use crate::models::{MemorySeal, validate_memory_seal_commitment};
+use crate::models::{MemorySeal, validate_attestation_seal_fields};
 
 pub mod migrate;
 pub mod read_pool;
@@ -19979,12 +19979,12 @@ impl DbConnection {
         content_commitment: &str,
         sealed_at: &str,
     ) -> Result<()> {
-        validate_memory_seal_commitment(content_commitment).map_err(|error| {
-            DbError::MalformedRow {
+        validate_attestation_seal_fields(content_commitment, sealed_at, None, None).map_err(
+            |_| DbError::MalformedRow {
                 operation: DbOperation::Execute,
-                message: format!("memory_seals.content_commitment rejected: {error}"),
-            }
-        })?;
+                message: "memory_seals insert rejected invalid public seal evidence".to_owned(),
+            },
+        )?;
         self.execute_for(
             DbOperation::Execute,
             "INSERT INTO memory_seals (memory_id, content_commitment, sealed_at, revealed_at, reveal_verified) VALUES (?1, ?2, ?3, NULL, NULL)",
@@ -20006,7 +20006,7 @@ impl DbConnection {
         )?;
         rows.first()
             .map(|row| {
-                Ok(MemorySeal {
+                let seal = MemorySeal {
                     memory_id: required_text(row, 0, DbOperation::Query, "memory_id")?.to_string(),
                     content_commitment: required_text(
                         row,
@@ -20019,7 +20019,18 @@ impl DbConnection {
                     revealed_at: optional_text(row, 3)?.map(str::to_string),
                     reveal_verified: optional_u64(row, 4, DbOperation::Query, "reveal_verified")?
                         .map(|value| value == 1),
-                })
+                };
+                validate_attestation_seal_fields(
+                    &seal.content_commitment,
+                    &seal.sealed_at,
+                    seal.revealed_at.as_deref(),
+                    seal.reveal_verified,
+                )
+                .map_err(|_| DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "memory_seals row contains invalid public seal evidence".to_owned(),
+                })?;
+                Ok(seal)
             })
             .transpose()
     }
@@ -35414,6 +35425,87 @@ mod tests {
                 .is_err(),
             "malformed commitments must be rejected before SQL",
         )?;
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn memory_seal_read_rejects_hostile_persisted_evidence_without_echoing_it() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 98)?;
+        setup_workspace(&connection)?;
+
+        let valid_commitment =
+            crate::models::memory_seal_commitment(b"valid planted protocol evidence");
+        let hostile_commitment = format!("blake3:{}", "S".repeat(64));
+        let cases = [
+            (
+                hostile_commitment.as_str(),
+                "2026-08-10T00:00:00Z",
+                None,
+                None,
+            ),
+            (valid_commitment.as_str(), "PRIVATE_SEALED_AT", None, None),
+            (
+                valid_commitment.as_str(),
+                "2026-08-10T00:00:00Z",
+                Some("PRIVATE_REVEALED_AT"),
+                Some(1),
+            ),
+            (
+                valid_commitment.as_str(),
+                "2026-08-10T00:00:00Z",
+                Some("2026-08-11T00:00:00Z"),
+                Some(0),
+            ),
+        ];
+
+        for (index, (commitment, sealed_at, revealed_at, reveal_verified)) in
+            cases.into_iter().enumerate()
+        {
+            let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(
+                u128::try_from(index + 1).map_err(|error| error.to_string())?,
+            ))
+            .to_string();
+            connection.insert_memory(
+                &memory_id,
+                &test_memory_input(
+                    "wsp_01234567890123456789012345",
+                    crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT,
+                ),
+            )?;
+            connection.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO memory_seals (memory_id, content_commitment, sealed_at, revealed_at, reveal_verified) VALUES (?1, ?2, ?3, ?4, ?5)",
+                &[
+                    Value::Text(memory_id.clone()),
+                    Value::Text(commitment.to_owned()),
+                    Value::Text(sealed_at.to_owned()),
+                    revealed_at.map_or(Value::Null, |value| Value::Text(value.to_owned())),
+                    reveal_verified.map_or(Value::Null, Value::Int),
+                ],
+            )?;
+
+            let error = connection
+                .get_memory_seal(&memory_id)
+                .expect_err("hostile persisted seal evidence must fail closed");
+            let rendered = error.to_string();
+            ensure(
+                rendered.contains("invalid public seal evidence"),
+                format!("unexpected hostile-row error: {rendered}"),
+            )?;
+            for secret in [
+                hostile_commitment.as_str(),
+                "PRIVATE_SEALED_AT",
+                "PRIVATE_REVEALED_AT",
+            ] {
+                ensure(
+                    !rendered.contains(secret),
+                    "hostile persisted seal value escaped through its validation error",
+                )?;
+            }
+        }
+
         connection.close()?;
         Ok(())
     }

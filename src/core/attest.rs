@@ -286,6 +286,18 @@ pub fn public_attestation_bundle(bundle: &AttestationBundle) -> AttestationBundl
     let mut public = bundle.clone();
     let mut omitted_noncanonical_hash = false;
     let mut omitted_provenance_uri = false;
+    let omitted_invalid_seal = public.seal.as_ref().is_some_and(|seal| {
+        crate::models::validate_attestation_seal_fields(
+            &seal.content_commitment,
+            &seal.sealed_at,
+            seal.revealed_at.as_deref(),
+            seal.reveal_verified,
+        )
+        .is_err()
+    });
+    if omitted_invalid_seal {
+        public.seal = None;
+    }
     public.schema = crate::models::attestation::ATTESTATION_BUNDLE_SCHEMA_V2.to_owned();
     public.subject.id = public_attestation_subject_id(public.subject.kind, &public.subject.id);
     public.subject.content_hashes.retain_mut(|entry| {
@@ -369,6 +381,17 @@ pub fn public_attestation_bundle(bundle: &AttestationBundle) -> AttestationBundl
         public.omissions.push(AttestationOmission::new(
             "publicProjection.provenanceUri",
             "provenance URIs are omitted from the public attestation bundle",
+        ));
+    }
+    if omitted_invalid_seal
+        && !public
+            .omissions
+            .iter()
+            .any(|entry| entry.field == "publicProjection.invalidSeal")
+    {
+        public.omissions.push(AttestationOmission::new(
+            "publicProjection.invalidSeal",
+            "invalid seal evidence was omitted from the public attestation bundle",
         ));
     }
     public.trust_statement.scope =
@@ -1317,6 +1340,80 @@ mod tests {
                         .is_some_and(crate::db::is_canonical_blake3_hash))),
                 "surface manifest filters noncanonical hashes at {pointer}"
             );
+        }
+    }
+
+    #[test]
+    fn public_attestation_projection_preserves_valid_seal_and_omits_hostile_seal_values() {
+        let commitment = "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let unsealed = build_query_attestation("safe public projection subject");
+        let valid = unsealed
+            .clone()
+            .with_seal(Some(crate::models::AttestationSeal {
+                content_commitment: commitment.to_owned(),
+                sealed_at: "2026-08-10T00:00:00Z".to_owned(),
+                revealed_at: Some("2026-08-11T00:00:00Z".to_owned()),
+                reveal_verified: Some(true),
+            }));
+        let public_valid = public_attestation_bundle(&valid);
+        assert_eq!(
+            public_valid
+                .seal
+                .as_ref()
+                .map(|seal| seal.content_commitment.as_str()),
+            Some(commitment)
+        );
+        assert_ne!(
+            public_attestation_bundle(&unsealed).bundle_hash(),
+            public_valid.bundle_hash(),
+            "valid seal evidence must remain hash-covered after public projection"
+        );
+
+        let hostile_commitment = format!("blake3:{}", "S".repeat(64));
+        let hostile_seals = [
+            crate::models::AttestationSeal {
+                content_commitment: hostile_commitment.clone(),
+                sealed_at: "2026-08-10T00:00:00Z".to_owned(),
+                revealed_at: None,
+                reveal_verified: None,
+            },
+            crate::models::AttestationSeal {
+                content_commitment: commitment.to_owned(),
+                sealed_at: "PRIVATE_SEALED_AT".to_owned(),
+                revealed_at: None,
+                reveal_verified: None,
+            },
+            crate::models::AttestationSeal {
+                content_commitment: commitment.to_owned(),
+                sealed_at: "2026-08-10T00:00:00Z".to_owned(),
+                revealed_at: Some("PRIVATE_REVEALED_AT".to_owned()),
+                reveal_verified: Some(true),
+            },
+            crate::models::AttestationSeal {
+                content_commitment: commitment.to_owned(),
+                sealed_at: "2026-08-10T00:00:00Z".to_owned(),
+                revealed_at: Some("2026-08-11T00:00:00Z".to_owned()),
+                reveal_verified: Some(false),
+            },
+        ];
+        for hostile_seal in hostile_seals {
+            let hostile = unsealed.clone().with_seal(Some(hostile_seal));
+            let public_hostile = public_attestation_bundle(&hostile);
+            assert!(public_hostile.seal.is_none());
+            assert!(public_hostile.omissions.iter().any(|omission| {
+                omission.field == "publicProjection.invalidSeal"
+                    && omission.reason
+                        == "invalid seal evidence was omitted from the public attestation bundle"
+            }));
+            assert_eq!(
+                public_attestation_bundle(&public_hostile),
+                public_hostile,
+                "hostile seal omission must be idempotent"
+            );
+            let rendered = public_hostile.canonical_json();
+            assert!(!rendered.contains(&hostile_commitment));
+            assert!(!rendered.contains("PRIVATE_SEALED_AT"));
+            assert!(!rendered.contains("PRIVATE_REVEALED_AT"));
         }
     }
 

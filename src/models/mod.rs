@@ -51,11 +51,12 @@ pub mod verification;
 pub mod why_tag;
 
 pub use attestation::{
-    ATTESTATION_BUNDLE_SCHEMA_V1, ATTESTATION_BUNDLE_SCHEMA_V2, ATTESTATION_HASH_ALGORITHM,
-    ATTESTATION_LOCAL_TRUTH_STATEMENT, AttestationBundle, AttestationEvidenceManifest,
-    AttestationEvidenceRef, AttestationHashEntry, AttestationHashManifest, AttestationOmission,
-    AttestationRedactionEntry, AttestationRedactionManifest, AttestationSeal, AttestationSubject,
-    AttestationSubjectKind, AttestationTrustStatement, ParseAttestationSubjectKindError,
+    ATTESTATION_BUNDLE_SCHEMA_V2, ATTESTATION_HASH_ALGORITHM, ATTESTATION_LOCAL_TRUTH_STATEMENT,
+    AttestationBundle, AttestationEvidenceManifest, AttestationEvidenceRef, AttestationHashEntry,
+    AttestationHashManifest, AttestationOmission, AttestationRedactionEntry,
+    AttestationRedactionManifest, AttestationSeal, AttestationSealValidationError,
+    AttestationSubject, AttestationSubjectKind, AttestationTrustStatement,
+    ParseAttestationSubjectKindError, validate_attestation_seal_fields,
 };
 pub use backup::{
     BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_LIST_SCHEMA_V1,
