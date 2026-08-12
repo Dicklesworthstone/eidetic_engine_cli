@@ -657,7 +657,8 @@ SECRET_FAST_EXIT=$LAST_EXIT
 if [[ "${SECRET_PLANT_EXIT}" -eq 0 && "${SECRET_FAST_EXIT}" -eq 0 ]] \
     && ! grep -Fq "${SECRET_TAG}" "${SECRET_FAST_JSON}" \
     && jq -e '[.data.fastContent.recent[]?, .data.fastContent.relevant[]?
-              | select(any(.tags[]?; startswith("[REDACTED:public_replay_text:")))]
+              | select(.content == "Planted secret-shaped tag probe for fast orientation.")
+              | select(any(.tags[]?; . == "[REDACTED:github_token]"))]
               | length >= 1' "${SECRET_FAST_JSON}" >/dev/null 2>&1; then
     event fast_orient_json_redacts_secret_shaped_tag pass
 else
@@ -667,7 +668,9 @@ fi
 
 run_ee --workspace "${SCALE_WS}" orient --fast "Planted secret-shaped tag probe"
 SECRET_FAST_HUMAN="${LAST_STDOUT}"
-if [[ "${LAST_EXIT}" -eq 0 ]] && ! grep -Fq "${SECRET_TAG}" "${SECRET_FAST_HUMAN}"; then
+if [[ "${LAST_EXIT}" -eq 0 ]] \
+    && grep -Fq "[REDACTED:github_token]" "${SECRET_FAST_HUMAN}" \
+    && ! grep -Fq "${SECRET_TAG}" "${SECRET_FAST_HUMAN}"; then
     event fast_orient_human_never_leaks_secret_shaped_tag pass
 else
     event fast_orient_human_never_leaks_secret_shaped_tag fail \
