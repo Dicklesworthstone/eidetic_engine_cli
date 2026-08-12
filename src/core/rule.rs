@@ -1280,6 +1280,116 @@ struct PreparedRuleUpdate {
     next_detail: RuleDetails,
 }
 
+/// Post-commit derived-index convergence shared by every durable rule
+/// mutation (bd-index-auto-freshness-m5kwf). `index_status` becomes
+/// `indexed` only when the coalesced drain reports every job literally
+/// `completed`; any other outcome keeps the durable job retryable, keeps the
+/// prior truthful `queued` status, and appends the cataloged
+/// `rule_index_publish_failed` degradation with an exact-source repair.
+fn apply_rule_index_convergence(
+    connection: &DbConnection,
+    workspace_id: &str,
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+    rule_id: &str,
+    index_status: &mut String,
+    degraded: &mut Vec<RuleAddDegradation>,
+) {
+    let index_dir = workspace_path
+        .join(".ee")
+        .join(crate::core::index::DEFAULT_INDEX_SUBDIR);
+    let failure = match crate::core::index::process_pending_index_jobs_coalesced(
+        connection,
+        workspace_id,
+        &index_dir,
+        None,
+    ) {
+        Ok(job_reports) => {
+            let non_completed = job_reports
+                .iter()
+                .find(|job_report| job_report.outcome != "completed")
+                .map(|job_report| {
+                    job_report
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| format!("index job outcome was {}", job_report.outcome))
+                });
+            if non_completed.is_none() {
+                let status =
+                    crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                        workspace_path: workspace_path.to_path_buf(),
+                        database_path: database_path.map(Path::to_path_buf),
+                        index_dir: None,
+                    });
+                match status {
+                    Ok(status)
+                        if status.health == crate::core::index::IndexHealth::Ready
+                            && status.db_generation.is_some()
+                            && status.db_generation == status.index_generation =>
+                    {
+                        *index_status = "indexed".to_owned();
+                        return;
+                    }
+                    Ok(status) => format!(
+                        "post-drain index status was {:?} (database generation {:?}, index generation {:?})",
+                        status.health, status.db_generation, status.index_generation
+                    ),
+                    Err(error) => format!("post-drain index status could not be verified: {error}"),
+                }
+            } else {
+                non_completed.unwrap_or_else(|| "index job did not complete".to_owned())
+            }
+        }
+        Err(error) => error.to_string(),
+    };
+    degraded.push(RuleAddDegradation {
+        code: "rule_index_publish_failed".to_owned(),
+        severity: "medium".to_owned(),
+        message: format!(
+            "Rule {rule_id} mutation was committed, but automatic publication of durable search-index work did not complete: {failure}. Search may omit the current rule state until the durable job is retried."
+        ),
+        repair: rule_index_repair_command(workspace_path, database_path),
+    });
+}
+
+/// Exact-source repair command for a failed rule index publication.
+fn rule_index_repair_command(workspace_path: &Path, database_path: Option<&Path>) -> String {
+    let workspace = rule_shell_quote_command_arg(workspace_path.to_string_lossy().as_ref());
+    match database_path {
+        Some(database_path) => {
+            let database = rule_shell_quote_command_arg(database_path.to_string_lossy().as_ref());
+            format!("ee index rebuild --workspace {workspace} --database {database}")
+        }
+        None => format!("ee index rebuild --workspace {workspace}"),
+    }
+}
+
+fn rule_shell_quote_command_arg(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_owned();
+    }
+    if value.bytes().all(|byte| {
+        matches!(
+            byte,
+            b'A'..=b'Z'
+                | b'a'..=b'z'
+                | b'0'..=b'9'
+                | b'_'
+                | b'-'
+                | b'.'
+                | b'/'
+                | b':'
+                | b'@'
+                | b'+'
+                | b'='
+        )
+    }) {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
 /// Add a procedural rule or preview the write.
 pub fn add_rule(options: &RuleAddOptions<'_>) -> Result<RuleAddReport, DomainError> {
     let prepared = prepare_rule_add(options)?;
@@ -1368,57 +1478,15 @@ pub fn add_rule(options: &RuleAddOptions<'_>) -> Result<RuleAddReport, DomainErr
         Some(index_job_id),
         true,
     );
-    // bd-index-auto-freshness-m5kwf: a rule write is an ordinary write path.
-    // Converge the derived index post-commit the same way remember and JSONL
-    // import do. The rule row above is already durable, so any publication
-    // failure downgrades to a truthful non-fatal degradation while the
-    // durable index job stays pending and retryable.
-    let index_dir = prepared
-        .workspace_path
-        .join(".ee")
-        .join(crate::core::index::DEFAULT_INDEX_SUBDIR);
-    let drain = crate::core::index::process_pending_index_jobs_coalesced(
+    apply_rule_index_convergence(
         &connection,
         &prepared.workspace_id,
-        &index_dir,
-        None,
+        &prepared.workspace_path,
+        options.database_path,
+        &rule_id,
+        &mut report.index_status,
+        &mut report.degraded,
     );
-    match drain {
-        Ok(job_reports)
-            if job_reports
-                .iter()
-                .all(|job_report| job_report.outcome == "completed") =>
-        {
-            report.index_status = "indexed".to_owned();
-        }
-        Ok(job_reports) => {
-            let first_error = job_reports
-                .iter()
-                .find(|job_report| job_report.outcome != "completed")
-                .and_then(|job_report| job_report.error.clone())
-                .unwrap_or_else(|| "index job did not complete".to_owned());
-            report.degraded.push(RuleAddDegradation {
-                code: "rule_index_publish_failed".to_owned(),
-                severity: "medium".to_owned(),
-                message: format!(
-                    "Rule {} is durably stored, but derived index publication failed and its index job remains retryable: {first_error}",
-                    report.rule_id
-                ),
-                repair: "ee index rebuild --workspace .".to_owned(),
-            });
-        }
-        Err(error) => {
-            report.degraded.push(RuleAddDegradation {
-                code: "rule_index_publish_failed".to_owned(),
-                severity: "medium".to_owned(),
-                message: format!(
-                    "Rule {} is durably stored, but derived index publication failed and its index job remains pending: {error}",
-                    report.rule_id
-                ),
-                repair: "ee index rebuild --workspace .".to_owned(),
-            });
-        }
-    }
     Ok(report)
 }
 
@@ -1645,7 +1713,7 @@ pub fn protect_rule(options: &RuleProtectOptions<'_>) -> Result<RuleProtectRepor
             repair: Some("ee doctor".to_owned()),
         })?;
 
-    Ok(rule_protect_report(
+    let mut report = rule_protect_report(
         &prepared,
         &rule_id,
         options.protected,
@@ -1654,7 +1722,20 @@ pub fn protect_rule(options: &RuleProtectOptions<'_>) -> Result<RuleProtectRepor
         false,
         Some(audit_id),
         Some(index_job_id),
-    ))
+    );
+    if report.index_job_id.is_some() {
+        let mut index_status = "queued".to_owned();
+        apply_rule_index_convergence(
+            &connection,
+            &prepared.workspace_id,
+            &prepared.workspace_path,
+            options.database_path,
+            &rule_id,
+            &mut index_status,
+            &mut report.degraded,
+        );
+    }
+    Ok(report)
 }
 
 /// Record lifecycle evidence for one procedural rule.
@@ -1824,7 +1905,7 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
 
     let updated = load_active_rule(&connection, &prepared.workspace_id, &rule_id)?;
     let updated_detail = load_rule_details(&connection, updated)?;
-    Ok(rule_mark_report(RuleMarkReportInput {
+    let mut report = rule_mark_report(RuleMarkReportInput {
         prepared: &prepared,
         rule_id: &rule_id,
         dry_run: false,
@@ -1836,7 +1917,19 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
         evidence: &evidence,
         previous_rule: previous_detail,
         rule: updated_detail,
-    }))
+    });
+    if report.index_job_id.is_some() {
+        apply_rule_index_convergence(
+            &connection,
+            &prepared.workspace_id,
+            &prepared.workspace_path,
+            options.database_path,
+            &rule_id,
+            &mut report.index_status,
+            &mut report.degraded,
+        );
+    }
+    Ok(report)
 }
 
 /// Update mutable metadata for one procedural rule.
@@ -1927,7 +2020,7 @@ pub fn update_rule(options: &RuleUpdateOptions<'_>) -> Result<RuleUpdateReport, 
 
     let updated = load_active_rule(&connection, &prepared.workspace_id, &rule_id)?;
     let updated_detail = load_rule_details(&connection, updated)?;
-    Ok(rule_update_report(RuleUpdateReportInput {
+    let mut report = rule_update_report(RuleUpdateReportInput {
         prepared: &prepared,
         rule_id: &rule_id,
         dry_run: false,
@@ -1938,7 +2031,19 @@ pub fn update_rule(options: &RuleUpdateOptions<'_>) -> Result<RuleUpdateReport, 
         index_job_id: Some(index_job_id),
         previous_rule: previous_detail,
         rule: updated_detail,
-    }))
+    });
+    if report.index_job_id.is_some() {
+        apply_rule_index_convergence(
+            &connection,
+            &prepared.workspace_id,
+            &prepared.workspace_path,
+            options.database_path,
+            &rule_id,
+            &mut report.index_status,
+            &mut report.degraded,
+        );
+    }
+    Ok(report)
 }
 
 /// Extract procedural-rule curation candidates from repeated semantic memories.
@@ -5756,12 +5861,23 @@ mod tests {
             &[],
         )
         .map_err(|error| format!("post-rule-add search: {error:?}"))?;
+        let hit = search
+            .results
+            .iter()
+            .find(|hit| hit.doc_id == report.rule_id)
+            .ok_or("rule hit missing from immediate search")?;
+        let metadata = hit
+            .metadata
+            .as_ref()
+            .ok_or("rule hit missing indexed metadata")?;
         ensure(
-            search
-                .results
-                .iter()
-                .any(|hit| hit.doc_id == report.rule_id),
-            "exact rule content searchable immediately without rebuild",
+            metadata.get("content").and_then(serde_json::Value::as_str)
+                == Some("Freshness proof rule about coalesced convergence.")
+                && metadata
+                    .get("workspace_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(report.workspace_id.as_str()),
+            "search hit must carry the exact indexed rule content and source workspace identity",
         )?;
         ensure(
             !search
@@ -5851,6 +5967,144 @@ mod tests {
             retryable >= 1,
             "publish failure must leave durable retryable index work",
         )
+    }
+
+    #[test]
+    fn rule_lifecycle_matrix_keeps_index_fresh_after_every_mutation() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let assert_fresh = |expect_hit_query: &str, rule_id: &str, label: &str| -> TestResult {
+            let status =
+                crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                    workspace_path: temp.path().to_path_buf(),
+                    database_path: None,
+                    index_dir: None,
+                })
+                .map_err(|error| format!("{label} index status: {error:?}"))?;
+            ensure(
+                status.health == crate::core::index::IndexHealth::Ready
+                    && status.db_generation.is_some()
+                    && status.db_generation == status.index_generation,
+                &format!("{label}: db generation must equal index generation"),
+            )?;
+            let search = crate::core::search::run_search_with_filters(
+                &crate::core::search::SearchOptions {
+                    workspace_path: temp.path().to_path_buf(),
+                    database_path: None,
+                    index_dir: None,
+                    query: expect_hit_query.to_owned(),
+                    limit: 5,
+                    speed: crate::search::SpeedMode::Instant,
+                    explain: false,
+                    as_of: None,
+                    include_tombstoned: false,
+                    include_expired: false,
+                    include_future: false,
+                    include_stale: false,
+                    relevance_floor: Some(0.0),
+                    dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                    source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                    strict_source_mode: true,
+                    memory_scope: crate::models::MemoryScope::Workspace,
+                    strict_scope: false,
+                },
+                None,
+                &[],
+            )
+            .map_err(|error| format!("{label} search: {error:?}"))?;
+            ensure(
+                search.results.iter().any(|hit| hit.doc_id == rule_id),
+                &format!("{label}: current rule state must be searchable"),
+            )?;
+            ensure(
+                !search
+                    .degraded
+                    .iter()
+                    .any(|entry| entry.code == "search_index_stale"),
+                &format!("{label}: no stale advisory"),
+            )
+        };
+
+        let added = add_rule(&RuleAddOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Matrix rule about staged provenance discipline.",
+            scope: "workspace",
+            scope_pattern: None,
+            maturity: "candidate",
+            confidence: None,
+            utility: 0.5,
+            importance: 0.5,
+            trust_class: "human_explicit",
+            protected: false,
+            tags: &[],
+            source_memory_ids: &[],
+            dry_run: false,
+            actor: None,
+        })
+        .map_err(|error| error.message())?;
+        ensure(added.index_status == "indexed", "add must report indexed")?;
+        let rule_id = added.rule_id.clone();
+        assert_fresh("staged provenance discipline", &rule_id, "after add")?;
+
+        let marked = mark_rule(&RuleMarkOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            rule_id: &rule_id,
+            trigger: "outcome_helpful",
+            evidence: RuleMarkEvidenceOptions::default(),
+            dry_run: false,
+            actor: None,
+        })
+        .map_err(|error| error.message())?;
+        ensure(
+            marked.index_job_id.is_none() || marked.index_status == "indexed",
+            "an indexable mark must report indexed",
+        )?;
+        assert_fresh("staged provenance discipline", &rule_id, "after mark")?;
+
+        let updated = update_rule(&RuleUpdateOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            rule_id: &rule_id,
+            content: Some("Matrix rule updated toward coalesced drain proof."),
+            scope: None,
+            scope_pattern: None,
+            clear_scope_pattern: false,
+            trust_class: None,
+            confidence: None,
+            utility: None,
+            importance: None,
+            protected: None,
+            tags: None,
+            clear_tags: false,
+            source_memory_ids: None,
+            clear_source_memory_ids: false,
+            dry_run: false,
+            actor: None,
+        })
+        .map_err(|error| error.message())?;
+        ensure(
+            updated.index_status == "indexed",
+            "update must report indexed",
+        )?;
+        assert_fresh("coalesced drain proof", &rule_id, "after update")?;
+
+        let protected = protect_rule(&RuleProtectOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            rule_id: &rule_id,
+            protected: true,
+            dry_run: false,
+            actor: None,
+        })
+        .map_err(|error| error.message())?;
+        ensure(
+            protected.degraded.is_empty(),
+            "healthy protect publication must not degrade",
+        )?;
+        assert_fresh("coalesced drain proof", &rule_id, "after protect")
     }
 
     #[test]

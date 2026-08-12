@@ -1,0 +1,35 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "rule_index_publish_failed",
+  "introduced_by": {
+    "bead": "bd-index-auto-freshness-m5kwf",
+    "epic_letter": "I"
+  },
+  "surfaces": [
+    "rule add",
+    "rule mark",
+    "rule update",
+    "rule protect"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A rule mutation commits its source-of-truth row, audit record, and durable index job, but the real post-commit index publisher cannot complete that job.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# Replace the active index directory with a symlink so the real publisher claims the durable job and then refuses publication."
+    ],
+    "invocation": "ee rule add --workspace . 'A durable rule whose derived index publication is blocked.' --json"
+  },
+  "expected_emission": {
+    "code": "rule_index_publish_failed",
+    "severity": "medium",
+    "message_contains": [
+      "mutation was committed",
+      "automatic publication of durable search-index work",
+      "did not complete",
+      "Search may omit the current rule state"
+    ],
+    "repair_contains": "ee index rebuild --workspace"
+  }
+}
