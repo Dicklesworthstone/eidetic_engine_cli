@@ -23,6 +23,7 @@
         "degraded",
         "errors",
         "metrics",
+        "rerank",
         "elapsedMs"
       ],
       "additionalProperties": false,

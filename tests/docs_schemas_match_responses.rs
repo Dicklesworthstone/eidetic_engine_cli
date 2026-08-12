@@ -2376,6 +2376,15 @@ fn search_schema_closes_rerank_advisory_and_rejects_fake_automatic_repairs() -> 
     });
     validate_json_schema(&response, &schema, &schema, "$")?;
 
+    let mut missing_rerank = response.clone();
+    missing_rerank["data"]
+        .as_object_mut()
+        .ok_or_else(|| "search response data must be an object".to_owned())?
+        .remove("rerank");
+    if validate_json_schema(&missing_rerank, &schema, &schema, "$").is_ok() {
+        return Err("ee.search.v1 must require the structured rerank posture".to_owned());
+    }
+
     let mut placeholder_repair = response.clone();
     placeholder_repair["data"]["rerank"]["advisory"]["repair"] =
         json!("ee model fetch rerank-default --from-file /path/to/model.tar.zst");

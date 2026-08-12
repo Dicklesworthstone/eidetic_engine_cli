@@ -16,8 +16,8 @@ use crate::core::context::{
 use crate::core::doctor::DoctorReport;
 use crate::core::memory::{RememberMemoryOptions, RememberMemoryReport, remember_memory};
 use crate::core::search::{
-    SearchAdvisorySession, SearchDedupMode, SearchOptions, SearchReport, SearchSourceMode,
-    run_search,
+    SearchAdvisorySession, SearchAdvisorySettlement, SearchDedupMode, SearchOptions, SearchReport,
+    SearchSourceMode, run_search,
 };
 use crate::core::subscribe::{SubscribePollOptions, parse_subscribe_filter, poll_memory_deltas};
 use crate::core::swarm_brief::{
@@ -56,6 +56,14 @@ pub const SERVE_ENDPOINT_SCHEMA_V1: &str = "ee.serve.endpoint.v1";
 pub const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 pub const DEFAULT_SERVE_PORT: u16 = 8766;
 pub const MIN_SERVE_TOKEN_BITS: usize = 256;
+const SERVE_ADVISORY_SETTLEMENT_RETRY_LIMIT: usize = 64;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ServeSearchAdvisoryDelivery {
+    workspace_key: String,
+    token: u64,
+    large_gap_capacity_busy: bool,
+}
 
 /// Process-lifetime advisory state for repeated `/v1/search` requests.
 ///
@@ -70,7 +78,11 @@ struct ServeSearchAdvisoryState {
 }
 
 impl ServeSearchAdvisoryState {
-    fn render(&self, report: &SearchReport, workspace_key: &str) -> Result<JsonValue, DomainError> {
+    fn render_for_delivery(
+        &self,
+        report: &SearchReport,
+        workspace_key: &str,
+    ) -> Result<(JsonValue, Option<ServeSearchAdvisoryDelivery>), DomainError> {
         let mut session = self
             .session
             .lock()
@@ -79,7 +91,56 @@ impl ServeSearchAdvisoryState {
                     .to_owned(),
                 repair: Some("Restart `ee serve --foreground`.".to_owned()),
             })?;
-        Ok(report.data_json_with_advisory_session_for_workspace(&mut session, workspace_key))
+        let mut reservation = session.reserve_delivery(workspace_key);
+        let data = report.data_json_with_advisory_delivery_reservation(
+            &mut session,
+            workspace_key,
+            &mut reservation,
+        );
+        let delivery = reservation.emitted().then(|| ServeSearchAdvisoryDelivery {
+            workspace_key: reservation.workspace_id().to_owned(),
+            token: reservation.token(),
+            large_gap_capacity_busy: reservation.large_gap_capacity_busy(),
+        });
+        Ok((data, delivery))
+    }
+
+    fn settle(
+        &self,
+        delivery: Option<ServeSearchAdvisoryDelivery>,
+        delivered: bool,
+    ) -> Result<(), DomainError> {
+        let Some(delivery) = delivery else {
+            return Ok(());
+        };
+        for attempt in 0..=SERVE_ADVISORY_SETTLEMENT_RETRY_LIMIT {
+            let settlement = self
+                .session
+                .lock()
+                .map_err(|_| DomainError::Configuration {
+                    message: "ee serve search advisory state is unavailable after a process panic."
+                        .to_owned(),
+                    repair: Some("Restart `ee serve --foreground`.".to_owned()),
+                })?
+                .settle_delivery(
+                    &delivery.workspace_key,
+                    delivery.token,
+                    delivered,
+                    delivery.large_gap_capacity_busy,
+                );
+            if settlement == SearchAdvisorySettlement::Complete {
+                return Ok(());
+            }
+            if attempt < SERVE_ADVISORY_SETTLEMENT_RETRY_LIMIT {
+                std::thread::yield_now();
+            }
+        }
+        tracing::warn!(
+            workspace_key = delivery.workspace_key,
+            token = delivery.token,
+            "serve search advisory capacity remained busy after bounded settlement retries"
+        );
+        Ok(())
     }
 }
 
@@ -263,6 +324,47 @@ pub struct ServeForegroundOnceReport {
     pub listener_metadata: JsonValue,
     pub accepted: ServeAcceptedConnection,
 }
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServeForegroundReport {
+    pub bound_addr: SocketAddr,
+    pub listener_metadata: JsonValue,
+    pub accepted_connections: usize,
+    pub successful_connections: usize,
+}
+
+#[derive(Debug)]
+struct ServeRenderedResponse {
+    wire: String,
+    advisory_delivery: Option<ServeSearchAdvisoryDelivery>,
+}
+
+impl ServeRenderedResponse {
+    fn without_delivery(wire: String) -> Self {
+        Self {
+            wire,
+            advisory_delivery: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ServeDispatchPayload {
+    payload: JsonValue,
+    advisory_delivery: Option<ServeSearchAdvisoryDelivery>,
+}
+
+impl ServeDispatchPayload {
+    fn without_delivery(payload: JsonValue) -> Self {
+        Self {
+            payload,
+            advisory_delivery: None,
+        }
+    }
+}
+
+type ServeSearchPayloadRenderer =
+    fn(&ServeHttpRequest, &ServeSearchAdvisoryState) -> Result<ServeDispatchPayload, DomainError>;
 
 pub fn serve_startup_report_json(
     options: &ServeStartupOptions,
@@ -955,9 +1057,37 @@ pub fn render_serve_transport_exchange(
     token: Option<&str>,
     elapsed_ms: u64,
 ) -> String {
+    let advisory_state = ServeSearchAdvisoryState::default();
+    let rendered = render_serve_transport_exchange_with_state(
+        request_id,
+        request_bytes,
+        limits,
+        token,
+        elapsed_ms,
+        &advisory_state,
+        serve_search_payload_json,
+    );
+    let _ = advisory_state.settle(rendered.advisory_delivery, true);
+    rendered.wire
+}
+
+fn render_serve_transport_exchange_with_state(
+    request_id: &str,
+    request_bytes: &[u8],
+    limits: &ServeLimits,
+    token: Option<&str>,
+    elapsed_ms: u64,
+    advisory_state: &ServeSearchAdvisoryState,
+    search_payload_renderer: ServeSearchPayloadRenderer,
+) -> ServeRenderedResponse {
     let request = match parse_serve_http_request(request_bytes, limits) {
         Ok(request) => request,
-        Err(error) => return render_serve_http_json_response(400, &serve_error_payload(&error)),
+        Err(error) => {
+            return ServeRenderedResponse::without_delivery(render_serve_http_json_response(
+                400,
+                &serve_error_payload(&error),
+            ));
+        }
     };
 
     let auth_state = serve_auth_state(&request, token);
@@ -967,10 +1097,10 @@ pub fn render_serve_transport_exchange(
     // unknown path returned 401 even when the bearer token was correct,
     // hiding endpoint-discovery errors behind an auth failure.
     if request.endpoint.auth_required() && auth_state != "accepted" {
-        return render_serve_http_json_response(
+        return ServeRenderedResponse::without_delivery(render_serve_http_json_response(
             401,
             &serve_auth_failure_envelope(request_id, &request, auth_state, elapsed_ms),
-        );
+        ));
     }
 
     let plan = match serve_dispatch_plan(&request) {
@@ -981,7 +1111,7 @@ pub fn render_serve_transport_exchange(
             } else {
                 400
             };
-            return render_serve_http_json_response(
+            return ServeRenderedResponse::without_delivery(render_serve_http_json_response(
                 status_code,
                 &serve_error_exchange_envelope(
                     request_id,
@@ -991,7 +1121,7 @@ pub fn render_serve_transport_exchange(
                     &error,
                     elapsed_ms,
                 ),
-            );
+            ));
         }
     };
 
@@ -1011,14 +1141,19 @@ pub fn render_serve_transport_exchange(
                 0,
             ),
         };
-        return render_serve_http_sse_response(&frame);
+        return ServeRenderedResponse::without_delivery(render_serve_http_sse_response(&frame));
     }
 
-    let payload = match serve_dispatch_payload_for_plan(&plan, &request) {
+    let dispatched = match serve_dispatch_payload_for_plan(
+        &plan,
+        &request,
+        advisory_state,
+        search_payload_renderer,
+    ) {
         Ok(payload) => payload,
         Err(error) => {
             let status_code = serve_status_code_for_payload_error(&error);
-            return render_serve_http_json_response(
+            return ServeRenderedResponse::without_delivery(render_serve_http_json_response(
                 status_code,
                 &serve_error_exchange_envelope(
                     request_id,
@@ -1028,23 +1163,51 @@ pub fn render_serve_transport_exchange(
                     &error,
                     elapsed_ms,
                 ),
-            );
+            ));
         }
     };
-    render_serve_http_json_response(
-        200,
-        &serve_dispatch_exchange_envelope(
-            request_id, &request, auth_state, 200, &payload, elapsed_ms,
+    ServeRenderedResponse {
+        wire: render_serve_http_json_response(
+            200,
+            &serve_dispatch_exchange_envelope(
+                request_id,
+                &request,
+                auth_state,
+                200,
+                &dispatched.payload,
+                elapsed_ms,
+            ),
         ),
-    )
+        advisory_delivery: dispatched.advisory_delivery,
+    }
 }
 
 pub fn serve_single_connection_exchange(
+    stream: TcpStream,
+    request_id: &str,
+    limits: &ServeLimits,
+    token: Option<&str>,
+    elapsed_ms: u64,
+) -> Result<ServeConnectionExchange, DomainError> {
+    serve_single_connection_exchange_with_state(
+        stream,
+        request_id,
+        limits,
+        token,
+        elapsed_ms,
+        serve_search_advisory_state(),
+        serve_search_payload_json,
+    )
+}
+
+fn serve_single_connection_exchange_with_state(
     mut stream: TcpStream,
     request_id: &str,
     limits: &ServeLimits,
     token: Option<&str>,
     elapsed_ms: u64,
+    advisory_state: &ServeSearchAdvisoryState,
+    search_payload_renderer: ServeSearchPayloadRenderer,
 ) -> Result<ServeConnectionExchange, DomainError> {
     stream
         .set_read_timeout(Some(Duration::from_millis(
@@ -1078,21 +1241,44 @@ pub fn serve_single_connection_exchange(
         }
     }
 
-    let response =
-        render_serve_transport_exchange(request_id, &request_bytes, limits, token, elapsed_ms);
-    stream
-        .write_all(response.as_bytes())
-        .map_err(|error| serve_transport_io_error("write response", error))?;
-    stream
-        .flush()
-        .map_err(|error| serve_transport_io_error("flush response", error))?;
+    let rendered = render_serve_transport_exchange_with_state(
+        request_id,
+        &request_bytes,
+        limits,
+        token,
+        elapsed_ms,
+        advisory_state,
+        search_payload_renderer,
+    );
+    let response_bytes = rendered.wire.len();
+    let response_status_line = rendered.wire.lines().next().unwrap_or_default().to_owned();
+    write_serve_rendered_response(&mut stream, rendered, advisory_state)?;
     let _ = stream.shutdown(Shutdown::Both);
 
     Ok(ServeConnectionExchange {
         request_bytes: request_bytes.len(),
-        response_bytes: response.len(),
-        response_status_line: response.lines().next().unwrap_or_default().to_owned(),
+        response_bytes,
+        response_status_line,
     })
+}
+
+fn write_serve_rendered_response<W: Write>(
+    writer: &mut W,
+    rendered: ServeRenderedResponse,
+    advisory_state: &ServeSearchAdvisoryState,
+) -> Result<(), DomainError> {
+    let write_result = writer
+        .write_all(rendered.wire.as_bytes())
+        .map_err(|error| serve_transport_io_error("write response", error))
+        .and_then(|()| {
+            writer
+                .flush()
+                .map_err(|error| serve_transport_io_error("flush response", error))
+        });
+    let delivered = write_result.is_ok();
+    let settlement = advisory_state.settle(rendered.advisory_delivery, delivered);
+    write_result?;
+    settlement
 }
 
 pub fn serve_accept_once(
@@ -1168,6 +1354,92 @@ where
         bound_addr,
         listener_metadata,
         accepted,
+    })
+}
+
+pub fn serve_foreground<F>(
+    options: &ServeStartupOptions,
+    token: Option<&str>,
+    request_id_prefix: &str,
+    elapsed_ms: u64,
+    on_bound: F,
+) -> Result<ServeForegroundReport, DomainError>
+where
+    F: FnOnce(&ServeListenerBinding) -> Result<(), DomainError>,
+{
+    serve_foreground_with_connection_limit(
+        options,
+        token,
+        request_id_prefix,
+        elapsed_ms,
+        on_bound,
+        None,
+        serve_search_advisory_state(),
+        serve_search_payload_json,
+    )
+}
+
+fn serve_foreground_with_connection_limit<F>(
+    options: &ServeStartupOptions,
+    token: Option<&str>,
+    request_id_prefix: &str,
+    elapsed_ms: u64,
+    on_bound: F,
+    max_connections: Option<usize>,
+    advisory_state: &ServeSearchAdvisoryState,
+    search_payload_renderer: ServeSearchPayloadRenderer,
+) -> Result<ServeForegroundReport, DomainError>
+where
+    F: FnOnce(&ServeListenerBinding) -> Result<(), DomainError>,
+{
+    let binding = bind_serve_listener(options, token)?;
+    let bound_addr = binding
+        .listener
+        .local_addr()
+        .map_err(|error| serve_transport_io_error("inspect listener local address", error))?;
+    let listener_metadata = binding.metadata.clone();
+    on_bound(&binding)?;
+    binding
+        .listener
+        .set_nonblocking(false)
+        .map_err(|error| serve_transport_io_error("set listener blocking mode", error))?;
+
+    let mut accepted_connections = 0_usize;
+    let mut successful_connections = 0_usize;
+    while max_connections.is_none_or(|limit| accepted_connections < limit) {
+        let (stream, peer_addr) = binding
+            .listener
+            .accept()
+            .map_err(|error| serve_transport_io_error("accept connection", error))?;
+        accepted_connections = accepted_connections.saturating_add(1);
+        let request_id = format!("{request_id_prefix}-{accepted_connections}");
+        match serve_single_connection_exchange_with_state(
+            stream,
+            &request_id,
+            &options.limits,
+            token,
+            elapsed_ms,
+            advisory_state,
+            search_payload_renderer,
+        ) {
+            Ok(_) => {
+                successful_connections = successful_connections.saturating_add(1);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    peer_addr = %peer_addr,
+                    error_code = error.code(),
+                    "ee serve connection ended before a response was delivered"
+                );
+            }
+        }
+    }
+
+    Ok(ServeForegroundReport {
+        bound_addr,
+        listener_metadata,
+        accepted_connections,
+        successful_connections,
     })
 }
 
@@ -1393,15 +1665,28 @@ fn serve_error_exchange_envelope(
 fn serve_dispatch_payload_for_plan(
     plan: &ServeDispatchPlan,
     request: &ServeHttpRequest,
-) -> Result<JsonValue, DomainError> {
+    advisory_state: &ServeSearchAdvisoryState,
+    search_payload_renderer: ServeSearchPayloadRenderer,
+) -> Result<ServeDispatchPayload, DomainError> {
     match plan.endpoint {
-        ServeEndpoint::Status => serve_status_payload_json(),
-        ServeEndpoint::Doctor => serve_doctor_payload_json(),
-        ServeEndpoint::Search => serve_search_payload_json(request),
-        ServeEndpoint::Context => serve_context_payload_json(request),
-        ServeEndpoint::Why => serve_why_payload_json(request),
-        ServeEndpoint::SwarmBrief => serve_swarm_brief_payload_json(),
-        ServeEndpoint::DurableWrite => serve_durable_write_payload_json(plan, request),
+        ServeEndpoint::Status => {
+            serve_status_payload_json().map(ServeDispatchPayload::without_delivery)
+        }
+        ServeEndpoint::Doctor => {
+            serve_doctor_payload_json().map(ServeDispatchPayload::without_delivery)
+        }
+        ServeEndpoint::Search => search_payload_renderer(request, advisory_state),
+        ServeEndpoint::Context => {
+            serve_context_payload_json(request).map(ServeDispatchPayload::without_delivery)
+        }
+        ServeEndpoint::Why => {
+            serve_why_payload_json(request).map(ServeDispatchPayload::without_delivery)
+        }
+        ServeEndpoint::SwarmBrief => {
+            serve_swarm_brief_payload_json().map(ServeDispatchPayload::without_delivery)
+        }
+        ServeEndpoint::DurableWrite => serve_durable_write_payload_json(plan, request)
+            .map(ServeDispatchPayload::without_delivery),
         ServeEndpoint::Events | ServeEndpoint::Unknown => Err(serve_usage_error(format!(
             "Endpoint `{}` is not a JSON dispatch endpoint.",
             plan.endpoint.as_str()
@@ -1455,7 +1740,10 @@ fn serve_doctor_payload_json() -> Result<JsonValue, DomainError> {
     parse_rendered_response_json(&crate::output::render_doctor_json(&report), "doctor")
 }
 
-fn serve_search_payload_json(request: &ServeHttpRequest) -> Result<JsonValue, DomainError> {
+fn serve_search_payload_json(
+    request: &ServeHttpRequest,
+    advisory_state: &ServeSearchAdvisoryState,
+) -> Result<ServeDispatchPayload, DomainError> {
     let workspace_path = serve_current_workspace_path()?;
     let advisory_workspace_key = workspace_path.to_string_lossy().into_owned();
     let query = require_single_query_value(request, "q", "/v1/search")?;
@@ -1483,9 +1771,13 @@ fn serve_search_payload_json(request: &ServeHttpRequest) -> Result<JsonValue, Do
         message: error.to_string(),
         repair: error.repair_hint().map(str::to_owned),
     })?;
-    let data = serve_search_advisory_state().render(&report, &advisory_workspace_key)?;
+    let (data, advisory_delivery) =
+        advisory_state.render_for_delivery(&report, &advisory_workspace_key)?;
     let degraded = data.get("degraded").cloned().unwrap_or_else(|| json!([]));
-    Ok(serve_response_payload_from_data(data, degraded))
+    Ok(ServeDispatchPayload {
+        payload: serve_response_payload_from_data(data, degraded),
+        advisory_delivery,
+    })
 }
 
 fn serve_context_payload_json(request: &ServeHttpRequest) -> Result<JsonValue, DomainError> {
@@ -2848,46 +3140,207 @@ mod tests {
         }
     }
 
+    fn rerank_unavailable_search_payload(
+        request: &ServeHttpRequest,
+        advisory_state: &ServeSearchAdvisoryState,
+    ) -> Result<ServeDispatchPayload, DomainError> {
+        let query = require_single_query_value(request, "q", "/v1/search")?;
+        let report = rerank_unavailable_search_report(&query);
+        let (data, advisory_delivery) =
+            advisory_state.render_for_delivery(&report, "serve-transport-workspace")?;
+        let degraded = data.get("degraded").cloned().unwrap_or_else(|| json!([]));
+        Ok(ServeDispatchPayload {
+            payload: serve_response_payload_from_data(data, degraded),
+            advisory_delivery,
+        })
+    }
+
+    fn send_serve_test_request(
+        addr: SocketAddr,
+        token: &str,
+        path: &str,
+    ) -> Result<String, String> {
+        let mut client = TcpStream::connect(addr).map_err(|error| error.to_string())?;
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+        );
+        client
+            .write_all(request.as_bytes())
+            .map_err(|error| error.to_string())?;
+        client
+            .shutdown(Shutdown::Write)
+            .map_err(|error| error.to_string())?;
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .map_err(|error| error.to_string())?;
+        Ok(response)
+    }
+
+    fn serve_response_json(response: &str) -> Result<JsonValue, String> {
+        let (_, body) = split_http_response(response)?;
+        serde_json::from_str(body).map_err(|error| error.to_string())
+    }
+
     #[test]
-    fn serve_search_advisory_state_emits_permanent_notice_once_per_process_session() -> TestResult {
-        let state = ServeSearchAdvisoryState::default();
-        let first = state
-            .render(
-                &rerank_unavailable_search_report("first serve search"),
-                "serve-workspace",
+    fn serve_foreground_reuses_advisory_session_across_real_search_requests() -> TestResult {
+        let token = "01234567890123456789012345678901";
+        let server_token = token.to_owned();
+        let options = ServeStartupOptions {
+            port: 0,
+            limits: ServeLimits {
+                connection_read_timeout_ms: 1_000,
+                ..ServeLimits::default()
+            },
+            ..ServeStartupOptions::default()
+        };
+        let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || -> Result<ServeForegroundReport, String> {
+            let state = ServeSearchAdvisoryState::default();
+            serve_foreground_with_connection_limit(
+                &options,
+                Some(server_token.as_str()),
+                "req-persistent-search",
+                0,
+                |binding| {
+                    addr_tx
+                        .send(binding.listener.local_addr().map_err(|error| {
+                            serve_transport_io_error("inspect test listener", error)
+                        })?)
+                        .map_err(|error| DomainError::Configuration {
+                            message: format!("Failed to publish test listener address: {error}"),
+                            repair: None,
+                        })
+                },
+                Some(2),
+                &state,
+                rerank_unavailable_search_payload,
             )
+            .map_err(|error| error.to_string())
+        });
+
+        let addr = addr_rx
+            .recv_timeout(Duration::from_secs(1))
             .map_err(|error| error.to_string())?;
-        let repeated = state
-            .render(
-                &rerank_unavailable_search_report("repeated serve search"),
-                "serve-workspace",
-            )
-            .map_err(|error| error.to_string())?;
+        let first =
+            serve_response_json(&send_serve_test_request(addr, token, "/v1/search?q=first")?)?;
+        let repeated = serve_response_json(&send_serve_test_request(
+            addr,
+            token,
+            "/v1/search?q=repeated",
+        )?)?;
+        let report = server
+            .join()
+            .map_err(|_| "persistent serve thread panicked".to_owned())??;
+        let first_rerank = &first["response"]["payload"]["data"]["rerank"];
+        let repeated_rerank = &repeated["response"]["payload"]["data"]["rerank"];
 
         ensure(
-            first["rerank"]["advisory"]["resolution"].as_str(),
+            first_rerank["advisory"]["resolution"].as_str(),
             Some("automatic_repair_unavailable"),
             "first serve search advisory resolution",
         )?;
         ensure(
-            first["rerank"]["advisorySummary"]["scope"].as_str(),
+            first_rerank["advisorySummary"]["scope"].as_str(),
             Some(crate::core::search::SEARCH_ADVISORY_SCOPE_PROCESS),
             "serve search advisory scope",
         )?;
         ensure(
-            repeated["rerank"]["advisory"].is_null(),
+            repeated_rerank["advisory"].is_null(),
             true,
             "repeated serve search suppresses permanent advisory",
         )?;
         ensure(
-            repeated["rerank"]["advisorySummary"]["suppressedCount"].as_u64(),
+            repeated_rerank["advisorySummary"]["suppressedCount"].as_u64(),
             Some(1),
             "repeated serve search suppression count",
         )?;
         ensure(
-            repeated["rerank"]["advisorySummary"]["sessionOccurrenceCount"].as_u64(),
+            repeated_rerank["advisorySummary"]["sessionOccurrenceCount"].as_u64(),
             Some(2),
             "serve process advisory occurrence count",
+        )?;
+        ensure(report.accepted_connections, 2, "persistent accepted count")?;
+        ensure(report.successful_connections, 2, "persistent success count")
+    }
+
+    struct FailingServeWriter;
+
+    impl Write for FailingServeWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                ErrorKind::BrokenPipe,
+                "intentional disconnected client",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn serve_failed_search_delivery_retries_permanent_advisory() -> TestResult {
+        let token = "01234567890123456789012345678901";
+        let request = format!(
+            "GET /v1/search?q=retry HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+        );
+        let state = ServeSearchAdvisoryState::default();
+        let first = render_serve_transport_exchange_with_state(
+            "req-failed-delivery",
+            request.as_bytes(),
+            &ServeLimits::default(),
+            Some(token),
+            0,
+            &state,
+            rerank_unavailable_search_payload,
+        );
+        let first_json = serve_response_json(&first.wire)?;
+        ensure(
+            first_json["response"]["payload"]["data"]["rerank"]["advisory"].is_object(),
+            true,
+            "failed delivery initially carries advisory",
+        )?;
+        let error = write_serve_rendered_response(&mut FailingServeWriter, first, &state)
+            .expect_err("disconnected writer must fail");
+        ensure(
+            error.to_string().contains("write response"),
+            true,
+            "failed delivery reports write failure",
+        )?;
+
+        let retry = render_serve_transport_exchange_with_state(
+            "req-retry-delivery",
+            request.as_bytes(),
+            &ServeLimits::default(),
+            Some(token),
+            0,
+            &state,
+            rerank_unavailable_search_payload,
+        );
+        let retry_json = serve_response_json(&retry.wire)?;
+        ensure(
+            retry_json["response"]["payload"]["data"]["rerank"]["advisory"].is_object(),
+            true,
+            "retry preserves undelivered advisory",
+        )?;
+        write_serve_rendered_response(&mut Vec::new(), retry, &state)
+            .map_err(|error| error.to_string())?;
+
+        let delivered = render_serve_transport_exchange_with_state(
+            "req-after-delivery",
+            request.as_bytes(),
+            &ServeLimits::default(),
+            Some(token),
+            0,
+            &state,
+            rerank_unavailable_search_payload,
+        );
+        let delivered_json = serve_response_json(&delivered.wire)?;
+        ensure(
+            delivered_json["response"]["payload"]["data"]["rerank"]["advisory"].is_null(),
+            true,
+            "successful retry consumes advisory",
         )
     }
 

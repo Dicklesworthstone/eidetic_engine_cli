@@ -20003,7 +20003,7 @@ where
             };
             match crate::core::model::build_model_status_report(&options) {
                 Ok(report) => render_model_status(cli, &report, stdout),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
         }
         ModelCommand::List(args) => {
@@ -20013,7 +20013,7 @@ where
             };
             match crate::core::model::build_model_list_report(&options) {
                 Ok(report) => render_model_list(cli, &report, stdout),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
         }
         ModelCommand::Fetch(args) => {
@@ -20026,7 +20026,7 @@ where
             };
             match crate::core::model::fetch_model(&options) {
                 Ok(report) => render_model_fetch(cli, &report, stdout),
-                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+                Err(error) => write_domain_error(&error, cli.renderer(), stdout, stderr),
             }
         }
     }
@@ -20040,29 +20040,19 @@ fn render_model_status<W>(
 where
     W: Write,
 {
+    let response = model_response_envelope(report.data_json());
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
             write_stdout(stdout, &report.human_summary())
         }
         output::Renderer::Toon => write_stdout(
             stdout,
-            &format!(
-                "MODEL_STATUS|{}|registered={}|available={}\n",
-                report.active.fast_model_id, report.registered_count, report.available_count,
-            ),
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
         ),
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V2,
-                "success": true,
-                "data": report.data_json(),
-                "degraded": [],
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
     }
 }
 
@@ -20074,31 +20064,35 @@ fn render_model_list<W>(
 where
     W: Write,
 {
+    let response = model_response_envelope(report.data_json());
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
             write_stdout(stdout, &report.human_summary())
         }
         output::Renderer::Toon => write_stdout(
             stdout,
-            &format!(
-                "MODEL_LIST|{}|count={}\n",
-                report.workspace_id,
-                report.entries.len(),
-            ),
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
         ),
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V2,
-                "success": true,
-                "data": report.data_json(),
-                "degraded": [],
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
     }
+}
+
+fn model_response_envelope(data: serde_json::Value) -> serde_json::Value {
+    let degraded = crate::output::response_degraded_from_data(&serde_json::json!({
+        "degraded": data
+            .get("degradations")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    }));
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+        "degraded": degraded,
+    })
 }
 
 fn render_model_fetch<W>(
@@ -61209,10 +61203,10 @@ where
         let token = read(EnvVar::ServeToken);
         let options = serve_startup_options_from_args(args);
         let mut startup_written = false;
-        let result = crate::serve::serve_foreground_once(
+        let result = crate::serve::serve_foreground(
             &options,
             token.as_deref(),
-            "cli-serve-foreground-once",
+            "cli-serve-foreground",
             0,
             |binding| {
                 let response = if cli.wants_json() {
@@ -67206,10 +67200,10 @@ mod tests {
         parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
         plan_cache_diag_degraded, plan_cache_diag_response_json,
-        read_environment_attestation_fixture_json, render_bootstrap_degradations, run,
-        search_via_daemon, status_probe_mode, validate_daemon_search_capabilities,
-        write_cancelled_error, write_context_stream_terminal_error, write_domain_error,
-        write_index_rebuild_error,
+        read_environment_attestation_fixture_json, render_bootstrap_degradations,
+        render_model_list, render_model_status, run, search_via_daemon, status_probe_mode,
+        validate_daemon_search_capabilities, write_cancelled_error,
+        write_context_stream_terminal_error, write_domain_error, write_index_rebuild_error,
     };
     use crate::cass::CassImportError;
     use crate::config::MeshCommandMode;
@@ -68159,6 +68153,158 @@ mod tests {
         let stdout = String::from_utf8_lossy(&stdout).into_owned();
         let stderr = String::from_utf8_lossy(&stderr).into_owned();
         (exit, stdout, stderr)
+    }
+
+    #[test]
+    fn model_status_and_list_keep_json_degraded_and_toon_envelopes_in_parity() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path();
+        let init_report = init_workspace(&InitOptions {
+            workspace_path: workspace.to_path_buf(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        if matches!(init_report.status, crate::core::init::InitStatus::Failed) {
+            return Err(format!(
+                "initialize model renderer fixture: {:?}",
+                init_report.action_errors
+            ));
+        }
+
+        let status = crate::core::model::build_model_status_report(
+            &crate::core::model::ModelStatusOptions {
+                workspace_path: workspace,
+                database_path: None,
+            },
+        )
+        .map_err(|error| format!("build model status renderer fixture: {error:?}"))?;
+        let list =
+            crate::core::model::build_model_list_report(&crate::core::model::ModelListOptions {
+                workspace_path: workspace,
+                database_path: None,
+            })
+            .map_err(|error| format!("build model list renderer fixture: {error:?}"))?;
+        let json_cli = Cli::try_parse_from(["ee", "--json", "model", "status"])
+            .map_err(|error| error.to_string())?;
+        let toon_cli = Cli::try_parse_from(["ee", "--format", "toon", "model", "status"])
+            .map_err(|error| error.to_string())?;
+
+        let mut status_json = Vec::new();
+        ensure_equal(
+            &render_model_status(&json_cli, &status, &mut status_json),
+            &ProcessExitCode::Success,
+            "model status JSON render exit",
+        )?;
+        let status_json = String::from_utf8(status_json).map_err(|error| error.to_string())?;
+        let mut status_toon = Vec::new();
+        ensure_equal(
+            &render_model_status(&toon_cli, &status, &mut status_toon),
+            &ProcessExitCode::Success,
+            "model status TOON render exit",
+        )?;
+        let status_toon = String::from_utf8(status_toon).map_err(|error| error.to_string())?;
+        ensure_toon_matches_json(&status_json, &status_toon, "model status TOON parity")?;
+        let status_value: serde_json::Value =
+            serde_json::from_str(&status_json).map_err(|error| error.to_string())?;
+        ensure(
+            status_value["degraded"]
+                .as_array()
+                .is_some_and(|entries| !entries.is_empty()),
+            "model status fixture must exercise a real degradation",
+        )?;
+        ensure_equal(
+            &status_value["degraded"],
+            &status_value["data"]["degradations"],
+            "model status top-level degraded parity",
+        )?;
+
+        let mut list_json = Vec::new();
+        ensure_equal(
+            &render_model_list(&json_cli, &list, &mut list_json),
+            &ProcessExitCode::Success,
+            "model list JSON render exit",
+        )?;
+        let list_json = String::from_utf8(list_json).map_err(|error| error.to_string())?;
+        let mut list_toon = Vec::new();
+        ensure_equal(
+            &render_model_list(&toon_cli, &list, &mut list_toon),
+            &ProcessExitCode::Success,
+            "model list TOON render exit",
+        )?;
+        let list_toon = String::from_utf8(list_toon).map_err(|error| error.to_string())?;
+        ensure_toon_matches_json(&list_json, &list_toon, "model list TOON parity")?;
+        let list_value: serde_json::Value =
+            serde_json::from_str(&list_json).map_err(|error| error.to_string())?;
+        ensure(
+            list_value["degraded"]
+                .as_array()
+                .is_some_and(|entries| !entries.is_empty()),
+            "model list fixture must exercise a real degradation",
+        )?;
+        ensure_equal(
+            &list_value["degraded"],
+            &list_value["data"]["degradations"],
+            "model list top-level degraded parity",
+        )
+    }
+
+    #[test]
+    fn model_status_and_list_toon_errors_match_json_error_envelopes() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().display().to_string();
+        let missing_database = temp.path().join("missing-ee.db").display().to_string();
+
+        for subcommand in ["status", "list"] {
+            let (json_exit, json_stdout, json_stderr) = invoke(&[
+                "ee",
+                "--workspace",
+                workspace.as_str(),
+                "--json",
+                "model",
+                subcommand,
+                "--database",
+                missing_database.as_str(),
+            ]);
+            ensure_equal(
+                &json_exit,
+                &ProcessExitCode::WorkspaceStoreMissing,
+                &format!("model {subcommand} JSON error exit"),
+            )?;
+            ensure(
+                json_stderr.is_empty(),
+                &format!("model {subcommand} JSON error must not write stderr"),
+            )?;
+
+            let (toon_exit, toon_stdout, toon_stderr) = invoke(&[
+                "ee",
+                "--workspace",
+                workspace.as_str(),
+                "--format",
+                "toon",
+                "model",
+                subcommand,
+                "--database",
+                missing_database.as_str(),
+            ]);
+            ensure_equal(
+                &toon_exit,
+                &ProcessExitCode::WorkspaceStoreMissing,
+                &format!("model {subcommand} TOON error exit"),
+            )?;
+            ensure(
+                toon_stderr.is_empty(),
+                &format!("model {subcommand} TOON error must not write stderr"),
+            )?;
+            ensure_toon_matches_json(
+                &json_stdout,
+                &toon_stdout,
+                &format!("model {subcommand} TOON error parity"),
+            )?;
+        }
+        Ok(())
     }
 
     fn seed_legacy_v011_database(workspace: &Path) -> Result<String, String> {
