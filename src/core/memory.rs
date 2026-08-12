@@ -14416,6 +14416,70 @@ mod tests {
                 .is_file(),
             true,
             "index metadata published",
+        )?;
+
+        let canonical = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let status =
+            crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                workspace_path: canonical.clone(),
+                database_path: None,
+                index_dir: None,
+            })
+            .map_err(|error| error.to_string())?;
+        ensure(
+            status.health == crate::core::index::IndexHealth::Ready,
+            true,
+            "single remember leaves the index ready",
+        )?;
+        ensure(
+            status.db_generation,
+            status.index_generation,
+            "single remember leaves database and index generations equal",
+        )?;
+        ensure(
+            status
+                .index_document_counts
+                .as_ref()
+                .map(|counts| counts.memories),
+            Some(1),
+            "single remember publishes exactly one memory document",
+        )?;
+
+        let search = crate::core::search::run_search_with_filters(
+            &crate::core::search::SearchOptions {
+                workspace_path: canonical,
+                database_path: None,
+                index_dir: None,
+                query: "Store release checks".to_owned(),
+                limit: 10,
+                speed: crate::search::SpeedMode::Instant,
+                explain: false,
+                as_of: None,
+                include_tombstoned: false,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                memory_scope: crate::models::MemoryScope::Workspace,
+                strict_scope: false,
+            },
+            None,
+            &[],
+        )
+        .map_err(|error| format!("single-remember search failed: {error:?}"))?;
+        ensure(
+            search
+                .results
+                .iter()
+                .any(|hit| hit.doc_id == report.memory_id.to_string()),
+            true,
+            "single remember is immediately searchable without a manual rebuild",
         )
     }
 
