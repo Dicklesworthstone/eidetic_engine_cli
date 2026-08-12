@@ -624,20 +624,7 @@ impl StorelessWorkspaceAssessment {
             budget,
             registry_path,
         );
-        let candidate_retargets = discovery
-            .stores
-            .iter()
-            .cloned()
-            .map(|store| {
-                let database = std::path::Path::new(&store.store_dir).join("ee.db");
-                let arguments = format!(
-                    "--workspace {} --database {}",
-                    shell_quote_repair_arg(&store.workspace_root),
-                    shell_quote_repair_arg(&database.display().to_string())
-                );
-                StorelessWorkspaceRetarget { store, arguments }
-            })
-            .collect::<Vec<_>>();
+        let candidate_retargets = storeless_workspace_candidate_retargets(&discovery);
         let init_command = format!("ee init {addressed_workspace_argument}");
         let recovery_actions = storeless_workspace_recovery_actions(
             &addressed_store_path,
@@ -714,6 +701,28 @@ impl StorelessWorkspaceAssessment {
         })
         .to_string()
     }
+}
+
+fn storeless_workspace_candidate_retargets(
+    discovery: &crate::core::orient::NearbyStoreScanAssessment,
+) -> Vec<StorelessWorkspaceRetarget> {
+    if discovery.outcome == crate::core::orient::NearbyStoreScanOutcome::Unavailable {
+        return Vec::new();
+    }
+    discovery
+        .stores
+        .iter()
+        .cloned()
+        .map(|store| {
+            let database = std::path::Path::new(&store.store_dir).join("ee.db");
+            let arguments = format!(
+                "--workspace {} --database {}",
+                shell_quote_repair_arg(&store.workspace_root),
+                shell_quote_repair_arg(&database.display().to_string())
+            );
+            StorelessWorkspaceRetarget { store, arguments }
+        })
+        .collect()
 }
 
 fn storeless_workspace_root(database_path: &std::path::Path) -> std::path::PathBuf {
@@ -921,7 +930,7 @@ mod tests {
         VERSION_PROVENANCE_SCHEMA_V1, VersionReport, build_features, build_info,
         clean_build_metadata, db_migration_range, duration_millis_saturating, parse_build_bool,
         run_cli_future, runtime_status, serialize_or_error, serialize_pretty_or_error,
-        shell_quote_repair_arg, supported_schemas,
+        shell_quote_repair_arg, storeless_workspace_candidate_retargets, supported_schemas,
     };
 
     type TestResult = Result<(), String>;
@@ -1373,6 +1382,25 @@ mod tests {
                     .as_slice()
                     == registry_bytes,
             "unavailable read-only assessment must not create a store or mutate its registry",
+        )
+    }
+
+    #[test]
+    fn unavailable_discovery_never_creates_retarget_recovery_actions() -> TestResult {
+        let discovery = crate::core::orient::NearbyStoreScanAssessment {
+            stores: vec![crate::core::orient::NearbyStore {
+                workspace_root: "/tmp/unverified foreign workspace".to_owned(),
+                store_dir: "/tmp/unverified foreign workspace/.ee".to_owned(),
+                documents: 99,
+                last_write: Some("2026-08-10T14:15:16Z".to_owned()),
+            }],
+            outcome: crate::core::orient::NearbyStoreScanOutcome::Unavailable,
+        };
+
+        let retargets = storeless_workspace_candidate_retargets(&discovery);
+        ensure(
+            retargets.is_empty(),
+            "unavailable discovery candidates are observations, not retarget authority",
         )
     }
 }

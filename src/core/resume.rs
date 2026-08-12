@@ -783,7 +783,10 @@ fn resume_next_commands(nearby_stores: Option<&NearbyStoreScanAssessment>) -> Ve
             ),
         }
     }
-    if let Some(best) = nearby_stores.and_then(|scan| scan.stores.first()) {
+    if let Some(best) = nearby_stores
+        .filter(|scan| scan.outcome != NearbyStoreScanOutcome::Unavailable)
+        .and_then(|scan| scan.stores.first())
+    {
         let workspace = shell_quote_cli_arg(&best.workspace_root);
         let database =
             shell_quote_cli_arg(&Path::new(&best.store_dir).join("ee.db").to_string_lossy());
@@ -1467,7 +1470,12 @@ mod tests {
     #[test]
     fn unavailable_nearby_scan_emits_diagnostic_without_claiming_no_store() {
         let scan = NearbyStoreScanAssessment {
-            stores: Vec::new(),
+            stores: vec![NearbyStore {
+                workspace_root: "/tmp/unverified foreign workspace".to_owned(),
+                store_dir: "/tmp/unverified foreign workspace/.ee".to_owned(),
+                documents: 99,
+                last_write: Some("2026-08-10T14:15:16Z".to_owned()),
+            }],
             outcome: NearbyStoreScanOutcome::Unavailable,
         };
 
@@ -1477,10 +1485,7 @@ mod tests {
             commands.first().map(String::as_str),
             Some("ee doctor --workspace . --json  # diagnose unavailable nearby-store discovery")
         );
-        assert!(
-            commands
-                .iter()
-                .all(|command| !command.contains("no nearby"))
-        );
+        assert!(commands.iter().all(|command| !command.contains("no nearby")
+            && !command.contains("unverified foreign workspace")));
     }
 }
