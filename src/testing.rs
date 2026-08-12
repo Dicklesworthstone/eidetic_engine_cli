@@ -177,12 +177,14 @@ fn validate_json_schema_value(
     }
 
     if let Some(expected) = schema.get("const")
-        && value != expected
+        && !json_schema_values_equal(value, expected)
     {
         return Err(format!("{path} expected const {expected}, got {value}"));
     }
     if let Some(enum_values) = schema.get("enum").and_then(Value::as_array)
-        && !enum_values.iter().any(|candidate| candidate == value)
+        && !enum_values
+            .iter()
+            .any(|candidate| json_schema_values_equal(candidate, value))
     {
         return Err(format!(
             "{path} value {value} is not in enum {enum_values:?}"
@@ -232,29 +234,41 @@ fn validate_json_schema_value(
     }
 
     if let Some(number) = value.as_number() {
-        if let Some(minimum) = schema.get("minimum").and_then(Value::as_number)
-            && compare_json_numbers(number, minimum) == Some(Ordering::Less)
-        {
-            return Err(format!("{path} value {number} is below minimum {minimum}"));
+        if let Some(minimum) = schema.get("minimum").and_then(Value::as_number) {
+            let ordering = compare_json_numbers(number, minimum).ok_or_else(|| {
+                format!("{path} could not compare value {number} with minimum {minimum}")
+            })?;
+            if ordering == Ordering::Less {
+                return Err(format!("{path} value {number} is below minimum {minimum}"));
+            }
         }
-        if let Some(maximum) = schema.get("maximum").and_then(Value::as_number)
-            && compare_json_numbers(number, maximum) == Some(Ordering::Greater)
-        {
-            return Err(format!("{path} value {number} is above maximum {maximum}"));
+        if let Some(maximum) = schema.get("maximum").and_then(Value::as_number) {
+            let ordering = compare_json_numbers(number, maximum).ok_or_else(|| {
+                format!("{path} could not compare value {number} with maximum {maximum}")
+            })?;
+            if ordering == Ordering::Greater {
+                return Err(format!("{path} value {number} is above maximum {maximum}"));
+            }
         }
-        if let Some(minimum) = schema.get("exclusiveMinimum").and_then(Value::as_number)
-            && compare_json_numbers(number, minimum).is_some_and(Ordering::is_le)
-        {
-            return Err(format!(
-                "{path} value {number} is not above exclusive minimum {minimum}"
-            ));
+        if let Some(minimum) = schema.get("exclusiveMinimum").and_then(Value::as_number) {
+            let ordering = compare_json_numbers(number, minimum).ok_or_else(|| {
+                format!("{path} could not compare value {number} with exclusive minimum {minimum}")
+            })?;
+            if ordering.is_le() {
+                return Err(format!(
+                    "{path} value {number} is not above exclusive minimum {minimum}"
+                ));
+            }
         }
-        if let Some(maximum) = schema.get("exclusiveMaximum").and_then(Value::as_number)
-            && compare_json_numbers(number, maximum).is_some_and(Ordering::is_ge)
-        {
-            return Err(format!(
-                "{path} value {number} is not below exclusive maximum {maximum}"
-            ));
+        if let Some(maximum) = schema.get("exclusiveMaximum").and_then(Value::as_number) {
+            let ordering = compare_json_numbers(number, maximum).ok_or_else(|| {
+                format!("{path} could not compare value {number} with exclusive maximum {maximum}")
+            })?;
+            if ordering.is_ge() {
+                return Err(format!(
+                    "{path} value {number} is not below exclusive maximum {maximum}"
+                ));
+            }
         }
     }
 
@@ -463,6 +477,30 @@ fn normalize_json_number(number: &serde_json::Number) -> Option<NormalizedJsonDe
 
 fn json_schema_number_is_integer(number: &serde_json::Number) -> bool {
     normalize_json_number(number).is_some_and(|number| number.exponent >= 0)
+}
+
+fn json_schema_values_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => {
+            compare_json_numbers(left, right) == Some(Ordering::Equal)
+        }
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| json_schema_values_equal(left, right))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, left)| {
+                    right
+                        .get(key)
+                        .is_some_and(|right| json_schema_values_equal(left, right))
+                })
+        }
+        _ => left == right,
+    }
 }
 
 fn compare_json_numbers(left: &serde_json::Number, right: &serde_json::Number) -> Option<Ordering> {
@@ -958,18 +996,52 @@ mod tests {
             .map_err(|error| format!("parse over-u64 decimal fixture: {error}"))?;
         let near_boundary_fraction: Value = serde_json::from_str("18446744073709551614.5")
             .map_err(|error| format!("parse near-boundary fractional fixture: {error}"))?;
+        let huge_exponent: Value = serde_json::from_str("1e9223372036854775808")
+            .map_err(|error| format!("parse huge-exponent fixture: {error}"))?;
         for value in [
             serde_json::json!(-1),
             serde_json::json!(1.5),
             over_u64,
             over_u64_decimal,
             near_boundary_fraction,
+            huge_exponent.clone(),
         ] {
             if validate_json_schema_instance(&value, &schema).is_ok() {
                 return Err(format!(
                     "uint64 schema accepted out-of-domain JSON number {value}"
                 ));
             }
+        }
+        let bounded_number_schema = serde_json::json!({
+            "type": "number",
+            "maximum": 18446744073709551615_u64
+        });
+        if validate_json_schema_instance(&huge_exponent, &bounded_number_schema).is_ok() {
+            return Err(
+                "bounded number schema accepted a value whose exact comparison overflowed".into(),
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn draft_2020_12_numeric_const_and_enum_use_mathematical_equality() -> TestResult {
+        let const_schema = serde_json::json!({ "const": 1 });
+        let enum_schema = serde_json::json!({ "enum": [0, 1] });
+        let nested_schema = serde_json::json!({ "const": { "value": [1] } });
+        for raw in ["1", "1.0", "1e0"] {
+            let value: Value = serde_json::from_str(raw)
+                .map_err(|error| format!("parse numeric equality fixture {raw}: {error}"))?;
+            validate_json_schema_instance(&value, &const_schema)?;
+            validate_json_schema_instance(&value, &enum_schema)?;
+        }
+        let nested: Value = serde_json::from_str(r#"{"value":[1.0]}"#)
+            .map_err(|error| format!("parse nested numeric equality fixture: {error}"))?;
+        validate_json_schema_instance(&nested, &nested_schema)?;
+        if validate_json_schema_instance(&serde_json::json!(2), &const_schema).is_ok()
+            || validate_json_schema_instance(&serde_json::json!(2), &enum_schema).is_ok()
+        {
+            return Err("numeric const/enum accepted a mathematically distinct value".into());
         }
         Ok(())
     }

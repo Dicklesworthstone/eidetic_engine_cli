@@ -6440,12 +6440,19 @@ mod tests {
         ] {
             assert_eq!(json_number_to_u64(&value), None, "{value}");
         }
-        for unrepresentable in ["NaN", "Infinity", "-Infinity", "1e400"] {
+        for unrepresentable in ["NaN", "Infinity", "-Infinity"] {
             assert!(
                 serde_json::from_str::<serde_json::Value>(unrepresentable).is_err(),
-                "nonfinite or unrepresentable JSON number must fail before uint64 conversion: {unrepresentable}"
+                "nonfinite JSON number must fail before uint64 conversion: {unrepresentable}"
             );
         }
+        let huge_finite: serde_json::Value = serde_json::from_str("1e400")
+            .expect("arbitrary-precision JSON must preserve huge finite numbers");
+        assert_eq!(
+            json_number_to_u64(&huge_finite),
+            None,
+            "finite values outside uint64 must fail conversion"
+        );
     }
 
     #[test]
