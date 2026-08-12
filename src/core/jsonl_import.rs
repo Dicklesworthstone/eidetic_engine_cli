@@ -708,18 +708,62 @@ pub fn import_jsonl_records(
         let index_dir = workspace_path
             .join(".ee")
             .join(crate::core::index::DEFAULT_INDEX_SUBDIR);
-        if let Err(error) = crate::core::index::process_pending_index_jobs_coalesced(
+        let publication = crate::core::index::process_pending_index_jobs_coalesced(
             &connection,
             &workspace_id,
             &index_dir,
             None,
-        ) {
+        );
+        let failure = match publication {
+            Ok(job_reports) => {
+                let non_completed = job_reports
+                    .iter()
+                    .find(|job_report| job_report.outcome != "completed")
+                    .map(|job_report| {
+                        job_report.error.clone().unwrap_or_else(|| {
+                            format!("index job outcome was {}", job_report.outcome)
+                        })
+                    });
+                if let Some(failure) = non_completed {
+                    Some(failure)
+                } else {
+                    match crate::core::index::get_index_status(
+                        &crate::core::index::IndexStatusOptions {
+                            workspace_path: workspace_path.clone(),
+                            database_path: Some(database_path.clone()),
+                            index_dir: None,
+                        },
+                    ) {
+                        Ok(status)
+                            if status.health == crate::core::index::IndexHealth::Ready
+                                && status.db_generation.is_some()
+                                && status.db_generation == status.index_generation =>
+                        {
+                            None
+                        }
+                        Ok(status) => Some(format!(
+                            "post-drain index status was {:?} (database generation {:?}, index generation {:?})",
+                            status.health, status.db_generation, status.index_generation
+                        )),
+                        Err(error) => Some(format!(
+                            "post-drain index status could not be verified: {error}"
+                        )),
+                    }
+                }
+            }
+            Err(error) => Some(error.to_string()),
+        };
+        if let Some(failure) = failure {
+            let repair = jsonl_import_index_repair_command(
+                &workspace_path,
+                options.database_path.as_deref(),
+            );
             report.issues.push(JsonlImportIssue {
                 line: None,
                 code: "import_index_publish_failed".to_owned(),
                 severity: JsonlImportIssueSeverity::Warning,
                 message: format!(
-                    "Imported memories are durable, but derived index publication failed and the index jobs remain pending: {error}. Run `ee index rebuild --workspace .`."
+                    "Imported memories are durable, but automatic publication of durable search-index jobs did not complete: {failure}. Search may omit imported memories until the durable jobs are retried. Run `{repair}`."
                 ),
             });
         }
@@ -735,6 +779,46 @@ fn import_search_index_job_id(memory_id: &str) -> String {
         .to_hex()
         .to_string();
     format!("sidx_{}", &hash[..26])
+}
+
+fn jsonl_import_index_repair_command(
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+) -> String {
+    let workspace = jsonl_import_shell_quote_arg(workspace_path.to_string_lossy().as_ref());
+    match database_path {
+        Some(database_path) => {
+            let database = jsonl_import_shell_quote_arg(database_path.to_string_lossy().as_ref());
+            format!("ee index rebuild --workspace {workspace} --database {database}")
+        }
+        None => format!("ee index rebuild --workspace {workspace}"),
+    }
+}
+
+fn jsonl_import_shell_quote_arg(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_owned();
+    }
+    if value.bytes().all(|byte| {
+        matches!(
+            byte,
+            b'A'..=b'Z'
+                | b'a'..=b'z'
+                | b'0'..=b'9'
+                | b'_'
+                | b'-'
+                | b'.'
+                | b'/'
+                | b':'
+                | b'@'
+                | b'+'
+                | b'='
+        )
+    }) {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 fn reimport_conflict_issue(
@@ -2791,6 +2875,89 @@ mod tests {
                 .any(|entry| entry.code == "search_index_stale"),
             false,
             "no stale advisory after import drain",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_jsonl_survives_noncompleted_index_publication_with_retryable_job() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace with spaces");
+        fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let source = tempdir.path().join("source.jsonl");
+        fs::write(&source, sample_jsonl()).map_err(|error| error.to_string())?;
+
+        let index_dir = workspace
+            .join(".ee")
+            .join(crate::core::index::DEFAULT_INDEX_SUBDIR);
+        let blocked_target = workspace.join(".ee").join("index-publish-blocker");
+        fs::create_dir_all(&blocked_target).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&blocked_target, &index_dir)
+            .map_err(|error| error.to_string())?;
+
+        let report = import_jsonl_records(&JsonlImportOptions {
+            workspace_path: workspace.clone(),
+            database_path: None,
+            source_path: source,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(
+            report.status.as_str(),
+            "completed",
+            "source import remains completed",
+        )?;
+        ensure(
+            report.memories_imported,
+            1,
+            "source memory remains imported",
+        )?;
+        let issue = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "import_index_publish_failed")
+            .ok_or("missing truthful import index publication issue")?;
+        let expected_repair = format!(
+            "ee index rebuild --workspace {}",
+            jsonl_import_shell_quote_arg(workspace.to_string_lossy().as_ref())
+        );
+        ensure(
+            issue
+                .message
+                .contains("automatic publication of durable search-index jobs did not complete")
+                && issue.message.contains("Search may omit imported memories")
+                && issue.message.contains(&format!("Run `{expected_repair}`")),
+            true,
+            "publication issue carries exact failure truth and shell-safe repair",
+        )?;
+
+        let connection = DbConnection::open(DatabaseConfig::file(workspace.join(".ee/ee.db")))
+            .map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .get_memory("mem_01234567890123456789012345")
+                .map_err(|error| error.to_string())?
+                .is_some(),
+            true,
+            "source-of-truth imported memory survives publication failure",
+        )?;
+        let workspace_id =
+            ensure_workspace(&connection, &workspace).map_err(|error| error.to_string())?;
+        let jobs = connection
+            .list_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            jobs.iter().any(|job| {
+                matches!(
+                    job.status_enum(),
+                    Some(
+                        crate::db::SearchIndexJobStatus::Pending
+                            | crate::db::SearchIndexJobStatus::Failed
+                    )
+                )
+            }),
+            true,
+            "noncompleted publication leaves durable retryable index work",
         )
     }
 

@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "import_index_publish_failed",
+  "introduced_by": {
+    "bead": "bd-index-auto-freshness-m5kwf",
+    "epic_letter": "I"
+  },
+  "surfaces": [
+    "import jsonl"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A JSONL import commits its memory rows, audit records, and durable index jobs, but the real post-commit index publisher cannot complete those jobs.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# Replace the active index directory with a symlink so the real publisher claims the durable job and then refuses publication."
+    ],
+    "invocation": "ee import jsonl --workspace . --source-path export.jsonl --json"
+  },
+  "expected_emission": {
+    "code": "import_index_publish_failed",
+    "severity": "warning",
+    "message_contains": [
+      "Imported memories are durable",
+      "automatic publication of durable search-index jobs did not complete",
+      "Search may omit imported memories",
+      "durable jobs are retried"
+    ],
+    "repair_contains": "ee index rebuild --workspace"
+  }
+}
