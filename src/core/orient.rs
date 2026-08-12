@@ -1252,7 +1252,20 @@ mod tests {
     #[test]
     fn orient_decisions_reuses_due_decision_query() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        let init_report = init_workspace(&InitOptions {
+            workspace_path: temp.path().to_path_buf(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        if !init_report.status.is_success() {
+            return Err(format!(
+                "initialize decision fixture store failed: {:?}",
+                init_report.action_errors
+            ));
+        }
         let now = DateTime::parse_from_rfc3339("2026-06-15T12:00:00Z")
             .map_err(|error| error.to_string())?
             .with_timezone(&Utc);
