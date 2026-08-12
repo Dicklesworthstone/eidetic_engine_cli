@@ -451,8 +451,11 @@ fn daemon_failed_delivery_does_not_consume_stale_warning_episode() -> TestResult
             "replay after aborted delivery",
         )?;
         assert_search_index_freshness(&candidate, "failed-delivery-settlement-probe")?;
-        let codes = degraded_codes_at(&candidate, "/response/data/degraded")
-            .ok_or_else(|| format!("settlement probe omitted degraded[]: {candidate}"))?;
+        let codes = degraded_codes_at(
+            &candidate,
+            "/response/data/degraded",
+            "failed-delivery-settlement-probe",
+        )?;
         if codes.contains(&"search_index_stale") && codes.contains(&"search_index_large_gap") {
             break candidate;
         }
@@ -492,7 +495,9 @@ fn daemon_failed_delivery_does_not_consume_stale_warning_episode() -> TestResult
     )?;
     assert_search_index_freshness(&suppressed, "suppressed_freshness")?;
 
-    handle.shutdown()
+    handle
+        .shutdown()
+        .map_err(|error| format!("shutdown advisory-abort daemon: {error}"))
 }
 
 fn assert_stale_episode(
