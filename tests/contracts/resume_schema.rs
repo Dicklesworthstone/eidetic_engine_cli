@@ -187,6 +187,34 @@ fn resume_required_fields_and_staleness_contract_are_pinned() -> TestResult {
     ensure(
         stale_required == expected_stale,
         format!("staleness contract drifted: {stale_required:?}"),
+    )?;
+    ensure(
+        schema
+            .pointer("/properties/staleCount/description")
+            .and_then(Value::as_str)
+            .is_some_and(|description| {
+                description.contains("unique stale memory IDs")
+                    && description.contains("counts once")
+            }),
+        "staleCount must document unique-memory counting across projections",
+    )?;
+    ensure(
+        schema
+            .pointer("/$defs/item/properties/stale/properties/sharedTags/minItems")
+            .and_then(Value::as_u64)
+            == Some(1),
+        "stale.sharedTags must require at least one subject tag",
+    )?;
+    ensure(
+        schema
+            .pointer("/$defs/item/properties/stale/properties/sharedTags/description")
+            .and_then(Value::as_str)
+            .is_some_and(|description| {
+                description.contains("subject tags")
+                    && description.contains("session-*")
+                    && description.contains("next/queue/blocking/pending/todo")
+            }),
+        "stale.sharedTags must exclude session and open-loop control tags",
     )
 }
 
