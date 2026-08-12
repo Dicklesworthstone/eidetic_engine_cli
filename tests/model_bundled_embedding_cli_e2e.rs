@@ -1004,7 +1004,6 @@ fn registered_model2vec_fixture_is_neural_without_overrides_or_download_path() -
             query,
             "--workspace",
             workspace.workspace_arg()?,
-            "--fast",
             "--json",
         ],
         &network_env,
