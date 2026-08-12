@@ -51,7 +51,7 @@ pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 const INDEX_METADATA_FILE: &str = "meta.json";
 pub const INDEX_METADATA_SCHEMA_V2: &str = "ee.index_metadata.v2";
 const INDEX_CORPUS_REVISION_DOMAIN: &[u8] = b"ee.index.corpus_revision.v1\0";
-const MEMORY_INDEX_ELIGIBILITY_REVISION_V1: &str = "ee.memory_index_eligibility.v1";
+const MEMORY_INDEX_ELIGIBILITY_REVISION_V2: &str = "ee.memory_index_eligibility.v2";
 const SESSION_INDEX_ELIGIBILITY_REVISION_V1: &str = "ee.session_index_eligibility.v1";
 const ARTIFACT_INDEX_ELIGIBILITY_REVISION_V1: &str = "ee.artifact_index_eligibility.v1";
 const RULE_INDEX_ELIGIBILITY_REVISION_V1: &str = "ee.rule_index_eligibility.v1";
@@ -743,7 +743,7 @@ pub fn expected_index_corpus_revision() -> &'static CorpusRevision {
             (
                 "memory",
                 MEMORY_INDEX_PROJECTION_SCHEMA_V1,
-                MEMORY_INDEX_ELIGIBILITY_REVISION_V1,
+                MEMORY_INDEX_ELIGIBILITY_REVISION_V2,
             ),
             (
                 "session",
@@ -3520,39 +3520,56 @@ fn memory_documents_with_anchors(
     db: &DbConnection,
     memories: &[crate::db::StoredMemory],
 ) -> Result<Vec<CanonicalSearchDocument>, IndexRebuildError> {
-    memories
-        .iter()
-        .map(|memory| {
-            // Index rebuild is the fourth precision anchor-extraction point, after
-            // remember, CASS import, and curate apply (all wired through
-            // DbConnection::insert_memory). Backfill anchors for memories that have
-            // none yet — rows created before the anchor table existed, or through the
-            // revision write path, which does not extract at insert time. Memories
-            // that already carry anchors keep their original source provenance; this
-            // never downgrades a cass_import/curate_apply source to index_rebuild.
-            let mut anchors = db.list_memory_anchors(&memory.id)?;
-            if anchors.is_empty() {
-                db.refresh_memory_anchors_for_memory(&memory.id, &memory.content)?;
-                anchors = db.list_memory_anchors(&memory.id)?;
-            }
-            // ADR 0064: the anchor reverse index is rebuilt alongside the
-            // search documents so `ee index rebuild` restores it from
-            // scratch and its MAX(generation) advances with the rebuild.
-            db.refresh_memory_anchor_index_for_memory(
-                &memory.workspace_id,
-                &memory.id,
-                &memory.content,
-            )?;
-            let typed_fields_json = db.get_memory_typed_fields_json(&memory.id)?;
-            Ok(memory_to_document_with_context_anchors_and_typed_fields(
-                memory,
-                None,
-                &[],
-                &anchors,
-                typed_fields_json.as_deref(),
-            ))
-        })
-        .collect()
+    let mut documents = Vec::with_capacity(memories.len());
+    for memory in memories {
+        if memory_has_seal_sidecar(db, memory)? {
+            continue;
+        }
+        // Index rebuild is the fourth precision anchor-extraction point, after
+        // remember, CASS import, and curate apply (all wired through
+        // DbConnection::insert_memory). Backfill anchors for memories that have
+        // none yet — rows created before the anchor table existed, or through the
+        // revision write path, which does not extract at insert time. Memories
+        // that already carry anchors keep their original source provenance; this
+        // never downgrades a cass_import/curate_apply source to index_rebuild.
+        let mut anchors = db.list_memory_anchors(&memory.id)?;
+        if anchors.is_empty() {
+            db.refresh_memory_anchors_for_memory(&memory.id, &memory.content)?;
+            anchors = db.list_memory_anchors(&memory.id)?;
+        }
+        // ADR 0064: the anchor reverse index is rebuilt alongside the
+        // search documents so `ee index rebuild` restores it from
+        // scratch and its MAX(generation) advances with the rebuild.
+        db.refresh_memory_anchor_index_for_memory(
+            &memory.workspace_id,
+            &memory.id,
+            &memory.content,
+        )?;
+        let typed_fields_json = db.get_memory_typed_fields_json(&memory.id)?;
+        documents.push(memory_to_document_with_context_anchors_and_typed_fields(
+            memory,
+            None,
+            &[],
+            &anchors,
+            typed_fields_json.as_deref(),
+        ));
+    }
+    Ok(documents)
+}
+
+/// Sealed eligibility is sidecar state, never a content-string heuristic.
+///
+/// A verified reveal publishes a new live revision without a seal row, while
+/// the superseded placeholder retains its seal as historical evidence. Thus
+/// the placeholder row is always excluded and the revealed revision is not.
+fn memory_has_seal_sidecar(
+    db: &DbConnection,
+    memory: &crate::db::StoredMemory,
+) -> Result<bool, DbError> {
+    if memory.content != crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
+        return Ok(false);
+    }
+    Ok(db.get_memory_seal(&memory.id)?.is_some())
 }
 
 fn processing_mode_for_job(job: &StoredSearchIndexJob) -> &'static str {
@@ -6355,6 +6372,12 @@ fn current_index_corpus_counts(
     workspace_id: &str,
 ) -> Result<(IndexDocumentCounts, EvidenceAdmissionReport), DbError> {
     let memories = db.list_memories_for_retrieval_with_global(workspace_id, None, false)?;
+    let mut indexable_memory_count = 0_usize;
+    for memory in &memories {
+        if !memory_has_seal_sidecar(db, memory)? {
+            indexable_memory_count = indexable_memory_count.saturating_add(1);
+        }
+    }
     let sessions = db.count_sessions_for_workspace(workspace_id)?;
     let artifacts = db.list_artifacts(workspace_id, None)?;
     let rules = db
@@ -6379,7 +6402,7 @@ fn current_index_corpus_counts(
         })
     };
     let counts = IndexDocumentCounts::checked(
-        to_u32("memory", memories.len())?,
+        to_u32("memory", indexable_memory_count)?,
         sessions,
         to_u32("artifact", artifacts.len())?,
         to_u32("rule", rules)?,

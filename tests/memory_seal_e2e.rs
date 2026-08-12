@@ -6,15 +6,19 @@
 //! promises: seal a protocol (content withheld, commitment recorded), fail a
 //! reveal with wrong bytes (zero mutation, honest error), succeed with the
 //! exact bytes (published through the revise path), refuse a second reveal,
-//! surface seal state on `ee why`, and keep sealed placeholders out of packs.
+//! surface seal state on `ee why`, and keep sealed placeholders out of the
+//! real index, search results, and packs.
 
 use std::fs;
+use std::io::Write as _;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 type TestResult = Result<(), String>;
 
 const PROTOCOL: &str = "PRE-REGISTERED PROTOCOL v1: measure retrieval precision on fixture set A before reading any outcome labels.";
+const PLACEHOLDER: &str =
+    "[sealed memory: content committed by hash; reveal with `ee memory reveal`]";
 
 fn temp_workspace() -> Result<tempfile::TempDir, String> {
     tempfile::Builder::new()
@@ -32,6 +36,33 @@ fn run_ee(workspace: &str, args: &[&str]) -> Result<Output, String> {
         .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
+fn run_ee_with_stdin(workspace: &str, args: &[&str], stdin: &[u8]) -> Result<Output, String> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    command
+        .args(args)
+        .arg("--workspace")
+        .arg(workspace)
+        .env_remove("EE_WORKSPACE")
+        .env_remove("EE_WORKSPACE_REGISTRY")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to spawn ee {}: {error}", args.join(" ")))?;
+    let mut child_stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("ee {} did not expose piped stdin", args.join(" ")))?;
+    child_stdin
+        .write_all(stdin)
+        .map_err(|error| format!("failed to write bounded ee stdin: {error}"))?;
+    drop(child_stdin);
+    child
+        .wait_with_output()
+        .map_err(|error| format!("failed to wait for ee {}: {error}", args.join(" ")))
 }
 
 fn stdout_json(output: &Output, label: &str) -> Result<serde_json::Value, String> {
@@ -246,7 +277,7 @@ fn seal_reveal_lifecycle_end_to_end() -> TestResult {
 }
 
 #[test]
-fn sealed_memory_stays_out_of_packs() -> TestResult {
+fn sealed_memory_stays_out_of_search_and_packs() -> TestResult {
     let workspace = temp_workspace()?;
     let ws = workspace.path().to_string_lossy().to_string();
     let (memory_id, _) = init_and_seal(workspace.path())?;
@@ -265,6 +296,72 @@ fn sealed_memory_stays_out_of_packs() -> TestResult {
         ],
     )?;
     ensure_success(&plain, "remember plain")?;
+    let plain_id = stdout_json(&plain, "remember plain")?
+        .pointer("/data/memoryId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("remember plain: no memory id")?
+        .to_owned();
+
+    // The bytes alone do not confer seal status. This exact-content control
+    // catches the former false-positive where index/search treated the public
+    // placeholder string as authoritative instead of consulting memory_seals.
+    let placeholder_control = run_ee(&ws, &["remember", PLACEHOLDER, "--json"])?;
+    ensure_success(&placeholder_control, "remember exact-placeholder control")?;
+    let placeholder_control_id =
+        stdout_json(&placeholder_control, "remember exact-placeholder control")?
+            .pointer("/data/memoryId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("remember exact-placeholder control: no memory id")?
+            .to_owned();
+
+    // Both ordinary memories are real index documents. The sealed row is
+    // storage metadata until reveal, regardless of identical public bytes.
+    let index_rebuild = run_ee(&ws, &["index", "rebuild", "--json"])?;
+    ensure_success(&index_rebuild, "index rebuild")?;
+    let index_envelope = stdout_json(&index_rebuild, "index rebuild")?;
+    ensure(
+        index_envelope
+            .pointer("/data/memories_indexed")
+            .and_then(serde_json::Value::as_u64)
+            == Some(2),
+        format!("both unsealed memories and no sealed row must be indexed: {index_envelope}"),
+    )?;
+
+    let search = run_ee(
+        &ws,
+        &[
+            "search",
+            "sealed memory reveal",
+            "--limit",
+            "100",
+            "--source-mode",
+            "lexical_only",
+            "--strict-source-mode",
+            "--json",
+        ],
+    )?;
+    ensure_success(&search, "search")?;
+    let search_stdout = String::from_utf8_lossy(&search.stdout).to_string();
+    ensure(
+        search_stdout.contains(&plain_id),
+        "search control memory must remain discoverable",
+    )?;
+    ensure(
+        search_stdout.contains(&placeholder_control_id),
+        "ordinary memory equal to the placeholder text must remain discoverable",
+    )?;
+    ensure(
+        !search_stdout.contains(&memory_id),
+        "search must not return the sealed memory",
+    )?;
+    ensure(
+        search_stdout.contains(PLACEHOLDER),
+        "search must preserve exact placeholder bytes on an ordinary memory",
+    )?;
+    ensure(
+        !search_stdout.contains(PROTOCOL),
+        "search must not expose the unrevealed protocol bytes",
+    )?;
 
     // Query words chosen to hit the placeholder lexically.
     let pack = run_ee(&ws, &["pack", "sealed memory reveal", "--json"])?;
@@ -275,8 +372,8 @@ fn sealed_memory_stays_out_of_packs() -> TestResult {
         "pack must not serve the sealed memory",
     )?;
     ensure(
-        !stdout.contains("content committed by hash; reveal with"),
-        "pack must not spend budget on the seal placeholder text",
+        !stdout.contains(PROTOCOL),
+        "pack must not expose the unrevealed protocol bytes",
     )
 }
 
@@ -312,17 +409,75 @@ fn reveal_without_seal_and_seal_guards_fail_closed() -> TestResult {
     )?;
     ensure_failure(&reveal, "reveal of unsealed memory")?;
 
-    // --seal with contradictory companions.
-    for extra in [
-        vec!["--reinforce"],
-        vec!["--sentinel", "path_exists:README.md"],
-        vec!["--global"],
+    // Every single-memory companion that consumes, predicates over, scopes, or
+    // deduplicates content must reject --seal before it can mutate storage.
+    for (extra, expected) in [
+        (vec!["--reinforce"], "--reinforce"),
+        (
+            vec!["--sentinel", "path_exists:README.md"],
+            "--sentinel/--revive-when",
+        ),
+        (
+            vec!["--revive-when", "path_exists:README.md"],
+            "--sentinel/--revive-when",
+        ),
+        (
+            vec!["--idempotency-key", "sealed-guard-key"],
+            "--idempotency-key",
+        ),
+        (vec!["--global"], "--global"),
     ] {
         let mut args = vec!["remember", "sealed protocol", "--seal", "--json"];
         args.extend(extra.iter().copied());
         let out = run_ee(&ws, &args)?;
         ensure_failure(&out, &format!("--seal with {extra:?} must be rejected"))?;
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        ensure(
+            output.contains(expected),
+            format!("--seal with {extra:?} failed for the wrong reason: {output}"),
+        )?;
     }
+
+    for extra in [
+        vec!["--from-commit", "HEAD"],
+        vec!["--from-diff", "HEAD"],
+        vec!["--from-worktree"],
+    ] {
+        let mut args = vec!["remember", "--seal", "--json"];
+        args.extend(extra.iter().copied());
+        let out = run_ee(&ws, &args)?;
+        ensure_failure(&out, &format!("--seal with {extra:?} must be rejected"))?;
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        ensure(
+            output.contains("--seal cannot be combined with git capture modes"),
+            format!("--seal with {extra:?} failed for the wrong reason: {output}"),
+        )?;
+    }
+
+    let batch = run_ee_with_stdin(
+        &ws,
+        &["remember", "--seal", "--batch", "--stdin", "--json"],
+        br#"{"content":"sealed batch protocol"}
+"#,
+    )?;
+    ensure_failure(&batch, "--seal with --batch --stdin must be rejected")?;
+    let batch_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&batch.stdout),
+        String::from_utf8_lossy(&batch.stderr)
+    );
+    ensure(
+        batch_output.contains("--seal applies to single-memory mode"),
+        format!("--seal with batch failed for the wrong reason: {batch_output}"),
+    )?;
     Ok(())
 }
 
@@ -359,6 +514,93 @@ fn attestation_bundle_carries_the_seal_block_offline() -> TestResult {
             .pointer("/seal/revealedAt")
             .is_some_and(serde_json::Value::is_null),
         "unrevealed seal must report revealedAt null",
+    )?;
+
+    // Reveal publishes a new immutable memory revision. Attesting either the
+    // original row or the live revision must resolve to the same seal lineage.
+    let content_file = workspace.path().join("attested-protocol.txt");
+    fs::write(&content_file, PROTOCOL).map_err(|error| error.to_string())?;
+    let reveal = run_ee(
+        &ws,
+        &[
+            "memory",
+            "reveal",
+            &memory_id,
+            "--content-file",
+            content_file.to_str().unwrap(),
+            "--json",
+        ],
+    )?;
+    ensure_success(&reveal, "reveal before post-reveal attest")?;
+    let reveal_envelope = stdout_json(&reveal, "reveal before post-reveal attest")?;
+    let revealed_id = reveal_envelope
+        .pointer("/data/revealedMemoryId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("reveal omitted revised memory id: {reveal_envelope}"))?
+        .to_owned();
+    let revealed_at = reveal_envelope
+        .pointer("/data/revealedAt")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("reveal omitted revealedAt: {reveal_envelope}"))?;
+    ensure(
+        reveal_envelope
+            .pointer("/data/revisionGroupId")
+            .and_then(serde_json::Value::as_str)
+            == Some(memory_id.as_str()),
+        format!("reveal must retain the sealed memory as logical root: {reveal_envelope}"),
+    )?;
+    ensure(
+        reveal_envelope
+            .pointer("/data/revisionNumber")
+            .and_then(serde_json::Value::as_u64)
+            == Some(2),
+        format!("first reveal must publish revision two: {reveal_envelope}"),
+    )?;
+
+    let attest_original = run_ee(&ws, &["attest", "memory", &memory_id, "--json"])?;
+    ensure_success(&attest_original, "attest original memory after reveal")?;
+    let original_envelope = stdout_json(&attest_original, "attest original memory after reveal")?;
+    let original_seal = original_envelope
+        .pointer("/data/bundle/seal")
+        .ok_or_else(|| format!("post-reveal original attest omitted seal: {original_envelope}"))?;
+
+    let attest_revised = run_ee(&ws, &["attest", "memory", &revealed_id, "--json"])?;
+    ensure_success(&attest_revised, "attest revised memory after reveal")?;
+    let revised_envelope = stdout_json(&attest_revised, "attest revised memory after reveal")?;
+    let revised_bundle = revised_envelope
+        .pointer("/data/bundle")
+        .ok_or_else(|| format!("post-reveal revised attest omitted bundle: {revised_envelope}"))?;
+    let revised_seal = revised_bundle
+        .pointer("/seal")
+        .ok_or_else(|| format!("post-reveal revised attest omitted seal: {revised_bundle}"))?;
+    ensure(
+        revised_bundle
+            .pointer("/subject/id")
+            .and_then(serde_json::Value::as_str)
+            == Some(revealed_id.as_str()),
+        format!("attestation subject must remain the revised memory: {revised_bundle}"),
+    )?;
+    ensure(
+        revised_seal == original_seal,
+        format!("original and revised attestations must share one seal: {revised_bundle}"),
+    )?;
+    ensure(
+        revised_seal
+            .pointer("/contentCommitment")
+            .and_then(serde_json::Value::as_str)
+            == Some(commitment.as_str()),
+        format!("revised attestation changed the commitment: {revised_seal}"),
+    )?;
+    ensure(
+        revised_seal
+            .pointer("/revealedAt")
+            .and_then(serde_json::Value::as_str)
+            == Some(revealed_at),
+        format!("revised attestation must carry the exact reveal timestamp: {revised_seal}"),
+    )?;
+    ensure(
+        revised_seal.pointer("/revealVerified") == Some(&serde_json::Value::Bool(true)),
+        format!("revised attestation must report a verified reveal: {revised_seal}"),
     )?;
 
     // Unsealed memories must NOT carry a seal key (v1-identical shape).

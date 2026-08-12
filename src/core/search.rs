@@ -10414,13 +10414,32 @@ fn apply_tombstone_visibility_with_connection(
     let mut future_filtered = 0usize;
     let mut stale_filtered = 0usize;
     let mut malformed_filtered = 0usize;
+    let mut sealed_filtered = 0usize;
     let mut included = 0usize;
     let mut drift_hints = Vec::new();
+    let mut seal_lookup_error = None;
     let reference_time = options.as_of.unwrap_or_else(Utc::now);
 
     {
         let mut handle_loaded_memory =
             |mut hit: SearchHit, memory: &crate::db::StoredMemory| -> Option<SearchHit> {
+                // The canonical index projection omits sealed-unrevealed
+                // rows. Keep this read-side guard as defense in depth for
+                // indexes published before that eligibility revision. Seal
+                // sidecar state is authoritative: ordinary content equal to
+                // the placeholder text remains searchable.
+                if memory.content == crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT {
+                    match connection.get_memory_seal(&memory.id) {
+                        Ok(Some(_)) => {
+                            sealed_filtered = sealed_filtered.saturating_add(1);
+                            return None;
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            seal_lookup_error.get_or_insert_with(|| error.to_string());
+                        }
+                    }
+                }
                 if memory.tombstoned_at.is_some() {
                     if options.include_tombstoned {
                         mark_hit_tombstoned(&mut hit, memory.tombstoned_at.as_deref());
@@ -10507,13 +10526,18 @@ fn apply_tombstone_visibility_with_connection(
         }
     }
 
+    if let Some(error) = seal_lookup_error {
+        degraded.push(SearchDegradation::tombstone_visibility_unavailable(&error));
+    }
+
     let total_before = visible_hits
         .len()
         .saturating_add(filtered)
         .saturating_add(expired_filtered)
         .saturating_add(future_filtered)
         .saturating_add(stale_filtered)
-        .saturating_add(malformed_filtered);
+        .saturating_add(malformed_filtered)
+        .saturating_add(sealed_filtered);
     let validity_filtered = expired_filtered
         .saturating_add(future_filtered)
         .saturating_add(stale_filtered)
@@ -10532,6 +10556,7 @@ fn apply_tombstone_visibility_with_connection(
         future_filtered_count = future_filtered,
         stale_filtered_count = stale_filtered,
         malformed_filtered_count = malformed_filtered,
+        sealed_filtered_count = sealed_filtered,
         valid_count = visible_hits.len(),
         "visibility_filter"
     );

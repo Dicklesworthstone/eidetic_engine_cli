@@ -41,7 +41,7 @@ pub fn build_memory_attestation(
     let links = connection.list_memory_links_for_memory(memory_id, None)?;
     let anchors = connection.list_memory_anchors(memory_id)?;
     let audits = memory_attestation_audits(connection, memory_id, &memory.workspace_id)?;
-    let seal = connection.get_memory_seal(memory_id)?;
+    let seal = memory_attestation_seal(connection, &memory)?;
 
     Ok(Some(
         build_memory_attestation_from_parts(&memory, &links, &anchors, &audits)
@@ -91,11 +91,41 @@ pub fn build_memory_attestation_for_workspace(
     let links = connection.list_memory_links_for_memory(memory_id, None)?;
     let anchors = connection.list_memory_anchors(memory_id)?;
     let audits = memory_attestation_audits(connection, memory_id, workspace_id)?;
-    let seal = connection.get_memory_seal(memory_id)?;
+    let seal = memory_attestation_seal(connection, &memory)?;
     Ok(Some(
         build_memory_attestation_from_parts(&memory, &links, &anchors, &audits)
             .with_seal(seal.as_ref().map(attestation_seal_from_row)),
     ))
+}
+
+/// Load the seal attached to this memory's immutable revision lineage.
+///
+/// A reveal keeps the commitment on the original row and publishes the exact
+/// bytes as a new revision with the same `logical_id`. Attesting that live
+/// revision must therefore carry the original seal rather than looking like an
+/// unrelated unsealed memory.
+fn memory_attestation_seal(
+    connection: &DbConnection,
+    memory: &StoredMemory,
+) -> db::Result<Option<crate::models::MemorySeal>> {
+    if let Some(seal) = connection.get_memory_seal(&memory.id)? {
+        return Ok(Some(seal));
+    }
+    let Some(logical_id) = connection.get_memory_logical_id(&memory.id)? else {
+        return Ok(None);
+    };
+    if logical_id == memory.id {
+        return Ok(None);
+    }
+    let Some(root) = connection.get_memory(&logical_id)? else {
+        return Ok(None);
+    };
+    if root.workspace_id != memory.workspace_id
+        || connection.get_memory_logical_id(&root.id)?.as_deref() != Some(logical_id.as_str())
+    {
+        return Ok(None);
+    }
+    connection.get_memory_seal(&logical_id)
 }
 
 /// Project a stored seal row into the offline attestation block (bd-2ea4a).
