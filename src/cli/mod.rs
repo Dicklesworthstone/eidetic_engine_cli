@@ -61492,7 +61492,7 @@ where
     } else {
         args.jobs.clone()
     };
-    let data = match crate::serve::daemon_status_report(&workspace_path, &job_types, 20) {
+    let mut data = match crate::serve::daemon_status_report(&workspace_path, &job_types, 20) {
         Ok(report) => report.data_json(),
         Err(message) => {
             let error = DomainError::Storage {
@@ -61502,6 +61502,24 @@ where
             return write_domain_error(&error, cli.wants_json(), stdout, stderr);
         }
     };
+    if let Some(object) = data.as_object_mut() {
+        let database_path = workspace_path.join(".ee").join("ee.db");
+        let team = if let Ok(connection) = crate::db::DbConnection::open_file(&database_path) {
+            crate::mesh::team::inspect_team_health(
+                &connection,
+                &crate::core::causal::stable_workspace_id(&workspace_path),
+                Some(&workspace_path),
+            )
+            .ok()
+            .and_then(|report| serde_json::to_value(report).ok())
+        } else {
+            None
+        };
+        object.insert(
+            "team".to_owned(),
+            team.unwrap_or_else(|| serde_json::json!({"posture": "unavailable"})),
+        );
+    }
     let response = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
@@ -66207,6 +66225,52 @@ impl NormalizedInvocation {
                     team::TeamCommand::Status(_) => "team status".to_string(),
                     team::TeamCommand::Invite(_) => "team invite".to_string(),
                     team::TeamCommand::Join(_) => "team join".to_string(),
+                    team::TeamCommand::Revoke(_) => "team revoke".to_string(),
+                    team::TeamCommand::Share(team::TeamShareCommand::History(_)) => {
+                        "team share history".to_string()
+                    }
+                    team::TeamCommand::Share(team::TeamShareCommand::Bodies(_)) => {
+                        "team share bodies".to_string()
+                    }
+                    team::TeamCommand::Unshare(team::TeamUnshareCommand::Bodies(_)) => {
+                        "team unshare bodies".to_string()
+                    }
+                    team::TeamCommand::Members(team::TeamMembersCommand::List(_)) => {
+                        "team members list".to_string()
+                    }
+                    team::TeamCommand::Members(team::TeamMembersCommand::Remove(_)) => {
+                        "team members remove".to_string()
+                    }
+                    team::TeamCommand::Members(team::TeamMembersCommand::AddNode(_)) => {
+                        "team members add-node".to_string()
+                    }
+                    team::TeamCommand::Members(team::TeamMembersCommand::RotateKey(_)) => {
+                        "team members rotate-key".to_string()
+                    }
+                    team::TeamCommand::Members(team::TeamMembersCommand::Reconcile(_)) => {
+                        "team members reconcile".to_string()
+                    }
+                    team::TeamCommand::Leave(_) => "team leave".to_string(),
+                    team::TeamCommand::Sync(_) => "team sync".to_string(),
+                    team::TeamCommand::Pause(_) => "team pause".to_string(),
+                    team::TeamCommand::Resume(_) => "team resume".to_string(),
+                    team::TeamCommand::Activity(_) => "team activity".to_string(),
+                    team::TeamCommand::Projects(team::TeamProjectsCommand::Share(_)) => {
+                        "team projects share".to_string()
+                    }
+                    team::TeamCommand::Projects(team::TeamProjectsCommand::Adopt(_)) => {
+                        "team projects adopt".to_string()
+                    }
+                    team::TeamCommand::Projects(team::TeamProjectsCommand::List(_)) => {
+                        "team projects list".to_string()
+                    }
+                    team::TeamCommand::Fetch(team::TeamFetchCommand::Body(_)) => {
+                        "team fetch body".to_string()
+                    }
+                    team::TeamCommand::Steward(team::TeamStewardCommand::RunOnce(_)) => {
+                        "team steward run-once".to_string()
+                    }
+                    team::TeamCommand::Doctor(_) => "team doctor".to_string(),
                 },
                 Command::Situation(sit) => match sit {
                     SituationCommand::Classify(_) => "situation classify".to_string(),

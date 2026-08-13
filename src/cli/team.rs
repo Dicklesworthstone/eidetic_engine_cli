@@ -8,8 +8,13 @@ use serde_json::json;
 
 use crate::db::DbConnection;
 use crate::mesh::team::{
-    create_local_team, join_team_with_code, local_team_status, mint_team_invite,
-    serve_one_bootstrap_join,
+    add_local_team_node, adopt_team_project, any_local_team_paused, create_local_team_with_store,
+    fetch_local_team_body, inspect_team_health, join_team_with_code_on_store, leave_local_team,
+    list_team_activity, list_team_projects, local_team_status, mint_team_invite_with_store,
+    plan_team_steward_once, reconcile_local_team_membership, remove_team_member,
+    revoke_team_invite, rotate_local_signing_key, serve_one_bootstrap_join_with_store,
+    set_local_team_paused, share_team_bodies, share_team_history, share_team_project,
+    unshare_team_bodies,
 };
 use crate::models::{DomainError, ProcessExitCode};
 use crate::output;
@@ -27,6 +32,94 @@ pub enum TeamCommand {
     Invite(TeamInviteArgs),
     /// Join a team by proving an invite over live TCP.
     Join(TeamJoinArgs),
+    /// Revoke a pending invite.
+    Revoke(TeamRevokeArgs),
+    /// Share origin-owned history as metadata-only origin events.
+    #[command(subcommand)]
+    Share(TeamShareCommand),
+    /// Stop future serving of previously published bodies.
+    #[command(subcommand)]
+    Unshare(TeamUnshareCommand),
+    /// Membership list/remove.
+    #[command(subcommand)]
+    Members(TeamMembersCommand),
+    /// Leave the local team (self removal).
+    Leave(TeamLeaveArgs),
+    /// Run one mesh sync cycle for the local team.
+    Sync(TeamSyncArgs),
+    /// Pause team network exchange.
+    Pause(TeamPauseArgs),
+    /// Resume team network exchange.
+    Resume(TeamResumeArgs),
+    /// List closed-metadata team activity.
+    Activity(TeamActivityArgs),
+    /// Mint, adopt, or list team project identities.
+    #[command(subcommand)]
+    Projects(TeamProjectsCommand),
+    /// Fetch a published body from the local hardened cache.
+    #[command(subcommand)]
+    Fetch(TeamFetchCommand),
+    /// Foreground steward pass.
+    #[command(subcommand)]
+    Steward(TeamStewardCommand),
+    /// Read-only team health checks.
+    Doctor(TeamDoctorArgs),
+}
+
+/// Nested `ee team fetch` verbs.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum TeamFetchCommand {
+    /// Read one published body cache key.
+    Body(TeamFetchBodyArgs),
+}
+
+/// Nested `ee team steward` verbs.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum TeamStewardCommand {
+    /// Plan and, if triggered, run one mesh sync.
+    RunOnce(TeamStewardRunOnceArgs),
+}
+
+/// Nested `ee team projects` verbs.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum TeamProjectsCommand {
+    /// Mint a team-scoped project id for a local path.
+    Share(TeamProjectsShareArgs),
+    /// Map an existing project id onto a local path.
+    Adopt(TeamProjectsAdoptArgs),
+    /// List minted and adopted projects.
+    List(TeamProjectsListArgs),
+}
+
+/// Nested `ee team members` verbs.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum TeamMembersCommand {
+    /// List recorded members.
+    List(TeamMembersListArgs),
+    /// Remove a non-self member.
+    Remove(TeamMembersRemoveArgs),
+    /// Bind another local node to the self member.
+    AddNode(TeamMembersAddNodeArgs),
+    /// Rotate the local signing key.
+    RotateKey(TeamMembersRotateKeyArgs),
+    /// Replay origin membership events onto local rows.
+    Reconcile(TeamMembersReconcileArgs),
+}
+
+/// Nested `ee team share` verbs.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum TeamShareCommand {
+    /// Preview or project pre-team local memories.
+    History(TeamShareHistoryArgs),
+    /// Preview or publish origin-owned bodies into the local cache.
+    Bodies(TeamShareBodiesArgs),
+}
+
+/// Nested `ee team unshare` verbs.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum TeamUnshareCommand {
+    /// Stop future body serving from this node.
+    Bodies(TeamUnshareBodiesArgs),
 }
 
 /// Arguments for `ee team create`.
@@ -69,13 +162,253 @@ pub struct TeamInviteArgs {
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct TeamJoinArgs {
     /// `eeteam1-` invite code.
+    #[arg(long, required_unless_present = "invite_stdin")]
+    pub invite: Option<String>,
+
+    /// Read the invite code from stdin (no-echo TTY, or a pipe for agents).
     #[arg(long)]
-    pub invite: String,
+    pub invite_stdin: bool,
 
     /// Display name the inviter should record for this node.
     #[arg(long, default_value = "joiner")]
     pub name: String,
 
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team revoke`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamRevokeArgs {
+    /// Invite id from `ee team invite`.
+    #[arg(long)]
+    pub invite_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team share bodies`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamShareBodiesArgs {
+    /// Publish previewed bodies into the hardened local cache.
+    #[arg(long)]
+    pub confirm: bool,
+
+    /// Mint a sensitive `eeap1_` body-approval token on preview.
+    #[arg(long)]
+    pub issue_token: bool,
+
+    /// Consume a body-approval token on confirm.
+    #[arg(long)]
+    pub token: Option<String>,
+
+    /// Maximum memories to consider (1–256).
+    #[arg(long, default_value_t = 64)]
+    pub limit: usize,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team unshare bodies`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamUnshareBodiesArgs {
+    /// Confirm the non-erasure unshare.
+    #[arg(long)]
+    pub confirm: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team share history`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamShareHistoryArgs {
+    /// Project the previewed history onto the origin stream.
+    #[arg(long)]
+    pub confirm: bool,
+
+    /// Maximum memories to consider (1–256).
+    #[arg(long, default_value_t = 64)]
+    pub limit: usize,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team members list`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamMembersListArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team members remove`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamMembersRemoveArgs {
+    /// Member id from `ee team status` / `ee team members list`.
+    #[arg(long)]
+    pub member_id: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team members add-node`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamMembersAddNodeArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team members rotate-key`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamMembersRotateKeyArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team members reconcile`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamMembersReconcileArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team leave`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamLeaveArgs {
+    /// Confirm the irreversible local leave.
+    #[arg(long)]
+    pub confirm: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team sync`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamSyncArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team pause`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamPauseArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team resume`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamResumeArgs {
+    /// Confirm resume after a pause.
+    #[arg(long)]
+    pub confirm: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team activity`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamActivityArgs {
+    /// Exclusive member-attested as-of timestamp (RFC 3339).
+    #[arg(long)]
+    pub as_of: String,
+
+    /// Maximum events to return (1–1000).
+    #[arg(long, default_value_t = 100)]
+    pub limit: usize,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team projects share`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamProjectsShareArgs {
+    /// Human project name.
+    #[arg(long)]
+    pub name: String,
+
+    /// Local path this node binds to the project.
+    #[arg(long)]
+    pub path: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team projects adopt`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamProjectsAdoptArgs {
+    /// `prj_tm_` project id from another member.
+    #[arg(long)]
+    pub project_id: String,
+
+    /// Human project name.
+    #[arg(long)]
+    pub name: String,
+
+    /// Local path this node binds to the project.
+    #[arg(long)]
+    pub path: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team projects list`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamProjectsListArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team fetch body`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamFetchBodyArgs {
+    /// Body cache key from `ee team share bodies`.
+    #[arg(long)]
+    pub key: String,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team steward run-once`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamStewardRunOnceArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team doctor`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamDoctorArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
@@ -96,6 +429,52 @@ where
         TeamCommand::Status(args) => handle_team_status(cli, args, stdout, stderr),
         TeamCommand::Invite(args) => handle_team_invite(cli, args, stdout, stderr),
         TeamCommand::Join(args) => handle_team_join(cli, args, stdout, stderr),
+        TeamCommand::Revoke(args) => handle_team_revoke(cli, args, stdout, stderr),
+        TeamCommand::Share(TeamShareCommand::History(args)) => {
+            handle_team_share_history(cli, args, stdout, stderr)
+        }
+        TeamCommand::Share(TeamShareCommand::Bodies(args)) => {
+            handle_team_share_bodies(cli, args, stdout, stderr)
+        }
+        TeamCommand::Unshare(TeamUnshareCommand::Bodies(args)) => {
+            handle_team_unshare_bodies(cli, args, stdout, stderr)
+        }
+        TeamCommand::Members(TeamMembersCommand::List(args)) => {
+            handle_team_members_list(cli, args, stdout, stderr)
+        }
+        TeamCommand::Members(TeamMembersCommand::Remove(args)) => {
+            handle_team_members_remove(cli, args, stdout, stderr)
+        }
+        TeamCommand::Members(TeamMembersCommand::AddNode(args)) => {
+            handle_team_members_add_node(cli, args, stdout, stderr)
+        }
+        TeamCommand::Members(TeamMembersCommand::RotateKey(args)) => {
+            handle_team_members_rotate_key(cli, args, stdout, stderr)
+        }
+        TeamCommand::Members(TeamMembersCommand::Reconcile(args)) => {
+            handle_team_members_reconcile(cli, args, stdout, stderr)
+        }
+        TeamCommand::Leave(args) => handle_team_leave(cli, args, stdout, stderr),
+        TeamCommand::Sync(args) => handle_team_sync(cli, args, stdout, stderr),
+        TeamCommand::Pause(args) => handle_team_pause(cli, args, stdout, stderr),
+        TeamCommand::Resume(args) => handle_team_resume(cli, args, stdout, stderr),
+        TeamCommand::Activity(args) => handle_team_activity(cli, args, stdout, stderr),
+        TeamCommand::Projects(TeamProjectsCommand::Share(args)) => {
+            handle_team_projects_share(cli, args, stdout, stderr)
+        }
+        TeamCommand::Projects(TeamProjectsCommand::Adopt(args)) => {
+            handle_team_projects_adopt(cli, args, stdout, stderr)
+        }
+        TeamCommand::Projects(TeamProjectsCommand::List(args)) => {
+            handle_team_projects_list(cli, args, stdout, stderr)
+        }
+        TeamCommand::Fetch(TeamFetchCommand::Body(args)) => {
+            handle_team_fetch_body(cli, args, stdout, stderr)
+        }
+        TeamCommand::Steward(TeamStewardCommand::RunOnce(args)) => {
+            handle_team_steward_run_once(cli, args, stdout, stderr)
+        }
+        TeamCommand::Doctor(args) => handle_team_doctor(cli, args, stdout, stderr),
     }
 }
 
@@ -114,7 +493,14 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
-    match create_local_team(&connection, &workspace_id, &args.name, &produced_at) {
+    let workspace_path = cli.resolve_workspace();
+    match create_local_team_with_store(
+        &connection,
+        &workspace_id,
+        &args.name,
+        &produced_at,
+        Some(&workspace_path),
+    ) {
         Ok(report) => {
             let human = format!(
                 "Team {}: {}\n  team_id: {}\n  origin_node_id: {}\n  hello_port: {}\n  genesis: {}\nNext:\n  {}\n",
@@ -183,6 +569,15 @@ where
                         ));
                     }
                 }
+                if !report.nodes.is_empty() {
+                    lines.push(format!("Nodes: {}", report.nodes.len()));
+                    for node in &report.nodes {
+                        lines.push(format!(
+                            "  {} gen {} {}",
+                            node.node_id, node.signing_key_generation, node.state
+                        ));
+                    }
+                }
                 lines.join("\n") + "\n"
             };
             write_team_report(cli, &report, &human, stdout)
@@ -215,7 +610,14 @@ where
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
     let expires_at = (chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339();
-    match mint_team_invite(&connection, &args.endpoint, &produced_at, &expires_at) {
+    let workspace_path = cli.resolve_workspace();
+    match mint_team_invite_with_store(
+        &connection,
+        &args.endpoint,
+        &produced_at,
+        &expires_at,
+        Some(&workspace_path),
+    ) {
         Ok(mut report) => {
             if args.wait {
                 let Some(bind) = crate::mesh::bootstrap_envelope::parse_live_peer_endpoint(
@@ -250,11 +652,12 @@ where
                         );
                     }
                 };
-                match serve_one_bootstrap_join(
+                match serve_one_bootstrap_join_with_store(
                     &connection,
                     &workspace_id,
                     &listener,
                     std::time::Duration::from_secs(300),
+                    Some(&workspace_path),
                 ) {
                     Ok(granted) => report.granted = Some(granted),
                     Err(error) => {
@@ -302,6 +705,886 @@ where
     }
 }
 
+fn handle_team_revoke<W, E>(
+    cli: &Cli,
+    args: &TeamRevokeArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let revoked_at = chrono::Utc::now().to_rfc3339();
+    match revoke_team_invite(&connection, &args.invite_id, &revoked_at) {
+        Ok(true) => {
+            let report = json!({
+                "schema": "ee.team.revoke.v1",
+                "command": "team revoke",
+                "inviteId": args.invite_id,
+                "revoked": true,
+                "revokedAt": revoked_at,
+                "meshPrimitives": ["team_pending_invites.revoke", "team_invite_auth_floor"],
+            });
+            write_team_report(
+                cli,
+                &report,
+                &format!("Invite {} revoked\n", args.invite_id),
+                stdout,
+            )
+        }
+        Ok(false) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Invite {} is not pending", args.invite_id),
+                repair: Some("ee team invite --endpoint <ip> --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to revoke invite: {error}"),
+                repair: Some("ee team status --workspace . --json".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_share_history<W, E>(
+    cli: &Cli,
+    args: &TeamShareHistoryArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let produced_at = chrono::Utc::now().to_rfc3339();
+    let workspace_path = cli.resolve_workspace();
+    match share_team_history(
+        &connection,
+        &workspace_id,
+        &produced_at,
+        args.confirm,
+        args.limit,
+        Some(&workspace_path),
+    ) {
+        Ok(report) => {
+            let human = if report.confirmed {
+                format!(
+                    "History projected: {} new, {} already shared\n  team_id: {}\n  consent: {}\n",
+                    report.projected_count,
+                    report.skipped_count,
+                    report.team_id,
+                    report.consent_hash
+                )
+            } else {
+                format!(
+                    "History preview: {} candidates ({} already shared)\n  team_id: {}\n  consent: {}\nNext:\n  ee team share history --confirm --workspace .\n",
+                    report.candidate_count,
+                    report.skipped_count,
+                    report.team_id,
+                    report.consent_hash
+                )
+            };
+            write_team_report(cli, &report, &human, stdout)
+        }
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to share team history: {error}"),
+                repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_share_bodies<W, E>(
+    cli: &Cli,
+    args: &TeamShareBodiesArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let produced_at = chrono::Utc::now().to_rfc3339();
+    let workspace_path = cli.resolve_workspace();
+    match share_team_bodies(
+        &connection,
+        &workspace_id,
+        &produced_at,
+        args.confirm,
+        args.limit,
+        Some(&workspace_path),
+        args.issue_token,
+        args.token.as_deref(),
+    ) {
+        Ok(report) => {
+            let human = if report.confirmed {
+                format!(
+                    "Bodies published: {} new, {} already cached\n  team_id: {}\n  consent: {}\n",
+                    report.published_count,
+                    report.skipped_count,
+                    report.team_id,
+                    report.consent_hash
+                )
+            } else {
+                format!(
+                    "Body preview: {} candidates ({} already cached)\n  team_id: {}\n  consent: {}\nNext:\n  ee team share bodies --confirm --workspace .\n",
+                    report.candidate_count,
+                    report.skipped_count,
+                    report.team_id,
+                    report.consent_hash
+                )
+            };
+            write_team_report(cli, &report, &human, stdout)
+        }
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to share team bodies: {error}"),
+                repair: Some("ee team share history --workspace . --json".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_unshare_bodies<W, E>(
+    cli: &Cli,
+    args: &TeamUnshareBodiesArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !args.confirm {
+        return write_domain_error(
+            &DomainError::Storage {
+                message: "Unshare bodies requires --confirm".to_owned(),
+                repair: Some("ee team unshare bodies --confirm --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
+    let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let produced_at = chrono::Utc::now().to_rfc3339();
+    match unshare_team_bodies(&connection, &workspace_id, &produced_at) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!(
+                "Unshared {} body cache row(s) (bytes not erased)\n  team_id: {}\n",
+                report.published_count, report.team_id
+            ),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to unshare team bodies: {error}"),
+                repair: Some("ee team share bodies --workspace . --json".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_members_list<W, E>(
+    cli: &Cli,
+    args: &TeamMembersListArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    handle_team_status(
+        cli,
+        &TeamStatusArgs {
+            database: args.database.clone(),
+        },
+        stdout,
+        stderr,
+    )
+}
+
+fn handle_team_members_remove<W, E>(
+    cli: &Cli,
+    args: &TeamMembersRemoveArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let produced_at = chrono::Utc::now().to_rfc3339();
+    let workspace_path = cli.resolve_workspace();
+    match remove_team_member(
+        &connection,
+        &workspace_id,
+        &args.member_id,
+        &produced_at,
+        Some(&workspace_path),
+    ) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!(
+                "Member {} now {}\n  team_id: {}\n",
+                report.member_id, report.state, report.team_id
+            ),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to remove member: {error}"),
+                repair: Some("ee team members list --workspace . --json".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_members_add_node<W, E>(
+    cli: &Cli,
+    args: &TeamMembersAddNodeArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let produced_at = chrono::Utc::now().to_rfc3339();
+    let workspace_path = cli.resolve_workspace();
+    match add_local_team_node(
+        &connection,
+        &workspace_id,
+        &produced_at,
+        Some(&workspace_path),
+    ) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!(
+                "Added node {}\n  team_id: {}\n",
+                report.origin_node_id, report.team_id
+            ),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to add node: {error}"),
+                repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_members_rotate_key<W, E>(
+    cli: &Cli,
+    args: &TeamMembersRotateKeyArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let produced_at = chrono::Utc::now().to_rfc3339();
+    let workspace_path = cli.resolve_workspace();
+    match rotate_local_signing_key(&connection, &workspace_id, &produced_at, &workspace_path) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!(
+                "Rotated signing key for {}\n  {}\n",
+                report.origin_node_id, report.state
+            ),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to rotate signing key: {error}"),
+                repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_members_reconcile<W, E>(
+    cli: &Cli,
+    args: &TeamMembersReconcileArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    match reconcile_local_team_membership(&connection, &workspace_id) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!(
+                "Reconciled {}: {} addition(s), {} removal(s) from {} event(s)\n",
+                report.team_id,
+                report.applied_additions,
+                report.applied_removals,
+                report.inspected_events
+            ),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to reconcile membership: {error}"),
+                repair: Some("ee team status --workspace . --json".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_leave<W, E>(
+    cli: &Cli,
+    args: &TeamLeaveArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !args.confirm {
+        return write_domain_error(
+            &DomainError::Storage {
+                message: "Leave requires --confirm".to_owned(),
+                repair: Some("ee team leave --confirm --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
+    let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let produced_at = chrono::Utc::now().to_rfc3339();
+    let workspace_path = cli.resolve_workspace();
+    match leave_local_team(
+        &connection,
+        &workspace_id,
+        &produced_at,
+        Some(&workspace_path),
+    ) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!("Left team {}\n", report.team_id),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to leave team: {error}"),
+                repair: Some("ee team status --workspace . --json".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_sync<W, E>(
+    cli: &Cli,
+    args: &TeamSyncArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    match any_local_team_paused(&connection) {
+        Ok(true) => {
+            return write_domain_error(
+                &DomainError::Storage {
+                    message: "Team is paused".to_owned(),
+                    repair: Some("ee team resume --confirm --workspace .".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+        Ok(false) => {}
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::Storage {
+                    message: format!("Failed to read team posture: {error}"),
+                    repair: Some("ee team status --workspace . --json".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    }
+    super::mesh::handle_mesh_sync(
+        cli,
+        &super::mesh::MeshSyncArgs {
+            database: args.database.clone(),
+            once: true,
+            cadence_ms: 0,
+            peer_concurrency: 1,
+            body_fetch_budget_bytes: 65_536,
+            stale_read_window_ms: 5_000,
+            time_budget_ms: 5_000,
+        },
+        stdout,
+        stderr,
+    )
+}
+
+fn handle_team_pause<W, E>(
+    cli: &Cli,
+    args: &TeamPauseArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    handle_team_posture(cli, args.database.as_deref(), true, stdout, stderr)
+}
+
+fn handle_team_resume<W, E>(
+    cli: &Cli,
+    args: &TeamResumeArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !args.confirm {
+        return write_domain_error(
+            &DomainError::Storage {
+                message: "Resume requires --confirm".to_owned(),
+                repair: Some("ee team resume --confirm --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
+    handle_team_posture(cli, args.database.as_deref(), false, stdout, stderr)
+}
+
+fn handle_team_activity<W, E>(
+    cli: &Cli,
+    args: &TeamActivityArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    match list_team_activity(&connection, &workspace_id, &args.as_of, args.limit) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!(
+                "Team activity {}: {} event(s) as-of {}\n",
+                report.team_id, report.event_count, report.as_of
+            ),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to list team activity: {error}"),
+                repair: Some("ee team status --workspace . --json".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_projects_share<W, E>(
+    cli: &Cli,
+    args: &TeamProjectsShareArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let produced_at = chrono::Utc::now().to_rfc3339();
+    let workspace_path = cli.resolve_workspace();
+    match share_team_project(
+        &connection,
+        &workspace_id,
+        &args.name,
+        &args.path,
+        &produced_at,
+        Some(&workspace_path),
+    ) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!(
+                "{} project {}\n  team_id: {}\n",
+                if report.minted { "Shared" } else { "Existing" },
+                report
+                    .projects
+                    .first()
+                    .map(|project| project.project_id.as_str())
+                    .unwrap_or("unknown"),
+                report.team_id
+            ),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to share project: {error}"),
+                repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_projects_adopt<W, E>(
+    cli: &Cli,
+    args: &TeamProjectsAdoptArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let produced_at = chrono::Utc::now().to_rfc3339();
+    match adopt_team_project(
+        &connection,
+        &args.project_id,
+        &args.name,
+        &args.path,
+        &produced_at,
+    ) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!("Adopted {}\n  path: {}\n", args.project_id, args.path),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to adopt project: {error}"),
+                repair: Some("ee team projects list --workspace . --json".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_projects_list<W, E>(
+    cli: &Cli,
+    args: &TeamProjectsListArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    match list_team_projects(&connection) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!(
+                "Team projects {}: {} project(s)\n",
+                report.team_id, report.project_count
+            ),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to list projects: {error}"),
+                repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_fetch_body<W, E>(
+    cli: &Cli,
+    args: &TeamFetchBodyArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let workspace_path = cli.resolve_workspace();
+    match fetch_local_team_body(&connection, &workspace_id, &workspace_path, &args.key) {
+        Ok(report) => {
+            let human = if report.body_hex.is_some() {
+                format!(
+                    "Fetched {} ({} bytes)\n",
+                    report.body_cache_key, report.size_bytes
+                )
+            } else {
+                format!(
+                    "Body {} is {}\n",
+                    report.body_cache_key, report.cache_status
+                )
+            };
+            write_team_report(cli, &report, &human, stdout)
+        }
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to fetch team body: {error}"),
+                repair: Some("ee team share bodies --workspace . --json".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_steward_run_once<W, E>(
+    cli: &Cli,
+    args: &TeamStewardRunOnceArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let plan = match plan_team_steward_once(&connection) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::Storage {
+                    message: format!("Failed to plan team steward: {error}"),
+                    repair: Some("ee team status --workspace . --json".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+    if !plan.ran_sync {
+        return write_team_report(
+            cli,
+            &plan,
+            &format!(
+                "Steward {}: {} (sync skipped)\n  team_id: {}\n",
+                plan.outcome, plan.reason, plan.team_id
+            ),
+            stdout,
+        );
+    }
+    super::mesh::handle_mesh_sync(
+        cli,
+        &super::mesh::MeshSyncArgs {
+            database: args.database.clone(),
+            once: true,
+            cadence_ms: 0,
+            peer_concurrency: 1,
+            body_fetch_budget_bytes: 65_536,
+            stale_read_window_ms: 5_000,
+            time_budget_ms: 5_000,
+        },
+        stdout,
+        stderr,
+    )
+}
+
+fn handle_team_doctor<W, E>(
+    cli: &Cli,
+    args: &TeamDoctorArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let workspace_path = cli.resolve_workspace();
+    match inspect_team_health(&connection, &workspace_id, Some(&workspace_path)) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!(
+                "Team doctor {}: {} check(s)\n",
+                report.posture,
+                report.checks.len()
+            ),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to inspect team health: {error}"),
+                repair: Some("ee team status --workspace . --json".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_posture<W, E>(
+    cli: &Cli,
+    database: Option<&std::path::Path>,
+    paused: bool,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, _) = match open_team_store(cli, database) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let updated_at = chrono::Utc::now().to_rfc3339();
+    match set_local_team_paused(&connection, paused, &updated_at) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!(
+                "Team {} (generation {})\n  team_id: {}\n",
+                if report.paused { "paused" } else { "resumed" },
+                report.pause_generation,
+                report.team_id
+            ),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to update team posture: {error}"),
+                repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
 fn handle_team_join<W, E>(
     cli: &Cli,
     args: &TeamJoinArgs,
@@ -317,13 +1600,44 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
-    match join_team_with_code(
+    let invite_code = if args.invite_stdin {
+        match read_invite_code_from_stdin() {
+            Ok(code) => code,
+            Err(error) => {
+                return write_domain_error(
+                    &DomainError::Storage {
+                        message: format!("Failed to read invite from stdin: {error}"),
+                        repair: Some("ee team join --invite-stdin --workspace .".to_owned()),
+                    },
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                );
+            }
+        }
+    } else {
+        args.invite.clone().unwrap_or_default()
+    };
+    if invite_code.is_empty() {
+        return write_domain_error(
+            &DomainError::Storage {
+                message: "Join needs --invite or --invite-stdin".to_owned(),
+                repair: Some("ee team join --invite-stdin --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
+    let workspace_path = cli.resolve_workspace();
+    match join_team_with_code_on_store(
         &connection,
         &workspace_id,
-        &args.invite,
+        &invite_code,
         &args.name,
         &produced_at,
         std::time::Duration::from_secs(10),
+        Some(&workspace_path),
     ) {
         Ok(report) => {
             let human = format!(
@@ -345,6 +1659,38 @@ where
             stderr,
         ),
     }
+}
+
+#[cfg(unix)]
+struct StdinEchoGuard;
+
+#[cfg(unix)]
+impl Drop for StdinEchoGuard {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("stty").arg("echo").status();
+    }
+}
+
+fn read_invite_code_from_stdin() -> Result<String, String> {
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    #[cfg(unix)]
+    let _guard = if tty {
+        std::process::Command::new("stty")
+            .arg("-echo")
+            .status()
+            .map_err(|error| format!("disable stdin echo: {error}"))?;
+        Some(StdinEchoGuard)
+    } else {
+        None
+    };
+    let mut raw = String::new();
+    std::io::stdin()
+        .read_line(&mut raw)
+        .map_err(|error| error.to_string())?;
+    if tty {
+        let _ = writeln!(std::io::stderr());
+    }
+    Ok(raw.trim().to_owned())
 }
 
 fn open_team_store(

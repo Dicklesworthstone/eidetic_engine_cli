@@ -4741,7 +4741,7 @@ where
     )
 }
 
-fn handle_mesh_sync<W, E>(
+pub(crate) fn handle_mesh_sync<W, E>(
     cli: &Cli,
     args: &MeshSyncArgs,
     stdout: &mut W,
