@@ -7616,8 +7616,8 @@ fn resolve_search_rerank_runtime(
     let database_path = options.resolve_database_path();
     let workspace_root = default_workspace_root(&options.workspace_path);
     let workspace_id = crate::core::curate::stable_workspace_id(&workspace_root);
-    let entry_result = match connection {
-        Some(connection) => selected_available_reranker_entry(connection, &workspace_id),
+    let resolution_result = match connection {
+        Some(connection) => resolve_registered_reranker(connection, &workspace_id),
         None => {
             if !database_path.exists() {
                 Err(format!(
@@ -7628,16 +7628,26 @@ fn resolve_search_rerank_runtime(
                 DbConnection::open_file_read_only(&database_path)
                     .map_err(|error| error.to_string())
                     .and_then(|connection| {
-                        selected_available_reranker_entry(&connection, &workspace_id)
+                        resolve_registered_reranker(&connection, &workspace_id)
                     })
             }
         }
     };
 
-    let entry = match entry_result {
-        Ok(Some(entry)) => entry,
-        Ok(None) => {
+    let resolved = match resolution_result {
+        Ok(RegisteredRerankerResolution::Loaded(resolved)) => resolved,
+        Ok(RegisteredRerankerResolution::Absent) => {
             degraded.push(SearchDegradation::rerank_model_absent());
+            return SearchRerankRuntime::disabled();
+        }
+        Ok(RegisteredRerankerResolution::Unloadable) => {
+            tracing::warn!(
+                target: "ee::search::rerank",
+                event = "rerank_model_load_failed",
+            );
+            degraded.push(SearchDegradation::rerank_model_unavailable(
+                "The registered local reranker could not be loaded; retry the query or inspect local model status.",
+            ));
             return SearchRerankRuntime::disabled();
         }
         Err(_error) => {
@@ -7652,32 +7662,18 @@ fn resolve_search_rerank_runtime(
         }
     };
 
-    match load_search_reranker(&entry) {
-        Ok(reranker) => {
-            tracing::info!(
-                target: "ee::search::rerank",
-                event = "rerank_model_resolved",
-                model_id = %entry.model_name,
-                top_k = configured_top_k,
-            );
-            SearchRerankRuntime::enabled(
-                reranker,
-                SearchRerankTextProvider::new(database_path, &options.workspace_path, options),
-                entry.model_name,
-                configured_top_k,
-            )
-        }
-        Err(_error) => {
-            tracing::warn!(
-                target: "ee::search::rerank",
-                event = "rerank_model_load_failed",
-            );
-            degraded.push(SearchDegradation::rerank_model_unavailable(
-                "The registered local reranker could not be loaded; retry the query or inspect local model status.",
-            ));
-            SearchRerankRuntime::disabled()
-        }
-    }
+    tracing::info!(
+        target: "ee::search::rerank",
+        event = "rerank_model_resolved",
+        model_id = %resolved.entry.model_name,
+        top_k = configured_top_k,
+    );
+    SearchRerankRuntime::enabled(
+        resolved.reranker,
+        SearchRerankTextProvider::new(database_path, &options.workspace_path, options),
+        resolved.entry.model_name,
+        configured_top_k,
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -7715,13 +7711,41 @@ pub(crate) fn resolve_search_rerank_runtime_posture(
     }
 }
 
-fn selected_available_reranker_entry(
+pub(crate) enum RegisteredRerankerResolution {
+    Absent,
+    Loaded(ResolvedRegisteredReranker),
+    Unloadable,
+}
+
+pub(crate) struct ResolvedRegisteredReranker {
+    entry: StoredModelRegistryEntry,
+    reranker: Arc<dyn Reranker>,
+}
+
+pub(crate) fn resolve_registered_reranker(
     connection: &DbConnection,
     workspace_id: &str,
-) -> Result<Option<StoredModelRegistryEntry>, String> {
-    let mut entries = connection
+) -> Result<RegisteredRerankerResolution, String> {
+    let entries = connection
         .list_model_registry_entries(workspace_id)
         .map_err(|error| error.to_string())?;
+    let entries = sorted_available_reranker_entries(entries);
+    if entries.is_empty() {
+        return Ok(RegisteredRerankerResolution::Absent);
+    }
+    if let Some((entry, reranker)) =
+        first_loadable_registered_reranker(entries, load_search_reranker)
+    {
+        return Ok(RegisteredRerankerResolution::Loaded(
+            ResolvedRegisteredReranker { entry, reranker },
+        ));
+    }
+    Ok(RegisteredRerankerResolution::Unloadable)
+}
+
+fn sorted_available_reranker_entries(
+    mut entries: Vec<StoredModelRegistryEntry>,
+) -> Vec<StoredModelRegistryEntry> {
     entries.retain(|entry| {
         entry.purpose == ModelPurpose::Reranker && entry.status == ModelRegistryStatus::Available
     });
@@ -7730,7 +7754,19 @@ fn selected_available_reranker_entry(
             .cmp(&right.model_name)
             .then_with(|| left.id.cmp(&right.id))
     });
-    Ok(entries.into_iter().next())
+    entries
+}
+
+fn first_loadable_registered_reranker<T, E>(
+    entries: Vec<StoredModelRegistryEntry>,
+    mut load: impl FnMut(&StoredModelRegistryEntry) -> Result<T, E>,
+) -> Option<(StoredModelRegistryEntry, T)> {
+    for entry in entries {
+        if let Ok(loaded) = load(&entry) {
+            return Some((entry, loaded));
+        }
+    }
+    None
 }
 
 fn load_search_reranker(entry: &StoredModelRegistryEntry) -> Result<Arc<dyn Reranker>, String> {
@@ -7745,14 +7781,6 @@ fn load_search_reranker(entry: &StoredModelRegistryEntry) -> Result<Arc<dyn Rera
         )
     })?;
     Ok(Arc::new(frankensearch::SyncRerankerAdapter(reranker)))
-}
-
-/// Validate that a registry row resolves to a loadable local reranker without
-/// exposing the loaded model outside the search subsystem.
-pub(crate) fn verify_registered_reranker_loadable(
-    entry: &StoredModelRegistryEntry,
-) -> Result<(), String> {
-    load_search_reranker(entry).map(drop)
 }
 
 fn verify_reranker_registry_hash(entry: &StoredModelRegistryEntry) -> Result<(), String> {

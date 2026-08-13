@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
 use crate::core::context::{
-    ContextPackOptions, ContextPackOutputOptions, attach_context_search_advisories_for_delivery,
-    run_context_pack_with_performance,
+    ContextPackOptions, ContextPackOutputOptions, ContextSearchAdvisorySnapshot,
+    attach_context_cached_search_advisories_for_delivery,
+    attach_context_search_advisories_for_delivery, run_context_pack_with_performance,
 };
 use crate::core::doctor::DoctorReport;
 use crate::core::memory::{RememberMemoryOptions, RememberMemoryReport, remember_memory};
@@ -127,6 +128,38 @@ impl ServeSearchAdvisoryState {
         attach_context_search_advisories_for_delivery(
             &mut payload,
             report,
+            &mut session,
+            workspace_key,
+            &mut reservation,
+        );
+        let delivery = reservation
+            .requires_settlement()
+            .then(|| ServeSearchAdvisoryDelivery {
+                workspace_key: reservation.workspace_id().to_owned(),
+                token: reservation.token(),
+                large_gap_capacity_busy: reservation.large_gap_capacity_busy(),
+            });
+        Ok((payload, delivery))
+    }
+
+    fn render_cached_context_for_delivery(
+        &self,
+        mut payload: JsonValue,
+        snapshot: &ContextSearchAdvisorySnapshot,
+        workspace_key: &str,
+    ) -> Result<(JsonValue, Option<ServeSearchAdvisoryDelivery>), DomainError> {
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| DomainError::Configuration {
+                message: "ee serve search advisory state is unavailable after a process panic."
+                    .to_owned(),
+                repair: Some("Restart `ee serve --foreground`.".to_owned()),
+            })?;
+        let mut reservation = session.reserve_delivery(workspace_key);
+        attach_context_cached_search_advisories_for_delivery(
+            &mut payload,
+            snapshot,
             &mut session,
             workspace_key,
             &mut reservation,
@@ -1862,12 +1895,16 @@ fn serve_context_payload_json(
         &crate::output::render_context_response_json(&run.response),
         "pack",
     )?;
-    let Some(search_report) = run.search_report.as_ref() else {
-        return Ok(ServeDispatchPayload::without_delivery(payload));
-    };
     let workspace_key = crate::core::workspace::stable_workspace_id(&options.workspace_path);
-    let (payload, advisory_delivery) =
-        advisory_state.render_context_for_delivery(payload, search_report, &workspace_key)?;
+    let (payload, advisory_delivery) = if let Some(search_report) = run.search_report.as_ref() {
+        advisory_state.render_context_for_delivery(payload, search_report, &workspace_key)?
+    } else {
+        advisory_state.render_cached_context_for_delivery(
+            payload,
+            &run.search_advisory_snapshot,
+            &workspace_key,
+        )?
+    };
     Ok(ServeDispatchPayload {
         payload,
         advisory_delivery,

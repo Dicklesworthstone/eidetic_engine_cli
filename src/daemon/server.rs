@@ -40,8 +40,10 @@ use rustix::fs::{FlockOperation, flock};
 use crate::config::env_registry::{self, EnvVar};
 use crate::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
-    ContextPackOutputOptions, attach_context_search_advisories_for_delivery,
-    attach_pack_dna_to_context_response, run_context_pack_with_performance_controlled,
+    ContextPackOutputOptions, ContextSearchAdvisorySnapshot,
+    attach_context_cached_search_advisories_for_delivery,
+    attach_context_search_advisories_for_delivery, attach_pack_dna_to_context_response,
+    run_context_pack_with_performance_controlled,
 };
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, PERFORMANCE_FALLBACK_REDACTED_MESSAGE,
@@ -4987,6 +4989,7 @@ fn dispatch_context(
     };
     let mut context_response = context_run.response;
     let context_search_report = context_run.search_report;
+    let context_search_advisory_snapshot = context_run.search_advisory_snapshot;
 
     if shutdown.load(Ordering::SeqCst) {
         return daemon_shutting_down_response(
@@ -5042,22 +5045,14 @@ fn dispatch_context(
         let mut advisory_session = search_advisory_session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(search_report) = context_search_report.as_ref() {
-            attach_context_search_advisories_for_delivery(
-                &mut result,
-                search_report,
-                &mut advisory_session,
-                &advisory_workspace_id,
-                pending_delivery.reservation_mut(),
-            );
-        } else {
-            filter_context_large_gap_advisory_for_delivery(
-                &mut result,
-                &mut advisory_session,
-                &advisory_workspace_id,
-                pending_delivery.reservation_mut(),
-            );
-        }
+        attach_daemon_context_search_advisories_for_delivery(
+            &mut result,
+            context_search_report.as_ref(),
+            &context_search_advisory_snapshot,
+            &mut advisory_session,
+            &advisory_workspace_id,
+            pending_delivery.reservation_mut(),
+        );
     }
     if daemon_context_deadline_expired(context_started, params.timeout_ms) {
         return daemon_context_deadline_response(
@@ -5095,6 +5090,33 @@ fn dispatch_context(
         );
     }
     pending_delivery.finish(response, defer_advisory_until_socket_write)
+}
+
+fn attach_daemon_context_search_advisories_for_delivery(
+    response: &mut serde_json::Value,
+    search_report: Option<&SearchReport>,
+    search_advisory_snapshot: &ContextSearchAdvisorySnapshot,
+    session: &mut SearchAdvisorySession,
+    workspace_id: &str,
+    reservation: &mut SearchAdvisoryDeliveryReservation,
+) {
+    if let Some(search_report) = search_report {
+        attach_context_search_advisories_for_delivery(
+            response,
+            search_report,
+            session,
+            workspace_id,
+            reservation,
+        );
+    } else {
+        attach_context_cached_search_advisories_for_delivery(
+            response,
+            search_advisory_snapshot,
+            session,
+            workspace_id,
+            reservation,
+        );
+    }
 }
 
 fn filter_context_large_gap_advisory_for_delivery(

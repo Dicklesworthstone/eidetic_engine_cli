@@ -35,8 +35,7 @@ use crate::mesh::repair_action_graph::{
 };
 use crate::models::error_codes::{self, ErrorCode};
 use crate::models::{
-    EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, ModelPurpose, ModelRegistryStatus,
-    SingleFlightPostureReport, TrustClass,
+    EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, SingleFlightPostureReport, TrustClass,
 };
 use crate::search::lexical_ram_tier::{
     LEXICAL_RAM_TIER_HUGEPAGES_ENV, LEXICAL_RAM_TIER_PIN_RAM_ENV, LexicalRamTierConfig,
@@ -50,7 +49,7 @@ use super::build_cli_runtime;
 use super::curate::stable_workspace_id;
 use super::index::{DEFAULT_INDEX_SUBDIR, IndexHealth, IndexStatusOptions, get_index_status};
 use super::qos::{QosLaneSummary, summarize_qos_lane_registry};
-use super::search::verify_registered_reranker_loadable;
+use super::search::{RegisteredRerankerResolution, resolve_registered_reranker};
 use super::singleflight::singleflight_posture_report;
 use super::status::{
     FlightRecorderStatusReport, default_workspace_path, gather_flight_recorder_status,
@@ -3030,25 +3029,14 @@ fn check_reranker_posture(workspace_path: Option<&Path>) -> CheckResult {
         }
     };
     let workspace_id = stable_workspace_id(workspace_path);
-    match connection.list_model_registry_entries(&workspace_id) {
-        Ok(mut entries) => {
-            entries.retain(|entry| {
-                entry.purpose == ModelPurpose::Reranker
-                    && entry.status == ModelRegistryStatus::Available
-            });
-            entries.sort_by(|left, right| {
-                left.model_name
-                    .cmp(&right.model_name)
-                    .then_with(|| left.id.cmp(&right.id))
-            });
-            if entries.is_empty() {
-                return reranker_posture_check_result(Some(false), None);
-            }
-            for entry in &entries {
-                if verify_registered_reranker_loadable(entry).is_ok() {
-                    return reranker_posture_check_result(Some(true), None);
-                }
-            }
+    match resolve_registered_reranker(&connection, &workspace_id) {
+        Ok(RegisteredRerankerResolution::Absent) => {
+            reranker_posture_check_result(Some(false), None)
+        }
+        Ok(RegisteredRerankerResolution::Loaded(_)) => {
+            reranker_posture_check_result(Some(true), None)
+        }
+        Ok(RegisteredRerankerResolution::Unloadable) => {
             tracing::warn!(
                 target: "ee::doctor::reranker",
                 event = "registered_reranker_load_failed",

@@ -877,7 +877,7 @@ pub(crate) struct ContextSearchAdvisorySnapshot {
 }
 
 impl ContextSearchAdvisorySnapshot {
-    fn from_search_report(report: &SearchReport) -> Self {
+    pub(crate) fn from_search_report(report: &SearchReport) -> Self {
         let rerank_score_count = report
             .data_json()
             .pointer("/rerank/rerankScoreCount")
