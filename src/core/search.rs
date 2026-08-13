@@ -1144,8 +1144,8 @@ impl SearchAdvisorySession {
         } else {
             let entry = self
                 .permanent_occurrences
-                .get_mut(&identity)
-                .expect("permanent advisory identity was inserted above");
+                .entry(identity.clone())
+                .or_default();
             entry.occurrence_count = entry.occurrence_count.saturating_add(1);
             if !emitted {
                 self.permanent_suppressed_count = self.permanent_suppressed_count.saturating_add(1);
