@@ -345,6 +345,7 @@ mod insights;
 mod mesh;
 mod sandbox;
 mod share;
+mod team;
 
 const MIGRATION_REPAIR_COMMAND: &str = "ee migrate run --workspace . --json";
 
@@ -1080,6 +1081,9 @@ pub enum Command {
     /// Foreground local mesh operations for peers, status, export/import, and sync-once.
     #[command(subcommand)]
     Mesh(mesh::MeshCommand),
+    /// Team confederation over mesh primitives.
+    #[command(subcommand)]
+    Team(team::TeamCommand),
     /// Classify, compare, link (dry-run), show, or explain task situations.
     #[command(subcommand)]
     Situation(SituationCommand),
@@ -14431,6 +14435,7 @@ where
         }
         Some(Command::Share(ref command)) => share::handle_share(&cli, command, stdout, stderr),
         Some(Command::Mesh(ref command)) => mesh::handle_mesh(&cli, command, stdout, stderr),
+        Some(Command::Team(ref command)) => team::handle_team(&cli, command, stdout, stderr),
         Some(Command::Situation(SituationCommand::Classify(ref args))) => {
             handle_situation_classify(&cli, args, stdout, stderr)
         }
