@@ -7,17 +7,21 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::tailscale_probe::{
+    TailnetOwnerDisposition, TailscaleLocalReport, TailscaleUserProfile, evaluate_tailnet_owner,
+};
 use crate::db::{
     CreateMemoryInput, DbConnection, InsertTeamHistoryProjectionInput, InsertTeamMemberInput,
     InsertTeamMemberNodeInput, InsertTeamPendingInviteInput, InsertTeamProjectInput,
-    StoredMeshOriginEvent, StoredTeamMember, StoredTeamProject, UpsertMeshBodyCacheMetadataInput,
-    UpsertTeamJoinAttemptInput,
+    StoredMeshOriginEvent, StoredTeamMember, StoredTeamMemberIdentity, StoredTeamProject,
+    UpsertMeshBodyCacheMetadataInput, UpsertTeamJoinAttemptInput,
 };
 use crate::mesh::bootstrap_envelope::{
     BOOTSTRAP_DECLINE_SCHEMA_V1, BootstrapCapability, BootstrapDeclineV1, decode_envelope,
     encode_envelope, read_std_framed, write_std_framed,
 };
 use crate::mesh::hello_responder::configured_hello_port;
+use crate::mesh::idp::{IdpProviderCapability, classify_oidc_provider};
 use crate::mesh::origin_stream::{
     Ed25519OriginSigner, InboundOriginEvent, ManifestEventPayload, MemoryEventOperation,
     MemoryEventPayload, OriginAppendRequest, OriginEventPayload, OriginSignatureVerifier,
@@ -56,6 +60,10 @@ pub const TEAM_STEWARD_SCHEMA_V1: &str = "ee.team.steward.v1";
 pub const TEAM_DOCTOR_SCHEMA_V1: &str = "ee.team.doctor.v1";
 pub const TEAM_PROJECTS_SCHEMA_V1: &str = "ee.team.projects.v1";
 pub const TEAM_PROJECT_SHARED_OPERATION: &str = "teamProjectShared";
+pub const TEAM_IDP_SCHEMA_V1: &str = "ee.team.idp.v1";
+pub const TEAM_IDP_REVALIDATE_SCHEMA_V1: &str = "ee.team.idp.revalidate.v1";
+pub const TEAM_IDP_SET_SCHEMA_V1: &str = "ee.team.idp.set.v1";
+pub const TEAM_IDP_POLICY_SET_OPERATION: &str = "teamIdpPolicySet";
 pub const TEAM_INVITE_CODE_PREFIX: &str = "eeteam1-";
 pub const TEAM_ACTIVITY_CLOCK_SKEW_SECS: i64 = 600;
 
@@ -315,6 +323,58 @@ pub struct TeamProjectsReport {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TeamIdpPolicyReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub team_id: String,
+    pub kind: String,
+    pub allowed_domain: Option<String>,
+    pub policy_generation: u64,
+    pub mesh_primitives: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamIdpMemberCheck {
+    pub member_id: String,
+    pub origin_node_id: String,
+    pub is_self: bool,
+    pub login: Option<String>,
+    pub disposition: String,
+    pub state: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamIdpSetReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub team_id: String,
+    pub issuer: String,
+    pub client_id: String,
+    pub capability: String,
+    pub discovery_hash: String,
+    pub mesh_primitives: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamIdpRevalidateReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub team_id: String,
+    pub kind: String,
+    pub allowed_domain: Option<String>,
+    pub checked: usize,
+    pub attested: usize,
+    pub suspended: usize,
+    pub missing: usize,
+    pub members: Vec<TeamIdpMemberCheck>,
+    pub mesh_primitives: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TeamActivityReport {
     pub schema: &'static str,
     pub command: &'static str,
@@ -548,6 +608,7 @@ fn team_create_report(team: TeamRecord, created: bool) -> TeamCreateReport {
             ),
             format!("ee team invite --endpoint <tailscale-ip> {workspace_flag} --json"),
             format!("ee mesh sync --once {workspace_flag} --json"),
+            format!("ee daemon install {workspace_flag} --json"),
         ],
         team,
         mesh_primitives: vec![
@@ -1788,6 +1849,29 @@ pub fn plan_team_steward_once(
             mesh_primitives: vec!["team_posture", "steward_decision"],
         });
     }
+    let suspended_identities = connection
+        .list_team_member_identities(&team.team_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .into_iter()
+        .filter(|identity| identity.state == "suspended")
+        .count();
+    if suspended_identities > 0 {
+        return Ok(TeamStewardReport {
+            schema: TEAM_STEWARD_SCHEMA_V1,
+            command: "team steward run-once",
+            team_id: team.team_id,
+            paused: false,
+            active_member_count,
+            outcome: "no_op".to_owned(),
+            reason: "identity_revalidation_failed".to_owned(),
+            ran_sync: false,
+            mesh_primitives: vec![
+                "team_idp_policy",
+                "team_member_identity",
+                "steward_decision",
+            ],
+        });
+    }
     let decision = crate::mesh::steward_decision::decide_steward_outcome(
         &crate::mesh::steward_decision::StewardDecisionInput {
             enabled: true,
@@ -1923,6 +2007,58 @@ pub fn inspect_team_health(
             }
         });
     }
+    if let Ok(Some(policy)) = connection.get_team_idp_policy(&team.team_id) {
+        let identities = connection
+            .list_team_member_identities(&team.team_id)
+            .unwrap_or_default();
+        let suspended = identities
+            .iter()
+            .filter(|identity| identity.state == "suspended")
+            .count();
+        checks.push(TeamDoctorCheck {
+            name: "idp".to_owned(),
+            status: if suspended > 0 {
+                "warning".to_owned()
+            } else {
+                "ok".to_owned()
+            },
+            message: format!(
+                "policy {} gen {} ({} identity row(s), {suspended} suspended)",
+                policy.kind,
+                policy.policy_generation,
+                identities.len()
+            ),
+            repair: (suspended > 0).then(|| "ee team members revalidate --workspace .".to_owned()),
+        });
+    } else {
+        checks.push(TeamDoctorCheck {
+            name: "idp".to_owned(),
+            status: "ok".to_owned(),
+            message: "no tailnet-attested identity policy".to_owned(),
+            repair: None,
+        });
+    }
+    if workspace_path.is_some()
+        && let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from)
+    {
+        let kind = crate::daemon::service_install::current_service_kind();
+        let installed = crate::daemon::service_install::default_unit_path(kind, &home)
+            .is_some_and(|path| path.is_file());
+        checks.push(TeamDoctorCheck {
+            name: "daemon_service".to_owned(),
+            status: if installed {
+                "ok".to_owned()
+            } else {
+                "warning".to_owned()
+            },
+            message: if installed {
+                "user-scoped steward service unit is present".to_owned()
+            } else {
+                "user-scoped steward service is not installed".to_owned()
+            },
+            repair: (!installed).then(|| "ee daemon install --confirm".to_owned()),
+        });
+    }
     let posture = if paused {
         "paused"
     } else if checks.iter().any(|check| check.status == "error") {
@@ -1943,8 +2079,374 @@ pub fn inspect_team_health(
             "team_members",
             "mesh_body_cache_metadata",
             "steward_decision",
+            "team_idp_policy",
         ],
     })
+}
+
+/// Persist `ee team idp require --tailnet-attested`.
+pub fn require_tailnet_attested(
+    connection: &DbConnection,
+    workspace_id: &str,
+    allowed_domain: Option<&str>,
+    produced_at: &str,
+    workspace_path: Option<&std::path::Path>,
+) -> Result<TeamIdpPolicyReport, OriginStreamError> {
+    if any_local_team_paused(connection)? {
+        return Err(OriginStreamError::Encode(
+            "team is paused; resume before changing identity policy".to_owned(),
+        ));
+    }
+    let domain = allowed_domain
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.trim_start_matches('@').to_ascii_lowercase());
+    if let Some(domain) = domain.as_deref()
+        && (domain.contains('@')
+            || domain.starts_with('.')
+            || domain.ends_with('.')
+            || domain.contains(".."))
+    {
+        return Err(OriginStreamError::Encode(
+            "allowed domain must be a hostname without @".to_owned(),
+        ));
+    }
+    let team = load_local_teams(connection)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| OriginStreamError::Encode("no local team genesis".to_owned()))?;
+    let generation = connection
+        .upsert_team_idp_policy(
+            &team.team_id,
+            "tailnet_attested",
+            domain.as_deref(),
+            produced_at,
+        )
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    let seed = blake3::hash(format!("{}:idp:{generation}:{produced_at}", team.team_id).as_bytes());
+    let hex = seed.to_hex();
+    let payload = OriginEventPayload::Manifest(ManifestEventPayload {
+        operation: TEAM_IDP_POLICY_SET_OPERATION.to_owned(),
+        document_id: format!("tdoc_{}", &hex.as_str()[..24]),
+        predecessor_revision_id: None,
+        document_payload: serde_json::json!({
+            "kind": "tailnet_attested",
+            "allowedDomain": domain,
+            "policyGeneration": generation,
+        }),
+    });
+    let origin_node_id = team.origin_node_id.clone();
+    let ed25519 = workspace_path
+        .map(|path| Ed25519OriginSigner::load_or_create(path, &origin_node_id, produced_at))
+        .transpose()?;
+    let mac = LocalOriginSigner::for_workspace(workspace_id);
+    let signer: &dyn OriginSigner = ed25519
+        .as_ref()
+        .map(|signer| signer as &dyn OriginSigner)
+        .unwrap_or(&mac);
+    append_origin_event(
+        connection,
+        signer,
+        &OriginAppendRequest {
+            team_id: &team.team_id,
+            origin_node_id: &origin_node_id,
+            payload,
+            required_features: Vec::new(),
+            produced_at,
+            body_nonce: None,
+        },
+    )?;
+    Ok(TeamIdpPolicyReport {
+        schema: TEAM_IDP_SCHEMA_V1,
+        command: "team idp require",
+        team_id: team.team_id,
+        kind: "tailnet_attested".to_owned(),
+        allowed_domain: domain,
+        policy_generation: generation,
+        mesh_primitives: vec!["team_idp_policy", "teamIdpPolicySet"],
+    })
+}
+
+/// Pin a secretless-public OIDC issuer from a local discovery document.
+pub fn set_team_oidc_provider(
+    connection: &DbConnection,
+    issuer: &str,
+    client_id: &str,
+    discovery: &serde_json::Value,
+    set_at: &str,
+) -> Result<TeamIdpSetReport, OriginStreamError> {
+    if any_local_team_paused(connection)? {
+        return Err(OriginStreamError::Encode(
+            "team is paused; resume before changing identity policy".to_owned(),
+        ));
+    }
+    let issuer = issuer.trim();
+    let client_id = client_id.trim();
+    if !issuer.starts_with("https://") || client_id.is_empty() {
+        return Err(OriginStreamError::Encode(
+            "OIDC issuer must be https and client_id must be non-empty".to_owned(),
+        ));
+    }
+    match classify_oidc_provider(discovery) {
+        IdpProviderCapability::SecretlessPublic => {}
+        other => {
+            return Err(OriginStreamError::Encode(format!(
+                "OIDC provider is unsupported ({})",
+                other.as_str()
+            )));
+        }
+    }
+    let team = load_local_teams(connection)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| OriginStreamError::Encode("no local team genesis".to_owned()))?;
+    let canonical = serde_json::to_vec(discovery)
+        .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+    let discovery_hash = format!("blake3:{}", blake3::hash(&canonical).to_hex());
+    connection
+        .upsert_team_idp_oidc(
+            &team.team_id,
+            issuer,
+            client_id,
+            IdpProviderCapability::SecretlessPublic.as_str(),
+            &discovery_hash,
+            set_at,
+        )
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    Ok(TeamIdpSetReport {
+        schema: TEAM_IDP_SET_SCHEMA_V1,
+        command: "team idp set",
+        team_id: team.team_id,
+        issuer: issuer.to_owned(),
+        client_id: client_id.to_owned(),
+        capability: IdpProviderCapability::SecretlessPublic.as_str().to_owned(),
+        discovery_hash,
+        mesh_primitives: vec!["team_idp_oidc"],
+    })
+}
+
+/// Read the recorded IdP policy, or a none-policy when unset.
+pub fn team_idp_status(
+    connection: &DbConnection,
+) -> Result<TeamIdpPolicyReport, OriginStreamError> {
+    let team = load_local_teams(connection)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| OriginStreamError::Encode("no local team genesis".to_owned()))?;
+    let policy = connection
+        .get_team_idp_policy(&team.team_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    Ok(TeamIdpPolicyReport {
+        schema: TEAM_IDP_SCHEMA_V1,
+        command: "team idp status",
+        team_id: team.team_id,
+        kind: policy
+            .as_ref()
+            .map(|row| row.kind.clone())
+            .unwrap_or_else(|| "none".to_owned()),
+        allowed_domain: policy.as_ref().and_then(|row| row.allowed_domain.clone()),
+        policy_generation: policy
+            .as_ref()
+            .map(|row| row.policy_generation)
+            .unwrap_or(0),
+        mesh_primitives: vec!["team_idp_policy"],
+    })
+}
+
+/// Record the first or refreshed tailnet login for one member.
+pub fn record_member_tailnet_identity(
+    connection: &DbConnection,
+    member_id: &str,
+    login: &str,
+    user_id: Option<&str>,
+    checked_at: &str,
+) -> Result<StoredTeamMemberIdentity, OriginStreamError> {
+    let member = connection
+        .get_team_member(member_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .ok_or_else(|| OriginStreamError::Encode("member is not recorded locally".to_owned()))?;
+    let login = login.trim();
+    if login.is_empty() {
+        return Err(OriginStreamError::Encode(
+            "tailnet login must not be empty".to_owned(),
+        ));
+    }
+    connection
+        .upsert_team_member_identity(
+            member_id,
+            &member.team_id,
+            login,
+            user_id.map(str::trim).filter(|value| !value.is_empty()),
+            "attested",
+            checked_at,
+        )
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    connection
+        .get_team_member_identity(member_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .ok_or_else(|| OriginStreamError::Encode("identity row missing after upsert".to_owned()))
+}
+
+/// Revalidate every local member against a tailscale status report.
+pub fn revalidate_team_identities(
+    connection: &DbConnection,
+    report: &TailscaleLocalReport,
+    checked_at: &str,
+) -> Result<TeamIdpRevalidateReport, OriginStreamError> {
+    let team = load_local_teams(connection)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| OriginStreamError::Encode("no local team genesis".to_owned()))?;
+    let policy = connection
+        .get_team_idp_policy(&team.team_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    let kind = policy
+        .as_ref()
+        .map(|row| row.kind.as_str())
+        .unwrap_or("none");
+    let allowed_domain = policy
+        .as_ref()
+        .and_then(|row| row.allowed_domain.as_deref());
+    let members = connection
+        .list_all_team_members()
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .into_iter()
+        .filter(|member| member.team_id == team.team_id && member.state == "active")
+        .collect::<Vec<_>>();
+    if kind != "tailnet_attested" {
+        return Ok(TeamIdpRevalidateReport {
+            schema: TEAM_IDP_REVALIDATE_SCHEMA_V1,
+            command: "team members revalidate",
+            team_id: team.team_id,
+            kind: kind.to_owned(),
+            allowed_domain: allowed_domain.map(str::to_owned),
+            checked: 0,
+            attested: 0,
+            suspended: 0,
+            missing: 0,
+            members: Vec::new(),
+            mesh_primitives: vec!["team_idp_policy"],
+        });
+    }
+    let mut checks = Vec::new();
+    let mut attested = 0;
+    let mut suspended = 0;
+    let mut missing = 0;
+    for member in members {
+        let recorded = connection
+            .get_team_member_identity(&member.member_id)
+            .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+        let observed = observed_owner_for_member(&member, report, recorded.as_ref());
+        let disposition = evaluate_tailnet_owner(
+            observed.as_ref(),
+            recorded.as_ref().map(|row| row.login.as_str()),
+            allowed_domain,
+        );
+        let (state, login, user_id) = match (disposition, observed) {
+            (TailnetOwnerDisposition::Attested, Some(owner)) => {
+                attested += 1;
+                ("attested", owner.login_name, owner.user_id)
+            }
+            (TailnetOwnerDisposition::Attested, None) => {
+                missing += 1;
+                let login = recorded
+                    .as_ref()
+                    .map(|row| row.login.clone())
+                    .unwrap_or_else(|| "unknown".to_owned());
+                let user_id = recorded.as_ref().and_then(|row| row.user_id.clone());
+                ("missing", login, user_id.unwrap_or_default())
+            }
+            (TailnetOwnerDisposition::Missing, owner) => {
+                missing += 1;
+                let login = owner
+                    .as_ref()
+                    .map(|row| row.login_name.clone())
+                    .or_else(|| recorded.as_ref().map(|row| row.login.clone()))
+                    .unwrap_or_else(|| "unknown".to_owned());
+                let user_id = owner
+                    .as_ref()
+                    .map(|row| row.user_id.clone())
+                    .or_else(|| recorded.and_then(|row| row.user_id));
+                ("missing", login, user_id.unwrap_or_default())
+            }
+            (
+                TailnetOwnerDisposition::DomainMismatch | TailnetOwnerDisposition::Reassigned,
+                owner,
+            ) => {
+                suspended += 1;
+                let login = owner
+                    .as_ref()
+                    .map(|row| row.login_name.clone())
+                    .or_else(|| recorded.as_ref().map(|row| row.login.clone()))
+                    .unwrap_or_else(|| "unknown".to_owned());
+                let user_id = owner
+                    .as_ref()
+                    .map(|row| row.user_id.clone())
+                    .or_else(|| recorded.and_then(|row| row.user_id));
+                ("suspended", login, user_id.unwrap_or_default())
+            }
+        };
+        connection
+            .upsert_team_member_identity(
+                &member.member_id,
+                &team.team_id,
+                &login,
+                (!user_id.is_empty()).then_some(user_id.as_str()),
+                state,
+                checked_at,
+            )
+            .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+        checks.push(TeamIdpMemberCheck {
+            member_id: member.member_id,
+            origin_node_id: member.origin_node_id,
+            is_self: member.is_self,
+            login: Some(login),
+            disposition: disposition.as_str().to_owned(),
+            state: state.to_owned(),
+        });
+    }
+    Ok(TeamIdpRevalidateReport {
+        schema: TEAM_IDP_REVALIDATE_SCHEMA_V1,
+        command: "team members revalidate",
+        team_id: team.team_id,
+        kind: kind.to_owned(),
+        allowed_domain: allowed_domain.map(str::to_owned),
+        checked: checks.len(),
+        attested,
+        suspended,
+        missing,
+        members: checks,
+        mesh_primitives: vec!["team_idp_policy", "team_member_identity"],
+    })
+}
+
+fn observed_owner_for_member(
+    member: &StoredTeamMember,
+    report: &TailscaleLocalReport,
+    recorded: Option<&StoredTeamMemberIdentity>,
+) -> Option<TailscaleUserProfile> {
+    if member.is_self {
+        return report.self_owner.clone();
+    }
+    if let Some(recorded) = recorded {
+        if let Some(peer) = report.peers.iter().find(|peer| {
+            peer.owner
+                .as_ref()
+                .is_some_and(|owner| owner.login_name.eq_ignore_ascii_case(&recorded.login))
+        }) {
+            return peer.owner.clone();
+        }
+        if let Some(user_id) = recorded.user_id.as_deref()
+            && let Some(peer) = report.peers.iter().find(|peer| {
+                peer.owner
+                    .as_ref()
+                    .is_some_and(|owner| owner.user_id == user_id)
+            })
+        {
+            return peer.owner.clone();
+        }
+    }
+    None
 }
 
 /// Whether any local team is paused.
@@ -4565,5 +5067,150 @@ mod tests {
         let paused = inspect_team_health(&connection, "wsp_persistfixture000000000001", None)
             .expect("paused");
         assert_eq!(paused.posture, "paused");
+    }
+
+    fn tailnet_report(self_login: &str, peer_login: Option<(&str, &str)>) -> TailscaleLocalReport {
+        TailscaleLocalReport {
+            schema: crate::core::tailscale_probe::TAILSCALE_LOCAL_SCHEMA_V1,
+            installed: true,
+            daemon_reachable: true,
+            authenticated: true,
+            binary_authentic: true,
+            binary_version_raw: None,
+            binary_absolute_path: None,
+            shields_up: Some(false),
+            tailnet_id: Some("tailnet-alpha".to_owned()),
+            tailnet_display_name: Some("alpha.example".to_owned()),
+            self_node_key: Some("nodekey:self".to_owned()),
+            self_tailscale_ip: Some("100.64.0.1".to_owned()),
+            self_magic_dns_name: Some("self.tailnet.test.".to_owned()),
+            self_advertised_tags: Vec::new(),
+            self_owner: Some(TailscaleUserProfile {
+                user_id: "11".to_owned(),
+                login_name: self_login.to_owned(),
+                display_name: Some("Self".to_owned()),
+            }),
+            peers: peer_login
+                .map(|(login, user_id)| {
+                    vec![crate::core::tailscale_probe::TailscalePeerReport {
+                        node_key: "nodekey:peer".to_owned(),
+                        tailscale_ips: vec!["100.64.0.2".to_owned()],
+                        magic_dns_name: Some("peer.tailnet.test.".to_owned()),
+                        hostname: Some("peer".to_owned()),
+                        advertised_tags: Vec::new(),
+                        online: Some(true),
+                        ee_capability: None,
+                        owner: Some(TailscaleUserProfile {
+                            user_id: user_id.to_owned(),
+                            login_name: login.to_owned(),
+                            display_name: Some("Peer".to_owned()),
+                        }),
+                    }]
+                })
+                .unwrap_or_default(),
+            version: Some("1.66.0".to_owned()),
+            probe_method: crate::core::tailscale_probe::TailscaleProbeMethod::Cli,
+            probe_elapsed_ms: 4,
+            platform: crate::core::tailscale_probe::TailscalePlatform::Linux,
+            degradations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn require_tailnet_attested_persists_policy_and_revalidate_suspends_reassignment() {
+        let connection = open_db();
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let required = require_tailnet_attested(
+            &connection,
+            "wsp_persistfixture000000000001",
+            Some("acme.com"),
+            "2026-08-13T18:00:00Z",
+            None,
+        )
+        .expect("require");
+        assert_eq!(required.kind, "tailnet_attested");
+        assert_eq!(required.allowed_domain.as_deref(), Some("acme.com"));
+        assert_eq!(required.policy_generation, 1);
+        let status = team_idp_status(&connection).expect("status");
+        assert_eq!(status.kind, "tailnet_attested");
+        let first = revalidate_team_identities(
+            &connection,
+            &tailnet_report("alice@acme.com", None),
+            "2026-08-13T18:01:00Z",
+        )
+        .expect("first");
+        assert_eq!(first.attested, 1);
+        assert_eq!(first.suspended, 0);
+        let reassigned = revalidate_team_identities(
+            &connection,
+            &tailnet_report("mallory@acme.com", None),
+            "2026-08-13T18:02:00Z",
+        )
+        .expect("reassigned");
+        assert_eq!(reassigned.attested, 0);
+        assert_eq!(reassigned.suspended, 1);
+        assert_eq!(reassigned.members[0].disposition, "reassigned");
+        assert_eq!(reassigned.members[0].state, "suspended");
+        let identity = connection
+            .get_team_member_identity(&reassigned.members[0].member_id)
+            .expect("load")
+            .expect("row");
+        assert_eq!(identity.state, "suspended");
+        let blocked = plan_team_steward_once(&connection).expect("blocked");
+        assert!(!blocked.ran_sync);
+        assert_eq!(blocked.reason, "identity_revalidation_failed");
+        let outside = revalidate_team_identities(
+            &connection,
+            &tailnet_report("alice@other.com", None),
+            "2026-08-13T18:03:00Z",
+        )
+        .expect("domain");
+        assert_eq!(outside.members[0].disposition, "domain_mismatch");
+        assert_eq!(outside.suspended, 1);
+    }
+
+    #[test]
+    fn set_team_oidc_provider_accepts_secretless_and_rejects_client_secret() {
+        let connection = open_db();
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let accepted = set_team_oidc_provider(
+            &connection,
+            "https://idp.example",
+            "ee-public",
+            &serde_json::json!({
+                "token_endpoint": "https://idp.example/token",
+                "device_authorization_endpoint": "https://idp.example/device",
+                "token_endpoint_auth_methods_supported": ["none"]
+            }),
+            "2026-08-13T19:00:00Z",
+        )
+        .expect("set");
+        assert_eq!(accepted.capability, "secretless_public");
+        assert!(accepted.discovery_hash.starts_with("blake3:"));
+        let rejected = set_team_oidc_provider(
+            &connection,
+            "https://idp.example",
+            "ee-public",
+            &serde_json::json!({
+                "token_endpoint": "https://idp.example/token",
+                "device_authorization_endpoint": "https://idp.example/device",
+                "token_endpoint_auth_methods_supported": ["client_secret_basic"]
+            }),
+            "2026-08-13T19:01:00Z",
+        )
+        .expect_err("secret");
+        assert!(rejected.to_string().contains("client_secret_required"));
     }
 }
