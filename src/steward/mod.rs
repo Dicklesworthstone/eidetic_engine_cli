@@ -524,6 +524,8 @@ pub enum JobType {
     /// Refresh the retrieval-affinity accumulation and snapshot
     /// (ADR 0066 §2 / bd-3a1op.2).
     RetrievalAffinityRefresh,
+    /// Plan one team-confed steward pass (T6.1).
+    TeamSteward,
     /// Custom job type for extensions.
     Custom,
 }
@@ -552,6 +554,7 @@ impl JobType {
             Self::PrimerRefresh => "primer_refresh",
             Self::JournalDistill => "journal_distill",
             Self::RetrievalAffinityRefresh => "retrieval_affinity_refresh",
+            Self::TeamSteward => "team_steward",
             Self::Custom => "custom",
         }
     }
@@ -579,6 +582,7 @@ impl JobType {
             Self::JournalDistill,
             Self::PrimerRefresh,
             Self::RetrievalAffinityRefresh,
+            Self::TeamSteward,
             Self::Custom,
         ]
     }
@@ -616,6 +620,7 @@ impl JobType {
             Self::RetrievalAffinityRefresh => {
                 "Accumulate retrieval co-occurrence evidence and refresh the affinity snapshot"
             }
+            Self::TeamSteward => "Plan one team-confed steward pass and record the decision",
             Self::Custom => "Custom job type",
         }
     }
@@ -667,6 +672,7 @@ impl FromStr for JobType {
             "primer_refresh" => Ok(Self::PrimerRefresh),
             "journal_distill" => Ok(Self::JournalDistill),
             "retrieval_affinity_refresh" => Ok(Self::RetrievalAffinityRefresh),
+            "team_steward" => Ok(Self::TeamSteward),
             "custom" => Ok(Self::Custom),
             _ => Err(ParseJobTypeError {
                 input: s.to_owned(),
@@ -1918,6 +1924,10 @@ pub fn default_budgets_for_job_type(job_type: JobType) -> Vec<ResourceBudget> {
         JobType::RetrievalAffinityRefresh => vec![
             ResourceBudget::time_limit_ms(60_000), // 1 minute
             ResourceBudget::item_limit(1_024),
+        ],
+        JobType::TeamSteward => vec![
+            ResourceBudget::time_limit_ms(15_000),
+            ResourceBudget::item_limit(1),
         ],
         JobType::CachePruning => vec![
             ResourceBudget::time_limit_ms(60_000), // 1 minute
@@ -3436,6 +3446,7 @@ impl ManualRunner {
             JobType::PrimerRefresh => self.execute_primer_refresh(budget),
             JobType::JournalDistill => self.execute_journal_distill(budget),
             JobType::RetrievalAffinityRefresh => self.execute_retrieval_affinity_refresh(budget),
+            JobType::TeamSteward => self.execute_team_steward(budget),
             JobType::Custom => self.execute_custom_job(),
         }
     }
@@ -6281,6 +6292,102 @@ impl ManualRunner {
         )
     }
 
+    fn execute_team_steward(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        let started = Instant::now();
+        let workspace_path = self.normalized_workspace_path();
+        let Some(database_path) = self.resolve_database_path() else {
+            return (
+                RunOutcome::Success,
+                Some(0),
+                None,
+                Some(json!({
+                    "schema": "ee.steward.team_steward.v1",
+                    "jobType": JobType::TeamSteward.as_str(),
+                    "storageStatus": "unresolved",
+                    "wouldSync": false,
+                    "dryRun": self.options.dry_run,
+                    "durableMutation": false,
+                })),
+            );
+        };
+        if !database_path.exists() {
+            return (
+                RunOutcome::Success,
+                Some(0),
+                None,
+                Some(json!({
+                    "schema": "ee.steward.team_steward.v1",
+                    "jobType": JobType::TeamSteward.as_str(),
+                    "storageStatus": "missing",
+                    "wouldSync": false,
+                    "dryRun": self.options.dry_run,
+                    "durableMutation": false,
+                })),
+            );
+        }
+        let connection = match DbConnection::open_file(&database_path) {
+            Ok(connection) => connection,
+            Err(error) => {
+                return (
+                    RunOutcome::Failed,
+                    Some(0),
+                    Some(format!("Failed to open team store: {error}")),
+                    Some(json!({
+                        "schema": "ee.steward.team_steward.v1",
+                        "jobType": JobType::TeamSteward.as_str(),
+                        "storageStatus": "error",
+                        "wouldSync": false,
+                        "dryRun": self.options.dry_run,
+                        "durableMutation": false,
+                    })),
+                );
+            }
+        };
+        let plan = match crate::mesh::team::plan_team_steward_once(&connection) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return (
+                    RunOutcome::Success,
+                    Some(0),
+                    None,
+                    Some(json!({
+                        "schema": "ee.steward.team_steward.v1",
+                        "jobType": JobType::TeamSteward.as_str(),
+                        "storageStatus": "no_team",
+                        "message": error.to_string(),
+                        "wouldSync": false,
+                        "dryRun": self.options.dry_run,
+                        "durableMutation": false,
+                    })),
+                );
+            }
+        };
+        budget.record(ResourceType::Items, 1);
+        budget.record(ResourceType::TimeMs, millis_to_u64(started.elapsed()));
+        (
+            RunOutcome::Success,
+            Some(1),
+            None,
+            Some(json!({
+                "schema": "ee.steward.team_steward.v1",
+                "jobType": JobType::TeamSteward.as_str(),
+                "storageStatus": "ready",
+                "teamId": plan.team_id,
+                "outcome": plan.outcome,
+                "reason": plan.reason,
+                "wouldSync": plan.ran_sync,
+                "paused": plan.paused,
+                "activeMemberCount": plan.active_member_count,
+                "workspace": workspace_path.display().to_string(),
+                "dryRun": self.options.dry_run,
+                "durableMutation": false,
+            })),
+        )
+    }
+
     fn resolve_database_path(&self) -> Option<PathBuf> {
         self.options.database_path.clone().or_else(|| {
             self.options.workspace_path.as_ref().map(|workspace| {
@@ -7542,7 +7649,8 @@ const BACKGROUND_SCHEDULER_SLEEP_SLICE_MS: u64 = 500;
 
 /// Job types run by the background scheduler on every tick. These are the
 /// low-overhead jobs safe to run unattended inside the daemon process.
-const BACKGROUND_SCHEDULER_JOB_TYPES: &[JobType] = &[JobType::DecaySweep, JobType::HealthCheck];
+const BACKGROUND_SCHEDULER_JOB_TYPES: &[JobType] =
+    &[JobType::DecaySweep, JobType::HealthCheck, JobType::TeamSteward];
 
 /// Run the steward scheduler indefinitely on a background cadence.
 ///
@@ -9063,7 +9171,12 @@ mod tests {
             true,
             "all() includes EvidenceRescreen",
         )?;
-        ensure(all.len(), 20, "all() lists every JobType variant")?;
+        ensure(
+            all.contains(&JobType::TeamSteward),
+            true,
+            "all() includes TeamSteward",
+        )?;
+        ensure(all.len(), 22, "all() lists every JobType variant")?;
         Ok(())
     }
 
@@ -9071,6 +9184,7 @@ mod tests {
     fn job_type_display() {
         assert_eq!(JobType::IndexRebuild.to_string(), "index_rebuild");
         assert_eq!(JobType::DecaySweep.to_string(), "decay_sweep");
+        assert_eq!(JobType::TeamSteward.to_string(), "team_steward");
         assert_eq!(
             JobType::GraphSnapshotPrune.to_string(),
             "graph_snapshot_prune"
