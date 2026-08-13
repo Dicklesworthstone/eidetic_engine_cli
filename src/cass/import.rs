@@ -700,12 +700,20 @@ pub fn import_cass_sessions(
             if let Some(existing) =
                 connection.get_session_by_cass_id(&workspace_id, &session.source_path)?
             {
+                let index_job_id = existing_session_index_job_for_reconciliation(
+                    &connection,
+                    &workspace_id,
+                    &existing.id,
+                )?;
+                if index_job_id.is_some() {
+                    index_jobs_queued = index_jobs_queued.saturating_add(1);
+                }
                 cursor.record_skipped();
                 skipped = skipped.saturating_add(1);
                 session_reports.push(ImportedCassSession {
                     source_path: session.source_path,
                     session_id: Some(existing.id),
-                    index_job_id: None,
+                    index_job_id,
                     status: ImportSessionStatus::Skipped,
                     spans_imported: 0,
                     message_count: session.message_count,
@@ -722,12 +730,20 @@ pub fn import_cass_sessions(
 
             match persist_session_import_if_absent(&connection, &workspace_id, &session, &spans)? {
                 SessionImportPersistResult::Skipped { session_id } => {
+                    let index_job_id = existing_session_index_job_for_reconciliation(
+                        &connection,
+                        &workspace_id,
+                        &session_id,
+                    )?;
+                    if index_job_id.is_some() {
+                        index_jobs_queued = index_jobs_queued.saturating_add(1);
+                    }
                     cursor.record_skipped();
                     skipped = skipped.saturating_add(1);
                     session_reports.push(ImportedCassSession {
                         source_path: session.source_path,
                         session_id: Some(session_id),
-                        index_job_id: None,
+                        index_job_id,
                         status: ImportSessionStatus::Skipped,
                         spans_imported: 0,
                         message_count: session.message_count,
@@ -1739,6 +1755,36 @@ fn search_index_job_input(workspace_id: &str, session_id: &str) -> CreateSearchI
         document_id: Some(session_id.to_string()),
         documents_total: 1,
     }
+}
+
+/// Recover durable publication work when an identical CASS import observes a
+/// session that was committed by an earlier attempt. Completed jobs need no
+/// work; pending/running/cancelled/failed jobs are returned to the caller so
+/// the ordinary CLI reconciliation pass processes (or truthfully observes)
+/// the same deterministic job. A legacy session with no job receives that
+/// missing deterministic row under the import transaction's contention-safe
+/// retry lane.
+fn existing_session_index_job_for_reconciliation(
+    connection: &DbConnection,
+    workspace_id: &str,
+    session_id: &str,
+) -> Result<Option<String>, DbError> {
+    let index_job_id = stable_search_index_job_id(workspace_id, session_id);
+    with_import_session_transaction(connection, || {
+        match connection.get_search_index_job(&index_job_id)? {
+            Some(job) if job.status_enum() == Some(crate::db::SearchIndexJobStatus::Completed) => {
+                Ok(None)
+            }
+            Some(_) => Ok(Some(index_job_id.clone())),
+            None => {
+                connection.insert_search_index_job(
+                    &index_job_id,
+                    &search_index_job_input(workspace_id, session_id),
+                )?;
+                Ok(Some(index_job_id.clone()))
+            }
+        }
+    })
 }
 
 fn ensure_workspace(connection: &DbConnection, workspace_path: &Path) -> Result<String, DbError> {
@@ -3594,7 +3640,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn import_persists_pending_session_index_job() -> TestResult {
+    fn import_persists_and_reschedules_the_same_session_index_job() -> TestResult {
         let root = unique_test_dir("queue-index-job")?;
         let bin_dir = root.join("bin");
         let workspace_path = root.join("workspace");
@@ -3665,6 +3711,47 @@ mod tests {
             &job.document_id.as_deref(),
             &Some(session_id),
             "job document",
+        )?;
+
+        ensure(
+            connection
+                .start_search_index_job(index_job_id)
+                .map_err(|error| error.to_string())?,
+            "fixture job starts",
+        )?;
+        ensure(
+            connection
+                .fail_search_index_job(index_job_id, "injected publication failure")
+                .map_err(|error| error.to_string())?,
+            "fixture job fails",
+        )?;
+
+        let retry = import_cass_sessions(&client, &options).map_err(|error| error.to_string())?;
+        ensure_equal(&retry.sessions_imported, &0, "retry imports no duplicate")?;
+        ensure_equal(&retry.sessions_skipped, &1, "retry skips durable session")?;
+        ensure_equal(
+            &retry.index_jobs_queued,
+            &1,
+            "retry schedules the noncompleted durable job for reconciliation",
+        )?;
+        let retried_session = retry
+            .sessions
+            .first()
+            .ok_or_else(|| "retry report should include skipped session".to_string())?;
+        ensure_equal(
+            &retried_session.status,
+            &ImportSessionStatus::Skipped,
+            "retry session status",
+        )?;
+        ensure_equal(
+            &retried_session.session_id.as_deref(),
+            &Some(session_id),
+            "retry preserves session id",
+        )?;
+        ensure_equal(
+            &retried_session.index_job_id.as_deref(),
+            &Some(index_job_id),
+            "retry exposes the exact failed job id for the CLI reconciliation pass",
         )
     }
 

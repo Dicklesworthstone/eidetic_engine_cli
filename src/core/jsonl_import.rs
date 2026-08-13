@@ -3051,13 +3051,15 @@ mod tests {
             &[],
         )
         .map_err(|error| format!("post-import search: {error:?}"))?;
+        let actual_ids = search
+            .results
+            .iter()
+            .map(|hit| hit.doc_id.as_str())
+            .collect::<BTreeSet<_>>();
         ensure(
-            search
-                .results
-                .iter()
-                .any(|hit| hit.doc_id == "mem_01234567890123456789012345"),
-            true,
-            "imported memory searchable immediately without rebuild",
+            actual_ids,
+            BTreeSet::from(["mem_01234567890123456789012345"]),
+            "strict lexical search returns exactly the imported memory id",
         )?;
         ensure(
             search

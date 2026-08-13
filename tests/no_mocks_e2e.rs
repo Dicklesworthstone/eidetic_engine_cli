@@ -3024,8 +3024,9 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
             }),
         "CASS publish failure must distinguish committed source data from stale derived index",
     )?;
-    let failure_connection = DbConnection::open(DatabaseConfig::file(failure_database_path))
-        .map_err(|error| error.to_string())?;
+    let failure_connection =
+        DbConnection::open(DatabaseConfig::file(failure_database_path.clone()))
+            .map_err(|error| error.to_string())?;
     let failure_workspaces = failure_connection
         .list_workspaces()
         .map_err(|error| error.to_string())?;
@@ -3049,9 +3050,209 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         failure_spans.len() >= 3,
         "CASS publish failure preserves committed evidence spans",
     )?;
+    let failure_session_id = failure_sessions[0].id.clone();
+    let failure_evidence_id = failure_spans
+        .iter()
+        .find(|span| {
+            span.excerpt
+                .contains("x65f imported CASS evidence remains durable and searchable")
+        })
+        .map(|span| span.id.clone())
+        .ok_or_else(|| "CASS failure path lost the searchable evidence span".to_owned())?;
     failure_connection
         .close()
         .map_err(|error| error.to_string())?;
+
+    let preserved_blocker = failure_workspace.join(".ee/index-publish-blocker-link");
+    fs::rename(&blocked_index_path, &preserved_blocker).map_err(|error| {
+        format!(
+            "failed to preserve the publication blocker {} as {}: {error}",
+            blocked_index_path.display(),
+            preserved_blocker.display()
+        )
+    })?;
+    fs::rename(&preserved_initial_index, &blocked_index_path).map_err(|error| {
+        format!(
+            "failed to restore the regular index directory {} as {}: {error}",
+            preserved_initial_index.display(),
+            blocked_index_path.display()
+        )
+    })?;
+
+    let (_retry_publish_event, retry_publish_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &failure_workspace,
+        StepSpec {
+            name: "08_reimport_retries_failed_index_publication",
+            args: vec![
+                "--workspace".to_owned(),
+                failure_workspace_arg.clone(),
+                "--json".to_owned(),
+                "import".to_owned(),
+                "cass".to_owned(),
+                "--database".to_owned(),
+                failure_database_arg.clone(),
+                "--limit".to_owned(),
+                "5".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v2",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+    ensure_equal(
+        &retry_publish_json.pointer("/data/sessionsImported"),
+        &Some(&json!(0)),
+        "CASS retry imports no duplicate session",
+    )?;
+    ensure_equal(
+        &retry_publish_json.pointer("/data/sessionsSkipped"),
+        &Some(&json!(1)),
+        "CASS retry recognizes the committed session",
+    )?;
+    ensure_equal(
+        &retry_publish_json.pointer("/data/indexJobsQueued"),
+        &Some(&json!(1)),
+        "CASS retry reschedules the failed deterministic index job",
+    )?;
+    ensure_equal(
+        &retry_publish_json.pointer("/data/sessions/0/sessionId"),
+        &Some(&json!(failure_session_id)),
+        "CASS retry preserves the exact session id",
+    )?;
+    ensure(
+        retry_publish_json
+            .pointer("/data/sessions/0/indexJobId")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|job_id| !job_id.is_empty()),
+        "CASS retry exposes the deterministic index job id",
+    )?;
+    ensure_equal(
+        &retry_publish_json.pointer("/data/indexRequiredAction"),
+        &Some(&JsonValue::Null),
+        "successful CASS retry clears the rebuild action",
+    )?;
+    ensure_equal(
+        &retry_publish_json.pointer("/degraded"),
+        &Some(&json!([])),
+        "successful CASS retry has no publication degradation",
+    )?;
+
+    let (_retry_status_event, retry_status_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &failure_workspace,
+        StepSpec {
+            name: "09_reimport_reaches_ready_generation",
+            args: vec![
+                "--workspace".to_owned(),
+                failure_workspace_arg.clone(),
+                "--json".to_owned(),
+                "index".to_owned(),
+                "status".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v2",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+    ensure_equal(
+        &retry_status_json.pointer("/data/health"),
+        &Some(&json!("ready")),
+        "CASS retry index health",
+    )?;
+    ensure(
+        retry_status_json
+            .pointer("/data/dbGeneration")
+            .and_then(JsonValue::as_u64)
+            .is_some(),
+        "CASS retry database generation is measurable",
+    )?;
+    ensure_equal(
+        &retry_status_json.pointer("/data/dbGeneration"),
+        &retry_status_json.pointer("/data/indexGeneration"),
+        "CASS retry reaches the committed database generation",
+    )?;
+
+    let (_retry_session_search_event, retry_session_search_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &failure_workspace,
+        StepSpec {
+            name: "10_reimport_session_id_is_exactly_searchable",
+            args: vec![
+                "--workspace".to_owned(),
+                failure_workspace_arg.clone(),
+                "--json".to_owned(),
+                "search".to_owned(),
+                "CASS session codex".to_owned(),
+                "--source-mode".to_owned(),
+                "lexical_only".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v2",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+    let retry_session_ids = json_array(
+        &retry_session_search_json,
+        "/data/results",
+        "CASS retry session search",
+    )?
+    .iter()
+    .filter_map(|result| result.get("docId").and_then(JsonValue::as_str))
+    .collect::<BTreeSet<_>>();
+    ensure_equal(
+        &retry_session_ids,
+        &BTreeSet::from([failure_session_id.as_str()]),
+        "CASS retry search returns exactly the committed session id",
+    )?;
+
+    let (_retry_evidence_search_event, retry_evidence_search_json) = run_step_with_env(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &failure_workspace,
+        StepSpec {
+            name: "11_reimport_evidence_id_is_exactly_searchable",
+            args: vec![
+                "--workspace".to_owned(),
+                failure_workspace_arg,
+                "--json".to_owned(),
+                "search".to_owned(),
+                "x65f imported CASS evidence remains durable and searchable".to_owned(),
+                "--source-mode".to_owned(),
+                "lexical_only".to_owned(),
+                "--limit".to_owned(),
+                "10".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v2",
+            expect_clean_stderr: true,
+        },
+        &envs,
+    )?;
+    let retry_evidence_ids = json_array(
+        &retry_evidence_search_json,
+        "/data/results",
+        "CASS retry evidence search",
+    )?
+    .iter()
+    .filter_map(|result| result.get("docId").and_then(JsonValue::as_str))
+    .collect::<BTreeSet<_>>();
+    ensure_equal(
+        &retry_evidence_ids,
+        &BTreeSet::from([failure_evidence_id.as_str()]),
+        "CASS retry search returns exactly the committed evidence id",
+    )?;
+
     let stub_invocations =
         fs::read_to_string(&stub_cass.invocation_log).map_err(|error| error.to_string())?;
     ensure(
