@@ -9781,6 +9781,74 @@ CREATE INDEX idx_team_projects_team ON team_projects(team_id, display_name);
     "blake3:v111_team_projects_2026_08_13",
 );
 
+/// V112: tailnet-attested IdP policy plus per-member identity leases (T7.2).
+pub const V112_TEAM_IDP_POLICY: Migration = Migration::new(
+    112,
+    "team_idp_policy",
+    r#"
+CREATE TABLE team_idp_policy (
+    team_id TEXT PRIMARY KEY CHECK (
+        team_id GLOB 'team_*'
+        AND length(trim(team_id)) > 5
+        AND team_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    kind TEXT NOT NULL CHECK (kind IN ('none', 'tailnet_attested')),
+    allowed_domain TEXT CHECK (
+        allowed_domain IS NULL
+        OR (
+            length(trim(allowed_domain)) > 0
+            AND allowed_domain NOT GLOB '*[^A-Za-z0-9.-]*'
+        )
+    ),
+    policy_generation INTEGER NOT NULL CHECK (policy_generation >= 1),
+    required_at TEXT NOT NULL CHECK (length(trim(required_at)) > 0)
+);
+CREATE TABLE team_member_identity (
+    member_id TEXT PRIMARY KEY CHECK (
+        member_id GLOB 'mbr_*'
+        AND length(trim(member_id)) > 4
+        AND member_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    team_id TEXT NOT NULL CHECK (
+        team_id GLOB 'team_*'
+        AND length(trim(team_id)) > 5
+        AND team_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    kind TEXT NOT NULL CHECK (kind IN ('tailnet')),
+    login TEXT NOT NULL CHECK (length(trim(login)) > 0),
+    user_id TEXT CHECK (user_id IS NULL OR length(trim(user_id)) > 0),
+    state TEXT NOT NULL CHECK (state IN ('attested', 'suspended', 'missing')),
+    checked_at TEXT NOT NULL CHECK (length(trim(checked_at)) > 0)
+);
+CREATE INDEX idx_team_member_identity_team ON team_member_identity(team_id, state);
+"#,
+    "blake3:v112_team_idp_policy_2026_08_13",
+);
+
+/// V113: persisted OIDC provider pin after secretless-public preflight (T7.4).
+pub const V113_TEAM_IDP_OIDC: Migration = Migration::new(
+    113,
+    "team_idp_oidc",
+    r#"
+CREATE TABLE team_idp_oidc (
+    team_id TEXT PRIMARY KEY CHECK (
+        team_id GLOB 'team_*'
+        AND length(trim(team_id)) > 5
+        AND team_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    issuer TEXT NOT NULL CHECK (
+        issuer GLOB 'https://*'
+        AND length(trim(issuer)) > 8
+    ),
+    client_id TEXT NOT NULL CHECK (length(trim(client_id)) > 0),
+    capability TEXT NOT NULL CHECK (capability IN ('secretless_public')),
+    discovery_hash TEXT NOT NULL CHECK (length(trim(discovery_hash)) = 71),
+    set_at TEXT NOT NULL CHECK (length(trim(set_at)) > 0)
+);
+"#,
+    "blake3:v113_team_idp_oidc_2026_08_13",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -9894,6 +9962,8 @@ pub const MIGRATIONS: &[Migration] = &[
     V109_TEAM_POSTURE,
     V110_TEAM_JOIN_ATTEMPTS,
     V111_TEAM_PROJECTS,
+    V112_TEAM_IDP_POLICY,
+    V113_TEAM_IDP_OIDC,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -14462,6 +14532,39 @@ pub struct StoredTeamProject {
     pub created_at: String,
 }
 
+/// Stored `team_idp_policy` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredTeamIdpPolicy {
+    pub team_id: String,
+    pub kind: String,
+    pub allowed_domain: Option<String>,
+    pub policy_generation: u64,
+    pub required_at: String,
+}
+
+/// Stored `team_idp_oidc` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredTeamIdpOidc {
+    pub team_id: String,
+    pub issuer: String,
+    pub client_id: String,
+    pub capability: String,
+    pub discovery_hash: String,
+    pub set_at: String,
+}
+
+/// Stored `team_member_identity` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredTeamMemberIdentity {
+    pub member_id: String,
+    pub team_id: String,
+    pub kind: String,
+    pub login: String,
+    pub user_id: Option<String>,
+    pub state: String,
+    pub checked_at: String,
+}
+
 /// Input for one minted or adopted team project.
 #[derive(Debug, Clone)]
 pub struct InsertTeamProjectInput {
@@ -14600,6 +14703,39 @@ fn stored_team_member_node_from_row(row: &Row) -> Result<StoredTeamMemberNode> {
         signing_key_generation: required_u64(row, 4, DbOperation::Query, "signing_key_generation")?,
         state: required_text(row, 5, DbOperation::Query, "state")?.to_string(),
         bound_at: required_text(row, 6, DbOperation::Query, "bound_at")?.to_string(),
+    })
+}
+
+fn stored_team_idp_policy_from_row(row: &Row) -> Result<StoredTeamIdpPolicy> {
+    Ok(StoredTeamIdpPolicy {
+        team_id: required_text(row, 0, DbOperation::Query, "team_id")?.to_string(),
+        kind: required_text(row, 1, DbOperation::Query, "kind")?.to_string(),
+        allowed_domain: optional_text(row, 2)?.map(str::to_string),
+        policy_generation: required_u64(row, 3, DbOperation::Query, "policy_generation")?,
+        required_at: required_text(row, 4, DbOperation::Query, "required_at")?.to_string(),
+    })
+}
+
+fn stored_team_idp_oidc_from_row(row: &Row) -> Result<StoredTeamIdpOidc> {
+    Ok(StoredTeamIdpOidc {
+        team_id: required_text(row, 0, DbOperation::Query, "team_id")?.to_string(),
+        issuer: required_text(row, 1, DbOperation::Query, "issuer")?.to_string(),
+        client_id: required_text(row, 2, DbOperation::Query, "client_id")?.to_string(),
+        capability: required_text(row, 3, DbOperation::Query, "capability")?.to_string(),
+        discovery_hash: required_text(row, 4, DbOperation::Query, "discovery_hash")?.to_string(),
+        set_at: required_text(row, 5, DbOperation::Query, "set_at")?.to_string(),
+    })
+}
+
+fn stored_team_member_identity_from_row(row: &Row) -> Result<StoredTeamMemberIdentity> {
+    Ok(StoredTeamMemberIdentity {
+        member_id: required_text(row, 0, DbOperation::Query, "member_id")?.to_string(),
+        team_id: required_text(row, 1, DbOperation::Query, "team_id")?.to_string(),
+        kind: required_text(row, 2, DbOperation::Query, "kind")?.to_string(),
+        login: required_text(row, 3, DbOperation::Query, "login")?.to_string(),
+        user_id: optional_text(row, 4)?.map(str::to_string),
+        state: required_text(row, 5, DbOperation::Query, "state")?.to_string(),
+        checked_at: required_text(row, 6, DbOperation::Query, "checked_at")?.to_string(),
     })
 }
 
@@ -16491,6 +16627,132 @@ impl DbConnection {
             &[Value::Text(team_id.to_owned())],
         )?;
         rows.iter().map(stored_team_project_from_row).collect()
+    }
+
+    /// Persist or advance the team's IdP policy generation.
+    pub fn upsert_team_idp_policy(
+        &self,
+        team_id: &str,
+        kind: &str,
+        allowed_domain: Option<&str>,
+        required_at: &str,
+    ) -> Result<u64> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO team_idp_policy (team_id, kind, allowed_domain, policy_generation, required_at) VALUES (?1, ?2, ?3, 1, ?4) ON CONFLICT(team_id) DO UPDATE SET kind = excluded.kind, allowed_domain = excluded.allowed_domain, policy_generation = team_idp_policy.policy_generation + 1, required_at = excluded.required_at",
+            &[
+                Value::Text(team_id.to_owned()),
+                Value::Text(kind.to_owned()),
+                allowed_domain.map_or(Value::Null, |domain| Value::Text(domain.to_owned())),
+                Value::Text(required_at.to_owned()),
+            ],
+        )?;
+        Ok(self
+            .get_team_idp_policy(team_id)?
+            .map(|policy| policy.policy_generation)
+            .unwrap_or(1))
+    }
+
+    /// Load the team's IdP policy if one has been recorded.
+    pub fn get_team_idp_policy(&self, team_id: &str) -> Result<Option<StoredTeamIdpPolicy>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT team_id, kind, allowed_domain, policy_generation, required_at FROM team_idp_policy WHERE team_id = ?1",
+            &[Value::Text(team_id.to_owned())],
+        )?;
+        rows.first()
+            .map(stored_team_idp_policy_from_row)
+            .transpose()
+    }
+
+    /// Persist a secretless-public OIDC provider pin.
+    pub fn upsert_team_idp_oidc(
+        &self,
+        team_id: &str,
+        issuer: &str,
+        client_id: &str,
+        capability: &str,
+        discovery_hash: &str,
+        set_at: &str,
+    ) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO team_idp_oidc (team_id, issuer, client_id, capability, discovery_hash, set_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(team_id) DO UPDATE SET issuer = excluded.issuer, client_id = excluded.client_id, capability = excluded.capability, discovery_hash = excluded.discovery_hash, set_at = excluded.set_at",
+            &[
+                Value::Text(team_id.to_owned()),
+                Value::Text(issuer.to_owned()),
+                Value::Text(client_id.to_owned()),
+                Value::Text(capability.to_owned()),
+                Value::Text(discovery_hash.to_owned()),
+                Value::Text(set_at.to_owned()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Load the pinned OIDC provider if one has been recorded.
+    pub fn get_team_idp_oidc(&self, team_id: &str) -> Result<Option<StoredTeamIdpOidc>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT team_id, issuer, client_id, capability, discovery_hash, set_at FROM team_idp_oidc WHERE team_id = ?1",
+            &[Value::Text(team_id.to_owned())],
+        )?;
+        rows.first().map(stored_team_idp_oidc_from_row).transpose()
+    }
+
+    /// Persist one member's tailnet identity check.
+    pub fn upsert_team_member_identity(
+        &self,
+        member_id: &str,
+        team_id: &str,
+        login: &str,
+        user_id: Option<&str>,
+        state: &str,
+        checked_at: &str,
+    ) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO team_member_identity (member_id, team_id, kind, login, user_id, state, checked_at) VALUES (?1, ?2, 'tailnet', ?3, ?4, ?5, ?6) ON CONFLICT(member_id) DO UPDATE SET login = excluded.login, user_id = excluded.user_id, state = excluded.state, checked_at = excluded.checked_at",
+            &[
+                Value::Text(member_id.to_owned()),
+                Value::Text(team_id.to_owned()),
+                Value::Text(login.to_owned()),
+                user_id.map_or(Value::Null, |id| Value::Text(id.to_owned())),
+                Value::Text(state.to_owned()),
+                Value::Text(checked_at.to_owned()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Load one member's tailnet identity check.
+    pub fn get_team_member_identity(
+        &self,
+        member_id: &str,
+    ) -> Result<Option<StoredTeamMemberIdentity>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT member_id, team_id, kind, login, user_id, state, checked_at FROM team_member_identity WHERE member_id = ?1",
+            &[Value::Text(member_id.to_owned())],
+        )?;
+        rows.first()
+            .map(stored_team_member_identity_from_row)
+            .transpose()
+    }
+
+    /// Load every identity row for one team.
+    pub fn list_team_member_identities(
+        &self,
+        team_id: &str,
+    ) -> Result<Vec<StoredTeamMemberIdentity>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT member_id, team_id, kind, login, user_id, state, checked_at FROM team_member_identity WHERE team_id = ?1 ORDER BY login ASC, member_id ASC",
+            &[Value::Text(team_id.to_owned())],
+        )?;
+        rows.iter()
+            .map(stored_team_member_identity_from_row)
+            .collect()
     }
 
     /// Load every local team member row.
