@@ -7627,9 +7627,7 @@ fn resolve_search_rerank_runtime(
             } else {
                 DbConnection::open_file_read_only(&database_path)
                     .map_err(|error| error.to_string())
-                    .and_then(|connection| {
-                        resolve_registered_reranker(&connection, &workspace_id)
-                    })
+                    .and_then(|connection| resolve_registered_reranker(&connection, &workspace_id))
             }
         }
     };

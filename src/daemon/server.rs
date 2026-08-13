@@ -5119,6 +5119,7 @@ fn attach_daemon_context_search_advisories_for_delivery(
     }
 }
 
+#[cfg(test)]
 fn filter_context_large_gap_advisory_for_delivery(
     response: &mut serde_json::Value,
     session: &mut SearchAdvisorySession,
@@ -5128,6 +5129,7 @@ fn filter_context_large_gap_advisory_for_delivery(
     filter_context_large_gap_advisory_inner(response, session, workspace_id, Some(reservation));
 }
 
+#[cfg(test)]
 fn filter_context_large_gap_advisory_inner(
     response: &mut serde_json::Value,
     session: &mut SearchAdvisorySession,
@@ -5965,11 +5967,8 @@ mod tests {
         let report = permanent_reranker_advisory_report();
         let snapshot = ContextSearchAdvisorySnapshot::from_search_report(&report);
         let policy = DaemonDispatchPolicy::for_workspace(TEST_WORKSPACE_ID);
-        let (mut failed_response, failed_result) = cached_context_advisory_delivery_candidate(
-            &snapshot,
-            &policy,
-            TEST_WORKSPACE_ID,
-        );
+        let (mut failed_response, failed_result) =
+            cached_context_advisory_delivery_candidate(&snapshot, &policy, TEST_WORKSPACE_ID);
         assert_eq!(
             failed_result
                 .pointer("/data/rerank/advisory/code")
@@ -5984,11 +5983,8 @@ mod tests {
             &mut failed_response,
         ));
 
-        let (mut retry_response, retry_result) = cached_context_advisory_delivery_candidate(
-            &snapshot,
-            &policy,
-            TEST_WORKSPACE_ID,
-        );
+        let (mut retry_response, retry_result) =
+            cached_context_advisory_delivery_candidate(&snapshot, &policy, TEST_WORKSPACE_ID);
         assert_eq!(
             retry_result
                 .pointer("/data/rerank/advisory/code")
