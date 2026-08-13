@@ -99,11 +99,13 @@ impl ServeSearchAdvisoryState {
             workspace_key,
             &mut reservation,
         );
-        let delivery = reservation.emitted().then(|| ServeSearchAdvisoryDelivery {
-            workspace_key: reservation.workspace_id().to_owned(),
-            token: reservation.token(),
-            large_gap_capacity_busy: reservation.large_gap_capacity_busy(),
-        });
+        let delivery = reservation
+            .requires_settlement()
+            .then(|| ServeSearchAdvisoryDelivery {
+                workspace_key: reservation.workspace_id().to_owned(),
+                token: reservation.token(),
+                large_gap_capacity_busy: reservation.large_gap_capacity_busy(),
+            });
         Ok((data, delivery))
     }
 
@@ -129,11 +131,13 @@ impl ServeSearchAdvisoryState {
             workspace_key,
             &mut reservation,
         );
-        let delivery = reservation.emitted().then(|| ServeSearchAdvisoryDelivery {
-            workspace_key: reservation.workspace_id().to_owned(),
-            token: reservation.token(),
-            large_gap_capacity_busy: reservation.large_gap_capacity_busy(),
-        });
+        let delivery = reservation
+            .requires_settlement()
+            .then(|| ServeSearchAdvisoryDelivery {
+                workspace_key: reservation.workspace_id().to_owned(),
+                token: reservation.token(),
+                large_gap_capacity_busy: reservation.large_gap_capacity_busy(),
+            });
         Ok((payload, delivery))
     }
 
@@ -3412,6 +3416,72 @@ mod tests {
             true,
             "successful retry consumes advisory",
         )
+    }
+
+    #[test]
+    fn serve_failed_suppressed_delivery_discards_only_its_local_counters() -> TestResult {
+        let report = rerank_unavailable_search_report("concurrent advisory delivery");
+        let state = ServeSearchAdvisoryState::default();
+
+        let (first, first_delivery) = state
+            .render_for_delivery(&report, "serve-concurrent-workspace")
+            .map_err(|error| error.to_string())?;
+        ensure(
+            first["rerank"]["advisory"].is_object(),
+            true,
+            "first reservation owns the advisory",
+        )?;
+        let first_delivery =
+            first_delivery.ok_or_else(|| "first response must carry settlement".to_owned())?;
+
+        let (suppressed, suppressed_delivery) = state
+            .render_for_delivery(&report, "serve-concurrent-workspace")
+            .map_err(|error| error.to_string())?;
+        ensure(
+            suppressed["rerank"]["advisory"].is_null(),
+            true,
+            "concurrent response is suppressed by the first ownership reservation",
+        )?;
+        ensure(
+            suppressed["rerank"]["advisorySummary"]["sessionOccurrenceCount"].as_u64(),
+            Some(1),
+            "suppressed response must not expose the pending owner's occurrence",
+        )?;
+        ensure(
+            suppressed["rerank"]["advisorySummary"]["sessionSuppressedCount"].as_u64(),
+            Some(1),
+            "suppressed response exposes only its own local suppression delta",
+        )?;
+        let suppressed_delivery = suppressed_delivery
+            .ok_or_else(|| "suppressed response must carry counter settlement".to_owned())?;
+        state
+            .settle(Some(suppressed_delivery), false)
+            .map_err(|error| error.to_string())?;
+        state
+            .settle(Some(first_delivery), false)
+            .map_err(|error| error.to_string())?;
+
+        let (retry, retry_delivery) = state
+            .render_for_delivery(&report, "serve-concurrent-workspace")
+            .map_err(|error| error.to_string())?;
+        ensure(
+            retry["rerank"]["advisory"].is_object(),
+            true,
+            "failed deliveries leave the advisory eligible for retry",
+        )?;
+        ensure(
+            retry["rerank"]["advisorySummary"]["sessionOccurrenceCount"].as_u64(),
+            Some(1),
+            "failed deliveries must not retain provisional occurrences",
+        )?;
+        ensure(
+            retry["rerank"]["advisorySummary"]["sessionSuppressedCount"].as_u64(),
+            Some(0),
+            "failed deliveries must not retain provisional suppressions",
+        )?;
+        state
+            .settle(retry_delivery, true)
+            .map_err(|error| error.to_string())
     }
 
     #[test]

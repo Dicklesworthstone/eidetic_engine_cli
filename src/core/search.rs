@@ -942,14 +942,27 @@ struct SearchAdvisoryWorkspaceState {
     last_observed: u64,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct SearchAdvisoryDeliveryAccounting {
+    /// Deltas owned by one response. They are invisible to every other
+    /// reservation until successful socket settlement commits them.
+    workspace_id: String,
+    permanent_occurrences: BTreeMap<SearchAdvisoryIdentity, u64>,
+    permanent_suppressed_count: u64,
+    large_gap_occurrence_count: u64,
+}
+
 /// One daemon response's provisional claim on advisories that must not be
-/// consumed until its socket frame is delivered successfully.
+/// consumed until its socket frame is delivered successfully. Counter deltas
+/// remain token-local for the same reason: another concurrent response renders
+/// committed state plus only its own delta, never another in-flight attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SearchAdvisoryDeliveryReservation {
     workspace_id: String,
     token: u64,
     emitted: bool,
     large_gap_capacity_busy: bool,
+    provisional_accounting: bool,
 }
 
 impl SearchAdvisoryDeliveryReservation {
@@ -972,6 +985,16 @@ impl SearchAdvisoryDeliveryReservation {
     pub(crate) const fn large_gap_capacity_busy(&self) -> bool {
         self.large_gap_capacity_busy
     }
+
+    #[must_use]
+    pub(crate) const fn has_provisional_accounting(&self) -> bool {
+        self.provisional_accounting
+    }
+
+    #[must_use]
+    pub(crate) const fn requires_settlement(&self) -> bool {
+        self.emitted() || self.has_provisional_accounting()
+    }
 }
 
 /// Process-lifetime permanent-advisory ledger plus bounded, workspace-
@@ -989,6 +1012,7 @@ pub struct SearchAdvisorySession {
     permanent_suppressed_count: u64,
     workspaces: BTreeMap<String, SearchAdvisoryWorkspaceState>,
     capacity_busy_deliveries: BTreeMap<u64, String>,
+    delivery_accounting: BTreeMap<u64, SearchAdvisoryDeliveryAccounting>,
     observation_clock: u64,
     delivery_clock: u64,
 }
@@ -1003,7 +1027,13 @@ impl SearchAdvisorySession {
             let oldest_workspace = self
                 .workspaces
                 .iter()
-                .filter(|(_, state)| state.large_gap_reserved_delivery.is_none())
+                .filter(|(workspace_id, state)| {
+                    state.large_gap_reserved_delivery.is_none()
+                        && !self.delivery_accounting.values().any(|accounting| {
+                            accounting.workspace_id.as_str() == workspace_id.as_str()
+                                && accounting.large_gap_occurrence_count > 0
+                        })
+                })
                 .min_by(|(left_id, left), (right_id, right)| {
                     left.last_observed
                         .cmp(&right.last_observed)
@@ -1029,6 +1059,7 @@ impl SearchAdvisorySession {
                 .values()
                 .any(|state| state.large_gap_reserved_delivery == Some(token))
             || self.capacity_busy_deliveries.contains_key(&token)
+            || self.delivery_accounting.contains_key(&token)
     }
 
     fn next_delivery_token(&mut self) -> u64 {
@@ -1049,14 +1080,28 @@ impl SearchAdvisorySession {
             token: self.next_delivery_token(),
             emitted: false,
             large_gap_capacity_busy: false,
+            provisional_accounting: false,
         }
+    }
+
+    fn delivery_accounting_mut(
+        &mut self,
+        reservation: &mut SearchAdvisoryDeliveryReservation,
+    ) -> &mut SearchAdvisoryDeliveryAccounting {
+        reservation.provisional_accounting = true;
+        self.delivery_accounting
+            .entry(reservation.token)
+            .or_insert_with(|| SearchAdvisoryDeliveryAccounting {
+                workspace_id: reservation.workspace_id.clone(),
+                ..SearchAdvisoryDeliveryAccounting::default()
+            })
     }
 
     fn observe_permanent_inner(
         &mut self,
         workspace_id: &str,
         degradation: &SearchDegradation,
-        reservation: Option<&mut SearchAdvisoryDeliveryReservation>,
+        mut reservation: Option<&mut SearchAdvisoryDeliveryReservation>,
     ) -> SearchAdvisoryObservation {
         let identity = SearchAdvisoryIdentity {
             code: degradation.code.clone(),
@@ -1064,27 +1109,74 @@ impl SearchAdvisorySession {
             message: degradation.message.clone(),
             repair: degradation.repair.clone(),
         };
-        let entry = self.permanent_occurrences.entry(identity).or_default();
-        entry.occurrence_count = entry.occurrence_count.saturating_add(1);
-        let occurrence_count = entry.occurrence_count;
-        let emitted = !entry.delivered && entry.reserved_delivery.is_none();
-        if emitted {
-            if let Some(reservation) = reservation {
+        let emitted = {
+            let entry = self
+                .permanent_occurrences
+                .entry(identity.clone())
+                .or_default();
+            let emitted = !entry.delivered && entry.reserved_delivery.is_none();
+            if emitted && let Some(reservation) = reservation.as_deref_mut() {
                 debug_assert_eq!(reservation.workspace_id, workspace_id);
                 entry.reserved_delivery = Some(reservation.token);
-                reservation.emitted = true;
-            } else {
+            } else if emitted {
                 entry.delivered = true;
             }
+            emitted
+        };
+        let mut local_occurrence_count = 0;
+        let mut local_suppressed_count = 0;
+        if let Some(reservation) = reservation.as_deref_mut() {
+            if emitted {
+                reservation.emitted = true;
+            }
+            let accounting = self.delivery_accounting_mut(reservation);
+            let occurrence_delta = accounting
+                .permanent_occurrences
+                .entry(identity.clone())
+                .or_default();
+            *occurrence_delta = occurrence_delta.saturating_add(1);
+            local_occurrence_count = *occurrence_delta;
+            if !emitted {
+                accounting.permanent_suppressed_count =
+                    accounting.permanent_suppressed_count.saturating_add(1);
+            }
+            local_suppressed_count = accounting.permanent_suppressed_count;
+        } else {
+            let entry = self
+                .permanent_occurrences
+                .get_mut(&identity)
+                .expect("permanent advisory identity was inserted above");
+            entry.occurrence_count = entry.occurrence_count.saturating_add(1);
+            if !emitted {
+                self.permanent_suppressed_count = self.permanent_suppressed_count.saturating_add(1);
+            }
         }
-        if !emitted {
-            self.permanent_suppressed_count = self.permanent_suppressed_count.saturating_add(1);
+        let occurrence_count =
+            self.permanent_occurrences
+                .get(&identity)
+                .map_or(local_occurrence_count, |entry| {
+                    entry
+                        .occurrence_count
+                        .saturating_add(local_occurrence_count)
+                });
+        let mut distinct_identities = self
+            .permanent_occurrences
+            .iter()
+            .filter(|(_, entry)| entry.occurrence_count > 0)
+            .map(|(identity, _)| identity.clone())
+            .collect::<BTreeSet<_>>();
+        if let Some(reservation) = reservation
+            && let Some(accounting) = self.delivery_accounting.get(&reservation.token)
+        {
+            distinct_identities.extend(accounting.permanent_occurrences.keys().cloned());
         }
         SearchAdvisoryObservation {
             emitted,
             occurrence_count,
-            distinct_count: self.permanent_occurrences.len(),
-            session_suppressed_count: self.permanent_suppressed_count,
+            distinct_count: distinct_identities.len(),
+            session_suppressed_count: self
+                .permanent_suppressed_count
+                .saturating_add(local_suppressed_count),
         }
     }
 
@@ -1131,11 +1223,16 @@ impl SearchAdvisorySession {
         &mut self,
         workspace_id: &str,
         active: bool,
-        reservation: Option<&mut SearchAdvisoryDeliveryReservation>,
+        mut reservation: Option<&mut SearchAdvisoryDeliveryReservation>,
     ) -> SearchAdvisoryEmission {
         if !active {
             self.capacity_busy_deliveries
                 .retain(|_, pending_workspace_id| pending_workspace_id != workspace_id);
+            for accounting in self.delivery_accounting.values_mut() {
+                if accounting.workspace_id == workspace_id {
+                    accounting.large_gap_occurrence_count = 0;
+                }
+            }
             if let Some(state) = self.workspaces.get_mut(workspace_id) {
                 state.large_gap_occurrence_count = 0;
                 state.large_gap_delivered = false;
@@ -1144,7 +1241,7 @@ impl SearchAdvisorySession {
             return SearchAdvisoryEmission::Suppress;
         }
         let Some(state) = self.workspace_mut(workspace_id) else {
-            if let Some(reservation) = reservation {
+            if let Some(reservation) = reservation.as_deref_mut() {
                 debug_assert_eq!(reservation.workspace_id, workspace_id);
                 reservation.emitted = true;
                 reservation.large_gap_capacity_busy = true;
@@ -1157,16 +1254,24 @@ impl SearchAdvisorySession {
             }
             return SearchAdvisoryEmission::CapacityBusy;
         };
-        state.large_gap_occurrence_count = state.large_gap_occurrence_count.saturating_add(1);
         let emitted = !state.large_gap_delivered && state.large_gap_reserved_delivery.is_none();
         if emitted {
-            if let Some(reservation) = reservation {
+            if let Some(reservation) = reservation.as_deref_mut() {
                 debug_assert_eq!(reservation.workspace_id, workspace_id);
                 state.large_gap_reserved_delivery = Some(reservation.token);
                 reservation.emitted = true;
             } else {
+                state.large_gap_occurrence_count =
+                    state.large_gap_occurrence_count.saturating_add(1);
                 state.large_gap_delivered = true;
             }
+        }
+        if let Some(reservation) = reservation.as_deref_mut() {
+            let accounting = self.delivery_accounting_mut(reservation);
+            accounting.large_gap_occurrence_count =
+                accounting.large_gap_occurrence_count.saturating_add(1);
+        } else if !emitted {
+            state.large_gap_occurrence_count = state.large_gap_occurrence_count.saturating_add(1);
         }
         if emitted {
             SearchAdvisoryEmission::Emit
@@ -1187,6 +1292,10 @@ impl SearchAdvisorySession {
         delivered: bool,
         large_gap_capacity_busy: bool,
     ) -> SearchAdvisorySettlement {
+        let accounting = self.delivery_accounting.remove(&token);
+        if delivered && let Some(accounting) = accounting {
+            self.commit_delivery_accounting(accounting);
+        }
         for entry in self.permanent_occurrences.values_mut() {
             if entry.reserved_delivery == Some(token) {
                 entry.reserved_delivery = None;
@@ -1203,6 +1312,7 @@ impl SearchAdvisorySession {
                 state.large_gap_delivered = true;
             }
         }
+        self.remove_uncommitted_advisory_identities();
         if large_gap_capacity_busy && !delivered {
             self.capacity_busy_deliveries.remove(&token);
         }
@@ -1225,6 +1335,35 @@ impl SearchAdvisorySession {
             state.large_gap_reserved_delivery = None;
         }
         SearchAdvisorySettlement::Complete
+    }
+
+    fn commit_delivery_accounting(&mut self, accounting: SearchAdvisoryDeliveryAccounting) {
+        for (identity, occurrence_count) in accounting.permanent_occurrences {
+            let entry = self.permanent_occurrences.entry(identity).or_default();
+            entry.occurrence_count = entry.occurrence_count.saturating_add(occurrence_count);
+        }
+        self.permanent_suppressed_count = self
+            .permanent_suppressed_count
+            .saturating_add(accounting.permanent_suppressed_count);
+        if let Some(state) = self.workspaces.get_mut(&accounting.workspace_id) {
+            state.large_gap_occurrence_count = state
+                .large_gap_occurrence_count
+                .saturating_add(accounting.large_gap_occurrence_count);
+        }
+    }
+
+    fn remove_uncommitted_advisory_identities(&mut self) {
+        let pending_identities = self
+            .delivery_accounting
+            .values()
+            .flat_map(|accounting| accounting.permanent_occurrences.keys().cloned())
+            .collect::<BTreeSet<_>>();
+        self.permanent_occurrences.retain(|identity, entry| {
+            entry.occurrence_count > 0
+                || entry.delivered
+                || entry.reserved_delivery.is_some()
+                || pending_identities.contains(identity)
+        });
     }
 
     #[must_use]
@@ -7538,6 +7677,41 @@ fn resolve_search_rerank_runtime(
             ));
             SearchRerankRuntime::disabled()
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SearchRerankRuntimePosture {
+    pub(crate) configured_mode: crate::config::SearchRerankMode,
+    pub(crate) configured_top_k: usize,
+    pub(crate) runtime_available: bool,
+    pub(crate) degraded: Vec<SearchDegradation>,
+}
+
+/// Re-resolve only the reranker state whose truth can change independently of
+/// a cached pack. L2 callers use this after a confirmed hit so the cached
+/// selection remains reusable while delivery-time advisory posture stays
+/// current.
+pub(crate) fn resolve_search_rerank_runtime_posture(
+    options: &SearchOptions,
+    source_mode: SearchSourceMode,
+    connection: Option<&DbConnection>,
+) -> SearchRerankRuntimePosture {
+    let (configured_mode, configured_top_k) = resolve_search_rerank_config(&options.workspace_path);
+    let mut degraded = Vec::new();
+    let runtime = resolve_search_rerank_runtime(
+        options,
+        source_mode,
+        connection,
+        configured_mode,
+        configured_top_k,
+        &mut degraded,
+    );
+    SearchRerankRuntimePosture {
+        configured_mode,
+        configured_top_k,
+        runtime_available: runtime.is_enabled(),
+        degraded,
     }
 }
 
@@ -18976,6 +19150,144 @@ mod tests {
         assert_eq!(source, SearchAdvisorySession::default());
         assert_ne!(staged, source);
         assert_eq!(json["rerank"]["advisorySummary"]["emittedCount"], 1);
+    }
+
+    #[test]
+    fn failed_delivery_rolls_back_only_its_provisional_advisory_counters() {
+        let degradation = SearchDegradation::rerank_model_absent();
+        let workspace_id = "concurrent-delivery-workspace";
+        let mut session = SearchAdvisorySession::default();
+
+        let mut winner = session.reserve_delivery(workspace_id);
+        let winner_observation =
+            session.observe_permanent_for_delivery(workspace_id, &degradation, &mut winner);
+        assert!(winner_observation.emitted);
+        assert!(winner.emitted());
+        assert!(winner.has_provisional_accounting());
+
+        let mut suppressed = session.reserve_delivery(workspace_id);
+        let suppressed_observation =
+            session.observe_permanent_for_delivery(workspace_id, &degradation, &mut suppressed);
+        assert!(!suppressed_observation.emitted);
+        assert!(!suppressed.emitted());
+        assert!(suppressed.has_provisional_accounting());
+        assert_eq!(suppressed_observation.occurrence_count, 1);
+        assert_eq!(suppressed_observation.session_suppressed_count, 1);
+
+        assert_eq!(
+            session.settle_delivery(
+                suppressed.workspace_id(),
+                suppressed.token(),
+                false,
+                suppressed.large_gap_capacity_busy(),
+            ),
+            SearchAdvisorySettlement::Complete
+        );
+        let state = session
+            .permanent_occurrences
+            .values()
+            .next()
+            .expect("winner reservation must remain after competing rollback");
+        assert_eq!(state.occurrence_count, 0);
+        assert_eq!(state.reserved_delivery, Some(winner.token()));
+        assert_eq!(session.permanent_suppressed_count, 0);
+
+        assert_eq!(
+            session.settle_delivery(
+                winner.workspace_id(),
+                winner.token(),
+                false,
+                winner.large_gap_capacity_busy(),
+            ),
+            SearchAdvisorySettlement::Complete
+        );
+        assert!(session.permanent_occurrences.is_empty());
+        assert_eq!(session.permanent_suppressed_count, 0);
+
+        let mut retry = session.reserve_delivery(workspace_id);
+        let retry_observation =
+            session.observe_permanent_for_delivery(workspace_id, &degradation, &mut retry);
+        assert!(retry_observation.emitted);
+        assert_eq!(retry_observation.occurrence_count, 1);
+        assert_eq!(retry_observation.distinct_count, 1);
+        assert_eq!(retry_observation.session_suppressed_count, 0);
+    }
+
+    #[test]
+    fn concurrent_delivery_counters_never_include_another_pending_reservation() {
+        let degradation = SearchDegradation::rerank_model_absent();
+        let workspace_id = "three-way-delivery-workspace";
+        let mut session = SearchAdvisorySession::default();
+
+        let mut reservation_a = session.reserve_delivery(workspace_id);
+        let observation_a =
+            session.observe_permanent_for_delivery(workspace_id, &degradation, &mut reservation_a);
+        assert!(observation_a.emitted);
+        assert_eq!(observation_a.occurrence_count, 1);
+        assert_eq!(observation_a.session_suppressed_count, 0);
+
+        let mut reservation_b = session.reserve_delivery(workspace_id);
+        let observation_b =
+            session.observe_permanent_for_delivery(workspace_id, &degradation, &mut reservation_b);
+        assert!(!observation_b.emitted);
+        assert_eq!(observation_b.occurrence_count, 1);
+        assert_eq!(observation_b.session_suppressed_count, 1);
+
+        let mut reservation_c = session.reserve_delivery(workspace_id);
+        let observation_c =
+            session.observe_permanent_for_delivery(workspace_id, &degradation, &mut reservation_c);
+        assert!(!observation_c.emitted);
+        assert_eq!(observation_c.occurrence_count, 1);
+        assert_eq!(observation_c.session_suppressed_count, 1);
+
+        assert_eq!(
+            session.settle_delivery(
+                reservation_c.workspace_id(),
+                reservation_c.token(),
+                true,
+                reservation_c.large_gap_capacity_busy(),
+            ),
+            SearchAdvisorySettlement::Complete
+        );
+        assert_eq!(
+            session
+                .permanent_occurrences
+                .values()
+                .next()
+                .expect("C settlement commits the identity")
+                .occurrence_count,
+            1
+        );
+        assert_eq!(session.permanent_suppressed_count, 1);
+
+        assert_eq!(
+            session.settle_delivery(
+                reservation_b.workspace_id(),
+                reservation_b.token(),
+                false,
+                reservation_b.large_gap_capacity_busy(),
+            ),
+            SearchAdvisorySettlement::Complete
+        );
+        assert_eq!(
+            session
+                .permanent_occurrences
+                .values()
+                .next()
+                .expect("C's committed identity must survive B rollback")
+                .occurrence_count,
+            1
+        );
+        assert_eq!(session.permanent_suppressed_count, 1);
+        assert_eq!(
+            session
+                .permanent_occurrences
+                .values()
+                .next()
+                .and_then(|state| state.reserved_delivery),
+            Some(reservation_a.token()),
+            "B failure must not release A's ownership reservation"
+        );
     }
 
     #[test]

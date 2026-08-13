@@ -71,7 +71,7 @@ use crate::core::search::{
     SearchPerformanceTrace, SearchReport, SearchSourceMode, SearchStatus,
     SearchWorkspaceProbeState, elapsed_timing_json, map_frankensearch_error,
     performance_redaction_json, query_observation_json, reconcile_search_index_before_read_with_cx,
-    run_context_search_with_preloaded_memories,
+    resolve_search_rerank_runtime_posture, run_context_search_with_preloaded_memories,
     run_context_search_with_preloaded_memories_and_workspace_state_with_cx,
     search_advisory_snapshot_data_json_with_delivery_reservation, search_degraded_data_json,
 };
@@ -907,6 +907,33 @@ impl ContextSearchAdvisorySnapshot {
                 "repair": entry.repair,
             })).collect::<Vec<_>>(),
         })
+    }
+
+    fn refresh_rerank_posture_from(&mut self, current: &Self) {
+        self.rerank_configured_mode = current.rerank_configured_mode;
+        self.rerank_configured_top_k = current.rerank_configured_top_k;
+        self.rerank_runtime_available = current.rerank_runtime_available;
+        self.degraded
+            .retain(|entry| entry.code != "rerank_model_unavailable");
+        self.degraded.extend(
+            current
+                .degraded
+                .iter()
+                .filter(|entry| entry.code == "rerank_model_unavailable")
+                .cloned(),
+        );
+    }
+
+    fn from_current_rerank_posture(
+        posture: crate::core::search::SearchRerankRuntimePosture,
+    ) -> Self {
+        Self {
+            rerank_configured_mode: posture.configured_mode,
+            rerank_configured_top_k: posture.configured_top_k,
+            rerank_runtime_available: posture.runtime_available,
+            rerank_score_count: 0,
+            degraded: posture.degraded,
+        }
     }
 
     fn from_cache_json(value: &serde_json::Value) -> Result<Self, String> {
@@ -2639,6 +2666,8 @@ async fn run_context_pack_with_performance_inner(
                 context,
                 command,
                 options,
+                &search_options,
+                read_connection,
                 &request,
                 total_start,
                 &mut trace,
@@ -6035,6 +6064,8 @@ fn context_pack_l2_try_hit(
     l2_context: &ContextPackL2Context,
     command: &'static str,
     options: &ContextPackOptions,
+    search_options: &SearchOptions,
+    connection: &DbConnection,
     request: &ContextRequest,
     total_start: Instant,
     trace: &mut ContextPerformanceTrace,
@@ -6049,7 +6080,7 @@ fn context_pack_l2_try_hit(
                 l2_context.key_input.embed_backend,
             ) {
                 Ok(cached_json) => {
-                    let search_advisory_snapshot =
+                    let mut search_advisory_snapshot =
                         match context_pack_l2_cached_search_advisory_snapshot(&hit.pack_json) {
                             Ok(snapshot) => snapshot,
                             Err(message) => {
@@ -6080,6 +6111,15 @@ fn context_pack_l2_try_hit(
                         );
                         return None;
                     }
+                    let current_rerank_posture =
+                        ContextSearchAdvisorySnapshot::from_current_rerank_posture(
+                            resolve_search_rerank_runtime_posture(
+                                search_options,
+                                source_mode_metadata.applied,
+                                Some(connection),
+                            ),
+                        );
+                    search_advisory_snapshot.refresh_rerank_posture_from(&current_rerank_posture);
                     trace.record_elapsed("packL2Lookup", lookup_start);
                     trace.record_elapsed("total", total_start);
                     tracing::info!(
@@ -15751,6 +15791,233 @@ pub fn unrelated_context() -> u64 {{
         assert_eq!(metadata.applied, report.source_mode_applied);
         assert_eq!(metadata.strict, report.strict_source_mode);
         assert_eq!(metadata.fallback, report.source_mode_fallback);
+    }
+
+    #[test]
+    fn l2_advisory_snapshot_refreshes_both_reranker_availability_transitions() {
+        let absent = SearchDegradation::rerank_model_absent();
+        let transient = SearchDegradation {
+            code: "rerank_model_unavailable".to_owned(),
+            severity: "low".to_owned(),
+            message: "registered reranker failed to load".to_owned(),
+            repair: None,
+        };
+        let unrelated = SearchDegradation::stale_index(Some(7), Some(3));
+        let mut cached_absent = super::ContextSearchAdvisorySnapshot {
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: 50,
+            rerank_runtime_available: false,
+            rerank_score_count: 0,
+            degraded: vec![absent, unrelated.clone()],
+        };
+        let available_now = super::ContextSearchAdvisorySnapshot {
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: 25,
+            rerank_runtime_available: true,
+            rerank_score_count: 0,
+            degraded: Vec::new(),
+        };
+
+        cached_absent.refresh_rerank_posture_from(&available_now);
+        assert!(cached_absent.rerank_runtime_available);
+        assert_eq!(cached_absent.rerank_configured_top_k, 25);
+        assert!(
+            cached_absent
+                .degraded
+                .iter()
+                .all(|entry| entry.code != "rerank_model_unavailable")
+        );
+        assert_eq!(cached_absent.degraded, vec![unrelated.clone()]);
+
+        let mut cached_available = super::ContextSearchAdvisorySnapshot {
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: 25,
+            rerank_runtime_available: true,
+            rerank_score_count: 8,
+            degraded: vec![unrelated.clone()],
+        };
+        let unavailable_now = super::ContextSearchAdvisorySnapshot {
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: 50,
+            rerank_runtime_available: false,
+            rerank_score_count: 0,
+            degraded: vec![transient.clone()],
+        };
+
+        cached_available.refresh_rerank_posture_from(&unavailable_now);
+        assert!(!cached_available.rerank_runtime_available);
+        assert_eq!(cached_available.rerank_configured_top_k, 50);
+        assert_eq!(
+            cached_available.rerank_score_count, 8,
+            "cached pack provenance must retain the score count that shaped its selection"
+        );
+        assert_eq!(cached_available.degraded, vec![unrelated, transient]);
+    }
+
+    #[test]
+    fn l2_hit_revalidates_stale_reranker_posture_without_losing_the_hit() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let database_path = workspace.join("ee.db");
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let cache = crate::cache::pack_l2::PackL2Cache::new(
+            tempdir.path().join("pack-l2"),
+            crate::cache::pack_l2::PackL2CacheOptions::default(),
+        );
+        let request = ContextRequest::from_query("refresh reranker posture")
+            .map_err(|error| error.to_string())?;
+        let output_options =
+            super::ContextPackOutputOptions::default().with_cache_json_response(true);
+        let options = super::ContextPackOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database_path.clone()),
+            index_dir: None,
+            query: request.query.clone(),
+            speed: crate::search::SpeedMode::Default,
+            source_mode: crate::core::search::SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            filters: crate::models::QueryFilters::default(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(400),
+            candidate_pool: Some(10),
+            max_results: None,
+            include_tombstoned: false,
+            as_of: None,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            redaction_level: crate::models::RedactionLevel::Minimal,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
+            pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
+            require_fresh_sentinels: false,
+            output_options,
+            persist_pack: false,
+            baseline_write: None,
+            no_lod: false,
+        };
+        let search_options = SearchOptions {
+            workspace_path: workspace,
+            database_path: Some(database_path),
+            index_dir: None,
+            query: request.query.clone(),
+            limit: 10,
+            speed: crate::search::SpeedMode::Default,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            dedup_mode: crate::core::search::SearchDedupMode::DocId,
+            source_mode: crate::core::search::SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        };
+        let key_input = super::PackL2CacheKeyInput {
+            workspace_id: "wsp_l2_reranker_refresh".to_owned(),
+            database_generation: 1,
+            index_generation: 1,
+            graph_generation: None,
+            embed_backend: EmbedBackend::HashFallback,
+            redaction_level: options.redaction_level,
+            request: request.clone(),
+            output_options,
+            include_legacy_selection_certificate: false,
+            memory_scope: options.memory_scope,
+            strict_scope: options.strict_scope,
+            source_mode: options.source_mode,
+            strict_source_mode: options.strict_source_mode,
+            context_feature_flags_hash: "blake3:test-features".to_owned(),
+            personalization_generation: None,
+        };
+        let key = super::compute_pack_l2_cache_key(&key_input);
+        let l2_context = super::ContextPackL2Context {
+            cache: cache.clone(),
+            key: key.clone(),
+            key_input,
+        };
+        let stale_available = super::ContextSearchAdvisorySnapshot {
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: 50,
+            rerank_runtime_available: true,
+            rerank_score_count: 7,
+            degraded: Vec::new(),
+        };
+        let response_json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
+            "success": true,
+            "data": {
+                "command": PACK_COMMAND,
+                "embed_backend": "hash_fallback",
+                "pack": { "schema": crate::models::PACK_SCHEMA_V2 }
+            },
+            "degraded": []
+        })
+        .to_string();
+        let payload = serde_json::json!({
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3,
+            "responseJson": response_json,
+            "searchAdvisorySnapshot": stale_available.cache_json(),
+            "sourceMode": {
+                "requested": "hybrid",
+                "applied": "hybrid",
+                "strict": false,
+                "fallback": false
+            }
+        });
+        cache
+            .put_compressed(&key, &payload)
+            .map_err(|error| error.to_string())?;
+
+        let mut trace = super::ContextPerformanceTrace::default();
+        let mut degraded = Vec::new();
+        let cached_run = super::context_pack_l2_try_hit(
+            &l2_context,
+            PACK_COMMAND,
+            &options,
+            &search_options,
+            &connection,
+            &request,
+            std::time::Instant::now(),
+            &mut trace,
+            &mut degraded,
+        )
+        .ok_or_else(|| "seeded L2 entry should remain a cache hit".to_owned())?;
+
+        assert_eq!(
+            cached_run
+                .performance
+                .pointer("/data/cache/status")
+                .and_then(serde_json::Value::as_str),
+            Some("hit")
+        );
+        assert!(cached_run.response.cached_json.is_some());
+        assert!(!cached_run.search_advisory_snapshot.rerank_runtime_available);
+        assert_eq!(
+            cached_run.search_advisory_snapshot.rerank_score_count, 7,
+            "the cached ranking provenance must survive runtime-posture refresh"
+        );
+        assert!(
+            cached_run
+                .search_advisory_snapshot
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "rerank_model_unavailable")
+        );
+        assert!(degraded.is_empty());
+        Ok(())
     }
 
     #[test]

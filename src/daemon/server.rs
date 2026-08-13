@@ -250,7 +250,7 @@ impl<'a> PendingSearchAdvisoryDelivery<'a> {
             .reservation
             .take()
             .expect("pending advisory delivery must retain its reservation");
-        if !reservation.emitted() {
+        if !reservation.requires_settlement() {
             return response;
         }
         if defer_until_socket_write {
@@ -276,7 +276,7 @@ impl Drop for PendingSearchAdvisoryDelivery<'_> {
         let Some(reservation) = self.reservation.take() else {
             return;
         };
-        if reservation.emitted() {
+        if reservation.requires_settlement() {
             settle_search_advisory_delivery(
                 self.session,
                 reservation.workspace_id(),
@@ -5821,9 +5821,9 @@ mod tests {
         let wire_response = reader.join().expect("socket reader must not panic");
         assert_eq!(wire_response.result, Some(delivered_result));
 
-        let (repeated_response, repeated_result) =
+        let (mut repeated_response, repeated_result) =
             advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
-        assert!(repeated_response.delivery.is_none());
+        assert!(repeated_response.delivery.is_some());
         assert!(
             repeated_result
                 .pointer("/response/data/rerank/advisory")
@@ -5835,6 +5835,7 @@ mod tests {
                 .and_then(serde_json::Value::as_u64),
             Some(1)
         );
+        settle_daemon_response_delivery(&policy, &mut repeated_response, true);
     }
 
     #[test]
@@ -6101,9 +6102,9 @@ mod tests {
         );
 
         for workspace_id in [&capacity_busy_workspace, &failed_workspace] {
-            let (repeated_response, repeated_result) =
+            let (mut repeated_response, repeated_result) =
                 advisory_delivery_candidate(&report, &policy, workspace_id);
-            assert!(repeated_response.delivery.is_none());
+            assert!(repeated_response.delivery.is_some());
             assert!(
                 repeated_result["response"]["data"]["degraded"]
                     .as_array()
@@ -6116,6 +6117,7 @@ mod tests {
                         )
                     })
             );
+            settle_daemon_response_delivery(&policy, &mut repeated_response, true);
         }
         assert_eq!(
             policy
@@ -6208,10 +6210,14 @@ mod tests {
             "one process-wide permanent advisory identity must have one winner across all workspaces"
         );
         for (_, response, result) in &outcomes {
+            assert!(
+                response.delivery.is_some(),
+                "every provisional occurrence must carry socket settlement"
+            );
             let advisory = result
                 .pointer("/response/data/rerank/advisory")
                 .expect("rerank advisory field must remain present");
-            if response.delivery.is_some() {
+            if advisory.is_object() {
                 assert_eq!(
                     advisory.get("code").and_then(serde_json::Value::as_str),
                     Some("rerank_model_unavailable"),
@@ -6228,8 +6234,10 @@ mod tests {
             settle_daemon_response_delivery(&policy, response, true);
         }
 
-        let (_, repeated_a) = advisory_delivery_candidate(&report, &policy, "workspace-a");
-        let (_, repeated_b) = advisory_delivery_candidate(&report, &policy, "workspace-b");
+        let (mut repeated_response_a, repeated_a) =
+            advisory_delivery_candidate(&report, &policy, "workspace-a");
+        let (mut repeated_response_b, repeated_b) =
+            advisory_delivery_candidate(&report, &policy, "workspace-b");
         for repeated in [&repeated_a, &repeated_b] {
             assert!(
                 repeated
@@ -6237,6 +6245,8 @@ mod tests {
                     .is_some_and(serde_json::Value::is_null)
             );
         }
+        settle_daemon_response_delivery(&policy, &mut repeated_response_a, true);
+        settle_daemon_response_delivery(&policy, &mut repeated_response_b, true);
     }
 
     #[test]
@@ -6285,13 +6295,15 @@ mod tests {
                 .iter()
                 .filter(|(response, _)| response.delivery.is_some())
                 .count(),
-            1
+            THREADS,
+            "suppressed occurrences also require delivery settlement"
         );
         for (response, result) in &outcomes {
+            assert!(response.delivery.is_some());
             let advisory = result
                 .pointer("/response/data/rerank/advisory")
                 .expect("rerank advisory field must remain present");
-            if response.delivery.is_some() {
+            if advisory.is_object() {
                 assert_eq!(
                     advisory.get("code").and_then(serde_json::Value::as_str),
                     Some("rerank_model_unavailable"),
@@ -6304,17 +6316,18 @@ mod tests {
                 );
             }
         }
-        let first_response = outcomes
-            .iter_mut()
-            .find_map(|(response, _)| {
-                if response.delivery.is_some() {
-                    Some(response)
-                } else {
-                    None
-                }
+        let winner_index = outcomes
+            .iter()
+            .position(|(_, result)| {
+                result
+                    .pointer("/response/data/rerank/advisory/code")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("rerank_model_unavailable")
             })
-            .expect("one response must carry the reservation");
-        settle_daemon_response_delivery(&policy, first_response, false);
+            .expect("one response must own the advisory reservation");
+        for (index, (response, _)) in outcomes.iter_mut().enumerate() {
+            settle_daemon_response_delivery(&policy, response, index != winner_index);
+        }
         let (mut retry_response, retry_result) =
             advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
         assert_eq!(
