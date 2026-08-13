@@ -9628,6 +9628,159 @@ CREATE INDEX idx_team_members_team ON team_members(team_id, joined_at, member_id
     "blake3:v106_team_members_2026_08_13",
 );
 
+/// V107: signing-key bindings for team member nodes (T3.1 / T4.1).
+pub const V107_TEAM_MEMBER_NODES: Migration = Migration::new(
+    107,
+    "team_member_nodes",
+    r#"
+CREATE TABLE team_member_nodes (
+    node_id TEXT PRIMARY KEY CHECK (
+        node_id GLOB 'node_*'
+        AND length(trim(node_id)) > 5
+        AND node_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    member_id TEXT NOT NULL CHECK (
+        length(member_id) = 36 AND member_id GLOB 'mbr_*'
+        AND substr(member_id, 5) NOT GLOB '*[^0-9a-f]*'
+    ),
+    team_id TEXT NOT NULL CHECK (
+        team_id GLOB 'team_*'
+        AND length(trim(team_id)) > 5
+        AND team_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    verifying_key_hex TEXT NOT NULL CHECK (
+        length(verifying_key_hex) = 64
+        AND verifying_key_hex NOT GLOB '*[^0-9a-f]*'
+    ),
+    signing_key_generation INTEGER NOT NULL CHECK (signing_key_generation >= 1),
+    state TEXT NOT NULL CHECK (state IN ('active', 'revoked')),
+    bound_at TEXT NOT NULL CHECK (length(trim(bound_at)) > 0)
+);
+CREATE INDEX idx_team_member_nodes_member ON team_member_nodes(member_id, signing_key_generation);
+CREATE TABLE team_invite_auth_floor (
+    team_id TEXT PRIMARY KEY CHECK (
+        team_id GLOB 'team_*'
+        AND length(trim(team_id)) > 5
+        AND team_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    floor_at TEXT NOT NULL CHECK (length(trim(floor_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0)
+);
+"#,
+    "blake3:v107_team_member_nodes_2026_08_13",
+);
+
+/// V108: idempotent origin-owned history projection markers (T4.5).
+pub const V108_TEAM_HISTORY_PROJECTIONS: Migration = Migration::new(
+    108,
+    "team_history_projections",
+    r#"
+CREATE TABLE team_history_projections (
+    team_id TEXT NOT NULL CHECK (
+        team_id GLOB 'team_*'
+        AND length(trim(team_id)) > 5
+        AND team_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    memory_id TEXT NOT NULL CHECK (
+        memory_id GLOB 'mem_*' AND length(memory_id) = 30
+    ),
+    revision_id TEXT NOT NULL CHECK (length(trim(revision_id)) > 0),
+    origin_event_id TEXT NOT NULL CHECK (length(trim(origin_event_id)) > 0),
+    projected_at TEXT NOT NULL CHECK (length(trim(projected_at)) > 0),
+    PRIMARY KEY (team_id, memory_id, revision_id)
+);
+CREATE INDEX idx_team_history_projections_team ON team_history_projections(team_id, projected_at);
+"#,
+    "blake3:v108_team_history_projections_2026_08_13",
+);
+
+/// V109: durable team pause generation (T4.6).
+pub const V109_TEAM_POSTURE: Migration = Migration::new(
+    109,
+    "team_posture",
+    r#"
+CREATE TABLE team_posture (
+    team_id TEXT PRIMARY KEY CHECK (
+        team_id GLOB 'team_*'
+        AND length(trim(team_id)) > 5
+        AND team_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    paused INTEGER NOT NULL CHECK (paused IN (0, 1)),
+    pause_generation INTEGER NOT NULL CHECK (pause_generation >= 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0)
+);
+"#,
+    "blake3:v109_team_posture_2026_08_13",
+);
+
+/// V110: crash-resumable join attempts + per-generation signing keys (T4.3 / T4.4).
+pub const V110_TEAM_JOIN_ATTEMPTS: Migration = Migration::new(
+    110,
+    "team_join_attempts",
+    r#"
+CREATE TABLE team_join_attempts (
+    invite_id TEXT PRIMARY KEY CHECK (length(trim(invite_id)) = 32 AND invite_id NOT GLOB '*[^0-9a-f]*'),
+    team_id TEXT NOT NULL CHECK (
+        team_id GLOB 'team_*'
+        AND length(trim(team_id)) > 5
+        AND team_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    joiner_node_id TEXT NOT NULL CHECK (
+        joiner_node_id GLOB 'node_*'
+        AND length(trim(joiner_node_id)) > 5
+    ),
+    joiner_nonce TEXT NOT NULL CHECK (length(trim(joiner_nonce)) > 0),
+    inviter_nonce TEXT CHECK (inviter_nonce IS NULL OR length(trim(inviter_nonce)) > 0),
+    phase TEXT NOT NULL CHECK (phase IN ('hello', 'challenged', 'granted')),
+    granted_json TEXT,
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0)
+);
+CREATE TABLE team_member_signing_keys (
+    node_id TEXT NOT NULL CHECK (
+        node_id GLOB 'node_*'
+        AND length(trim(node_id)) > 5
+        AND node_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    signing_key_generation INTEGER NOT NULL CHECK (signing_key_generation >= 1),
+    verifying_key_hex TEXT NOT NULL CHECK (
+        length(verifying_key_hex) = 64
+        AND verifying_key_hex NOT GLOB '*[^0-9a-f]*'
+    ),
+    state TEXT NOT NULL CHECK (state IN ('active', 'revoked')),
+    bound_at TEXT NOT NULL CHECK (length(trim(bound_at)) > 0),
+    PRIMARY KEY (node_id, signing_key_generation)
+);
+"#,
+    "blake3:v110_team_join_attempts_2026_08_13",
+);
+
+/// V111: minted/adopted team project identity (T4.8).
+pub const V111_TEAM_PROJECTS: Migration = Migration::new(
+    111,
+    "team_projects",
+    r#"
+CREATE TABLE team_projects (
+    project_id TEXT PRIMARY KEY CHECK (
+        project_id GLOB 'prj_tm_*'
+        AND length(trim(project_id)) = 33
+        AND project_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    team_id TEXT NOT NULL CHECK (
+        team_id GLOB 'team_*'
+        AND length(trim(team_id)) > 5
+        AND team_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    display_name TEXT NOT NULL CHECK (length(trim(display_name)) > 0),
+    local_path TEXT NOT NULL CHECK (length(trim(local_path)) > 0),
+    source TEXT NOT NULL CHECK (source IN ('minted', 'adopted')),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    UNIQUE(team_id, display_name)
+);
+CREATE INDEX idx_team_projects_team ON team_projects(team_id, display_name);
+"#,
+    "blake3:v111_team_projects_2026_08_13",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -9736,6 +9889,11 @@ pub const MIGRATIONS: &[Migration] = &[
     V104_MESH_ORIGIN_EVENTS,
     V105_TEAM_PENDING_INVITES,
     V106_TEAM_MEMBERS,
+    V107_TEAM_MEMBER_NODES,
+    V108_TEAM_HISTORY_PROJECTIONS,
+    V109_TEAM_POSTURE,
+    V110_TEAM_JOIN_ATTEMPTS,
+    V111_TEAM_PROJECTS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -14243,6 +14401,98 @@ pub struct StoredTeamMember {
     pub joined_at: String,
 }
 
+/// Input for one team member node signing-key binding.
+#[derive(Debug, Clone)]
+pub struct InsertTeamMemberNodeInput {
+    pub node_id: String,
+    pub member_id: String,
+    pub team_id: String,
+    pub verifying_key_hex: String,
+    pub signing_key_generation: u64,
+    pub state: String,
+    pub bound_at: String,
+}
+
+/// Stored `team_member_nodes` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredTeamMemberNode {
+    pub node_id: String,
+    pub member_id: String,
+    pub team_id: String,
+    pub verifying_key_hex: String,
+    pub signing_key_generation: u64,
+    pub state: String,
+    pub bound_at: String,
+}
+
+/// Crash-resumable join attempt. The invite secret is never stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredTeamJoinAttempt {
+    pub invite_id: String,
+    pub team_id: String,
+    pub joiner_node_id: String,
+    pub joiner_nonce: String,
+    pub inviter_nonce: Option<String>,
+    pub phase: String,
+    pub granted_json: Option<String>,
+    pub updated_at: String,
+}
+
+/// Input for one crash-resumable join attempt row.
+#[derive(Debug, Clone)]
+pub struct UpsertTeamJoinAttemptInput {
+    pub invite_id: String,
+    pub team_id: String,
+    pub joiner_node_id: String,
+    pub joiner_nonce: String,
+    pub inviter_nonce: Option<String>,
+    pub phase: String,
+    pub granted_json: Option<String>,
+    pub updated_at: String,
+}
+
+/// Stored `team_projects` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredTeamProject {
+    pub project_id: String,
+    pub team_id: String,
+    pub display_name: String,
+    pub local_path: String,
+    pub source: String,
+    pub created_at: String,
+}
+
+/// Input for one minted or adopted team project.
+#[derive(Debug, Clone)]
+pub struct InsertTeamProjectInput {
+    pub project_id: String,
+    pub team_id: String,
+    pub display_name: String,
+    pub local_path: String,
+    pub source: String,
+    pub created_at: String,
+}
+
+/// Input for one history-projection marker.
+#[derive(Debug, Clone)]
+pub struct InsertTeamHistoryProjectionInput {
+    pub team_id: String,
+    pub memory_id: String,
+    pub revision_id: String,
+    pub origin_event_id: String,
+    pub projected_at: String,
+}
+
+/// Stored `team_history_projections` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredTeamHistoryProjection {
+    pub team_id: String,
+    pub memory_id: String,
+    pub revision_id: String,
+    pub origin_event_id: String,
+    pub projected_at: String,
+}
+
 /// Append failure: either the chain invariant refused the write (durable
 /// fork/regression evidence for the caller) or the database failed.
 #[derive(Debug)]
@@ -14337,6 +14587,43 @@ fn stored_team_member_from_row(row: &Row) -> Result<StoredTeamMember> {
         origin_node_id: required_text(row, 6, DbOperation::Query, "origin_node_id")?.to_string(),
         bound_via: required_text(row, 7, DbOperation::Query, "bound_via")?.to_string(),
         joined_at: required_text(row, 8, DbOperation::Query, "joined_at")?.to_string(),
+    })
+}
+
+fn stored_team_member_node_from_row(row: &Row) -> Result<StoredTeamMemberNode> {
+    Ok(StoredTeamMemberNode {
+        node_id: required_text(row, 0, DbOperation::Query, "node_id")?.to_string(),
+        member_id: required_text(row, 1, DbOperation::Query, "member_id")?.to_string(),
+        team_id: required_text(row, 2, DbOperation::Query, "team_id")?.to_string(),
+        verifying_key_hex: required_text(row, 3, DbOperation::Query, "verifying_key_hex")?
+            .to_string(),
+        signing_key_generation: required_u64(row, 4, DbOperation::Query, "signing_key_generation")?,
+        state: required_text(row, 5, DbOperation::Query, "state")?.to_string(),
+        bound_at: required_text(row, 6, DbOperation::Query, "bound_at")?.to_string(),
+    })
+}
+
+fn stored_team_project_from_row(row: &Row) -> Result<StoredTeamProject> {
+    Ok(StoredTeamProject {
+        project_id: required_text(row, 0, DbOperation::Query, "project_id")?.to_string(),
+        team_id: required_text(row, 1, DbOperation::Query, "team_id")?.to_string(),
+        display_name: required_text(row, 2, DbOperation::Query, "display_name")?.to_string(),
+        local_path: required_text(row, 3, DbOperation::Query, "local_path")?.to_string(),
+        source: required_text(row, 4, DbOperation::Query, "source")?.to_string(),
+        created_at: required_text(row, 5, DbOperation::Query, "created_at")?.to_string(),
+    })
+}
+
+fn stored_team_join_attempt_from_row(row: &Row) -> Result<StoredTeamJoinAttempt> {
+    Ok(StoredTeamJoinAttempt {
+        invite_id: required_text(row, 0, DbOperation::Query, "invite_id")?.to_string(),
+        team_id: required_text(row, 1, DbOperation::Query, "team_id")?.to_string(),
+        joiner_node_id: required_text(row, 2, DbOperation::Query, "joiner_node_id")?.to_string(),
+        joiner_nonce: required_text(row, 3, DbOperation::Query, "joiner_nonce")?.to_string(),
+        inviter_nonce: optional_text(row, 4)?.map(str::to_string),
+        phase: required_text(row, 5, DbOperation::Query, "phase")?.to_string(),
+        granted_json: optional_text(row, 6)?.map(str::to_string),
+        updated_at: required_text(row, 7, DbOperation::Query, "updated_at")?.to_string(),
     })
 }
 
@@ -15942,6 +16229,23 @@ impl DbConnection {
         rows.iter().map(stored_mesh_origin_event_from_row).collect()
     }
 
+    /// List every origin event for one team, newest produced_at first.
+    pub fn list_all_mesh_origin_events(
+        &self,
+        team_id: &str,
+        limit: u32,
+    ) -> Result<Vec<StoredMeshOriginEvent>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT event_id, team_id, origin_node_id, signing_key_generation, seq, prev_event_hash, event_hash, signature, payload_schema, payload_json, required_features_json, produced_at FROM mesh_origin_events WHERE team_id = ?1 ORDER BY produced_at DESC, event_id ASC LIMIT ?2",
+            &[
+                Value::Text(team_id.to_owned()),
+                Value::from_u64_clamped(u64::from(limit.max(1))),
+            ],
+        )?;
+        rows.iter().map(stored_mesh_origin_event_from_row).collect()
+    }
+
     /// Persist one single-use team invite.
     pub fn insert_team_pending_invite(&self, input: &InsertTeamPendingInviteInput) -> Result<()> {
         self.execute_for(
@@ -15978,6 +16282,19 @@ impl DbConnection {
             .transpose()
     }
 
+    /// Mark a pending invite revoked exactly once.
+    pub fn revoke_team_pending_invite(&self, invite_id: &str, revoked_at: &str) -> Result<bool> {
+        let changed = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE team_pending_invites SET status = 'revoked', redeemed_at = ?2 WHERE invite_id = ?1 AND status = 'pending'",
+            &[
+                Value::Text(invite_id.to_owned()),
+                Value::Text(revoked_at.to_owned()),
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Mark a pending invite redeemed exactly once.
     pub fn redeem_team_pending_invite(&self, invite_id: &str, redeemed_at: &str) -> Result<bool> {
         let changed = self.execute_for(
@@ -15995,7 +16312,7 @@ impl DbConnection {
     pub fn insert_team_member(&self, input: &InsertTeamMemberInput) -> Result<()> {
         self.execute_for(
             DbOperation::Execute,
-            "INSERT OR IGNORE INTO team_members (member_id, team_id, workspace_id, display_name, state, is_self, origin_node_id, bound_via, joined_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO team_members (member_id, team_id, workspace_id, display_name, state, is_self, origin_node_id, bound_via, joined_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             &[
                 Value::Text(input.member_id.clone()),
                 Value::Text(input.team_id.clone()),
@@ -16021,6 +16338,161 @@ impl DbConnection {
         rows.iter().map(stored_team_member_from_row).collect()
     }
 
+    /// Mark one team member active or removed.
+    pub fn set_team_member_state(&self, member_id: &str, state: &str) -> Result<bool> {
+        let changed = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE team_members SET state = ?2 WHERE member_id = ?1",
+            &[
+                Value::Text(member_id.to_owned()),
+                Value::Text(state.to_owned()),
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Load one team member by id.
+    pub fn get_team_member(&self, member_id: &str) -> Result<Option<StoredTeamMember>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT member_id, team_id, workspace_id, display_name, state, is_self, origin_node_id, bound_via, joined_at FROM team_members WHERE member_id = ?1",
+            &[Value::Text(member_id.to_owned())],
+        )?;
+        rows.first().map(stored_team_member_from_row).transpose()
+    }
+
+    /// Revoke every signing binding for one member.
+    pub fn revoke_team_member_nodes(&self, member_id: &str) -> Result<u64> {
+        let changed = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE team_member_nodes SET state = 'revoked' WHERE member_id = ?1 AND state = 'active'",
+            &[Value::Text(member_id.to_owned())],
+        )?;
+        Ok(changed)
+    }
+
+    /// Write team pause posture, advancing generation on every change.
+    pub fn upsert_team_posture(
+        &self,
+        team_id: &str,
+        paused: bool,
+        updated_at: &str,
+    ) -> Result<u64> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO team_posture (team_id, paused, pause_generation, updated_at) VALUES (?1, ?2, 1, ?3) ON CONFLICT(team_id) DO UPDATE SET paused = excluded.paused, pause_generation = team_posture.pause_generation + 1, updated_at = excluded.updated_at",
+            &[
+                Value::Text(team_id.to_owned()),
+                Value::BigInt(if paused { 1 } else { 0 }),
+                Value::Text(updated_at.to_owned()),
+            ],
+        )?;
+        Ok(self.team_pause_generation(team_id)?.unwrap_or(1))
+    }
+
+    /// Current pause flag for a team.
+    pub fn team_is_paused(&self, team_id: &str) -> Result<bool> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT paused FROM team_posture WHERE team_id = ?1",
+            &[Value::Text(team_id.to_owned())],
+        )?;
+        Ok(rows
+            .first()
+            .map(|row| required_i64(row, 0, DbOperation::Query, "paused"))
+            .transpose()?
+            .is_some_and(|paused| paused != 0))
+    }
+
+    /// Current pause generation for a team.
+    pub fn team_pause_generation(&self, team_id: &str) -> Result<Option<u64>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT pause_generation FROM team_posture WHERE team_id = ?1",
+            &[Value::Text(team_id.to_owned())],
+        )?;
+        rows.first()
+            .map(|row| required_u64(row, 0, DbOperation::Query, "pause_generation"))
+            .transpose()
+    }
+
+    /// Persist one minted or adopted team project. Duplicate name is a no-op.
+    pub fn insert_team_project(&self, input: &InsertTeamProjectInput) -> Result<bool> {
+        let changed = self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO team_projects (project_id, team_id, display_name, local_path, source, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(team_id, display_name) DO NOTHING",
+            &[
+                Value::Text(input.project_id.clone()),
+                Value::Text(input.team_id.clone()),
+                Value::Text(input.display_name.clone()),
+                Value::Text(input.local_path.clone()),
+                Value::Text(input.source.clone()),
+                Value::Text(input.created_at.clone()),
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Adopt an existing project id onto a local path.
+    pub fn upsert_team_project_path(
+        &self,
+        project_id: &str,
+        team_id: &str,
+        display_name: &str,
+        local_path: &str,
+        created_at: &str,
+    ) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO team_projects (project_id, team_id, display_name, local_path, source, created_at) VALUES (?1, ?2, ?3, ?4, 'adopted', ?5) ON CONFLICT(project_id) DO UPDATE SET local_path = excluded.local_path",
+            &[
+                Value::Text(project_id.to_owned()),
+                Value::Text(team_id.to_owned()),
+                Value::Text(display_name.to_owned()),
+                Value::Text(local_path.to_owned()),
+                Value::Text(created_at.to_owned()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Load one project by id.
+    pub fn get_team_project(&self, project_id: &str) -> Result<Option<StoredTeamProject>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT project_id, team_id, display_name, local_path, source, created_at FROM team_projects WHERE project_id = ?1",
+            &[Value::Text(project_id.to_owned())],
+        )?;
+        rows.first().map(stored_team_project_from_row).transpose()
+    }
+
+    /// Load one project by team + display name.
+    pub fn get_team_project_by_name(
+        &self,
+        team_id: &str,
+        display_name: &str,
+    ) -> Result<Option<StoredTeamProject>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT project_id, team_id, display_name, local_path, source, created_at FROM team_projects WHERE team_id = ?1 AND display_name = ?2",
+            &[
+                Value::Text(team_id.to_owned()),
+                Value::Text(display_name.to_owned()),
+            ],
+        )?;
+        rows.first().map(stored_team_project_from_row).transpose()
+    }
+
+    /// List projects for one team.
+    pub fn list_team_projects(&self, team_id: &str) -> Result<Vec<StoredTeamProject>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT project_id, team_id, display_name, local_path, source, created_at FROM team_projects WHERE team_id = ?1 ORDER BY display_name ASC, project_id ASC",
+            &[Value::Text(team_id.to_owned())],
+        )?;
+        rows.iter().map(stored_team_project_from_row).collect()
+    }
+
     /// Load every local team member row.
     pub fn list_all_team_members(&self) -> Result<Vec<StoredTeamMember>> {
         let rows = self.query_for(
@@ -16029,6 +16501,205 @@ impl DbConnection {
             &[],
         )?;
         rows.iter().map(stored_team_member_from_row).collect()
+    }
+
+    /// Persist one member-node signing key. Duplicate node id is a no-op.
+    pub fn insert_team_member_node(&self, input: &InsertTeamMemberNodeInput) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO team_member_nodes (node_id, member_id, team_id, verifying_key_hex, signing_key_generation, state, bound_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(node_id) DO NOTHING",
+            &[
+                Value::Text(input.node_id.clone()),
+                Value::Text(input.member_id.clone()),
+                Value::Text(input.team_id.clone()),
+                Value::Text(input.verifying_key_hex.clone()),
+                Value::BigInt(i64::try_from(input.signing_key_generation).unwrap_or(i64::MAX)),
+                Value::Text(input.state.clone()),
+                Value::Text(input.bound_at.clone()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Load the active signing binding for one origin node generation.
+    pub fn get_team_member_node(
+        &self,
+        node_id: &str,
+        signing_key_generation: u64,
+    ) -> Result<Option<StoredTeamMemberNode>> {
+        let lineage = self.query_for(
+            DbOperation::Query,
+            "SELECT node_id, verifying_key_hex, signing_key_generation, state, bound_at FROM team_member_signing_keys WHERE node_id = ?1 AND signing_key_generation = ?2",
+            &[
+                Value::Text(node_id.to_owned()),
+                Value::BigInt(i64::try_from(signing_key_generation).unwrap_or(i64::MAX)),
+            ],
+        )?;
+        if let Some(row) = lineage.first() {
+            return Ok(Some(StoredTeamMemberNode {
+                node_id: required_text(row, 0, DbOperation::Query, "node_id")?.to_string(),
+                member_id: String::new(),
+                team_id: String::new(),
+                verifying_key_hex: required_text(row, 1, DbOperation::Query, "verifying_key_hex")?
+                    .to_string(),
+                signing_key_generation: required_u64(
+                    row,
+                    2,
+                    DbOperation::Query,
+                    "signing_key_generation",
+                )?,
+                state: required_text(row, 3, DbOperation::Query, "state")?.to_string(),
+                bound_at: required_text(row, 4, DbOperation::Query, "bound_at")?.to_string(),
+            }));
+        }
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT node_id, member_id, team_id, verifying_key_hex, signing_key_generation, state, bound_at FROM team_member_nodes WHERE node_id = ?1 AND signing_key_generation = ?2",
+            &[
+                Value::Text(node_id.to_owned()),
+                Value::BigInt(i64::try_from(signing_key_generation).unwrap_or(i64::MAX)),
+            ],
+        )?;
+        rows.first()
+            .map(stored_team_member_node_from_row)
+            .transpose()
+    }
+
+    /// Persist one signing-key generation. Duplicate generation is a no-op.
+    pub fn insert_team_member_signing_key(
+        &self,
+        node_id: &str,
+        signing_key_generation: u64,
+        verifying_key_hex: &str,
+        bound_at: &str,
+    ) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO team_member_signing_keys (node_id, signing_key_generation, verifying_key_hex, state, bound_at) VALUES (?1, ?2, ?3, 'active', ?4) ON CONFLICT(node_id, signing_key_generation) DO NOTHING",
+            &[
+                Value::Text(node_id.to_owned()),
+                Value::BigInt(i64::try_from(signing_key_generation).unwrap_or(i64::MAX)),
+                Value::Text(verifying_key_hex.to_owned()),
+                Value::Text(bound_at.to_owned()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Upsert a crash-resumable join attempt. Never stores the invite secret.
+    pub fn upsert_team_join_attempt(&self, input: &UpsertTeamJoinAttemptInput) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO team_join_attempts (invite_id, team_id, joiner_node_id, joiner_nonce, inviter_nonce, phase, granted_json, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(invite_id) DO UPDATE SET inviter_nonce = excluded.inviter_nonce, phase = excluded.phase, granted_json = excluded.granted_json, updated_at = excluded.updated_at",
+            &[
+                Value::Text(input.invite_id.clone()),
+                Value::Text(input.team_id.clone()),
+                Value::Text(input.joiner_node_id.clone()),
+                Value::Text(input.joiner_nonce.clone()),
+                input
+                    .inviter_nonce
+                    .as_ref()
+                    .map_or(Value::Null, |nonce| Value::Text(nonce.clone())),
+                Value::Text(input.phase.clone()),
+                input
+                    .granted_json
+                    .as_ref()
+                    .map_or(Value::Null, |json| Value::Text(json.clone())),
+                Value::Text(input.updated_at.clone()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Load a crash-resumable join attempt.
+    pub fn get_team_join_attempt(&self, invite_id: &str) -> Result<Option<StoredTeamJoinAttempt>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT invite_id, team_id, joiner_node_id, joiner_nonce, inviter_nonce, phase, granted_json, updated_at FROM team_join_attempts WHERE invite_id = ?1",
+            &[Value::Text(invite_id.to_owned())],
+        )?;
+        rows.first()
+            .map(stored_team_join_attempt_from_row)
+            .transpose()
+    }
+
+    /// Record one history projection. Duplicate revision is a no-op.
+    pub fn insert_team_history_projection(
+        &self,
+        input: &InsertTeamHistoryProjectionInput,
+    ) -> Result<bool> {
+        let changed = self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO team_history_projections (team_id, memory_id, revision_id, origin_event_id, projected_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(team_id, memory_id, revision_id) DO NOTHING",
+            &[
+                Value::Text(input.team_id.clone()),
+                Value::Text(input.memory_id.clone()),
+                Value::Text(input.revision_id.clone()),
+                Value::Text(input.origin_event_id.clone()),
+                Value::Text(input.projected_at.clone()),
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Whether this memory revision is already projected for the team.
+    pub fn team_history_projection_exists(
+        &self,
+        team_id: &str,
+        memory_id: &str,
+        revision_id: &str,
+    ) -> Result<bool> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT 1 FROM team_history_projections WHERE team_id = ?1 AND memory_id = ?2 AND revision_id = ?3",
+            &[
+                Value::Text(team_id.to_owned()),
+                Value::Text(memory_id.to_owned()),
+                Value::Text(revision_id.to_owned()),
+            ],
+        )?;
+        Ok(!rows.is_empty())
+    }
+
+    /// Load every local member-node signing binding.
+    pub fn list_all_team_member_nodes(&self) -> Result<Vec<StoredTeamMemberNode>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT node_id, member_id, team_id, verifying_key_hex, signing_key_generation, state, bound_at FROM team_member_nodes ORDER BY bound_at ASC, node_id ASC",
+            &[],
+        )?;
+        rows.iter().map(stored_team_member_node_from_row).collect()
+    }
+
+    /// Raise the invite-authorization clock floor if `floor_at` is newer.
+    pub fn raise_team_invite_auth_floor(
+        &self,
+        team_id: &str,
+        floor_at: &str,
+        updated_at: &str,
+    ) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO team_invite_auth_floor (team_id, floor_at, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(team_id) DO UPDATE SET floor_at = excluded.floor_at, updated_at = excluded.updated_at WHERE excluded.floor_at > team_invite_auth_floor.floor_at",
+            &[
+                Value::Text(team_id.to_owned()),
+                Value::Text(floor_at.to_owned()),
+                Value::Text(updated_at.to_owned()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Current invite-authorization clock floor for a team, if any.
+    pub fn team_invite_auth_floor(&self, team_id: &str) -> Result<Option<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT floor_at FROM team_invite_auth_floor WHERE team_id = ?1",
+            &[Value::Text(team_id.to_owned())],
+        )?;
+        rows.first()
+            .map(|row| Ok(required_text(row, 0, DbOperation::Query, "floor_at")?.to_string()))
+            .transpose()
     }
 
     /// Read the body-fetch-only commitment nonce for one local event.

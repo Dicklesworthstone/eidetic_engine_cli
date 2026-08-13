@@ -4,8 +4,8 @@
  "gateBead": "bd-1n0np.23.1",
  "manifestOwner": "tests/contracts/dueling_wizards_migration_registry.rs",
  "sourceOfTruth": "src/db/mod.rs::MIGRATIONS",
- "currentLastCompiledMigration": 106,
- "nextPlannedMigration": 107,
+ "currentLastCompiledMigration": 111,
+ "nextPlannedMigration": 112,
  "boundaryMigrationE2e": "scripts/e2e_boundary_migration.sh",
  "backupCoverageBead": "bd-1n0np.23.2",
  "policy": {
@@ -49,7 +49,12 @@
     "V103": "V103_SUGGEST_LINK_CANDIDATE_TYPES (bd-3a1op.3 curation_candidates rebuild adding link_proposal/contradiction_review candidate types)",
     "V104": "V104_MESH_ORIGIN_EVENTS (bd-tc-epic-qzk7o.3.1 T2.0 origin stream: per-origin append-only chain, body-fetch-only nonce sidecar, sparse receiver dispositions)",
     "V105": "V105_TEAM_PENDING_INVITES (bd-tc-epic-qzk7o T4.2 single-use team invite mint/redeem rows)",
-    "V106": "V106_TEAM_MEMBERS (bd-tc-epic-qzk7o T3.1 workspace-scoped team members at genesis and join)"
+    "V106": "V106_TEAM_MEMBERS (bd-tc-epic-qzk7o T3.1 workspace-scoped team members at genesis and join)",
+    "V107": "V107_TEAM_MEMBER_NODES (bd-tc-epic-qzk7o T3.1/T4.1 member-node Ed25519 bindings and invite-authorization clock floor)",
+    "V108": "V108_TEAM_HISTORY_PROJECTIONS (bd-tc-epic-qzk7o T4.5 idempotent origin-owned history projection markers)",
+    "V109": "V109_TEAM_POSTURE (bd-tc-epic-qzk7o T4.6 durable team pause generation)",
+    "V110": "V110_TEAM_JOIN_ATTEMPTS (bd-tc-epic-qzk7o T4.3 crash-resumable join + T4.4 signing-key lineage)",
+    "V111": "V111_TEAM_PROJECTS (bd-tc-epic-qzk7o T4.8 minted/adopted team project identity)"
    }
   }
  },
