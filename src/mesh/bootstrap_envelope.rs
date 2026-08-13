@@ -290,6 +290,130 @@ pub fn parse_live_peer_endpoint(
         .map(|ip| std::net::SocketAddr::new(ip, committed_port))
 }
 
+/// Schema for one metadata-only anti-entropy round on the hello TCP socket.
+pub const SYNC_ROUND_SCHEMA_V1: &str = "ee.mesh.sync_round.v1";
+
+/// One origin tip advertised in a sync round.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SyncRoundTip {
+    pub origin_node_id: String,
+    pub origin_workspace_id: String,
+    pub last_seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tip_event_hash: Option<String>,
+}
+
+/// One origin event header carried in a sync round. Payload is the signed
+/// header JSON already stored locally; this is not a body-lane fetch.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SyncRoundEvent {
+    pub origin_node_id: String,
+    pub origin_workspace_id: String,
+    pub seq: u64,
+    pub event_hash: String,
+    pub payload_json: String,
+}
+
+/// Caller → responder after hello.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SyncRoundRequest {
+    pub schema: String,
+    pub tips: Vec<SyncRoundTip>,
+    pub range_start_seq: u64,
+    pub max_events: u32,
+}
+
+/// Responder → caller.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SyncRoundResponse {
+    pub schema: String,
+    pub tips: Vec<SyncRoundTip>,
+    pub events: Vec<SyncRoundEvent>,
+}
+
+impl SyncRoundRequest {
+    #[must_use]
+    pub fn new(tips: Vec<SyncRoundTip>, range_start_seq: u64, max_events: u32) -> Self {
+        Self {
+            schema: SYNC_ROUND_SCHEMA_V1.to_owned(),
+            tips,
+            range_start_seq,
+            max_events: max_events.max(1).min(512),
+        }
+    }
+}
+
+/// Parse a sync-round request; unknown schema is refused.
+#[must_use]
+pub fn parse_sync_round_request(bytes: &[u8]) -> Option<SyncRoundRequest> {
+    let request = serde_json::from_slice::<SyncRoundRequest>(bytes).ok()?;
+    (request.schema == SYNC_ROUND_SCHEMA_V1).then_some(request)
+}
+
+/// Parse a sync-round response.
+#[must_use]
+pub fn parse_sync_round_response(bytes: &[u8]) -> Option<SyncRoundResponse> {
+    let response = serde_json::from_slice::<SyncRoundResponse>(bytes).ok()?;
+    (response.schema == SYNC_ROUND_SCHEMA_V1).then_some(response)
+}
+
+/// Hello plus one bounded event-header round on the same TCP socket.
+pub fn exchange_live_mesh_round(
+    address: std::net::SocketAddr,
+    timeout: std::time::Duration,
+    hello_payload: JsonValue,
+    sync_request: &SyncRoundRequest,
+) -> Result<(JsonValue, SyncRoundResponse), BootstrapEnvelopeError> {
+    if address.ip().is_unspecified() {
+        return Err(BootstrapEnvelopeError::Malformed {
+            message: "live mesh round refuses an unspecified remote address".to_owned(),
+        });
+    }
+    let request = encode_envelope(BootstrapCapability::Hello, hello_payload)?;
+    let mut stream = std::net::TcpStream::connect_timeout(&address, timeout).map_err(|error| {
+        BootstrapEnvelopeError::Malformed {
+            message: format!("live mesh connect: {error}"),
+        }
+    })?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .and_then(|()| stream.set_write_timeout(Some(timeout)))
+        .map_err(|error| BootstrapEnvelopeError::Malformed {
+            message: format!("live mesh timeout: {error}"),
+        })?;
+    write_std_framed(&mut stream, &request)?;
+    let reply = read_std_framed(&mut stream)?;
+    if let Ok(decline) = serde_json::from_slice::<BootstrapDeclineV1>(&reply)
+        && decline.schema == BOOTSTRAP_DECLINE_SCHEMA_V1
+    {
+        return Err(BootstrapEnvelopeError::Malformed {
+            message: format!("bootstrap hello declined: {}", decline.code),
+        });
+    }
+    let envelope = decode_envelope(&reply)?;
+    if envelope.capability != BootstrapCapability::Hello {
+        return Err(BootstrapEnvelopeError::UnsupportedCapability {
+            observed: envelope.capability.token().to_owned(),
+        });
+    }
+    let sync_bytes =
+        serde_json::to_vec(sync_request).map_err(|error| BootstrapEnvelopeError::Malformed {
+            message: format!("serialize sync round: {error}"),
+        })?;
+    write_std_framed(&mut stream, &sync_bytes)?;
+    let sync_reply = read_std_framed(&mut stream)?;
+    let sync = parse_sync_round_response(&sync_reply).ok_or_else(|| {
+        BootstrapEnvelopeError::Malformed {
+            message: "peer did not return ee.mesh.sync_round.v1".to_owned(),
+        }
+    })?;
+    Ok((envelope.payload, sync))
+}
+
 /// Exchange one unsigned bootstrap hello over length-prefixed TCP.
 pub fn exchange_bootstrap_hello(
     address: std::net::SocketAddr,
@@ -563,6 +687,50 @@ mod tests {
         .expect("client exchange");
         assert_eq!(payload, json!({"pong": true}));
         server.join().expect("server thread");
+    }
+
+    #[test]
+    fn live_mesh_round_returns_event_batch_after_hello() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = read_std_framed(&mut stream).expect("hello");
+            let hello = encode_envelope(BootstrapCapability::Hello, json!({"ok": true}))
+                .expect("hello reply");
+            write_std_framed(&mut stream, &hello).expect("write hello");
+            let sync_bytes = read_std_framed(&mut stream).expect("sync");
+            let request = parse_sync_round_request(&sync_bytes).expect("parse sync");
+            assert_eq!(request.schema, SYNC_ROUND_SCHEMA_V1);
+            let reply = serde_json::to_vec(&SyncRoundResponse {
+                schema: SYNC_ROUND_SCHEMA_V1.to_owned(),
+                tips: vec![SyncRoundTip {
+                    origin_node_id: "node_a".to_owned(),
+                    origin_workspace_id: "wsp_a".to_owned(),
+                    last_seq: 2,
+                    tip_event_hash: Some("blake3:tip".to_owned()),
+                }],
+                events: vec![SyncRoundEvent {
+                    origin_node_id: "node_a".to_owned(),
+                    origin_workspace_id: "wsp_a".to_owned(),
+                    seq: 2,
+                    event_hash: "blake3:e2".to_owned(),
+                    payload_json: "{}".to_owned(),
+                }],
+            })
+            .expect("encode");
+            write_std_framed(&mut stream, &reply).expect("write sync");
+        });
+        let (_hello, sync) = exchange_live_mesh_round(
+            address,
+            std::time::Duration::from_secs(2),
+            json!({"ping": true}),
+            &SyncRoundRequest::new(Vec::new(), 0, 8),
+        )
+        .expect("round");
+        assert_eq!(sync.events.len(), 1);
+        assert_eq!(sync.events[0].seq, 2);
+        server.join().expect("server");
     }
 
     #[test]
