@@ -71,6 +71,7 @@ pub const TEAM_IDP_SET_SCHEMA_V1: &str = "ee.team.idp.set.v1";
 pub const TEAM_IDP_DEVICE_SCHEMA_V1: &str = "ee.team.idp.device.v1";
 pub const TEAM_IDP_ATTEST_SCHEMA_V1: &str = "ee.team.idp.attest.v1";
 pub const TEAM_IDP_POLICY_SET_OPERATION: &str = "teamIdpPolicySet";
+pub const TEAM_IDP_ATTESTED_OPERATION: &str = "identityAttested";
 pub const TEAM_INVITE_CODE_PREFIX: &str = "eeteam1-";
 pub const TEAM_ACTIVITY_CLOCK_SKEW_SECS: i64 = 600;
 
@@ -2271,12 +2272,52 @@ pub fn attest_local_id_token(
         .email
         .clone()
         .unwrap_or_else(|| claims.subject.clone());
+    let token_hash = format!("blake3:{}", blake3::hash(token.as_bytes()).to_hex());
+    let consumed = connection
+        .insert_team_idp_token_replay(
+            &token_hash,
+            &self_member.team_id,
+            &self_member.member_id,
+            checked_at,
+        )
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    if !consumed {
+        return Err(OriginStreamError::Encode(
+            "id token hash was already consumed".to_owned(),
+        ));
+    }
     record_member_tailnet_identity(
         connection,
         &self_member.member_id,
         &login,
         Some(&claims.subject),
         checked_at,
+    )?;
+    let seed = blake3::hash(format!("{}:attest:{token_hash}", self_member.team_id).as_bytes());
+    let hex = seed.to_hex();
+    let payload = OriginEventPayload::Manifest(ManifestEventPayload {
+        operation: TEAM_IDP_ATTESTED_OPERATION.to_owned(),
+        document_id: format!("tdoc_{}", &hex.as_str()[..24]),
+        predecessor_revision_id: None,
+        document_payload: serde_json::json!({
+            "subject": claims.subject,
+            "email": claims.email,
+            "matchedGroups": claims.matched_groups,
+            "tokenHash": token_hash,
+        }),
+    });
+    let mac = LocalOriginSigner::for_workspace(&self_member.workspace_id);
+    append_origin_event(
+        connection,
+        &mac,
+        &OriginAppendRequest {
+            team_id: &self_member.team_id,
+            origin_node_id: &self_member.origin_node_id,
+            payload,
+            required_features: Vec::new(),
+            produced_at: checked_at,
+            body_nonce: None,
+        },
     )?;
     Ok(TeamIdpAttestReport {
         schema: TEAM_IDP_ATTEST_SCHEMA_V1,
@@ -2286,7 +2327,12 @@ pub fn attest_local_id_token(
         subject: claims.subject,
         email: claims.email,
         matched_groups: claims.matched_groups,
-        mesh_primitives: vec!["team_member_identity", "id_token_claim_reduction"],
+        mesh_primitives: vec![
+            "team_member_identity",
+            "id_token_claim_reduction",
+            "team_idp_token_replay",
+            "identityAttested",
+        ],
     })
 }
 
@@ -5535,5 +5581,16 @@ mod tests {
             .expect("row");
         assert_eq!(identity.login, "alice@acme.com");
         assert_eq!(identity.user_id.as_deref(), Some("user-1"));
+        let events = connection
+            .list_all_mesh_origin_events(&report.team_id, 16)
+            .expect("events");
+        assert!(events.iter().any(|event| {
+            event.payload_json.contains("identityAttested")
+                && event.payload_json.contains("alice@acme.com")
+                && !event.payload_json.contains(&token)
+        }));
+        let replayed = attest_local_id_token(&connection, &token, &["eng"], "2026-08-13T20:01:00Z")
+            .expect_err("replay");
+        assert!(replayed.to_string().contains("already consumed"));
     }
 }
