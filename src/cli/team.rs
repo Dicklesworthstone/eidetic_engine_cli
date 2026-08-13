@@ -8,14 +8,15 @@ use serde_json::json;
 
 use crate::db::DbConnection;
 use crate::mesh::team::{
-    add_local_team_node, adopt_team_project, any_local_team_paused, create_local_team_with_store,
-    fetch_local_team_body, inspect_team_health, join_team_with_code_on_store, leave_local_team,
-    list_team_activity, list_team_projects, local_team_status, mint_team_invite_with_store,
-    plan_team_steward_once, reconcile_local_team_membership, remove_team_member,
-    require_tailnet_attested, revalidate_team_identities, revoke_team_invite,
-    rotate_local_signing_key, serve_one_bootstrap_join_with_store, set_local_team_paused,
-    set_team_oidc_provider, share_team_bodies, share_team_history, share_team_project,
-    team_idp_status, unshare_team_bodies,
+    add_local_team_node, adopt_team_project, any_local_team_paused, attest_local_id_token,
+    create_local_team_with_store, fetch_local_team_body, inspect_team_health,
+    join_team_with_code_on_store, leave_local_team, list_team_activity, list_team_projects,
+    local_team_status, mint_team_invite_with_store, plan_team_idp_device, plan_team_steward_once,
+    reconcile_local_team_membership, remove_team_member, require_tailnet_attested,
+    revalidate_team_identities, revoke_team_invite, rotate_local_signing_key,
+    serve_one_bootstrap_join_with_store, set_local_team_paused, set_team_oidc_provider,
+    share_team_bodies, share_team_history, share_team_project, team_idp_status,
+    unshare_team_bodies,
 };
 use crate::models::{DomainError, ProcessExitCode};
 use crate::output;
@@ -121,6 +122,10 @@ pub enum TeamIdpCommand {
     Status(TeamIdpStatusArgs),
     /// Pin a secretless-public OIDC issuer from a local discovery document.
     Set(TeamIdpSetArgs),
+    /// Plan a local RFC 8628 device ceremony from offline JSON.
+    Device(TeamIdpDeviceArgs),
+    /// Bind allowlisted ID-token claims to the local self member.
+    Attest(TeamIdpAttestArgs),
 }
 
 /// Nested `ee team share` verbs.
@@ -475,6 +480,42 @@ pub struct TeamIdpSetArgs {
     pub database: Option<PathBuf>,
 }
 
+/// Arguments for `ee team idp device`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamIdpDeviceArgs {
+    /// Local OpenID discovery JSON file. No network is used.
+    #[arg(long, value_name = "PATH")]
+    pub discovery_json: PathBuf,
+
+    /// Local RFC 8628 device-authorization JSON file.
+    #[arg(long, value_name = "PATH")]
+    pub authorization_json: PathBuf,
+
+    /// Absolute curl binary. Defaults to /usr/bin/curl.
+    #[arg(long, value_name = "PATH", default_value = "/usr/bin/curl")]
+    pub curl: PathBuf,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team idp attest`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamIdpAttestArgs {
+    /// Compact ID token, or `-` to read stdin.
+    #[arg(long)]
+    pub id_token: String,
+
+    /// Configured group to match. Repeatable. Unlisted groups are dropped.
+    #[arg(long = "group")]
+    pub groups: Vec<String>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
 /// Arguments for `ee team members revalidate`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct TeamMembersRevalidateArgs {
@@ -534,6 +575,12 @@ where
         }
         TeamCommand::Idp(TeamIdpCommand::Set(args)) => {
             handle_team_idp_set(cli, args, stdout, stderr)
+        }
+        TeamCommand::Idp(TeamIdpCommand::Device(args)) => {
+            handle_team_idp_device(cli, args, stdout, stderr)
+        }
+        TeamCommand::Idp(TeamIdpCommand::Attest(args)) => {
+            handle_team_idp_attest(cli, args, stdout, stderr)
         }
         TeamCommand::Leave(args) => handle_team_leave(cli, args, stdout, stderr),
         TeamCommand::Sync(args) => handle_team_sync(cli, args, stdout, stderr),
@@ -1766,6 +1813,134 @@ where
             stderr,
         ),
     }
+}
+
+fn handle_team_idp_device<W, E>(
+    cli: &Cli,
+    args: &TeamIdpDeviceArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let discovery = match read_json_file(&args.discovery_json) {
+        Ok(value) => value,
+        Err(error) => {
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let authorization = match read_json_file(&args.authorization_json) {
+        Ok(value) => value,
+        Err(error) => {
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    match plan_team_idp_device(
+        &connection,
+        &discovery,
+        &authorization,
+        &args.curl.to_string_lossy(),
+    ) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!(
+                "Team device ceremony {}\n  uri: {}\n  wait: {}s\n",
+                report.user_code,
+                report
+                    .verification_uri_complete
+                    .as_deref()
+                    .unwrap_or(&report.verification_uri),
+                report.first_wait_secs
+            ),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to plan device ceremony: {error}"),
+                repair: Some(
+                    "ee team idp device --discovery-json <file> --authorization-json <file> --workspace ."
+                        .to_owned(),
+                ),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_idp_attest<W, E>(
+    cli: &Cli,
+    args: &TeamIdpAttestArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let token = if args.id_token == "-" {
+        match read_invite_code_from_stdin() {
+            Ok(token) => token,
+            Err(error) => {
+                return write_domain_error(
+                    &DomainError::Usage {
+                        message: format!("Failed to read id token from stdin: {error}"),
+                        repair: Some("ee team idp attest --id-token - --workspace .".to_owned()),
+                    },
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                );
+            }
+        }
+    } else {
+        args.id_token.clone()
+    };
+    let groups = args.groups.iter().map(String::as_str).collect::<Vec<_>>();
+    let checked_at = chrono::Utc::now().to_rfc3339();
+    match attest_local_id_token(&connection, token.trim(), &groups, &checked_at) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!(
+                "Team identity attested\n  member: {}\n  subject: {}\n",
+                report.member_id, report.subject
+            ),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to attest identity: {error}"),
+                repair: Some("ee team idp attest --id-token <jwt> --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn read_json_file(path: &std::path::Path) -> Result<serde_json::Value, DomainError> {
+    let bytes = std::fs::read(path).map_err(|error| DomainError::Usage {
+        message: format!("Failed to read {}: {error}", path.display()),
+        repair: Some("pass a local JSON file; ee does not fetch IdP HTTP".to_owned()),
+    })?;
+    serde_json::from_slice(&bytes).map_err(|error| DomainError::Usage {
+        message: format!("JSON is malformed: {error}"),
+        repair: Some("pass a local JSON file; ee does not fetch IdP HTTP".to_owned()),
+    })
 }
 
 fn handle_team_members_revalidate<W, E>(

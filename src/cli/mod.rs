@@ -66440,6 +66440,12 @@ impl NormalizedInvocation {
                     team::TeamCommand::Idp(team::TeamIdpCommand::Set(_)) => {
                         "team idp set".to_string()
                     }
+                    team::TeamCommand::Idp(team::TeamIdpCommand::Device(_)) => {
+                        "team idp device".to_string()
+                    }
+                    team::TeamCommand::Idp(team::TeamIdpCommand::Attest(_)) => {
+                        "team idp attest".to_string()
+                    }
                     team::TeamCommand::Leave(_) => "team leave".to_string(),
                     team::TeamCommand::Sync(_) => "team sync".to_string(),
                     team::TeamCommand::Pause(_) => "team pause".to_string(),
