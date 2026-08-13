@@ -18533,6 +18533,76 @@ mod tests {
         }
     }
 
+    fn registered_reranker_entry(
+        id: &str,
+        model_name: &str,
+        purpose: ModelPurpose,
+        status: ModelRegistryStatus,
+    ) -> StoredModelRegistryEntry {
+        StoredModelRegistryEntry {
+            id: id.to_owned(),
+            workspace_id: "wsp_reranker_resolution".to_owned(),
+            provider: crate::models::ModelProvider::FastEmbed,
+            model_name: model_name.to_owned(),
+            purpose,
+            dimension: None,
+            distance_metric: None,
+            status,
+            version: Some("v1".to_owned()),
+            source_uri: None,
+            content_hash: None,
+            metadata_json: None,
+            created_at: "2026-08-12T00:00:00Z".to_owned(),
+            updated_at: "2026-08-12T00:00:00Z".to_owned(),
+            last_checked_at: None,
+        }
+    }
+
+    #[test]
+    fn doctor_and_search_resolution_skip_broken_first_for_valid_second() {
+        let entries = vec![
+            registered_reranker_entry(
+                "mdl_valid_second",
+                "b-valid",
+                ModelPurpose::Reranker,
+                ModelRegistryStatus::Available,
+            ),
+            registered_reranker_entry(
+                "mdl_broken_first",
+                "a-broken",
+                ModelPurpose::Reranker,
+                ModelRegistryStatus::Available,
+            ),
+            registered_reranker_entry(
+                "mdl_unavailable",
+                "0-unavailable",
+                ModelPurpose::Reranker,
+                ModelRegistryStatus::Unavailable,
+            ),
+            registered_reranker_entry(
+                "mdl_embedding",
+                "0-embedding",
+                ModelPurpose::Embedding,
+                ModelRegistryStatus::Available,
+            ),
+        ];
+        let entries = sorted_available_reranker_entries(entries);
+        let mut attempts = Vec::new();
+        let (selected, loaded) = first_loadable_registered_reranker(entries, |entry| {
+            attempts.push(entry.model_name.clone());
+            if entry.model_name == "b-valid" {
+                Ok("loaded-valid-second")
+            } else {
+                Err("broken-first")
+            }
+        })
+        .expect("the deterministic resolver must continue after the broken first entry");
+
+        assert_eq!(attempts, vec!["a-broken", "b-valid"]);
+        assert_eq!(selected.model_name, "b-valid");
+        assert_eq!(loaded, "loaded-valid-second");
+    }
+
     #[test]
     fn reranked_score_kind_is_stable() {
         assert_eq!(ScoreSource::Reranked.score_kind(), "reranked");

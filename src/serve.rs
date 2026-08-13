@@ -3456,6 +3456,65 @@ mod tests {
     }
 
     #[test]
+    fn serve_cached_context_snapshot_is_rollback_safe_and_shares_once_ledger() -> TestResult {
+        let report = rerank_unavailable_search_report("cached context advisory");
+        let snapshot = ContextSearchAdvisorySnapshot::from_search_report(&report);
+        let state = ServeSearchAdvisoryState::default();
+        let workspace_key = "serve-cached-context-workspace";
+        let payload = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
+            "success": true,
+            "data": {"command": "pack", "degraded": []},
+            "degraded": [],
+        });
+
+        let (failed_payload, failed_delivery) = state
+            .render_cached_context_for_delivery(payload.clone(), &snapshot, workspace_key)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            failed_payload["data"]["rerank"]["advisory"]["code"].as_str(),
+            Some("rerank_model_unavailable"),
+            "cached context first advisory",
+        )?;
+        let failed = ServeRenderedResponse {
+            wire: failed_payload.to_string(),
+            advisory_delivery: failed_delivery,
+        };
+        write_serve_rendered_response(&mut FailingServeWriter, failed, &state)
+            .expect_err("cached context disconnected writer must fail");
+
+        let (retry_payload, retry_delivery) = state
+            .render_cached_context_for_delivery(payload.clone(), &snapshot, workspace_key)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            retry_payload["data"]["rerank"]["advisory"]["code"].as_str(),
+            Some("rerank_model_unavailable"),
+            "failed cached context delivery preserves advisory",
+        )?;
+        write_serve_rendered_response(
+            &mut Vec::new(),
+            ServeRenderedResponse {
+                wire: retry_payload.to_string(),
+                advisory_delivery: retry_delivery,
+            },
+            &state,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let (fresh_payload, fresh_delivery) = state
+            .render_context_for_delivery(payload, &report, workspace_key)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            fresh_payload["data"]["rerank"]["advisory"].is_null(),
+            true,
+            "fresh and cached serve context paths share one process ledger",
+        )?;
+        state
+            .settle(fresh_delivery, true)
+            .map_err(|error| error.to_string())
+    }
+
+    #[test]
     fn serve_failed_suppressed_delivery_discards_only_its_local_counters() -> TestResult {
         let report = rerank_unavailable_search_report("concurrent advisory delivery");
         let state = ServeSearchAdvisoryState::default();

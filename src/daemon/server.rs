@@ -5820,6 +5820,42 @@ mod tests {
         (pending.finish(response, true), result)
     }
 
+    fn cached_context_advisory_delivery_candidate(
+        snapshot: &ContextSearchAdvisorySnapshot,
+        policy: &DaemonDispatchPolicy,
+        workspace_id: &str,
+    ) -> (DaemonResponse, serde_json::Value) {
+        let mut pending =
+            PendingSearchAdvisoryDelivery::new(policy.search_advisory_session(), workspace_id);
+        let mut result = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
+            "success": true,
+            "data": {"command": "pack", "degraded": []},
+            "degraded": [],
+        });
+        {
+            let mut session = policy
+                .search_advisory_session()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            attach_daemon_context_search_advisories_for_delivery(
+                &mut result,
+                None,
+                snapshot,
+                &mut session,
+                workspace_id,
+                pending.reservation_mut(),
+            );
+        }
+        let response = DaemonResponse::ok(
+            "req-cached-context-advisory-delivery",
+            TEST_AGENT_ID,
+            Some(workspace_id.to_owned()),
+            result.clone(),
+        );
+        (pending.finish(response, true), result)
+    }
+
     #[test]
     fn successful_socket_delivery_consumes_permanent_advisory() {
         let report = permanent_reranker_advisory_report();
@@ -5922,6 +5958,65 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("rerank_model_unavailable")
         );
+    }
+
+    #[test]
+    fn cached_context_snapshot_uses_socket_settlement_and_shared_once_ledger() {
+        let report = permanent_reranker_advisory_report();
+        let snapshot = ContextSearchAdvisorySnapshot::from_search_report(&report);
+        let policy = DaemonDispatchPolicy::for_workspace(TEST_WORKSPACE_ID);
+        let (mut failed_response, failed_result) = cached_context_advisory_delivery_candidate(
+            &snapshot,
+            &policy,
+            TEST_WORKSPACE_ID,
+        );
+        assert_eq!(
+            failed_result
+                .pointer("/data/rerank/advisory/code")
+                .and_then(serde_json::Value::as_str),
+            Some("rerank_model_unavailable")
+        );
+        let (mut failed_server, failed_client) = UnixStream::pair().expect("socketpair");
+        drop(failed_client);
+        assert!(!write_and_settle_daemon_response(
+            &mut failed_server,
+            &policy,
+            &mut failed_response,
+        ));
+
+        let (mut retry_response, retry_result) = cached_context_advisory_delivery_candidate(
+            &snapshot,
+            &policy,
+            TEST_WORKSPACE_ID,
+        );
+        assert_eq!(
+            retry_result
+                .pointer("/data/rerank/advisory/code")
+                .and_then(serde_json::Value::as_str),
+            Some("rerank_model_unavailable"),
+            "failed cached delivery must preserve the permanent advisory"
+        );
+        let (mut retry_server, mut retry_client) = UnixStream::pair().expect("socketpair");
+        let retry_reader = thread::spawn(move || read_framed_daemon_response(&mut retry_client));
+        assert!(write_and_settle_daemon_response(
+            &mut retry_server,
+            &policy,
+            &mut retry_response,
+        ));
+        assert_eq!(
+            retry_reader.join().expect("cached retry reader").result,
+            Some(retry_result)
+        );
+
+        let (mut fresh_response, fresh_result) =
+            context_advisory_delivery_candidate(&report, &policy, TEST_WORKSPACE_ID);
+        assert!(
+            fresh_result
+                .pointer("/data/rerank/advisory")
+                .is_some_and(serde_json::Value::is_null),
+            "fresh and cached context paths must share one process ledger"
+        );
+        settle_daemon_response_delivery(&policy, &mut fresh_response, true);
     }
 
     #[test]
