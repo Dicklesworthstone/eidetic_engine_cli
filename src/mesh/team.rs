@@ -21,7 +21,12 @@ use crate::mesh::bootstrap_envelope::{
     encode_envelope, read_std_framed, write_std_framed,
 };
 use crate::mesh::hello_responder::configured_hello_port;
-use crate::mesh::idp::{IdpProviderCapability, classify_oidc_provider};
+use crate::mesh::idp::{
+    IdentityRevalidationPosture, IdpProviderCapability, classify_identity_revalidation,
+    classify_oidc_provider, decide_device_poll, device_poll_deadline_secs,
+    discovery_https_endpoint, parse_device_authorization, plan_constrained_https_post,
+    reduce_id_token_claims,
+};
 use crate::mesh::origin_stream::{
     Ed25519OriginSigner, InboundOriginEvent, ManifestEventPayload, MemoryEventOperation,
     MemoryEventPayload, OriginAppendRequest, OriginEventPayload, OriginSignatureVerifier,
@@ -63,6 +68,8 @@ pub const TEAM_PROJECT_SHARED_OPERATION: &str = "teamProjectShared";
 pub const TEAM_IDP_SCHEMA_V1: &str = "ee.team.idp.v1";
 pub const TEAM_IDP_REVALIDATE_SCHEMA_V1: &str = "ee.team.idp.revalidate.v1";
 pub const TEAM_IDP_SET_SCHEMA_V1: &str = "ee.team.idp.set.v1";
+pub const TEAM_IDP_DEVICE_SCHEMA_V1: &str = "ee.team.idp.device.v1";
+pub const TEAM_IDP_ATTEST_SCHEMA_V1: &str = "ee.team.idp.attest.v1";
 pub const TEAM_IDP_POLICY_SET_OPERATION: &str = "teamIdpPolicySet";
 pub const TEAM_INVITE_CODE_PREFIX: &str = "eeteam1-";
 pub const TEAM_ACTIVITY_CLOCK_SKEW_SECS: i64 = 600;
@@ -330,7 +337,23 @@ pub struct TeamIdpPolicyReport {
     pub kind: String,
     pub allowed_domain: Option<String>,
     pub policy_generation: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oidc_issuer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oidc_capability: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leases: Vec<TeamIdentityLease>,
     pub mesh_primitives: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamIdentityLease {
+    pub member_id: String,
+    pub login: String,
+    pub state: String,
+    pub checked_at: String,
+    pub posture: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -354,6 +377,39 @@ pub struct TeamIdpSetReport {
     pub client_id: String,
     pub capability: String,
     pub discovery_hash: String,
+    pub mesh_primitives: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamIdpDeviceReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub team_id: String,
+    pub capability: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_uri_complete: Option<String>,
+    pub expires_in: u64,
+    pub interval: u64,
+    pub deadline_secs: u64,
+    pub first_wait_secs: u64,
+    pub curl_argv: Vec<String>,
+    pub mesh_primitives: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamIdpAttestReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub team_id: String,
+    pub member_id: String,
+    pub subject: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    pub matched_groups: Vec<String>,
     pub mesh_primitives: Vec<&'static str>,
 }
 
@@ -1849,13 +1905,16 @@ pub fn plan_team_steward_once(
             mesh_primitives: vec!["team_posture", "steward_decision"],
         });
     }
-    let suspended_identities = connection
+    let identities = connection
         .list_team_member_identities(&team.team_id)
-        .map_err(|error| OriginStreamError::Db(error.to_string()))?
-        .into_iter()
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    let suspended_identities = identities
+        .iter()
         .filter(|identity| identity.state == "suspended")
         .count();
-    if suspended_identities > 0 {
+    if suspended_identities > 0
+        || worst_identity_timer(&identities) == Some(IdentityRevalidationPosture::Suspended)
+    {
         return Ok(TeamStewardReport {
             schema: TEAM_STEWARD_SCHEMA_V1,
             command: "team steward run-once",
@@ -2030,6 +2089,23 @@ pub fn inspect_team_health(
             ),
             repair: (suspended > 0).then(|| "ee team members revalidate --workspace .".to_owned()),
         });
+        if let Some(worst) = worst_identity_timer(&identities) {
+            checks.push(TeamDoctorCheck {
+                name: "identity_timer".to_owned(),
+                status: match worst {
+                    IdentityRevalidationPosture::Current => "ok".to_owned(),
+                    IdentityRevalidationPosture::Due => "ok".to_owned(),
+                    IdentityRevalidationPosture::Overdue => "warning".to_owned(),
+                    IdentityRevalidationPosture::Suspended => "warning".to_owned(),
+                },
+                message: format!("revalidation posture {}", worst.as_str()),
+                repair: matches!(
+                    worst,
+                    IdentityRevalidationPosture::Overdue | IdentityRevalidationPosture::Suspended
+                )
+                .then(|| "ee team members revalidate --workspace .".to_owned()),
+            });
+        }
     } else {
         checks.push(TeamDoctorCheck {
             name: "idp".to_owned(),
@@ -2163,7 +2239,117 @@ pub fn require_tailnet_attested(
         kind: "tailnet_attested".to_owned(),
         allowed_domain: domain,
         policy_generation: generation,
+        oidc_issuer: None,
+        oidc_capability: None,
+        leases: Vec::new(),
         mesh_primitives: vec!["team_idp_policy", "teamIdpPolicySet"],
+    })
+}
+
+/// Reduce a compact ID token and bind the allowlisted claims to the local self member.
+pub fn attest_local_id_token(
+    connection: &DbConnection,
+    token: &str,
+    configured_groups: &[&str],
+    checked_at: &str,
+) -> Result<TeamIdpAttestReport, OriginStreamError> {
+    if any_local_team_paused(connection)? {
+        return Err(OriginStreamError::Encode(
+            "team is paused; resume before attesting identity".to_owned(),
+        ));
+    }
+    let claims = reduce_id_token_claims(token, configured_groups).map_err(|disposition| {
+        OriginStreamError::Encode(format!("id token is {}", disposition.as_str()))
+    })?;
+    let self_member = connection
+        .list_all_team_members()
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .into_iter()
+        .find(|member| member.is_self && member.state == "active")
+        .ok_or_else(|| OriginStreamError::Encode("no active self member".to_owned()))?;
+    let login = claims
+        .email
+        .clone()
+        .unwrap_or_else(|| claims.subject.clone());
+    record_member_tailnet_identity(
+        connection,
+        &self_member.member_id,
+        &login,
+        Some(&claims.subject),
+        checked_at,
+    )?;
+    Ok(TeamIdpAttestReport {
+        schema: TEAM_IDP_ATTEST_SCHEMA_V1,
+        command: "team idp attest",
+        team_id: self_member.team_id,
+        member_id: self_member.member_id,
+        subject: claims.subject,
+        email: claims.email,
+        matched_groups: claims.matched_groups,
+        mesh_primitives: vec!["team_member_identity", "id_token_claim_reduction"],
+    })
+}
+
+/// Plan a local RFC 8628 device ceremony from offline discovery + authorization JSON.
+pub fn plan_team_idp_device(
+    connection: &DbConnection,
+    discovery: &serde_json::Value,
+    authorization: &serde_json::Value,
+    curl_binary: &str,
+) -> Result<TeamIdpDeviceReport, OriginStreamError> {
+    let team = load_local_teams(connection)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| OriginStreamError::Encode("no local team genesis".to_owned()))?;
+    let capability = classify_oidc_provider(discovery);
+    if !capability.accepted() {
+        return Err(OriginStreamError::Encode(format!(
+            "OIDC provider is unsupported ({})",
+            capability.as_str()
+        )));
+    }
+    let token_url = discovery_https_endpoint(discovery, "token_endpoint").ok_or_else(|| {
+        OriginStreamError::Encode("discovery is missing an https token_endpoint".to_owned())
+    })?;
+    let grant = parse_device_authorization(authorization)
+        .map_err(|reason| OriginStreamError::Encode(format!("device authorization {reason}")))?;
+    let deadline_secs = device_poll_deadline_secs(grant.expires_in);
+    let first = decide_device_poll(
+        0,
+        deadline_secs,
+        grant.interval,
+        0,
+        Some("authorization_pending"),
+    );
+    let first_wait_secs = match first {
+        crate::mesh::idp::DevicePollDisposition::Wait { delay_secs } => delay_secs,
+        _ => {
+            return Err(OriginStreamError::Encode(
+                "device authorization expired before the first poll".to_owned(),
+            ));
+        }
+    };
+    let curl = plan_constrained_https_post(curl_binary, &token_url, first_wait_secs.max(15))
+        .ok_or_else(|| {
+            OriginStreamError::Encode(
+                "constrained curl plan requires an absolute curl binary and https token URL"
+                    .to_owned(),
+            )
+        })?;
+    Ok(TeamIdpDeviceReport {
+        schema: TEAM_IDP_DEVICE_SCHEMA_V1,
+        command: "team idp device",
+        team_id: team.team_id,
+        capability: capability.as_str().to_owned(),
+        user_code: grant.user_code,
+        verification_uri: grant.verification_uri,
+        verification_uri_complete: grant.verification_uri_complete,
+        expires_in: grant.expires_in,
+        interval: grant.interval,
+        deadline_secs,
+        first_wait_secs,
+        curl_argv: curl.argv,
+        mesh_primitives: vec!["team_idp_oidc", "rfc8628"],
     })
 }
 
@@ -2236,6 +2422,10 @@ pub fn team_idp_status(
     let policy = connection
         .get_team_idp_policy(&team.team_id)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    let oidc = connection
+        .get_team_idp_oidc(&team.team_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    let leases = identity_leases(connection, &team.team_id)?;
     Ok(TeamIdpPolicyReport {
         schema: TEAM_IDP_SCHEMA_V1,
         command: "team idp status",
@@ -2249,8 +2439,40 @@ pub fn team_idp_status(
             .as_ref()
             .map(|row| row.policy_generation)
             .unwrap_or(0),
-        mesh_primitives: vec!["team_idp_policy"],
+        oidc_issuer: oidc.as_ref().map(|row| row.issuer.clone()),
+        oidc_capability: oidc.as_ref().map(|row| row.capability.clone()),
+        leases,
+        mesh_primitives: vec!["team_idp_policy", "team_idp_oidc", "team_member_identity"],
     })
+}
+
+fn identity_leases(
+    connection: &DbConnection,
+    team_id: &str,
+) -> Result<Vec<TeamIdentityLease>, OriginStreamError> {
+    let now = chrono::Utc::now().timestamp();
+    Ok(connection
+        .list_team_member_identities(team_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .into_iter()
+        .map(|identity| {
+            let posture = chrono::DateTime::parse_from_rfc3339(&identity.checked_at)
+                .ok()
+                .map(|checked| {
+                    classify_identity_revalidation(checked.timestamp(), now, 86_400, 86_400)
+                        .as_str()
+                        .to_owned()
+                })
+                .unwrap_or_else(|| identity.state.clone());
+            TeamIdentityLease {
+                member_id: identity.member_id,
+                login: identity.login,
+                state: identity.state,
+                checked_at: identity.checked_at,
+                posture,
+            }
+        })
+        .collect())
 }
 
 /// Record the first or refreshed tailnet login for one member.
@@ -2418,6 +2640,27 @@ pub fn revalidate_team_identities(
         members: checks,
         mesh_primitives: vec!["team_idp_policy", "team_member_identity"],
     })
+}
+
+fn worst_identity_timer(
+    identities: &[crate::db::StoredTeamMemberIdentity],
+) -> Option<IdentityRevalidationPosture> {
+    let now = chrono::Utc::now().timestamp();
+    identities
+        .iter()
+        .filter_map(|identity| {
+            chrono::DateTime::parse_from_rfc3339(&identity.checked_at)
+                .ok()
+                .map(|checked| {
+                    classify_identity_revalidation(checked.timestamp(), now, 86_400, 86_400)
+                })
+        })
+        .max_by_key(|posture| match posture {
+            IdentityRevalidationPosture::Current => 0,
+            IdentityRevalidationPosture::Due => 1,
+            IdentityRevalidationPosture::Overdue => 2,
+            IdentityRevalidationPosture::Suspended => 3,
+        })
 }
 
 fn observed_owner_for_member(
@@ -5147,6 +5390,10 @@ mod tests {
         .expect("first");
         assert_eq!(first.attested, 1);
         assert_eq!(first.suspended, 0);
+        let leased = team_idp_status(&connection).expect("leases");
+        assert_eq!(leased.leases.len(), 1);
+        assert_eq!(leased.leases[0].state, "attested");
+        assert_eq!(leased.leases[0].posture, "current");
         let reassigned = revalidate_team_identities(
             &connection,
             &tailnet_report("mallory@acme.com", None),
@@ -5199,6 +5446,9 @@ mod tests {
         .expect("set");
         assert_eq!(accepted.capability, "secretless_public");
         assert!(accepted.discovery_hash.starts_with("blake3:"));
+        let status = team_idp_status(&connection).expect("status");
+        assert_eq!(status.oidc_issuer.as_deref(), Some("https://idp.example"));
+        assert_eq!(status.oidc_capability.as_deref(), Some("secretless_public"));
         let rejected = set_team_oidc_provider(
             &connection,
             "https://idp.example",
@@ -5212,5 +5462,78 @@ mod tests {
         )
         .expect_err("secret");
         assert!(rejected.to_string().contains("client_secret_required"));
+    }
+
+    #[test]
+    fn plan_team_idp_device_omits_device_code_and_builds_https_curl() {
+        let connection = open_db();
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let report = plan_team_idp_device(
+            &connection,
+            &serde_json::json!({
+                "token_endpoint": "https://idp.example/token",
+                "device_authorization_endpoint": "https://idp.example/device",
+                "token_endpoint_auth_methods_supported": ["none"]
+            }),
+            &serde_json::json!({
+                "device_code": "secret-device-code",
+                "user_code": "WDJB-MJHT",
+                "verification_uri": "https://idp.example/device",
+                "verification_uri_complete": "https://idp.example/device?user_code=WDJB-MJHT",
+                "expires_in": 600
+            }),
+            "/usr/bin/curl",
+        )
+        .expect("plan");
+        assert_eq!(report.user_code, "WDJB-MJHT");
+        assert_eq!(report.interval, 5);
+        assert_eq!(report.first_wait_secs, 5);
+        assert!(
+            report
+                .curl_argv
+                .iter()
+                .any(|arg| arg == "https://idp.example/token")
+        );
+        let json = serde_json::to_string(&report).expect("json");
+        assert!(!json.contains("secret-device-code"));
+        assert!(json.contains("WDJB-MJHT"));
+    }
+
+    #[test]
+    fn attest_local_id_token_binds_reduced_claims_to_self() {
+        let connection = open_db();
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let token = format!(
+            "{}.{}.{}",
+            crate::mesh::idp::encode_unpadded_base64url(br#"{"alg":"RS256","kid":"k1"}"#),
+            crate::mesh::idp::encode_unpadded_base64url(
+                br#"{"sub":"user-1","email":"alice@acme.com","groups":["eng","secret-admin"]}"#,
+            ),
+            crate::mesh::idp::encode_unpadded_base64url(b"sig"),
+        );
+        let report = attest_local_id_token(&connection, &token, &["eng"], "2026-08-13T20:00:00Z")
+            .expect("attest");
+        assert_eq!(report.email.as_deref(), Some("alice@acme.com"));
+        assert_eq!(report.matched_groups, vec!["eng".to_owned()]);
+        let json = serde_json::to_string(&report).expect("json");
+        assert!(!json.contains("secret-admin"));
+        let identity = connection
+            .get_team_member_identity(&report.member_id)
+            .expect("load")
+            .expect("row");
+        assert_eq!(identity.login, "alice@acme.com");
+        assert_eq!(identity.user_id.as_deref(), Some("user-1"));
     }
 }
