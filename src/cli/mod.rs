@@ -2589,6 +2589,10 @@ pub enum DaemonCommand {
     /// socket so subsequent `ee` invocations stop short-circuiting to
     /// the (now-dead) daemon.
     Stop(DaemonHotModeStopArgs),
+    /// Install a user-scoped launchd/systemd unit for the team steward.
+    Install(DaemonServiceInstallArgs),
+    /// Quarantine the user-scoped launchd/systemd unit.
+    Uninstall(DaemonServiceUninstallArgs),
 }
 
 #[derive(Clone, Debug, Parser, PartialEq)]
@@ -2618,6 +2622,22 @@ pub struct DaemonHotModeStopArgs {
     /// Override the UDS path. Same defaults as `daemon start`.
     #[arg(long, value_name = "PATH")]
     pub socket: Option<PathBuf>,
+}
+
+/// Arguments for `ee daemon install`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct DaemonServiceInstallArgs {
+    /// Write the unit file. Without this flag the command is a dry-run.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub confirm: bool,
+}
+
+/// Arguments for `ee daemon uninstall`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct DaemonServiceUninstallArgs {
+    /// Quarantine the unit file. Without this flag the command is a dry-run.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub confirm: bool,
 }
 
 /// Arguments for `ee serve`.
@@ -60528,6 +60548,12 @@ where
     if let Some(DaemonCommand::Stop(stop_args)) = &args.command {
         return handle_daemon_hot_mode_stop(cli, stop_args, stdout, stderr);
     }
+    if let Some(DaemonCommand::Install(install_args)) = &args.command {
+        return handle_daemon_service_install(cli, install_args, stdout, stderr);
+    }
+    if let Some(DaemonCommand::Uninstall(uninstall_args)) = &args.command {
+        return handle_daemon_service_uninstall(cli, uninstall_args, stdout, stderr);
+    }
     if matches!(args.command, Some(DaemonCommand::Status(_))) || !args.foreground {
         return write_daemon_status(cli, args, stdout, stderr);
     }
@@ -60702,6 +60728,158 @@ fn wait_for_daemon_shutdown_signal_or_request(
             return DaemonShutdownTrigger::Signal(signal);
         }
         std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn handle_daemon_service_install<W, E>(
+    cli: &Cli,
+    args: &DaemonServiceInstallArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    handle_daemon_service_plan(cli, "daemon install", args.confirm, false, stdout, stderr)
+}
+
+fn handle_daemon_service_uninstall<W, E>(
+    cli: &Cli,
+    args: &DaemonServiceUninstallArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    handle_daemon_service_plan(cli, "daemon uninstall", args.confirm, true, stdout, stderr)
+}
+
+fn handle_daemon_service_plan<W, E>(
+    cli: &Cli,
+    command: &'static str,
+    confirm: bool,
+    uninstall: bool,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let home = match std::env::var_os("HOME").map(PathBuf::from) {
+        Some(path) => path,
+        None => {
+            return write_domain_error(
+                &DomainError::Configuration {
+                    message: "HOME is unset; cannot locate a user-scoped service directory"
+                        .to_owned(),
+                    repair: Some("export HOME and retry ee daemon install --dry-run".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+    let binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ee"));
+    let kind = crate::daemon::service_install::current_service_kind();
+    let mut plan =
+        crate::daemon::service_install::plan_daemon_service(command, kind, &home, &binary, confirm);
+    if kind == crate::daemon::service_install::DaemonServiceKind::Unsupported {
+        return write_domain_error(
+            &DomainError::Configuration {
+                message: "Windows remains client-only for the team daemon until credential-store parity lands".to_owned(),
+                repair: Some("use ee team sync --workspace . on this node".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
+    if confirm {
+        if uninstall {
+            if let Some(path) = plan.unit_path.as_deref().map(PathBuf::from)
+                && path.is_file()
+            {
+                match crate::daemon::service_install::quarantine_unit_file(&path) {
+                    Ok(_) => plan.written = true,
+                    Err(error) => {
+                        return write_domain_error(
+                            &DomainError::Storage {
+                                message: format!("Failed to quarantine daemon unit: {error}"),
+                                repair: Some("ee daemon uninstall --confirm --json".to_owned()),
+                            },
+                            cli.wants_json(),
+                            stdout,
+                            stderr,
+                        );
+                    }
+                }
+            }
+        } else if let (Some(path), Some(body)) = (
+            plan.unit_path.as_deref().map(PathBuf::from),
+            plan.unit_body.as_deref(),
+        ) {
+            match crate::daemon::service_install::write_unit_file(&path, body) {
+                Ok(()) => plan.written = true,
+                Err(error) => {
+                    return write_domain_error(
+                        &DomainError::Storage {
+                            message: format!("Failed to write daemon unit: {error}"),
+                            repair: Some("ee daemon install --confirm --json".to_owned()),
+                        },
+                        cli.wants_json(),
+                        stdout,
+                        stderr,
+                    );
+                }
+            }
+        }
+    }
+    write_team_like_json(
+        cli,
+        &plan,
+        &format!(
+            "Daemon service {} ({})\n  path: {}\n  written: {}\n",
+            command,
+            plan.kind.as_str(),
+            plan.unit_path.as_deref().unwrap_or("<none>"),
+            plan.written
+        ),
+        stdout,
+    )
+}
+
+fn write_team_like_json<W, T>(
+    cli: &Cli,
+    report: &T,
+    human_output: &str,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+    T: serde::Serialize,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, human_output),
+        _ => match serde_json::to_value(report) {
+            Ok(data) => {
+                let response = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
+                    "success": true,
+                    "data": data,
+                    "degraded": [],
+                });
+                write_stdout(stdout, &(response.to_string() + "\n"))
+            }
+            Err(error) => write_stdout(
+                stdout,
+                &format!("error: failed to serialize daemon service report: {error}\n"),
+            ),
+        },
     }
 }
 
@@ -66249,6 +66427,18 @@ impl NormalizedInvocation {
                     }
                     team::TeamCommand::Members(team::TeamMembersCommand::Reconcile(_)) => {
                         "team members reconcile".to_string()
+                    }
+                    team::TeamCommand::Members(team::TeamMembersCommand::Revalidate(_)) => {
+                        "team members revalidate".to_string()
+                    }
+                    team::TeamCommand::Idp(team::TeamIdpCommand::Require(_)) => {
+                        "team idp require".to_string()
+                    }
+                    team::TeamCommand::Idp(team::TeamIdpCommand::Status(_)) => {
+                        "team idp status".to_string()
+                    }
+                    team::TeamCommand::Idp(team::TeamIdpCommand::Set(_)) => {
+                        "team idp set".to_string()
                     }
                     team::TeamCommand::Leave(_) => "team leave".to_string(),
                     team::TeamCommand::Sync(_) => "team sync".to_string(),
@@ -83180,6 +83370,22 @@ mod tests {
             Some(Command::Daemon(args)) => match args.command {
                 Some(DaemonCommand::Status(_)) => Ok(()),
                 other => Err(format!("expected daemon status subcommand, got {other:?}")),
+            },
+            _ => Err("expected daemon command".to_string()),
+        }
+    }
+
+    #[test]
+    fn daemon_install_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "daemon", "install", "--confirm", "--json"])
+            .map_err(|e| format!("failed to parse daemon install: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Daemon(args)) => match args.command {
+                Some(DaemonCommand::Install(install)) => {
+                    ensure_equal(&install.confirm, &true, "confirm flag")
+                }
+                other => Err(format!("expected daemon install subcommand, got {other:?}")),
             },
             _ => Err("expected daemon command".to_string()),
         }

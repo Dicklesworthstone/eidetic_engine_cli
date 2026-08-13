@@ -49,6 +49,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub mod protocol;
+pub mod service_install;
 
 /// Metrics-collection seam for the dispatch path (bd-3vkyp). Platform-
 /// agnostic: depends only on the wire types in [`protocol`].
