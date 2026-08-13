@@ -756,6 +756,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn status_capability_probe_timeout_consumes_effective_timeout_not_advertised_latency() {
         let mut peer = peer("nodekey:alpha", &[EE_MESH_SERVICE_TAG]);
         peer.ee_capability = Some(TailscalePeerEeCapability {
