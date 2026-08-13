@@ -1490,6 +1490,71 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         "embed_model_unavailable",
         0,
     )?;
+    let diag_search = run_ee_with_env(
+        &workspace,
+        "registry_path_diag_search",
+        &[
+            "diag",
+            "search",
+            query,
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--all-arms",
+            "--relevance-floor",
+            "0",
+            "--json",
+        ],
+        &offline_env,
+    )?;
+    ensure_success(&diag_search, "registry-path ee diag search")?;
+    let diag_search_json = stdout_json(&diag_search, "registry-path ee diag search")?;
+    ensure_eq_str(
+        diag_search_json
+            .pointer("/final/embed_backend")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "registry-path diag embed_backend missing".to_string())?,
+        "neural_local",
+        "registry-path diagnostic embed backend",
+    )?;
+    ensure_eq_str(
+        diag_search_json
+            .pointer("/final/metrics/sourceModeApplied")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "registry-path diag sourceModeApplied missing".to_string())?,
+        "hybrid",
+        "registry-path diagnostic applied source mode",
+    )?;
+    ensure_eq_bool(
+        diag_search_json
+            .pointer("/final/metrics/fallbackApplied")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| "registry-path diag fallbackApplied missing".to_string())?,
+        false,
+        "registry-path diagnostic source-mode fallback",
+    )?;
+    ensure_u64_at_least(
+        diag_search_json
+            .pointer("/final/metrics/fastScoreCount")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "registry-path diag fastScoreCount missing".to_string())?,
+        1,
+        "registry-path diagnostic neural score count",
+    )?;
+    ensure_eq_bool(
+        diag_search_json
+            .pointer("/preFusion/semanticFast/available")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| "registry-path diagnostic semantic arm posture missing".to_string())?,
+        true,
+        "registry-path diagnostic semantic arm availability",
+    )?;
+    ensure_diag_degraded_code_count(
+        &diag_search_json,
+        "registry-path neural diagnostic degradation",
+        "embed_model_unavailable",
+        0,
+    )?;
+    network_tripwire.assert_unused()?;
 
     // Build a second workspace through the same public init/remember/reembed
     // path, then invalidate only its registry metadata. Both workspaces are
@@ -2192,6 +2257,13 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         &offline_env,
         &network_tripwire,
     )?;
+    let malformed_metadata_diag = run_offline_registry_fallback_diag_search(
+        &workspace,
+        "registry_path_malformed_metadata_diag",
+        query,
+        &offline_env,
+        &network_tripwire,
+    )?;
     let model_cache_root = workspace.xdg_data.join("ee/models");
     let override_cache_before = model_cache_artifact_state(&model_cache_root)?;
     let malformed_metadata_with_override = run_ee_with_env(
@@ -2490,6 +2562,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         ("reembed", &reembed),
         ("model_list", &list),
         ("search", &search),
+        ("diag_search", &diag_search),
         ("daemon_search_first", &daemon_search_first),
         ("daemon_search_second", &daemon_search_second),
         ("daemon_search_third", &daemon_search_third),
@@ -2504,6 +2577,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         ("unverified", &unverified),
         ("mismatched_name", &mismatched_name),
         ("malformed_metadata", &malformed_metadata),
+        ("malformed_metadata_diag", &malformed_metadata_diag),
         (
             "malformed_metadata_with_override",
             &malformed_metadata_with_override,
@@ -2541,6 +2615,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
     ];
     for (name, output) in [
         ("search", &search),
+        ("diag_search", &diag_search),
         ("model_list", &list),
         ("daemon_search_first", &daemon_search_first),
         ("daemon_search_second", &daemon_search_second),
@@ -2556,6 +2631,7 @@ fn public_reembed_persists_canonical_model2vec_source_and_offline_search_is_neur
         ("unverified", &unverified),
         ("mismatched_name", &mismatched_name),
         ("malformed_metadata", &malformed_metadata),
+        ("malformed_metadata_diag", &malformed_metadata_diag),
         (
             "malformed_metadata_with_override",
             &malformed_metadata_with_override,
@@ -2904,6 +2980,85 @@ fn run_offline_registry_fallback_surface(
 }
 
 #[cfg(unix)]
+fn run_offline_registry_fallback_diag_search(
+    workspace: &E2eWorkspace,
+    phase: &str,
+    query: &str,
+    env: &[(String, String)],
+    network_tripwire: &NetworkTripwire,
+) -> TestResult<Output> {
+    let model_cache_root = workspace.xdg_data.join("ee/models");
+    let cache_before = model_cache_artifact_state(&model_cache_root)?;
+    let output = run_ee_with_env(
+        workspace,
+        phase,
+        &[
+            "diag",
+            "search",
+            query,
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--all-arms",
+            "--relevance-floor",
+            "0",
+            "--json",
+        ],
+        env,
+    )?;
+    ensure_success(&output, phase)?;
+    let response = stdout_json(&output, phase)?;
+    ensure_eq_str(
+        response
+            .pointer("/final/embed_backend")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{phase} embed_backend missing"))?,
+        "hash_fallback",
+        &format!("{phase} embed backend"),
+    )?;
+    ensure_eq_str(
+        response
+            .pointer("/final/metrics/sourceModeApplied")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{phase} sourceModeApplied missing"))?,
+        "lexical_only",
+        &format!("{phase} applied source mode"),
+    )?;
+    ensure_eq_bool(
+        response
+            .pointer("/final/metrics/fallbackApplied")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| format!("{phase} fallbackApplied missing"))?,
+        true,
+        &format!("{phase} source-mode fallback"),
+    )?;
+    ensure_eq_u64(
+        response
+            .pointer("/final/metrics/fastScoreCount")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("{phase} fastScoreCount missing"))?,
+        0,
+        &format!("{phase} neural fast-score count"),
+    )?;
+    ensure_eq_bool(
+        response
+            .pointer("/preFusion/semanticFast/available")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| format!("{phase} semantic arm posture missing"))?,
+        false,
+        &format!("{phase} semantic arm availability"),
+    )?;
+    ensure_diag_degraded_code_count(&response, phase, "embed_model_unavailable", 1)?;
+    network_tripwire.assert_unused()?;
+    let cache_after = model_cache_artifact_state(&model_cache_root)?;
+    if cache_after != cache_before {
+        return Err(format!(
+            "{phase} mutated the model cache after rejecting the registry row: before={cache_before:?} after={cache_after:?}"
+        ));
+    }
+    Ok(output)
+}
+
+#[cfg(unix)]
 fn database_artifact_state(workspace: &E2eWorkspace) -> TestResult<Vec<(String, Option<String>)>> {
     let database = workspace.path.join(".ee").join("ee.db");
     [
@@ -3231,6 +3386,29 @@ fn ensure_response_embed_backend(output: &Output, context: &str, expected: &str)
     let value = stdout_json(output, context)?;
     let data = response_data(&value, context)?;
     ensure_eq_str(string_member(data, "embed_backend")?, expected, context)
+}
+
+#[cfg(unix)]
+fn ensure_diag_degraded_code_count(
+    value: &Value,
+    context: &str,
+    code: &str,
+    expected: usize,
+) -> TestResult {
+    let degraded = value
+        .pointer("/final/degraded")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{context} final degraded array missing"))?;
+    let actual = degraded
+        .iter()
+        .filter(|entry| entry.get("code").and_then(Value::as_str) == Some(code))
+        .count();
+    if actual == expected {
+        return Ok(());
+    }
+    Err(format!(
+        "{context} expected {expected} {code} degradation(s), got {actual}: {degraded:?}"
+    ))
 }
 
 #[cfg(unix)]

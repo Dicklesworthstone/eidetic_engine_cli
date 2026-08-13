@@ -8307,29 +8307,52 @@ pub async fn run_diag_search_with_cx(
     cx: &asupersync::Cx,
     options: &SearchOptions,
 ) -> Result<SearchDiagnosticReport, SearchError> {
-    // Production retains the default neural resolver. Tests that build an
-    // index with an explicit embedder can pass that same backend through the
-    // private seam below instead of consulting process-global model state.
-    run_diag_search_with_cx_and_embedder(cx, options, None).await
+    let index_dir = options.resolve_index_dir();
+    let fast_embedder = if options.source_mode.uses_embeddings()
+        && index_dir.exists()
+        && crate::core::index::index_corpus_compatibility_is_current(&index_dir)
+    {
+        Some(
+            prepare_search_embedder_for_workspace(
+                cx,
+                &options.workspace_path,
+                &options.resolve_database_path(),
+            )
+            .await
+            .map_err(|error| map_frankensearch_error(cx, "diagnostic embedder preparation", error))?
+            .fast_embedder,
+        )
+    } else {
+        None
+    };
+    run_diag_search_with_cx_and_workspace_embedder(cx, options, fast_embedder).await
 }
 
+#[cfg(test)]
 async fn run_diag_search_with_cx_and_embedder(
     cx: &asupersync::Cx,
     options: &SearchOptions,
     fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
 ) -> Result<SearchDiagnosticReport, SearchError> {
+    run_diag_search_with_cx_and_embedder_policy(cx, options, fast_embedder_override, false).await
+}
+
+async fn run_diag_search_with_cx_and_workspace_embedder(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
+) -> Result<SearchDiagnosticReport, SearchError> {
+    run_diag_search_with_cx_and_embedder_policy(cx, options, fast_embedder_override, true).await
+}
+
+async fn run_diag_search_with_cx_and_embedder_policy(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
+    resolve_runtime_source_mode: bool,
+) -> Result<SearchDiagnosticReport, SearchError> {
     search_checkpoint(cx)?;
     let start = Instant::now();
-    let embed_backend = fast_embedder_override.as_ref().map_or_else(
-        crate::core::index::active_embed_backend,
-        |embedder| {
-            if embedder.is_semantic() {
-                EmbedBackend::NeuralLocal
-            } else {
-                EmbedBackend::HashFallback
-            }
-        },
-    );
     let index_dir = options.resolve_index_dir();
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
     let (effective_limit, limit_capped) = runtime_profile.cap_search_limit(options.limit);
@@ -8342,6 +8365,37 @@ async fn run_diag_search_with_cx_and_embedder(
     }
 
     let (mut degraded, index_freshness) = search_degradations(options, &index_dir);
+    let source_mode = if resolve_runtime_source_mode {
+        resolve_source_mode(
+            options,
+            &index_dir,
+            &mut degraded,
+            fast_embedder_override.as_deref(),
+        )?
+    } else {
+        // Unit tests that provide the exact embedder used to build a synthetic
+        // diagnostic index exercise arm/fusion math, not production model
+        // discovery. The public path above always enables runtime resolution.
+        SourceModeResolution {
+            applied: options.source_mode,
+            fallback_applied: false,
+            unavailable_no_results: false,
+        }
+    };
+    let embed_backend = if source_mode.applied.uses_embeddings() {
+        fast_embedder_override.as_ref().map_or_else(
+            crate::core::index::active_embed_backend,
+            |embedder| {
+                if embedder.is_semantic() {
+                    EmbedBackend::NeuralLocal
+                } else {
+                    EmbedBackend::HashFallback
+                }
+            },
+        )
+    } else {
+        EmbedBackend::HashFallback
+    };
     push_model_lifecycle_search_degradation(options, None, &mut degraded);
     if limit_capped {
         degraded.push(SearchDegradation::profile_search_limit_capped(
@@ -8360,7 +8414,7 @@ async fn run_diag_search_with_cx_and_embedder(
         effective_limit as usize,
         config,
         options.explain,
-        options.source_mode,
+        source_mode.applied,
         fusion_weights,
         fast_embedder_override,
     )
@@ -8467,8 +8521,8 @@ async fn run_diag_search_with_cx_and_embedder(
         candidates_below_floor: dropped,
         query_assist,
         source_mode_requested: options.source_mode,
-        source_mode_applied: options.source_mode,
-        source_mode_fallback: false,
+        source_mode_applied: source_mode.applied,
+        source_mode_fallback: source_mode.fallback_applied,
         strict_source_mode: options.strict_source_mode,
         memory_scope: options.memory_scope,
         strict_scope: options.strict_scope,
@@ -9298,8 +9352,14 @@ async fn diag_search_sync(
         let candidate_limit = limit
             .max(1)
             .saturating_mul(config.candidate_multiplier.max(1));
-        let fast_embedder = fast_embedder_override
-            .unwrap_or_else(|| crate::core::index::default_search_embedder_stack().fast_arc());
+        let fast_embedder =
+            if source_mode == SearchSourceMode::LexicalOnly {
+                None
+            } else {
+                Some(fast_embedder_override.unwrap_or_else(|| {
+                    crate::core::index::default_search_embedder_stack().fast_arc()
+                }))
+            };
         let lexical = match open_lexical_searcher_for_diag(&index_dir_owned) {
             Ok(lexical) => lexical,
             Err(error) => {
@@ -9354,20 +9414,39 @@ async fn diag_search_sync(
         }
 
         let semantic_start = Instant::now();
-        let semantic_result = match fast_embedder.embed(&cx, &query_owned).await {
-            Ok(query_vec) => match index.search_fast(&query_vec, candidate_limit) {
-                Ok(results) => SearchArmDiagnostics {
-                    available: true,
-                    score_scale: "cosine_similarity",
-                    elapsed_ms: semantic_start.elapsed().as_secs_f64() * 1000.0,
-                    results: vector_hits_to_arm_hits(&results),
-                    error: None,
+        let semantic_result = match fast_embedder.as_ref() {
+            Some(fast_embedder) => match fast_embedder.embed(&cx, &query_owned).await {
+                Ok(query_vec) => match index.search_fast(&query_vec, candidate_limit) {
+                    Ok(results) => SearchArmDiagnostics {
+                        available: true,
+                        score_scale: "cosine_similarity",
+                        elapsed_ms: semantic_start.elapsed().as_secs_f64() * 1000.0,
+                        results: vector_hits_to_arm_hits(&results),
+                        error: None,
+                    },
+                    Err(error @ frankensearch::SearchError::Cancelled { .. }) => {
+                        if let Ok(mut guard) = task_result.lock() {
+                            *guard = Some(Err(map_frankensearch_error(
+                                &cx,
+                                "Diagnostic vector arm cancelled",
+                                error,
+                            )));
+                        }
+                        return;
+                    }
+                    Err(error) => SearchArmDiagnostics {
+                        available: true,
+                        score_scale: "cosine_similarity",
+                        elapsed_ms: semantic_start.elapsed().as_secs_f64() * 1000.0,
+                        results: Vec::new(),
+                        error: Some(error.to_string()),
+                    },
                 },
                 Err(error @ frankensearch::SearchError::Cancelled { .. }) => {
                     if let Ok(mut guard) = task_result.lock() {
                         *guard = Some(Err(map_frankensearch_error(
                             &cx,
-                            "Diagnostic vector arm cancelled",
+                            "Diagnostic embedding arm cancelled",
                             error,
                         )));
                     }
@@ -9381,22 +9460,15 @@ async fn diag_search_sync(
                     error: Some(error.to_string()),
                 },
             },
-            Err(error @ frankensearch::SearchError::Cancelled { .. }) => {
-                if let Ok(mut guard) = task_result.lock() {
-                    *guard = Some(Err(map_frankensearch_error(
-                        &cx,
-                        "Diagnostic embedding arm cancelled",
-                        error,
-                    )));
-                }
-                return;
-            }
-            Err(error) => SearchArmDiagnostics {
-                available: true,
+            None => SearchArmDiagnostics {
+                available: false,
                 score_scale: "cosine_similarity",
                 elapsed_ms: semantic_start.elapsed().as_secs_f64() * 1000.0,
                 results: Vec::new(),
-                error: Some(error.to_string()),
+                error: Some(
+                    "semantic arm not executed because source mode resolved to lexical_only"
+                        .to_owned(),
+                ),
             },
         };
         if let Err(error) = search_checkpoint(&cx) {
@@ -9419,13 +9491,70 @@ async fn diag_search_sync(
         };
 
         let final_start = Instant::now();
-        let searcher = TwoTierSearcher::new(Arc::clone(&index), Arc::clone(&fast_embedder), config);
-        let searcher = if let Some(lexical) = lexical {
-            searcher.with_lexical(lexical)
+        let final_result: Result<Vec<SearchHit>, SearchError> = if source_mode
+            == SearchSourceMode::LexicalOnly
+        {
+            match lexical.as_ref() {
+                Some(lexical) => lexical
+                    .search(&cx, &query_owned, limit)
+                    .await
+                    .map(|results| {
+                        results
+                            .into_iter()
+                            .map(|result| {
+                                search_hit_from_scored_result(
+                                    result,
+                                    explain,
+                                    source_mode,
+                                    fusion_weights,
+                                )
+                            })
+                            .collect()
+                    })
+                    .map_err(|error| {
+                        map_frankensearch_error(&cx, "Diagnostic lexical search failed", error)
+                    }),
+                None => Err(SearchError::Index("Lexical index not found".to_owned())),
+            }
         } else {
-            searcher
+            match fast_embedder.as_ref() {
+                Some(fast_embedder) => {
+                    let searcher =
+                        TwoTierSearcher::new(Arc::clone(&index), Arc::clone(fast_embedder), config);
+                    let searcher = if source_mode == SearchSourceMode::Hybrid {
+                        if let Some(lexical) = lexical {
+                            searcher.with_lexical(lexical)
+                        } else {
+                            searcher
+                        }
+                    } else {
+                        searcher
+                    };
+                    searcher
+                        .search_collect(&cx, &query_owned, limit)
+                        .await
+                        .map(|(results, _metrics)| {
+                            results
+                                .into_iter()
+                                .map(|result| {
+                                    search_hit_from_scored_result(
+                                        result,
+                                        explain,
+                                        source_mode,
+                                        fusion_weights,
+                                    )
+                                })
+                                .collect()
+                        })
+                        .map_err(|error| {
+                            map_frankensearch_error(&cx, "Diagnostic search failed", error)
+                        })
+                }
+                None => Err(SearchError::Index(
+                    "Diagnostic semantic search requires a prepared embedder".to_owned(),
+                )),
+            }
         };
-        let final_result = searcher.search_collect(&cx, &query_owned, limit).await;
         if let Err(error) = search_checkpoint(&cx) {
             if let Ok(mut guard) = task_result.lock() {
                 *guard = Some(Err(error));
@@ -9433,13 +9562,7 @@ async fn diag_search_sync(
             return;
         }
         let converted = match final_result {
-            Ok((results, _metrics)) => {
-                let mut hits: Vec<SearchHit> = results
-                    .into_iter()
-                    .map(|result| {
-                        search_hit_from_scored_result(result, explain, source_mode, fusion_weights)
-                    })
-                    .collect();
+            Ok(mut hits) => {
                 let rerank_seed = Deterministic::from_seed(0).shared_child("search.rerank");
                 canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
                 sort_search_hits_by_score_order(&mut hits);
@@ -9454,11 +9577,7 @@ async fn diag_search_sync(
                     errors: Vec::new(),
                 })
             }
-            Err(error) => Err(map_frankensearch_error(
-                &cx,
-                "Diagnostic search failed",
-                error,
-            )),
+            Err(error) => Err(error),
         };
 
         if let Ok(mut guard) = task_result.lock() {
