@@ -2921,15 +2921,12 @@ mod tests {
 
     #[test]
     fn production_owner_rejects_loopback_status_before_any_listener_bind() {
-        let runtime = crate::core::build_cli_runtime().expect("build owner test runtime");
-        let cx = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
         let registry = ResponderRouteRegistry::new([route(
             PathBuf::from("/tmp/ee-responder-owner-loopback-negative"),
             41888,
         )])
         .expect("valid local route registry");
-        let result = runtime.block_on(async {
-            let _ambient = Cx::set_current(Some(cx.clone()));
+        let result = crate::core::run_cli_with_cx(Duration::from_secs(5), |cx| async move {
             ResponderBrokerOwner::start(
                 &cx,
                 StaticLocalApi {
@@ -2950,7 +2947,7 @@ mod tests {
         });
         assert!(matches!(
             result,
-            Err(ResponderBrokerError::TransportUnavailable)
+            Ok(Err(ResponderBrokerError::TransportUnavailable))
         ));
     }
 

@@ -3567,7 +3567,7 @@ where
             limits: SessionChannelLimits::default(),
         })
         .collect::<Vec<_>>();
-    let owner = match crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| {
+    let mut owner = match crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| {
         let local_api = local_api.clone();
         let registrations = registrations.clone();
         let revalidate_ms = args.revalidate_ms;
@@ -3582,7 +3582,8 @@ where
             .await
         }
     }) {
-        Ok(owner) => owner,
+        Ok(Ok(owner)) => owner,
+        Ok(Err(error)) => return write_responder_broker_error(&error, cli, stdout, stderr),
         Err(error) => {
             return write_domain_error(
                 &DomainError::Configuration {
@@ -3594,10 +3595,6 @@ where
                 stderr,
             );
         }
-    };
-    let mut owner = match owner {
-        Ok(owner) => owner,
-        Err(error) => return write_responder_broker_error(&error, cli, stdout, stderr),
     };
     #[cfg(unix)]
     if let Err(error) = owner.listen_control(control_socket) {
@@ -3647,10 +3644,23 @@ where
         owner.shutdown();
         return written;
     }
-    let served = runtime.block_on(async {
-        let _ambient = Cx::set_current(Some(cx.clone()));
-        owner.serve_until_cancelled(&cx).await
-    });
+    let served = match crate::core::run_cli_with_cx(
+        Duration::from_secs(365 * 24 * 60 * 60),
+        |cx| async move { owner.serve_until_cancelled(&cx).await },
+    ) {
+        Ok(served) => served,
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::Configuration {
+                    message: format!("Failed to run responder owner: {error}"),
+                    repair: Some("Run `ee doctor --json` and retry.".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
     lifecycle_status.apply_live_owner(false, report.bound_addresses.first().cloned());
     let _ = persist_lifecycle_audit(
         &connection,
