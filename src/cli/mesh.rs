@@ -52,7 +52,9 @@ use crate::mesh::foreground_cli::{
     MeshStorageCounts, MeshSyncSupervisorOptions, MeshSyncSupervisorReport,
     apply_outbound_export_policy, foreground_degradations, run_mesh_sync_supervisor_supervised,
 };
-use crate::mesh::hello_responder::HelloResponderStatusReport;
+use crate::mesh::hello_responder::{
+    HelloResponderLifecycleEventKind, HelloResponderStatusReport, persist_lifecycle_audit,
+};
 use crate::mesh::peer::{
     MeshPeerCapabilityProfile, MeshPeerCommandReport, MeshPeerEndpoint, MeshPeerEnrollInput,
     MeshPeerHandshake, MeshPeerRecord, MeshPeerRotateInput, enroll_peer,
@@ -63,7 +65,7 @@ use crate::mesh::responder_broker::{
     DurableResponderRegistration, PreAuthAdmissionLimits, RESPONDER_CONTROL_SCHEMA_V1,
     ResponderBrokerError, ResponderBrokerOwner, ResponderControlOp, ResponderControlRequest,
     TailscaleLocalApiClient, default_responder_control_socket_path,
-    submit_responder_control_request,
+    responder_control_status_request, submit_responder_control_request,
 };
 use crate::mesh::tailscale_autodiscovery::{
     TailscaleAutodiscoveryConfig, TailscaleAutodiscoveryReport,
@@ -281,6 +283,10 @@ pub struct MeshHelloResponderStatusArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+
+    /// Same-EUID control socket published by `ee mesh hello-responder run`.
+    #[arg(long = "control-socket", value_name = "PATH")]
+    pub control_socket: Option<PathBuf>,
 }
 
 /// Arguments for `ee mesh hello-responder run`.
@@ -3439,7 +3445,7 @@ where
     W: Write,
     E: Write,
 {
-    let (snapshot, _connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
+    let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
         Ok(store) => store,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
@@ -3593,8 +3599,30 @@ where
             .map(ToString::to_string)
             .collect(),
         registered_routes: owner.route_count(),
-        workspace_id: snapshot.workspace_id,
+        workspace_id: snapshot.workspace_id.clone(),
     };
+    let mut lifecycle_status =
+        match HelloResponderStatusReport::from_environment(snapshot.mesh_enabled) {
+            Ok(mut status) => {
+                status.apply_live_owner(true, report.bound_addresses.first().cloned());
+                status
+            }
+            Err(_) => HelloResponderStatusReport::from_runtime(
+                &crate::mesh::hello_responder::HelloResponderRuntimeInput::new(
+                    snapshot.mesh_enabled,
+                ),
+            ),
+        };
+    lifecycle_status.apply_live_owner(true, report.bound_addresses.first().cloned());
+    if let Err(error) = persist_lifecycle_audit(
+        &connection,
+        &snapshot.workspace_id,
+        HelloResponderLifecycleEventKind::Started,
+        &lifecycle_status,
+    ) {
+        owner.shutdown();
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
     let human = format!(
         "Mesh responder owner is listening on {} with {} exact route(s).",
         report.bound_addresses.join(", "),
@@ -3609,6 +3637,13 @@ where
         let _ambient = Cx::set_current(Some(cx.clone()));
         owner.serve_until_cancelled(&cx).await
     });
+    lifecycle_status.apply_live_owner(false, report.bound_addresses.first().cloned());
+    let _ = persist_lifecycle_audit(
+        &connection,
+        &snapshot.workspace_id,
+        HelloResponderLifecycleEventKind::Stopped,
+        &lifecycle_status,
+    );
     match served {
         Ok(()) | Err(ResponderBrokerError::Cancelled) => ProcessExitCode::Success,
         Err(error) => write_responder_broker_error(&error, cli, stdout, stderr),
@@ -3638,7 +3673,7 @@ where
     }
     #[cfg(unix)]
     {
-        let (snapshot, _) = match open_mesh_peer_store(cli, args.database.as_deref()) {
+        let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
             Ok(store) => store,
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         };
@@ -3732,6 +3767,25 @@ where
             .unwrap_or_else(default_responder_control_socket_path);
         match submit_responder_control_request(&socket, &request) {
             Ok(response) if response.ok => {
+                let mut status = HelloResponderStatusReport::from_runtime(
+                    &crate::mesh::hello_responder::HelloResponderRuntimeInput::new(
+                        snapshot.mesh_enabled,
+                    ),
+                );
+                status.apply_live_owner(
+                    !response.bound_addresses.is_empty() || response.registered_routes > 0,
+                    response.bound_addresses.first().cloned(),
+                );
+                let kind = match op {
+                    ResponderControlOp::Unregister => HelloResponderLifecycleEventKind::Stopped,
+                    _ => HelloResponderLifecycleEventKind::Started,
+                };
+                let _ = persist_lifecycle_audit(
+                    &connection,
+                    &snapshot.workspace_id,
+                    kind,
+                    &status,
+                );
                 let human = format!(
                     "Responder control {} succeeded with {} route(s).",
                     match op {
@@ -3796,7 +3850,7 @@ where
         Ok(snapshot) => snapshot,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    let report = match HelloResponderStatusReport::from_environment(snapshot.mesh_enabled) {
+    let mut report = match HelloResponderStatusReport::from_environment(snapshot.mesh_enabled) {
         Ok(report) => report,
         Err(error) => {
             let domain_error = DomainError::Configuration {
@@ -3809,6 +3863,22 @@ where
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
     };
+    #[cfg(unix)]
+    {
+        let socket = args
+            .control_socket
+            .clone()
+            .unwrap_or_else(default_responder_control_socket_path);
+        if let Ok(live) =
+            submit_responder_control_request(&socket, &responder_control_status_request())
+            && live.ok
+        {
+            report.apply_live_owner(
+                !live.bound_addresses.is_empty() || live.registered_routes > 0,
+                live.bound_addresses.first().cloned(),
+            );
+        }
+    }
     write_mesh_report(
         cli,
         &report,

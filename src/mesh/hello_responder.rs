@@ -12,6 +12,8 @@ use std::net::{IpAddr, SocketAddr};
 use serde::Serialize;
 
 use crate::config::{EnvVar, read_env_var};
+use crate::db::{CreateAuditInput, DbConnection, generate_audit_id};
+use crate::models::DomainError;
 
 pub const HELLO_RESPONDER_STATUS_SCHEMA_V1: &str = "ee.mesh.hello_responder.status.v1";
 pub const HELLO_RESPONDER_LIFECYCLE_AUDIT_SCHEMA_V1: &str =
@@ -213,6 +215,21 @@ impl HelloResponderStatusReport {
         }
         Ok(Self::from_runtime(&input))
     }
+
+    /// Overlay live owner posture from the same-EUID control channel.
+    pub fn apply_live_owner(&mut self, running: bool, listen_address: Option<String>) {
+        self.running = running;
+        if listen_address.is_some() {
+            self.listen_address = listen_address;
+        }
+        if self.running {
+            self.degraded.retain(|item| {
+                item.code != HELLO_RESPONDER_NOT_RUNNING_CODE
+                    && (self.listen_address.is_none()
+                        || item.code != HELLO_RESPONDER_NO_TAILSCALE_IP_CODE)
+            });
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -413,6 +430,38 @@ pub fn lifecycle_audit(
     }
 }
 
+/// Persist a redaction-safe lifecycle row on the workspace audit chain.
+pub fn persist_lifecycle_audit(
+    connection: &DbConnection,
+    workspace_id: &str,
+    kind: HelloResponderLifecycleEventKind,
+    status: &HelloResponderStatusReport,
+) -> Result<String, DomainError> {
+    let audit = lifecycle_audit(kind, status);
+    let details = serde_json::to_string(&audit).map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize hello-responder lifecycle audit: {error}"),
+        repair: Some("Retry after the workspace store is writable.".to_owned()),
+    })?;
+    let audit_id = generate_audit_id();
+    connection
+        .insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.to_owned()),
+                actor: Some("ee-mesh-responder".to_owned()),
+                action: audit.event_type.to_owned(),
+                target_type: Some("mesh_hello_responder".to_owned()),
+                target_id: Some(workspace_id.to_owned()),
+                details: Some(details),
+            },
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to persist hello-responder lifecycle audit: {error}"),
+            repair: Some("Check that the workspace database is writable and retry.".to_owned()),
+        })?;
+    Ok(audit_id)
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
@@ -451,6 +500,23 @@ mod tests {
 
         assert_eq!(report.listen_address.as_deref(), Some("100.64.0.8:41889"));
         assert!(report.degraded.is_empty());
+    }
+
+    #[test]
+    fn live_owner_overlay_clears_not_running_and_keeps_listen_address() {
+        let report =
+            HelloResponderStatusReport::from_runtime(&HelloResponderRuntimeInput::new(true));
+        assert!(!report.running);
+        let mut live = report;
+        live.apply_live_owner(true, Some("100.64.0.8:41888".to_owned()));
+        assert!(live.running);
+        assert_eq!(live.listen_address.as_deref(), Some("100.64.0.8:41888"));
+        assert!(
+            live.degraded
+                .iter()
+                .all(|item| item.code != HELLO_RESPONDER_NOT_RUNNING_CODE
+                    && item.code != HELLO_RESPONDER_NO_TAILSCALE_IP_CODE)
+        );
     }
 
     #[test]

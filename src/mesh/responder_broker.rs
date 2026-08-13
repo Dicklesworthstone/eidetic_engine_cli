@@ -2166,16 +2166,38 @@ impl Drop for ResponderControlListener {
     }
 }
 
+#[must_use]
+pub fn responder_control_status_request() -> ResponderControlRequest {
+    ResponderControlRequest {
+        schema: RESPONDER_CONTROL_SCHEMA_V1.to_owned(),
+        op: ResponderControlOp::Status,
+        nonce: "0".repeat(CONTROL_NONCE_HEX_LEN),
+        workspace_id: String::new(),
+        team_id: String::new(),
+        responder_node_id: String::new(),
+        workspace_path: PathBuf::new(),
+        database_path: PathBuf::new(),
+        peer_handles: Vec::new(),
+        committed_port: 0,
+    }
+}
+
 fn validate_control_request(request: &ResponderControlRequest) -> Result<(), ResponderBrokerError> {
     if request.schema != RESPONDER_CONTROL_SCHEMA_V1
         || request.nonce.len() < CONTROL_NONCE_HEX_LEN
         || !request.nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || !valid_identity(&request.workspace_id)
+    {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    if request.op == ResponderControlOp::Status {
+        return Ok(());
+    }
+    if !valid_identity(&request.workspace_id)
         || !valid_identity(&request.team_id)
         || !valid_identity(&request.responder_node_id)
         || request.committed_port < 1024
+        || request.peer_handles.is_empty()
         || request.peer_handles.len() > 32
-        || (request.op != ResponderControlOp::Status && request.peer_handles.is_empty())
         || !request
             .peer_handles
             .iter()
@@ -2183,13 +2205,7 @@ fn validate_control_request(request: &ResponderControlRequest) -> Result<(), Res
     {
         return Err(ResponderBrokerError::InvalidConfiguration);
     }
-    if matches!(
-        request.op,
-        ResponderControlOp::Register | ResponderControlOp::Unregister
-    ) {
-        revalidate_control_paths(request)?;
-    }
-    Ok(())
+    revalidate_control_paths(request)
 }
 
 fn revalidate_control_paths(request: &ResponderControlRequest) -> Result<(), ResponderBrokerError> {
@@ -2912,6 +2928,11 @@ mod tests {
             ),
             PathBuf::from("/var/tmp/ee-501/mesh-responder.sock")
         );
+    }
+
+    #[test]
+    fn status_control_request_skips_path_and_identity_gates() {
+        assert!(validate_control_request(&responder_control_status_request()).is_ok());
     }
 
     #[test]
