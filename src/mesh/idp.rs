@@ -86,6 +86,74 @@ pub fn classify_oidc_provider(discovery: &Value) -> IdpProviderCapability {
     IdpProviderCapability::Unsupported
 }
 
+pub const FORBIDDEN_CURL_ENV: &[&str] = &[
+    "http_proxy",
+    "https_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "CURL_CA_BUNDLE",
+    "SSL_CERT_FILE",
+    "SSLKEYLOGFILE",
+    "NETRC",
+    "CURL_HOME",
+];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConstrainedCurlPlan {
+    pub binary: String,
+    pub argv: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub stdin_body: bool,
+}
+
+#[must_use]
+pub fn plan_constrained_https_post(
+    curl_binary: &str,
+    url: &str,
+    timeout_secs: u64,
+) -> Option<ConstrainedCurlPlan> {
+    let binary = curl_binary.trim();
+    let url = url.trim();
+    if !binary.starts_with('/') || binary.contains("..") || !url.starts_with("https://") {
+        return None;
+    }
+    Some(ConstrainedCurlPlan {
+        binary: binary.to_owned(),
+        argv: vec![
+            binary.to_owned(),
+            "--proto".to_owned(),
+            "=https".to_owned(),
+            "--tlsv1.2".to_owned(),
+            "--http1.1".to_owned(),
+            "--silent".to_owned(),
+            "--show-error".to_owned(),
+            "--max-time".to_owned(),
+            timeout_secs.max(1).to_string(),
+            "-X".to_owned(),
+            "POST".to_owned(),
+            "--data-binary".to_owned(),
+            "@-".to_owned(),
+            url.to_owned(),
+        ],
+        env: Vec::new(),
+        stdin_body: true,
+    })
+}
+
+#[must_use]
+pub fn discovery_https_endpoint(discovery: &Value, key: &str) -> Option<String> {
+    discovery
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| value.starts_with("https://"))
+        .map(str::to_owned)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IdentityRevalidationPosture {
     Current,
@@ -115,7 +183,7 @@ pub fn classify_identity_revalidation(
     grace_secs: i64,
 ) -> IdentityRevalidationPosture {
     if now_unix < checked_at_unix {
-        return IdentityRevalidationPosture::Due;
+        return IdentityRevalidationPosture::Current;
     }
     let age = now_unix.saturating_sub(checked_at_unix);
     if age < due_after_secs {
@@ -220,9 +288,7 @@ pub fn decide_device_poll(
         };
     }
     if elapsed_secs >= deadline_secs {
-        return DevicePollDisposition::Expired {
-            reason: "deadline",
-        };
+        return DevicePollDisposition::Expired { reason: "deadline" };
     }
     let remaining = deadline_secs.saturating_sub(elapsed_secs);
     match token_error {
@@ -341,9 +407,7 @@ pub fn classify_compact_jwt(token: &str) -> CompactJwtDisposition {
     }
     match object.get("kid").and_then(Value::as_str).map(str::trim) {
         None | Some("") => CompactJwtDisposition::MissingKid,
-        Some(kid) if kid.contains(',') || kid.contains('\0') => {
-            CompactJwtDisposition::AmbiguousKid
-        }
+        Some(kid) if kid.contains(',') || kid.contains('\0') => CompactJwtDisposition::AmbiguousKid,
         Some(_) => CompactJwtDisposition::Eligible,
     }
 }
@@ -385,6 +449,37 @@ fn decode_unpadded_base64url(input: &str) -> Result<Vec<u8>, ()> {
     Ok(output)
 }
 
+#[must_use]
+pub(crate) fn encode_unpadded_base64url(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b0 = bytes[i];
+        let b1 = bytes.get(i + 1).copied();
+        let b2 = bytes.get(i + 2).copied();
+        out.push(char::from(TABLE[(b0 >> 2) as usize]));
+        match (b1, b2) {
+            (Some(b1), Some(b2)) => {
+                out.push(char::from(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize]));
+                out.push(char::from(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize]));
+                out.push(char::from(TABLE[(b2 & 0x3f) as usize]));
+                i += 3;
+            }
+            (Some(b1), None) => {
+                out.push(char::from(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize]));
+                out.push(char::from(TABLE[((b1 & 0x0f) << 2) as usize]));
+                i += 2;
+            }
+            (None, _) => {
+                out.push(char::from(TABLE[((b0 & 0x03) << 4) as usize]));
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 fn json_has_duplicate_keys(bytes: &[u8]) -> bool {
     let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
         return false;
@@ -395,7 +490,165 @@ fn json_has_duplicate_keys(bytes: &[u8]) -> bool {
     let Ok(raw) = std::str::from_utf8(bytes) else {
         return true;
     };
-    object.keys().any(|key| raw.matches(&format!("\"{key}\"")).count() > 1)
+    object
+        .keys()
+        .any(|key| raw.matches(&format!("\"{key}\"")).count() > 1)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JwksKeyDisposition {
+    Eligible,
+    MissingKid,
+    DuplicateKid,
+    AmbiguousKid,
+    UnsupportedKty,
+    EmbeddedOrRemote,
+}
+
+impl JwksKeyDisposition {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Eligible => "eligible",
+            Self::MissingKid => "missing_kid",
+            Self::DuplicateKid => "duplicate_kid",
+            Self::AmbiguousKid => "ambiguous_kid",
+            Self::UnsupportedKty => "unsupported_kty",
+            Self::EmbeddedOrRemote => "embedded_or_remote",
+        }
+    }
+}
+
+#[must_use]
+pub fn classify_jwks_kid(jwks: &Value, kid: &str) -> JwksKeyDisposition {
+    let kid = kid.trim();
+    if kid.is_empty() || kid.contains(',') {
+        return JwksKeyDisposition::AmbiguousKid;
+    }
+    let Some(keys) = jwks.get("keys").and_then(Value::as_array) else {
+        return JwksKeyDisposition::MissingKid;
+    };
+    let matches: Vec<&Value> = keys
+        .iter()
+        .filter(|key| key.get("kid").and_then(Value::as_str) == Some(kid))
+        .collect();
+    match matches.as_slice() {
+        [] => JwksKeyDisposition::MissingKid,
+        [_, _, ..] => JwksKeyDisposition::DuplicateKid,
+        [key] => {
+            if ["jku", "x5u", "x5c"]
+                .iter()
+                .any(|field| key.get(*field).is_some())
+            {
+                return JwksKeyDisposition::EmbeddedOrRemote;
+            }
+            match key.get("kty").and_then(Value::as_str) {
+                Some("RSA" | "EC") => JwksKeyDisposition::Eligible,
+                _ => JwksKeyDisposition::UnsupportedKty,
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenResponseGate {
+    pub jwt: CompactJwtDisposition,
+    pub has_access_token: bool,
+    pub has_refresh_token: bool,
+}
+
+#[must_use]
+pub fn classify_token_response(value: &Value) -> Result<TokenResponseGate, &'static str> {
+    let object = value.as_object().ok_or("token_response_not_object")?;
+    let id_token = object
+        .get("id_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .ok_or("missing_id_token")?;
+    Ok(TokenResponseGate {
+        jwt: classify_compact_jwt(id_token),
+        has_access_token: object
+            .get("access_token")
+            .and_then(Value::as_str)
+            .is_some_and(|token| !token.trim().is_empty()),
+        has_refresh_token: object
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .is_some_and(|token| !token.trim().is_empty()),
+    })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReducedIdTokenClaims {
+    pub subject: String,
+    pub email: Option<String>,
+    pub email_verified: bool,
+    pub matched_groups: Vec<String>,
+}
+
+/// Allowlisted claim reduction. Full group lists and unrelated claims are dropped.
+#[must_use]
+pub fn reduce_id_token_claims(
+    token: &str,
+    configured_groups: &[&str],
+) -> Result<ReducedIdTokenClaims, CompactJwtDisposition> {
+    let disposition = classify_compact_jwt(token);
+    if !disposition.accepted() {
+        return Err(disposition);
+    }
+    let payload = token
+        .split('.')
+        .nth(1)
+        .ok_or(CompactJwtDisposition::Malformed)?;
+    let bytes =
+        decode_unpadded_base64url(payload).map_err(|()| CompactJwtDisposition::NonCanonical)?;
+    if json_has_duplicate_keys(&bytes) {
+        return Err(CompactJwtDisposition::Malformed);
+    }
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|_| CompactJwtDisposition::Malformed)?;
+    let subject = value
+        .get("sub")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or(CompactJwtDisposition::Malformed)?
+        .to_owned();
+    let email = value
+        .get("email")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| value.contains('@'))
+        .map(str::to_owned);
+    let email_verified = value
+        .get("email_verified")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let presented = value
+        .get("groups")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    let mut matched_groups = configured_groups
+        .iter()
+        .filter(|group| {
+            presented
+                .iter()
+                .any(|item| item.eq_ignore_ascii_case(group))
+        })
+        .map(|group| (*group).to_owned())
+        .collect::<Vec<_>>();
+    matched_groups.sort();
+    matched_groups.dedup();
+    Ok(ReducedIdTokenClaims {
+        subject,
+        email,
+        email_verified,
+        matched_groups,
+    })
 }
 
 #[cfg(test)]
@@ -553,6 +806,10 @@ mod tests {
     #[test]
     fn identity_revalidation_is_timer_only_and_floor_never_moves_back() {
         assert_eq!(
+            classify_identity_revalidation(200, 110, 60, 60),
+            IdentityRevalidationPosture::Current
+        );
+        assert_eq!(
             classify_identity_revalidation(100, 110, 60, 60),
             IdentityRevalidationPosture::Current
         );
@@ -578,34 +835,88 @@ mod tests {
         );
     }
 
-    fn encode_unpadded_base64url(bytes: &[u8]) -> String {
-        const TABLE: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-        let mut out = String::new();
-        let mut i = 0;
-        while i < bytes.len() {
-            let b0 = bytes[i];
-            let b1 = bytes.get(i + 1).copied();
-            let b2 = bytes.get(i + 2).copied();
-            out.push(char::from(TABLE[(b0 >> 2) as usize]));
-            match (b1, b2) {
-                (Some(b1), Some(b2)) => {
-                    out.push(char::from(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize]));
-                    out.push(char::from(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize]));
-                    out.push(char::from(TABLE[(b2 & 0x3f) as usize]));
-                    i += 3;
-                }
-                (Some(b1), None) => {
-                    out.push(char::from(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize]));
-                    out.push(char::from(TABLE[((b1 & 0x0f) << 2) as usize]));
-                    i += 2;
-                }
-                (None, _) => {
-                    out.push(char::from(TABLE[((b0 & 0x03) << 4) as usize]));
-                    i += 1;
-                }
-            }
-        }
-        out
+    #[test]
+    fn jwks_kid_must_be_unique_and_local() {
+        let jwks = json!({
+            "keys": [
+                {"kty":"RSA","kid":"k1","n":"n","e":"AQAB"},
+                {"kty":"EC","kid":"k2","crv":"P-256","x":"x","y":"y"}
+            ]
+        });
+        assert_eq!(classify_jwks_kid(&jwks, "k1"), JwksKeyDisposition::Eligible);
+        assert_eq!(
+            classify_jwks_kid(&jwks, "missing"),
+            JwksKeyDisposition::MissingKid
+        );
+        let dup = json!({"keys":[{"kty":"RSA","kid":"k1"},{"kty":"RSA","kid":"k1"}]});
+        assert_eq!(
+            classify_jwks_kid(&dup, "k1"),
+            JwksKeyDisposition::DuplicateKid
+        );
+        let remote = json!({"keys":[{"kty":"RSA","kid":"k1","x5u":"https://evil"}]});
+        assert_eq!(
+            classify_jwks_kid(&remote, "k1"),
+            JwksKeyDisposition::EmbeddedOrRemote
+        );
+    }
+
+    #[test]
+    fn constrained_curl_plan_is_https_only_and_has_empty_env() {
+        let plan = plan_constrained_https_post("/usr/bin/curl", "https://idp.example/token", 15)
+            .expect("plan");
+        assert!(plan.stdin_body);
+        assert!(plan.env.is_empty());
+        assert!(plan.argv.contains(&"=https".to_owned()));
+        assert!(plan.argv.contains(&"@-".to_owned()));
+        assert!(!plan.argv.iter().any(|arg| arg.contains("client_secret")));
+        assert!(FORBIDDEN_CURL_ENV.contains(&"HTTPS_PROXY"));
+        assert!(FORBIDDEN_CURL_ENV.contains(&"SSLKEYLOGFILE"));
+        assert!(plan_constrained_https_post("curl", "https://idp.example/token", 15).is_none());
+        assert!(
+            plan_constrained_https_post("/usr/bin/curl", "http://idp.example/token", 15).is_none()
+        );
+    }
+
+    #[test]
+    fn token_response_gate_requires_id_token_and_flags_bearer_material() {
+        const ID: &str = "eyJhbGciOiJSUzI1NiIsImtpZCI6ImsxIn0.eyJzdWIiOiJhIn0.c2ln";
+        let gate = classify_token_response(&json!({
+            "id_token": ID,
+            "access_token": "atk",
+            "refresh_token": "rtk"
+        }))
+        .expect("gate");
+        assert_eq!(gate.jwt, CompactJwtDisposition::Eligible);
+        assert!(gate.has_access_token);
+        assert!(gate.has_refresh_token);
+        assert!(classify_token_response(&json!({"access_token":"atk"})).is_err());
+    }
+
+    #[test]
+    fn id_token_claim_reduction_keeps_subject_and_configured_groups_only() {
+        let token = format!(
+            "{}.{}.{}",
+            encode_unpadded_base64url(br#"{"alg":"RS256","kid":"k1"}"#),
+            encode_unpadded_base64url(
+                br#"{"sub":"user-1","email":"alice@acme.com","email_verified":true,"groups":["eng","secret-admin","staff"],"iss":"https://idp.example"}"#,
+            ),
+            encode_unpadded_base64url(b"sig"),
+        );
+        let claims = reduce_id_token_claims(&token, &["eng", "staff"]).expect("claims");
+        assert_eq!(claims.subject, "user-1");
+        assert_eq!(claims.email.as_deref(), Some("alice@acme.com"));
+        assert!(claims.email_verified);
+        assert_eq!(
+            claims.matched_groups,
+            vec!["eng".to_owned(), "staff".to_owned()]
+        );
+        let json = serde_json::to_string(&json!({
+            "subject": claims.subject,
+            "email": claims.email,
+            "matchedGroups": claims.matched_groups
+        }))
+        .expect("json");
+        assert!(!json.contains("secret-admin"));
+        assert!(!json.contains("https://idp.example"));
     }
 }
