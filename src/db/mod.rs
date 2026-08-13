@@ -25763,17 +25763,12 @@ impl DbConnection {
         Ok(affected > 0)
     }
 
-    /// Public retry path for interrupted or failed index work: atomically
-    /// transition every cancelled/failed job in the workspace back to
-    /// `pending` as the SAME logical job (no clone rows, no id churn),
-    /// clearing run bookkeeping so the next workflow-emitted processing tick
-    /// picks it up. A single conditional UPDATE keeps this race-free and
-    /// idempotent: a second caller finds no requeueable rows and changes
-    /// nothing. A deterministically failing job resurfaces once per
-    /// processing tick — deliberate, budget-bounded pressure that keeps the
-    /// staleness honest instead of silently abandoning the document.
+    /// Public retry path for interrupted or failed index work. Cancelled and
+    /// failed rows are always re-armed; `running` rows are re-armed only when
+    /// no live or unprobeable index-publish owner protects them. Every
+    /// transition preserves the same durable job ID.
     pub fn requeue_cancelled_search_index_jobs(&self, workspace_id: &str) -> Result<u32> {
-        let affected = self.execute_for(
+        let terminal = self.execute_for(
             DbOperation::Execute,
             "UPDATE search_index_jobs SET status = ?1, started_at = NULL, completed_at = NULL, error_message = NULL, documents_indexed = 0 WHERE workspace_id = ?2 AND status IN (?3, ?4)",
             &[
@@ -25783,7 +25778,54 @@ impl DbConnection {
                 Value::Text(SearchIndexJobStatus::Failed.as_str().to_string()),
             ],
         )?;
-        Ok(u32::try_from(affected).unwrap_or(u32::MAX))
+        let orphaned = self.requeue_orphaned_running_search_index_jobs(workspace_id)?;
+        Ok(u32::try_from(terminal)
+            .unwrap_or(u32::MAX)
+            .saturating_add(orphaned))
+    }
+
+    /// Recover index jobs whose worker disappeared after claiming them.
+    ///
+    /// A `running` row is re-armed only when no index-publish lease exists or
+    /// every recorded lease holder is provably dead. Live and unprobeable
+    /// holders remain authoritative, including after nominal lease expiry, so
+    /// recovery cannot steal a job from a process still publishing. The row is
+    /// transitioned back to `pending` in place: its durable job ID is never
+    /// replaced.
+    pub fn requeue_orphaned_running_search_index_jobs(&self, workspace_id: &str) -> Result<u32> {
+        self.ensure_advisory_locks_table()?;
+        let lock_id = AdvisoryLockId::index(workspace_id);
+
+        self.with_transaction(|| {
+            let rows = self.query_for(
+                DbOperation::Query,
+                "SELECT holder_id FROM ee_advisory_locks WHERE resource_type = ?1 AND resource_id = ?2 ORDER BY acquired_at DESC, resource_key ASC",
+                &[
+                    Value::Text(lock_id.resource_type().to_owned()),
+                    Value::Text(lock_id.resource_id().to_owned()),
+                ],
+            )?;
+            for row in rows {
+                let holder_id = required_text(&row, 0, DbOperation::Query, "holder_id")?;
+                if !matches!(
+                    advisory_lock_holder_liveness(holder_id),
+                    AdvisoryLockHolderLiveness::Dead { .. }
+                ) {
+                    return Ok(0);
+                }
+            }
+
+            let affected = self.execute_for(
+                DbOperation::Execute,
+                "UPDATE search_index_jobs SET status = ?1, started_at = NULL, completed_at = NULL, error_message = NULL, documents_indexed = 0 WHERE workspace_id = ?2 AND status = ?3",
+                &[
+                    Value::Text(SearchIndexJobStatus::Pending.as_str().to_owned()),
+                    Value::Text(workspace_id.to_owned()),
+                    Value::Text(SearchIndexJobStatus::Running.as_str().to_owned()),
+                ],
+            )?;
+            Ok(u32::try_from(affected).unwrap_or(u32::MAX))
+        })
     }
 
     /// Re-arm one completed logical job when authoritative index inspection
@@ -30544,17 +30586,21 @@ fn advisory_lock_timestamp(instant: DateTime<Utc>) -> String {
 pub fn advisory_lock_holder_pid(holder_id: &str) -> Option<u32> {
     let mut parts = holder_id.splitn(3, ':');
     match (parts.next(), parts.next(), parts.next()) {
-        (Some("remember"), Some(pid), Some(_memory_id)) => {
+        (Some("remember" | "index"), Some(pid), Some(_resource_id)) => {
             pid.parse::<u32>().ok().filter(|pid| *pid > 0)
         }
-        _ => None,
+        _ => holder_id
+            .strip_prefix("ee-index-")
+            .and_then(|suffix| suffix.split_once('-'))
+            .and_then(|(pid, _nonce)| pid.parse::<u32>().ok())
+            .filter(|pid| *pid > 0),
     }
 }
 
 pub fn advisory_lock_holder_liveness(holder_id: &str) -> AdvisoryLockHolderLiveness {
     let Some(pid) = advisory_lock_holder_pid(holder_id) else {
         return AdvisoryLockHolderLiveness::Unknown {
-            reason: "holder id does not encode a same-host remember PID".to_owned(),
+            reason: "holder id does not encode a same-host process PID".to_owned(),
         };
     };
     advisory_lock_process_liveness(pid)
@@ -53201,11 +53247,21 @@ mod tests {
     }
 
     #[test]
-    fn advisory_lock_holder_pid_parses_remember_holder() -> TestResult {
+    fn advisory_lock_holder_pid_parses_same_host_job_holders() -> TestResult {
         ensure_equal(
             &super::advisory_lock_holder_pid("remember:12345:mem_abc"),
             &Some(12345),
             "remember holder PID",
+        )?;
+        ensure_equal(
+            &super::advisory_lock_holder_pid("index:23456:1700000000"),
+            &Some(23456),
+            "index holder PID",
+        )?;
+        ensure_equal(
+            &super::advisory_lock_holder_pid("ee-index-34567-1700000000"),
+            &Some(34567),
+            "legacy index holder PID",
         )?;
         ensure_equal(
             &super::advisory_lock_holder_pid("remote:12345:mem_abc"),

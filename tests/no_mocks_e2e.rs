@@ -3024,6 +3024,12 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
             }),
         "CASS publish failure must distinguish committed source data from stale derived index",
     )?;
+    let failed_attempt_index_job_id = failed_publish_json
+        .pointer("/data/sessions/0/indexJobId")
+        .and_then(JsonValue::as_str)
+        .filter(|job_id| !job_id.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "CASS failed attempt omitted its durable index job id".to_owned())?;
     let failure_connection =
         DbConnection::open(DatabaseConfig::file(failure_database_path.clone()))
             .map_err(|error| error.to_string())?;
@@ -3051,6 +3057,17 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         "CASS publish failure preserves committed evidence spans",
     )?;
     let failure_session_id = failure_sessions[0].id.clone();
+    let failure_index_jobs = failure_connection
+        .list_search_index_jobs(&failure_workspaces[0].id, None)
+        .map_err(|error| error.to_string())?;
+    ensure(
+        failure_index_jobs.len() == 1
+            && failure_index_jobs[0].id.as_str() == failed_attempt_index_job_id.as_str()
+            && failure_index_jobs[0].status == "failed",
+        format!(
+            "CASS failed attempt must persist its exact reported job ID in failed state: {failure_index_jobs:?}"
+        ),
+    )?;
     let failure_evidence_id = failure_spans
         .iter()
         .find(|span| {
@@ -3123,12 +3140,10 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         &Some(&json!(failure_session_id)),
         "CASS retry preserves the exact session id",
     )?;
-    ensure(
-        retry_publish_json
-            .pointer("/data/sessions/0/indexJobId")
-            .and_then(JsonValue::as_str)
-            .is_some_and(|job_id| !job_id.is_empty()),
-        "CASS retry exposes the deterministic index job id",
+    ensure_equal(
+        &retry_publish_json.pointer("/data/sessions/0/indexJobId"),
+        &Some(&json!(failed_attempt_index_job_id)),
+        "CASS retry preserves exact failed-attempt index job id equality",
     )?;
     ensure_equal(
         &retry_publish_json.pointer("/data/indexRequiredAction"),

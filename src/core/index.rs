@@ -174,7 +174,7 @@ fn generate_index_holder_id() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("ee-index-{pid}-{ts}")
+    format!("index:{pid}:{ts}")
 }
 
 /// Acquire the index publish lock or return an error.
@@ -2204,11 +2204,11 @@ fn process_selected_index_jobs_coalesced_bounded(
     .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
 }
 
-/// Public retry path for cancelled index jobs: every workflow-emitted
-/// processing tick first transitions each cancelled job in the workspace
-/// atomically back to `pending` as the SAME logical job (one conditional
-/// UPDATE — no clone rows, no id churn, no read-then-write race), so the
-/// tick that follows an interruption converges without manual row surgery.
+/// Public retry path for interrupted index jobs: every workflow-emitted
+/// processing tick first transitions cancelled/failed jobs and orphaned
+/// `running` jobs in the workspace atomically back to `pending` as the SAME
+/// logical job (no clone rows or id churn). A live or unprobeable publisher
+/// retains ownership of its `running` rows.
 fn requeue_cancelled_search_index_jobs(
     db: &DbConnection,
     workspace_id: &str,
@@ -2219,7 +2219,7 @@ fn requeue_cancelled_search_index_jobs(
             target: "ee::index",
             workspace_id,
             requeued,
-            "requeued cancelled search index jobs back to pending"
+            "requeued interrupted search index jobs back to pending"
         );
     }
     Ok(requeued)
@@ -12276,6 +12276,127 @@ mod tests {
             format!("requeue must be idempotent once converged: {idle:?}"),
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn public_index_tick_recovers_orphaned_running_job_without_stealing_live_owner() -> TestResult {
+        const WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
+        const JOB_ID: &str = "sidx_orphanrunning0000000000000";
+
+        let root = unique_test_dir("orphaned-running-index-job");
+        let workspace = root.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("orphaned-running-index-job".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_search_index_job(
+                JOB_ID,
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    job_type: SearchIndexJobType::FullRebuild,
+                    document_source: None,
+                    document_id: None,
+                    documents_total: 0,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .start_search_index_job(JOB_ID)
+                .map_err(|error| error.to_string())?,
+            "fixture job must enter running state",
+        )?;
+
+        let lock_id = AdvisoryLockId::index(WORKSPACE_ID);
+        let live_holder = generate_index_holder_id();
+        ensure(
+            connection
+                .acquire_advisory_lock(
+                    &lock_id,
+                    &live_holder,
+                    Some(INDEX_PUBLISH_LOCK_TTL_SECS),
+                    Some("live owner fixture"),
+                )
+                .map_err(|error| error.to_string())?
+                .is_acquired(),
+            "fixture owner must hold the index publication lease",
+        )?;
+
+        let options = IndexProcessingOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+            dry_run: false,
+            job_limit: None,
+        };
+        let protected = process_index_jobs(&options).map_err(|error| error.to_string())?;
+        ensure(
+            protected.pending_jobs == 0 && protected.completed_jobs == 0,
+            format!("a live owner must keep its running job protected: {protected:?}"),
+        )?;
+        let still_running = connection
+            .get_search_index_job(JOB_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "protected running job disappeared".to_owned())?;
+        ensure(
+            still_running.status_enum() == Some(SearchIndexJobStatus::Running),
+            format!("live-owned job must remain running: {still_running:?}"),
+        )?;
+
+        ensure(
+            connection
+                .release_advisory_lock(&lock_id, &live_holder)
+                .map_err(|error| error.to_string())?,
+            "fixture owner must release its publication lease",
+        )?;
+        let dead_holder = "index:2147483647:orphaned-worker";
+        ensure(
+            connection
+                .acquire_advisory_lock(
+                    &lock_id,
+                    dead_holder,
+                    Some(INDEX_PUBLISH_LOCK_TTL_SECS),
+                    Some("orphaned owner fixture"),
+                )
+                .map_err(|error| error.to_string())?
+                .is_acquired(),
+            "fixture must retain the crashed owner's durable lease row",
+        )?;
+        let recovered = process_index_jobs(&options).map_err(|error| error.to_string())?;
+        ensure(
+            recovered.pending_jobs == 1 && recovered.completed_jobs == 1,
+            format!("the next public tick must recover the orphaned row: {recovered:?}"),
+        )?;
+        let completed = connection
+            .get_search_index_job(JOB_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "recovered index job disappeared".to_owned())?;
+        ensure(
+            completed.id == JOB_ID
+                && completed.status_enum() == Some(SearchIndexJobStatus::Completed),
+            format!("recovery must complete the same durable job ID: {completed:?}"),
+        )?;
+        let jobs = connection
+            .list_search_index_jobs(WORKSPACE_ID, None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            jobs.len() == 1 && jobs[0].id == JOB_ID,
+            format!("orphan recovery must not mint a replacement row: {jobs:?}"),
+        )?;
+
+        connection.close().map_err(|error| error.to_string())
     }
 
     /// bd-1oep7: a cancellation injected immediately AFTER the consolidation

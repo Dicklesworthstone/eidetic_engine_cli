@@ -3713,11 +3713,109 @@ mod tests {
             "job document",
         )?;
 
+        let assert_retry_state = |expected_status: crate::db::SearchIndexJobStatus,
+                                  label: &str|
+         -> TestResult {
+            let stored = connection
+                .get_search_index_job(index_job_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("{label} job row disappeared"))?;
+            ensure(
+                stored.status_enum() == Some(expected_status),
+                format!("{label} fixture state must be durable: {stored:?}"),
+            )?;
+
+            let retry =
+                import_cass_sessions(&client, &options).map_err(|error| error.to_string())?;
+            ensure(
+                retry.sessions_imported == 0 && retry.sessions_skipped == 1,
+                format!("{label} retry must skip the one durable session: {retry:?}"),
+            )?;
+            ensure(
+                retry.index_jobs_queued == 1,
+                format!("{label} retry must schedule reconciliation: {retry:?}"),
+            )?;
+            let retried_session = retry
+                .sessions
+                .first()
+                .ok_or_else(|| format!("{label} retry report omitted its session"))?;
+            ensure(
+                retried_session.status == ImportSessionStatus::Skipped
+                    && retried_session.session_id.as_deref() == Some(session_id)
+                    && retried_session.index_job_id.as_deref() == Some(index_job_id),
+                format!(
+                    "{label} retry must preserve the exact session and index job IDs: {retried_session:?}"
+                ),
+            )
+        };
+
+        ensure(
+            connection
+                .cancel_search_index_job(index_job_id)
+                .map_err(|error| error.to_string())?,
+            "fixture job cancels while pending",
+        )?;
+        assert_retry_state(
+            crate::db::SearchIndexJobStatus::Cancelled,
+            "cancelled CASS publication",
+        )?;
+
+        ensure(
+            connection
+                .requeue_cancelled_search_index_jobs(&workspace_id)
+                .map_err(|error| error.to_string())?
+                == 1,
+            "cancelled fixture job requeues in place",
+        )?;
         ensure(
             connection
                 .start_search_index_job(index_job_id)
                 .map_err(|error| error.to_string())?,
-            "fixture job starts",
+            "fixture job enters running state",
+        )?;
+        let publish_lock = crate::db::AdvisoryLockId::index(&workspace_id);
+        let live_holder = format!("index:{}:cass-state-matrix", std::process::id());
+        ensure(
+            connection
+                .acquire_advisory_lock(
+                    &publish_lock,
+                    &live_holder,
+                    Some(600),
+                    Some("CASS running-state fixture"),
+                )
+                .map_err(|error| error.to_string())?
+                .is_acquired(),
+            "running fixture job has a live publication owner",
+        )?;
+        assert_retry_state(
+            crate::db::SearchIndexJobStatus::Running,
+            "live-running CASS publication",
+        )?;
+        ensure(
+            connection
+                .requeue_cancelled_search_index_jobs(&workspace_id)
+                .map_err(|error| error.to_string())?
+                == 0,
+            "retry recovery must not steal a live-running CASS publication",
+        )?;
+        ensure(
+            connection
+                .release_advisory_lock(&publish_lock, &live_holder)
+                .map_err(|error| error.to_string())?,
+            "running fixture owner releases its publication lease",
+        )?;
+        ensure(
+            connection
+                .requeue_cancelled_search_index_jobs(&workspace_id)
+                .map_err(|error| error.to_string())?
+                == 1,
+            "orphaned running CASS job requeues in place",
+        )?;
+        ensure(
+            connection
+                .start_search_index_job(index_job_id)
+                .map_err(|error| error.to_string())?,
+            "recovered fixture job starts again",
         )?;
         ensure(
             connection
@@ -3725,33 +3823,9 @@ mod tests {
                 .map_err(|error| error.to_string())?,
             "fixture job fails",
         )?;
-
-        let retry = import_cass_sessions(&client, &options).map_err(|error| error.to_string())?;
-        ensure_equal(&retry.sessions_imported, &0, "retry imports no duplicate")?;
-        ensure_equal(&retry.sessions_skipped, &1, "retry skips durable session")?;
-        ensure_equal(
-            &retry.index_jobs_queued,
-            &1,
-            "retry schedules the noncompleted durable job for reconciliation",
-        )?;
-        let retried_session = retry
-            .sessions
-            .first()
-            .ok_or_else(|| "retry report should include skipped session".to_string())?;
-        ensure_equal(
-            &retried_session.status,
-            &ImportSessionStatus::Skipped,
-            "retry session status",
-        )?;
-        ensure_equal(
-            &retried_session.session_id.as_deref(),
-            &Some(session_id),
-            "retry preserves session id",
-        )?;
-        ensure_equal(
-            &retried_session.index_job_id.as_deref(),
-            &Some(index_job_id),
-            "retry exposes the exact failed job id for the CLI reconciliation pass",
+        assert_retry_state(
+            crate::db::SearchIndexJobStatus::Failed,
+            "failed CASS publication",
         )
     }
 
