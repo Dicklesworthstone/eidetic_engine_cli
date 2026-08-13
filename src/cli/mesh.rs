@@ -3777,7 +3777,7 @@ where
             schema: RESPONDER_CONTROL_SCHEMA_V1.to_owned(),
             op,
             nonce: uuid::Uuid::now_v7().as_simple().to_string(),
-            workspace_id: snapshot.workspace_id,
+            workspace_id: snapshot.workspace_id.clone(),
             team_id: args.team_id.clone(),
             responder_node_id: args.responder_node_id.clone(),
             workspace_path,
