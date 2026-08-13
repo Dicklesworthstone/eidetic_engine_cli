@@ -4,6 +4,7 @@
 //! isolated behind small runner traits so status/doctor surfaces can share one
 //! interpretation path.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
 #[cfg(unix)]
@@ -114,6 +115,75 @@ pub struct TailscaleBinaryReport {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TailscaleUserProfile {
+    pub user_id: String,
+    pub login_name: String,
+    pub display_name: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TailnetOwnerDisposition {
+    Attested,
+    Missing,
+    DomainMismatch,
+    Reassigned,
+}
+
+impl TailnetOwnerDisposition {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Attested => "attested",
+            Self::Missing => "missing",
+            Self::DomainMismatch => "domain_mismatch",
+            Self::Reassigned => "reassigned",
+        }
+    }
+}
+
+#[must_use]
+pub fn evaluate_tailnet_owner(
+    observed: Option<&TailscaleUserProfile>,
+    recorded_login: Option<&str>,
+    allowed_domain: Option<&str>,
+) -> TailnetOwnerDisposition {
+    let Some(owner) = observed else {
+        return TailnetOwnerDisposition::Missing;
+    };
+    let login = owner.login_name.trim();
+    if login.is_empty() {
+        return TailnetOwnerDisposition::Missing;
+    }
+    if allowed_domain
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|domain| !login_belongs_to_domain(login, domain))
+    {
+        return TailnetOwnerDisposition::DomainMismatch;
+    }
+    if recorded_login
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|recorded| !recorded.eq_ignore_ascii_case(login))
+    {
+        return TailnetOwnerDisposition::Reassigned;
+    }
+    TailnetOwnerDisposition::Attested
+}
+
+#[must_use]
+pub fn login_belongs_to_domain(login: &str, domain: &str) -> bool {
+    let login = login.trim();
+    let domain = domain.trim().trim_start_matches('@');
+    if login.is_empty() || domain.is_empty() {
+        return false;
+    }
+    login
+        .rsplit_once('@')
+        .is_some_and(|(_, host)| host.eq_ignore_ascii_case(domain))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TailscalePeerReport {
     pub node_key: String,
     pub tailscale_ips: Vec<String>,
@@ -122,6 +192,7 @@ pub struct TailscalePeerReport {
     pub advertised_tags: Vec<String>,
     pub online: Option<bool>,
     pub ee_capability: Option<TailscalePeerEeCapability>,
+    pub owner: Option<TailscaleUserProfile>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -149,6 +220,7 @@ pub struct TailscaleLocalReport {
     pub self_tailscale_ip: Option<String>,
     pub self_magic_dns_name: Option<String>,
     pub self_advertised_tags: Vec<String>,
+    pub self_owner: Option<TailscaleUserProfile>,
     pub peers: Vec<TailscalePeerReport>,
     pub version: Option<String>,
     pub probe_method: TailscaleProbeMethod,
@@ -266,6 +338,7 @@ impl TailscaleLocalReport {
             self_tailscale_ip: None,
             self_magic_dns_name: None,
             self_advertised_tags: Vec::new(),
+            self_owner: None,
             peers: Vec::new(),
             version: None,
             probe_method,
@@ -719,7 +792,9 @@ pub fn classify_status_payload(input: TailscaleStatusProbeInput<'_>) -> Tailscal
     report.self_magic_dns_name = string_value(self_node, "DNSName");
     report.self_tailscale_ip = first_string_array_value(self_node, "TailscaleIPs");
     report.self_advertised_tags = string_array_value(self_node, "Tags");
-    report.peers = peer_reports(&status);
+    let users = user_profiles(&status);
+    report.self_owner = node_owner(self_node, &users);
+    report.peers = peer_reports(&status, &users);
 
     if let Some(binary) = input.binary {
         report.binary_authentic = binary.authentic;
@@ -1231,7 +1306,10 @@ fn string_array_value(value: &Value, key: &str) -> Vec<String> {
         .collect()
 }
 
-fn peer_reports(status: &Value) -> Vec<TailscalePeerReport> {
+fn peer_reports(
+    status: &Value,
+    users: &BTreeMap<String, TailscaleUserProfile>,
+) -> Vec<TailscalePeerReport> {
     let Some(peers) = status.get("Peer").and_then(Value::as_object) else {
         return Vec::new();
     };
@@ -1255,11 +1333,66 @@ fn peer_reports(status: &Value) -> Vec<TailscalePeerReport> {
                 advertised_tags: string_array_value(peer, "Tags"),
                 online: bool_value(peer, "Online"),
                 ee_capability: peer_ee_capability(peer),
+                owner: node_owner(peer, users),
             })
         })
         .collect();
     reports.sort_by(|left, right| left.node_key.cmp(&right.node_key));
     reports
+}
+
+fn user_profiles(status: &Value) -> BTreeMap<String, TailscaleUserProfile> {
+    let Some(users) = status.get("User").and_then(Value::as_object) else {
+        return BTreeMap::new();
+    };
+    users
+        .iter()
+        .filter_map(|(key, value)| {
+            parse_user_profile(value, Some(key)).map(|profile| (profile.user_id.clone(), profile))
+        })
+        .collect()
+}
+
+fn parse_user_profile(value: &Value, fallback_id: Option<&str>) -> Option<TailscaleUserProfile> {
+    if !value.is_object() {
+        return None;
+    }
+    let user_id = numeric_or_string_id(value, "ID")
+        .or_else(|| fallback_id.map(str::to_owned))
+        .filter(|id| !id.trim().is_empty())?;
+    let login_name = string_value(value, "LoginName")
+        .or_else(|| string_value(value, "loginName"))
+        .filter(|login| !login.trim().is_empty())?;
+    Some(TailscaleUserProfile {
+        user_id,
+        login_name,
+        display_name: string_value(value, "DisplayName")
+            .or_else(|| string_value(value, "displayName"))
+            .filter(|name| !name.trim().is_empty()),
+    })
+}
+
+fn node_owner(
+    node: &Value,
+    users: &BTreeMap<String, TailscaleUserProfile>,
+) -> Option<TailscaleUserProfile> {
+    if let Some(nested) = node.get("UserProfile")
+        && let Some(profile) = parse_user_profile(nested, None)
+    {
+        return Some(profile);
+    }
+    let user_id =
+        numeric_or_string_id(node, "UserID").or_else(|| numeric_or_string_id(node, "User"))?;
+    users.get(&user_id).cloned()
+}
+
+fn numeric_or_string_id(value: &Value, key: &str) -> Option<String> {
+    let field = value.get(key)?;
+    field
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| field.as_i64().map(|n| n.to_string()))
+        .or_else(|| field.as_u64().map(|n| n.to_string()))
 }
 
 fn peer_ee_capability(peer: &Value) -> Option<TailscalePeerEeCapability> {
@@ -1625,5 +1758,174 @@ mod tests {
                 .any(|item| item.code == TAILSCALE_SHIELDS_UP_CODE)
         );
         Ok(())
+    }
+
+    #[test]
+    fn status_user_map_is_joined_to_self_and_peer_user_ids() {
+        let report = classify(
+            r#"{
+              "BackendState": "Running",
+              "Self": {
+                "ID":"nodekey:self",
+                "Authenticated":true,
+                "TailscaleIPs":["100.64.0.10"],
+                "Platform":"linux",
+                "UserID": 11
+              },
+              "Peer": {
+                "nodekey:alpha": {
+                  "ID": "nodekey:alpha",
+                  "UserID": 22,
+                  "HostName": "alpha",
+                  "TailscaleIPs": ["100.64.0.20"]
+                }
+              },
+              "User": {
+                "11": {
+                  "ID": 11,
+                  "LoginName": "alice@acme.com",
+                  "DisplayName": "Alice"
+                },
+                "22": {
+                  "ID": 22,
+                  "LoginName": "bob@acme.com",
+                  "DisplayName": "Bob"
+                }
+              }
+            }"#,
+        );
+        let self_owner = report.self_owner.as_ref().expect("self owner");
+        assert_eq!(self_owner.user_id, "11");
+        assert_eq!(self_owner.login_name, "alice@acme.com");
+        assert_eq!(self_owner.display_name.as_deref(), Some("Alice"));
+        let peer = &report.peers[0];
+        let owner = peer.owner.as_ref().expect("peer owner");
+        assert_eq!(owner.user_id, "22");
+        assert_eq!(owner.login_name, "bob@acme.com");
+    }
+
+    #[test]
+    fn nested_user_profile_is_accepted_when_user_map_is_absent() {
+        let report = classify(
+            r#"{
+              "BackendState": "Running",
+              "Self": {
+                "ID":"nodekey:self",
+                "Authenticated":true,
+                "Platform":"linux",
+                "UserProfile": {
+                  "ID": "77",
+                  "LoginName": "owner@example.test",
+                  "DisplayName": "Owner"
+                }
+              }
+            }"#,
+        );
+        let owner = report.self_owner.as_ref().expect("nested owner");
+        assert_eq!(owner.user_id, "77");
+        assert_eq!(owner.login_name, "owner@example.test");
+        assert_eq!(owner.display_name.as_deref(), Some("Owner"));
+    }
+
+    #[test]
+    fn missing_user_map_leaves_owner_unset() {
+        let report = classify(
+            r#"{
+              "BackendState": "Running",
+              "Self": {
+                "ID":"nodekey:self",
+                "Authenticated":true,
+                "UserID": 99,
+                "Platform":"linux"
+              },
+              "Peer": {
+                "nodekey:alpha": {
+                  "ID": "nodekey:alpha",
+                  "UserID": 99
+                }
+              }
+            }"#,
+        );
+        assert!(report.self_owner.is_none());
+        assert!(report.peers[0].owner.is_none());
+    }
+
+    #[test]
+    fn key_rotation_keeps_the_same_owner_while_reassignment_changes_login() {
+        let first = classify(
+            r#"{
+              "BackendState": "Running",
+              "Self": {"ID":"nodekey:self","Authenticated":true,"UserID":1,"Platform":"linux"},
+              "Peer": {
+                "nodekey:old": {"ID":"nodekey:old","UserID":1,"HostName":"peer"}
+              },
+              "User": {"1": {"ID":1,"LoginName":"alice@acme.com","DisplayName":"Alice"}}
+            }"#,
+        );
+        let rotated = classify(
+            r#"{
+              "BackendState": "Running",
+              "Self": {"ID":"nodekey:self","Authenticated":true,"UserID":1,"Platform":"linux"},
+              "Peer": {
+                "nodekey:new": {"ID":"nodekey:new","UserID":1,"HostName":"peer"}
+              },
+              "User": {"1": {"ID":1,"LoginName":"alice@acme.com","DisplayName":"Alice"}}
+            }"#,
+        );
+        let reassigned = classify(
+            r#"{
+              "BackendState": "Running",
+              "Self": {"ID":"nodekey:self","Authenticated":true,"UserID":2,"Platform":"linux"},
+              "Peer": {
+                "nodekey:new": {"ID":"nodekey:new","UserID":2,"HostName":"peer"}
+              },
+              "User": {"2": {"ID":2,"LoginName":"mallory@acme.com","DisplayName":"Mallory"}}
+            }"#,
+        );
+        let first_login = first.peers[0]
+            .owner
+            .as_ref()
+            .expect("first")
+            .login_name
+            .clone();
+        let rotated_login = rotated.peers[0]
+            .owner
+            .as_ref()
+            .expect("rotated")
+            .login_name
+            .clone();
+        let reassigned_login = reassigned.peers[0]
+            .owner
+            .as_ref()
+            .expect("reassigned")
+            .login_name
+            .clone();
+        assert_eq!(first_login, "alice@acme.com");
+        assert_eq!(rotated_login, first_login);
+        assert_eq!(reassigned_login, "mallory@acme.com");
+        assert_eq!(
+            evaluate_tailnet_owner(
+                rotated.peers[0].owner.as_ref(),
+                Some(&first_login),
+                Some("acme.com"),
+            ),
+            TailnetOwnerDisposition::Attested
+        );
+        assert_eq!(
+            evaluate_tailnet_owner(
+                reassigned.peers[0].owner.as_ref(),
+                Some(&first_login),
+                Some("acme.com"),
+            ),
+            TailnetOwnerDisposition::Reassigned
+        );
+        assert_eq!(
+            evaluate_tailnet_owner(reassigned.peers[0].owner.as_ref(), None, Some("other.com"),),
+            TailnetOwnerDisposition::DomainMismatch
+        );
+        assert_eq!(
+            evaluate_tailnet_owner(None, Some("alice@acme.com"), Some("acme.com")),
+            TailnetOwnerDisposition::Missing
+        );
     }
 }

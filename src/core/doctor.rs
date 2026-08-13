@@ -4079,6 +4079,7 @@ mod tests {
                 self_tailscale_ip: None,
                 self_magic_dns_name: None,
                 self_advertised_tags: Vec::new(),
+                self_owner: None,
                 peers: Vec::new(),
                 version: None,
                 probe_method: crate::core::tailscale_probe::TailscaleProbeMethod::Cli,

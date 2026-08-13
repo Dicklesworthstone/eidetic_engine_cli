@@ -678,6 +678,7 @@ mod tests {
             self_tailscale_ip: Some("100.64.0.1".to_owned()),
             self_magic_dns_name: Some("self.tailnet.test.".to_owned()),
             self_advertised_tags: vec![EE_MESH_SERVICE_TAG.to_owned()],
+            self_owner: None,
             peers,
             version: Some("1.66.0".to_owned()),
             probe_method: TailscaleProbeMethod::Cli,
@@ -696,6 +697,7 @@ mod tests {
             advertised_tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
             online: Some(true),
             ee_capability: None,
+            owner: None,
         }
     }
 

@@ -7911,6 +7911,7 @@ mod tests {
             self_tailscale_ip: Some("100.64.0.1".to_owned()),
             self_magic_dns_name: Some("self.tailnet.test.".to_owned()),
             self_advertised_tags: Vec::new(),
+            self_owner: None,
             peers: vec![TailscalePeerReport {
                 node_key: node_key.to_owned(),
                 tailscale_ips: vec!["100.64.0.2".to_owned()],
@@ -7925,6 +7926,7 @@ mod tests {
                     respond: true,
                     latency_ms: 1,
                 }),
+                owner: None,
             }],
             version: Some("1.66.0".to_owned()),
             probe_method: TailscaleProbeMethod::Cli,
@@ -8302,6 +8304,7 @@ mod tests {
             self_tailscale_ip: Some("100.64.0.1".to_owned()),
             self_magic_dns_name: Some("self.tailnet.test.".to_owned()),
             self_advertised_tags: Vec::new(),
+            self_owner: None,
             peers: vec![TailscalePeerReport {
                 node_key: "nodekey:ee".to_owned(),
                 tailscale_ips: vec!["100.64.0.4".to_owned()],
@@ -8316,6 +8319,7 @@ mod tests {
                     respond: true,
                     latency_ms: 1,
                 }),
+                owner: None,
             }],
             version: Some("1.66.0".to_owned()),
             probe_method: TailscaleProbeMethod::Cli,
@@ -8347,6 +8351,7 @@ mod tests {
             self_tailscale_ip: Some("100.64.0.1".to_owned()),
             self_magic_dns_name: Some("self.tailnet.test.".to_owned()),
             self_advertised_tags: Vec::new(),
+            self_owner: None,
             peers: vec![
                 TailscalePeerReport {
                     node_key: "nodekey:plain".to_owned(),
@@ -8356,6 +8361,7 @@ mod tests {
                     advertised_tags: Vec::new(),
                     online: Some(true),
                     ee_capability: None,
+                    owner: None,
                 },
                 TailscalePeerReport {
                     node_key: "nodekey:malformed".to_owned(),
@@ -8371,6 +8377,7 @@ mod tests {
                         respond: true,
                         latency_ms: 1,
                     }),
+                    owner: None,
                 },
                 TailscalePeerReport {
                     node_key: "nodekey:ee".to_owned(),
@@ -8386,6 +8393,7 @@ mod tests {
                         respond: true,
                         latency_ms: 1,
                     }),
+                    owner: None,
                 },
                 TailscalePeerReport {
                     node_key: "nodekey:offline-ee".to_owned(),
@@ -8401,6 +8409,7 @@ mod tests {
                         respond: true,
                         latency_ms: 1,
                     }),
+                    owner: None,
                 },
                 TailscalePeerReport {
                     node_key: "nodekey:declined".to_owned(),
@@ -8416,6 +8425,7 @@ mod tests {
                         respond: false,
                         latency_ms: 1,
                     }),
+                    owner: None,
                 },
                 TailscalePeerReport {
                     node_key: "nodekey:other-workspace".to_owned(),
@@ -8431,6 +8441,7 @@ mod tests {
                         respond: true,
                         latency_ms: 1,
                     }),
+                    owner: None,
                 },
             ],
             version: Some("1.66.0".to_owned()),
