@@ -738,7 +738,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn tcp_probe_does_not_treat_loopback_or_http_as_live_ee() {
         let mut loopback = peer("nodekey:loopback", &[EE_MESH_SERVICE_TAG]);
         loopback.tailscale_ips = vec!["127.0.0.1".to_owned()];

@@ -24,10 +24,13 @@ use std::time::Duration;
 use asupersync::{CancelKind, Cx};
 use ee::config::MeshLane;
 use ee::db::{
-    CreateWorkspaceInput, DbConnection, MeshLaneGrantMutationInput, MeshLaneGrantTargetAdapter,
-    UpsertMeshPeerInput,
+    CreateMeshOriginEventInput, CreateWorkspaceInput, DbConnection, MeshLaneGrantMutationInput,
+    MeshLaneGrantTargetAdapter, UpsertMeshPeerInput,
 };
-use ee::mesh::bootstrap_envelope::exchange_bootstrap_hello;
+use ee::mesh::bootstrap_envelope::{
+    SyncRoundRequest, exchange_bootstrap_hello, exchange_live_mesh_round,
+};
+use ee::mesh::foreground_cli::contact_authenticated_mesh_peer;
 use ee::mesh::hello::{build_request, parse_hello_response, serialize_within_budget};
 use ee::mesh::key_store::{MeshKeyStore, PairKeyClass, SecretBytes};
 use ee::mesh::peer::{
@@ -152,7 +155,15 @@ where
     F: FnOnce(Cx) -> Fut,
     Fut: Future<Output = TestResult<T>>,
 {
-    ee::core::run_cli_with_cx(TEST_TIMEOUT, operation)
+    run_runtime_with(TEST_TIMEOUT, operation)
+}
+
+fn run_runtime_with<F, Fut, T>(budget: Duration, operation: F) -> TestResult<T>
+where
+    F: FnOnce(Cx) -> Fut,
+    Fut: Future<Output = TestResult<T>>,
+{
+    ee::core::run_cli_with_cx(budget, operation)
         .map_err(|error| format!("asupersync runtime failed: {error}"))?
 }
 
@@ -1139,5 +1150,304 @@ fn production_broker_answers_unsigned_bootstrap_hello_on_the_same_port() -> Test
     server
         .join()
         .map_err(|_| "hello broker thread panicked".to_owned())??;
+    Ok(())
+}
+
+const LOOPBACK_ORIGIN_EVENT_ID: &str = "mesh_oevt_loopbackorigin000000000001";
+const LOOPBACK_ORIGIN_EVENT_HASH: &str =
+    "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+const LOOPBACK_RESPONDER_WORKSPACE_ID: &str = "wsp_responderloopback000000001";
+
+fn origin_capable_expectations() -> ResponderExpectations {
+    let mut expected = expectations();
+    expected.team_id = "team_loopback".to_owned();
+    expected.responder_node_id = "node_responder".to_owned();
+    expected.responder_workspace_id = LOOPBACK_RESPONDER_WORKSPACE_ID.to_owned();
+    expected
+}
+
+fn origin_capable_session_limits() -> SessionChannelLimits {
+    SessionChannelLimits {
+        connect_timeout: TEST_TIMEOUT,
+        io_timeout: TEST_TIMEOUT,
+        max_requested_budget_ms: 10_000,
+        max_authenticated_frames: 128,
+        max_authenticated_bytes: 1024 * 1024,
+    }
+}
+
+fn origin_capable_initiator_config() -> InitiatorSessionConfig {
+    let mut config = initiator_config();
+    config.binding.team_id = "team_loopback".to_owned();
+    config.binding.responder_node_id = "node_responder".to_owned();
+    config.binding.responder_workspace_id = LOOPBACK_RESPONDER_WORKSPACE_ID.to_owned();
+    config.limits = origin_capable_session_limits();
+    config
+}
+
+fn seed_loopback_origin_event(database_path: &Path) -> TestResult {
+    let connection = DbConnection::open_file(database_path)
+        .map_err(|error| format!("open loopback origin db: {error}"))?;
+    connection
+        .migrate()
+        .map_err(|error| format!("migrate loopback origin db: {error}"))?;
+    connection
+        .append_mesh_origin_event(&CreateMeshOriginEventInput {
+            event_id: LOOPBACK_ORIGIN_EVENT_ID.to_owned(),
+            team_id: "team_loopback".to_owned(),
+            origin_node_id: "node_responder".to_owned(),
+            signing_key_generation: 1,
+            seq: 0,
+            prev_event_hash: None,
+            event_hash: LOOPBACK_ORIGIN_EVENT_HASH.to_owned(),
+            signature: "sig-loopback".to_owned(),
+            payload_schema: "ee.mesh.memory_event.v1".to_owned(),
+            payload_json: r#"{"operation":"create","logicalMemoryId":"mem_loopbackorigin0001"}"#
+                .to_owned(),
+            required_features_json: "[]".to_owned(),
+            produced_at: CREATED_AT.to_owned(),
+            body_nonce_hex: None,
+        })
+        .map_err(|error| format!("append loopback origin event: {error}"))?;
+    Ok(())
+}
+
+fn seed_loopback_route_authority(database_path: &Path) -> TestResult {
+    let connection = DbConnection::open_file(database_path)
+        .map_err(|error| format!("open loopback authority db: {error}"))?;
+    connection
+        .insert_workspace(
+            LOOPBACK_RESPONDER_WORKSPACE_ID,
+            &CreateWorkspaceInput {
+                path: database_path
+                    .parent()
+                    .unwrap_or(database_path)
+                    .display()
+                    .to_string(),
+                name: Some("loopback responder".to_owned()),
+            },
+        )
+        .map_err(|error| format!("insert loopback workspace: {error}"))?;
+    let initiator_node_id = origin_capable_expectations().initiator_node_id;
+    connection
+        .upsert_mesh_peer(&UpsertMeshPeerInput {
+            workspace_id: LOOPBACK_RESPONDER_WORKSPACE_ID.to_owned(),
+            peer_id: PEER_HANDLE.to_owned(),
+            origin_node_id: initiator_node_id.clone(),
+            display_name: Some("loopback-initiator".to_owned()),
+            policy_summary_json: None,
+            enabled: true,
+            last_seen_at: Some(CREATED_AT.to_owned()),
+        })
+        .map_err(|error| format!("upsert loopback peer: {error}"))?;
+    connection
+        .apply_mesh_lane_grant_with_effect(
+            &MeshLaneGrantMutationInput {
+                workspace_id: LOOPBACK_RESPONDER_WORKSPACE_ID.to_owned(),
+                peer_id: PEER_HANDLE.to_owned(),
+                target_adapter: MeshLaneGrantTargetAdapter::new(PEER_HANDLE, initiator_node_id),
+                material_lane: MeshLane::Metadata,
+                expected_generation: 0,
+                approval_config_digest: Some(format!("blake3:{}", "a".repeat(64))),
+                updated_at: Some(CREATED_AT.to_owned()),
+            },
+            |_| Ok::<(), String>(()),
+        )
+        .map_err(|error| format!("grant loopback lane: {error}"))?;
+    connection
+        .execute_raw(&format!(
+            "UPDATE mesh_peers
+                SET transport_tailnet_id = {},
+                    transport_stable_node_id = {},
+                    transport_current_node_pubkey = {},
+                    transport_key_generation = 1
+              WHERE workspace_id = {} AND peer_id = {}",
+            sqlite_text_literal("tailnet-loopback"),
+            sqlite_text_literal("stable-initiator"),
+            sqlite_text_literal("nodekey:initiator-current"),
+            sqlite_text_literal(LOOPBACK_RESPONDER_WORKSPACE_ID),
+            sqlite_text_literal(PEER_HANDLE),
+        ))
+        .map_err(|error| format!("plant loopback transport identity: {error}"))?;
+    Ok(())
+}
+
+fn route_with_database(
+    workspace_path: PathBuf,
+    database_path: PathBuf,
+    port: u16,
+) -> RegisteredResponderRoute {
+    let mut registered = route(workspace_path, port);
+    registered.database_path = Some(database_path);
+    registered.expectations = origin_capable_expectations();
+    registered.limits = origin_capable_session_limits();
+    registered
+}
+
+#[test]
+fn production_broker_returns_origin_event_batch_after_unsigned_hello() -> TestResult {
+    let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
+    let database_path = workspace.path().join("ee.db");
+    seed_loopback_origin_event(&database_path)?;
+    let local_api_dir = tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
+    let fake = FakeLocalApi::spawn(local_api_dir.path(), 1)?;
+    let port = available_nonprivileged_port()?;
+    let bind_address: SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .map_err(|error| format!("parse bind address: {error}"))?;
+    let registry = ResponderRouteRegistry::new([route_with_database(
+        workspace.path().to_path_buf(),
+        database_path,
+        port,
+    )])
+    .map_err(|error| error.to_string())?;
+    let (address_tx, address_rx) = mpsc::sync_channel(1);
+    let server = thread::spawn(move || {
+        run_runtime(|cx| async move {
+            let client = TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT);
+            let broker = ResponderBroker::bind(
+                &cx,
+                bind_address,
+                client,
+                registry,
+                PreAuthAdmissionLimits::default(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            address_tx
+                .send(broker.local_addr())
+                .map_err(|error| format!("publish broker address: {error}"))?;
+            let error = match broker.accept_authenticated(&cx).await {
+                Ok(_) => {
+                    return Err("unsigned hello was treated as an authenticated session".to_owned());
+                }
+                Err(error) => error,
+            };
+            if !matches!(error, ResponderBrokerError::BootstrapHelloAnswered) {
+                return Err(format!("unexpected hello accept error: {error:?}"));
+            }
+            fake.finish()?;
+            Ok(())
+        })
+    });
+    let address = address_rx
+        .recv_timeout(TEST_TIMEOUT)
+        .map_err(|error| format!("wait for broker bind: {error}"))?;
+    let request = build_request(
+        "hello-sync-loopback",
+        "nodekey:initiator",
+        env!("CARGO_PKG_VERSION"),
+        vec!["workspace-initiator".to_owned()],
+        vec!["hello".to_owned(), "sync".to_owned()],
+        Vec::new(),
+    );
+    let payload_bytes =
+        serialize_within_budget(&request).map_err(|error| format!("serialize hello: {error}"))?;
+    let payload = serde_json::from_slice(&payload_bytes)
+        .map_err(|error| format!("hello payload json: {error}"))?;
+    let (_hello, sync) = exchange_live_mesh_round(
+        address,
+        TEST_TIMEOUT,
+        payload,
+        &SyncRoundRequest::new(Vec::new(), 0, 8),
+    )
+    .map_err(|error| format!("live mesh round: {error}"))?;
+    if sync.events.len() != 1 || sync.events[0].event_hash != LOOPBACK_ORIGIN_EVENT_HASH {
+        return Err(format!(
+            "unsigned hello did not return origin batch: {sync:?}"
+        ));
+    }
+    server
+        .join()
+        .map_err(|_| "hello+sync broker thread panicked".to_owned())??;
+    Ok(())
+}
+
+#[test]
+fn production_broker_serves_authenticated_event_fetch_from_origin_store() -> TestResult {
+    let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
+    let store = MeshKeyStore::open_or_create(workspace.path())
+        .map_err(|error| format!("preprovision key store: {error}"))?;
+    store
+        .store_pair_key(
+            PEER_HANDLE,
+            PairKeyClass::Current,
+            NonZeroU64::new(7).expect("test generation is nonzero"),
+            &pair_key(),
+            CREATED_AT,
+            false,
+        )
+        .map_err(|error| format!("preprovision pair key: {error}"))?;
+    let database_path = workspace.path().join("ee.db");
+    seed_loopback_origin_event(&database_path)?;
+    seed_loopback_route_authority(&database_path)?;
+
+    let local_api_dir = tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
+    let fake = FakeLocalApi::spawn(local_api_dir.path(), 2)?;
+    let port = available_nonprivileged_port()?;
+    let bind_address: SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .map_err(|error| format!("parse bind address: {error}"))?;
+    let registry = ResponderRouteRegistry::new([route_with_database(
+        workspace.path().to_path_buf(),
+        database_path,
+        port,
+    )])
+    .map_err(|error| error.to_string())?;
+    let (address_tx, address_rx) = mpsc::sync_channel(1);
+    let server = thread::spawn(move || {
+        let result = run_runtime_with(Duration::from_secs(30), |cx| async move {
+            let client = TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT);
+            let broker = ResponderBroker::bind(
+                &cx,
+                bind_address,
+                client,
+                registry,
+                PreAuthAdmissionLimits::default(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            address_tx
+                .send(broker.local_addr())
+                .map_err(|error| format!("publish broker address: {error}"))?;
+            broker
+                .accept_authenticated_and_serve(&cx)
+                .await
+                .map_err(|error| format!("authenticated serve: {error}"))?;
+            fake.finish()?;
+            Ok(())
+        });
+        result
+    });
+    let address = address_rx
+        .recv_timeout(Duration::from_secs(30))
+        .map_err(|error| format!("wait for broker bind: {error}"))?;
+    let client = run_runtime_with(Duration::from_secs(30), |cx| async move {
+        contact_authenticated_mesh_peer(
+            &cx,
+            address,
+            origin_capable_initiator_config(),
+            &SyncRoundRequest::new(Vec::new(), 0, 8),
+        )
+        .await
+        .map_err(|error| format!("authenticated EventFetch client: {error}"))
+    });
+    let server = server
+        .join()
+        .map_err(|_| "authenticated serve thread panicked".to_owned())?;
+    let sync = match (client, server) {
+        (Ok(sync), Ok(())) => sync,
+        (client, server) => {
+            return Err(format!(
+                "authenticated EventFetch failed client={client:?} server={server:?}"
+            ));
+        }
+    };
+    if sync.events.len() != 1 || sync.events[0].event_hash != LOOPBACK_ORIGIN_EVENT_HASH {
+        return Err(format!(
+            "authenticated EventFetch did not return origin batch: {sync:?}"
+        ));
+    }
     Ok(())
 }

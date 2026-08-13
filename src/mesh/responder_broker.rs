@@ -7,7 +7,8 @@
 //! hands the socket to T2.1's public source-coupled session acceptor.
 //!
 //! Unsigned bootstrap hello is answered on the same listener before
-//! session_open. Anti-entropy and authenticated sync remain later slices.
+//! session_open. After hello or an authenticated session, the broker serves
+//! one `ee.mesh.sync_round.v1` event-header batch from the origin store.
 //! A same-EUID Unix-domain control channel lets another
 //! local workspace register or unregister exact team routes without binding
 //! a second TCP port. Durable lifecycle audit persistence and application
@@ -1353,6 +1354,18 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
         }
     }
 
+    /// Accept one authenticated session, serve one EventFetch/Summary
+    /// sync-round from the origin store, then close the session.
+    pub async fn accept_authenticated_and_serve(
+        &self,
+        cx: &Cx,
+    ) -> Result<(), ResponderBrokerError> {
+        let mut session = self.accept_authenticated(cx).await?;
+        let result = serve_authenticated_sync_round(cx, &mut session, &self.routes).await;
+        session.close();
+        result
+    }
+
     fn admit(&self, source: IpAddr) -> Result<PreAuthPermit, ResponderBrokerError> {
         let mut state = self
             .admission
@@ -1660,9 +1673,8 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
     }
 
     /// Serve authenticated transport sessions until the caller context is
-    /// cancelled. Application protocol work remains owned by the next mesh
-    /// layer; this loop deliberately drops a completed authenticated session
-    /// only after T2.1 has proven the route and key.
+    /// cancelled. Each accepted session answers one EventFetch/Summary
+    /// sync-round from the registered origin store, then closes.
     pub async fn serve_until_cancelled(&mut self, cx: &Cx) -> Result<(), ResponderBrokerError> {
         let mut listener_index = 0_usize;
         loop {
@@ -1692,15 +1704,11 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             let accept_timed_out = match timeout(
                 now,
                 self.revalidate_interval,
-                broker.accept_authenticated(cx),
+                broker.accept_authenticated_and_serve(cx),
             )
             .await
             {
-                Ok(Ok(mut session)) => {
-                    let _ = serve_authenticated_sync_round(cx, &mut session, &broker.routes).await;
-                    session.close();
-                    false
-                }
+                Ok(Ok(())) => false,
                 Ok(Err(ResponderBrokerError::Cancelled)) => {
                     self.shutdown();
                     return Err(ResponderBrokerError::Cancelled);
@@ -2837,22 +2845,29 @@ async fn serve_authenticated_sync_round(
     session: &mut AuthenticatedTransportSession,
     routes: &ResponderRouteRegistry,
 ) -> Result<(), ResponderBrokerError> {
-    let Some(request) = session
-        .receive_request(cx)
-        .await
-        .map_err(ResponderBrokerError::Session)?
-    else {
-        return Ok(());
+    let request = loop {
+        let Some(request) = session
+            .receive_request(cx)
+            .await
+            .map_err(ResponderBrokerError::Session)?
+        else {
+            return Ok(());
+        };
+        if matches!(
+            request.capability,
+            FrameCapability::Summary | FrameCapability::EventFetch
+        ) {
+            break request;
+        }
     };
-    if !matches!(
-        request.capability,
-        FrameCapability::Summary | FrameCapability::EventFetch
-    ) {
-        return Ok(());
-    }
+    let (range_start_seq, max_events) = serde_json::to_vec(&request.payload)
+        .ok()
+        .and_then(|bytes| parse_sync_round_request(&bytes))
+        .map(|parsed| (parsed.range_start_seq, parsed.max_events))
+        .unwrap_or((0, 512));
     let processed = session
         .process_request(cx, &request, async {
-            load_sync_round_response(routes, 0, 512)
+            load_sync_round_response(routes, range_start_seq, max_events)
         })
         .await
         .map_err(ResponderBrokerError::Session)?;

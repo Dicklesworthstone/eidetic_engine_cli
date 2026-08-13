@@ -12,19 +12,22 @@ use asupersync::time::sleep as asupersync_sleep;
 use asupersync::{CancelReason, Cx, Outcome};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{MeshLane, MeshLaneDecision};
-use crate::core::memory_scope::{MeshOutboundPolicyDecisionInput, parse_mesh_lane};
+use crate::config::{MeshLane, MeshLaneDecision, workspace_config};
+use crate::core::memory_scope::{
+    MeshEventValidity, MeshImportDecisionInput, MeshImportDecisionKind,
+    MeshOutboundPolicyDecisionInput, decide_mesh_import, parse_mesh_lane,
+};
 use crate::core::tailscale_probe::TailscaleLocalReport;
 use crate::db::{
-    CreateMeshOriginEventInput, DbConnection, InsertMeshImportLedgerEventInput, MeshStorageStatus,
-    StoredMeshImportLedgerEvent, StoredMeshPeer, StoredMeshPeerCursor,
+    DbConnection, InsertMeshImportLedgerEventInput, MeshStorageStatus, StoredMeshImportLedgerEvent,
+    StoredMeshPeer, StoredMeshPeerCursor, UpsertMeshPeerCursorInput,
 };
 use crate::mesh::anti_entropy_protocol::{
     MeshAntiEntropyRetryPolicy, MeshRoundPeerOutcome, MeshSyncSummaryInput, build_sync_summary,
 };
 use crate::mesh::bootstrap_envelope::{
-    SyncRoundRequest, SyncRoundTip, exchange_bootstrap_hello, exchange_live_mesh_round,
-    parse_live_peer_endpoint,
+    SyncRoundRequest, SyncRoundResponse, SyncRoundTip, exchange_bootstrap_hello,
+    exchange_live_mesh_round, parse_live_peer_endpoint, parse_sync_round_response,
 };
 use crate::mesh::hello::{build_request, serialize_within_budget};
 use crate::mesh::hello_responder::configured_hello_port;
@@ -42,6 +45,9 @@ use crate::mesh::sync::{SelectiveSyncConfig, SelectiveSyncStatusSummary};
 use crate::mesh::tailscale_autodiscovery::{
     TAILSCALE_AUTODISCOVERY_SCHEMA_V1, TAILSCALE_PEER_LIST_UNAVAILABLE_CODE,
     TailscaleAutodiscoveryDegradation, TailscaleAutodiscoveryReport,
+};
+use crate::mesh::transport_session::{
+    FrameCapability, InitiatorSessionConfig, SessionMessage, connect_authenticated_session,
 };
 use crate::policy::{
     MeshExportPolicyAttestation, MeshExportSecretScanReport, MeshExportSecretScanSubject,
@@ -1481,20 +1487,19 @@ impl MeshForegroundSyncTransport for TcpMeshForegroundSyncTransport {
         let Ok(payload) = serde_json::from_slice(&payload_bytes) else {
             return MeshForegroundSyncPeerOutcome::default();
         };
-        let sync_request = SyncRoundRequest::new(
-            vec![SyncRoundTip {
-                origin_node_id: request.peer.origin_node_id.clone(),
-                origin_workspace_id: request.snapshot.workspace_id.clone(),
-                last_seq: 0,
-                tip_event_hash: None,
-            }],
-            0,
-            512,
-        );
+        let sync_request =
+            local_sync_round_request(request.snapshot, request.peer, request.peer_record);
         match exchange_live_mesh_round(address, self.timeout, payload, &sync_request) {
             Ok((_, sync)) => {
                 let received = u32::try_from(sync.events.len()).unwrap_or(u32::MAX);
-                let accepted = persist_sync_round_events(request.snapshot, &sync.events);
+                let accepted = persist_sync_round_events(
+                    request.snapshot,
+                    &request.peer.peer_id,
+                    &sync.events,
+                );
+                if accepted > 0 && accepted == received {
+                    persist_sync_round_cursor(request.snapshot, &request.peer.peer_id, &sync);
+                }
                 MeshForegroundSyncPeerOutcome {
                     contacted: true,
                     events_accepted: u64::from(accepted),
@@ -1517,8 +1522,122 @@ impl MeshForegroundSyncTransport for TcpMeshForegroundSyncTransport {
     }
 }
 
+/// Authenticated EventFetch initiator used after a pair key is already
+/// installed. Unsigned hello+sync remains the daemonless first-contact path.
+pub async fn contact_authenticated_mesh_peer(
+    cx: &Cx,
+    address: std::net::SocketAddr,
+    config: InitiatorSessionConfig,
+    request: &SyncRoundRequest,
+) -> Result<SyncRoundResponse, String> {
+    let mut session = connect_authenticated_session(cx, address, config)
+        .await
+        .map_err(|error| error.to_string())?;
+    let correlation_id = "sync-round-1".to_owned();
+    let payload = serde_json::to_value(request).map_err(|error| error.to_string())?;
+    session
+        .send_request(
+            cx,
+            SessionMessage {
+                correlation_id: correlation_id.clone(),
+                capability: FrameCapability::EventFetch,
+                requested_budget_ms: 10_000,
+                payload,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let reply = session
+        .receive_response(cx, &correlation_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    session.close();
+    let bytes = serde_json::to_vec(&reply.payload).map_err(|error| error.to_string())?;
+    parse_sync_round_response(&bytes)
+        .ok_or_else(|| "authenticated peer did not return ee.mesh.sync_round.v1".to_owned())
+}
+
+fn local_sync_round_request(
+    snapshot: &MeshForegroundSnapshot,
+    peer: &MeshPeerRow,
+    peer_record: &MeshPeerRecord,
+) -> SyncRoundRequest {
+    let mut tips = snapshot
+        .cursors
+        .iter()
+        .filter(|cursor| cursor.peer_id == peer.peer_id)
+        .map(|cursor| SyncRoundTip {
+            origin_node_id: cursor.origin_node_id.clone(),
+            origin_workspace_id: cursor.origin_workspace_id.clone(),
+            last_seq: cursor.last_seq,
+            tip_event_hash: cursor.tip_event_hash.clone(),
+        })
+        .collect::<Vec<_>>();
+    let range_start = tips
+        .iter()
+        .map(|tip| tip.last_seq.saturating_add(1))
+        .min()
+        .unwrap_or(0);
+    if tips.is_empty() {
+        tips.push(SyncRoundTip {
+            origin_node_id: peer.origin_node_id.clone(),
+            origin_workspace_id: peer_record.workspace_id.clone(),
+            last_seq: 0,
+            tip_event_hash: None,
+        });
+    }
+    SyncRoundRequest::new(tips, range_start, 512)
+}
+
+fn persist_sync_round_cursor(
+    snapshot: &MeshForegroundSnapshot,
+    peer_id: &str,
+    sync: &SyncRoundResponse,
+) {
+    let Some(tip) = sync.tips.first().cloned().or_else(|| {
+        sync.events.last().map(|event| SyncRoundTip {
+            origin_node_id: event.origin_node_id.clone(),
+            origin_workspace_id: event.origin_workspace_id.clone(),
+            last_seq: event.seq,
+            tip_event_hash: Some(event.event_hash.clone()),
+        })
+    }) else {
+        return;
+    };
+    let Ok(connection) = DbConnection::open_file(&snapshot.database_path) else {
+        return;
+    };
+    let _ = connection.upsert_mesh_peer_cursor(&UpsertMeshPeerCursorInput {
+        workspace_id: snapshot.workspace_id.clone(),
+        peer_id: peer_id.to_owned(),
+        origin_node_id: tip.origin_node_id,
+        origin_workspace_id: tip.origin_workspace_id,
+        last_seq: tip.last_seq,
+        tip_event_hash: tip.tip_event_hash,
+        tip_audit_hash: None,
+        status: "current".to_owned(),
+        updated_at: None,
+    });
+}
+
+fn ledger_event_id(raw_event_id: &str, event_hash: &str) -> String {
+    if raw_event_id.starts_with("mesh_evt_") && raw_event_id.len() > 9 {
+        return raw_event_id.to_owned();
+    }
+    let suffix = event_hash.trim_start_matches("blake3:");
+    let compact = suffix.chars().take(24).collect::<String>();
+    format!("mesh_evt_{compact}")
+}
+
+fn ledger_memory_id(event_hash: &str) -> String {
+    let suffix = event_hash.trim_start_matches("blake3:");
+    let compact = suffix.chars().take(24).collect::<String>();
+    format!("mem_{compact}")
+}
+
 fn persist_sync_round_events(
     snapshot: &MeshForegroundSnapshot,
+    producer_peer_id: &str,
     events: &[crate::mesh::bootstrap_envelope::SyncRoundEvent],
 ) -> u32 {
     if snapshot.database_path.is_empty() || events.is_empty() {
@@ -1527,84 +1646,79 @@ fn persist_sync_round_events(
     let Ok(connection) = DbConnection::open_file(&snapshot.database_path) else {
         return 0;
     };
+    let bindings = workspace_config(std::path::Path::new(&snapshot.workspace_path))
+        .and_then(|config| config.mesh.peer_group_bindings)
+        .unwrap_or_default();
     let mut imported = 0_u32;
     for event in events {
         let parsed = serde_json::from_str::<serde_json::Value>(&event.payload_json).ok();
-        let input = CreateMeshOriginEventInput {
-            event_id: parsed
-                .as_ref()
-                .and_then(|value| value.get("eventId").and_then(serde_json::Value::as_str))
-                .unwrap_or(event.event_hash.as_str())
-                .to_owned(),
-            team_id: parsed
-                .as_ref()
-                .and_then(|value| value.get("teamId").and_then(serde_json::Value::as_str))
-                .unwrap_or("team-mesh")
-                .to_owned(),
-            origin_node_id: event.origin_node_id.clone(),
-            signing_key_generation: parsed
-                .as_ref()
-                .and_then(|value| {
-                    value
-                        .get("signingKeyGeneration")
-                        .and_then(serde_json::Value::as_u64)
-                })
-                .unwrap_or(1),
-            seq: event.seq,
-            prev_event_hash: parsed.as_ref().and_then(|value| {
-                value
-                    .get("prevEventHash")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToOwned::to_owned)
-            }),
-            event_hash: event.event_hash.clone(),
-            signature: parsed
-                .as_ref()
-                .and_then(|value| value.get("signature").and_then(serde_json::Value::as_str))
-                .unwrap_or("")
-                .to_owned(),
-            payload_schema: parsed
-                .as_ref()
-                .and_then(|value| value.get("schema").and_then(serde_json::Value::as_str))
-                .unwrap_or("ee.mesh.event.v1")
-                .to_owned(),
-            payload_json: event.payload_json.clone(),
-            required_features_json: parsed
-                .as_ref()
-                .and_then(|value| value.get("requiredFeatures"))
-                .map(ToString::to_string)
-                .unwrap_or_else(|| "[]".to_owned()),
-            produced_at: parsed
-                .as_ref()
-                .and_then(|value| value.get("producedAt").and_then(serde_json::Value::as_str))
-                .unwrap_or("1970-01-01T00:00:00Z")
-                .to_owned(),
-            body_nonce_hex: None,
+        let event_validity = if parsed.is_some() {
+            MeshEventValidity::Valid
+        } else {
+            MeshEventValidity::Malformed
         };
-        if connection.append_mesh_origin_event(&input).is_ok() {
-            let _ = connection.insert_mesh_import_ledger_event(&InsertMeshImportLedgerEventInput {
+        let decision = if bindings.is_empty() {
+            None
+        } else {
+            Some(decide_mesh_import(
+                &MeshImportDecisionInput {
+                    local_workspace_id: snapshot.workspace_id.as_str(),
+                    origin_workspace_id: event.origin_workspace_id.as_str(),
+                    producer_peer_id,
+                    material_lane: MeshLane::Metadata,
+                    event_validity,
+                },
+                &bindings,
+            ))
+        };
+        let (import_decision, may_append) = match decision.as_ref() {
+            None if event_validity == MeshEventValidity::Valid => ("allow", true),
+            None => ("reject", false),
+            Some(decision) => (
+                decision.workspace_scope_decision.as_str(),
+                decision.workspace_scope_decision == MeshImportDecisionKind::Allow,
+            ),
+        };
+        let raw_event_id = parsed
+            .as_ref()
+            .and_then(|value| value.get("eventId").and_then(serde_json::Value::as_str))
+            .unwrap_or(event.event_hash.as_str());
+        let event_id = ledger_event_id(raw_event_id, &event.event_hash);
+        let prev_event_hash = parsed.as_ref().and_then(|value| {
+            value
+                .get("prevEventHash")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        });
+        // Inbound material must not enter mesh_origin_events. That table is
+        // origin-owned only; echoing a peer's chain would re-serve it as ours.
+        if connection
+            .insert_mesh_import_ledger_event(&InsertMeshImportLedgerEventInput {
                 workspace_id: snapshot.workspace_id.clone(),
-                event_id: input.event_id.clone(),
-                origin_node_id: input.origin_node_id.clone(),
+                event_id,
+                origin_node_id: event.origin_node_id.clone(),
                 origin_workspace_id: event.origin_workspace_id.clone(),
-                producer_peer_id: None,
-                seq: input.seq,
-                prev_event_hash: input.prev_event_hash.clone(),
-                event_hash: input.event_hash.clone(),
-                event_kind: "sync".to_owned(),
-                logical_memory_id: input.event_id.clone(),
-                content_hash: input.event_hash.clone(),
+                producer_peer_id: Some(producer_peer_id.to_owned()),
+                seq: event.seq.max(1),
+                prev_event_hash,
+                event_hash: event.event_hash.clone(),
+                event_kind: "create".to_owned(),
+                logical_memory_id: ledger_memory_id(&event.event_hash),
+                content_hash: event.event_hash.clone(),
                 material_lane: "metadata".to_owned(),
-                redaction_class: "none".to_owned(),
-                trust_lane: "peer".to_owned(),
-                import_decision: "allow".to_owned(),
+                redaction_class: "metadataOnly".to_owned(),
+                trust_lane: "peerAgent".to_owned(),
+                import_decision: import_decision.to_owned(),
                 local_memory_id: None,
                 body_cache_key: None,
                 policy_failure_surface_json: None,
                 policy_decision_json: None,
-                event_json: input.payload_json.clone(),
+                event_json: event.payload_json.clone(),
                 imported_at: None,
-            });
+            })
+            .is_ok()
+            && may_append
+        {
             imported = imported.saturating_add(1);
         }
     }
@@ -3162,12 +3276,13 @@ mod tests {
         MeshPeerRow, MeshStorageCounts, MeshSyncSupervisorOptions, REPAIR_ACTION_GRAPH_SCHEMA_V1,
         TcpMeshForegroundSyncTransport, apply_outbound_artifact_metadata_policy,
         apply_outbound_export_policy, auto_enrollment_status_for_snapshot,
-        canonical_mesh_event_hash, canonicalize_mesh_event_json, mesh_event_id_from_hash,
-        project_canonical_mesh_event, run_mesh_sync_supervisor_supervised,
-        run_mesh_sync_supervisor_supervised_with_transport,
+        canonical_mesh_event_hash, canonicalize_mesh_event_json, local_sync_round_request,
+        mesh_event_id_from_hash, persist_sync_round_events, project_canonical_mesh_event,
+        run_mesh_sync_supervisor_supervised, run_mesh_sync_supervisor_supervised_with_transport,
     };
     use crate::config::ConfigFile;
     use crate::core::tailscale_probe::TailscaleLocalReport;
+    use crate::db::{CreateWorkspaceInput, DbConnection};
     use crate::mesh::peer::{
         MESH_PEER_RECORD_SCHEMA_V1, MeshPeerCapabilities, MeshPeerCapabilityProfile,
         MeshPeerEndpoint, MeshPeerHandshake, MeshPeerKey, MeshPeerRecord, MeshPeerState,
@@ -4696,6 +4811,154 @@ max_bytes = 1048576
         assert_eq!(outcome.ranges_requested, 1);
         assert_eq!(outcome.ranges_fulfilled, 1);
         server.join().expect("server");
+    }
+
+    const PERSIST_WORKSPACE_ID: &str = "wsp_persistfixture000000000001";
+
+    fn persist_fixture_workspace(label: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("ee-mesh-persist-{label}-{stamp}"));
+        std::fs::create_dir_all(workspace.join(".ee")).expect("workspace");
+        let database_path = workspace.join("ee.db");
+        let connection = DbConnection::open_file(&database_path).expect("open persist db");
+        connection.migrate().expect("migrate persist db");
+        connection
+            .insert_workspace(
+                PERSIST_WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("persist fixture".to_owned()),
+                },
+            )
+            .expect("insert persist workspace");
+        (workspace, database_path)
+    }
+
+    fn persist_snapshot(
+        workspace: std::path::PathBuf,
+        database_path: std::path::PathBuf,
+    ) -> MeshForegroundSnapshot {
+        MeshForegroundSnapshot {
+            workspace_id: PERSIST_WORKSPACE_ID.to_owned(),
+            workspace_path: workspace.display().to_string(),
+            database_path: database_path.display().to_string(),
+            initialized: true,
+            mesh_enabled: true,
+            mode: "foreground".to_owned(),
+            storage: MeshStorageCounts::default(),
+            peers: Vec::new(),
+            cursors: Vec::new(),
+            events: Vec::new(),
+            degraded: Vec::new(),
+        }
+    }
+
+    fn persist_origin_event() -> crate::mesh::bootstrap_envelope::SyncRoundEvent {
+        crate::mesh::bootstrap_envelope::SyncRoundEvent {
+            origin_node_id: "node_peer".to_owned(),
+            origin_workspace_id: "wsp_peer".to_owned(),
+            seq: 0,
+            event_hash: "blake3:persist-evt".to_owned(),
+            payload_json: r#"{"schema":"ee.mesh.event.v1","eventId":"evt_persist"}"#.to_owned(),
+        }
+    }
+
+    #[test]
+    fn persist_sync_round_events_bootstrap_allows_without_bindings() {
+        let (workspace, database_path) = persist_fixture_workspace("allow");
+        let snapshot = persist_snapshot(workspace, database_path.clone());
+        let accepted = persist_sync_round_events(&snapshot, "peer_live", &[persist_origin_event()]);
+        assert_eq!(accepted, 1);
+        let connection = DbConnection::open_file(&database_path).expect("reopen");
+        assert!(
+            connection
+                .list_mesh_origin_events("team-mesh", "node_peer", 0, 8)
+                .expect("origin")
+                .is_empty(),
+            "inbound sync must not echo into the origin chain"
+        );
+        let rows = connection
+            .list_mesh_import_ledger_events(PERSIST_WORKSPACE_ID, "node_peer", "wsp_peer")
+            .expect("ledger");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].import_decision, "allow");
+    }
+
+    #[test]
+    fn persist_sync_round_events_denies_when_peer_group_binding_denies() {
+        let (workspace, database_path) = persist_fixture_workspace("deny");
+        std::fs::write(
+            workspace.join(".ee/config.toml"),
+            r#"
+[[mesh.peer_group_bindings]]
+workspace_id = "wsp_persistfixture000000000001"
+peer_group_id = "pg_deny"
+peer_ids = ["peer_live"]
+origin_workspace_ids = ["wsp_peer"]
+
+[mesh.peer_group_bindings.lanes]
+metadata = "deny"
+"#,
+        )
+        .expect("write deny binding");
+        let snapshot = persist_snapshot(workspace, database_path.clone());
+        let accepted = persist_sync_round_events(&snapshot, "peer_live", &[persist_origin_event()]);
+        assert_eq!(accepted, 0);
+        let connection = DbConnection::open_file(&database_path).expect("reopen");
+        assert!(
+            connection
+                .list_mesh_origin_events("team-mesh", "node_peer", 0, 8)
+                .expect("origin")
+                .is_empty()
+        );
+        let rows = connection
+            .list_mesh_import_ledger_events(PERSIST_WORKSPACE_ID, "node_peer", "wsp_peer")
+            .expect("ledger");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].import_decision, "deny");
+    }
+
+    #[test]
+    fn local_sync_round_request_starts_after_the_stored_cursor() {
+        let peer = sample_trusted_sync_peer("peer_live");
+        let record: MeshPeerRecord = serde_json::from_str(
+            peer.policy_summary_json
+                .as_deref()
+                .expect("trusted peer record"),
+        )
+        .expect("parse record");
+        let snapshot = MeshForegroundSnapshot {
+            workspace_id: "wsp_test".to_owned(),
+            workspace_path: "/tmp/ee-mesh-cursor".to_owned(),
+            database_path: "/tmp/ee-mesh-cursor.db".to_owned(),
+            initialized: true,
+            mesh_enabled: true,
+            mode: "foreground".to_owned(),
+            storage: MeshStorageCounts::default(),
+            peers: vec![peer.clone()],
+            cursors: vec![MeshCursorRow {
+                peer_id: "peer_live".to_owned(),
+                origin_node_id: "node_peer".to_owned(),
+                origin_workspace_id: "wsp_peer".to_owned(),
+                last_seq: 7,
+                tip_event_hash: Some("blake3:tip7".to_owned()),
+                tip_audit_hash: None,
+                status: "current".to_owned(),
+                updated_at: "2026-08-12T00:00:00Z".to_owned(),
+            }],
+            events: Vec::new(),
+            degraded: Vec::new(),
+        };
+        let request = local_sync_round_request(&snapshot, &peer, &record);
+        assert_eq!(request.range_start_seq, 8);
+        assert_eq!(request.tips[0].last_seq, 7);
+        assert_eq!(
+            request.tips[0].tip_event_hash.as_deref(),
+            Some("blake3:tip7")
+        );
     }
 
     fn sample_trusted_sync_peer(peer_id: &str) -> MeshPeerRow {
