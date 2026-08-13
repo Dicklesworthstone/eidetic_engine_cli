@@ -537,6 +537,82 @@ pub fn assert_no_responder_metadata_leak(error: &HelloError) -> Result<(), &'sta
     Ok(())
 }
 
+fn json_string_list(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse a hello request from an unsigned bootstrap payload.
+#[must_use]
+pub fn parse_hello_request(value: &serde_json::Value) -> Option<HelloRequest> {
+    if value.get("schema").and_then(serde_json::Value::as_str) != Some(HELLO_REQUEST_SCHEMA_V1) {
+        return None;
+    }
+    Some(HelloRequest {
+        schema: HELLO_REQUEST_SCHEMA_V1,
+        request_id: value.get("requestId")?.as_str()?.to_owned(),
+        requester_node_key: value.get("requesterNodeKey")?.as_str()?.to_owned(),
+        requester_ee_version: value.get("requesterEeVersion")?.as_str()?.to_owned(),
+        requester_ee_protocol_version: value
+            .get("requesterEeProtocolVersion")?
+            .as_str()?
+            .to_owned(),
+        requester_workspace_ids: json_string_list(value.get("requesterWorkspaceIds")),
+        requester_capabilities: json_string_list(value.get("requesterCapabilities")),
+        requester_advertised_tags: json_string_list(value.get("requesterAdvertisedTags")),
+    })
+}
+
+/// Parse a hello success response from a bootstrap payload.
+#[must_use]
+pub fn parse_hello_response(value: &serde_json::Value) -> Option<HelloResponse> {
+    if value.get("schema").and_then(serde_json::Value::as_str) != Some(HELLO_RESPONSE_SCHEMA_V1) {
+        return None;
+    }
+    Some(HelloResponse {
+        schema: HELLO_RESPONSE_SCHEMA_V1,
+        request_id: value.get("requestId")?.as_str()?.to_owned(),
+        responder_node_key: value.get("responderNodeKey")?.as_str()?.to_owned(),
+        responder_ee_version: value.get("responderEeVersion")?.as_str()?.to_owned(),
+        responder_ee_protocol_version: value
+            .get("responderEeProtocolVersion")?
+            .as_str()?
+            .to_owned(),
+        responder_workspace_ids: json_string_list(value.get("responderWorkspaceIds")),
+        responder_capabilities: json_string_list(value.get("responderCapabilities")),
+        responder_advertised_tags: json_string_list(value.get("responderAdvertisedTags")),
+        discovery_consent: value.get("discoveryConsent")?.as_bool()?,
+        response_elapsed_micros: value.get("responseElapsedMicros")?.as_u64()?,
+    })
+}
+
+/// Parse a privacy-preserving hello decline from a bootstrap payload.
+#[must_use]
+pub fn parse_hello_error(value: &serde_json::Value) -> Option<HelloError> {
+    if value.get("schema").and_then(serde_json::Value::as_str) != Some(HELLO_ERROR_SCHEMA_V1) {
+        return None;
+    }
+    let code = serde_json::from_value(value.get("code")?.clone()).ok()?;
+    Some(HelloError {
+        schema: HELLO_ERROR_SCHEMA_V1,
+        request_id: value.get("requestId")?.as_str()?.to_owned(),
+        discovery_consent: value.get("discoveryConsent")?.as_bool()?,
+        code,
+        detail: value
+            .get("detail")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
+    })
+}
+
 // ============================================================================
 // Inline tests (AGENTS.md L300-302 / bd-3usjw.62 Rule 7)
 // ============================================================================
@@ -561,6 +637,33 @@ mod tests {
             requester_capabilities: vec!["discovery".to_owned()],
             requester_advertised_tags: vec![],
         }
+    }
+
+    #[test]
+    fn parse_hello_payloads_round_trip() {
+        let request = fixture_request();
+        let value = serde_json::to_value(&request).expect("serialize request");
+        assert_eq!(parse_hello_request(&value).expect("parse request"), request);
+
+        let granted = match decide_hello_response(
+            &request,
+            &fixture_ctx(
+                "nodekey:responder",
+                &["wsp_one".to_owned()],
+                &["hello".to_owned()],
+                &[],
+                &empty_set(),
+                &empty_set(),
+            ),
+        ) {
+            HelloOutcome::Granted(response) => response,
+            HelloOutcome::Declined(error) => panic!("expected grant, got {error:?}"),
+        };
+        let granted_value = serde_json::to_value(&granted).expect("serialize response");
+        assert_eq!(
+            parse_hello_response(&granted_value).expect("parse response"),
+            granted
+        );
     }
 
     fn fixture_request_with_protocol(protocol_version: impl Into<String>) -> HelloRequest {

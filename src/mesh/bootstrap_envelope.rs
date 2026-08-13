@@ -243,6 +243,147 @@ pub fn decode_envelope(bytes: &[u8]) -> Result<BootstrapEnvelopeV1, BootstrapEnv
     })
 }
 
+/// Resolve one live TCP target from a Tailscale IP list and the committed
+/// hello port. Never scans alternate ports or falls back to a different port.
+#[must_use]
+pub fn bootstrap_hello_target(
+    tailscale_ips: &[String],
+    committed_port: u16,
+) -> Option<std::net::SocketAddr> {
+    if committed_port < 1024 {
+        return None;
+    }
+    tailscale_ips.iter().find_map(|raw| {
+        let trimmed = raw.trim();
+        if let Ok(addr) = trimmed.parse::<std::net::SocketAddr>() {
+            return (addr.port() == committed_port
+                && !addr.ip().is_unspecified()
+                && !addr.ip().is_loopback())
+            .then_some(addr);
+        }
+        trimmed
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .filter(|ip| !ip.is_unspecified() && !ip.is_loopback())
+            .map(|ip| std::net::SocketAddr::new(ip, committed_port))
+    })
+}
+
+/// Parse a stored peer endpoint into one TCP address. HTTP(S) sneakernet
+/// placeholders are not live transport locators.
+#[must_use]
+pub fn parse_live_peer_endpoint(
+    endpoint: &str,
+    committed_port: u16,
+) -> Option<std::net::SocketAddr> {
+    let trimmed = endpoint.trim();
+    if trimmed.is_empty() || trimmed.contains("://") || committed_port < 1024 {
+        return None;
+    }
+    if let Ok(addr) = trimmed.parse::<std::net::SocketAddr>() {
+        return (!addr.ip().is_unspecified()).then_some(addr);
+    }
+    trimmed
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .filter(|ip| !ip.is_unspecified())
+        .map(|ip| std::net::SocketAddr::new(ip, committed_port))
+}
+
+/// Exchange one unsigned bootstrap hello over length-prefixed TCP.
+pub fn exchange_bootstrap_hello(
+    address: std::net::SocketAddr,
+    timeout: std::time::Duration,
+    payload: JsonValue,
+) -> Result<JsonValue, BootstrapEnvelopeError> {
+    if address.ip().is_unspecified() {
+        return Err(BootstrapEnvelopeError::Malformed {
+            message: "bootstrap hello refuses an unspecified remote address".to_owned(),
+        });
+    }
+    let request = encode_envelope(BootstrapCapability::Hello, payload)?;
+    let mut stream = std::net::TcpStream::connect_timeout(&address, timeout).map_err(|error| {
+        BootstrapEnvelopeError::Malformed {
+            message: format!("bootstrap hello connect: {error}"),
+        }
+    })?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .and_then(|()| stream.set_write_timeout(Some(timeout)))
+        .map_err(|error| BootstrapEnvelopeError::Malformed {
+            message: format!("bootstrap hello timeout: {error}"),
+        })?;
+    write_std_framed(&mut stream, &request)?;
+    let reply = read_std_framed(&mut stream)?;
+    if let Ok(decline) = serde_json::from_slice::<BootstrapDeclineV1>(&reply)
+        && decline.schema == BOOTSTRAP_DECLINE_SCHEMA_V1
+    {
+        return Err(BootstrapEnvelopeError::Malformed {
+            message: format!("bootstrap hello declined: {}", decline.code),
+        });
+    }
+    let envelope = decode_envelope(&reply)?;
+    if envelope.capability != BootstrapCapability::Hello {
+        return Err(BootstrapEnvelopeError::UnsupportedCapability {
+            observed: envelope.capability.token().to_owned(),
+        });
+    }
+    Ok(envelope.payload)
+}
+
+pub(crate) fn write_std_framed(
+    stream: &mut std::net::TcpStream,
+    bytes: &[u8],
+) -> Result<(), BootstrapEnvelopeError> {
+    if bytes.len() > BOOTSTRAP_MAX_ENVELOPE_BYTES {
+        return Err(BootstrapEnvelopeError::OverBudget {
+            actual_bytes: bytes.len(),
+        });
+    }
+    let prefix = u32::try_from(bytes.len())
+        .map_err(|_| BootstrapEnvelopeError::Malformed {
+            message: "bootstrap frame length does not fit u32".to_owned(),
+        })?
+        .to_be_bytes();
+    use std::io::Write;
+    stream
+        .write_all(&prefix)
+        .and_then(|()| stream.write_all(bytes))
+        .and_then(|()| stream.flush())
+        .map_err(|error| BootstrapEnvelopeError::Malformed {
+            message: format!("bootstrap hello write: {error}"),
+        })
+}
+
+pub(crate) fn read_std_framed(
+    stream: &mut std::net::TcpStream,
+) -> Result<Vec<u8>, BootstrapEnvelopeError> {
+    use std::io::Read;
+    let mut prefix = [0_u8; 4];
+    stream
+        .read_exact(&mut prefix)
+        .map_err(|error| BootstrapEnvelopeError::Malformed {
+            message: format!("bootstrap hello read prefix: {error}"),
+        })?;
+    let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| {
+        BootstrapEnvelopeError::Malformed {
+            message: "bootstrap hello length does not fit usize".to_owned(),
+        }
+    })?;
+    if length == 0 || length > BOOTSTRAP_MAX_ENVELOPE_BYTES {
+        return Err(BootstrapEnvelopeError::OverBudget {
+            actual_bytes: length,
+        });
+    }
+    let mut bytes = vec![0_u8; length];
+    stream
+        .read_exact(&mut bytes)
+        .map_err(|error| BootstrapEnvelopeError::Malformed {
+            message: format!("bootstrap hello read body: {error}"),
+        })?;
+    Ok(bytes)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct WindowBucket {
     window_start_ms: u64,
@@ -366,6 +507,63 @@ impl Default for BootstrapAdmission {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn live_peer_endpoint_rejects_http_placeholders_and_accepts_tcp() {
+        assert_eq!(
+            parse_live_peer_endpoint("https://peer.tailnet.test/ee/mesh", 41888),
+            None
+        );
+        assert_eq!(parse_live_peer_endpoint("", 41888), None);
+        assert_eq!(parse_live_peer_endpoint("100.64.1.8", 80), None);
+        assert_eq!(
+            parse_live_peer_endpoint("100.64.1.8", 41888),
+            Some("100.64.1.8:41888".parse().expect("addr"))
+        );
+        assert_eq!(
+            parse_live_peer_endpoint("127.0.0.1:41901", 41888),
+            Some("127.0.0.1:41901".parse().expect("addr"))
+        );
+    }
+
+    #[test]
+    fn bootstrap_hello_target_ignores_loopback_and_wrong_port() {
+        assert_eq!(
+            bootstrap_hello_target(&["127.0.0.1".to_owned()], 41888),
+            None
+        );
+        assert_eq!(
+            bootstrap_hello_target(&["100.64.1.8:9999".to_owned()], 41888),
+            None
+        );
+        assert_eq!(
+            bootstrap_hello_target(&["100.64.1.8".to_owned()], 41888),
+            Some("100.64.1.8:41888".parse().expect("addr"))
+        );
+    }
+
+    #[test]
+    fn exchange_bootstrap_hello_round_trips_on_loopback() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let request = read_std_framed(&mut stream).expect("read request");
+            let envelope = decode_envelope(&request).expect("decode request");
+            assert_eq!(envelope.capability, BootstrapCapability::Hello);
+            let reply = encode_envelope(BootstrapCapability::Hello, json!({"pong": true}))
+                .expect("encode reply");
+            write_std_framed(&mut stream, &reply).expect("write reply");
+        });
+        let payload = exchange_bootstrap_hello(
+            address,
+            std::time::Duration::from_secs(2),
+            json!({"ping": true}),
+        )
+        .expect("client exchange");
+        assert_eq!(payload, json!({"pong": true}));
+        server.join().expect("server thread");
+    }
 
     #[test]
     fn hello_and_join_envelopes_round_trip() {

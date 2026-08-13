@@ -20,6 +20,16 @@ pub const HELLO_RESPONDER_LIFECYCLE_AUDIT_SCHEMA_V1: &str =
     "ee.mesh.hello_responder.lifecycle_audit.v1";
 
 pub const DEFAULT_HELLO_RESPONDER_PORT: u16 = 41888;
+
+/// Committed hello port from `EE_MESH_HELLO_PORT`, else [`DEFAULT_HELLO_RESPONDER_PORT`].
+/// Privileged or unparsable values are refused rather than silently remapped.
+#[must_use]
+pub fn configured_hello_port() -> u16 {
+    read_env_var(EnvVar::MeshHelloPort)
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .filter(|port| *port >= 1024)
+        .unwrap_or(DEFAULT_HELLO_RESPONDER_PORT)
+}
 pub const DEFAULT_HELLO_RESPONDER_RATE_LIMIT_PER_PEER: u32 = 16;
 pub const DEFAULT_HELLO_RESPONDER_RATE_WINDOW_SECONDS: u64 = 60;
 
