@@ -26,8 +26,9 @@ use crate::mesh::anti_entropy_protocol::{
     MeshAntiEntropyRetryPolicy, MeshRoundPeerOutcome, MeshSyncSummaryInput, build_sync_summary,
 };
 use crate::mesh::bootstrap_envelope::{
-    SyncRoundRequest, SyncRoundResponse, SyncRoundTip, exchange_bootstrap_hello,
-    exchange_live_mesh_round, parse_live_peer_endpoint, parse_sync_round_response,
+    BODY_FETCH_REQUEST_SCHEMA_V1, BodyFetchRequest, BodyFetchResponse, SyncRoundRequest,
+    SyncRoundResponse, SyncRoundTip, exchange_bootstrap_hello, exchange_live_mesh_round,
+    parse_live_peer_endpoint, parse_sync_round_response,
 };
 use crate::mesh::hello::{build_request, serialize_within_budget};
 use crate::mesh::hello_responder::configured_hello_port;
@@ -1557,6 +1558,43 @@ pub async fn contact_authenticated_mesh_peer(
         .ok_or_else(|| "authenticated peer did not return ee.mesh.sync_round.v1".to_owned())
 }
 
+/// Fetch one published body over an authenticated session.
+pub async fn contact_authenticated_body_fetch(
+    cx: &Cx,
+    address: std::net::SocketAddr,
+    config: InitiatorSessionConfig,
+    body_cache_key: &str,
+) -> Result<BodyFetchResponse, String> {
+    let mut session = connect_authenticated_session(cx, address, config)
+        .await
+        .map_err(|error| error.to_string())?;
+    let correlation_id = "body-fetch-1".to_owned();
+    let payload = serde_json::to_value(&BodyFetchRequest {
+        schema: BODY_FETCH_REQUEST_SCHEMA_V1.to_owned(),
+        body_cache_key: body_cache_key.to_owned(),
+    })
+    .map_err(|error| error.to_string())?;
+    session
+        .send_request(
+            cx,
+            SessionMessage {
+                correlation_id: correlation_id.clone(),
+                capability: FrameCapability::BodyFetch,
+                requested_budget_ms: 10_000,
+                payload,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let reply = session
+        .receive_response(cx, &correlation_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    session.close();
+    serde_json::from_value(reply.payload)
+        .map_err(|error| format!("authenticated peer did not return body fetch: {error}"))
+}
+
 fn local_sync_round_request(
     snapshot: &MeshForegroundSnapshot,
     peer: &MeshPeerRow,
@@ -1646,6 +1684,12 @@ fn persist_sync_round_events(
     let Ok(connection) = DbConnection::open_file(&snapshot.database_path) else {
         return 0;
     };
+    if matches!(
+        crate::mesh::team::any_local_team_paused(&connection),
+        Ok(true)
+    ) {
+        return 0;
+    }
     let bindings = workspace_config(std::path::Path::new(&snapshot.workspace_path))
         .and_then(|config| config.mesh.peer_group_bindings)
         .unwrap_or_default();
@@ -1657,6 +1701,42 @@ fn persist_sync_round_events(
         } else {
             MeshEventValidity::Malformed
         };
+        if matches!(
+            crate::mesh::team::origin_node_is_active_member(&connection, &event.origin_node_id),
+            Ok(Some(false))
+        ) {
+            continue;
+        }
+        let inbound = serde_json::from_str::<crate::mesh::origin_stream::InboundOriginEvent>(
+            &event.payload_json,
+        )
+        .ok();
+        if let Some(inbound) = inbound.as_ref() {
+            let own_origin = connection
+                .list_all_team_members()
+                .ok()
+                .and_then(|members| {
+                    members
+                        .into_iter()
+                        .find(|member| member.is_self)
+                        .map(|member| member.origin_node_id)
+                })
+                .unwrap_or_default();
+            let verifier = crate::mesh::team::TeamMemberKeyVerifier {
+                connection: &connection,
+            };
+            match crate::mesh::origin_stream::ingest_origin_event(
+                &connection,
+                &verifier,
+                &own_origin,
+                &BTreeSet::new(),
+                inbound,
+                chrono::Utc::now().to_rfc3339().as_str(),
+            ) {
+                Ok(crate::mesh::origin_stream::IngestDisposition::Applied) => {}
+                Ok(_) | Err(_) => continue,
+            }
+        }
         let decision = if bindings.is_empty() {
             None
         } else {
@@ -1692,6 +1772,15 @@ fn persist_sync_round_events(
         });
         // Inbound material must not enter mesh_origin_events. That table is
         // origin-owned only; echoing a peer's chain would re-serve it as ours.
+        if let Some(inbound) = inbound.as_ref()
+            && may_append
+        {
+            let _ = crate::mesh::team::project_inbound_team_memory(
+                &connection,
+                snapshot.workspace_id.as_str(),
+                inbound,
+            );
+        }
         if connection
             .insert_mesh_import_ledger_event(&InsertMeshImportLedgerEventInput {
                 workspace_id: snapshot.workspace_id.clone(),
@@ -4864,6 +4953,123 @@ max_bytes = 1048576
             event_hash: "blake3:persist-evt".to_owned(),
             payload_json: r#"{"schema":"ee.mesh.event.v1","eventId":"evt_persist"}"#.to_owned(),
         }
+    }
+
+    #[test]
+    fn persist_sync_round_events_skips_signed_inbound_that_fails_ingest() {
+        let (workspace, database_path) = persist_fixture_workspace("signed-skip");
+        let snapshot = persist_snapshot(workspace, database_path.clone());
+        let inbound = crate::mesh::origin_stream::InboundOriginEvent {
+            schema: crate::mesh::origin_stream::ORIGIN_EVENT_SCHEMA_V1.to_owned(),
+            event_id: "mesh_oevt_aaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            team_id: "team_x".to_owned(),
+            origin_node_id: "node_peer".to_owned(),
+            signing_key_generation: 1,
+            seq: 0,
+            prev_event_hash: None,
+            event_hash: "blake3:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                .to_owned(),
+            signature: format!("ed25519:{}", "00".repeat(64)),
+            payload_schema: crate::mesh::origin_stream::MEMORY_EVENT_PAYLOAD_SCHEMA_V1.to_owned(),
+            payload: serde_json::json!({
+                "operation": "create",
+                "logicalMemoryId": "olm_00000000000000000000000009",
+                "revisionId": "rev_0",
+                "bodyCommitment": "blake3:aa"
+            }),
+            required_features: Vec::new(),
+            produced_at: "2026-08-13T00:00:00Z".to_owned(),
+        };
+        let event = crate::mesh::bootstrap_envelope::SyncRoundEvent {
+            origin_node_id: "node_peer".to_owned(),
+            origin_workspace_id: "wsp_peer".to_owned(),
+            seq: 0,
+            event_hash: inbound.event_hash.clone(),
+            payload_json: serde_json::to_string(&inbound).expect("serialize inbound"),
+        };
+        let accepted = persist_sync_round_events(&snapshot, "peer_live", &[event]);
+        assert_eq!(accepted, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persist_sync_round_events_accepts_signed_inbound_from_a_bound_member() {
+        let producer_dir = tempfile::tempdir().expect("producer workspace");
+        let producer_db = producer_dir.path().join("ee.db");
+        let producer = DbConnection::open_file(&producer_db).expect("open producer");
+        producer.migrate().expect("migrate producer");
+        producer
+            .insert_workspace(
+                PERSIST_WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: producer_dir.path().display().to_string(),
+                    name: Some("producer".to_owned()),
+                },
+            )
+            .expect("insert producer workspace");
+        let created = crate::mesh::team::create_local_team_with_store(
+            &producer,
+            PERSIST_WORKSPACE_ID,
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+            Some(producer_dir.path()),
+        )
+        .expect("create");
+        let inbound = crate::mesh::origin_stream::inbound_from_stored(
+            &producer.list_mesh_manifest_origin_events(8).expect("list")[0],
+        )
+        .expect("inbound");
+        let node = producer
+            .get_team_member_node(&created.team.origin_node_id, 1)
+            .expect("load node")
+            .expect("bound");
+
+        let (workspace, database_path) = persist_fixture_workspace("signed-allow");
+        let receiver = DbConnection::open_file(&database_path).expect("open receiver");
+        receiver
+            .insert_team_member(&crate::db::InsertTeamMemberInput {
+                member_id: "mbr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                team_id: created.team.team_id.clone(),
+                workspace_id: PERSIST_WORKSPACE_ID.to_owned(),
+                display_name: "origin".to_owned(),
+                state: "active".to_owned(),
+                is_self: false,
+                origin_node_id: created.team.origin_node_id.clone(),
+                bound_via: "invite_ceremony".to_owned(),
+                joined_at: "2026-08-13T00:00:00Z".to_owned(),
+            })
+            .expect("insert member");
+        receiver
+            .insert_team_member_node(&crate::db::InsertTeamMemberNodeInput {
+                node_id: created.team.origin_node_id.clone(),
+                member_id: "mbr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                team_id: created.team.team_id.clone(),
+                verifying_key_hex: node.verifying_key_hex,
+                signing_key_generation: 1,
+                state: "active".to_owned(),
+                bound_at: "2026-08-13T00:00:00Z".to_owned(),
+            })
+            .expect("insert node");
+        let snapshot = persist_snapshot(workspace, database_path.clone());
+        let event = crate::mesh::bootstrap_envelope::SyncRoundEvent {
+            origin_node_id: created.team.origin_node_id.clone(),
+            origin_workspace_id: "wsp_peer".to_owned(),
+            seq: inbound.seq,
+            event_hash: inbound.event_hash.clone(),
+            payload_json: serde_json::to_string(&inbound).expect("serialize inbound"),
+        };
+        let accepted = persist_sync_round_events(&snapshot, "peer_live", &[event]);
+        assert_eq!(accepted, 1);
+        let rows = DbConnection::open_file(&database_path)
+            .expect("reopen")
+            .list_mesh_import_ledger_events(
+                PERSIST_WORKSPACE_ID,
+                &created.team.origin_node_id,
+                "wsp_peer",
+            )
+            .expect("ledger");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].import_decision, "allow");
     }
 
     #[test]
