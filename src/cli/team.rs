@@ -12,9 +12,10 @@ use crate::mesh::team::{
     fetch_local_team_body, inspect_team_health, join_team_with_code_on_store, leave_local_team,
     list_team_activity, list_team_projects, local_team_status, mint_team_invite_with_store,
     plan_team_steward_once, reconcile_local_team_membership, remove_team_member,
-    revoke_team_invite, rotate_local_signing_key, serve_one_bootstrap_join_with_store,
-    set_local_team_paused, share_team_bodies, share_team_history, share_team_project,
-    unshare_team_bodies,
+    require_tailnet_attested, revalidate_team_identities, revoke_team_invite,
+    rotate_local_signing_key, serve_one_bootstrap_join_with_store, set_local_team_paused,
+    set_team_oidc_provider, share_team_bodies, share_team_history, share_team_project,
+    team_idp_status, unshare_team_bodies,
 };
 use crate::models::{DomainError, ProcessExitCode};
 use crate::output;
@@ -64,6 +65,9 @@ pub enum TeamCommand {
     Steward(TeamStewardCommand),
     /// Read-only team health checks.
     Doctor(TeamDoctorArgs),
+    /// Tailnet-attested identity policy.
+    #[command(subcommand)]
+    Idp(TeamIdpCommand),
 }
 
 /// Nested `ee team fetch` verbs.
@@ -104,6 +108,19 @@ pub enum TeamMembersCommand {
     RotateKey(TeamMembersRotateKeyArgs),
     /// Replay origin membership events onto local rows.
     Reconcile(TeamMembersReconcileArgs),
+    /// Recheck tailnet owners against the recorded IdP policy.
+    Revalidate(TeamMembersRevalidateArgs),
+}
+
+/// Nested `ee team idp` verbs.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum TeamIdpCommand {
+    /// Require every member node to be owned by a tailnet login.
+    Require(TeamIdpRequireArgs),
+    /// Show the recorded identity policy.
+    Status(TeamIdpStatusArgs),
+    /// Pin a secretless-public OIDC issuer from a local discovery document.
+    Set(TeamIdpSetArgs),
 }
 
 /// Nested `ee team share` verbs.
@@ -414,6 +431,58 @@ pub struct TeamDoctorArgs {
     pub database: Option<PathBuf>,
 }
 
+/// Arguments for `ee team idp require`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamIdpRequireArgs {
+    /// Bind every member node to the tailnet UserProfile owner.
+    #[arg(long)]
+    pub tailnet_attested: bool,
+
+    /// Optional login domain restriction, e.g. acme.com.
+    #[arg(long)]
+    pub domain: Option<String>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team idp status`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamIdpStatusArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team idp set`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamIdpSetArgs {
+    /// Issuer URL. Must be https.
+    #[arg(long)]
+    pub issuer: String,
+
+    /// Public client id. Never a client secret.
+    #[arg(long)]
+    pub client_id: String,
+
+    /// Local OpenID discovery JSON file. No network is used.
+    #[arg(long, value_name = "PATH")]
+    pub discovery_json: PathBuf,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team members revalidate`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamMembersRevalidateArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
 pub fn handle_team<W, E>(
     cli: &Cli,
     command: &TeamCommand,
@@ -453,6 +522,18 @@ where
         }
         TeamCommand::Members(TeamMembersCommand::Reconcile(args)) => {
             handle_team_members_reconcile(cli, args, stdout, stderr)
+        }
+        TeamCommand::Members(TeamMembersCommand::Revalidate(args)) => {
+            handle_team_members_revalidate(cli, args, stdout, stderr)
+        }
+        TeamCommand::Idp(TeamIdpCommand::Require(args)) => {
+            handle_team_idp_require(cli, args, stdout, stderr)
+        }
+        TeamCommand::Idp(TeamIdpCommand::Status(args)) => {
+            handle_team_idp_status(cli, args, stdout, stderr)
+        }
+        TeamCommand::Idp(TeamIdpCommand::Set(args)) => {
+            handle_team_idp_set(cli, args, stdout, stderr)
         }
         TeamCommand::Leave(args) => handle_team_leave(cli, args, stdout, stderr),
         TeamCommand::Sync(args) => handle_team_sync(cli, args, stdout, stderr),
@@ -1504,6 +1585,244 @@ where
         },
         stdout,
         stderr,
+    )
+}
+
+fn handle_team_idp_require<W, E>(
+    cli: &Cli,
+    args: &TeamIdpRequireArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !args.tailnet_attested {
+        return write_domain_error(
+            &DomainError::Usage {
+                message: "ee team idp require needs --tailnet-attested".to_owned(),
+                repair: Some(
+                    "ee team idp require --tailnet-attested [--domain acme.com] --workspace ."
+                        .to_owned(),
+                ),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
+    let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let produced_at = chrono::Utc::now().to_rfc3339();
+    let workspace_path = cli.resolve_workspace();
+    match require_tailnet_attested(
+        &connection,
+        &workspace_id,
+        args.domain.as_deref(),
+        &produced_at,
+        Some(&workspace_path),
+    ) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!(
+                "Team IdP policy {} gen {}\n  team_id: {}\n  domain: {}\n",
+                report.kind,
+                report.policy_generation,
+                report.team_id,
+                report.allowed_domain.as_deref().unwrap_or("<any>")
+            ),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to require tailnet-attested identity: {error}"),
+                repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_idp_status<W, E>(
+    cli: &Cli,
+    args: &TeamIdpStatusArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    match team_idp_status(&connection) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!(
+                "Team IdP policy {} gen {}\n  team_id: {}\n  domain: {}\n",
+                report.kind,
+                report.policy_generation,
+                report.team_id,
+                report.allowed_domain.as_deref().unwrap_or("<any>")
+            ),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to read team IdP policy: {error}"),
+                repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_idp_set<W, E>(
+    cli: &Cli,
+    args: &TeamIdpSetArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let bytes = match std::fs::read(&args.discovery_json) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::Usage {
+                    message: format!("Failed to read discovery JSON: {error}"),
+                    repair: Some(
+                        "ee team idp set --issuer https://idp.example --client-id <id> --discovery-json <file> --workspace ."
+                            .to_owned(),
+                    ),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+    let discovery = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::Usage {
+                    message: format!("Discovery JSON is malformed: {error}"),
+                    repair: Some(
+                        "provide a local OpenID discovery document; ee does not fetch it"
+                            .to_owned(),
+                    ),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+    let set_at = chrono::Utc::now().to_rfc3339();
+    match set_team_oidc_provider(
+        &connection,
+        &args.issuer,
+        &args.client_id,
+        &discovery,
+        &set_at,
+    ) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!(
+                "Team OIDC provider {} ({})\n  team_id: {}\n",
+                report.issuer, report.capability, report.team_id
+            ),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to pin OIDC provider: {error}"),
+                repair: Some(
+                    "ee team idp set --issuer https://idp.example --client-id <id> --discovery-json <file> --workspace ."
+                        .to_owned(),
+                ),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_members_revalidate<W, E>(
+    cli: &Cli,
+    args: &TeamMembersRevalidateArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let report = probe_local_tailscale_for_team();
+    let checked_at = chrono::Utc::now().to_rfc3339();
+    match revalidate_team_identities(&connection, &report, &checked_at) {
+        Ok(result) => write_team_report(
+            cli,
+            &result,
+            &format!(
+                "Team identity revalidate: {} checked, {} attested, {} suspended, {} missing\n  team_id: {}\n",
+                result.checked, result.attested, result.suspended, result.missing, result.team_id
+            ),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to revalidate team identities: {error}"),
+                repair: Some("ee team idp require --tailnet-attested --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn probe_local_tailscale_for_team() -> crate::core::tailscale_probe::TailscaleLocalReport {
+    use crate::core::tailscale_probe::{
+        SystemTailscaleCliProbeRunner, SystemTailscaleSocketProbeRunner, TailscaleCliProbeConfig,
+        TailscaleSocketProbeConfig, probe_tailscale_local_with_runners,
+    };
+    let mut socket_config = TailscaleSocketProbeConfig::mesh_enabled();
+    let mut cli_config = TailscaleCliProbeConfig::mesh_enabled();
+    socket_config.platform_hint =
+        crate::core::tailscale_probe::TailscalePlatform::parse(Some(std::env::consts::OS));
+    cli_config.platform_hint = socket_config.platform_hint;
+    let mut socket_runner = SystemTailscaleSocketProbeRunner;
+    let mut cli_runner = SystemTailscaleCliProbeRunner;
+    probe_tailscale_local_with_runners(
+        &socket_config,
+        &cli_config,
+        &mut socket_runner,
+        &mut cli_runner,
     )
 }
 
