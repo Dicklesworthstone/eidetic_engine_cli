@@ -5,9 +5,8 @@
 //! body-commitment discipline, and transactional append over the V104
 //! tables. Origin SIGNING is deliberately a seam ([`OriginSigner`]): the
 //! hardened key storage this stream must eventually sign with belongs to
-//! the in-flight T2.1 lane, so production key wiring plugs in behind the
-//! trait after that lane closes — nothing here touches
-//! `transport_session`/`key_store`.
+//! Origin signing is [`Ed25519OriginSigner`] over the T2.1 hardened key
+//! store. Tests may still use a deterministic [`OriginSigner`].
 //!
 //! Contracts implemented here (ADR 0086 TC-D3/D4/D12):
 //! - append is origin-owned only: the API takes local mutations and chains
@@ -20,11 +19,17 @@
 //!   bytes, and the nonce lands only in the body-fetch-only sidecar —
 //!   content-identical revisions are unlinkable to metadata-only peers.
 
+use std::num::NonZeroU64;
+use std::path::Path;
+
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::db::{
     CreateMeshOriginEventInput, DbConnection, MeshOriginAppendError, StoredMeshOriginEvent,
 };
+use crate::mesh::key_store::{MeshKeyStore, SecretBytes, SigningKeyClass};
 
 /// Wire schema id of the outer event (draft: docs/schemas/ee.mesh.origin_event.v1.json).
 pub const ORIGIN_EVENT_SCHEMA_V1: &str = "ee.mesh.origin_event.v1";
@@ -39,12 +44,164 @@ pub const BODY_COMMITMENT_DOMAIN: &str = "ee.mesh.body_commitment.v1";
 /// Event-id prefix; `mesh_oevt_` + 26 hash-derived chars = 36 (V104 CHECK).
 pub const ORIGIN_EVENT_ID_PREFIX: &str = "mesh_oevt_";
 
-/// Signing seam: T2.1's hardened key storage implements this after that
-/// lane closes; tests use a deterministic signer. Implementations MUST
-/// domain-separate (the canonical bytes passed in are NOT pre-separated).
+/// Signing seam. Production team/origin writes use [`Ed25519OriginSigner`].
+/// Implementations MUST domain-separate (canonical bytes are NOT pre-separated).
 pub trait OriginSigner {
     fn signing_key_generation(&self) -> u64;
     fn sign(&self, domain: &str, canonical_bytes: &[u8]) -> String;
+}
+
+/// Wire prefix for Ed25519 origin signatures (`ed25519:` + 128 lowercase hex).
+pub const ORIGIN_SIGNATURE_PREFIX: &str = "ed25519:";
+
+/// Hardened-store Ed25519 origin signer (T3.6).
+pub struct Ed25519OriginSigner {
+    generation: u64,
+    signing_key: SigningKey,
+}
+
+impl Ed25519OriginSigner {
+    /// Load the current signing seed, or mint one with OS CSPRNG entropy.
+    pub fn load_or_create(
+        workspace_path: &Path,
+        node_handle: &str,
+        produced_at: &str,
+    ) -> Result<Self, OriginStreamError> {
+        let store = MeshKeyStore::open_or_create(workspace_path)
+            .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+        if let Some(record) = store
+            .load_signing_key(node_handle, SigningKeyClass::Current)
+            .map_err(|error| OriginStreamError::Encode(error.to_string()))?
+        {
+            return Ok(Self::from_seed(
+                record.generation.get(),
+                record.seed.as_bytes(),
+            ));
+        }
+        let mut seed = Zeroizing::new([0_u8; 32]);
+        getrandom::fill(seed.as_mut())
+            .map_err(|error| OriginStreamError::Encode(format!("csprng unavailable: {error}")))?;
+        let secret = SecretBytes::new(*seed);
+        let generation = NonZeroU64::MIN;
+        store
+            .store_signing_key(
+                node_handle,
+                SigningKeyClass::Current,
+                generation,
+                &secret,
+                produced_at,
+                false,
+            )
+            .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+        Ok(Self::from_seed(1, &*seed))
+    }
+
+    /// Construct from a 32-byte seed already loaded from the key store.
+    #[must_use]
+    pub fn from_seed(generation: u64, seed: &[u8; 32]) -> Self {
+        Self {
+            generation,
+            signing_key: SigningKey::from_bytes(seed),
+        }
+    }
+
+    /// 32-byte verifying key.
+    #[must_use]
+    pub fn verifying_key_bytes(&self) -> [u8; 32] {
+        self.signing_key.verifying_key().to_bytes()
+    }
+
+    /// `verify_strict` over the same domain-separated preimage `sign` uses.
+    #[must_use]
+    pub fn verify_strict(&self, domain: &str, canonical_bytes: &[u8], signature: &str) -> bool {
+        verify_ed25519_origin_signature(
+            &self.signing_key.verifying_key(),
+            domain,
+            canonical_bytes,
+            signature,
+        )
+    }
+}
+
+impl OriginSigner for Ed25519OriginSigner {
+    fn signing_key_generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn sign(&self, domain: &str, canonical_bytes: &[u8]) -> String {
+        let signature = self
+            .signing_key
+            .sign(&signature_preimage(domain, canonical_bytes));
+        format!(
+            "{ORIGIN_SIGNATURE_PREFIX}{}",
+            hex_encode_bytes(&signature.to_bytes())
+        )
+    }
+}
+
+/// Verify an `ed25519:` origin signature with `verify_strict`.
+#[must_use]
+pub fn verify_ed25519_origin_signature(
+    verifying_key: &VerifyingKey,
+    domain: &str,
+    canonical_bytes: &[u8],
+    signature: &str,
+) -> bool {
+    let Some(hex) = signature.strip_prefix(ORIGIN_SIGNATURE_PREFIX) else {
+        return false;
+    };
+    let Some(bytes) = hex_decode_exact::<64>(hex) else {
+        return false;
+    };
+    let parsed = Signature::from_bytes(&bytes);
+    verifying_key
+        .verify_strict(&signature_preimage(domain, canonical_bytes), &parsed)
+        .is_ok()
+}
+
+fn signature_preimage(domain: &str, canonical_bytes: &[u8]) -> Vec<u8> {
+    let mut preimage = Vec::with_capacity(
+        domain
+            .len()
+            .saturating_add(8)
+            .saturating_add(canonical_bytes.len()),
+    );
+    preimage.extend_from_slice(domain.as_bytes());
+    preimage.extend_from_slice(&(canonical_bytes.len() as u64).to_le_bytes());
+    preimage.extend_from_slice(canonical_bytes);
+    preimage
+}
+
+fn hex_encode_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn hex_decode_exact<const N: usize>(input: &str) -> Option<[u8; N]> {
+    if input.len() != N.saturating_mul(2) {
+        return None;
+    }
+    let mut out = [0_u8; N];
+    let bytes = input.as_bytes();
+    for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+        let high = hex_nibble(chunk[0])?;
+        let low = hex_nibble(chunk[1])?;
+        out[index] = (high << 4) | low;
+    }
+    Some(out)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
 }
 
 /// Memory operation vocabulary — create | revise | tombstone | shareWithdraw.
@@ -325,6 +482,31 @@ pub trait OriginSignatureVerifier {
         canonical_bytes: &[u8],
         signature: &str,
     ) -> bool;
+}
+
+/// Rebuild the inbound wire shape from a stored origin row.
+pub fn inbound_from_stored(
+    event: &StoredMeshOriginEvent,
+) -> Result<InboundOriginEvent, OriginStreamError> {
+    let payload = serde_json::from_str(&event.payload_json)
+        .map_err(|error| OriginStreamError::PayloadInvalid(error.to_string()))?;
+    let required_features =
+        serde_json::from_str(&event.required_features_json).unwrap_or_else(|_| Vec::new());
+    Ok(InboundOriginEvent {
+        schema: ORIGIN_EVENT_SCHEMA_V1.to_owned(),
+        event_id: event.event_id.clone(),
+        team_id: event.team_id.clone(),
+        origin_node_id: event.origin_node_id.clone(),
+        signing_key_generation: event.signing_key_generation,
+        seq: event.seq,
+        prev_event_hash: event.prev_event_hash.clone(),
+        event_hash: event.event_hash.clone(),
+        signature: event.signature.clone(),
+        payload_schema: event.payload_schema.clone(),
+        payload,
+        required_features,
+        produced_at: event.produced_at.clone(),
+    })
 }
 
 /// One inbound wire event, exactly the outer draft-schema shape.
@@ -1175,5 +1357,28 @@ mod tests {
             canonical_json_string(&scrambled).unwrap(),
             canonical_json_string(&ordered).unwrap()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ed25519_origin_signer_round_trips_and_rejects_tampering() {
+        let workspace = tempfile::tempdir().unwrap();
+        let first = Ed25519OriginSigner::load_or_create(
+            workspace.path(),
+            "node_ed25519fixture000000000000001",
+            "2026-08-13T00:00:00Z",
+        )
+        .unwrap();
+        let second = Ed25519OriginSigner::load_or_create(
+            workspace.path(),
+            "node_ed25519fixture000000000000001",
+            "2026-08-13T01:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(first.verifying_key_bytes(), second.verifying_key_bytes());
+        let signature = first.sign(ORIGIN_EVENT_SIGNATURE_DOMAIN, b"canonical");
+        assert!(signature.starts_with(ORIGIN_SIGNATURE_PREFIX));
+        assert!(first.verify_strict(ORIGIN_EVENT_SIGNATURE_DOMAIN, b"canonical", &signature));
+        assert!(!first.verify_strict(ORIGIN_EVENT_SIGNATURE_DOMAIN, b"tampered", &signature));
     }
 }

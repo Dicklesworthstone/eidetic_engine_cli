@@ -115,7 +115,9 @@ frankensearch = { version = "0.3.0", path = "../frankensearch/frankensearch", de
 # MSRV-compatible, safe advisory file locking for doctor fix/undo coordination.
 # Keep async features disabled: Tokio/async-std/smol are forbidden here.
 fs4 = { version = "0.13.1", default-features = false, features = ["sync"] }
+ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["fast", "zeroize"] }
 getrandom = { version = "0.4.2" }
+zeroize = { version = "=1.8.2", default-features = false }
 regex-lite = { version = "0.1" }
 # Direct libc remains available for low-level platform adapters; daemon gates
 # use safe wrappers in source to keep the crate-level unsafe-code ban intact.
