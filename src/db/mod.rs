@@ -15759,6 +15759,19 @@ impl DbConnection {
         rows.iter().map(stored_mesh_origin_event_from_row).collect()
     }
 
+    /// List locally originated manifest events, newest first.
+    pub fn list_mesh_manifest_origin_events(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<StoredMeshOriginEvent>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT event_id, team_id, origin_node_id, signing_key_generation, seq, prev_event_hash, event_hash, signature, payload_schema, payload_json, required_features_json, produced_at FROM mesh_origin_events WHERE payload_schema = 'ee.team.manifest_event.v1' ORDER BY seq ASC, event_id ASC LIMIT ?1",
+            &[Value::from_u64_clamped(u64::from(limit.max(1)))],
+        )?;
+        rows.iter().map(stored_mesh_origin_event_from_row).collect()
+    }
+
     /// Read the body-fetch-only commitment nonce for one local event.
     pub fn mesh_origin_event_nonce(&self, event_id: &str) -> Result<Option<String>> {
         let rows = self.query_for(

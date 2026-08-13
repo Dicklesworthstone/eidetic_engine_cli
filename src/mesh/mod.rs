@@ -39,4 +39,5 @@ pub mod steward_decision;
 pub mod sync;
 pub mod tailscale_autodiscovery;
 pub mod tailscale_transport;
+pub mod team;
 pub mod transport_session;
