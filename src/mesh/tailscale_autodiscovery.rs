@@ -13,13 +13,16 @@ use serde::Serialize;
 use crate::core::tailscale_probe::{
     TailscaleLocalReport, TailscalePeerEeCapability, TailscalePeerReport,
 };
+use crate::mesh::bootstrap_envelope::{bootstrap_hello_target, exchange_bootstrap_hello};
 use crate::mesh::discovery_policy::{
     DiscoveryDecision, DiscoveryDecisionInput, DiscoveryMode, decide_discovery,
 };
 use crate::mesh::hello::{
-    HELLO_RESPONSE_SCHEMA_V1, HelloErrorCode, HelloResponse,
-    classify_decline_for_caller_skip_reason,
+    HELLO_RESPONSE_SCHEMA_V1, HelloErrorCode, HelloResponse, build_request,
+    classify_decline_for_caller_skip_reason, parse_hello_error, parse_hello_response,
+    serialize_within_budget,
 };
+use crate::mesh::hello_responder::DEFAULT_HELLO_RESPONDER_PORT;
 
 pub const TAILSCALE_AUTODISCOVERY_SCHEMA_V1: &str = "ee.tailscale.autodiscovery.v1";
 
@@ -188,6 +191,122 @@ pub trait TailscaleHelloProbe {
 
     fn cancellation_requested(&self) -> bool {
         false
+    }
+}
+
+/// Real TCP bootstrap hello. ACL capability is an optional pre-filter hint
+/// only; the probe never synthesizes ee identity from it.
+#[derive(Clone, Debug)]
+pub struct TcpBootstrapHelloProbe {
+    pub committed_port: u16,
+    pub requester_node_key: String,
+    pub requester_ee_version: String,
+    pub requester_workspace_ids: Vec<String>,
+    pub requester_advertised_tags: Vec<String>,
+}
+
+impl TcpBootstrapHelloProbe {
+    #[must_use]
+    pub fn new(
+        committed_port: u16,
+        requester_node_key: impl Into<String>,
+        requester_workspace_ids: Vec<String>,
+    ) -> Self {
+        Self {
+            committed_port: if committed_port < 1024 {
+                DEFAULT_HELLO_RESPONDER_PORT
+            } else {
+                committed_port
+            },
+            requester_node_key: requester_node_key.into(),
+            requester_ee_version: env!("CARGO_PKG_VERSION").to_owned(),
+            requester_workspace_ids,
+            requester_advertised_tags: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_advertised_tags(mut self, tags: Vec<String>) -> Self {
+        self.requester_advertised_tags = tags;
+        self
+    }
+}
+
+impl TailscaleHelloProbe for TcpBootstrapHelloProbe {
+    fn probe(
+        &mut self,
+        peer: &TailscalePeerReport,
+        timeout_ms: u64,
+        remaining_budget_ms: u64,
+    ) -> TailscalePeerHelloProbe {
+        if peer.online == Some(false) {
+            return TailscalePeerHelloProbe::NonEe { elapsed_ms: 0 };
+        }
+        if peer
+            .ee_capability
+            .as_ref()
+            .is_some_and(|capability| !capability.respond)
+        {
+            return TailscalePeerHelloProbe::NonEe { elapsed_ms: 0 };
+        }
+        let effective_timeout_ms = timeout_ms.min(remaining_budget_ms).max(1);
+        let Some(address) = bootstrap_hello_target(&peer.tailscale_ips, self.committed_port) else {
+            return TailscalePeerHelloProbe::NonEe { elapsed_ms: 0 };
+        };
+        let started = std::time::Instant::now();
+        let request = build_request(
+            format!("autodiscovery:{}", peer.node_key),
+            self.requester_node_key.clone(),
+            self.requester_ee_version.clone(),
+            self.requester_workspace_ids.clone(),
+            Vec::new(),
+            if self.requester_advertised_tags.is_empty() {
+                peer.advertised_tags.clone()
+            } else {
+                self.requester_advertised_tags.clone()
+            },
+        );
+        let Ok(payload_bytes) = serialize_within_budget(&request) else {
+            return TailscalePeerHelloProbe::Malformed {
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            };
+        };
+        let Ok(payload) = serde_json::from_slice(&payload_bytes) else {
+            return TailscalePeerHelloProbe::Malformed {
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            };
+        };
+        match exchange_bootstrap_hello(
+            address,
+            std::time::Duration::from_millis(effective_timeout_ms),
+            payload,
+        ) {
+            Ok(reply) => {
+                if let Some(response) = parse_hello_response(&reply) {
+                    TailscalePeerHelloProbe::Granted {
+                        response,
+                        latency_ms: started.elapsed().as_millis() as u64,
+                    }
+                } else if let Some(error) = parse_hello_error(&reply) {
+                    TailscalePeerHelloProbe::Declined {
+                        code: error.code,
+                        latency_ms: started.elapsed().as_millis() as u64,
+                    }
+                } else {
+                    TailscalePeerHelloProbe::Malformed {
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                    }
+                }
+            }
+            Err(_) if started.elapsed().as_millis() as u64 >= effective_timeout_ms => {
+                TailscalePeerHelloProbe::Timeout {
+                    elapsed_ms: effective_timeout_ms,
+                }
+            }
+            Err(_) => TailscalePeerHelloProbe::NonEe {
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            },
+        }
     }
 }
 
@@ -619,6 +738,25 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn tcp_probe_does_not_treat_loopback_or_http_as_live_ee() {
+        let mut loopback = peer("nodekey:loopback", &[EE_MESH_SERVICE_TAG]);
+        loopback.tailscale_ips = vec!["127.0.0.1".to_owned()];
+        loopback.ee_capability = Some(TailscalePeerEeCapability {
+            ee_version: "0.2.0".to_owned(),
+            ee_protocol_version: "1.0".to_owned(),
+            workspace_ids: vec!["workspace-alpha".to_owned()],
+            respond: true,
+            latency_ms: 1,
+        });
+        let mut probe =
+            TcpBootstrapHelloProbe::new(41888, "nodekey:self", vec!["workspace-alpha".to_owned()]);
+        assert_eq!(
+            probe.probe(&loopback, 750, 5_000),
+            TailscalePeerHelloProbe::NonEe { elapsed_ms: 0 }
+        );
+    }
+
     fn status_capability_probe_timeout_consumes_effective_timeout_not_advertised_latency() {
         let mut peer = peer("nodekey:alpha", &[EE_MESH_SERVICE_TAG]);
         peer.ee_capability = Some(TailscalePeerEeCapability {

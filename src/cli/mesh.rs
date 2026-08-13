@@ -53,7 +53,8 @@ use crate::mesh::foreground_cli::{
     apply_outbound_export_policy, foreground_degradations, run_mesh_sync_supervisor_supervised,
 };
 use crate::mesh::hello_responder::{
-    HelloResponderLifecycleEventKind, HelloResponderStatusReport, persist_lifecycle_audit,
+    HelloResponderLifecycleEventKind, HelloResponderStatusReport, configured_hello_port,
+    persist_lifecycle_audit,
 };
 use crate::mesh::peer::{
     MeshPeerCapabilityProfile, MeshPeerCommandReport, MeshPeerEndpoint, MeshPeerEnrollInput,
@@ -68,9 +69,9 @@ use crate::mesh::responder_broker::{
     responder_control_status_request, submit_responder_control_request,
 };
 use crate::mesh::tailscale_autodiscovery::{
-    TailscaleAutodiscoveryConfig, TailscaleAutodiscoveryReport,
-    TailscaleStatusCapabilityHelloProbe, autodiscover_tailscale_peers,
-    tailscale_discovery_budget_ms_from_env_value, tailscale_peer_probe_timeout_ms_from_env_value,
+    TailscaleAutodiscoveryConfig, TailscaleAutodiscoveryReport, TcpBootstrapHelloProbe,
+    autodiscover_tailscale_peers, tailscale_discovery_budget_ms_from_env_value,
+    tailscale_peer_probe_timeout_ms_from_env_value,
 };
 use crate::mesh::transport_session::{SessionCapabilities, SessionChannelLimits};
 use crate::models::{DomainError, ProcessExitCode};
@@ -2992,7 +2993,18 @@ fn build_tailscale_autodiscovery_report_from_local(
     config.total_budget_ms = tailscale_discovery_budget_ms_from_env_value(
         read_env_var(EnvVar::TailscaleDiscoveryBudgetMs).as_deref(),
     );
-    let mut probe = TailscaleStatusCapabilityHelloProbe;
+    let requester_node_key = local
+        .and_then(|report| report.self_node_key.clone())
+        .unwrap_or_default();
+    let requester_tags = local
+        .map(|report| report.self_advertised_tags.clone())
+        .unwrap_or_default();
+    let mut probe = TcpBootstrapHelloProbe::new(
+        configured_hello_port(),
+        requester_node_key,
+        vec![snapshot.workspace_id.clone()],
+    )
+    .with_advertised_tags(requester_tags);
     autodiscover_tailscale_peers(local, &config, &mut probe)
 }
 

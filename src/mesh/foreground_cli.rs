@@ -21,6 +21,9 @@ use crate::db::{
 use crate::mesh::anti_entropy_protocol::{
     MeshAntiEntropyRetryPolicy, MeshRoundPeerOutcome, MeshSyncSummaryInput, build_sync_summary,
 };
+use crate::mesh::bootstrap_envelope::{exchange_bootstrap_hello, parse_live_peer_endpoint};
+use crate::mesh::hello::{build_request, serialize_within_budget};
+use crate::mesh::hello_responder::configured_hello_port;
 use crate::mesh::identity_change_guard::{
     AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE, AUTO_ENROLLMENT_TAILNET_CHANGED_CODE, BoundIdentity,
     CurrentIdentity, IdentityGuardVerdict, evaluate_identity_guard,
@@ -1427,12 +1430,69 @@ impl MeshForegroundSyncTransport for NoopMeshForegroundSyncTransport {
     }
 }
 
+/// Real TCP contact for `ee mesh sync`. A successful bootstrap hello counts
+/// as contact; event-range anti-entropy is a later T2.4 increment on this
+/// same transport.
+#[derive(Clone, Debug)]
+pub struct TcpMeshForegroundSyncTransport {
+    pub committed_port: u16,
+    pub requester_node_key: String,
+    pub requester_workspace_ids: Vec<String>,
+    pub timeout: Duration,
+}
+
+impl TcpMeshForegroundSyncTransport {
+    #[must_use]
+    pub fn from_snapshot(snapshot: &MeshForegroundSnapshot) -> Self {
+        Self {
+            committed_port: configured_hello_port(),
+            requester_node_key: snapshot.workspace_id.clone(),
+            requester_workspace_ids: vec![snapshot.workspace_id.clone()],
+            timeout: Duration::from_millis(750),
+        }
+    }
+}
+
+impl MeshForegroundSyncTransport for TcpMeshForegroundSyncTransport {
+    fn contact_peer(
+        &mut self,
+        request: MeshForegroundSyncRequest<'_>,
+    ) -> MeshForegroundSyncPeerOutcome {
+        let Some(address) =
+            parse_live_peer_endpoint(&request.peer_record.endpoint.endpoint, self.committed_port)
+        else {
+            return MeshForegroundSyncPeerOutcome::default();
+        };
+        let hello = build_request(
+            format!("sync:{}", request.peer.peer_id),
+            self.requester_node_key.clone(),
+            env!("CARGO_PKG_VERSION"),
+            self.requester_workspace_ids.clone(),
+            vec!["sync".to_owned()],
+            Vec::new(),
+        );
+        let Ok(payload_bytes) = serialize_within_budget(&hello) else {
+            return MeshForegroundSyncPeerOutcome::default();
+        };
+        let Ok(payload) = serde_json::from_slice(&payload_bytes) else {
+            return MeshForegroundSyncPeerOutcome::default();
+        };
+        match exchange_bootstrap_hello(address, self.timeout, payload) {
+            Ok(_) => MeshForegroundSyncPeerOutcome {
+                contacted: true,
+                ..MeshForegroundSyncPeerOutcome::default()
+            },
+            Err(_) => MeshForegroundSyncPeerOutcome::default(),
+        }
+    }
+}
+
 pub async fn run_mesh_sync_supervisor_supervised(
     cx: &Cx,
     snapshot: &MeshForegroundSnapshot,
     options: &MeshSyncSupervisorOptions,
 ) -> Outcome<MeshSyncSupervisorReport, String> {
-    let mut transport = NoopMeshForegroundSyncTransport;
+    let mut transport = TcpMeshForegroundSyncTransport::from_snapshot(snapshot);
     run_mesh_sync_supervisor_supervised_with_transport(cx, snapshot, options, &mut transport).await
 }
 
@@ -2976,10 +3036,11 @@ mod tests {
         MeshEventRow, MeshExportArtifact, MeshExportPolicyAttestation, MeshForegroundSnapshot,
         MeshForegroundSyncPeerOutcome, MeshForegroundSyncRequest, MeshForegroundSyncTransport,
         MeshPeerRow, MeshStorageCounts, MeshSyncSupervisorOptions, REPAIR_ACTION_GRAPH_SCHEMA_V1,
-        apply_outbound_artifact_metadata_policy, apply_outbound_export_policy,
-        auto_enrollment_status_for_snapshot, canonical_mesh_event_hash,
-        canonicalize_mesh_event_json, mesh_event_id_from_hash, project_canonical_mesh_event,
-        run_mesh_sync_supervisor_supervised, run_mesh_sync_supervisor_supervised_with_transport,
+        TcpMeshForegroundSyncTransport, apply_outbound_artifact_metadata_policy,
+        apply_outbound_export_policy, auto_enrollment_status_for_snapshot,
+        canonical_mesh_event_hash, canonicalize_mesh_event_json, mesh_event_id_from_hash,
+        project_canonical_mesh_event, run_mesh_sync_supervisor_supervised,
+        run_mesh_sync_supervisor_supervised_with_transport,
     };
     use crate::config::ConfigFile;
     use crate::core::tailscale_probe::TailscaleLocalReport;
@@ -4402,6 +4463,90 @@ max_bytes = 1048576
             last_seen_at: "2026-05-20T00:00:00Z".to_owned(),
             policy_summary_json: None,
         }
+    }
+
+    #[test]
+    fn tcp_sync_transport_contacts_live_loopback_hello() {
+        use crate::mesh::bootstrap_envelope::{
+            BootstrapCapability, decode_envelope, encode_envelope, read_std_framed,
+            write_std_framed,
+        };
+        use crate::mesh::hello::HELLO_RESPONSE_SCHEMA_V1;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let request = read_std_framed(&mut stream).expect("read");
+            let envelope = decode_envelope(&request).expect("decode");
+            assert_eq!(envelope.capability, BootstrapCapability::Hello);
+            let reply = encode_envelope(
+                BootstrapCapability::Hello,
+                serde_json::json!({
+                    "schema": HELLO_RESPONSE_SCHEMA_V1,
+                    "requestId": "sync:peer_live",
+                    "responderNodeKey": "nodekey:live",
+                    "responderEeVersion": "0.0.0",
+                    "responderEeProtocolVersion": "1.0",
+                    "responderWorkspaceIds": ["wsp_peer"],
+                    "responderCapabilities": ["hello"],
+                    "discoveryConsent": true,
+                    "responseElapsedMicros": 1
+                }),
+            )
+            .expect("encode");
+            write_std_framed(&mut stream, &reply).expect("write");
+        });
+
+        let mut peer = sample_trusted_sync_peer("peer_live");
+        let mut record: MeshPeerRecord = serde_json::from_str(
+            peer.policy_summary_json
+                .as_deref()
+                .expect("trusted peer record"),
+        )
+        .expect("parse record");
+        record.endpoint.endpoint = address.to_string();
+        peer.policy_summary_json =
+            Some(serde_json::to_string(&record).expect("serialize live peer"));
+        let snapshot = MeshForegroundSnapshot {
+            workspace_id: "wsp_test".to_owned(),
+            workspace_path: "/tmp/ee-mesh-sync-test".to_owned(),
+            database_path: "/tmp/ee-mesh-sync-test.db".to_owned(),
+            initialized: true,
+            mesh_enabled: true,
+            mode: "foreground".to_owned(),
+            storage: MeshStorageCounts {
+                peer_count: 1,
+                cursor_count: 0,
+                imported_event_count: 0,
+                policy_decision_event_count: 0,
+                policy_failure_event_count: 0,
+                mapped_memory_count: 0,
+                cached_body_count: 0,
+            },
+            peers: vec![peer.clone()],
+            cursors: Vec::new(),
+            events: Vec::new(),
+            degraded: Vec::new(),
+        };
+        let options = MeshSyncSupervisorOptions::default();
+        let mut transport = TcpMeshForegroundSyncTransport {
+            committed_port: address.port(),
+            requester_node_key: "wsp_test".to_owned(),
+            requester_workspace_ids: vec!["wsp_test".to_owned()],
+            timeout: std::time::Duration::from_secs(2),
+        };
+        let outcome = transport.contact_peer(MeshForegroundSyncRequest {
+            snapshot: &snapshot,
+            options: &options,
+            peer: &peer,
+            peer_record: &record,
+        });
+        assert!(
+            outcome.contacted,
+            "live TCP hello must count as contact, got {outcome:?}"
+        );
+        server.join().expect("server");
     }
 
     fn sample_trusted_sync_peer(peer_id: &str) -> MeshPeerRow {
