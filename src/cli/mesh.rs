@@ -3547,21 +3547,6 @@ where
             stderr,
         );
     };
-    let runtime = match crate::core::build_cli_runtime() {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            return write_domain_error(
-                &DomainError::Configuration {
-                    message: format!("Failed to build responder runtime: {error}"),
-                    repair: Some("Run `ee doctor --json` and retry.".to_owned()),
-                },
-                cli.wants_json(),
-                stdout,
-                stderr,
-            );
-        }
-    };
-    let cx = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
     #[cfg(unix)]
     let control_socket = args
         .control_socket
@@ -3582,17 +3567,34 @@ where
             limits: SessionChannelLimits::default(),
         })
         .collect::<Vec<_>>();
-    let owner = runtime.block_on(async {
-        let _ambient = Cx::set_current(Some(cx.clone()));
-        ResponderBrokerOwner::start_durable(
-            &cx,
-            local_api,
-            registrations,
-            PreAuthAdmissionLimits::default(),
-            Duration::from_millis(args.revalidate_ms),
-        )
-        .await
-    });
+    let owner = match crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| {
+        let local_api = local_api.clone();
+        let registrations = registrations.clone();
+        let revalidate_ms = args.revalidate_ms;
+        async move {
+            ResponderBrokerOwner::start_durable(
+                &cx,
+                local_api,
+                registrations,
+                PreAuthAdmissionLimits::default(),
+                Duration::from_millis(revalidate_ms),
+            )
+            .await
+        }
+    }) {
+        Ok(owner) => owner,
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::Configuration {
+                    message: format!("Failed to build responder runtime: {error}"),
+                    repair: Some("Run `ee doctor --json` and retry.".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
     let mut owner = match owner {
         Ok(owner) => owner,
         Err(error) => return write_responder_broker_error(&error, cli, stdout, stderr),
