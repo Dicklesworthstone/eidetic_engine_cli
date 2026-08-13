@@ -1285,6 +1285,24 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
                 };
             if decode_envelope(&first_packet)
                 .ok()
+                .is_some_and(|envelope| envelope.capability == BootstrapCapability::Join)
+            {
+                if let Err(error) =
+                    answer_bootstrap_join(cx, &mut stream, &self.routes, &first_packet).await
+                {
+                    let _ = stream.shutdown(Shutdown::Both);
+                    self.record_error(&error, false, true);
+                    return Err(error);
+                }
+                let _ = stream.shutdown(Shutdown::Both);
+                if let Ok(mut runtime) = self.runtime.lock() {
+                    runtime.application_hello_performed = true;
+                    runtime.record("bootstrap_join", None, false, false, false);
+                }
+                return Err(ResponderBrokerError::BootstrapHelloAnswered);
+            }
+            if decode_envelope(&first_packet)
+                .ok()
                 .is_some_and(|envelope| envelope.capability == BootstrapCapability::Hello)
             {
                 if let Err(error) =
@@ -2817,6 +2835,74 @@ async fn answer_bootstrap_hello(
     }
     .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
     let reply = encode_envelope(BootstrapCapability::Hello, payload)
+        .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    write_asupersync_framed(cx, stream, io_timeout, &reply).await
+}
+
+#[cfg(unix)]
+async fn answer_bootstrap_join(
+    cx: &Cx,
+    stream: &mut TcpStream,
+    routes: &ResponderRouteRegistry,
+    first_packet: &[u8],
+) -> Result<(), ResponderBrokerError> {
+    checkpoint(cx, "bootstrap join")?;
+    let io_timeout = routes.limits.io_timeout;
+    let envelope = match decode_envelope(first_packet) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            return write_bootstrap_decline(cx, stream, io_timeout, error.decline_code()).await;
+        }
+    };
+    if envelope.capability != BootstrapCapability::Join {
+        return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_unsupported_capability")
+            .await;
+    }
+    let request =
+        match serde_json::from_value::<crate::mesh::team::TeamJoinRequestV1>(envelope.payload) {
+            Ok(request) if request.schema == crate::mesh::team::TEAM_JOIN_SCHEMA_V1 => request,
+            _ => {
+                return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed")
+                    .await;
+            }
+        };
+    let Some(database_path) = routes
+        .routes
+        .values()
+        .find_map(|route| route.database_path.clone())
+    else {
+        return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed").await;
+    };
+    let Ok(connection) = DbConnection::open_file(database_path) else {
+        return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed").await;
+    };
+    let redeemed_at = chrono::Utc::now().to_rfc3339();
+    let granted = match crate::mesh::team::redeem_team_invite(
+        &connection,
+        &request.invite_id,
+        &request.secret,
+        &redeemed_at,
+    ) {
+        Ok(granted) => granted,
+        Err(_) => {
+            return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed").await;
+        }
+    };
+    if let Ok(workspaces) = connection.list_workspaces()
+        && let Some(workspace) = workspaces.first()
+    {
+        let _ = crate::mesh::team::record_inviter_side_join_member(
+            &connection,
+            &workspace.id,
+            &granted,
+            &request.joiner_node_id,
+            &request.joiner_display_name,
+            &redeemed_at,
+        );
+    }
+    let payload =
+        serde_json::to_value(&granted).map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    let reply = encode_envelope(BootstrapCapability::Join, payload)
         .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
     write_asupersync_framed(cx, stream, io_timeout, &reply).await
 }

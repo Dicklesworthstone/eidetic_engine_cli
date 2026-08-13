@@ -1451,3 +1451,199 @@ fn production_broker_serves_authenticated_event_fetch_from_origin_store() -> Tes
     }
     Ok(())
 }
+
+const JOIN_INVITER_WORKSPACE_ID: &str = "wsp_inviteloopback0000000001";
+const JOIN_JOINER_WORKSPACE_ID: &str = "wsp_joinloopback000000000001";
+
+fn seed_inviter_team_and_invite(database_path: &Path, endpoint: &str) -> TestResult<String> {
+    let connection = DbConnection::open_file(database_path)
+        .map_err(|error| format!("open inviter team db: {error}"))?;
+    connection
+        .migrate()
+        .map_err(|error| format!("migrate inviter team db: {error}"))?;
+    connection
+        .insert_workspace(
+            JOIN_INVITER_WORKSPACE_ID,
+            &CreateWorkspaceInput {
+                path: database_path
+                    .parent()
+                    .unwrap_or(database_path)
+                    .display()
+                    .to_string(),
+                name: Some("inviter".to_owned()),
+            },
+        )
+        .map_err(|error| format!("insert inviter workspace: {error}"))?;
+    ee::mesh::team::create_local_team(
+        &connection,
+        JOIN_INVITER_WORKSPACE_ID,
+        "Analysts",
+        CREATED_AT,
+    )
+    .map_err(|error| format!("create inviter team: {error}"))?;
+    let minted =
+        ee::mesh::team::mint_team_invite(&connection, endpoint, CREATED_AT, "2026-08-20T00:00:00Z")
+            .map_err(|error| format!("mint inviter invite: {error}"))?;
+    Ok(minted.invite_code)
+}
+
+#[test]
+fn production_broker_answers_unsigned_bootstrap_join_and_persists_team_joined() -> TestResult {
+    let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
+    let database_path = workspace.path().join("ee.db");
+    let port = available_nonprivileged_port()?;
+    let invite_code = seed_inviter_team_and_invite(&database_path, &format!("127.0.0.1:{port}"))?;
+    let local_api_dir = tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
+    let fake = FakeLocalApi::spawn(local_api_dir.path(), 1)?;
+    let bind_address: SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .map_err(|error| format!("parse bind address: {error}"))?;
+    let registry = ResponderRouteRegistry::new([route_with_database(
+        workspace.path().to_path_buf(),
+        database_path.clone(),
+        port,
+    )])
+    .map_err(|error| error.to_string())?;
+    let (address_tx, address_rx) = mpsc::sync_channel(1);
+    let server = thread::spawn(move || {
+        run_runtime(|cx| async move {
+            let client = TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT);
+            let broker = ResponderBroker::bind(
+                &cx,
+                bind_address,
+                client,
+                registry,
+                PreAuthAdmissionLimits::default(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            address_tx
+                .send(broker.local_addr())
+                .map_err(|error| format!("publish broker address: {error}"))?;
+            let error = match broker.accept_authenticated(&cx).await {
+                Ok(_) => {
+                    return Err("bootstrap join was treated as an authenticated session".to_owned());
+                }
+                Err(error) => error,
+            };
+            if !matches!(error, ResponderBrokerError::BootstrapHelloAnswered) {
+                return Err(format!("unexpected join accept error: {error:?}"));
+            }
+            fake.finish()?;
+            Ok(())
+        })
+    });
+    let _address = address_rx
+        .recv_timeout(TEST_TIMEOUT)
+        .map_err(|error| format!("wait for broker bind: {error}"))?;
+    let joiner = DbConnection::open_memory().map_err(|error| format!("open joiner db: {error}"))?;
+    joiner
+        .migrate()
+        .map_err(|error| format!("migrate joiner db: {error}"))?;
+    let report = ee::mesh::team::join_team_with_code(
+        &joiner,
+        JOIN_JOINER_WORKSPACE_ID,
+        &invite_code,
+        "Priya",
+        "2026-08-13T04:00:00Z",
+        TEST_TIMEOUT,
+    )
+    .map_err(|error| format!("live join: {error}"))?;
+    if !report.joined {
+        return Err("live join did not persist teamJoined".to_owned());
+    }
+    let status = ee::mesh::team::local_team_status(&joiner)
+        .map_err(|error| format!("joiner status: {error}"))?;
+    if status.team_count != 1 || status.members.len() != 1 || !status.members[0].is_self {
+        return Err(format!("joiner status missing self member: {status:?}"));
+    }
+    server
+        .join()
+        .map_err(|_| "join broker thread panicked".to_owned())??;
+    let inviter = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("reopen inviter db: {error}"))?;
+    let inviter_status = ee::mesh::team::local_team_status(&inviter)
+        .map_err(|error| format!("inviter status: {error}"))?;
+    if inviter_status.members.len() != 2
+        || !inviter_status
+            .members
+            .iter()
+            .any(|member| !member.is_self && member.display_name == "Priya")
+    {
+        return Err(format!(
+            "inviter did not record joining member: {inviter_status:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn production_broker_declines_bootstrap_join_with_wrong_secret() -> TestResult {
+    let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
+    let database_path = workspace.path().join("ee.db");
+    let port = available_nonprivileged_port()?;
+    let invite_code = seed_inviter_team_and_invite(&database_path, &format!("127.0.0.1:{port}"))?;
+    let parsed = ee::mesh::team::parse_team_invite_code(&invite_code)
+        .map_err(|error| format!("parse invite: {error}"))?;
+    let local_api_dir = tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
+    let fake = FakeLocalApi::spawn(local_api_dir.path(), 1)?;
+    let bind_address: SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .map_err(|error| format!("parse bind address: {error}"))?;
+    let registry = ResponderRouteRegistry::new([route_with_database(
+        workspace.path().to_path_buf(),
+        database_path,
+        port,
+    )])
+    .map_err(|error| error.to_string())?;
+    let (address_tx, address_rx) = mpsc::sync_channel(1);
+    let server = thread::spawn(move || {
+        run_runtime(|cx| async move {
+            let client = TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT);
+            let broker = ResponderBroker::bind(
+                &cx,
+                bind_address,
+                client,
+                registry,
+                PreAuthAdmissionLimits::default(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            address_tx
+                .send(broker.local_addr())
+                .map_err(|error| format!("publish broker address: {error}"))?;
+            let error = match broker.accept_authenticated(&cx).await {
+                Ok(_) => {
+                    return Err("wrong-secret join was treated as authenticated".to_owned());
+                }
+                Err(error) => error,
+            };
+            if !matches!(error, ResponderBrokerError::BootstrapHelloAnswered) {
+                return Err(format!("unexpected wrong-secret accept error: {error:?}"));
+            }
+            fake.finish()?;
+            Ok(())
+        })
+    });
+    let address = address_rx
+        .recv_timeout(TEST_TIMEOUT)
+        .map_err(|error| format!("wait for broker bind: {error}"))?;
+    let payload = serde_json::to_value(ee::mesh::team::TeamJoinRequestV1 {
+        schema: ee::mesh::team::TEAM_JOIN_SCHEMA_V1.to_owned(),
+        invite_id: parsed.invite_id,
+        secret: "ffffffffffffffffffffffffffffffff".to_owned(),
+        joiner_node_id: "node_ffffffffffffffffffffffffffffffff".to_owned(),
+        joiner_display_name: "attacker".to_owned(),
+    })
+    .map_err(|error| format!("serialize wrong-secret join: {error}"))?;
+    let error =
+        ee::mesh::bootstrap_envelope::exchange_bootstrap_join(address, TEST_TIMEOUT, payload)
+            .expect_err("wrong secret must decline");
+    if !error.to_string().contains("declined") {
+        return Err(format!("wrong-secret join was not declined: {error}"));
+    }
+    server
+        .join()
+        .map_err(|_| "wrong-secret join broker thread panicked".to_owned())??;
+    Ok(())
+}
