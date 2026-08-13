@@ -50,7 +50,8 @@ use crate::db::{
 };
 use crate::mesh::bootstrap_envelope::{
     BOOTSTRAP_DECLINE_SCHEMA_V1, BOOTSTRAP_MAX_ENVELOPE_BYTES, BootstrapAdmission,
-    BootstrapCapability, BootstrapDeclineV1, decode_envelope, encode_envelope,
+    BootstrapCapability, BootstrapDeclineV1, SYNC_ROUND_SCHEMA_V1, SyncRoundEvent,
+    SyncRoundResponse, SyncRoundTip, decode_envelope, encode_envelope, parse_sync_round_request,
 };
 use crate::mesh::discovery_policy::{DiscoveryMode, EE_MESH_SERVICE_TAG, load_workspace_lists};
 use crate::mesh::hello::{
@@ -61,9 +62,9 @@ use crate::mesh::key_store::{KeyStoreError, MeshKeyStore, PairKeyClass};
 use crate::mesh::peer::{MeshPeerRecord, MeshPeerState};
 use crate::mesh::transport_session::{
     AcceptedSessionConfig, AcceptedSourceAttestation, AuthenticatedTransportSession,
-    HandshakeObservations, ResolvedAcceptedRoute, ResponderExpectations, SessionCapabilities,
-    SessionChannelError, SessionChannelLimits, UntrustedRouteSelectors,
-    accept_authenticated_session_with_open_bytes,
+    FrameCapability, HandshakeObservations, ResolvedAcceptedRoute, ResponderExpectations,
+    SessionCapabilities, SessionChannelError, SessionChannelLimits, SessionMessage,
+    UntrustedRouteSelectors, accept_authenticated_session_with_open_bytes,
 };
 
 pub const RESPONDER_BROKER_STATUS_SCHEMA_V1: &str = "ee.mesh.responder_broker.status.v1";
@@ -1292,6 +1293,7 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
                     self.record_error(&error, false, true);
                     return Err(error);
                 }
+                let _ = answer_sync_round(cx, &mut stream, &self.routes).await;
                 let _ = stream.shutdown(Shutdown::Both);
                 if let Ok(mut runtime) = self.runtime.lock() {
                     runtime.application_hello_performed = true;
@@ -1694,7 +1696,11 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             )
             .await
             {
-                Ok(Ok(_session)) => false,
+                Ok(Ok(mut session)) => {
+                    let _ = serve_authenticated_sync_round(cx, &mut session, &broker.routes).await;
+                    session.close();
+                    false
+                }
                 Ok(Err(ResponderBrokerError::Cancelled)) => {
                     self.shutdown();
                     return Err(ResponderBrokerError::Cancelled);
@@ -2805,6 +2811,123 @@ async fn answer_bootstrap_hello(
     let reply = encode_envelope(BootstrapCapability::Hello, payload)
         .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
     write_asupersync_framed(cx, stream, io_timeout, &reply).await
+}
+
+#[cfg(unix)]
+async fn answer_sync_round(
+    cx: &Cx,
+    stream: &mut TcpStream,
+    routes: &ResponderRouteRegistry,
+) -> Result<(), ResponderBrokerError> {
+    let io_timeout = routes.limits.io_timeout;
+    let Ok(bytes) = read_asupersync_framed(cx, stream, io_timeout).await else {
+        return Ok(());
+    };
+    let Some(request) = parse_sync_round_request(&bytes) else {
+        return Ok(());
+    };
+    let response = load_sync_round_response(routes, request.range_start_seq, request.max_events);
+    let reply =
+        serde_json::to_vec(&response).map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    write_asupersync_framed(cx, stream, io_timeout, &reply).await
+}
+
+async fn serve_authenticated_sync_round(
+    cx: &Cx,
+    session: &mut AuthenticatedTransportSession,
+    routes: &ResponderRouteRegistry,
+) -> Result<(), ResponderBrokerError> {
+    let Some(request) = session
+        .receive_request(cx)
+        .await
+        .map_err(ResponderBrokerError::Session)?
+    else {
+        return Ok(());
+    };
+    if !matches!(
+        request.capability,
+        FrameCapability::Summary | FrameCapability::EventFetch
+    ) {
+        return Ok(());
+    }
+    let processed = session
+        .process_request(cx, &request, async {
+            load_sync_round_response(routes, 0, 512)
+        })
+        .await
+        .map_err(ResponderBrokerError::Session)?;
+    let payload =
+        serde_json::to_value(&processed).map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    session
+        .send_response(
+            cx,
+            SessionMessage {
+                correlation_id: request.correlation_id,
+                capability: request.capability,
+                requested_budget_ms: request.requested_budget_ms,
+                payload,
+            },
+        )
+        .await
+        .map_err(ResponderBrokerError::Session)
+}
+
+fn load_sync_round_response(
+    routes: &ResponderRouteRegistry,
+    range_start_seq: u64,
+    max_events: u32,
+) -> SyncRoundResponse {
+    let workspace_id = routes
+        .workspace_ids()
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    let (team_id, origin_node_id) = routes
+        .routes
+        .values()
+        .next()
+        .map(|route| {
+            (
+                route.expectations.team_id.clone(),
+                route.expectations.responder_node_id.clone(),
+            )
+        })
+        .unwrap_or_default();
+    let mut events = Vec::new();
+    if let Some(database_path) = routes
+        .routes
+        .values()
+        .find_map(|route| route.database_path.clone())
+        && let Ok(connection) = DbConnection::open_file_read_only(database_path)
+    {
+        let limit = max_events.max(1).min(512);
+        if let Ok(rows) =
+            connection.list_mesh_origin_events(&team_id, &origin_node_id, range_start_seq, limit)
+        {
+            events = rows
+                .into_iter()
+                .map(|row| SyncRoundEvent {
+                    origin_node_id: row.origin_node_id,
+                    origin_workspace_id: workspace_id.clone(),
+                    seq: row.seq,
+                    event_hash: row.event_hash,
+                    payload_json: row.payload_json,
+                })
+                .collect();
+        }
+    }
+    let last_seq = events.last().map_or(0, |event| event.seq);
+    let tip_hash = events.last().map(|event| event.event_hash.clone());
+    SyncRoundResponse {
+        schema: SYNC_ROUND_SCHEMA_V1.to_owned(),
+        tips: vec![SyncRoundTip {
+            origin_node_id,
+            origin_workspace_id: workspace_id,
+            last_seq,
+            tip_event_hash: tip_hash,
+        }],
+        events,
+    }
 }
 
 fn checkpoint(cx: &Cx, _phase: &'static str) -> Result<(), ResponderBrokerError> {

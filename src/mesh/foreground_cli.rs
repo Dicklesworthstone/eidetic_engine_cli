@@ -16,12 +16,16 @@ use crate::config::{MeshLane, MeshLaneDecision};
 use crate::core::memory_scope::{MeshOutboundPolicyDecisionInput, parse_mesh_lane};
 use crate::core::tailscale_probe::TailscaleLocalReport;
 use crate::db::{
-    MeshStorageStatus, StoredMeshImportLedgerEvent, StoredMeshPeer, StoredMeshPeerCursor,
+    CreateMeshOriginEventInput, DbConnection, InsertMeshImportLedgerEventInput, MeshStorageStatus,
+    StoredMeshImportLedgerEvent, StoredMeshPeer, StoredMeshPeerCursor,
 };
 use crate::mesh::anti_entropy_protocol::{
     MeshAntiEntropyRetryPolicy, MeshRoundPeerOutcome, MeshSyncSummaryInput, build_sync_summary,
 };
-use crate::mesh::bootstrap_envelope::{exchange_bootstrap_hello, parse_live_peer_endpoint};
+use crate::mesh::bootstrap_envelope::{
+    SyncRoundRequest, SyncRoundTip, exchange_bootstrap_hello, exchange_live_mesh_round,
+    parse_live_peer_endpoint,
+};
 use crate::mesh::hello::{build_request, serialize_within_budget};
 use crate::mesh::hello_responder::configured_hello_port;
 use crate::mesh::identity_change_guard::{
@@ -1477,14 +1481,134 @@ impl MeshForegroundSyncTransport for TcpMeshForegroundSyncTransport {
         let Ok(payload) = serde_json::from_slice(&payload_bytes) else {
             return MeshForegroundSyncPeerOutcome::default();
         };
-        match exchange_bootstrap_hello(address, self.timeout, payload) {
-            Ok(_) => MeshForegroundSyncPeerOutcome {
-                contacted: true,
-                ..MeshForegroundSyncPeerOutcome::default()
+        let sync_request = SyncRoundRequest::new(
+            vec![SyncRoundTip {
+                origin_node_id: request.peer.origin_node_id.clone(),
+                origin_workspace_id: request.snapshot.workspace_id.clone(),
+                last_seq: 0,
+                tip_event_hash: None,
+            }],
+            0,
+            512,
+        );
+        match exchange_live_mesh_round(address, self.timeout, payload, &sync_request) {
+            Ok((_, sync)) => {
+                let received = u32::try_from(sync.events.len()).unwrap_or(u32::MAX);
+                let accepted = persist_sync_round_events(request.snapshot, &sync.events);
+                MeshForegroundSyncPeerOutcome {
+                    contacted: true,
+                    events_accepted: u64::from(accepted),
+                    ranges_requested: 1,
+                    ranges_fulfilled: u64::from(!sync.events.is_empty()),
+                    imported_event_count: received,
+                    ..MeshForegroundSyncPeerOutcome::default()
+                }
+            }
+            Err(_) => match exchange_bootstrap_hello(address, self.timeout, {
+                serde_json::from_slice(&payload_bytes).unwrap_or_default()
+            }) {
+                Ok(_) => MeshForegroundSyncPeerOutcome {
+                    contacted: true,
+                    ..MeshForegroundSyncPeerOutcome::default()
+                },
+                Err(_) => MeshForegroundSyncPeerOutcome::default(),
             },
-            Err(_) => MeshForegroundSyncPeerOutcome::default(),
         }
     }
+}
+
+fn persist_sync_round_events(
+    snapshot: &MeshForegroundSnapshot,
+    events: &[crate::mesh::bootstrap_envelope::SyncRoundEvent],
+) -> u32 {
+    if snapshot.database_path.is_empty() || events.is_empty() {
+        return 0;
+    }
+    let Ok(connection) = DbConnection::open_file(&snapshot.database_path) else {
+        return 0;
+    };
+    let mut imported = 0_u32;
+    for event in events {
+        let parsed = serde_json::from_str::<serde_json::Value>(&event.payload_json).ok();
+        let input = CreateMeshOriginEventInput {
+            event_id: parsed
+                .as_ref()
+                .and_then(|value| value.get("eventId").and_then(serde_json::Value::as_str))
+                .unwrap_or(event.event_hash.as_str())
+                .to_owned(),
+            team_id: parsed
+                .as_ref()
+                .and_then(|value| value.get("teamId").and_then(serde_json::Value::as_str))
+                .unwrap_or("team-mesh")
+                .to_owned(),
+            origin_node_id: event.origin_node_id.clone(),
+            signing_key_generation: parsed
+                .as_ref()
+                .and_then(|value| {
+                    value
+                        .get("signingKeyGeneration")
+                        .and_then(serde_json::Value::as_u64)
+                })
+                .unwrap_or(1),
+            seq: event.seq,
+            prev_event_hash: parsed.as_ref().and_then(|value| {
+                value
+                    .get("prevEventHash")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            }),
+            event_hash: event.event_hash.clone(),
+            signature: parsed
+                .as_ref()
+                .and_then(|value| value.get("signature").and_then(serde_json::Value::as_str))
+                .unwrap_or("")
+                .to_owned(),
+            payload_schema: parsed
+                .as_ref()
+                .and_then(|value| value.get("schema").and_then(serde_json::Value::as_str))
+                .unwrap_or("ee.mesh.event.v1")
+                .to_owned(),
+            payload_json: event.payload_json.clone(),
+            required_features_json: parsed
+                .as_ref()
+                .and_then(|value| value.get("requiredFeatures"))
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "[]".to_owned()),
+            produced_at: parsed
+                .as_ref()
+                .and_then(|value| value.get("producedAt").and_then(serde_json::Value::as_str))
+                .unwrap_or("1970-01-01T00:00:00Z")
+                .to_owned(),
+            body_nonce_hex: None,
+        };
+        if connection.append_mesh_origin_event(&input).is_ok() {
+            let _ = connection.insert_mesh_import_ledger_event(&InsertMeshImportLedgerEventInput {
+                workspace_id: snapshot.workspace_id.clone(),
+                event_id: input.event_id.clone(),
+                origin_node_id: input.origin_node_id.clone(),
+                origin_workspace_id: event.origin_workspace_id.clone(),
+                producer_peer_id: None,
+                seq: input.seq,
+                prev_event_hash: input.prev_event_hash.clone(),
+                event_hash: input.event_hash.clone(),
+                event_kind: "sync".to_owned(),
+                logical_memory_id: input.event_id.clone(),
+                content_hash: input.event_hash.clone(),
+                material_lane: "metadata".to_owned(),
+                redaction_class: "none".to_owned(),
+                trust_lane: "peer".to_owned(),
+                import_decision: "allow".to_owned(),
+                local_memory_id: None,
+                body_cache_key: None,
+                policy_failure_surface_json: None,
+                policy_decision_json: None,
+                event_json: input.payload_json.clone(),
+                imported_at: None,
+            });
+            imported = imported.saturating_add(1);
+        }
+    }
+    imported
 }
 
 pub async fn run_mesh_sync_supervisor_supervised(
@@ -4496,6 +4620,28 @@ max_bytes = 1048576
             )
             .expect("encode");
             write_std_framed(&mut stream, &reply).expect("write");
+            let sync_request = read_std_framed(&mut stream).expect("read sync");
+            let _ = crate::mesh::bootstrap_envelope::parse_sync_round_request(&sync_request)
+                .expect("sync request");
+            let sync_reply =
+                serde_json::to_vec(&crate::mesh::bootstrap_envelope::SyncRoundResponse {
+                    schema: crate::mesh::bootstrap_envelope::SYNC_ROUND_SCHEMA_V1.to_owned(),
+                    tips: vec![crate::mesh::bootstrap_envelope::SyncRoundTip {
+                        origin_node_id: "peer_live-origin".to_owned(),
+                        origin_workspace_id: "wsp_peer".to_owned(),
+                        last_seq: 1,
+                        tip_event_hash: Some("blake3:tip".to_owned()),
+                    }],
+                    events: vec![crate::mesh::bootstrap_envelope::SyncRoundEvent {
+                        origin_node_id: "peer_live-origin".to_owned(),
+                        origin_workspace_id: "wsp_peer".to_owned(),
+                        seq: 1,
+                        event_hash: "blake3:evt".to_owned(),
+                        payload_json: "{\"schema\":\"ee.mesh.event.v1\"}".to_owned(),
+                    }],
+                })
+                .expect("encode sync");
+            write_std_framed(&mut stream, &sync_reply).expect("write sync");
         });
 
         let mut peer = sample_trusted_sync_peer("peer_live");
@@ -4546,6 +4692,9 @@ max_bytes = 1048576
             outcome.contacted,
             "live TCP hello must count as contact, got {outcome:?}"
         );
+        assert_eq!(outcome.imported_event_count, 1);
+        assert_eq!(outcome.ranges_requested, 1);
+        assert_eq!(outcome.ranges_fulfilled, 1);
         server.join().expect("server");
     }
 
