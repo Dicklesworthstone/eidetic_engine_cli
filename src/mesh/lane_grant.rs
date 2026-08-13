@@ -71,6 +71,9 @@ const MAX_SURFACE_CONTEXT_BYTES: usize = 256;
 const LANE_ENVELOPE_MAC_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.lane_approval.envelope.v1";
 const LANE_SNAPSHOT_TAG_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.lane_approval.snapshot.v1";
 const LANE_AUDIT_ID_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.lane_approval.audit_id.v1";
+const BODY_ENVELOPE_MAC_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.body_approval.envelope.v1";
+const BODY_SNAPSHOT_TAG_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.body_approval.snapshot.v1";
+const BODY_AUDIT_ID_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.body_approval.audit_id.v1";
 const CONFIG_DIGEST_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.lane_approval.config.v1\0";
 const AUDIT_ID_PREFIX: &str = "eela1_";
 
@@ -84,42 +87,50 @@ const AUDIT_ID_PREFIX: &str = "eela1_";
 pub enum ApprovalPurpose {
     /// T1.4 material-lane consent, including the lane named `Body`.
     Lane,
+    /// T5.9 team body-share consent. Uses the reserved BodyApproval domains.
+    Body,
 }
 
 impl ApprovalPurpose {
     const fn envelope_mac_domain(self) -> MacDomain {
         match self {
             Self::Lane => MacDomain::LaneApprovalEnvelopeMac,
+            Self::Body => MacDomain::BodyApprovalEnvelopeMac,
         }
     }
 
     const fn snapshot_tag_domain(self) -> MacDomain {
         match self {
             Self::Lane => MacDomain::LaneApprovalSnapshotTag,
+            Self::Body => MacDomain::BodyApprovalSnapshotTag,
         }
     }
 
     const fn audit_id_domain(self) -> MacDomain {
         match self {
             Self::Lane => MacDomain::LaneApprovalAuditId,
+            Self::Body => MacDomain::BodyApprovalAuditId,
         }
     }
 
     const fn envelope_message_domain(self) -> &'static [u8] {
         match self {
             Self::Lane => LANE_ENVELOPE_MAC_MESSAGE_DOMAIN,
+            Self::Body => BODY_ENVELOPE_MAC_MESSAGE_DOMAIN,
         }
     }
 
     const fn snapshot_message_domain(self) -> &'static [u8] {
         match self {
             Self::Lane => LANE_SNAPSHOT_TAG_MESSAGE_DOMAIN,
+            Self::Body => BODY_SNAPSHOT_TAG_MESSAGE_DOMAIN,
         }
     }
 
     const fn audit_message_domain(self) -> &'static [u8] {
         match self {
             Self::Lane => LANE_AUDIT_ID_MESSAGE_DOMAIN,
+            Self::Body => BODY_AUDIT_ID_MESSAGE_DOMAIN,
         }
     }
 }
@@ -806,6 +817,49 @@ mod tests {
             .expect("verify body metadata lane snapshot")
             .audit_id();
         assert!(lane_audit.to_opaque_string().starts_with(AUDIT_ID_PREFIX));
+    }
+
+    #[test]
+    fn body_approval_token_cannot_replay_as_a_lane_grant() {
+        let (_directory, root) = root();
+        let snapshot = br#"{"schema":"ee.team.share.bodies.v1","consent":"blake3:aa"}"#;
+        let issued = issue_with_nonce(
+            &root,
+            ApprovalPurpose::Body,
+            WORKSPACE,
+            "ee.team.share.bodies.v1",
+            snapshot,
+            NOW,
+            [0x3b; NONCE_LEN],
+        )
+        .expect("issue body");
+        let bearer = issued.token().expose_bearer();
+        assert!(bearer.starts_with(APPROVAL_TOKEN_PREFIX));
+        assert!(matches!(
+            verify_authentic(
+                &root,
+                ApprovalPurpose::Lane,
+                WORKSPACE,
+                "ee.team.share.bodies.v1",
+                &bearer,
+                NOW,
+            ),
+            Err(ApprovalTokenError::Invalid)
+        ));
+        let authenticated = verify_authentic(
+            &root,
+            ApprovalPurpose::Body,
+            WORKSPACE,
+            "ee.team.share.bodies.v1",
+            &bearer,
+            NOW,
+        )
+        .expect("body authentic");
+        compare_snapshot(&root, &authenticated, snapshot, NOW).expect("body snapshot");
+        assert!(matches!(
+            compare_snapshot(&root, &authenticated, br#"{"drift":true}"#, NOW),
+            Err(ApprovalTokenError::Stale)
+        ));
     }
 
     #[test]

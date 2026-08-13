@@ -292,6 +292,10 @@ pub fn parse_live_peer_endpoint(
 
 /// Schema for one metadata-only anti-entropy round on the hello TCP socket.
 pub const SYNC_ROUND_SCHEMA_V1: &str = "ee.mesh.sync_round.v1";
+/// Authenticated body-fetch request over a live session.
+pub const BODY_FETCH_REQUEST_SCHEMA_V1: &str = "ee.mesh.body_fetch.request.v1";
+/// Authenticated body-fetch response. Body bytes are omitted unless available.
+pub const BODY_FETCH_RESPONSE_SCHEMA_V1: &str = "ee.mesh.body_fetch.response.v1";
 
 /// One origin tip advertised in a sync round.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -314,6 +318,26 @@ pub struct SyncRoundEvent {
     pub seq: u64,
     pub event_hash: String,
     pub payload_json: String,
+}
+
+/// Caller → responder for one published body cache key.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BodyFetchRequest {
+    pub schema: String,
+    pub body_cache_key: String,
+}
+
+/// Responder → caller. `body_hex` is present only when the cache is available.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BodyFetchResponse {
+    pub schema: String,
+    pub body_cache_key: String,
+    pub cache_status: String,
+    pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_hex: Option<String>,
 }
 
 /// Caller → responder after hello.
