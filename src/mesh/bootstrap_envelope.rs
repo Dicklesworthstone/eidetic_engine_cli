@@ -414,6 +414,47 @@ pub fn exchange_live_mesh_round(
     Ok((envelope.payload, sync))
 }
 
+/// Exchange one unsigned bootstrap join over length-prefixed TCP.
+pub fn exchange_bootstrap_join(
+    address: std::net::SocketAddr,
+    timeout: std::time::Duration,
+    payload: JsonValue,
+) -> Result<JsonValue, BootstrapEnvelopeError> {
+    if address.ip().is_unspecified() {
+        return Err(BootstrapEnvelopeError::Malformed {
+            message: "bootstrap join refuses an unspecified remote address".to_owned(),
+        });
+    }
+    let request = encode_envelope(BootstrapCapability::Join, payload)?;
+    let mut stream = std::net::TcpStream::connect_timeout(&address, timeout).map_err(|error| {
+        BootstrapEnvelopeError::Malformed {
+            message: format!("bootstrap join connect: {error}"),
+        }
+    })?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .and_then(|()| stream.set_write_timeout(Some(timeout)))
+        .map_err(|error| BootstrapEnvelopeError::Malformed {
+            message: format!("bootstrap join timeout: {error}"),
+        })?;
+    write_std_framed(&mut stream, &request)?;
+    let reply = read_std_framed(&mut stream)?;
+    if let Ok(decline) = serde_json::from_slice::<BootstrapDeclineV1>(&reply)
+        && decline.schema == BOOTSTRAP_DECLINE_SCHEMA_V1
+    {
+        return Err(BootstrapEnvelopeError::Malformed {
+            message: format!("bootstrap join declined: {}", decline.code),
+        });
+    }
+    let envelope = decode_envelope(&reply)?;
+    if envelope.capability != BootstrapCapability::Join {
+        return Err(BootstrapEnvelopeError::UnsupportedCapability {
+            observed: envelope.capability.token().to_owned(),
+        });
+    }
+    Ok(envelope.payload)
+}
+
 /// Exchange one unsigned bootstrap hello over length-prefixed TCP.
 pub fn exchange_bootstrap_hello(
     address: std::net::SocketAddr,
