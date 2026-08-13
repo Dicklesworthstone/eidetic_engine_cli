@@ -227,6 +227,10 @@ pub struct TeamShareBodiesArgs {
     #[arg(long)]
     pub token: Option<String>,
 
+    /// Read the body-approval token from stdin instead of `--token`.
+    #[arg(long)]
+    pub token_stdin: bool,
+
     /// Maximum memories to consider (1–256).
     #[arg(long, default_value_t = 64)]
     pub limit: usize,
@@ -958,6 +962,27 @@ where
     };
     let produced_at = chrono::Utc::now().to_rfc3339();
     let workspace_path = cli.resolve_workspace();
+    let stdin_token = if args.token_stdin {
+        match read_invite_code_from_stdin() {
+            Ok(token) => Some(token),
+            Err(error) => {
+                return write_domain_error(
+                    &DomainError::Usage {
+                        message: format!("Failed to read body token from stdin: {error}"),
+                        repair: Some(
+                            "ee team share bodies --confirm --token-stdin --workspace .".to_owned(),
+                        ),
+                    },
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let token = stdin_token.as_deref().or(args.token.as_deref());
     match share_team_bodies(
         &connection,
         &workspace_id,
@@ -966,7 +991,7 @@ where
         args.limit,
         Some(&workspace_path),
         args.issue_token,
-        args.token.as_deref(),
+        token,
     ) {
         Ok(report) => {
             let human = if report.confirmed {
