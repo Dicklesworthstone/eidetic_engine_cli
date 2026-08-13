@@ -66189,6 +66189,12 @@ impl NormalizedInvocation {
                         mesh::MeshHelloResponderCommand::Run(_) => {
                             "mesh hello-responder run".to_string()
                         }
+                        mesh::MeshHelloResponderCommand::Register(_) => {
+                            "mesh hello-responder register".to_string()
+                        }
+                        mesh::MeshHelloResponderCommand::Unregister(_) => {
+                            "mesh hello-responder unregister".to_string()
+                        }
                     },
                 },
                 Command::Situation(sit) => match sit {

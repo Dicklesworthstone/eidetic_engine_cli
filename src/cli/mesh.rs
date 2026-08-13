@@ -60,8 +60,10 @@ use crate::mesh::peer::{
     unknown_peer_attempt_report,
 };
 use crate::mesh::responder_broker::{
-    DurableResponderRegistration, PreAuthAdmissionLimits, ResponderBrokerError,
-    ResponderBrokerOwner, TailscaleLocalApiClient,
+    DurableResponderRegistration, PreAuthAdmissionLimits, RESPONDER_CONTROL_SCHEMA_V1,
+    ResponderBrokerError, ResponderBrokerOwner, ResponderControlOp, ResponderControlRequest,
+    TailscaleLocalApiClient, default_responder_control_socket_path,
+    submit_responder_control_request,
 };
 use crate::mesh::tailscale_autodiscovery::{
     TailscaleAutodiscoveryConfig, TailscaleAutodiscoveryReport,
@@ -267,6 +269,10 @@ pub enum MeshHelloResponderCommand {
     Status(MeshHelloResponderStatusArgs),
     /// Own the real Tailscale responder listener in this foreground process.
     Run(MeshHelloResponderRunArgs),
+    /// Register exact team routes with the user-scoped owner over the same-EUID control socket.
+    Register(MeshHelloResponderRegisterArgs),
+    /// Remove previously registered routes from the user-scoped owner.
+    Unregister(MeshHelloResponderRegisterArgs),
 }
 
 /// Arguments for `ee mesh hello-responder status`.
@@ -307,6 +313,38 @@ pub struct MeshHelloResponderRunArgs {
     /// LocalAPI address-set revalidation interval.
     #[arg(long = "revalidate-ms", default_value_t = 2_000_u64)]
     pub revalidate_ms: u64,
+
+    /// Same-EUID control socket. Defaults to the user-scoped mesh-responder socket.
+    #[arg(long = "control-socket", value_name = "PATH")]
+    pub control_socket: Option<PathBuf>,
+}
+
+/// Arguments for `ee mesh hello-responder register|unregister`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshHelloResponderRegisterArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Locally configured team route identifier.
+    #[arg(long = "team-id", value_name = "TEAM_ID")]
+    pub team_id: String,
+
+    /// This ee installation's durable node identifier.
+    #[arg(long = "responder-node-id", value_name = "NODE_ID")]
+    pub responder_node_id: String,
+
+    /// Opaque enrolled peer handle. Repeat to register multiple exact routes.
+    #[arg(long = "peer", value_name = "PEER_ID", action = ArgAction::Append, required = true)]
+    pub peers: Vec<String>,
+
+    /// Committed nonprivileged responder port; defaults to EE_MESH_HELLO_PORT, then 41888.
+    #[arg(long)]
+    pub port: Option<u16>,
+
+    /// Same-EUID control socket published by `ee mesh hello-responder run`.
+    #[arg(long = "control-socket", value_name = "PATH")]
+    pub control_socket: Option<PathBuf>,
 }
 
 /// Arguments for `ee mesh preview-grant`.
@@ -3363,6 +3401,20 @@ where
         MeshHelloResponderCommand::Run(args) => {
             handle_mesh_hello_responder_run(cli, args, stdout, stderr)
         }
+        MeshHelloResponderCommand::Register(args) => handle_mesh_hello_responder_control(
+            cli,
+            args,
+            ResponderControlOp::Register,
+            stdout,
+            stderr,
+        ),
+        MeshHelloResponderCommand::Unregister(args) => handle_mesh_hello_responder_control(
+            cli,
+            args,
+            ResponderControlOp::Unregister,
+            stdout,
+            stderr,
+        ),
     }
 }
 
@@ -3492,6 +3544,11 @@ where
         }
     };
     let cx = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    #[cfg(unix)]
+    let control_socket = args
+        .control_socket
+        .clone()
+        .unwrap_or_else(default_responder_control_socket_path);
     let registrations = args
         .peers
         .iter()
@@ -3522,6 +3579,10 @@ where
         Ok(owner) => owner,
         Err(error) => return write_responder_broker_error(&error, cli, stdout, stderr),
     };
+    #[cfg(unix)]
+    if let Err(error) = owner.listen_control(control_socket) {
+        return write_responder_broker_error(&error, cli, stdout, stderr);
+    }
     let report = MeshHelloResponderRunReport {
         schema: "ee.mesh.hello_responder.run.v1",
         running: true,
@@ -3551,6 +3612,155 @@ where
     match served {
         Ok(()) | Err(ResponderBrokerError::Cancelled) => ProcessExitCode::Success,
         Err(error) => write_responder_broker_error(&error, cli, stdout, stderr),
+    }
+}
+
+fn handle_mesh_hello_responder_control<W, E>(
+    cli: &Cli,
+    args: &MeshHelloResponderRegisterArgs,
+    op: ResponderControlOp,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    #[cfg(not(unix))]
+    {
+        let _ = (args, op);
+        return write_responder_broker_error(
+            &ResponderBrokerError::PlatformUnsupported,
+            cli,
+            stdout,
+            stderr,
+        );
+    }
+    #[cfg(unix)]
+    {
+        let (snapshot, _) = match open_mesh_peer_store(cli, args.database.as_deref()) {
+            Ok(store) => store,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        if !snapshot.mesh_enabled {
+            return write_domain_error(
+                &DomainError::PolicyDenied {
+                    message: "Mesh is disabled; refusing to mutate the responder control channel."
+                        .to_owned(),
+                    repair: Some("Explicitly re-enable mesh after containment review.".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+        let workspace_path = match PathBuf::from(&snapshot.workspace_path).canonicalize() {
+            Ok(path) => path,
+            Err(error) => {
+                return write_domain_error(
+                    &DomainError::Configuration {
+                        message: format!("Cannot canonicalize responder workspace: {error}"),
+                        repair: Some("Use the canonical workspace path and retry.".to_owned()),
+                    },
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                );
+            }
+        };
+        let database_path = match PathBuf::from(&snapshot.database_path).canonicalize() {
+            Ok(path) => path,
+            Err(error) => {
+                return write_domain_error(
+                    &DomainError::Configuration {
+                        message: format!("Cannot canonicalize responder database: {error}"),
+                        repair: Some("Run `ee migrate run`, then retry.".to_owned()),
+                    },
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                );
+            }
+        };
+        let configured_port = read_env_var(EnvVar::MeshHelloPort);
+        let port = match (args.port, configured_port.as_deref()) {
+            (Some(port), _) => port,
+            (None, Some(value)) => match value.trim().parse::<u16>() {
+                Ok(port) => port,
+                Err(_) => {
+                    return write_domain_error(
+                        &DomainError::Usage {
+                            message: "EE_MESH_HELLO_PORT must be an integer port.".to_owned(),
+                            repair: Some(
+                                "Use EE_MESH_HELLO_PORT=41888 or pass --port 41888.".to_owned(),
+                            ),
+                        },
+                        cli.wants_json(),
+                        stdout,
+                        stderr,
+                    );
+                }
+            },
+            (None, None) => crate::mesh::hello_responder::DEFAULT_HELLO_RESPONDER_PORT,
+        };
+        if port < 1024 {
+            return write_domain_error(
+                &DomainError::Usage {
+                    message: "Responder port must be nonprivileged.".to_owned(),
+                    repair: Some("Use --port 41888.".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+        let request = ResponderControlRequest {
+            schema: RESPONDER_CONTROL_SCHEMA_V1.to_owned(),
+            op,
+            nonce: uuid::Uuid::now_v7().as_simple().to_string(),
+            workspace_id: snapshot.workspace_id,
+            team_id: args.team_id.clone(),
+            responder_node_id: args.responder_node_id.clone(),
+            workspace_path,
+            database_path,
+            peer_handles: args.peers.clone(),
+            committed_port: port,
+        };
+        let socket = args
+            .control_socket
+            .clone()
+            .unwrap_or_else(default_responder_control_socket_path);
+        match submit_responder_control_request(&socket, &request) {
+            Ok(response) if response.ok => {
+                let human = format!(
+                    "Responder control {} succeeded with {} route(s).",
+                    match op {
+                        ResponderControlOp::Register => "register",
+                        ResponderControlOp::Unregister => "unregister",
+                        ResponderControlOp::Status => "status",
+                    },
+                    response.registered_routes
+                );
+                write_mesh_report(cli, &response, &human, stdout)
+            }
+            Ok(response) => write_domain_error(
+                &DomainError::PolicyDeniedWithDetails {
+                    message: response
+                        .message
+                        .clone()
+                        .unwrap_or_else(|| "Responder control channel refused the request.".to_owned()),
+                    repair: Some(
+                        "Inspect `ee mesh hello-responder status` and re-register the exact local route."
+                            .to_owned(),
+                    ),
+                    details_json: serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            ),
+            Err(error) => write_responder_broker_error(&error, cli, stdout, stderr),
+        }
     }
 }
 
