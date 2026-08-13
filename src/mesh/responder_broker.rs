@@ -6,8 +6,9 @@
 //! consent generation, and pair-key generation from durable local stores, and
 //! hands the socket to T2.1's public source-coupled session acceptor.
 //!
-//! It deliberately does not run application hello, anti-entropy, or
-//! synchronization. A same-EUID Unix-domain control channel lets another
+//! Unsigned bootstrap hello is answered on the same listener before
+//! session_open. Anti-entropy and authenticated sync remain later slices.
+//! A same-EUID Unix-domain control channel lets another
 //! local workspace register or unregister exact team routes without binding
 //! a second TCP port. Durable lifecycle audit persistence and application
 //! dispatch remain later T2.2 slices.
@@ -34,9 +35,9 @@ use asupersync::Cx;
 #[cfg(unix)]
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
-use asupersync::net::TcpListener;
-#[cfg(unix)]
 use asupersync::net::unix::{UnixListener, UnixStream};
+#[cfg(unix)]
+use asupersync::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use asupersync::time::BudgetTimeExt;
 use asupersync::time::{sleep as asupersync_sleep, timeout, wall_now};
@@ -47,7 +48,14 @@ use crate::db::{
     DatabaseLocation, DbConnection, MeshPeerTransportIdentityError,
     ObserveMeshPeerTransportIdentityInput,
 };
-use crate::mesh::bootstrap_envelope::BootstrapAdmission;
+use crate::mesh::bootstrap_envelope::{
+    BOOTSTRAP_DECLINE_SCHEMA_V1, BOOTSTRAP_MAX_ENVELOPE_BYTES, BootstrapAdmission,
+    BootstrapCapability, BootstrapDeclineV1, decode_envelope, encode_envelope,
+};
+use crate::mesh::discovery_policy::{DiscoveryMode, EE_MESH_SERVICE_TAG, load_workspace_lists};
+use crate::mesh::hello::{
+    HelloOutcome, ResponderContext, decide_hello_response, parse_hello_request,
+};
 pub use crate::mesh::key_store::MESH_KEY_STORE_UNAVAILABLE_CODE;
 use crate::mesh::key_store::{KeyStoreError, MeshKeyStore, PairKeyClass};
 use crate::mesh::peer::{MeshPeerRecord, MeshPeerState};
@@ -55,7 +63,7 @@ use crate::mesh::transport_session::{
     AcceptedSessionConfig, AcceptedSourceAttestation, AuthenticatedTransportSession,
     HandshakeObservations, ResolvedAcceptedRoute, ResponderExpectations, SessionCapabilities,
     SessionChannelError, SessionChannelLimits, UntrustedRouteSelectors,
-    accept_authenticated_session_with,
+    accept_authenticated_session_with_open_bytes,
 };
 
 pub const RESPONDER_BROKER_STATUS_SCHEMA_V1: &str = "ee.mesh.responder_broker.status.v1";
@@ -786,6 +794,24 @@ impl ResponderRouteRegistry {
     pub fn route_count(&self) -> usize {
         self.routes.len()
     }
+
+    fn workspace_ids(&self) -> Vec<String> {
+        let mut ids = self
+            .routes
+            .values()
+            .map(|route| route.expectations.responder_workspace_id.clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    fn first_workspace_path(&self) -> Option<&Path> {
+        self.routes
+            .values()
+            .next()
+            .map(|route| route.workspace_path.as_path())
+    }
 }
 
 /// Pre-authentication concurrency and fixed-window rate bounds.
@@ -901,6 +927,7 @@ struct RuntimeStatus {
     authenticated_sessions: u64,
     rejected_connections: u64,
     last_error_code: Option<&'static str>,
+    application_hello_performed: bool,
     recent_audit: VecDeque<ResponderBrokerAuditEvent>,
 }
 
@@ -912,6 +939,7 @@ impl RuntimeStatus {
             authenticated_sessions: 0,
             rejected_connections: 0,
             last_error_code: None,
+            application_hello_performed: false,
             recent_audit: VecDeque::new(),
         }
     }
@@ -962,6 +990,7 @@ pub enum ResponderBrokerError {
     KeyStoreUnavailable,
     PairingRequired,
     Session(SessionChannelError),
+    BootstrapHelloAnswered,
 }
 
 impl ResponderBrokerError {
@@ -977,6 +1006,7 @@ impl ResponderBrokerError {
             Self::KeyStoreUnavailable => MESH_KEY_STORE_UNAVAILABLE_CODE,
             Self::PairingRequired => "mesh_frame_auth_failed",
             Self::Session(error) => error.degraded_code(),
+            Self::BootstrapHelloAnswered => "mesh_transport_unreachable",
             Self::PlatformUnsupported
             | Self::InvalidConfiguration
             | Self::TransportUnavailable
@@ -1010,6 +1040,7 @@ impl ResponderBrokerError {
             | Self::TransportUnavailable
             | Self::Cancelled
             | Self::AdmissionLimited
+            | Self::BootstrapHelloAnswered
             | Self::Session(_) => "warning",
         }
     }
@@ -1057,6 +1088,9 @@ impl ResponderBrokerError {
                 "Mesh responder route is not paired for authenticated transport".to_owned()
             }
             Self::Session(error) => error.message(),
+            Self::BootstrapHelloAnswered => {
+                "Mesh responder answered an unsigned bootstrap hello".to_owned()
+            }
         }
     }
 
@@ -1087,6 +1121,7 @@ impl ResponderBrokerError {
             Self::TransportUnavailable
             | Self::Cancelled
             | Self::AdmissionLimited
+            | Self::BootstrapHelloAnswered
             | Self::Session(_) => {
                 "Verify the enrolled peer endpoint and retry under a live bounded mesh operation."
             }
@@ -1236,10 +1271,39 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
             let route_selected = Arc::new(AtomicBool::new(false));
             let selected_slot = Arc::clone(&route_selected);
             let limits = self.routes.limits;
-            let accepted = accept_authenticated_session_with(
+            let mut stream = stream;
+            let first_packet =
+                match read_asupersync_framed(cx, &mut stream, limits.io_timeout).await {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        let _ = stream.shutdown(Shutdown::Both);
+                        self.record_error(&error, false, true);
+                        return Err(error);
+                    }
+                };
+            if decode_envelope(&first_packet)
+                .ok()
+                .is_some_and(|envelope| envelope.capability == BootstrapCapability::Hello)
+            {
+                if let Err(error) =
+                    answer_bootstrap_hello(cx, &mut stream, &self.routes, &first_packet).await
+                {
+                    let _ = stream.shutdown(Shutdown::Both);
+                    self.record_error(&error, false, true);
+                    return Err(error);
+                }
+                let _ = stream.shutdown(Shutdown::Both);
+                if let Ok(mut runtime) = self.runtime.lock() {
+                    runtime.application_hello_performed = true;
+                    runtime.record("bootstrap_hello", None, false, false, false);
+                }
+                return Err(ResponderBrokerError::BootstrapHelloAnswered);
+            }
+            let accepted = accept_authenticated_session_with_open_bytes(
                 cx,
                 stream,
                 limits,
+                first_packet,
                 move |route_cx, observed_source, selectors| {
                     let error_slot = Arc::clone(&error_slot);
                     async move {
@@ -1352,7 +1416,7 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
 
     #[must_use]
     pub fn status(&self) -> ResponderBrokerStatus {
-        let (state, accepted, authenticated, rejected, last_error) = self
+        let (state, accepted, authenticated, rejected, last_error, hello_performed) = self
             .runtime
             .lock()
             .map(|runtime| {
@@ -1362,6 +1426,7 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
                     runtime.authenticated_sessions,
                     runtime.rejected_connections,
                     runtime.last_error_code,
+                    runtime.application_hello_performed,
                 )
             })
             .unwrap_or((
@@ -1370,6 +1435,7 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
                 0,
                 0,
                 Some("mesh_transport_unreachable"),
+                false,
             ));
         let preauth_inflight = self
             .admission
@@ -1387,7 +1453,7 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
             authenticated_sessions: authenticated,
             rejected_connections: rejected,
             last_error_code: last_error,
-            application_hello_performed: false,
+            application_hello_performed: hello_performed,
             anti_entropy_performed: false,
             synchronized: false,
         }
@@ -2584,6 +2650,165 @@ where
         Ok(Err(_)) => Err(ResponderBrokerError::WhoIsUnavailable),
         Err(_) => Err(ResponderBrokerError::WhoIsUnavailable),
     }
+}
+
+#[cfg(unix)]
+async fn read_asupersync_framed(
+    cx: &Cx,
+    stream: &mut TcpStream,
+    duration: Duration,
+) -> Result<Vec<u8>, ResponderBrokerError> {
+    checkpoint(cx, "bootstrap frame read")?;
+    let now = wall_now();
+    let effective = cx
+        .budget()
+        .remaining_duration(now)
+        .map_or(duration, |remaining| remaining.min(duration));
+    if effective.is_zero() {
+        return Err(ResponderBrokerError::Cancelled);
+    }
+    let _ambient = Cx::set_current(Some(cx.clone()));
+    let bytes = match timeout(now, effective, async {
+        let mut prefix = [0_u8; 4];
+        stream.read_exact(&mut prefix).await?;
+        let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bootstrap length does not fit usize",
+            )
+        })?;
+        if length == 0 || length > BOOTSTRAP_MAX_ENVELOPE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "bootstrap length {length} exceeds {BOOTSTRAP_MAX_ENVELOPE_BYTES}-byte cap"
+                ),
+            ));
+        }
+        let mut body = vec![0_u8; length];
+        stream.read_exact(&mut body).await?;
+        Ok(body)
+    })
+    .await
+    {
+        Ok(Ok(body)) => body,
+        Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {
+            return Err(ResponderBrokerError::Cancelled);
+        }
+        Ok(Err(_)) | Err(_) => return Err(ResponderBrokerError::TransportUnavailable),
+    };
+    checkpoint(cx, "bootstrap frame read")?;
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+async fn write_asupersync_framed(
+    cx: &Cx,
+    stream: &mut TcpStream,
+    duration: Duration,
+    bytes: &[u8],
+) -> Result<(), ResponderBrokerError> {
+    if bytes.len() > BOOTSTRAP_MAX_ENVELOPE_BYTES {
+        return Err(ResponderBrokerError::TransportUnavailable);
+    }
+    checkpoint(cx, "bootstrap frame write")?;
+    let prefix = u32::try_from(bytes.len())
+        .map_err(|_| ResponderBrokerError::TransportUnavailable)?
+        .to_be_bytes();
+    let now = wall_now();
+    let effective = cx
+        .budget()
+        .remaining_duration(now)
+        .map_or(duration, |remaining| remaining.min(duration));
+    if effective.is_zero() {
+        return Err(ResponderBrokerError::Cancelled);
+    }
+    let _ambient = Cx::set_current(Some(cx.clone()));
+    match timeout(now, effective, async {
+        stream.write_all(&prefix).await?;
+        stream.write_all(bytes).await?;
+        stream.flush().await
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {
+            return Err(ResponderBrokerError::Cancelled);
+        }
+        Ok(Err(_)) | Err(_) => return Err(ResponderBrokerError::TransportUnavailable),
+    }
+    checkpoint(cx, "bootstrap frame write")?;
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn write_bootstrap_decline(
+    cx: &Cx,
+    stream: &mut TcpStream,
+    duration: Duration,
+    code: &str,
+) -> Result<(), ResponderBrokerError> {
+    let decline = BootstrapDeclineV1 {
+        schema: BOOTSTRAP_DECLINE_SCHEMA_V1.to_owned(),
+        code: code.to_owned(),
+    };
+    let bytes =
+        serde_json::to_vec(&decline).map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    write_asupersync_framed(cx, stream, duration, &bytes).await
+}
+
+#[cfg(unix)]
+async fn answer_bootstrap_hello(
+    cx: &Cx,
+    stream: &mut TcpStream,
+    routes: &ResponderRouteRegistry,
+    first_packet: &[u8],
+) -> Result<(), ResponderBrokerError> {
+    checkpoint(cx, "bootstrap hello")?;
+    let io_timeout = routes.limits.io_timeout;
+    let envelope = match decode_envelope(first_packet) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            return write_bootstrap_decline(cx, stream, io_timeout, error.decline_code()).await;
+        }
+    };
+    if envelope.capability != BootstrapCapability::Hello {
+        return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_unsupported_capability")
+            .await;
+    }
+    let Some(request) = parse_hello_request(&envelope.payload) else {
+        return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed").await;
+    };
+    let workspace_ids = routes.workspace_ids();
+    let lists = routes
+        .first_workspace_path()
+        .and_then(|path| load_workspace_lists(path).ok())
+        .unwrap_or_default();
+    let advertised_tags = vec![EE_MESH_SERVICE_TAG.to_owned()];
+    let capabilities = vec!["hello".to_owned()];
+    let context = ResponderContext {
+        mesh_enabled: true,
+        tailscale_authenticated: true,
+        shields_up: false,
+        respond_mode: DiscoveryMode::from_env_respond(|_| {}),
+        responder_node_key: &routes.responder_node_pubkey,
+        responder_ee_version: env!("CARGO_PKG_VERSION"),
+        responder_workspace_ids: &workspace_ids,
+        responder_capabilities: &capabilities,
+        responder_advertised_tags: &advertised_tags,
+        respond_allowlist: &lists.respond_allowlist,
+        denylist: &lists.denylist,
+        rate_limited: false,
+        elapsed_micros: 0,
+    };
+    let payload = match decide_hello_response(&request, &context) {
+        HelloOutcome::Granted(response) => serde_json::to_value(response),
+        HelloOutcome::Declined(error) => serde_json::to_value(error),
+    }
+    .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    let reply = encode_envelope(BootstrapCapability::Hello, payload)
+        .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    write_asupersync_framed(cx, stream, io_timeout, &reply).await
 }
 
 fn checkpoint(cx: &Cx, _phase: &'static str) -> Result<(), ResponderBrokerError> {

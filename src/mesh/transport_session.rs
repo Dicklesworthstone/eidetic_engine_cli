@@ -2986,6 +2986,15 @@ async fn read_pending_accepted_session(
             return Err(error);
         }
     };
+    pending_accepted_session_from_open_bytes(stream, peer_address, limits, open_bytes)
+}
+
+fn pending_accepted_session_from_open_bytes(
+    stream: TcpStream,
+    peer_address: SocketAddr,
+    limits: SessionChannelLimits,
+    open_bytes: Vec<u8>,
+) -> Result<PendingAcceptedSession, SessionChannelError> {
     let untrusted_open = match decode_session_open(&open_bytes) {
         Ok(open) => open,
         Err(error) => {
@@ -3060,6 +3069,46 @@ where
     F: Future<Output = Result<ResolvedAcceptedRoute<G>, SessionChannelError>>,
 {
     let pending = read_pending_accepted_session(cx, stream, limits).await?;
+    authenticate_pending_with_resolver(cx, pending, limits, resolve).await
+}
+
+/// Same as [`accept_authenticated_session_with`] after the first framed
+/// packet has already been read (so the owner can triage bootstrap hello).
+pub async fn accept_authenticated_session_with_open_bytes<R, F, G>(
+    cx: &Cx,
+    stream: TcpStream,
+    limits: SessionChannelLimits,
+    open_bytes: Vec<u8>,
+    resolve: R,
+) -> Result<AuthenticatedTransportSession, SessionChannelError>
+where
+    R: FnOnce(Cx, SocketAddr, UntrustedRouteSelectors) -> F,
+    F: Future<Output = Result<ResolvedAcceptedRoute<G>, SessionChannelError>>,
+{
+    refuse_if_transport_disabled()?;
+    checkpoint(cx, "accepted session")?;
+    validate_limits(limits)?;
+    let peer_address = stream
+        .peer_addr()
+        .map_err(|error| SessionChannelError::Io {
+            phase: "peer address",
+            message: error.to_string(),
+        })?;
+    let pending =
+        pending_accepted_session_from_open_bytes(stream, peer_address, limits, open_bytes)?;
+    authenticate_pending_with_resolver(cx, pending, limits, resolve).await
+}
+
+async fn authenticate_pending_with_resolver<R, F, G>(
+    cx: &Cx,
+    pending: PendingAcceptedSession,
+    limits: SessionChannelLimits,
+    resolve: R,
+) -> Result<AuthenticatedTransportSession, SessionChannelError>
+where
+    R: FnOnce(Cx, SocketAddr, UntrustedRouteSelectors) -> F,
+    F: Future<Output = Result<ResolvedAcceptedRoute<G>, SessionChannelError>>,
+{
     let selectors = untrusted_route_selectors(&pending.untrusted_open)?;
     let route = match await_route_resolution(
         cx,

@@ -27,6 +27,8 @@ use ee::db::{
     CreateWorkspaceInput, DbConnection, MeshLaneGrantMutationInput, MeshLaneGrantTargetAdapter,
     UpsertMeshPeerInput,
 };
+use ee::mesh::bootstrap_envelope::exchange_bootstrap_hello;
+use ee::mesh::hello::{build_request, parse_hello_response, serialize_within_budget};
 use ee::mesh::key_store::{MeshKeyStore, PairKeyClass, SecretBytes};
 use ee::mesh::peer::{
     MeshPeerCapabilityProfile, MeshPeerEndpoint, MeshPeerEnrollInput, MeshPeerHandshake,
@@ -1057,5 +1059,85 @@ fn mesh_transport_kill_switch_binds_no_broker_socket() -> TestResult {
     let rebound = StdTcpListener::bind(bind_address)
         .map_err(|error| format!("kill switch left broker socket bound: {error}"))?;
     drop(rebound);
+    Ok(())
+}
+
+#[test]
+fn production_broker_answers_unsigned_bootstrap_hello_on_the_same_port() -> TestResult {
+    let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
+    let local_api_dir = tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
+    let fake = FakeLocalApi::spawn(local_api_dir.path(), 1)?;
+    let port = available_nonprivileged_port()?;
+    let bind_address: SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .map_err(|error| format!("parse bind address: {error}"))?;
+    let registry = ResponderRouteRegistry::new([route(workspace.path().to_path_buf(), port)])
+        .map_err(|error| error.to_string())?;
+    let (address_tx, address_rx) = mpsc::sync_channel(1);
+    let server = thread::spawn(move || {
+        run_runtime(|cx| async move {
+            let client = TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT);
+            let broker = ResponderBroker::bind(
+                &cx,
+                bind_address,
+                client,
+                registry,
+                PreAuthAdmissionLimits::default(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            address_tx
+                .send(broker.local_addr())
+                .map_err(|error| format!("publish broker address: {error}"))?;
+            let error = match broker.accept_authenticated(&cx).await {
+                Ok(_) => {
+                    return Err(
+                        "bootstrap hello was treated as an authenticated session".to_owned()
+                    );
+                }
+                Err(error) => error,
+            };
+            if !matches!(error, ResponderBrokerError::BootstrapHelloAnswered) {
+                return Err(format!("unexpected hello accept error: {error:?}"));
+            }
+            let status = broker.status();
+            if !status.application_hello_performed || status.authenticated_sessions != 0 {
+                return Err(format!("hello status overstated work: {status:?}"));
+            }
+            fake.finish()?;
+            Ok(())
+        })
+    });
+    let address = address_rx
+        .recv_timeout(TEST_TIMEOUT)
+        .map_err(|error| format!("wait for broker bind: {error}"))?;
+    let request = build_request(
+        "hello-loopback",
+        "nodekey:initiator",
+        env!("CARGO_PKG_VERSION"),
+        vec!["workspace-initiator".to_owned()],
+        vec!["hello".to_owned()],
+        Vec::new(),
+    );
+    let payload_bytes =
+        serialize_within_budget(&request).map_err(|error| format!("serialize hello: {error}"))?;
+    let payload = serde_json::from_slice(&payload_bytes)
+        .map_err(|error| format!("hello payload json: {error}"))?;
+    let reply = exchange_bootstrap_hello(address, Duration::from_secs(2), payload)
+        .map_err(|error| format!("bootstrap hello exchange: {error}"))?;
+    let response = parse_hello_response(&reply)
+        .ok_or_else(|| format!("bootstrap hello reply was not a hello response: {reply}"))?;
+    if response.responder_node_key != "nodekey:responder-current" {
+        return Err(format!(
+            "hello answered with unexpected responder identity: {}",
+            response.responder_node_key
+        ));
+    }
+    if !response.discovery_consent {
+        return Err("hello response declined discovery consent".to_owned());
+    }
+    server
+        .join()
+        .map_err(|_| "hello broker thread panicked".to_owned())??;
     Ok(())
 }
