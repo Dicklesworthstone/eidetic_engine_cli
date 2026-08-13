@@ -25,14 +25,15 @@ use asupersync::{CancelKind, Cx};
 use ee::config::MeshLane;
 use ee::db::{
     CreateMeshOriginEventInput, CreateWorkspaceInput, DbConnection, MeshLaneGrantMutationInput,
-    MeshLaneGrantTargetAdapter, UpsertMeshPeerInput,
+    MeshLaneGrantTargetAdapter, UpsertMeshBodyCacheMetadataInput, UpsertMeshPeerInput,
 };
 use ee::mesh::bootstrap_envelope::{
-    SyncRoundRequest, exchange_bootstrap_hello, exchange_live_mesh_round,
+    BOOTSTRAP_DECLINE_SCHEMA_V1, BootstrapCapability, BootstrapDeclineV1, SyncRoundRequest,
+    decode_envelope, encode_envelope, exchange_bootstrap_hello, exchange_live_mesh_round,
 };
-use ee::mesh::foreground_cli::contact_authenticated_mesh_peer;
+use ee::mesh::foreground_cli::{contact_authenticated_body_fetch, contact_authenticated_mesh_peer};
 use ee::mesh::hello::{build_request, parse_hello_response, serialize_within_budget};
-use ee::mesh::key_store::{MeshKeyStore, PairKeyClass, SecretBytes};
+use ee::mesh::key_store::{MeshKeyStore, PairKeyClass, SecretBytes, SecureLocalDir};
 use ee::mesh::peer::{
     MeshPeerCapabilityProfile, MeshPeerEndpoint, MeshPeerEnrollInput, MeshPeerHandshake,
     build_peer_origin_node_id, enroll_peer,
@@ -1452,8 +1453,161 @@ fn production_broker_serves_authenticated_event_fetch_from_origin_store() -> Tes
     Ok(())
 }
 
-const JOIN_INVITER_WORKSPACE_ID: &str = "wsp_inviteloopback0000000001";
-const JOIN_JOINER_WORKSPACE_ID: &str = "wsp_joinloopback000000000001";
+fn seed_loopback_body_cache(workspace_path: &Path, database_path: &Path) -> TestResult {
+    let connection = DbConnection::open_file(database_path)
+        .map_err(|error| format!("open loopback body db: {error}"))?;
+    connection
+        .upsert_mesh_body_cache_metadata(&UpsertMeshBodyCacheMetadataInput {
+            workspace_id: LOOPBACK_RESPONDER_WORKSPACE_ID.to_owned(),
+            body_cache_key: "body_loopback1".to_owned(),
+            origin_node_id: "node_responder".to_owned(),
+            origin_workspace_id: LOOPBACK_RESPONDER_WORKSPACE_ID.to_owned(),
+            logical_memory_id: "mem_loopbackorigin0001".to_owned(),
+            content_hash: format!("blake3:{}", "ab".repeat(32)),
+            body_ref_json: None,
+            preview_hash: None,
+            size_bytes: Some(19),
+            cache_status: "available".to_owned(),
+            local_body_hash: Some(format!("blake3:{}", "cd".repeat(32))),
+            cached_at: Some(CREATED_AT.to_owned()),
+            expires_at: None,
+        })
+        .map_err(|error| format!("upsert loopback body cache: {error}"))?;
+    let cache_dir = workspace_path.join(".ee").join("mesh-body-cache");
+    let cache = SecureLocalDir::open_or_create(workspace_path, &cache_dir)
+        .map_err(|error| format!("open loopback body cache dir: {error}"))?;
+    cache
+        .write_replace("body_loopback1", b"secret-body-payload")
+        .map_err(|error| format!("write loopback body: {error}"))?;
+    Ok(())
+}
+
+#[test]
+fn production_broker_serves_authenticated_body_fetch_from_local_cache() -> TestResult {
+    let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
+    let store = MeshKeyStore::open_or_create(workspace.path())
+        .map_err(|error| format!("preprovision key store: {error}"))?;
+    store
+        .store_pair_key(
+            PEER_HANDLE,
+            PairKeyClass::Current,
+            NonZeroU64::new(7).expect("test generation is nonzero"),
+            &pair_key(),
+            CREATED_AT,
+            false,
+        )
+        .map_err(|error| format!("preprovision pair key: {error}"))?;
+    let database_path = workspace.path().join("ee.db");
+    seed_loopback_origin_event(&database_path)?;
+    seed_loopback_route_authority(&database_path)?;
+    seed_loopback_body_cache(workspace.path(), &database_path)?;
+
+    let local_api_dir = tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
+    let fake = FakeLocalApi::spawn(local_api_dir.path(), 2)?;
+    let port = available_nonprivileged_port()?;
+    let bind_address: SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .map_err(|error| format!("parse bind address: {error}"))?;
+    let registry = ResponderRouteRegistry::new([route_with_database(
+        workspace.path().to_path_buf(),
+        database_path,
+        port,
+    )])
+    .map_err(|error| error.to_string())?;
+    let (address_tx, address_rx) = mpsc::sync_channel(1);
+    let server = thread::spawn(move || {
+        let result = run_runtime_with(Duration::from_secs(30), |cx| async move {
+            let client = TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT);
+            let broker = ResponderBroker::bind(
+                &cx,
+                bind_address,
+                client,
+                registry,
+                PreAuthAdmissionLimits::default(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            address_tx
+                .send(broker.local_addr())
+                .map_err(|error| format!("publish broker address: {error}"))?;
+            broker
+                .accept_authenticated_and_serve(&cx)
+                .await
+                .map_err(|error| format!("authenticated serve: {error}"))?;
+            fake.finish()?;
+            Ok(())
+        });
+        result
+    });
+    let address = address_rx
+        .recv_timeout(Duration::from_secs(30))
+        .map_err(|error| format!("wait for broker bind: {error}"))?;
+    let client = run_runtime_with(Duration::from_secs(30), |cx| async move {
+        contact_authenticated_body_fetch(
+            &cx,
+            address,
+            origin_capable_initiator_config(),
+            "body_loopback1",
+        )
+        .await
+        .map_err(|error| format!("authenticated BodyFetch client: {error}"))
+    });
+    let server = server
+        .join()
+        .map_err(|_| "authenticated body serve thread panicked".to_owned())?;
+    let fetched = match (client, server) {
+        (Ok(fetched), Ok(())) => fetched,
+        (client, server) => {
+            return Err(format!(
+                "authenticated BodyFetch failed client={client:?} server={server:?}"
+            ));
+        }
+    };
+    if fetched.cache_status != "available" || fetched.body_hex.is_none() {
+        return Err(format!(
+            "BodyFetch did not return available body: {fetched:?}"
+        ));
+    }
+    let expected = b"secret-body-payload"
+        .iter()
+        .fold(String::new(), |mut out, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{byte:02x}");
+            out
+        });
+    if fetched.body_hex.as_deref() != Some(expected.as_str()) {
+        return Err(format!("BodyFetch hex mismatch: {fetched:?}"));
+    }
+    Ok(())
+}
+
+const JOIN_INVITER_WORKSPACE_ID: &str = "wsp_inviteloopback000000000001";
+const JOIN_JOINER_WORKSPACE_ID: &str = "wsp_joinloopback00000000000001";
+
+fn write_test_framed(stream: &mut std::net::TcpStream, bytes: &[u8]) -> TestResult {
+    let prefix = u32::try_from(bytes.len())
+        .map_err(|_| "bootstrap frame length does not fit u32".to_owned())?
+        .to_be_bytes();
+    stream
+        .write_all(&prefix)
+        .and_then(|()| stream.write_all(bytes))
+        .and_then(|()| stream.flush())
+        .map_err(|error| format!("write framed join: {error}"))
+}
+
+fn read_test_framed(stream: &mut std::net::TcpStream) -> TestResult<Vec<u8>> {
+    let mut prefix = [0_u8; 4];
+    stream
+        .read_exact(&mut prefix)
+        .map_err(|error| format!("read framed join prefix: {error}"))?;
+    let length = usize::try_from(u32::from_be_bytes(prefix))
+        .map_err(|_| "framed join length does not fit usize".to_owned())?;
+    let mut bytes = vec![0_u8; length];
+    stream
+        .read_exact(&mut bytes)
+        .map_err(|error| format!("read framed join: {error}"))?;
+    Ok(bytes)
+}
 
 fn seed_inviter_team_and_invite(database_path: &Path, endpoint: &str) -> TestResult<String> {
     let connection = DbConnection::open_file(database_path)
@@ -1474,16 +1628,23 @@ fn seed_inviter_team_and_invite(database_path: &Path, endpoint: &str) -> TestRes
             },
         )
         .map_err(|error| format!("insert inviter workspace: {error}"))?;
-    ee::mesh::team::create_local_team(
+    let workspace_path = database_path.parent().unwrap_or(database_path);
+    ee::mesh::team::create_local_team_with_store(
         &connection,
         JOIN_INVITER_WORKSPACE_ID,
         "Analysts",
         CREATED_AT,
+        Some(workspace_path),
     )
     .map_err(|error| format!("create inviter team: {error}"))?;
-    let minted =
-        ee::mesh::team::mint_team_invite(&connection, endpoint, CREATED_AT, "2026-08-20T00:00:00Z")
-            .map_err(|error| format!("mint inviter invite: {error}"))?;
+    let minted = ee::mesh::team::mint_team_invite_with_store(
+        &connection,
+        endpoint,
+        CREATED_AT,
+        "2026-08-20T00:00:00Z",
+        Some(workspace_path),
+    )
+    .map_err(|error| format!("mint inviter invite: {error}"))?;
     Ok(minted.invite_code)
 }
 
@@ -1493,6 +1654,10 @@ fn production_broker_answers_unsigned_bootstrap_join_and_persists_team_joined() 
     let database_path = workspace.path().join("ee.db");
     let port = available_nonprivileged_port()?;
     let invite_code = seed_inviter_team_and_invite(&database_path, &format!("127.0.0.1:{port}"))?;
+    let joiner = DbConnection::open_memory().map_err(|error| format!("open joiner db: {error}"))?;
+    joiner
+        .migrate()
+        .map_err(|error| format!("migrate joiner db: {error}"))?;
     let local_api_dir = tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
     let fake = FakeLocalApi::spawn(local_api_dir.path(), 1)?;
     let bind_address: SocketAddr = format!("127.0.0.1:{port}")
@@ -1506,7 +1671,7 @@ fn production_broker_answers_unsigned_bootstrap_join_and_persists_team_joined() 
     .map_err(|error| error.to_string())?;
     let (address_tx, address_rx) = mpsc::sync_channel(1);
     let server = thread::spawn(move || {
-        run_runtime(|cx| async move {
+        run_runtime_with(Duration::from_secs(60), |cx| async move {
             let client = TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT);
             let broker = ResponderBroker::bind(
                 &cx,
@@ -1534,32 +1699,38 @@ fn production_broker_answers_unsigned_bootstrap_join_and_persists_team_joined() 
         })
     });
     let _address = address_rx
-        .recv_timeout(TEST_TIMEOUT)
+        .recv_timeout(Duration::from_secs(30))
         .map_err(|error| format!("wait for broker bind: {error}"))?;
-    let joiner = DbConnection::open_memory().map_err(|error| format!("open joiner db: {error}"))?;
-    joiner
-        .migrate()
-        .map_err(|error| format!("migrate joiner db: {error}"))?;
-    let report = ee::mesh::team::join_team_with_code(
+    let client = ee::mesh::team::join_team_with_code(
         &joiner,
         JOIN_JOINER_WORKSPACE_ID,
         &invite_code,
         "Priya",
         "2026-08-13T04:00:00Z",
-        TEST_TIMEOUT,
-    )
-    .map_err(|error| format!("live join: {error}"))?;
+        Duration::from_secs(30),
+    );
+    let server = server
+        .join()
+        .map_err(|_| "join broker thread panicked".to_owned())?;
+    let report = match (client, server) {
+        (Ok(report), Ok(())) => report,
+        (client, server) => {
+            return Err(format!(
+                "live join failed client={client:?} server={server:?}"
+            ));
+        }
+    };
     if !report.joined {
         return Err("live join did not persist teamJoined".to_owned());
     }
     let status = ee::mesh::team::local_team_status(&joiner)
         .map_err(|error| format!("joiner status: {error}"))?;
-    if status.team_count != 1 || status.members.len() != 1 || !status.members[0].is_self {
+    if status.team_count != 1
+        || status.members.len() != 2
+        || !status.members.iter().any(|member| member.is_self)
+    {
         return Err(format!("joiner status missing self member: {status:?}"));
     }
-    server
-        .join()
-        .map_err(|_| "join broker thread panicked".to_owned())??;
     let inviter = DbConnection::open_file(&database_path)
         .map_err(|error| format!("reopen inviter db: {error}"))?;
     let inviter_status = ee::mesh::team::local_team_status(&inviter)
@@ -1628,19 +1799,62 @@ fn production_broker_declines_bootstrap_join_with_wrong_secret() -> TestResult {
     let address = address_rx
         .recv_timeout(TEST_TIMEOUT)
         .map_err(|error| format!("wait for broker bind: {error}"))?;
-    let payload = serde_json::to_value(ee::mesh::team::TeamJoinRequestV1 {
-        schema: ee::mesh::team::TEAM_JOIN_SCHEMA_V1.to_owned(),
-        invite_id: parsed.invite_id,
-        secret: "ffffffffffffffffffffffffffffffff".to_owned(),
+    let hello = ee::mesh::team::TeamJoinHelloV1 {
+        schema: ee::mesh::team::TEAM_JOIN_HELLO_SCHEMA_V1.to_owned(),
+        invite_id: parsed.invite_id.clone(),
         joiner_node_id: "node_ffffffffffffffffffffffffffffffff".to_owned(),
         joiner_display_name: "attacker".to_owned(),
-    })
-    .map_err(|error| format!("serialize wrong-secret join: {error}"))?;
-    let error =
-        ee::mesh::bootstrap_envelope::exchange_bootstrap_join(address, TEST_TIMEOUT, payload)
-            .expect_err("wrong secret must decline");
-    if !error.to_string().contains("declined") {
-        return Err(format!("wrong-secret join was not declined: {error}"));
+        joiner_nonce: "aa".repeat(16),
+        joiner_verifying_key: String::new(),
+    };
+    let mut stream = std::net::TcpStream::connect_timeout(&address, TEST_TIMEOUT)
+        .map_err(|error| format!("wrong-secret connect: {error}"))?;
+    stream
+        .set_read_timeout(Some(TEST_TIMEOUT))
+        .and_then(|()| stream.set_write_timeout(Some(TEST_TIMEOUT)))
+        .map_err(|error| format!("wrong-secret timeout: {error}"))?;
+    write_test_framed(
+        &mut stream,
+        &encode_envelope(
+            BootstrapCapability::Join,
+            serde_json::to_value(&hello)
+                .map_err(|error| format!("serialize join hello: {error}"))?,
+        )
+        .map_err(|error| format!("encode join hello: {error}"))?,
+    )?;
+    let challenge_bytes = read_test_framed(&mut stream)?;
+    let challenge_envelope = decode_envelope(&challenge_bytes)
+        .map_err(|error| format!("decode join challenge: {error}"))?;
+    let challenge =
+        serde_json::from_value::<ee::mesh::team::TeamJoinChallengeV1>(challenge_envelope.payload)
+            .map_err(|error| format!("parse join challenge: {error}"))?;
+    let prove = ee::mesh::team::TeamJoinProveV1 {
+        schema: ee::mesh::team::TEAM_JOIN_PROVE_SCHEMA_V1.to_owned(),
+        invite_id: parsed.invite_id,
+        secret: "ffffffffffffffffffffffffffffffff".to_owned(),
+        joiner_node_id: hello.joiner_node_id,
+        joiner_display_name: hello.joiner_display_name,
+        joiner_nonce: hello.joiner_nonce,
+        inviter_nonce: challenge.inviter_nonce,
+    };
+    write_test_framed(
+        &mut stream,
+        &encode_envelope(
+            BootstrapCapability::Join,
+            serde_json::to_value(&prove)
+                .map_err(|error| format!("serialize join prove: {error}"))?,
+        )
+        .map_err(|error| format!("encode join prove: {error}"))?,
+    )?;
+    let reply = read_test_framed(&mut stream)?;
+    let declined = serde_json::from_slice::<BootstrapDeclineV1>(&reply)
+        .ok()
+        .is_some_and(|decline| decline.schema == BOOTSTRAP_DECLINE_SCHEMA_V1);
+    if !declined {
+        return Err(format!(
+            "wrong-secret join was not declined: {}",
+            String::from_utf8_lossy(&reply)
+        ));
     }
     server
         .join()

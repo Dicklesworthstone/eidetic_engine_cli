@@ -50,7 +50,8 @@ use crate::db::{
     ObserveMeshPeerTransportIdentityInput,
 };
 use crate::mesh::bootstrap_envelope::{
-    BOOTSTRAP_DECLINE_SCHEMA_V1, BOOTSTRAP_MAX_ENVELOPE_BYTES, BootstrapAdmission,
+    BODY_FETCH_REQUEST_SCHEMA_V1, BODY_FETCH_RESPONSE_SCHEMA_V1, BOOTSTRAP_DECLINE_SCHEMA_V1,
+    BOOTSTRAP_MAX_ENVELOPE_BYTES, BodyFetchRequest, BodyFetchResponse, BootstrapAdmission,
     BootstrapCapability, BootstrapDeclineV1, SYNC_ROUND_SCHEMA_V1, SyncRoundEvent,
     SyncRoundResponse, SyncRoundTip, decode_envelope, encode_envelope, parse_sync_round_request,
 };
@@ -1290,11 +1291,11 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
                 if let Err(error) =
                     answer_bootstrap_join(cx, &mut stream, &self.routes, &first_packet).await
                 {
-                    let _ = stream.shutdown(Shutdown::Both);
+                    let _ = stream.shutdown(Shutdown::Write);
                     self.record_error(&error, false, true);
                     return Err(error);
                 }
-                let _ = stream.shutdown(Shutdown::Both);
+                let _ = stream.shutdown(Shutdown::Write);
                 if let Ok(mut runtime) = self.runtime.lock() {
                     runtime.application_hello_performed = true;
                     runtime.record("bootstrap_join", None, false, false, false);
@@ -2858,29 +2859,77 @@ async fn answer_bootstrap_join(
         return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_unsupported_capability")
             .await;
     }
-    let request =
-        match serde_json::from_value::<crate::mesh::team::TeamJoinRequestV1>(envelope.payload) {
-            Ok(request) if request.schema == crate::mesh::team::TEAM_JOIN_SCHEMA_V1 => request,
-            _ => {
-                return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed")
-                    .await;
-            }
-        };
-    let Some(database_path) = routes
-        .routes
-        .values()
-        .find_map(|route| route.database_path.clone())
-    else {
+    let hello = match serde_json::from_value::<crate::mesh::team::TeamJoinHelloV1>(envelope.payload)
+    {
+        Ok(hello) if hello.schema == crate::mesh::team::TEAM_JOIN_HELLO_SCHEMA_V1 => hello,
+        _ => {
+            return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed").await;
+        }
+    };
+    let Some(route) = routes.routes.values().next() else {
+        return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed").await;
+    };
+    let Some(database_path) = route.database_path.clone() else {
         return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed").await;
     };
     let Ok(connection) = DbConnection::open_file(database_path) else {
         return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed").await;
     };
+    let Ok(Some(invite)) = connection.get_team_pending_invite(&hello.invite_id) else {
+        return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed").await;
+    };
+    let signer = match crate::mesh::origin_stream::Ed25519OriginSigner::load_or_create(
+        &route.workspace_path,
+        &invite.origin_node_id,
+        &invite.created_at,
+    ) {
+        Ok(signer) => signer,
+        Err(_) => {
+            return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed").await;
+        }
+    };
+    let challenge = match crate::mesh::team::sign_join_challenge(&signer, &invite, &hello) {
+        Ok(challenge) => challenge,
+        Err(_) => {
+            return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed").await;
+        }
+    };
+    let challenge_value =
+        serde_json::to_value(&challenge).map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    let challenge_bytes = encode_envelope(BootstrapCapability::Join, challenge_value)
+        .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    write_asupersync_framed(cx, stream, io_timeout, &challenge_bytes).await?;
+    let prove_bytes = match read_asupersync_framed(cx, stream, io_timeout).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed").await;
+        }
+    };
+    let prove_envelope = match decode_envelope(&prove_bytes) {
+        Ok(envelope) => envelope,
+        Err(_) => {
+            return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed").await;
+        }
+    };
+    let prove = match serde_json::from_value::<crate::mesh::team::TeamJoinProveV1>(
+        prove_envelope.payload,
+    ) {
+        Ok(prove) if prove.schema == crate::mesh::team::TEAM_JOIN_PROVE_SCHEMA_V1 => prove,
+        _ => {
+            return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed").await;
+        }
+    };
+    if prove.invite_id != hello.invite_id
+        || prove.joiner_nonce != hello.joiner_nonce
+        || prove.inviter_nonce != challenge.inviter_nonce
+    {
+        return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed").await;
+    }
     let redeemed_at = chrono::Utc::now().to_rfc3339();
-    let granted = match crate::mesh::team::redeem_team_invite(
+    let mut granted = match crate::mesh::team::redeem_team_invite(
         &connection,
-        &request.invite_id,
-        &request.secret,
+        &prove.invite_id,
+        &prove.secret,
         &redeemed_at,
     ) {
         Ok(granted) => granted,
@@ -2888,6 +2937,16 @@ async fn answer_bootstrap_join(
             return write_bootstrap_decline(cx, stream, io_timeout, "bootstrap_malformed").await;
         }
     };
+    let pair = crate::mesh::team::derive_team_pair_key(
+        &prove.secret,
+        &granted.team_id,
+        &prove.invite_id,
+        &prove.joiner_node_id,
+        &granted.origin_node_id,
+        &prove.joiner_nonce,
+        &prove.inviter_nonce,
+    );
+    granted.pair_confirmation = crate::mesh::team::pair_confirmation(&pair);
     if let Ok(workspaces) = connection.list_workspaces()
         && let Some(workspace) = workspaces.first()
     {
@@ -2895,11 +2954,19 @@ async fn answer_bootstrap_join(
             &connection,
             &workspace.id,
             &granted,
-            &request.joiner_node_id,
-            &request.joiner_display_name,
+            &prove.joiner_node_id,
+            &prove.joiner_display_name,
             &redeemed_at,
+            Some(hello.joiner_verifying_key.as_str()).filter(|key| key.len() == 64),
         );
     }
+    let _ = crate::mesh::team::persist_pair_key(
+        &route.workspace_path,
+        &granted.team_id,
+        &prove.joiner_node_id,
+        &pair,
+        &redeemed_at,
+    );
     let payload =
         serde_json::to_value(&granted).map_err(|_| ResponderBrokerError::TransportUnavailable)?;
     let reply = encode_envelope(BootstrapCapability::Join, payload)
@@ -2941,24 +3008,33 @@ async fn serve_authenticated_sync_round(
         };
         if matches!(
             request.capability,
-            FrameCapability::Summary | FrameCapability::EventFetch
+            FrameCapability::Summary | FrameCapability::EventFetch | FrameCapability::BodyFetch
         ) {
             break request;
         }
     };
-    let (range_start_seq, max_events) = serde_json::to_vec(&request.payload)
-        .ok()
-        .and_then(|bytes| parse_sync_round_request(&bytes))
-        .map(|parsed| (parsed.range_start_seq, parsed.max_events))
-        .unwrap_or((0, 512));
-    let processed = session
-        .process_request(cx, &request, async {
-            load_sync_round_response(routes, range_start_seq, max_events)
-        })
-        .await
-        .map_err(ResponderBrokerError::Session)?;
-    let payload =
-        serde_json::to_value(&processed).map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    let payload = if request.capability == FrameCapability::BodyFetch {
+        let processed = session
+            .process_request(cx, &request, async {
+                load_body_fetch_response(routes, &request.payload)
+            })
+            .await
+            .map_err(ResponderBrokerError::Session)?;
+        serde_json::to_value(&processed).map_err(|_| ResponderBrokerError::TransportUnavailable)?
+    } else {
+        let (range_start_seq, max_events) = serde_json::to_vec(&request.payload)
+            .ok()
+            .and_then(|bytes| parse_sync_round_request(&bytes))
+            .map(|parsed| (parsed.range_start_seq, parsed.max_events))
+            .unwrap_or((0, 512));
+        let processed = session
+            .process_request(cx, &request, async {
+                load_sync_round_response(routes, range_start_seq, max_events)
+            })
+            .await
+            .map_err(ResponderBrokerError::Session)?;
+        serde_json::to_value(&processed).map_err(|_| ResponderBrokerError::TransportUnavailable)?
+    };
     session
         .send_response(
             cx,
@@ -3007,12 +3083,18 @@ fn load_sync_round_response(
         {
             events = rows
                 .into_iter()
-                .map(|row| SyncRoundEvent {
-                    origin_node_id: row.origin_node_id,
-                    origin_workspace_id: workspace_id.clone(),
-                    seq: row.seq,
-                    event_hash: row.event_hash,
-                    payload_json: row.payload_json,
+                .map(|row| {
+                    let payload_json = crate::mesh::origin_stream::inbound_from_stored(&row)
+                        .ok()
+                        .and_then(|event| serde_json::to_string(&event).ok())
+                        .unwrap_or(row.payload_json);
+                    SyncRoundEvent {
+                        origin_node_id: row.origin_node_id,
+                        origin_workspace_id: workspace_id.clone(),
+                        seq: row.seq,
+                        event_hash: row.event_hash,
+                        payload_json,
+                    }
                 })
                 .collect();
         }
@@ -3029,6 +3111,66 @@ fn load_sync_round_response(
         }],
         events,
     }
+}
+
+fn load_body_fetch_response(
+    routes: &ResponderRouteRegistry,
+    payload: &serde_json::Value,
+) -> BodyFetchResponse {
+    let request = serde_json::from_value::<BodyFetchRequest>(payload.clone()).ok();
+    let key = request
+        .as_ref()
+        .map(|parsed| parsed.body_cache_key.as_str())
+        .unwrap_or_default();
+    if key.is_empty()
+        || request
+            .as_ref()
+            .is_none_or(|parsed| parsed.schema != BODY_FETCH_REQUEST_SCHEMA_V1)
+    {
+        return BodyFetchResponse {
+            schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
+            body_cache_key: key.to_owned(),
+            cache_status: "metadata_only".to_owned(),
+            size_bytes: 0,
+            body_hex: None,
+        };
+    }
+    let workspace_id = routes
+        .workspace_ids()
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    let workspace_path = routes.first_workspace_path().map(Path::to_path_buf);
+    let database_path = routes
+        .routes
+        .values()
+        .find_map(|route| route.database_path.clone());
+    let Some((workspace_path, database_path)) = workspace_path.zip(database_path) else {
+        return BodyFetchResponse {
+            schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
+            body_cache_key: key.to_owned(),
+            cache_status: "metadata_only".to_owned(),
+            size_bytes: 0,
+            body_hex: None,
+        };
+    };
+    let Ok(connection) = DbConnection::open_file_read_only(database_path) else {
+        return BodyFetchResponse {
+            schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
+            body_cache_key: key.to_owned(),
+            cache_status: "metadata_only".to_owned(),
+            size_bytes: 0,
+            body_hex: None,
+        };
+    };
+    crate::mesh::team::fetch_local_team_body(&connection, &workspace_id, &workspace_path, key)
+        .unwrap_or_else(|_| BodyFetchResponse {
+            schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
+            body_cache_key: key.to_owned(),
+            cache_status: "metadata_only".to_owned(),
+            size_bytes: 0,
+            body_hex: None,
+        })
 }
 
 fn checkpoint(cx: &Cx, _phase: &'static str) -> Result<(), ResponderBrokerError> {
