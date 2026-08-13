@@ -1257,20 +1257,37 @@ pub fn is_verified_memory(memory: &StoredMemory) -> bool {
 }
 
 fn load_team_members(workspace_path: &Path) -> BTreeSet<String> {
+    let mut members = BTreeSet::new();
     let config_path = workspace_path.join(".ee").join("config.toml");
-    let Some(contents) = read_memory_scope_config(&config_path) else {
-        return BTreeSet::new();
-    };
-    let Ok(config) = ConfigFile::parse(&contents) else {
-        return BTreeSet::new();
-    };
-    config
-        .trust
-        .team_members
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(normalized_non_empty)
-        .collect()
+    if let Some(contents) = read_memory_scope_config(&config_path)
+        && let Ok(config) = ConfigFile::parse(&contents)
+    {
+        members.extend(
+            config
+                .trust
+                .team_members
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(normalized_non_empty),
+        );
+    }
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if database_path.is_file()
+        && let Ok(connection) = crate::db::DbConnection::open_file_read_only(&database_path)
+        && let Ok(rows) = connection.list_all_team_members()
+    {
+        for row in rows {
+            if row.state == "active" {
+                if let Some(name) = normalized_non_empty(row.display_name) {
+                    members.insert(name);
+                }
+                if let Some(node) = normalized_non_empty(row.origin_node_id) {
+                    members.insert(node);
+                }
+            }
+        }
+    }
+    members
 }
 
 /// Hard cap on the byte length of `<workspace>/.ee/config.toml` when
