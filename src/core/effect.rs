@@ -1977,6 +1977,30 @@ impl EffectManifest {
                 "Probe mesh peers and persist reviewed auto-enrollment state",
             ),
             CommandEffect::external_io_write(
+                "mesh hello-responder register",
+                Vec::new(),
+                vec!["user-scoped mesh-responder control socket"],
+                "request nonce plus team id plus workspace id plus peer handle",
+                "Register exact team routes with the same-EUID user-scoped responder owner",
+            ),
+            CommandEffect::external_io_write(
+                "mesh hello-responder run",
+                Vec::new(),
+                vec![
+                    "verified Tailscale listener",
+                    "user-scoped mesh-responder control socket",
+                ],
+                "process id plus committed port plus control socket path",
+                "Own the user-scoped Tailscale responder listener and same-EUID control channel",
+            ),
+            CommandEffect::external_io_write(
+                "mesh hello-responder unregister",
+                Vec::new(),
+                vec!["user-scoped mesh-responder control socket"],
+                "request nonce plus team id plus workspace id plus peer handle",
+                "Remove exact team routes from the same-EUID user-scoped responder owner",
+            ),
+            CommandEffect::external_io_write(
                 "model fetch",
                 vec!["model_registry", "audit_log"],
                 vec!["~/.local/share/ee/models/"],

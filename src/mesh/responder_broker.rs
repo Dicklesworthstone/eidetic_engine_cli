@@ -7,17 +7,23 @@
 //! hands the socket to T2.1's public source-coupled session acceptor.
 //!
 //! It deliberately does not run application hello, anti-entropy, or
-//! synchronization. Cross-workspace daemon registration, durable lifecycle
-//! audit persistence, and application dispatch remain later T2.2 slices.
+//! synchronization. A same-EUID Unix-domain control channel lets another
+//! local workspace register or unregister exact team routes without binding
+//! a second TCP port. Durable lifecycle audit persistence and application
+//! dispatch remain later T2.2 slices.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
+#[cfg(unix)]
+use std::fs;
 use std::future::Future;
 #[cfg(unix)]
-use std::io;
+use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::net::Shutdown;
 use std::net::{IpAddr, SocketAddr};
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,7 +36,7 @@ use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use asupersync::net::TcpListener;
 #[cfg(unix)]
-use asupersync::net::unix::UnixStream;
+use asupersync::net::unix::{UnixListener, UnixStream};
 #[cfg(unix)]
 use asupersync::time::BudgetTimeExt;
 use asupersync::time::{sleep as asupersync_sleep, timeout, wall_now};
@@ -59,6 +65,9 @@ pub const MESH_BOOTSTRAP_IDENTITY_UNVERIFIED_CODE: &str = "mesh_bootstrap_identi
 pub const MESH_RESPONDER_PORT_CONFLICT_CODE: &str = "mesh_responder_port_conflict";
 pub const MESH_RESPONDER_IDENTITY_UPGRADE_REQUIRED_CODE: &str =
     "mesh_responder_identity_upgrade_required";
+pub const RESPONDER_CONTROL_SCHEMA_V1: &str = "ee.mesh.responder_control.v1";
+pub const RESPONDER_CONTROL_MAX_BYTES: usize = 8 * 1024;
+const CONTROL_NONCE_HEX_LEN: usize = 16;
 
 #[cfg(unix)]
 const LOCAL_API_MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -451,6 +460,45 @@ pub struct DurableResponderRegistration {
     pub committed_port: u16,
     pub capabilities: SessionCapabilities,
     pub limits: SessionChannelLimits,
+}
+
+/// Same-EUID control-channel operation. Network frames never carry these.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponderControlOp {
+    Register,
+    Unregister,
+    Status,
+}
+
+/// Bounded local registration request. Paths are revalidated against the
+/// caller's filesystem; they are never taken from a network peer.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResponderControlRequest {
+    pub schema: String,
+    pub op: ResponderControlOp,
+    pub nonce: String,
+    pub workspace_id: String,
+    pub team_id: String,
+    pub responder_node_id: String,
+    pub workspace_path: PathBuf,
+    pub database_path: PathBuf,
+    pub peer_handles: Vec<String>,
+    pub committed_port: u16,
+}
+
+/// Secret-free control-channel reply. Echoes the request nonce only.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResponderControlResponse {
+    pub schema: String,
+    pub ok: bool,
+    pub nonce: String,
+    pub code: Option<String>,
+    pub message: Option<String>,
+    pub bound_addresses: Vec<String>,
+    pub registered_routes: usize,
 }
 
 /// Authoritative LocalAPI snapshot plus the exact durable route it resolved.
@@ -1386,6 +1434,8 @@ pub struct ResponderBrokerOwner<A> {
     bound_addresses: Vec<SocketAddr>,
     revalidate_interval: Duration,
     last_revalidated_at: Instant,
+    #[cfg(unix)]
+    control: Option<ResponderControlListener>,
 }
 
 impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
@@ -1423,6 +1473,8 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             bound_addresses: Vec::new(),
             revalidate_interval,
             last_revalidated_at: Instant::now(),
+            #[cfg(unix)]
+            control: None,
         };
         owner.reconcile(cx).await?;
         Ok(owner)
@@ -1485,6 +1537,8 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             bound_addresses: Vec::new(),
             revalidate_interval,
             last_revalidated_at: Instant::now(),
+            #[cfg(unix)]
+            control: None,
         };
         owner.reconcile(cx).await?;
         Ok(owner)
@@ -1518,6 +1572,25 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             })
     }
 
+    /// Publish the same-EUID control socket used by another local workspace
+    /// to register exact routes with this owner.
+    #[cfg(unix)]
+    pub fn listen_control(
+        &mut self,
+        socket_path: impl Into<PathBuf>,
+    ) -> Result<(), ResponderBrokerError> {
+        self.control = Some(ResponderControlListener::publish(socket_path.into())?);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[must_use]
+    pub fn control_socket_path(&self) -> Option<&Path> {
+        self.control
+            .as_ref()
+            .map(|control| control.socket_path.as_path())
+    }
+
     /// Serve authenticated transport sessions until the caller context is
     /// cancelled. Application protocol work remains owned by the next mesh
     /// layer; this loop deliberately drops a completed authenticated session
@@ -1539,7 +1612,10 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
                     }
                 }
             }
+            #[cfg(unix)]
+            self.poll_control(cx).await;
             if self.brokers.is_empty() {
+                asupersync_sleep(cx.now(), self.revalidate_interval).await;
                 continue;
             }
             listener_index %= self.brokers.len();
@@ -1684,6 +1760,127 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
         }
         self.brokers.clear();
         self.bound_addresses.clear();
+    }
+
+    #[cfg(unix)]
+    async fn poll_control(&mut self, cx: &Cx) {
+        let Some(control) = self.control.as_ref() else {
+            return;
+        };
+        let accepted = match timeout(
+            wall_now(),
+            Duration::from_millis(50),
+            control.listener.accept(),
+        )
+        .await
+        {
+            Ok(Ok((stream, _))) => stream,
+            Ok(Err(_)) | Err(_) => return,
+        };
+        let (mut stream, request) = match read_control_request(cx, accepted).await {
+            Ok(read) => read,
+            Err(_) => return,
+        };
+        let response = self.dispatch_control(cx, request).await;
+        let _ = write_control_response(&mut stream, &response).await;
+    }
+
+    #[cfg(unix)]
+    async fn dispatch_control(
+        &mut self,
+        cx: &Cx,
+        request: ResponderControlRequest,
+    ) -> ResponderControlResponse {
+        let nonce = request.nonce.clone();
+        let outcome = match request.op {
+            ResponderControlOp::Status => Ok(()),
+            ResponderControlOp::Register => self.apply_control_register(cx, &request).await,
+            ResponderControlOp::Unregister => self.apply_control_unregister(cx, &request).await,
+        };
+        match outcome {
+            Ok(()) => ResponderControlResponse {
+                schema: RESPONDER_CONTROL_SCHEMA_V1.to_owned(),
+                ok: true,
+                nonce,
+                code: None,
+                message: None,
+                bound_addresses: self
+                    .bound_addresses
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                registered_routes: self.route_count(),
+            },
+            Err(error) => ResponderControlResponse {
+                schema: RESPONDER_CONTROL_SCHEMA_V1.to_owned(),
+                ok: false,
+                nonce,
+                code: Some(error.code().to_owned()),
+                message: Some(error.message()),
+                bound_addresses: self
+                    .bound_addresses
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                registered_routes: self.route_count(),
+            },
+        }
+    }
+
+    #[cfg(unix)]
+    async fn apply_control_register(
+        &mut self,
+        cx: &Cx,
+        request: &ResponderControlRequest,
+    ) -> Result<(), ResponderBrokerError> {
+        let incoming = materialize_control_registrations(request)?;
+        let mut next = self.durable_registrations.clone().unwrap_or_default();
+        if let Some(existing) = next.first()
+            && existing.committed_port != request.committed_port
+        {
+            return Err(ResponderBrokerError::PortConflict);
+        }
+        for registration in incoming {
+            next.retain(|row| {
+                !(row.workspace_id == registration.workspace_id
+                    && row.team_id == registration.team_id
+                    && row.peer_handle == registration.peer_handle)
+            });
+            next.push(registration);
+        }
+        let routes = resolve_durable_route_registry(cx, self.local_api.as_ref(), &next).await?;
+        self.durable_registrations = Some(next);
+        self.routes = routes;
+        self.reconcile(cx).await
+    }
+
+    #[cfg(unix)]
+    async fn apply_control_unregister(
+        &mut self,
+        cx: &Cx,
+        request: &ResponderControlRequest,
+    ) -> Result<(), ResponderBrokerError> {
+        let Some(mut next) = self.durable_registrations.clone() else {
+            return Err(ResponderBrokerError::RouteUnavailable);
+        };
+        let before = next.len();
+        next.retain(|row| {
+            !(row.workspace_id == request.workspace_id
+                && row.team_id == request.team_id
+                && request.peer_handles.contains(&row.peer_handle))
+        });
+        if next.len() == before {
+            return Err(ResponderBrokerError::RouteUnavailable);
+        }
+        if next.is_empty() {
+            self.durable_registrations = Some(next);
+            self.shutdown_listeners();
+            return Ok(());
+        }
+        let routes = resolve_durable_route_registry(cx, self.local_api.as_ref(), &next).await?;
+        self.durable_registrations = Some(next);
+        self.routes = routes;
+        self.reconcile(cx).await
     }
 }
 
@@ -1873,6 +2070,362 @@ fn valid_durable_node_principal(value: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     })
+}
+
+/// User-scoped control socket path. Mirrors the daemon partition:
+/// private `XDG_RUNTIME_DIR/ee/mesh-responder.sock`, otherwise
+/// `${TMPDIR:-/tmp}/ee-${uid}/mesh-responder.sock`.
+#[must_use]
+pub fn default_responder_control_socket_path() -> PathBuf {
+    default_responder_control_socket_path_with(
+        |key| std::env::var_os(key),
+        current_responder_euid(),
+    )
+}
+
+fn default_responder_control_socket_path_with(
+    mut env_var: impl FnMut(&str) -> Option<std::ffi::OsString>,
+    uid: u32,
+) -> PathBuf {
+    let tmp = env_var("TMPDIR").unwrap_or_else(|| "/tmp".into());
+    if let Some(runtime_dir) = env_var("XDG_RUNTIME_DIR") {
+        let runtime = Path::new(&runtime_dir);
+        if !runtime.as_os_str().is_empty()
+            && runtime != Path::new("/tmp")
+            && runtime != Path::new("/var/tmp")
+            && runtime != Path::new("/private/tmp")
+        {
+            return runtime.join("ee").join("mesh-responder.sock");
+        }
+    }
+    Path::new(&tmp)
+        .join(format!("ee-{uid}"))
+        .join("mesh-responder.sock")
+}
+
+#[cfg(unix)]
+fn current_responder_euid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
+#[cfg(not(unix))]
+fn current_responder_euid() -> u32 {
+    0
+}
+
+/// Submit one same-EUID control request to a published owner socket.
+#[cfg(unix)]
+pub fn submit_responder_control_request(
+    socket_path: &Path,
+    request: &ResponderControlRequest,
+) -> Result<ResponderControlResponse, ResponderBrokerError> {
+    validate_control_request(request)?;
+    refuse_insecure_socket_path(socket_path)?;
+    let mut stream = std::os::unix::net::UnixStream::connect(socket_path)
+        .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    let peer = control_std_peer_uid(&stream)?;
+    if peer != current_responder_euid() {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    write_control_frame(&mut stream, request)?;
+    read_control_frame(&mut stream)
+}
+
+#[cfg(unix)]
+struct ResponderControlListener {
+    listener: UnixListener,
+    socket_path: PathBuf,
+}
+
+#[cfg(unix)]
+impl ResponderControlListener {
+    fn publish(socket_path: PathBuf) -> Result<Self, ResponderBrokerError> {
+        publish_control_socket(&socket_path)?;
+        let std_listener = std::os::unix::net::UnixListener::bind(&socket_path)
+            .map_err(|_| ResponderBrokerError::PortConflict)?;
+        if let Err(error) = fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600)) {
+            let _ = remove_owned_socket(&socket_path);
+            let _ = error;
+            return Err(ResponderBrokerError::InvalidConfiguration);
+        }
+        // Bind-then-chmod is the same contract as the daemon: parent is 0700,
+        // so no other UID can connect during the brief window.
+        let listener = UnixListener::from_std(std_listener)
+            .map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+        Ok(Self {
+            listener,
+            socket_path,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ResponderControlListener {
+    fn drop(&mut self) {
+        let _ = remove_owned_socket(&self.socket_path);
+    }
+}
+
+fn validate_control_request(request: &ResponderControlRequest) -> Result<(), ResponderBrokerError> {
+    if request.schema != RESPONDER_CONTROL_SCHEMA_V1
+        || request.nonce.len() < CONTROL_NONCE_HEX_LEN
+        || !request.nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !valid_identity(&request.workspace_id)
+        || !valid_identity(&request.team_id)
+        || !valid_identity(&request.responder_node_id)
+        || request.committed_port < 1024
+        || request.peer_handles.len() > 32
+        || (request.op != ResponderControlOp::Status && request.peer_handles.is_empty())
+        || !request
+            .peer_handles
+            .iter()
+            .all(|handle| valid_opaque_peer_handle(handle))
+    {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    if matches!(
+        request.op,
+        ResponderControlOp::Register | ResponderControlOp::Unregister
+    ) {
+        revalidate_control_paths(request)?;
+    }
+    Ok(())
+}
+
+fn revalidate_control_paths(request: &ResponderControlRequest) -> Result<(), ResponderBrokerError> {
+    let workspace = owner_safe_canonical_path(&request.workspace_path)?;
+    let database = owner_safe_canonical_path(&request.database_path)?;
+    if database != workspace.join(".ee").join("ee.db") {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    Ok(())
+}
+
+fn owner_safe_canonical_path(path: &Path) -> Result<PathBuf, ResponderBrokerError> {
+    if !path.is_absolute() {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+    if metadata.file_type().is_symlink() || metadata.uid() != current_responder_euid() {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+    if canonical != path {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    Ok(canonical)
+}
+
+fn materialize_control_registrations(
+    request: &ResponderControlRequest,
+) -> Result<Vec<DurableResponderRegistration>, ResponderBrokerError> {
+    validate_control_request(request)?;
+    let workspace_path = owner_safe_canonical_path(&request.workspace_path)?;
+    let database_path = owner_safe_canonical_path(&request.database_path)?;
+    Ok(request
+        .peer_handles
+        .iter()
+        .map(|peer_handle| DurableResponderRegistration {
+            workspace_path: workspace_path.clone(),
+            database_path: database_path.clone(),
+            workspace_id: request.workspace_id.clone(),
+            team_id: request.team_id.clone(),
+            responder_node_id: request.responder_node_id.clone(),
+            peer_handle: peer_handle.clone(),
+            committed_port: request.committed_port,
+            capabilities: SessionCapabilities::base(),
+            limits: SessionChannelLimits::default(),
+        })
+        .collect())
+}
+
+#[cfg(unix)]
+fn publish_control_socket(socket_path: &Path) -> Result<(), ResponderBrokerError> {
+    let parent = socket_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or(ResponderBrokerError::InvalidConfiguration)?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)
+        .map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+    let parent_meta =
+        fs::symlink_metadata(parent).map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+    if parent_meta.file_type().is_symlink()
+        || !parent_meta.file_type().is_dir()
+        || parent_meta.uid() != current_responder_euid()
+        || parent_meta.mode() & 0o077 != 0
+    {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    match fs::symlink_metadata(socket_path) {
+        Ok(metadata) if metadata.file_type().is_socket() => {
+            let _ = remove_owned_socket(socket_path);
+        }
+        Ok(_) => return Err(ResponderBrokerError::PortConflict),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(ResponderBrokerError::InvalidConfiguration),
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn remove_owned_socket(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_socket() => fs::remove_file(path),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "refusing to remove a non-socket control path",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn refuse_insecure_socket_path(path: &Path) -> Result<(), ResponderBrokerError> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    if !metadata.file_type().is_socket() || metadata.uid() != current_responder_euid() {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn control_std_peer_uid(
+    stream: &std::os::unix::net::UnixStream,
+) -> Result<u32, ResponderBrokerError> {
+    #[cfg(target_os = "linux")]
+    {
+        rustix::net::sockopt::socket_peercred(stream)
+            .map(|credentials| credentials.uid.as_raw())
+            .map_err(|_| ResponderBrokerError::InvalidConfiguration)
+    }
+    #[cfg(target_vendor = "apple")]
+    {
+        stream
+            .peer_cred()
+            .map(|credentials| credentials.uid)
+            .map_err(|_| ResponderBrokerError::InvalidConfiguration)
+    }
+    #[cfg(all(not(target_os = "linux"), not(target_vendor = "apple")))]
+    {
+        let _ = stream;
+        Err(ResponderBrokerError::PlatformUnsupported)
+    }
+}
+
+#[cfg(unix)]
+async fn read_control_request(
+    cx: &Cx,
+    mut stream: UnixStream,
+) -> Result<(UnixStream, ResponderControlRequest), ResponderBrokerError> {
+    checkpoint(cx, "responder control")?;
+    let peer = stream
+        .peer_cred()
+        .map(|credentials| credentials.uid)
+        .map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+    if peer != current_responder_euid() {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    let request = read_control_frame_async(cx, &mut stream).await?;
+    validate_control_request(&request)?;
+    Ok((stream, request))
+}
+
+#[cfg(unix)]
+async fn write_control_response(
+    stream: &mut UnixStream,
+    response: &ResponderControlResponse,
+) -> Result<(), ResponderBrokerError> {
+    write_control_frame_async(stream, response).await
+}
+
+#[cfg(unix)]
+fn write_control_frame<T: Serialize>(
+    stream: &mut std::os::unix::net::UnixStream,
+    value: &T,
+) -> Result<(), ResponderBrokerError> {
+    let bytes =
+        serde_json::to_vec(value).map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+    if bytes.len() > RESPONDER_CONTROL_MAX_BYTES {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    let len = u32::try_from(bytes.len()).map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+    stream
+        .write_all(&len.to_le_bytes())
+        .and_then(|()| stream.write_all(&bytes))
+        .map_err(|_| ResponderBrokerError::TransportUnavailable)
+}
+
+#[cfg(unix)]
+fn read_control_frame<T: for<'de> Deserialize<'de>>(
+    stream: &mut std::os::unix::net::UnixStream,
+) -> Result<T, ResponderBrokerError> {
+    let mut len_buf = [0_u8; 4];
+    stream
+        .read_exact(&mut len_buf)
+        .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    let len = usize::try_from(u32::from_le_bytes(len_buf))
+        .map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+    if len == 0 || len > RESPONDER_CONTROL_MAX_BYTES {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    let mut bytes = vec![0_u8; len];
+    stream
+        .read_exact(&mut bytes)
+        .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    serde_json::from_slice(&bytes).map_err(|_| ResponderBrokerError::InvalidConfiguration)
+}
+
+#[cfg(unix)]
+async fn write_control_frame_async<T: Serialize>(
+    stream: &mut UnixStream,
+    value: &T,
+) -> Result<(), ResponderBrokerError> {
+    let bytes =
+        serde_json::to_vec(value).map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+    if bytes.len() > RESPONDER_CONTROL_MAX_BYTES {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    let len = u32::try_from(bytes.len()).map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+    stream
+        .write_all(&len.to_le_bytes())
+        .await
+        .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    stream
+        .write_all(&bytes)
+        .await
+        .map_err(|_| ResponderBrokerError::TransportUnavailable)
+}
+
+#[cfg(unix)]
+async fn read_control_frame_async<T: for<'de> Deserialize<'de>>(
+    cx: &Cx,
+    stream: &mut UnixStream,
+) -> Result<T, ResponderBrokerError> {
+    checkpoint(cx, "responder control frame")?;
+    let mut len_buf = [0_u8; 4];
+    stream
+        .read_exact(&mut len_buf)
+        .await
+        .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    let len = usize::try_from(u32::from_le_bytes(len_buf))
+        .map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+    if len == 0 || len > RESPONDER_CONTROL_MAX_BYTES {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    let mut bytes = vec![0_u8; len];
+    stream
+        .read_exact(&mut bytes)
+        .await
+        .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    serde_json::from_slice(&bytes).map_err(|_| ResponderBrokerError::InvalidConfiguration)
 }
 
 #[cfg(unix)]
@@ -2334,5 +2887,58 @@ mod tests {
         assert_eq!(value["applicationHelloPerformed"], false);
         assert_eq!(value["antiEntropyPerformed"], false);
         assert_eq!(value["synchronized"], false);
+    }
+
+    #[test]
+    fn default_control_socket_follows_daemon_partition() {
+        assert_eq!(
+            default_responder_control_socket_path_with(
+                |key| match key {
+                    "XDG_RUNTIME_DIR" => Some("/run/user/1000".into()),
+                    _ => None,
+                },
+                1000,
+            ),
+            PathBuf::from("/run/user/1000/ee/mesh-responder.sock")
+        );
+        assert_eq!(
+            default_responder_control_socket_path_with(
+                |key| match key {
+                    "XDG_RUNTIME_DIR" => Some("/tmp".into()),
+                    "TMPDIR" => Some("/var/tmp".into()),
+                    _ => None,
+                },
+                501,
+            ),
+            PathBuf::from("/var/tmp/ee-501/mesh-responder.sock")
+        );
+    }
+
+    #[test]
+    fn control_request_rejects_network_shaped_fields_and_relative_paths() {
+        let request = ResponderControlRequest {
+            schema: RESPONDER_CONTROL_SCHEMA_V1.to_owned(),
+            op: ResponderControlOp::Register,
+            nonce: "0123456789abcdef".to_owned(),
+            workspace_id: "wsp_test".to_owned(),
+            team_id: "team_test".to_owned(),
+            responder_node_id: "node_0123456789abcdef0123456789abcdef".to_owned(),
+            workspace_path: PathBuf::from("relative/workspace"),
+            database_path: PathBuf::from("relative/ee.db"),
+            peer_handles: vec!["peer_0123456789abcdef0123456789abcdef".to_owned()],
+            committed_port: 41888,
+        };
+        assert!(matches!(
+            validate_control_request(&request),
+            Err(ResponderBrokerError::InvalidConfiguration)
+        ));
+        let mut unknown = request.clone();
+        unknown.schema = "ee.mesh.event.v1".to_owned();
+        unknown.workspace_path = PathBuf::from("/tmp/ee-control-unit");
+        unknown.database_path = PathBuf::from("/tmp/ee-control-unit/.ee/ee.db");
+        assert!(matches!(
+            validate_control_request(&unknown),
+            Err(ResponderBrokerError::InvalidConfiguration)
+        ));
     }
 }

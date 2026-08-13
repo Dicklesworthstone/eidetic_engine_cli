@@ -35,7 +35,9 @@ use ee::mesh::peer::{
 use ee::mesh::responder_broker::{
     DurableResponderRegistration, MESH_KEY_STORE_UNAVAILABLE_CODE, PreAuthAdmissionLimits,
     RegisteredResponderRoute, ResponderBroker, ResponderBrokerError, ResponderBrokerOwner,
-    ResponderBrokerState, ResponderRouteRegistry, TailscaleLocalApi, TailscaleLocalApiClient,
+    ResponderBrokerState, ResponderControlOp, ResponderControlRequest, ResponderRouteRegistry,
+    TailscaleLocalApi, TailscaleLocalApiClient, default_responder_control_socket_path,
+    submit_responder_control_request,
 };
 use ee::mesh::transport_session::{
     HandshakeObservations, InitiatorSessionConfig, ResponderExpectations, SessionBinding,
@@ -962,6 +964,33 @@ fn blocked_accept_observes_cancellation_then_shutdown() -> TestResult {
         fake.finish()?;
         Ok(())
     })
+}
+
+#[test]
+fn same_euid_control_register_rejects_relative_paths_before_connect() -> TestResult {
+    let missing_socket = tempfile::tempdir()
+        .map_err(|error| format!("temp control dir: {error}"))?
+        .path()
+        .join("missing-mesh-responder.sock");
+    let relative = ResponderControlRequest {
+        schema: ee::mesh::responder_broker::RESPONDER_CONTROL_SCHEMA_V1.to_owned(),
+        op: ResponderControlOp::Register,
+        nonce: "0123456789abcdef".to_owned(),
+        workspace_id: "wsp_control".to_owned(),
+        team_id: "team_control".to_owned(),
+        responder_node_id: "node_0123456789abcdef0123456789abcdef".to_owned(),
+        workspace_path: PathBuf::from("relative/workspace"),
+        database_path: PathBuf::from("relative/ee.db"),
+        peer_handles: vec![PEER_HANDLE.to_owned()],
+        committed_port: 41888,
+    };
+    let error = submit_responder_control_request(&missing_socket, &relative)
+        .expect_err("relative paths must fail before they reach the owner");
+    if !matches!(error, ResponderBrokerError::InvalidConfiguration) {
+        return Err(format!("unexpected relative-path control error: {error:?}"));
+    }
+    let _ = default_responder_control_socket_path();
+    Ok(())
 }
 
 #[test]
