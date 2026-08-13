@@ -12000,7 +12000,8 @@ mod tests {
     use crate::core::profile::{OperatingProfile, RuntimeProfileReport};
     use crate::core::search::{
         PERFORMANCE_EXPLAIN_SCHEMA_V1, RERANK_MODEL_UNAVAILABLE_ADVISORY, ScoreSource,
-        SearchDegradation, SearchHit, SearchReport, SearchStatus,
+        SearchAdvisorySession, SearchDegradation, SearchHit, SearchOptions, SearchReport,
+        SearchStatus,
     };
     use crate::db::read_pool::{
         AcquireWaitStats, PoolConfig, PoolStats, READ_POOL_UNDERSIZED_P99_THRESHOLD,
@@ -12017,9 +12018,9 @@ mod tests {
     };
     use crate::pack::{
         ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponseDegradation,
-        ContextResponseSeverity, PackAssemblyOptions, PackCandidate, PackCandidateInput,
-        PackProvenance, PackResourceProfile, PackScoreBreakdown, PackSection, TokenBudget,
-        assemble_draft_with_profile, assemble_draft_with_profile_and_options,
+        ContextResponseSeverity, PACK_COMMAND, PackAssemblyOptions, PackCandidate,
+        PackCandidateInput, PackProvenance, PackResourceProfile, PackScoreBreakdown, PackSection,
+        TokenBudget, assemble_draft_with_profile, assemble_draft_with_profile_and_options,
     };
 
     #[test]
@@ -16464,7 +16465,7 @@ pub fn unrelated_context() -> u64 {{
             .map_err(|error| error.to_string())?;
 
         let options = super::ContextPackOptions {
-            workspace_path: workspace,
+            workspace_path: workspace.clone(),
             database_path: Some(db_path),
             index_dir: Some(empty_index_dir),
             query: "format before release".to_owned(),

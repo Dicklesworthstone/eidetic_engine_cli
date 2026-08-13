@@ -5002,7 +5002,8 @@ fn verify_published_tier_counts(
                 lexical_path.display()
             )
         })?;
-        let actual = LexicalRead::doc_count(&lexical);
+        let actual = LexicalRead::doc_count(&lexical)
+            .map_err(|error| format!("failed to read lexical-tier document count: {error}"))?;
         if actual != expected {
             return Err(format!(
                 "lexical-tier persisted document count mismatch: expected {expected}, found {actual}"
