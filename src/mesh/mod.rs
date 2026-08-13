@@ -25,6 +25,7 @@ pub mod foreground_cli;
 pub mod hello;
 pub mod hello_responder;
 pub mod identity_change_guard;
+pub mod idp;
 pub mod key_store;
 pub mod lane_grant;
 pub mod lane_grant_preview;
