@@ -9849,6 +9849,33 @@ CREATE TABLE team_idp_oidc (
     "blake3:v113_team_idp_oidc_2026_08_13",
 );
 
+/// V114: single-use ID-token hash ledger (T7.5). Raw tokens are never stored.
+pub const V114_TEAM_IDP_TOKEN_REPLAY: Migration = Migration::new(
+    114,
+    "team_idp_token_replay",
+    r#"
+CREATE TABLE team_idp_token_replay (
+    token_hash TEXT PRIMARY KEY CHECK (
+        length(token_hash) = 71
+        AND token_hash GLOB 'blake3:*'
+        AND substr(token_hash, 8) NOT GLOB '*[^0-9a-f]*'
+    ),
+    team_id TEXT NOT NULL CHECK (
+        team_id GLOB 'team_*'
+        AND length(trim(team_id)) > 5
+        AND team_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    member_id TEXT NOT NULL CHECK (
+        member_id GLOB 'mbr_*'
+        AND length(trim(member_id)) > 4
+    ),
+    consumed_at TEXT NOT NULL CHECK (length(trim(consumed_at)) > 0)
+);
+CREATE INDEX idx_team_idp_token_replay_team ON team_idp_token_replay(team_id, consumed_at);
+"#,
+    "blake3:v114_team_idp_token_replay_2026_08_13",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -9964,6 +9991,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V111_TEAM_PROJECTS,
     V112_TEAM_IDP_POLICY,
     V113_TEAM_IDP_OIDC,
+    V114_TEAM_IDP_TOKEN_REPLAY,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -16688,6 +16716,27 @@ impl DbConnection {
             ],
         )?;
         Ok(())
+    }
+
+    /// Consume one ID-token hash. Returns false when the hash was already used.
+    pub fn insert_team_idp_token_replay(
+        &self,
+        token_hash: &str,
+        team_id: &str,
+        member_id: &str,
+        consumed_at: &str,
+    ) -> Result<bool> {
+        let changed = self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO team_idp_token_replay (token_hash, team_id, member_id, consumed_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(token_hash) DO NOTHING",
+            &[
+                Value::Text(token_hash.to_owned()),
+                Value::Text(team_id.to_owned()),
+                Value::Text(member_id.to_owned()),
+                Value::Text(consumed_at.to_owned()),
+            ],
+        )?;
+        Ok(changed > 0)
     }
 
     /// Load the pinned OIDC provider if one has been recorded.

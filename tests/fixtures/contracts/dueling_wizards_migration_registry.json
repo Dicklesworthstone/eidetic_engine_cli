@@ -4,8 +4,8 @@
  "gateBead": "bd-1n0np.23.1",
  "manifestOwner": "tests/contracts/dueling_wizards_migration_registry.rs",
  "sourceOfTruth": "src/db/mod.rs::MIGRATIONS",
- "currentLastCompiledMigration": 113,
- "nextPlannedMigration": 114,
+ "currentLastCompiledMigration": 114,
+ "nextPlannedMigration": 115,
  "boundaryMigrationE2e": "scripts/e2e_boundary_migration.sh",
  "backupCoverageBead": "bd-1n0np.23.2",
  "policy": {
@@ -56,7 +56,8 @@
     "V110": "V110_TEAM_JOIN_ATTEMPTS (bd-tc-epic-qzk7o T4.3 crash-resumable join + T4.4 signing-key lineage)",
     "V111": "V111_TEAM_PROJECTS (bd-tc-epic-qzk7o T4.8 minted/adopted team project identity)",
     "V112": "V112_TEAM_IDP_POLICY (bd-tc-epic-qzk7o T7.2 tailnet-attested IdP policy and member identity)",
-    "V113": "V113_TEAM_IDP_OIDC (bd-tc-epic-qzk7o T7.4 secretless public OIDC provider pin)"
+    "V113": "V113_TEAM_IDP_OIDC (bd-tc-epic-qzk7o T7.4 secretless public OIDC provider pin)",
+    "V114": "V114_TEAM_IDP_TOKEN_REPLAY (bd-tc-epic-qzk7o T7.5 single-use ID-token hash ledger)"
    }
   }
  },
