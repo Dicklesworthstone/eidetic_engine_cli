@@ -4,8 +4,8 @@
  "gateBead": "bd-1n0np.23.1",
  "manifestOwner": "tests/contracts/dueling_wizards_migration_registry.rs",
  "sourceOfTruth": "src/db/mod.rs::MIGRATIONS",
- "currentLastCompiledMigration": 104,
- "nextPlannedMigration": 105,
+ "currentLastCompiledMigration": 106,
+ "nextPlannedMigration": 107,
  "boundaryMigrationE2e": "scripts/e2e_boundary_migration.sh",
  "backupCoverageBead": "bd-1n0np.23.2",
  "policy": {
@@ -47,7 +47,9 @@
     "V101": "V101_ATTEMPT_FAMILY_IMMUTABILITY_REPAIR (bd-multiplicity-aware-trust-p0u7g forward-only DELETE and pointer-rewrite guards for the shipped V095 ledger)",
     "V102": "V102_RETRIEVAL_AFFINITY_PROJECTION (bd-3a1op.2 retrieval-affinity graph projection: cursor + edge tables for the steward-refreshed co-selection snapshot)",
     "V103": "V103_SUGGEST_LINK_CANDIDATE_TYPES (bd-3a1op.3 curation_candidates rebuild adding link_proposal/contradiction_review candidate types)",
-    "V104": "V104_MESH_ORIGIN_EVENTS (bd-tc-epic-qzk7o.3.1 T2.0 origin stream: per-origin append-only chain, body-fetch-only nonce sidecar, sparse receiver dispositions)"
+    "V104": "V104_MESH_ORIGIN_EVENTS (bd-tc-epic-qzk7o.3.1 T2.0 origin stream: per-origin append-only chain, body-fetch-only nonce sidecar, sparse receiver dispositions)",
+    "V105": "V105_TEAM_PENDING_INVITES (bd-tc-epic-qzk7o T4.2 single-use team invite mint/redeem rows)",
+    "V106": "V106_TEAM_MEMBERS (bd-tc-epic-qzk7o T3.1 workspace-scoped team members at genesis and join)"
    }
   }
  },

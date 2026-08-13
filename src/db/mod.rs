@@ -9555,6 +9555,79 @@ CREATE TABLE mesh_origin_dispositions (
     "blake3:v104_mesh_origin_events_2026_08_11",
 );
 
+/// V105: single-use team invite rows for `ee team invite` / `ee team join`.
+pub const V105_TEAM_PENDING_INVITES: Migration = Migration::new(
+    105,
+    "team_pending_invites",
+    r#"
+CREATE TABLE team_pending_invites (
+    invite_id TEXT PRIMARY KEY CHECK (
+        length(invite_id) = 32 AND invite_id NOT GLOB '*[^0-9a-f]*'
+    ),
+    team_id TEXT NOT NULL CHECK (
+        team_id GLOB 'team_*'
+        AND length(trim(team_id)) > 5
+        AND team_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    origin_node_id TEXT NOT NULL CHECK (
+        origin_node_id GLOB 'node_*'
+        AND length(trim(origin_node_id)) > 5
+        AND origin_node_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    hello_port INTEGER NOT NULL CHECK (hello_port >= 1024),
+    endpoint TEXT NOT NULL CHECK (length(trim(endpoint)) > 0),
+    genesis_event_hash TEXT NOT NULL CHECK (
+        genesis_event_hash GLOB 'blake3:*' AND length(genesis_event_hash) = 71
+    ),
+    secret_hash TEXT NOT NULL CHECK (
+        secret_hash GLOB 'blake3:*' AND length(secret_hash) = 71
+    ),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'redeemed', 'revoked')),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    expires_at TEXT NOT NULL CHECK (length(trim(expires_at)) > 0),
+    redeemed_at TEXT
+);
+"#,
+    "blake3:v105_team_pending_invites_2026_08_13",
+);
+
+/// V106: workspace-scoped team members recorded at genesis and join.
+pub const V106_TEAM_MEMBERS: Migration = Migration::new(
+    106,
+    "team_members",
+    r#"
+CREATE TABLE team_members (
+    member_id TEXT PRIMARY KEY CHECK (
+        length(member_id) = 36 AND member_id GLOB 'mbr_*'
+        AND substr(member_id, 5) NOT GLOB '*[^0-9a-f]*'
+    ),
+    team_id TEXT NOT NULL CHECK (
+        team_id GLOB 'team_*'
+        AND length(trim(team_id)) > 5
+        AND team_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    workspace_id TEXT NOT NULL CHECK (
+        workspace_id GLOB 'wsp_*' AND length(workspace_id) = 30
+    ),
+    display_name TEXT NOT NULL CHECK (length(trim(display_name)) > 0),
+    state TEXT NOT NULL CHECK (state IN ('active', 'removed')),
+    is_self INTEGER NOT NULL CHECK (is_self IN (0, 1)),
+    origin_node_id TEXT NOT NULL CHECK (
+        origin_node_id GLOB 'node_*'
+        AND length(trim(origin_node_id)) > 5
+        AND origin_node_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    bound_via TEXT NOT NULL CHECK (
+        bound_via IN ('team_genesis', 'invite_ceremony', 'member_added_node')
+    ),
+    joined_at TEXT NOT NULL CHECK (length(trim(joined_at)) > 0),
+    UNIQUE (team_id, workspace_id, origin_node_id)
+);
+CREATE INDEX idx_team_members_team ON team_members(team_id, joined_at, member_id);
+"#,
+    "blake3:v106_team_members_2026_08_13",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -9661,6 +9734,8 @@ pub const MIGRATIONS: &[Migration] = &[
     V102_RETRIEVAL_AFFINITY_PROJECTION,
     V103_SUGGEST_LINK_CANDIDATE_TYPES,
     V104_MESH_ORIGIN_EVENTS,
+    V105_TEAM_PENDING_INVITES,
+    V106_TEAM_MEMBERS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -14109,6 +14184,65 @@ pub struct StoredMeshOriginEvent {
     pub produced_at: String,
 }
 
+/// Input for one single-use team invite row.
+#[derive(Debug, Clone)]
+pub struct InsertTeamPendingInviteInput {
+    pub invite_id: String,
+    pub team_id: String,
+    pub origin_node_id: String,
+    pub hello_port: u16,
+    pub endpoint: String,
+    pub genesis_event_hash: String,
+    pub secret_hash: String,
+    pub status: String,
+    pub created_at: String,
+    pub expires_at: String,
+}
+
+/// Stored `team_pending_invites` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredTeamPendingInvite {
+    pub invite_id: String,
+    pub team_id: String,
+    pub origin_node_id: String,
+    pub hello_port: u16,
+    pub endpoint: String,
+    pub genesis_event_hash: String,
+    pub secret_hash: String,
+    pub status: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub redeemed_at: Option<String>,
+}
+
+/// Input for one workspace-scoped team member row.
+#[derive(Debug, Clone)]
+pub struct InsertTeamMemberInput {
+    pub member_id: String,
+    pub team_id: String,
+    pub workspace_id: String,
+    pub display_name: String,
+    pub state: String,
+    pub is_self: bool,
+    pub origin_node_id: String,
+    pub bound_via: String,
+    pub joined_at: String,
+}
+
+/// Stored `team_members` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredTeamMember {
+    pub member_id: String,
+    pub team_id: String,
+    pub workspace_id: String,
+    pub display_name: String,
+    pub state: String,
+    pub is_self: bool,
+    pub origin_node_id: String,
+    pub bound_via: String,
+    pub joined_at: String,
+}
+
 /// Append failure: either the chain invariant refused the write (durable
 /// fork/regression evidence for the caller) or the database failed.
 #[derive(Debug)]
@@ -14167,6 +14301,42 @@ fn stored_mesh_origin_event_from_row(row: &Row) -> Result<StoredMeshOriginEvent>
         )?
         .to_string(),
         produced_at: required_text(row, 11, DbOperation::Query, "produced_at")?.to_string(),
+    })
+}
+
+fn stored_team_pending_invite_from_row(row: &Row) -> Result<StoredTeamPendingInvite> {
+    let hello_port = u16::try_from(required_u64(row, 3, DbOperation::Query, "hello_port")?)
+        .map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "team invite hello_port does not fit u16".to_owned(),
+        })?;
+    Ok(StoredTeamPendingInvite {
+        invite_id: required_text(row, 0, DbOperation::Query, "invite_id")?.to_string(),
+        team_id: required_text(row, 1, DbOperation::Query, "team_id")?.to_string(),
+        origin_node_id: required_text(row, 2, DbOperation::Query, "origin_node_id")?.to_string(),
+        hello_port,
+        endpoint: required_text(row, 4, DbOperation::Query, "endpoint")?.to_string(),
+        genesis_event_hash: required_text(row, 5, DbOperation::Query, "genesis_event_hash")?
+            .to_string(),
+        secret_hash: required_text(row, 6, DbOperation::Query, "secret_hash")?.to_string(),
+        status: required_text(row, 7, DbOperation::Query, "status")?.to_string(),
+        created_at: required_text(row, 8, DbOperation::Query, "created_at")?.to_string(),
+        expires_at: required_text(row, 9, DbOperation::Query, "expires_at")?.to_string(),
+        redeemed_at: optional_text(row, 10)?.map(str::to_string),
+    })
+}
+
+fn stored_team_member_from_row(row: &Row) -> Result<StoredTeamMember> {
+    Ok(StoredTeamMember {
+        member_id: required_text(row, 0, DbOperation::Query, "member_id")?.to_string(),
+        team_id: required_text(row, 1, DbOperation::Query, "team_id")?.to_string(),
+        workspace_id: required_text(row, 2, DbOperation::Query, "workspace_id")?.to_string(),
+        display_name: required_text(row, 3, DbOperation::Query, "display_name")?.to_string(),
+        state: required_text(row, 4, DbOperation::Query, "state")?.to_string(),
+        is_self: required_i64(row, 5, DbOperation::Query, "is_self")? != 0,
+        origin_node_id: required_text(row, 6, DbOperation::Query, "origin_node_id")?.to_string(),
+        bound_via: required_text(row, 7, DbOperation::Query, "bound_via")?.to_string(),
+        joined_at: required_text(row, 8, DbOperation::Query, "joined_at")?.to_string(),
     })
 }
 
@@ -15770,6 +15940,95 @@ impl DbConnection {
             &[Value::from_u64_clamped(u64::from(limit.max(1)))],
         )?;
         rows.iter().map(stored_mesh_origin_event_from_row).collect()
+    }
+
+    /// Persist one single-use team invite.
+    pub fn insert_team_pending_invite(&self, input: &InsertTeamPendingInviteInput) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO team_pending_invites (invite_id, team_id, origin_node_id, hello_port, endpoint, genesis_event_hash, secret_hash, status, created_at, expires_at, redeemed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)",
+            &[
+                Value::Text(input.invite_id.clone()),
+                Value::Text(input.team_id.clone()),
+                Value::Text(input.origin_node_id.clone()),
+                Value::from_u64_clamped(u64::from(input.hello_port)),
+                Value::Text(input.endpoint.clone()),
+                Value::Text(input.genesis_event_hash.clone()),
+                Value::Text(input.secret_hash.clone()),
+                Value::Text(input.status.clone()),
+                Value::Text(input.created_at.clone()),
+                Value::Text(input.expires_at.clone()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Load one invite by id.
+    pub fn get_team_pending_invite(
+        &self,
+        invite_id: &str,
+    ) -> Result<Option<StoredTeamPendingInvite>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT invite_id, team_id, origin_node_id, hello_port, endpoint, genesis_event_hash, secret_hash, status, created_at, expires_at, redeemed_at FROM team_pending_invites WHERE invite_id = ?1",
+            &[Value::Text(invite_id.to_owned())],
+        )?;
+        rows.first()
+            .map(stored_team_pending_invite_from_row)
+            .transpose()
+    }
+
+    /// Mark a pending invite redeemed exactly once.
+    pub fn redeem_team_pending_invite(&self, invite_id: &str, redeemed_at: &str) -> Result<bool> {
+        let changed = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE team_pending_invites SET status = 'redeemed', redeemed_at = ?2 WHERE invite_id = ?1 AND status = 'pending'",
+            &[
+                Value::Text(invite_id.to_owned()),
+                Value::Text(redeemed_at.to_owned()),
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Persist one team member. Duplicate `(team, workspace, node)` is a no-op.
+    pub fn insert_team_member(&self, input: &InsertTeamMemberInput) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT OR IGNORE INTO team_members (member_id, team_id, workspace_id, display_name, state, is_self, origin_node_id, bound_via, joined_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            &[
+                Value::Text(input.member_id.clone()),
+                Value::Text(input.team_id.clone()),
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.display_name.clone()),
+                Value::Text(input.state.clone()),
+                Value::BigInt(if input.is_self { 1 } else { 0 }),
+                Value::Text(input.origin_node_id.clone()),
+                Value::Text(input.bound_via.clone()),
+                Value::Text(input.joined_at.clone()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Load members for one team, oldest first.
+    pub fn list_team_members(&self, team_id: &str) -> Result<Vec<StoredTeamMember>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT member_id, team_id, workspace_id, display_name, state, is_self, origin_node_id, bound_via, joined_at FROM team_members WHERE team_id = ?1 ORDER BY joined_at ASC, member_id ASC",
+            &[Value::Text(team_id.to_owned())],
+        )?;
+        rows.iter().map(stored_team_member_from_row).collect()
+    }
+
+    /// Load every local team member row.
+    pub fn list_all_team_members(&self) -> Result<Vec<StoredTeamMember>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT member_id, team_id, workspace_id, display_name, state, is_self, origin_node_id, bound_via, joined_at FROM team_members ORDER BY joined_at ASC, member_id ASC",
+            &[],
+        )?;
+        rows.iter().map(stored_team_member_from_row).collect()
     }
 
     /// Read the body-fetch-only commitment nonce for one local event.
