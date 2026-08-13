@@ -66202,6 +66202,12 @@ impl NormalizedInvocation {
                         }
                     },
                 },
+                Command::Team(team_cmd) => match team_cmd {
+                    team::TeamCommand::Create(_) => "team create".to_string(),
+                    team::TeamCommand::Status(_) => "team status".to_string(),
+                    team::TeamCommand::Invite(_) => "team invite".to_string(),
+                    team::TeamCommand::Join(_) => "team join".to_string(),
+                },
                 Command::Situation(sit) => match sit {
                     SituationCommand::Classify(_) => "situation classify".to_string(),
                     SituationCommand::Adopt(_) => "situation adopt".to_string(),
