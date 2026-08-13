@@ -2476,12 +2476,10 @@ async fn write_control_frame_async<T: Serialize>(
         return Err(ResponderBrokerError::InvalidConfiguration);
     }
     let len = u32::try_from(bytes.len()).map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
-    stream
-        .write_all(&len.to_le_bytes())
+    AsyncWriteExt::write_all(stream, &len.to_le_bytes())
         .await
         .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
-    stream
-        .write_all(&bytes)
+    AsyncWriteExt::write_all(stream, &bytes)
         .await
         .map_err(|_| ResponderBrokerError::TransportUnavailable)
 }
@@ -2493,8 +2491,7 @@ async fn read_control_frame_async<T: for<'de> Deserialize<'de>>(
 ) -> Result<T, ResponderBrokerError> {
     checkpoint(cx, "responder control frame")?;
     let mut len_buf = [0_u8; 4];
-    stream
-        .read_exact(&mut len_buf)
+    AsyncReadExt::read_exact(stream, &mut len_buf)
         .await
         .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
     let len = usize::try_from(u32::from_le_bytes(len_buf))
@@ -2503,8 +2500,7 @@ async fn read_control_frame_async<T: for<'de> Deserialize<'de>>(
         return Err(ResponderBrokerError::InvalidConfiguration);
     }
     let mut bytes = vec![0_u8; len];
-    stream
-        .read_exact(&mut bytes)
+    AsyncReadExt::read_exact(stream, &mut bytes)
         .await
         .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
     serde_json::from_slice(&bytes).map_err(|_| ResponderBrokerError::InvalidConfiguration)
@@ -2670,7 +2666,7 @@ async fn read_asupersync_framed(
     let _ambient = Cx::set_current(Some(cx.clone()));
     let bytes = match timeout(now, effective, async {
         let mut prefix = [0_u8; 4];
-        stream.read_exact(&mut prefix).await?;
+        AsyncReadExt::read_exact(stream, &mut prefix).await?;
         let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -2686,7 +2682,7 @@ async fn read_asupersync_framed(
             ));
         }
         let mut body = vec![0_u8; length];
-        stream.read_exact(&mut body).await?;
+        AsyncReadExt::read_exact(stream, &mut body).await?;
         Ok(body)
     })
     .await
@@ -2725,9 +2721,9 @@ async fn write_asupersync_framed(
     }
     let _ambient = Cx::set_current(Some(cx.clone()));
     match timeout(now, effective, async {
-        stream.write_all(&prefix).await?;
-        stream.write_all(bytes).await?;
-        stream.flush().await
+        AsyncWriteExt::write_all(stream, &prefix).await?;
+        AsyncWriteExt::write_all(stream, bytes).await?;
+        AsyncWriteExt::flush(stream).await
     })
     .await
     {
