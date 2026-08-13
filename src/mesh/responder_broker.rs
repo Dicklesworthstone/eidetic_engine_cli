@@ -111,6 +111,9 @@ pub struct LocalTailscaleStatus {
 pub struct WhoIsIdentity {
     pub stable_id: String,
     pub current_node_pubkey: String,
+    pub login_name: Option<String>,
+    pub display_name: Option<String>,
+    pub user_id: Option<String>,
 }
 
 /// Narrow conformance seam around the two read-only LocalAPI calls the broker
@@ -323,6 +326,26 @@ impl TailscaleLocalApi for TailscaleLocalApiClient {
                 Ok(WhoIsIdentity {
                     stable_id: node.stable_id,
                     current_node_pubkey: node.current_node_pubkey,
+                    login_name: response
+                        .user_profile
+                        .as_ref()
+                        .and_then(|profile| profile.login_name.clone())
+                        .filter(|login| !login.trim().is_empty()),
+                    display_name: response
+                        .user_profile
+                        .as_ref()
+                        .and_then(|profile| profile.display_name.clone())
+                        .filter(|name| !name.trim().is_empty()),
+                    user_id: response.user_profile.as_ref().and_then(|profile| {
+                        profile.id.as_ref().and_then(|value| {
+                            value.as_str().map(str::to_owned).or_else(|| {
+                                value
+                                    .as_i64()
+                                    .map(|id| id.to_string())
+                                    .or_else(|| value.as_u64().map(|id| id.to_string()))
+                            })
+                        })
+                    }),
                 })
             }
         })
@@ -369,6 +392,19 @@ struct LocalApiCurrentTailnet {
 struct LocalApiWhoIsResponse {
     #[serde(rename = "Node")]
     node: Option<LocalApiWhoIsNode>,
+    #[serde(rename = "UserProfile")]
+    user_profile: Option<LocalApiWhoIsUserProfile>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Deserialize)]
+struct LocalApiWhoIsUserProfile {
+    #[serde(rename = "ID")]
+    id: Option<serde_json::Value>,
+    #[serde(rename = "LoginName")]
+    login_name: Option<String>,
+    #[serde(rename = "DisplayName")]
+    display_name: Option<String>,
 }
 
 #[cfg(unix)]
