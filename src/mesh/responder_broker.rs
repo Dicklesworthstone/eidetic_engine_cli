@@ -3165,7 +3165,38 @@ async fn serve_authenticated_sync_round(
     {
         crate::mesh::admission::release_authenticated_admission(peer);
     }
+    persist_authenticated_admission_snapshot(routes, admission);
     result
+}
+
+fn persist_authenticated_admission_snapshot(
+    routes: &ResponderRouteRegistry,
+    admission: &Arc<Mutex<AdmissionState>>,
+) {
+    let Some(database_path) = routes
+        .routes
+        .values()
+        .find_map(|route| route.database_path.clone())
+    else {
+        return;
+    };
+    let Some(workspace_id) = routes.workspace_ids().into_iter().next() else {
+        return;
+    };
+    let Ok(state) = admission.lock() else {
+        return;
+    };
+    let peers = state.peers.values().cloned().collect::<Vec<_>>();
+    drop(state);
+    let Ok(connection) = DbConnection::open_file(database_path) else {
+        return;
+    };
+    let _ = crate::mesh::team::persist_team_admission_states(
+        &connection,
+        &workspace_id,
+        &peers,
+        &chrono::Utc::now().to_rfc3339(),
+    );
 }
 
 fn load_sync_round_response(
