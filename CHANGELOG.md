@@ -92,7 +92,13 @@ future changelog pass expands those rows into full capability sections.
   Omitted history share stays body-free. The import ledger records
   the producer `body_cache_key`.
   Join enrolls the inviter under the pair-key handle so EventFetch
-  can find the invite TCP endpoint. `retry_pending_team_body_fetches`
+  can find the invite TCP endpoint. The inviter enrolls the accepted
+  joiner at the join TCP source IP and the advertised `joinerHelloPort`
+  (hello also carries `joinerWorkspaceId`) so EventFetch/BodyFetch
+  work both ways. `ee team fetch body` retries granted BodyFetch
+  when the local cache is still metadata-only. Enroll is best-effort
+  after redeem so a missing workspace row cannot withhold the grant.
+  `retry_pending_team_body_fetches`
   calls fetch only when the durable body lane is Allow, then applies
   nonce-checked bytes. Invite codes and join grants carry
   `originWorkspaceId`. Enroll stores it on the peer record.
