@@ -2263,6 +2263,7 @@ pub const fn score_source_name(source: ScoreSource) -> &'static str {
         ScoreSource::SemanticQuality => "semantic_quality",
         ScoreSource::Hybrid => "hybrid",
         ScoreSource::Reranked => "reranked",
+        ScoreSource::HashControl => "hash_control",
     }
 }
 

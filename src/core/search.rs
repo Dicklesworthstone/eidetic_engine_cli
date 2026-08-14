@@ -619,7 +619,8 @@ pub fn normalized_relevance_score(source: ScoreSource, raw_score: f32) -> f32 {
         ScoreSource::Lexical
         | ScoreSource::SemanticFast
         | ScoreSource::SemanticQuality
-        | ScoreSource::Reranked => raw_score,
+        | ScoreSource::Reranked
+        | ScoreSource::HashControl => raw_score,
     };
     normalized.clamp(0.0, 1.0)
 }
@@ -641,7 +642,8 @@ pub const fn default_floor_for_source(source: ScoreSource) -> f32 {
         ScoreSource::Lexical
         | ScoreSource::SemanticFast
         | ScoreSource::SemanticQuality
-        | ScoreSource::Reranked => DEFAULT_RELEVANCE_FLOOR,
+        | ScoreSource::Reranked
+        | ScoreSource::HashControl => DEFAULT_RELEVANCE_FLOOR,
     }
 }
 
@@ -1665,6 +1667,7 @@ pub struct RetrievalSourceCounts {
     pub semantic_quality: usize,
     pub hybrid: usize,
     pub reranked: usize,
+    pub hash_control: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -2691,6 +2694,7 @@ pub enum ScoreSource {
     SemanticQuality,
     Hybrid,
     Reranked,
+    HashControl,
 }
 
 impl ScoreSource {
@@ -2702,6 +2706,7 @@ impl ScoreSource {
             Self::SemanticQuality => "semantic_quality",
             Self::Hybrid => "hybrid",
             Self::Reranked => "reranked",
+            Self::HashControl => "hash_control",
         }
     }
 
@@ -2718,7 +2723,9 @@ impl ScoreSource {
         match self {
             Self::Hybrid => "rrf_fused",
             Self::Reranked => "reranked",
-            Self::Lexical | Self::SemanticFast | Self::SemanticQuality => "unit_normalized",
+            Self::Lexical | Self::SemanticFast | Self::SemanticQuality | Self::HashControl => {
+                "unit_normalized"
+            }
         }
     }
 }
@@ -5735,6 +5742,7 @@ impl RetrievalSourceCounts {
             ScoreSource::SemanticQuality => self.semantic_quality += 1,
             ScoreSource::Hybrid => self.hybrid += 1,
             ScoreSource::Reranked => self.reranked += 1,
+            ScoreSource::HashControl => self.hash_control += 1,
         }
     }
 }
@@ -6211,6 +6219,18 @@ impl ScoreExplanation {
                         "fast_score",
                         "candidate component = fast_score; final score = rerank_score",
                     ));
+                }
+            }
+            ScoreSource::HashControl => {
+                if let Some(fast) = hit.fast_score {
+                    factors.push(ScoreFactor::new(
+                        "hash_control",
+                        fast,
+                        "hash/FNV/JL control vector similarity",
+                        "fast_score",
+                        "score = fast_score",
+                    ));
+                    summary_parts.push(format!("hash control ({:.2})", fast));
                 }
             }
         }
@@ -9923,6 +9943,7 @@ fn score_source_from_frankensearch(source: crate::search::ScoreSource) -> ScoreS
         crate::search::ScoreSource::SemanticQuality => ScoreSource::SemanticQuality,
         crate::search::ScoreSource::Hybrid => ScoreSource::Hybrid,
         crate::search::ScoreSource::Reranked => ScoreSource::Reranked,
+        crate::search::ScoreSource::HashControl => ScoreSource::HashControl,
     }
 }
 
