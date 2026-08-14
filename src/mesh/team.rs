@@ -222,6 +222,7 @@ pub struct TeamBodyShareReport {
     pub published_count: usize,
     pub skipped_count: usize,
     pub items: Vec<TeamBodyShareItem>,
+    pub representation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_token: Option<String>,
     pub mesh_primitives: Vec<&'static str>,
@@ -1541,15 +1542,47 @@ pub fn fetch_local_team_body(
         return Ok(empty("metadata_only", row.size_bytes.unwrap_or(0)));
     };
     match cache.read(body_cache_key) {
-        Ok(Some(bytes)) => Ok(BodyFetchResponse {
-            schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
-            body_cache_key: body_cache_key.to_owned(),
-            cache_status: "available".to_owned(),
-            size_bytes: u64::try_from(bytes.len()).unwrap_or(0),
-            body_hex: Some(hex_encode(&bytes)),
-        }),
+        Ok(Some(bytes)) => {
+            let actual_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+            let hash_ok = row.local_body_hash.as_deref() == Some(actual_hash.as_str());
+            let size_ok = row
+                .size_bytes
+                .is_none_or(|expected| u64::try_from(bytes.len()).ok() == Some(expected));
+            if !hash_ok || !size_ok {
+                return Ok(empty("metadata_only", row.size_bytes.unwrap_or(0)));
+            }
+            Ok(BodyFetchResponse {
+                schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
+                body_cache_key: body_cache_key.to_owned(),
+                cache_status: "available".to_owned(),
+                size_bytes: u64::try_from(bytes.len()).unwrap_or(0),
+                body_hex: Some(hex_encode(&bytes)),
+            })
+        }
         Ok(None) | Err(_) => Ok(empty("metadata_only", row.size_bytes.unwrap_or(0))),
     }
+}
+
+/// Remote BodyFetch is allowed only when the requester's durable grant
+/// explicitly allows the body lane. Missing or deny/quarantine stays
+/// metadata-only.
+#[must_use]
+pub fn body_lane_allows_fetch(
+    connection: &DbConnection,
+    workspace_id: &str,
+    peer_id: &str,
+) -> bool {
+    connection
+        .get_mesh_lane_grant_state(workspace_id, peer_id)
+        .ok()
+        .flatten()
+        .is_some_and(|grant| {
+            grant.target_matches_current_peer
+                && matches!(
+                    grant.body_override,
+                    Some(crate::config::MeshLaneDecision::Allow)
+                )
+        })
 }
 
 fn bodies_consent_hash(team_id: &str, items: &[TeamBodyShareItem]) -> String {
@@ -1575,6 +1608,38 @@ pub fn share_team_bodies(
     issue_token: bool,
     approval_token: Option<&str>,
 ) -> Result<TeamBodyShareReport, OriginStreamError> {
+    share_team_bodies_represented(
+        connection,
+        workspace_id,
+        produced_at,
+        confirm,
+        limit,
+        workspace_path,
+        issue_token,
+        approval_token,
+        "exact",
+    )
+}
+
+/// Publish origin-owned bodies with an explicit signed representation.
+/// `already_redacted` is allowed; switching an `exact` publication to
+/// `already_redacted` is refused so redact-over-exact cannot masquerade.
+pub fn share_team_bodies_represented(
+    connection: &DbConnection,
+    workspace_id: &str,
+    produced_at: &str,
+    confirm: bool,
+    limit: usize,
+    workspace_path: Option<&std::path::Path>,
+    issue_token: bool,
+    approval_token: Option<&str>,
+    representation: &str,
+) -> Result<TeamBodyShareReport, OriginStreamError> {
+    if representation != "exact" && representation != "already_redacted" {
+        return Err(OriginStreamError::Encode(
+            "body representation must be exact or already_redacted".to_owned(),
+        ));
+    }
     let team = load_local_teams(connection)?
         .into_iter()
         .next()
@@ -1655,6 +1720,7 @@ pub fn share_team_bodies(
                 .filter(|item| item.cache_status == "available")
                 .count(),
             items,
+            representation: representation.to_owned(),
             approval_token: token,
             mesh_primitives: vec!["mesh_body_cache_metadata", "ee.mesh.memory_event.v1"],
         });
@@ -1679,6 +1745,12 @@ pub fn share_team_bodies(
     let mut out = Vec::new();
     for item in items {
         if item.cache_status == "available" {
+            if representation == "already_redacted" {
+                return Err(OriginStreamError::Encode(
+                    "refuse redact-over-exact; unshare and preview a fresh already_redacted set"
+                        .to_owned(),
+                ));
+            }
             skipped = skipped.saturating_add(1);
             out.push(item);
             continue;
@@ -1716,8 +1788,9 @@ pub fn share_team_bodies(
             project_binding: None,
             origin_trust_claim: Some(memory.trust_class.clone()),
             provenance_refs: Vec::new(),
-            body_representation: Some("exact".to_owned()),
-            redaction_provenance: None,
+            body_representation: Some(representation.to_owned()),
+            redaction_provenance: (representation == "already_redacted")
+                .then(|| "origin_already_redacted".to_owned()),
             body_commitment: commitment.clone(),
         });
         append_origin_event(
@@ -1778,6 +1851,7 @@ pub fn share_team_bodies(
         published_count: published,
         skipped_count: skipped,
         items: out,
+        representation: representation.to_owned(),
         approval_token: None,
         mesh_primitives: vec![
             "mesh_body_cache_metadata",
@@ -1932,6 +2006,7 @@ pub fn unshare_team_bodies(
             .filter(|item| item.cache_status != "evicted")
             .count(),
         items,
+        representation: "withdrawn".to_owned(),
         approval_token: None,
         mesh_primitives: vec!["mesh_body_cache_metadata"],
     })
@@ -2385,6 +2460,39 @@ pub fn inspect_team_health(
             .to_owned(),
         repair: None,
     });
+    if let Ok(jobs) = connection
+        .list_search_index_jobs(workspace_id, Some(crate::db::SearchIndexJobStatus::Pending))
+    {
+        checks.push(TeamDoctorCheck {
+            name: "index_rematerialization".to_owned(),
+            status: if jobs.is_empty() {
+                "ok".to_owned()
+            } else {
+                "warning".to_owned()
+            },
+            message: format!("{} pending index rematerialization job(s)", jobs.len()),
+            repair: (!jobs.is_empty()).then(|| "ee index rebuild --workspace .".to_owned()),
+        });
+    }
+    if let Ok(cursors) = connection.list_mesh_peer_cursors(workspace_id) {
+        let stalled = cursors
+            .iter()
+            .filter(|cursor| matches!(cursor.status.as_str(), "behind" | "blocked" | "quarantined"))
+            .count();
+        checks.push(TeamDoctorCheck {
+            name: "origin_outbox".to_owned(),
+            status: if stalled == 0 {
+                "ok".to_owned()
+            } else {
+                "warning".to_owned()
+            },
+            message: format!(
+                "{} peer cursor(s); {stalled} behind/blocked/quarantined",
+                cursors.len()
+            ),
+            repair: (stalled > 0).then(|| "ee team steward once --workspace .".to_owned()),
+        });
+    }
     if let Ok(rows) = connection.list_mesh_body_cache_metadata(workspace_id) {
         let staging = rows
             .iter()
@@ -6091,6 +6199,248 @@ mod tests {
         assert!(still.body_hex.is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn already_redacted_share_passes_and_redact_over_exact_is_refused() {
+        let workspace = tempfile::tempdir().unwrap();
+        let connection = open_db();
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: Some("bodies-redacted".to_owned()),
+                },
+            )
+            .expect("workspace");
+        create_local_team_with_store(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+            Some(workspace.path()),
+        )
+        .expect("create");
+        connection
+            .insert_memory(
+                "mem_teamredact0000000000000001",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "already-redacted body".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("remember");
+        let published = share_team_bodies(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T20:00:00Z",
+            true,
+            16,
+            Some(workspace.path()),
+            false,
+            None,
+        )
+        .expect("exact");
+        assert_eq!(published.published_count, 1);
+        let fetched = fetch_local_team_body(
+            &connection,
+            "wsp_persistfixture000000000001",
+            workspace.path(),
+            &team_body_cache_key("mem_teamredact0000000000000001"),
+        )
+        .expect("fetch");
+        assert_eq!(fetched.cache_status, "available");
+        let refused = share_team_bodies_represented(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T20:01:00Z",
+            true,
+            16,
+            Some(workspace.path()),
+            false,
+            None,
+            "already_redacted",
+        )
+        .expect_err("redact-over-exact");
+        assert!(refused.to_string().contains("redact-over-exact"));
+        unshare_team_bodies(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T20:02:00Z",
+        )
+        .expect("unshare");
+        let redacted = share_team_bodies_represented(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T20:03:00Z",
+            true,
+            16,
+            Some(workspace.path()),
+            false,
+            None,
+            "already_redacted",
+        )
+        .expect("already_redacted");
+        assert_eq!(redacted.published_count, 1);
+        assert_eq!(redacted.representation, "already_redacted");
+        assert!(!body_lane_allows_fetch(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "peer_missing_body_grant",
+        ));
+    }
+
+    #[test]
+    fn body_lane_grant_then_revoke_gates_fetch() {
+        let connection = open_db();
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-team-body-grant".to_owned(),
+                    name: Some("bodies-grant".to_owned()),
+                },
+            )
+            .expect("workspace");
+        connection
+            .upsert_mesh_peer(&crate::db::UpsertMeshPeerInput {
+                workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                peer_id: "peer_bodygrant000000000001".to_owned(),
+                origin_node_id: "node_bodygrant000000000001".to_owned(),
+                display_name: Some("contractor".to_owned()),
+                policy_summary_json: None,
+                enabled: true,
+                last_seen_at: Some("2026-08-13T21:00:00Z".to_owned()),
+            })
+            .expect("peer");
+        assert!(!body_lane_allows_fetch(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "peer_bodygrant000000000001",
+        ));
+        let mutation = crate::db::MeshLaneGrantMutationInput {
+            workspace_id: "wsp_persistfixture000000000001".to_owned(),
+            peer_id: "peer_bodygrant000000000001".to_owned(),
+            target_adapter: crate::db::MeshLaneGrantTargetAdapter::new(
+                "peer_bodygrant000000000001",
+                "node_bodygrant000000000001",
+            ),
+            material_lane: crate::config::MeshLane::Body,
+            expected_generation: 0,
+            approval_config_digest: Some(format!("blake3:{}", "a".repeat(64))),
+            updated_at: Some("2026-08-13T21:00:00Z".to_owned()),
+        };
+        connection
+            .apply_mesh_lane_grant_with_effect(&mutation, |_| Ok::<(), String>(()))
+            .expect("grant");
+        assert!(body_lane_allows_fetch(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "peer_bodygrant000000000001",
+        ));
+        connection
+            .revoke_mesh_lane_with_effect(
+                &crate::db::MeshLaneGrantMutationInput {
+                    expected_generation: 1,
+                    updated_at: Some("2026-08-13T21:01:00Z".to_owned()),
+                    ..mutation
+                },
+                |_| Ok::<(), String>(()),
+            )
+            .expect("revoke");
+        assert!(!body_lane_allows_fetch(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "peer_bodygrant000000000001",
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn substituted_body_cache_bytes_stay_metadata_only() {
+        let workspace = tempfile::tempdir().unwrap();
+        let connection = open_db();
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: Some("bodies-sub".to_owned()),
+                },
+            )
+            .expect("workspace");
+        create_local_team_with_store(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+            Some(workspace.path()),
+        )
+        .expect("create");
+        connection
+            .insert_memory(
+                "mem_teamsubst0000000000000001",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "canonical body".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("remember");
+        share_team_bodies(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T22:00:00Z",
+            true,
+            16,
+            Some(workspace.path()),
+            false,
+            None,
+        )
+        .expect("share");
+        let key = team_body_cache_key("mem_teamsubst0000000000000001");
+        let cache_dir = workspace.path().join(".ee").join("mesh-body-cache");
+        let cache =
+            crate::mesh::key_store::SecureLocalDir::open_existing(workspace.path(), &cache_dir)
+                .expect("open cache")
+                .expect("cache dir");
+        cache
+            .write_replace(&key, b"substituted revision")
+            .expect("swap");
+        let fetched = fetch_local_team_body(
+            &connection,
+            "wsp_persistfixture000000000001",
+            workspace.path(),
+            &key,
+        )
+        .expect("fetch");
+        assert_eq!(fetched.cache_status, "metadata_only");
+        assert!(fetched.body_hex.is_none());
+    }
+
     #[test]
     fn team_steward_once_skips_when_paused_or_solo() {
         let connection = open_db();
@@ -6167,6 +6517,18 @@ mod tests {
                 .checks
                 .iter()
                 .any(|check| check.name == "client_only" && check.status == "ok")
+        );
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| { check.name == "index_rematerialization" && check.status == "ok" })
+        );
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| check.name == "origin_outbox" && check.status == "ok")
         );
         set_local_team_paused(&connection, true, "2026-08-13T17:00:00Z").expect("pause");
         let paused = inspect_team_health(&connection, "wsp_persistfixture000000000001", None)
