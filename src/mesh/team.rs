@@ -724,7 +724,7 @@ fn team_create_report(team: TeamRecord, created: bool) -> TeamCreateReport {
                 "ee mesh hello-responder run {workspace_flag} --team-id {} --responder-node-id {} --peer <peer-id> --json",
                 team.team_id, team.origin_node_id
             ),
-            format!("ee team invite --endpoint <tailscale-ip> {workspace_flag} --json"),
+            format!("ee team invite {workspace_flag} --json"),
             format!("ee mesh sync --once {workspace_flag} --json"),
             format!("ee daemon install {workspace_flag} --json"),
         ],
@@ -733,6 +733,7 @@ fn team_create_report(team: TeamRecord, created: bool) -> TeamCreateReport {
             "mesh_origin_events.append",
             "ee.team.manifest_event.v1",
             "teamCreated",
+            "team_invite_auth_floor",
         ],
     }
 }
