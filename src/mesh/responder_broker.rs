@@ -3025,7 +3025,7 @@ async fn answer_sync_round(
 }
 
 fn admit_authenticated_capability(
-    peer_id: &str,
+    _peer_id: &str,
     capability: &FrameCapability,
     payload: &serde_json::Value,
     peer_state: &mut crate::mesh::admission::MeshPeerAdmissionState,
@@ -3310,6 +3310,21 @@ fn load_body_fetch_response(
             body_hex: None,
         };
     };
+    if let Some(peer_id) = routes
+        .routes
+        .values()
+        .next()
+        .map(|route| route.peer_handle.clone())
+        && !crate::mesh::team::body_lane_allows_fetch(&connection, &workspace_id, &peer_id)
+    {
+        return BodyFetchResponse {
+            schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
+            body_cache_key: key.to_owned(),
+            cache_status: "metadata_only".to_owned(),
+            size_bytes: 0,
+            body_hex: None,
+        };
+    }
     crate::mesh::team::fetch_local_team_body(&connection, &workspace_id, &workspace_path, key)
         .unwrap_or_else(|_| BodyFetchResponse {
             schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
