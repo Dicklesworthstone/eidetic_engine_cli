@@ -64,7 +64,7 @@ future changelog pass expands those rows into full capability sections.
   cache bytes. `ee team doctor` reports `index_rematerialization`,
   `origin_outbox`, `invite_auth_floor`, `pending_invites`,
   `delegated_members`, `signing_rotation`, `pair_rotation`,
-  `projects`, and `removal_acknowledgements`. Removal seeds a durable
+  `projects`, `inbound_body_fetches`, and `removal_acknowledgements`. Removal seeds a durable
   V117 acknowledgement matrix of the active audience at that moment.
   Pending rows stay a warning; fanout is not claimed bounded until
   those members apply the event. `ee team steward once` advances
@@ -84,6 +84,13 @@ future changelog pass expands those rows into full capability sections.
   `ee team status` lists `pendingInvites[]` so a revoke can name an id.
   `ee team projects reconcile` rematerializes origin `teamProjectShared`
   events onto local project rows.
+  Inbound `exact`/`already_redacted` memory events persist a
+  producer-keyed `metadata_only` body-cache row. Authorized BodyFetch
+  releases `nonceHex`; `apply_fetched_team_body` recomputes the
+  event-signed commitment before `staging→available`. Mismatch
+  quarantines. `ee team doctor` reports `inbound_body_fetches`.
+  Omitted history share stays body-free. The import ledger records
+  the producer `body_cache_key`.
   `ee team invite --wait --resume <invite-id>` continues a pending
   waiter without re-emitting the secret.
   `ee team steward once` is the canonical steward verb (`run-once`
