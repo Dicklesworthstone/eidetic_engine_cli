@@ -48,7 +48,26 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
-_Nothing staged beyond 0.13.1 at cut time._
+### Team confederation (ADR 0086, live Unix EE-to-EE)
+
+- `ee team` create/invite/join/members/share/unshare/pause/resume/leave,
+  signed origin events, authenticated TCP hello/sync/body/identity_attest,
+  Tailscale-attested and secretless OIDC IdP, user-scoped
+  `ee daemon install`, and `ee team doctor` now exist as product
+  commands. Isolated-host proofs are recorded in
+  `docs/mesh/perf_budgets.md` and `docs/mesh/verification_matrix.md`.
+- Body publication is confirm-gated and fails closed with
+  `mesh_body_cache_lifecycle_failed` when the T2.1 secure-file adapter
+  is missing. Windows remains client-only; no SID/DACL adapter has been
+  proven.
+- Authenticated responder sessions now apply
+  `MeshAdmissionLimits::conservative_default()` before EventFetch,
+  BodyFetch, Summary, and `identity_attest`.
+
+### Added
+
+- `docs/team/quickstart.md`, `docs/team/trusted_vs_contractor.md`,
+  `docs/agent-ux/team.md`, `docs/mesh/perf_budgets.md`.
 
 ## [0.13.1] - 2026-08-06
 
