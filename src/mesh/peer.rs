@@ -286,6 +286,8 @@ pub struct MeshPeerRecord {
     pub peer_id: String,
     pub alias: String,
     pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub origin_workspace_id: String,
     pub endpoint: MeshPeerEndpoint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub materialized_on_node_key: Option<String>,
@@ -519,6 +521,7 @@ pub fn enroll_peer(input: MeshPeerEnrollInput) -> MeshPeerCommandReport {
         peer_id: peer_id.clone(),
         alias: input.alias,
         workspace_id: input.workspace_id,
+        origin_workspace_id: String::new(),
         endpoint: input.endpoint,
         materialized_on_node_key: None,
         capabilities: MeshPeerCapabilities::from_profile(input.capability_profile),

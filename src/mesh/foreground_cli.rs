@@ -5401,6 +5401,7 @@ metadata = "deny"
             peer_id: peer_id.to_owned(),
             alias: peer_id.to_owned(),
             workspace_id: "wsp_peer".to_owned(),
+            origin_workspace_id: String::new(),
             endpoint: MeshPeerEndpoint {
                 tailscale_node_key: format!("{peer_id}-node"),
                 tailnet_id: "tailnet-test".to_owned(),
