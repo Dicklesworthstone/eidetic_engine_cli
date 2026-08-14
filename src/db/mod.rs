@@ -9930,6 +9930,42 @@ CREATE INDEX idx_mesh_body_cache_status
     "blake3:v115_mesh_body_cache_lifecycle_2026_08_13",
 );
 
+/// V116: rematerialized project shares may exist without a local path.
+pub const V116_TEAM_PROJECTS_RECONCILED: Migration = Migration::new(
+    116,
+    "team_projects_reconciled",
+    r#"
+CREATE TABLE team_projects_v116 (
+    project_id TEXT PRIMARY KEY CHECK (
+        project_id GLOB 'prj_tm_*'
+        AND length(trim(project_id)) = 33
+        AND project_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    team_id TEXT NOT NULL CHECK (
+        team_id GLOB 'team_*'
+        AND length(trim(team_id)) > 5
+        AND team_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    display_name TEXT NOT NULL CHECK (length(trim(display_name)) > 0),
+    source TEXT NOT NULL CHECK (source IN ('minted', 'adopted', 'reconciled')),
+    local_path TEXT NOT NULL CHECK (
+        source = 'reconciled' OR length(trim(local_path)) > 0
+    ),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    UNIQUE(team_id, display_name)
+);
+INSERT INTO team_projects_v116 (
+    project_id, team_id, display_name, source, local_path, created_at
+)
+SELECT project_id, team_id, display_name, source, local_path, created_at
+FROM team_projects;
+DROP TABLE team_projects;
+ALTER TABLE team_projects_v116 RENAME TO team_projects;
+CREATE INDEX idx_team_projects_team ON team_projects(team_id, display_name);
+"#,
+    "blake3:v116_team_projects_reconciled_2026_08_14",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -10047,6 +10083,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V113_TEAM_IDP_OIDC,
     V114_TEAM_IDP_TOKEN_REPLAY,
     V115_MESH_BODY_CACHE_LIFECYCLE,
+    V116_TEAM_PROJECTS_RECONCILED,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
