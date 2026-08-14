@@ -1795,6 +1795,20 @@ fn issue_body_share_token(
     workspace_id: &str,
     consent_hash: &str,
 ) -> Result<String, OriginStreamError> {
+    issue_body_share_token_at(
+        workspace_path,
+        workspace_id,
+        consent_hash,
+        chrono::Utc::now().timestamp(),
+    )
+}
+
+fn issue_body_share_token_at(
+    workspace_path: &std::path::Path,
+    workspace_id: &str,
+    consent_hash: &str,
+    now_unix_seconds: i64,
+) -> Result<String, OriginStreamError> {
     let keys_dir = crate::policy::store_auth::workspace_keys_dir(workspace_path);
     let root = crate::policy::store_auth::StoreAuthRoot::open_or_create(keys_dir)
         .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
@@ -1804,7 +1818,7 @@ fn issue_body_share_token(
         workspace_id,
         BODY_SHARE_TOKEN_SURFACE,
         consent_hash.as_bytes(),
-        chrono::Utc::now().timestamp(),
+        now_unix_seconds,
     )
     .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
     Ok(issued.token().expose_bearer())
@@ -2189,9 +2203,7 @@ pub fn inspect_team_health(
     let cache_platform = crate::mesh::key_store::mesh_credential_store_platform();
     checks.push(TeamDoctorCheck {
         name: "key_store".to_owned(),
-        status: if cache_platform
-            == crate::mesh::key_store::MeshCredentialStorePlatform::HardenedUnix
-        {
+        status: if cache_platform.is_hardened() {
             "ok".to_owned()
         } else {
             "error".to_owned()
@@ -2200,19 +2212,22 @@ pub fn inspect_team_health(
             crate::mesh::key_store::MeshCredentialStorePlatform::HardenedUnix => {
                 "hardened Unix secure-file adapter".to_owned()
             }
+            crate::mesh::key_store::MeshCredentialStorePlatform::HardenedWindows => {
+                "hardened Windows SID/DACL/reparse adapter".to_owned()
+            }
             crate::mesh::key_store::MeshCredentialStorePlatform::Unsupported => {
-                "mesh_key_store_unavailable; Windows remains fail-closed".to_owned()
+                "mesh_key_store_unavailable; no reviewed secure-file adapter".to_owned()
             }
         },
-        repair: (cache_platform
-            == crate::mesh::key_store::MeshCredentialStorePlatform::Unsupported)
-            .then(|| "use a Unix host or wait for Windows secure-file parity".to_owned()),
+        repair: cache_platform
+            .is_hardened()
+            .then_some(())
+            .is_none()
+            .then(|| "use a Unix or Windows host with the reviewed secure-file adapter".to_owned()),
     });
     checks.push(TeamDoctorCheck {
         name: "body_cache".to_owned(),
-        status: if cache_platform
-            == crate::mesh::key_store::MeshCredentialStorePlatform::HardenedUnix
-        {
+        status: if cache_platform.is_hardened() {
             "ok".to_owned()
         } else {
             "error".to_owned()
@@ -2222,14 +2237,19 @@ pub fn inspect_team_health(
             match cache_platform {
                 crate::mesh::key_store::MeshCredentialStorePlatform::HardenedUnix =>
                     "hardened_unix",
+                crate::mesh::key_store::MeshCredentialStorePlatform::HardenedWindows => {
+                    "hardened_windows"
+                }
                 crate::mesh::key_store::MeshCredentialStorePlatform::Unsupported => {
                     crate::mesh::cache::MESH_BODY_CACHE_LIFECYCLE_FAILED_CODE
                 }
             }
         ),
-        repair: (cache_platform
-            == crate::mesh::key_store::MeshCredentialStorePlatform::Unsupported)
-            .then(|| "use a Unix host or wait for Windows secure-file parity".to_owned()),
+        repair: cache_platform
+            .is_hardened()
+            .then_some(())
+            .is_none()
+            .then(|| "use a Unix or Windows host with the reviewed secure-file adapter".to_owned()),
     });
     if let Some(path) = workspace_path {
         let keys = crate::policy::store_auth::workspace_keys_dir(path);
@@ -2317,6 +2337,75 @@ pub fn inspect_team_health(
                 "user-scoped steward service is not installed".to_owned()
             },
             repair: (!installed).then(|| "ee daemon install --confirm".to_owned()),
+        });
+    }
+    checks.push(TeamDoctorCheck {
+        name: "broker_port".to_owned(),
+        status: "ok".to_owned(),
+        message:
+            "one host-wide responder port; additional workspaces register over the control channel"
+                .to_owned(),
+        repair: None,
+    });
+    checks.push(TeamDoctorCheck {
+        name: "client_only".to_owned(),
+        status: match cache_platform {
+            crate::mesh::key_store::MeshCredentialStorePlatform::HardenedUnix => "ok".to_owned(),
+            crate::mesh::key_store::MeshCredentialStorePlatform::HardenedWindows => {
+                "warning".to_owned()
+            }
+            crate::mesh::key_store::MeshCredentialStorePlatform::Unsupported => "error".to_owned(),
+        },
+        message: match cache_platform {
+            crate::mesh::key_store::MeshCredentialStorePlatform::HardenedUnix => {
+                "this host can run the inbound responder".to_owned()
+            }
+            crate::mesh::key_store::MeshCredentialStorePlatform::HardenedWindows => {
+                "Windows remains inbound client-only; credentials use the hardened DACL adapter"
+                    .to_owned()
+            }
+            crate::mesh::key_store::MeshCredentialStorePlatform::Unsupported => {
+                "no reviewed secure-file adapter; team credentials stay blocked".to_owned()
+            }
+        },
+        repair: match cache_platform {
+            crate::mesh::key_store::MeshCredentialStorePlatform::HardenedUnix => None,
+            crate::mesh::key_store::MeshCredentialStorePlatform::HardenedWindows => {
+                Some("use a Unix host for the inbound responder".to_owned())
+            }
+            crate::mesh::key_store::MeshCredentialStorePlatform::Unsupported => {
+                Some("use a Unix or Windows host with the reviewed secure-file adapter".to_owned())
+            }
+        },
+    });
+    checks.push(TeamDoctorCheck {
+        name: "whois".to_owned(),
+        status: "ok".to_owned(),
+        message: "authenticated accept requires WhoIs-verified peer identity before pair-key use"
+            .to_owned(),
+        repair: None,
+    });
+    if let Ok(rows) = connection.list_mesh_body_cache_metadata(workspace_id) {
+        let staging = rows
+            .iter()
+            .filter(|row| row.cache_status == "staging")
+            .count();
+        let pending_purge = rows
+            .iter()
+            .filter(|row| row.cache_status == "invalidated_pending_purge")
+            .count();
+        checks.push(TeamDoctorCheck {
+            name: "body_cache_lifecycle".to_owned(),
+            status: if staging == 0 && pending_purge == 0 {
+                "ok".to_owned()
+            } else {
+                "warning".to_owned()
+            },
+            message: format!(
+                "{staging} staging row(s), {pending_purge} invalidated_pending_purge row(s)"
+            ),
+            repair: (staging > 0 || pending_purge > 0)
+                .then(|| "ee team steward once --workspace .".to_owned()),
         });
     }
     let posture = if paused {
@@ -5672,6 +5761,336 @@ mod tests {
         assert!(drifted.to_string().contains("stale") || drifted.to_string().contains("authentic"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn body_cache_crash_boundaries_and_tokens_stay_unlinkable() {
+        let workspace = tempfile::tempdir().unwrap();
+        let connection = open_db();
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: Some("bodies-crash".to_owned()),
+                },
+            )
+            .expect("workspace");
+        create_local_team_with_store(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+            Some(workspace.path()),
+        )
+        .expect("create");
+        connection
+            .insert_memory(
+                "mem_teamcrash00000000000000001",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "crash-boundary secret body".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("remember");
+
+        let first = share_team_bodies(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T18:00:00Z",
+            false,
+            16,
+            Some(workspace.path()),
+            true,
+            None,
+        )
+        .expect("preview-one");
+        let second = share_team_bodies(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T18:00:01Z",
+            false,
+            16,
+            Some(workspace.path()),
+            true,
+            None,
+        )
+        .expect("preview-two");
+        let token_one = first.approval_token.clone().expect("token-one");
+        let token_two = second.approval_token.clone().expect("token-two");
+        assert_ne!(token_one, token_two);
+        assert_eq!(first.consent_hash, second.consent_hash);
+        for report in [&first, &second] {
+            let json = serde_json::to_string(report).expect("json");
+            assert!(!json.contains("crash-boundary secret body"));
+            assert!(!json.contains("tokenId"));
+            assert!(!json.contains("token_id"));
+        }
+
+        let malformed = share_team_bodies(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T18:00:02Z",
+            true,
+            16,
+            Some(workspace.path()),
+            false,
+            Some("eeap1_not-a-real-mac"),
+        )
+        .expect_err("malformed");
+        let malformed_text = malformed.to_string();
+        assert!(
+            malformed_text.contains("invalid")
+                || malformed_text.contains("authentic")
+                || malformed_text.contains("MAC")
+                || malformed_text.contains("token")
+        );
+        assert!(!malformed_text.contains("crash-boundary secret body"));
+
+        let published = share_team_bodies(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T18:01:00Z",
+            true,
+            16,
+            Some(workspace.path()),
+            false,
+            Some(token_two.as_str()),
+        )
+        .expect("publish");
+        assert_eq!(published.published_count, 1);
+
+        let key = team_body_cache_key("mem_teamcrash00000000000000001");
+        let existing = connection
+            .get_mesh_body_cache_metadata("wsp_persistfixture000000000001", &key)
+            .expect("row")
+            .expect("present");
+        connection
+            .upsert_mesh_body_cache_metadata(&UpsertMeshBodyCacheMetadataInput {
+                workspace_id: existing.workspace_id.clone(),
+                body_cache_key: existing.body_cache_key.clone(),
+                origin_node_id: existing.origin_node_id.clone(),
+                origin_workspace_id: existing.origin_workspace_id.clone(),
+                logical_memory_id: existing.logical_memory_id.clone(),
+                content_hash: existing.content_hash.clone(),
+                body_ref_json: existing.body_ref_json.clone(),
+                preview_hash: existing.preview_hash.clone(),
+                size_bytes: existing.size_bytes,
+                cache_status: "invalidated_pending_purge".to_owned(),
+                local_body_hash: existing.local_body_hash.clone(),
+                cached_at: Some("2026-08-13T18:02:00Z".to_owned()),
+                expires_at: existing.expires_at.clone(),
+            })
+            .expect("invalidate");
+        let mid = fetch_local_team_body(
+            &connection,
+            "wsp_persistfixture000000000001",
+            workspace.path(),
+            &key,
+        )
+        .expect("mid-fetch");
+        assert_eq!(mid.cache_status, "invalidated_pending_purge");
+        assert!(mid.body_hex.is_none());
+        let folded = reconcile_team_body_cache(
+            &connection,
+            "wsp_persistfixture000000000001",
+            Some(workspace.path()),
+            "2026-08-13T18:03:00Z",
+        )
+        .expect("reconcile-invalidate");
+        assert_eq!(folded, 1);
+        let after_purge = fetch_local_team_body(
+            &connection,
+            "wsp_persistfixture000000000001",
+            workspace.path(),
+            &key,
+        )
+        .expect("post-purge");
+        assert_eq!(after_purge.cache_status, "evicted");
+        assert!(after_purge.body_hex.is_none());
+
+        let leftover = reconcile_team_body_cache(
+            &connection,
+            "wsp_persistfixture000000000001",
+            Some(workspace.path()),
+            "2026-08-13T18:04:00Z",
+        )
+        .expect("reconcile-leftover-file");
+        assert_eq!(leftover, 0);
+        let still_evicted = connection
+            .get_mesh_body_cache_metadata("wsp_persistfixture000000000001", &key)
+            .expect("reload")
+            .expect("present");
+        assert_eq!(still_evicted.cache_status, "evicted");
+
+        connection
+            .upsert_mesh_body_cache_metadata(&UpsertMeshBodyCacheMetadataInput {
+                workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                body_cache_key: "body_orphan000000000000000001".to_owned(),
+                origin_node_id: existing.origin_node_id,
+                origin_workspace_id: existing.origin_workspace_id,
+                logical_memory_id: "mem_orphan00000000000000000001".to_owned(),
+                content_hash: existing.content_hash,
+                body_ref_json: None,
+                preview_hash: None,
+                size_bytes: Some(12),
+                cache_status: "staging".to_owned(),
+                local_body_hash: None,
+                cached_at: Some("2026-08-13T18:05:00Z".to_owned()),
+                expires_at: None,
+            })
+            .expect("orphan-stage");
+        let staged = fetch_local_team_body(
+            &connection,
+            "wsp_persistfixture000000000001",
+            workspace.path(),
+            "body_orphan000000000000000001",
+        )
+        .expect("staging-fetch");
+        assert_eq!(staged.cache_status, "staging");
+        assert!(staged.body_hex.is_none());
+        let folded_orphan = reconcile_team_body_cache(
+            &connection,
+            "wsp_persistfixture000000000001",
+            Some(workspace.path()),
+            "2026-08-13T18:06:00Z",
+        )
+        .expect("reconcile-orphan");
+        assert_eq!(folded_orphan, 1);
+        let orphan = fetch_local_team_body(
+            &connection,
+            "wsp_persistfixture000000000001",
+            workspace.path(),
+            "body_orphan000000000000000001",
+        )
+        .expect("orphan-fetch");
+        assert_eq!(orphan.cache_status, "metadata_only");
+        assert!(orphan.body_hex.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn body_share_token_rejects_expired_and_wrong_store() {
+        let workspace = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let connection = open_db();
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: Some("bodies-expiry".to_owned()),
+                },
+            )
+            .expect("workspace");
+        create_local_team_with_store(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+            Some(workspace.path()),
+        )
+        .expect("create");
+        connection
+            .insert_memory(
+                "mem_teamexpire0000000000000001",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "expiry-bound body".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("remember");
+        let preview = share_team_bodies(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T19:00:00Z",
+            false,
+            16,
+            Some(workspace.path()),
+            false,
+            None,
+        )
+        .expect("preview");
+        let expired = issue_body_share_token_at(
+            workspace.path(),
+            "wsp_persistfixture000000000001",
+            &preview.consent_hash,
+            1_700_000_000,
+        )
+        .expect("old token");
+        let stale = share_team_bodies(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T19:01:00Z",
+            true,
+            16,
+            Some(workspace.path()),
+            false,
+            Some(expired.as_str()),
+        )
+        .expect_err("expired");
+        let stale_text = stale.to_string();
+        assert!(stale_text.contains("stale") || stale_text.contains("expired"));
+        assert!(!stale_text.contains("expiry-bound body"));
+
+        let fresh = issue_body_share_token(
+            workspace.path(),
+            "wsp_persistfixture000000000001",
+            &preview.consent_hash,
+        )
+        .expect("fresh");
+        let wrong_store = share_team_bodies(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T19:02:00Z",
+            true,
+            16,
+            Some(other.path()),
+            false,
+            Some(fresh.as_str()),
+        )
+        .expect_err("wrong store");
+        let wrong_text = wrong_store.to_string();
+        assert!(
+            wrong_text.contains("invalid")
+                || wrong_text.contains("authentic")
+                || wrong_text.contains("token")
+                || wrong_text.contains("store")
+        );
+        let still = fetch_local_team_body(
+            &connection,
+            "wsp_persistfixture000000000001",
+            workspace.path(),
+            &team_body_cache_key("mem_teamexpire0000000000000001"),
+        )
+        .expect("unshared");
+        assert_ne!(still.cache_status, "available");
+        assert!(still.body_hex.is_none());
+    }
+
     #[test]
     fn team_steward_once_skips_when_paused_or_solo() {
         let connection = open_db();
@@ -5730,6 +6149,24 @@ mod tests {
                 .checks
                 .iter()
                 .any(|check| check.name == "key_store" && check.status == "ok")
+        );
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| check.name == "broker_port" && check.status == "ok")
+        );
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| check.name == "whois" && check.status == "ok")
+        );
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| check.name == "client_only" && check.status == "ok")
         );
         set_local_team_paused(&connection, true, "2026-08-13T17:00:00Z").expect("pause");
         let paused = inspect_team_health(&connection, "wsp_persistfixture000000000001", None)
