@@ -16,11 +16,13 @@ those surfaces are the next command, not a prompt to invent one.
 `ee team doctor` also reports `admission`, `key_store`, `broker_port`,
 `client_only`, `whois`, `body_cache_lifecycle`, `index_rematerialization`,
 `origin_outbox`, `invite_auth_floor`, `pending_invites`,
-`delegated_members`, `signing_rotation`, and `pair_rotation`. Staging,
-`invalidated_pending_purge`, pending index jobs, or behind/blocked/
-quarantined peer cursors are a warning, not a successful fetch. Pending
-invites created before the authorization floor are an error; the repair
-is `ee team revoke --all-before-floor`.
+`delegated_members`, `signing_rotation`, `pair_rotation`, `projects`,
+and `removal_acknowledgements`. Staging, `invalidated_pending_purge`,
+pending index jobs, or behind/blocked/quarantined peer cursors are a
+warning, not a successful fetch. A signed removal with remaining members
+and stalled cursors is also a warning: fanout is not bounded until those
+peers apply the event. Pending invites created before the authorization
+floor are an error; the repair is `ee team revoke --all-before-floor`.
 
 ## Mutations
 

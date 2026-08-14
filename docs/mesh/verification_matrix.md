@@ -202,7 +202,7 @@ This is a live Unix EE-to-EE ledger, not a bead-closing ceremony.
 
 | Slice | Status | Proof | Remainder |
 | --- | --- | --- | --- |
-| T1–T4 transport, origin, join, authorizer, pair-key, leave/pause | **Proven** | Isolated live TCP hello, sync_round, join, revoke, history share, signed inbound persist. Create/join raise the invite-authorization floor. `ee team projects reconcile` rematerializes origin `teamProjectShared` rows (V116). `ee team invite --wait --resume <invite-id>` continues a pending waiter without re-emitting the secret. | Isolated re-proof of floor/inspect/project/resume lib tests is compiling on `ubuntu@38.242.134.66` |
+| T1–T4 transport, origin, join, authorizer, pair-key, leave/pause | **Proven** | Isolated live TCP hello, sync_round, join, revoke, history share, signed inbound persist. Create/join raise the invite-authorization floor. `ee team projects reconcile` rematerializes origin `teamProjectShared` rows (V116) whose `projectId` is `prj_tm_` plus 26 chars. Isolated 2026-08-14: `reconcile_rematerializes_origin_project_shares` 60.95s exit 0; `resume_pending_invite_omits_the_secret` 51.71s exit 0. | A 29-char fixture id is ignored by reconcile; doctor now uses the same id check |
 | T5.1–T5.8 pack scope, activity, attribution | **Landed** | Product commands + unit tests | Full US-6 crash-injection matrix is not a separate harness |
 | T5.9 Unix body product | **Proven** | `share_team_bodies_publishes_then_unshare_stops_serving` exit 0; live BodyFetch; confirm gated on secure-file | Files never deleted; reconcile does not resurrect |
 | T5.9 Windows SID/DACL/reparse | **Adapter compiles (`HardenedWindows`)** | Isolated `cargo check --target x86_64-pc-windows-gnu --lib` Finished in 9m 44s after enabling `windows_by_handle`, gating Unix-only responder control, and stubbing the Windows daemon search type. Adapter rejects reparse points, pins file identity, applies/verifies protected owner+SYSTEM DACL, write-through publish. | No Windows-host runtime DACL soak; inbound responder remains Unix-only. |
@@ -210,7 +210,7 @@ This is a live Unix EE-to-EE ledger, not a bead-closing ceremony.
 | T6.1 steward | **Proven** | Isolated 2026-08-14: membership execute 51.59s; `snapshot_from_paths_loads_peers_and_sync_once_stays_deferred_when_mesh_off` 107.15s. Daemon calls `run_mesh_sync_once_from_paths` when `ran_sync`. Execute also rematerializes origin project shares. | Live contact still needs mesh enabled + reachable peers |
 | T6.2 daemon install | **Proven on Linux and macOS user supervisors** | Linux: `systemctl --user start ee-team-confed-proof.service` → `ActiveState=active` at 2026-08-14T01:47:44Z. macOS: `launchctl bootstrap gui/501/ai.eideticengine.ee-team-confed-proof` → `active count = 1` / `state = xpcproxy` at 2026-08-14T02:14:58Z. Both units quarantined by rename. | Real `ee` binary KeepAlive service was not left running; Windows remains client-only |
 | T6.3 admission | **Wired + persisted** | Authenticated serve folds decisions into a broker-owned per-peer map; repeated oversized BodyFetch raises malformed counts and backs off; in-flight is released after the response | — |
-| T6.4 doctor | **Landed** | previous rows plus invite_auth_floor, pending_invites, delegated_members, signing_rotation, pair_rotation, projects; `ee team revoke --all-before-floor`; `ee team status` lists `pendingInvites[]`; `ee team steward once` is the verb | Isolated re-proof of `revoke_before_floor_clears_stale_pending_invites` and `inspect_team_health_reports_no_team_then_ok_then_paused` is compiling on `ubuntu@38.242.134.66` |
+| T6.4 doctor | **Proven** | Isolated 2026-08-14: `revoke_before_floor_clears_stale_pending_invites` 46.91s exit 0; `inspect_team_health_reports_no_team_then_ok_then_paused` 58.07s exit 0; `reconcile_reapplies_a_missed_member_removal` 54.08s exit 0. Rows include invite_auth_floor, pending_invites, delegated_members, signing_rotation, pair_rotation, projects, and `removal_acknowledgements` (signed removal + stalled cursors is a warning; fanout is not claimed bounded). | No durable per-member ack matrix table; doctor derives from origin events + peer cursors |
 | T6.5 budgets | **Documented + unit-enforced** | `docs/mesh/perf_budgets.md`; conservative-limit unit test | No Criterion `[[bench]]` for join/relay; compile cost dominates |
 | T6.6 docs | **Landed** | `docs/team/quickstart.md`, `trusted_vs_contractor.md`, `docs/agent-ux/team.md`, CHANGELOG | — |
 | T7.1–T7.6 IdP | **Proven** | Fake-IdP HTTPS RS256 1.40s; live TCP identity_attest 88.42s compile+test | No production IdP vendor soak |
@@ -219,10 +219,12 @@ This is a live Unix EE-to-EE ledger, not a bead-closing ceremony.
 Campaign is **done as live Unix EE-to-EE capability**, including
 T5.10 crash/token/`already_redacted`/grant-revoke/hash-checked fetch
 proofs, T6.2 supervisor load on Linux and macOS, T6.4
-invite-floor / pending-invite / project rematerialization doctor
-rows, and a reviewed `HardenedWindows` secure-file adapter in tree.
-The current isolated re-proof of T6.4 plus project reconcile is
-still compiling; this ledger will record those exits when they
-land. Windows inbound listen and a Windows-host runtime proof of
-the DACL adapter remain out of scope for this campaign's Unix
-isolated harness. Do not self-close beads from this ledger.
+invite-floor / pending-invite / project rematerialization /
+removal-acknowledgement doctor rows, and a reviewed
+`HardenedWindows` secure-file adapter in tree. Isolated T6.4
+re-proof on `ubuntu@38.242.134.66` 2026-08-14T14:05–14:21Z:
+floor 46.91s, inspect 58.07s, project 60.95s, resume 51.71s,
+removal 54.08s, all exit 0. Windows inbound listen and a
+Windows-host runtime proof of the DACL adapter remain out of
+scope for this campaign's Unix isolated harness. Do not
+self-close beads from this ledger.
