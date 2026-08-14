@@ -2868,13 +2868,29 @@ pub fn inspect_team_health(
             repair: (!installed).then(|| "ee daemon install --confirm".to_owned()),
         });
     }
-    checks.push(TeamDoctorCheck {
-        name: "broker_port".to_owned(),
-        status: "ok".to_owned(),
-        message:
-            "one host-wide responder port; additional workspaces register over the control channel"
-                .to_owned(),
-        repair: None,
+    let configured_port = configured_hello_port();
+    checks.push(if team.hello_port == configured_port {
+        TeamDoctorCheck {
+            name: "broker_port".to_owned(),
+            status: "ok".to_owned(),
+            message: format!(
+                "genesis and configured responder share port {configured_port}; additional workspaces register over the control channel"
+            ),
+            repair: None,
+        }
+    } else {
+        TeamDoctorCheck {
+            name: "broker_port".to_owned(),
+            status: "warning".to_owned(),
+            message: format!(
+                "genesis hello port {} does not match configured responder port {configured_port}",
+                team.hello_port
+            ),
+            repair: Some(format!(
+                "set EE_MESH_HELLO_PORT={} or mint a new invite after aligning the port",
+                team.hello_port
+            )),
+        }
     });
     checks.push(TeamDoctorCheck {
         name: "client_only".to_owned(),
@@ -2910,7 +2926,7 @@ pub fn inspect_team_health(
     checks.push(TeamDoctorCheck {
         name: "whois".to_owned(),
         status: "ok".to_owned(),
-        message: "authenticated accept requires WhoIs-verified peer identity before pair-key use"
+        message: "accept requires WhoIs-verified peer identity before pair-key use; doctor does not probe Tailscale"
             .to_owned(),
         repair: None,
     });
@@ -7633,12 +7649,11 @@ mod tests {
                 .iter()
                 .any(|check| check.name == "key_store" && check.status == "ok")
         );
-        assert!(
-            healthy
-                .checks
-                .iter()
-                .any(|check| check.name == "broker_port" && check.status == "ok")
-        );
+        assert!(healthy.checks.iter().any(|check| {
+            check.name == "broker_port"
+                && check.status == "ok"
+                && check.message.contains(&configured_hello_port().to_string())
+        }));
         assert!(
             healthy
                 .checks
