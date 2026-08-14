@@ -2664,6 +2664,17 @@ pub fn inspect_team_health(
         repair: (below_floor > 0)
             .then(|| "ee team revoke --all-before-floor --workspace .".to_owned()),
     });
+    let pending_ids: Vec<&str> = invites
+        .iter()
+        .filter(|invite| invite.status == "pending")
+        .map(|invite| invite.invite_id.as_str())
+        .collect();
+    let shown_ids = pending_ids
+        .iter()
+        .take(8)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(",");
     checks.push(TeamDoctorCheck {
         name: "pending_invites".to_owned(),
         status: if expired_pending == 0 {
@@ -2671,9 +2682,17 @@ pub fn inspect_team_health(
         } else {
             "warning".to_owned()
         },
-        message: format!("{pending} pending invite(s); {expired_pending} expired"),
-        repair: (expired_pending > 0)
-            .then(|| "ee team revoke --invite-id <id> --workspace .".to_owned()),
+        message: if pending_ids.is_empty() {
+            format!("{pending} pending invite(s); {expired_pending} expired")
+        } else {
+            format!("{pending} pending invite(s); {expired_pending} expired; ids={shown_ids}")
+        },
+        repair: (expired_pending > 0).then(|| {
+            format!(
+                "ee team revoke --invite-id {} --workspace .",
+                pending_ids[0]
+            )
+        }),
     });
     let delegated = connection
         .list_all_team_members()
