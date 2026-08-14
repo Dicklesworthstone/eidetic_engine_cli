@@ -546,6 +546,9 @@ pub fn create_local_team_with_store(
             .map(|signer| hex_encode(&signer.verifying_key_bytes()))
             .as_deref(),
     )?;
+    connection
+        .raise_team_invite_auth_floor(&team_id, produced_at, produced_at)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
     Ok(team_create_report(
         TeamRecord {
             team_id,
@@ -2627,7 +2630,7 @@ pub fn inspect_team_health(
             None => "no invite-authorization floor recorded".to_owned(),
         },
         repair: (below_floor > 0)
-            .then(|| "ee team invite revoke --all-before-floor --workspace .".to_owned()),
+            .then(|| "ee team revoke --all-before-floor --workspace .".to_owned()),
     });
     checks.push(TeamDoctorCheck {
         name: "pending_invites".to_owned(),
@@ -2637,7 +2640,8 @@ pub fn inspect_team_health(
             "warning".to_owned()
         },
         message: format!("{pending} pending invite(s); {expired_pending} expired"),
-        repair: (expired_pending > 0).then(|| "ee team invite revoke --workspace .".to_owned()),
+        repair: (expired_pending > 0)
+            .then(|| "ee team revoke --invite-id <id> --workspace .".to_owned()),
     });
     let delegated = connection
         .list_all_team_members()
@@ -4690,6 +4694,9 @@ pub fn persist_granted_join_with_store(
             .map(|signer| hex_encode(&signer.verifying_key_bytes()))
             .as_deref(),
     )?;
+    connection
+        .raise_team_invite_auth_floor(&granted.team_id, produced_at, produced_at)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
     Ok(TeamJoinReport {
         schema: TEAM_JOIN_SCHEMA_V1,
         command: "team join",
@@ -4862,6 +4869,12 @@ mod tests {
         assert!(status.members[0].is_self);
         assert_eq!(status.members[0].bound_via, "team_genesis");
         assert_eq!(status.members[0].display_name, "Analysts");
+        assert_eq!(
+            connection
+                .team_invite_auth_floor(&report.team.team_id)
+                .expect("floor"),
+            Some("2026-08-13T00:00:00Z".to_owned())
+        );
     }
 
     #[test]
@@ -6823,11 +6836,12 @@ mod tests {
             .expect("invite");
         let sick =
             inspect_team_health(&connection, "wsp_persistfixture000000000001", None).expect("sick");
-        assert!(
-            sick.checks
-                .iter()
-                .any(|check| check.name == "invite_auth_floor" && check.status == "error")
-        );
+        assert!(sick.checks.iter().any(|check| {
+            check.name == "invite_auth_floor"
+                && check.status == "error"
+                && check.repair.as_deref()
+                    == Some("ee team revoke --all-before-floor --workspace .")
+        }));
         let revoked =
             revoke_team_invites_before_floor(&connection, "2026-08-13T12:00:00Z").expect("revoke");
         assert_eq!(revoked, 1);

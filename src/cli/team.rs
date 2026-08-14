@@ -83,6 +83,7 @@ pub enum TeamFetchCommand {
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum TeamStewardCommand {
     /// Plan and, if triggered, run one mesh sync.
+    #[command(name = "once", alias = "run-once")]
     RunOnce(TeamStewardRunOnceArgs),
 }
 
@@ -434,7 +435,7 @@ pub struct TeamFetchBodyArgs {
     pub database: Option<PathBuf>,
 }
 
-/// Arguments for `ee team steward run-once`.
+/// Arguments for `ee team steward once`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct TeamStewardRunOnceArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.

@@ -61,8 +61,13 @@ future changelog pass expands those rows into full capability sections.
   is missing. `ee team share bodies --representation already_redacted`
   is a distinct signed publication; redact-over-exact is refused.
   BodyFetch requires a durable Body-lane Allow and refuses substituted
-  cache bytes. `ee team doctor` reports `index_rematerialization` and
-  `origin_outbox`. Windows inbound listen stays client-only; the
+  cache bytes. `ee team doctor` reports `index_rematerialization`,
+  `origin_outbox`, `invite_auth_floor`, `pending_invites`,
+  `delegated_members`, `signing_rotation`, and `pair_rotation`.
+  `ee team revoke --all-before-floor` is the invite-floor repair.
+  Team create and join raise the invite-authorization floor.
+  `ee team steward once` is the canonical steward verb (`run-once`
+  remains an alias). Windows inbound listen stays client-only; the
   `HardenedWindows` SID/DACL/reparse adapter compiles but has no
   Windows-host runtime soak.
 - Authenticated responder sessions now apply
