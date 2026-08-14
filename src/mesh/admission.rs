@@ -345,7 +345,6 @@ pub struct MeshAdmissionTestEvent {
     pub local_tier1_unaffected: bool,
 }
 
-#[must_use]
 /// Authenticated-session wrapper used by the production responder. Pre-auth
 /// concurrency still lives in the broker; this applies the post-handshake
 /// payload/index caps from [`MeshAdmissionLimits::conservative_default`].
@@ -358,17 +357,70 @@ pub fn admit_authenticated_mesh_capability(
     body_fetch_bytes: u64,
     now_epoch_ms: u64,
 ) -> MeshAdmissionDecision {
-    let request = MeshAdmissionRequest::new(peer_id, kind, now_epoch_ms)
-        .with_payload(payload_bytes)
-        .with_event_count(event_count)
-        .with_body_fetch_bytes(body_fetch_bytes);
-    decide_admission(
-        MeshAdmissionLimits::conservative_default(),
+    admit_authenticated_mesh_capability_with_state(
         &MeshPeerAdmissionState::new(peer_id),
-        &request,
+        kind,
+        payload_bytes,
+        event_count,
+        body_fetch_bytes,
+        now_epoch_ms,
     )
 }
 
+/// Same caps as [`admit_authenticated_mesh_capability`], but uses the
+/// caller's persisted peer state so backoff and malformed counts survive
+/// across authenticated requests.
+#[must_use]
+pub fn admit_authenticated_mesh_capability_with_state(
+    state: &MeshPeerAdmissionState,
+    kind: MeshAdmissionRequestKind,
+    payload_bytes: u64,
+    event_count: u32,
+    body_fetch_bytes: u64,
+    now_epoch_ms: u64,
+) -> MeshAdmissionDecision {
+    let request = MeshAdmissionRequest::new(state.peer_id.as_str(), kind, now_epoch_ms)
+        .with_payload(payload_bytes)
+        .with_event_count(event_count)
+        .with_body_fetch_bytes(body_fetch_bytes);
+    decide_admission(MeshAdmissionLimits::conservative_default(), state, &request)
+}
+
+/// Fold a decision into durable per-peer counters. Allowed requests raise
+/// in-flight; rejected payloads/index jobs raise the backoff clocks.
+pub fn record_authenticated_admission(
+    state: &mut MeshPeerAdmissionState,
+    decision: &MeshAdmissionDecision,
+    now_epoch_ms: u64,
+) {
+    if decision.allowed() {
+        state.in_flight_requests = state.in_flight_requests.saturating_add(1);
+        return;
+    }
+    match decision.reason {
+        MeshAdmissionReason::PayloadRejected => {
+            state.malformed_frame_count = state.malformed_frame_count.saturating_add(1);
+        }
+        MeshAdmissionReason::BudgetExhausted => {
+            state.policy_denial_count = state.policy_denial_count.saturating_add(1);
+        }
+        MeshAdmissionReason::PeerThrottled
+        | MeshAdmissionReason::BackoffActive
+        | MeshAdmissionReason::WithinBudget => {}
+    }
+    state.backoff_until_epoch_ms = computed_backoff_until_epoch_ms(
+        MeshAdmissionLimits::conservative_default(),
+        state,
+        now_epoch_ms,
+    );
+}
+
+/// Release one previously allowed in-flight authenticated request.
+pub fn release_authenticated_admission(state: &mut MeshPeerAdmissionState) {
+    state.in_flight_requests = state.in_flight_requests.saturating_sub(1);
+}
+
+#[must_use]
 pub fn decide_admission(
     limits: MeshAdmissionLimits,
     state: &MeshPeerAdmissionState,
@@ -717,6 +769,38 @@ mod tests {
         assert_eq!(limits.max_body_fetch_bytes, 512 * 1024);
         assert_eq!(limits.max_index_jobs_per_round, 16);
         assert_eq!(limits.max_concurrent_requests_per_peer, 4);
+    }
+
+    #[test]
+    fn persisted_peer_state_backs_off_after_repeated_payload_rejects() {
+        let limits = MeshAdmissionLimits::conservative_default();
+        let mut state = MeshPeerAdmissionState::new("peer-noisy");
+        let oversize = limits.max_body_fetch_bytes.saturating_add(1);
+        for _ in 0..limits.max_malformed_frames_before_backoff {
+            let decision = admit_authenticated_mesh_capability_with_state(
+                &state,
+                MeshAdmissionRequestKind::BodyFetch,
+                oversize,
+                0,
+                oversize,
+                NOW,
+            );
+            assert_eq!(decision.reason, MeshAdmissionReason::PayloadRejected);
+            record_authenticated_admission(&mut state, &decision, NOW);
+        }
+        let throttled = admit_authenticated_mesh_capability_with_state(
+            &state,
+            MeshAdmissionRequestKind::Summary,
+            8,
+            0,
+            0,
+            NOW,
+        );
+        assert!(!throttled.allowed());
+        assert_eq!(throttled.reason, MeshAdmissionReason::PeerThrottled);
+        assert!(state.backoff_until_epoch_ms.is_some());
+        release_authenticated_admission(&mut state);
+        assert_eq!(state.in_flight_requests, 0);
     }
 
     #[test]
