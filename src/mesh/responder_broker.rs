@@ -1332,8 +1332,14 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
                 .ok()
                 .is_some_and(|envelope| envelope.capability == BootstrapCapability::Join)
             {
-                if let Err(error) =
-                    answer_bootstrap_join(cx, &mut stream, &self.routes, &first_packet).await
+                if let Err(error) = answer_bootstrap_join(
+                    cx,
+                    &mut stream,
+                    &self.routes,
+                    &first_packet,
+                    kernel_source,
+                )
+                .await
                 {
                     let _ = stream.shutdown(Shutdown::Write);
                     self.record_error(&error, false, true);
@@ -2877,6 +2883,7 @@ async fn answer_bootstrap_join(
     stream: &mut TcpStream,
     routes: &ResponderRouteRegistry,
     first_packet: &[u8],
+    joiner_addr: SocketAddr,
 ) -> Result<(), ResponderBrokerError> {
     checkpoint(cx, "bootstrap join")?;
     let io_timeout = routes.limits.io_timeout;
@@ -2989,6 +2996,17 @@ async fn answer_bootstrap_join(
             &prove.joiner_display_name,
             &redeemed_at,
             Some(hello.joiner_verifying_key.as_str()).filter(|key| key.len() == 64),
+        );
+        let _ = crate::mesh::team::enroll_joiner_from_accept(
+            &connection,
+            &workspace.id,
+            &granted.team_id,
+            &prove.joiner_node_id,
+            &prove.joiner_display_name,
+            joiner_addr,
+            &hello.joiner_workspace_id,
+            hello.joiner_hello_port,
+            &redeemed_at,
         );
     }
     let _ = crate::mesh::team::persist_pair_key(

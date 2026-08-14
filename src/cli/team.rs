@@ -1806,31 +1806,45 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let workspace_path = cli.resolve_workspace();
-    match fetch_local_team_body(&connection, &workspace_id, &workspace_path, &args.key) {
-        Ok(report) => {
-            let human = if report.body_hex.is_some() {
-                format!(
-                    "Fetched {} ({} bytes)\n",
-                    report.body_cache_key, report.size_bytes
-                )
-            } else {
-                format!(
-                    "Body {} is {}\n",
-                    report.body_cache_key, report.cache_status
-                )
-            };
-            write_team_report(cli, &report, &human, stdout)
+    let mut local =
+        match fetch_local_team_body(&connection, &workspace_id, &workspace_path, &args.key) {
+            Ok(report) => report,
+            Err(error) => {
+                return write_domain_error(
+                    &DomainError::Storage {
+                        message: format!("Failed to fetch team body: {error}"),
+                        repair: Some("ee team share bodies --workspace . --json".to_owned()),
+                    },
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                );
+            }
+        };
+    if local.body_hex.is_none() {
+        let database = args
+            .database
+            .clone()
+            .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+        let _ = crate::mesh::foreground_cli::fetch_pending_team_bodies_from_paths(
+            &workspace_path,
+            &database,
+        );
+        if let Ok(refreshed) =
+            fetch_local_team_body(&connection, &workspace_id, &workspace_path, &args.key)
+        {
+            local = refreshed;
         }
-        Err(error) => write_domain_error(
-            &DomainError::Storage {
-                message: format!("Failed to fetch team body: {error}"),
-                repair: Some("ee team share bodies --workspace . --json".to_owned()),
-            },
-            cli.wants_json(),
-            stdout,
-            stderr,
-        ),
     }
+    let human = if local.body_hex.is_some() {
+        format!(
+            "Fetched {} ({} bytes)\n",
+            local.body_cache_key, local.size_bytes
+        )
+    } else {
+        format!("Body {} is {}\n", local.body_cache_key, local.cache_status)
+    };
+    write_team_report(cli, &local, &human, stdout)
 }
 
 fn handle_team_steward_run_once<W, E>(

@@ -1936,6 +1936,8 @@ fn production_broker_declines_bootstrap_join_with_wrong_secret() -> TestResult {
         joiner_display_name: "attacker".to_owned(),
         joiner_nonce: "aa".repeat(16),
         joiner_verifying_key: String::new(),
+        joiner_workspace_id: String::new(),
+        joiner_hello_port: 0,
     };
     let mut stream = std::net::TcpStream::connect_timeout(&address, TEST_TIMEOUT)
         .map_err(|error| format!("wrong-secret connect: {error}"))?;

@@ -985,6 +985,12 @@ pub struct TeamJoinHelloV1 {
     pub joiner_display_name: String,
     pub joiner_nonce: String,
     pub joiner_verifying_key: String,
+    /// Joiner workspace. Empty on pre-campaign hellos.
+    #[serde(default)]
+    pub joiner_workspace_id: String,
+    /// Joiner hello listen port. Zero on pre-campaign hellos.
+    #[serde(default)]
+    pub joiner_hello_port: u16,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1178,7 +1184,7 @@ pub fn serve_one_bootstrap_join_with_store(
     listener
         .set_nonblocking(false)
         .map_err(|error| OriginStreamError::Encode(format!("join listen: {error}")))?;
-    let (mut stream, _) = listener
+    let (mut stream, joiner_addr) = listener
         .accept()
         .map_err(|error| OriginStreamError::Encode(format!("join accept: {error}")))?;
     stream
@@ -1271,6 +1277,19 @@ pub fn serve_one_bootstrap_join_with_store(
         &pair,
         &redeemed_at,
     )?;
+    // Invite is already redeemed. Enroll is how the inviter EventFetch/BodyFetch
+    // back; a missing workspace row must not withhold the grant.
+    let _ = enroll_joiner_from_accept(
+        connection,
+        workspace_id,
+        &granted.team_id,
+        &prove.joiner_node_id,
+        &prove.joiner_display_name,
+        joiner_addr,
+        &hello.joiner_workspace_id,
+        hello.joiner_hello_port,
+        &redeemed_at,
+    );
     write_join_payload(
         &mut stream,
         serde_json::to_value(&granted)
@@ -2140,6 +2159,37 @@ pub fn enroll_team_pair_peer(
         })
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
     Ok(peer_id)
+}
+
+/// Enroll the accepted joiner using the join TCP source IP and the joiner's
+/// advertised hello port so the inviter can EventFetch/BodyFetch back.
+pub fn enroll_joiner_from_accept(
+    connection: &DbConnection,
+    workspace_id: &str,
+    team_id: &str,
+    joiner_node_id: &str,
+    joiner_display_name: &str,
+    joiner_addr: std::net::SocketAddr,
+    joiner_workspace_id: &str,
+    joiner_hello_port: u16,
+    produced_at: &str,
+) -> Result<String, OriginStreamError> {
+    let hello_port = if joiner_hello_port >= 1024 {
+        joiner_hello_port
+    } else {
+        configured_hello_port()
+    };
+    enroll_team_pair_peer(
+        connection,
+        workspace_id,
+        team_id,
+        joiner_node_id,
+        joiner_display_name,
+        &joiner_addr.ip().to_string(),
+        hello_port,
+        produced_at,
+        joiner_workspace_id,
+    )
 }
 
 /// Grant-gated BodyFetch retry. `fetch` is called only for peers whose
@@ -5650,6 +5700,8 @@ pub fn join_team_with_code_on_store(
         joiner_display_name: name.to_owned(),
         joiner_nonce,
         joiner_verifying_key,
+        joiner_workspace_id: workspace_id.to_owned(),
+        joiner_hello_port: configured_hello_port(),
     };
     if existing.is_none() {
         connection
@@ -5729,7 +5781,9 @@ pub fn join_team_with_code_on_store(
             &pair,
             produced_at,
         )?;
-        enroll_team_pair_peer(
+        // Grant is already on the wire. Enroll is how this node EventFetch/BodyFetch
+        // the inviter; a missing workspace row must not drop the membership persist.
+        let _ = enroll_team_pair_peer(
             connection,
             workspace_id,
             &granted.team_id,
@@ -5743,7 +5797,7 @@ pub fn join_team_with_code_on_store(
             } else {
                 granted.origin_workspace_id.as_str()
             },
-        )?;
+        );
     }
     let granted_json = serde_json::to_string(&granted)
         .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
@@ -6379,6 +6433,82 @@ mod tests {
         assert_eq!(again, handle);
     }
 
+    #[test]
+    fn enroll_joiner_from_accept_uses_source_ip_and_advertised_port() {
+        let connection = open_db();
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-team-joiner-enroll".to_owned(),
+                    name: Some("enroll".to_owned()),
+                },
+            )
+            .expect("workspace");
+        let created = create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let joiner_addr: std::net::SocketAddr = "198.51.100.17:54321".parse().expect("addr");
+        let handle = enroll_joiner_from_accept(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &created.team.team_id,
+            "node_joiner0000000000000000000001",
+            "Priya",
+            joiner_addr,
+            "wsp_joinworkspace0000000000001",
+            41999,
+            "2026-08-13T04:00:00Z",
+        )
+        .expect("enroll");
+        assert_eq!(
+            handle,
+            team_pair_peer_handle(&created.team.team_id, "node_joiner0000000000000000000001")
+        );
+        let peer = connection
+            .get_mesh_peer("wsp_persistfixture000000000001", &handle)
+            .expect("get")
+            .expect("row");
+        let record = serde_json::from_str::<crate::mesh::peer::MeshPeerRecord>(
+            peer.policy_summary_json.as_deref().expect("policy"),
+        )
+        .expect("record");
+        assert_eq!(record.endpoint.endpoint, "198.51.100.17:41999");
+        assert_eq!(record.origin_workspace_id, "wsp_joinworkspace0000000000001");
+        assert_eq!(record.alias, "Priya");
+        let fallback = enroll_joiner_from_accept(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &created.team.team_id,
+            "node_joiner0000000000000000000002",
+            "Priya",
+            joiner_addr,
+            "wsp_joinworkspace0000000000002",
+            0,
+            "2026-08-13T04:01:00Z",
+        )
+        .expect("fallback");
+        let fallback_peer = connection
+            .get_mesh_peer("wsp_persistfixture000000000001", &fallback)
+            .expect("get fallback")
+            .expect("row");
+        let fallback_record = serde_json::from_str::<crate::mesh::peer::MeshPeerRecord>(
+            fallback_peer
+                .policy_summary_json
+                .as_deref()
+                .expect("policy"),
+        )
+        .expect("record");
+        assert_eq!(
+            fallback_record.endpoint.endpoint,
+            format!("198.51.100.17:{}", configured_hello_port())
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn create_local_team_with_store_signs_genesis_with_ed25519() {
@@ -6411,6 +6541,15 @@ mod tests {
     fn serve_one_bootstrap_join_redeems_and_records_the_joiner() {
         let keys = tempfile::tempdir().unwrap();
         let inviter = open_db();
+        inviter
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-team-join-enroll".to_owned(),
+                    name: Some("inviter".to_owned()),
+                },
+            )
+            .expect("workspace");
         create_local_team_with_store(
             &inviter,
             "wsp_persistfixture000000000001",
@@ -6441,6 +6580,15 @@ mod tests {
         let joiner_path = joiner_keys.path().to_path_buf();
         let client = std::thread::spawn(move || {
             let joiner = open_db();
+            joiner
+                .insert_workspace(
+                    "wsp_joinworkspace0000000000001",
+                    &crate::db::CreateWorkspaceInput {
+                        path: "/tmp/ee-team-join-joiner".to_owned(),
+                        name: Some("Priya".to_owned()),
+                    },
+                )
+                .expect("joiner workspace");
             join_team_with_code_on_store(
                 &joiner,
                 "wsp_joinworkspace0000000000001",
@@ -6472,6 +6620,21 @@ mod tests {
                 .iter()
                 .any(|member| !member.is_self && member.display_name == "Priya")
         );
+        let joiner_node = members
+            .iter()
+            .find(|member| !member.is_self && member.display_name == "Priya")
+            .expect("joiner member");
+        let joiner_handle = team_pair_peer_handle(&granted.team_id, &joiner_node.origin_node_id);
+        let enrolled = inviter
+            .get_mesh_peer("wsp_persistfixture000000000001", &joiner_handle)
+            .expect("peer")
+            .expect("enrolled");
+        let record = serde_json::from_str::<crate::mesh::peer::MeshPeerRecord>(
+            enrolled.policy_summary_json.as_deref().expect("policy"),
+        )
+        .expect("record");
+        assert!(record.endpoint.endpoint.starts_with("127.0.0.1:"));
+        assert_eq!(record.origin_workspace_id, "wsp_joinworkspace0000000000001");
     }
 
     #[test]
