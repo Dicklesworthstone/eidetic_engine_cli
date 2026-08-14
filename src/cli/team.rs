@@ -14,9 +14,10 @@ use crate::mesh::team::{
     list_team_activity, list_team_projects, local_team_status, mint_team_invite_with_store,
     plan_team_idp_device, reconcile_local_team_membership, remove_team_member,
     require_tailnet_attested, revalidate_team_identities, revoke_team_invite,
-    rotate_local_signing_key, serve_one_bootstrap_join_with_store, set_local_team_paused,
-    set_team_oidc_provider, share_team_bodies_represented, share_team_history, share_team_project,
-    team_idp_status, unshare_team_bodies,
+    revoke_team_invites_before_floor, rotate_local_signing_key,
+    serve_one_bootstrap_join_with_store, set_local_team_paused, set_team_oidc_provider,
+    share_team_bodies_represented, share_team_history, share_team_project, team_idp_status,
+    unshare_team_bodies,
 };
 use crate::models::{DomainError, ProcessExitCode};
 use crate::output;
@@ -204,8 +205,12 @@ pub struct TeamJoinArgs {
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct TeamRevokeArgs {
     /// Invite id from `ee team invite`.
+    #[arg(long, required_unless_present = "all_before_floor")]
+    pub invite_id: Option<String>,
+
+    /// Revoke every pending invite created before the authorization floor.
     #[arg(long)]
-    pub invite_id: String,
+    pub all_before_floor: bool,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -881,12 +886,52 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let revoked_at = chrono::Utc::now().to_rfc3339();
-    match revoke_team_invite(&connection, &args.invite_id, &revoked_at) {
+    if args.all_before_floor {
+        return match revoke_team_invites_before_floor(&connection, &revoked_at) {
+            Ok(revoked) => {
+                let report = json!({
+                    "schema": "ee.team.revoke.v1",
+                    "command": "team revoke",
+                    "allBeforeFloor": true,
+                    "revokedCount": revoked,
+                    "revokedAt": revoked_at,
+                    "meshPrimitives": ["team_pending_invites.revoke", "team_invite_auth_floor"],
+                });
+                write_team_report(
+                    cli,
+                    &report,
+                    &format!("{revoked} pending invite(s) below the authorization floor revoked\n"),
+                    stdout,
+                )
+            }
+            Err(error) => write_domain_error(
+                &DomainError::Storage {
+                    message: format!("Failed to revoke invites before the floor: {error}"),
+                    repair: Some("ee team doctor --workspace . --json".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            ),
+        };
+    }
+    let Some(invite_id) = args.invite_id.as_deref() else {
+        return write_domain_error(
+            &DomainError::Usage {
+                message: "invite revoke requires --invite-id or --all-before-floor".to_owned(),
+                repair: Some("ee team revoke --invite-id <id> --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    };
+    match revoke_team_invite(&connection, invite_id, &revoked_at) {
         Ok(true) => {
             let report = json!({
                 "schema": "ee.team.revoke.v1",
                 "command": "team revoke",
-                "inviteId": args.invite_id,
+                "inviteId": invite_id,
                 "revoked": true,
                 "revokedAt": revoked_at,
                 "meshPrimitives": ["team_pending_invites.revoke", "team_invite_auth_floor"],
@@ -894,13 +939,13 @@ where
             write_team_report(
                 cli,
                 &report,
-                &format!("Invite {} revoked\n", args.invite_id),
+                &format!("Invite {invite_id} revoked\n"),
                 stdout,
             )
         }
         Ok(false) => write_domain_error(
             &DomainError::Storage {
-                message: format!("Invite {} is not pending", args.invite_id),
+                message: format!("Invite {invite_id} is not pending"),
                 repair: Some("ee team invite --endpoint <ip> --workspace .".to_owned()),
             },
             cli.wants_json(),
