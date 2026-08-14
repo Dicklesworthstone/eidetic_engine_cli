@@ -15,7 +15,7 @@ use crate::mesh::team::{
     plan_team_steward_once, reconcile_local_team_membership, remove_team_member,
     require_tailnet_attested, revalidate_team_identities, revoke_team_invite,
     rotate_local_signing_key, serve_one_bootstrap_join_with_store, set_local_team_paused,
-    set_team_oidc_provider, share_team_bodies, share_team_history, share_team_project,
+    set_team_oidc_provider, share_team_bodies_represented, share_team_history, share_team_project,
     team_idp_status, unshare_team_bodies,
 };
 use crate::models::{DomainError, ProcessExitCode};
@@ -234,6 +234,11 @@ pub struct TeamShareBodiesArgs {
     /// Maximum memories to consider (1–256).
     #[arg(long, default_value_t = 64)]
     pub limit: usize,
+
+    /// Signed body representation. `already_redacted` is allowed; switching an
+    /// `exact` publication to `already_redacted` is refused.
+    #[arg(long, default_value = "exact")]
+    pub representation: String,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -1007,7 +1012,7 @@ where
         None
     };
     let token = stdin_token.as_deref().or(args.token.as_deref());
-    match share_team_bodies(
+    match share_team_bodies_represented(
         &connection,
         &workspace_id,
         &produced_at,
@@ -1016,23 +1021,27 @@ where
         Some(&workspace_path),
         args.issue_token,
         token,
+        &args.representation,
     ) {
         Ok(report) => {
             let human = if report.confirmed {
                 format!(
-                    "Bodies published: {} new, {} already cached\n  team_id: {}\n  consent: {}\n",
+                    "Bodies published: {} new, {} already cached\n  team_id: {}\n  representation: {}\n  consent: {}\n",
                     report.published_count,
                     report.skipped_count,
                     report.team_id,
+                    report.representation,
                     report.consent_hash
                 )
             } else {
                 format!(
-                    "Body preview: {} candidates ({} already cached)\n  team_id: {}\n  consent: {}\nNext:\n  ee team share bodies --confirm --workspace .\n",
+                    "Body preview: {} candidates ({} already cached)\n  team_id: {}\n  representation: {}\n  consent: {}\nNext:\n  ee team share bodies --confirm --representation {} --workspace .\n",
                     report.candidate_count,
                     report.skipped_count,
                     report.team_id,
-                    report.consent_hash
+                    report.representation,
+                    report.consent_hash,
+                    report.representation
                 )
             };
             write_team_report(cli, &report, &human, stdout)
