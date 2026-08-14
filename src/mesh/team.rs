@@ -15,7 +15,8 @@ use crate::db::{
     InsertTeamMemberInput, InsertTeamMemberNodeInput, InsertTeamPendingInviteInput,
     InsertTeamProjectInput, InsertTeamRemovalAckInput, SearchIndexJobType, StoredMeshOriginEvent,
     StoredTeamMember, StoredTeamMemberIdentity, StoredTeamProject,
-    UpsertMeshBodyCacheMetadataInput, UpsertTeamAdmissionPeerInput, UpsertTeamJoinAttemptInput,
+    UpsertMeshBodyCacheMetadataInput, UpsertMeshPeerInput, UpsertTeamAdmissionPeerInput,
+    UpsertTeamJoinAttemptInput,
 };
 use crate::mesh::bootstrap_envelope::{
     BOOTSTRAP_DECLINE_SCHEMA_V1, BootstrapCapability, BootstrapDeclineV1, decode_envelope,
@@ -1309,6 +1310,13 @@ fn length_prefixed(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Pair-key handle shared by join, grants, and BodyFetch.
+#[must_use]
+pub fn team_pair_peer_handle(team_id: &str, remote_node_id: &str) -> String {
+    let digest = blake3::hash(format!("{team_id}:{remote_node_id}").as_bytes());
+    format!("peer_{}", &digest.to_hex().as_str()[..32])
+}
+
 /// Derive the long-term pair key. A copied invite without the live nonces
 /// cannot reproduce this key.
 pub fn derive_team_pair_key(
@@ -1359,8 +1367,7 @@ pub(crate) fn persist_pair_key(
     pair: &[u8; 32],
     produced_at: &str,
 ) -> Result<(), OriginStreamError> {
-    let digest = blake3::hash(format!("{team_id}:{remote_node_id}").as_bytes());
-    let handle = format!("peer_{}", &digest.to_hex().as_str()[..32]);
+    let handle = team_pair_peer_handle(team_id, remote_node_id);
     let store = crate::mesh::key_store::MeshKeyStore::open_or_create(workspace_path)
         .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
     store
@@ -2047,6 +2054,119 @@ pub fn pending_team_body_fetch_keys(
         .filter(|row| row.cache_status == "metadata_only")
         .map(|row| row.body_cache_key)
         .collect())
+}
+
+/// Enroll the remote join peer under the same handle as the pair key so
+/// sync/BodyFetch can find an endpoint after the ceremony.
+pub fn enroll_team_pair_peer(
+    connection: &DbConnection,
+    workspace_id: &str,
+    team_id: &str,
+    remote_node_id: &str,
+    display_name: &str,
+    endpoint: &str,
+    hello_port: u16,
+    produced_at: &str,
+) -> Result<String, OriginStreamError> {
+    let peer_id = team_pair_peer_handle(team_id, remote_node_id);
+    if connection
+        .get_mesh_peer(workspace_id, &peer_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .is_some()
+    {
+        return Ok(peer_id);
+    }
+    let locator = if endpoint.contains(':') {
+        endpoint.to_owned()
+    } else {
+        format!("{endpoint}:{hello_port}")
+    };
+    let record = crate::mesh::peer::MeshPeerRecord {
+        schema: crate::mesh::peer::MESH_PEER_RECORD_SCHEMA_V1.to_owned(),
+        peer_id: peer_id.clone(),
+        alias: display_name.to_owned(),
+        workspace_id: workspace_id.to_owned(),
+        endpoint: crate::mesh::peer::MeshPeerEndpoint {
+            tailscale_node_key: remote_node_id.to_owned(),
+            tailnet_id: "tailnet-team-join".to_owned(),
+            tailnet_display_name: None,
+            endpoint: locator,
+            magic_dns_name: None,
+        },
+        materialized_on_node_key: None,
+        capabilities: crate::mesh::peer::MeshPeerCapabilities::from_profile(
+            crate::mesh::peer::MeshPeerCapabilityProfile::BodyAllowed,
+        ),
+        handshake: crate::mesh::peer::MeshPeerHandshake::granted(
+            "team-join",
+            "1.0",
+            remote_node_id,
+            vec!["metadata".to_owned(), "body".to_owned()],
+        ),
+        key: crate::mesh::peer::MeshPeerKey {
+            generation: 1,
+            public_key_fingerprint: format!("blake3:{}", blake3::hash(peer_id.as_bytes()).to_hex()),
+            created_at: produced_at.to_owned(),
+            rotated_at: None,
+            revoked_at: None,
+        },
+        state: crate::mesh::peer::MeshPeerState::Active,
+        enrolled_at: produced_at.to_owned(),
+        revoked_at: None,
+        trust_established_by: "explicit_human_consent".to_owned(),
+    };
+    let policy_summary_json = serde_json::to_string(&record)
+        .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+    connection
+        .upsert_mesh_peer(&UpsertMeshPeerInput {
+            workspace_id: workspace_id.to_owned(),
+            peer_id: peer_id.clone(),
+            origin_node_id: remote_node_id.to_owned(),
+            display_name: Some(display_name.to_owned()),
+            policy_summary_json: Some(policy_summary_json),
+            enabled: true,
+            last_seen_at: Some(produced_at.to_owned()),
+        })
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    Ok(peer_id)
+}
+
+/// Grant-gated BodyFetch retry. `fetch` is called only for peers whose
+/// durable body lane is Allow. Applied counts available publications.
+pub fn retry_pending_team_body_fetches(
+    connection: &DbConnection,
+    workspace_id: &str,
+    workspace_path: &std::path::Path,
+    mut fetch: impl FnMut(&str, &str) -> Option<crate::mesh::bootstrap_envelope::BodyFetchResponse>,
+) -> Result<usize, OriginStreamError> {
+    let keys = pending_team_body_fetch_keys(connection, workspace_id)?;
+    if keys.is_empty() {
+        return Ok(0);
+    }
+    let granted = connection
+        .list_mesh_peers(workspace_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .into_iter()
+        .filter(|peer| {
+            peer.enabled && body_lane_allows_fetch(connection, workspace_id, &peer.peer_id)
+        })
+        .map(|peer| peer.peer_id)
+        .collect::<Vec<_>>();
+    let mut applied = 0_usize;
+    for key in keys {
+        for peer_id in &granted {
+            let Some(fetched) = fetch(peer_id, &key) else {
+                continue;
+            };
+            let published =
+                apply_fetched_team_body(connection, workspace_id, workspace_path, &fetched)?;
+            if published.cache_status == "available" {
+                applied = applied.saturating_add(1);
+                break;
+            }
+        }
+    }
+    Ok(applied)
 }
 
 fn bodies_consent_hash(team_id: &str, items: &[TeamBodyShareItem]) -> String {
@@ -5556,6 +5676,16 @@ pub fn join_team_with_code_on_store(
             &pair,
             produced_at,
         )?;
+        enroll_team_pair_peer(
+            connection,
+            workspace_id,
+            &granted.team_id,
+            &granted.origin_node_id,
+            &granted.display_name,
+            &parsed.endpoint,
+            granted.hello_port,
+            produced_at,
+        )?;
     }
     let granted_json = serde_json::to_string(&granted)
         .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
@@ -6094,6 +6224,70 @@ mod tests {
                 .iter()
                 .any(|member| member.is_self && member.display_name == "Priya")
         );
+    }
+
+    #[test]
+    fn enroll_team_pair_peer_uses_the_pair_key_handle() {
+        let connection = open_db();
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-team-enroll".to_owned(),
+                    name: Some("enroll".to_owned()),
+                },
+            )
+            .expect("workspace");
+        let created = create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let handle = enroll_team_pair_peer(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &created.team.team_id,
+            &created.team.origin_node_id,
+            "Analysts",
+            "127.0.0.1",
+            created.team.hello_port,
+            "2026-08-13T04:00:00Z",
+        )
+        .expect("enroll");
+        assert_eq!(
+            handle,
+            team_pair_peer_handle(&created.team.team_id, &created.team.origin_node_id)
+        );
+        assert_eq!(handle.len(), 37);
+        let peer = connection
+            .get_mesh_peer("wsp_persistfixture000000000001", &handle)
+            .expect("get")
+            .expect("row");
+        assert!(peer.enabled);
+        let record = serde_json::from_str::<crate::mesh::peer::MeshPeerRecord>(
+            peer.policy_summary_json.as_deref().expect("policy"),
+        )
+        .expect("record");
+        assert_eq!(record.trust_established_by, "explicit_human_consent");
+        assert!(record.capabilities.may_receive.body);
+        assert_eq!(
+            record.endpoint.endpoint,
+            "127.0.0.1:".to_owned() + &created.team.hello_port.to_string()
+        );
+        let again = enroll_team_pair_peer(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &created.team.team_id,
+            &created.team.origin_node_id,
+            "Analysts",
+            "127.0.0.1",
+            created.team.hello_port,
+            "2026-08-13T04:01:00Z",
+        )
+        .expect("idempotent");
+        assert_eq!(again, handle);
     }
 
     #[cfg(unix)]
@@ -6859,6 +7053,116 @@ mod tests {
         .expect("receiver fetch");
         assert_eq!(local.cache_status, "available");
         assert_eq!(local.body_hex, applied.body_hex);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retry_pending_team_body_fetches_requires_a_body_lane_grant() {
+        use crate::mesh::bootstrap_envelope::{BODY_FETCH_RESPONSE_SCHEMA_V1, BodyFetchResponse};
+
+        let receiver_dir = tempfile::tempdir().unwrap();
+        let receiver = open_db();
+        receiver
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: receiver_dir.path().display().to_string(),
+                    name: Some("retry".to_owned()),
+                },
+            )
+            .expect("workspace");
+        let created = create_local_team(
+            &receiver,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let nonce = [7_u8; 32];
+        let body = b"granted fetch lands after retry";
+        let commitment = body_commitment(&nonce, body);
+        let key = team_body_cache_key("mem_teambodies0000000000000001");
+        receiver
+            .upsert_mesh_body_cache_metadata(&UpsertMeshBodyCacheMetadataInput {
+                workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                body_cache_key: key.clone(),
+                origin_node_id: created.team.origin_node_id.clone(),
+                origin_workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                logical_memory_id: "mem_teambodies0000000000000001".to_owned(),
+                content_hash: commitment,
+                body_ref_json: None,
+                preview_hash: None,
+                size_bytes: None,
+                cache_status: "metadata_only".to_owned(),
+                local_body_hash: None,
+                cached_at: Some("2026-08-13T16:00:00Z".to_owned()),
+                expires_at: None,
+            })
+            .expect("placeholder");
+        let peer_id = enroll_team_pair_peer(
+            &receiver,
+            "wsp_persistfixture000000000001",
+            &created.team.team_id,
+            &created.team.origin_node_id,
+            "Analysts",
+            "127.0.0.1",
+            created.team.hello_port,
+            "2026-08-13T16:00:00Z",
+        )
+        .expect("enroll");
+        let mut fetch_calls = 0_usize;
+        let denied = retry_pending_team_body_fetches(
+            &receiver,
+            "wsp_persistfixture000000000001",
+            receiver_dir.path(),
+            |_, _| {
+                fetch_calls = fetch_calls.saturating_add(1);
+                None
+            },
+        )
+        .expect("denied");
+        assert_eq!(denied, 0);
+        assert_eq!(fetch_calls, 0);
+        let mutation = crate::db::MeshLaneGrantMutationInput {
+            workspace_id: "wsp_persistfixture000000000001".to_owned(),
+            peer_id: peer_id.clone(),
+            target_adapter: crate::db::MeshLaneGrantTargetAdapter::new(
+                &peer_id,
+                &created.team.origin_node_id,
+            ),
+            material_lane: crate::config::MeshLane::Body,
+            expected_generation: 0,
+            approval_config_digest: Some(format!("blake3:{}", "b".repeat(64))),
+            updated_at: Some("2026-08-13T16:01:00Z".to_owned()),
+        };
+        receiver
+            .apply_mesh_lane_grant_with_effect(&mutation, |_| Ok::<(), String>(()))
+            .expect("grant");
+        let fetched = BodyFetchResponse {
+            schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
+            body_cache_key: key,
+            cache_status: "available".to_owned(),
+            size_bytes: u64::try_from(body.len()).unwrap(),
+            body_hex: Some(hex_encode(body)),
+            nonce_hex: Some(hex_encode(&nonce)),
+        };
+        let applied = retry_pending_team_body_fetches(
+            &receiver,
+            "wsp_persistfixture000000000001",
+            receiver_dir.path(),
+            |granted_peer, _| {
+                fetch_calls = fetch_calls.saturating_add(1);
+                (granted_peer == peer_id).then(|| fetched.clone())
+            },
+        )
+        .expect("retry");
+        assert_eq!(applied, 1);
+        assert_eq!(fetch_calls, 1);
+        assert!(
+            pending_team_body_fetch_keys(&receiver, "wsp_persistfixture000000000001")
+                .expect("drained")
+                .is_empty()
+        );
     }
 
     #[test]
