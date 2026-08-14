@@ -116,7 +116,9 @@ future changelog pass expands those rows into full capability sections.
   Team-join enroll uses `tailnet-team-join`; resolve binds it to the
   current LocalAPI tailnet and allows inbound EventFetch without a
   formal lane-grant generation. BodyFetch still requires durable
-  Body-lane Allow.
+  Body-lane Allow. When tailscaled is absent, `TeamJoinLocalApi`
+  answers WhoIs from the enrolled endpoint IP and allows loopback bind
+  so `ee mesh hello-responder run` and the daemon owner still listen.
   `ee team steward once` is the canonical steward verb (`run-once`
   remains an alias). Windows inbound listen stays client-only; the
   `HardenedWindows` SID/DACL/reparse adapter compiles but has no
