@@ -10005,6 +10005,28 @@ CREATE INDEX idx_team_removal_acks_pending
     "blake3:v117_team_removal_acks_2026_08_14",
 );
 
+/// V118: last authenticated admission snapshot for doctor/status (T6.3).
+pub const V118_TEAM_ADMISSION_PEERS: Migration = Migration::new(
+    118,
+    "team_admission_peer_state",
+    r#"
+CREATE TABLE team_admission_peer_state (
+    workspace_id TEXT NOT NULL CHECK (
+        workspace_id GLOB 'wsp_*' AND length(workspace_id) = 30
+    ),
+    peer_id TEXT NOT NULL CHECK (length(trim(peer_id)) > 0),
+    in_flight_requests INTEGER NOT NULL CHECK (in_flight_requests >= 0),
+    malformed_frame_count INTEGER NOT NULL CHECK (malformed_frame_count >= 0),
+    policy_denial_count INTEGER NOT NULL CHECK (policy_denial_count >= 0),
+    backoff_until_epoch_ms INTEGER,
+    local_tier1_reserved INTEGER NOT NULL CHECK (local_tier1_reserved IN (0, 1)),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    PRIMARY KEY (workspace_id, peer_id)
+);
+"#,
+    "blake3:v118_team_admission_peers_2026_08_14",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -10124,6 +10146,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V115_MESH_BODY_CACHE_LIFECYCLE,
     V116_TEAM_PROJECTS_RECONCILED,
     V117_TEAM_REMOVAL_ACKS,
+    V118_TEAM_ADMISSION_PEERS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -14718,6 +14741,32 @@ pub struct StoredTeamRemovalAck {
     pub created_at: String,
 }
 
+/// Input for one persisted admission peer snapshot.
+#[derive(Debug, Clone)]
+pub struct UpsertTeamAdmissionPeerInput {
+    pub workspace_id: String,
+    pub peer_id: String,
+    pub in_flight_requests: u32,
+    pub malformed_frame_count: u32,
+    pub policy_denial_count: u32,
+    pub backoff_until_epoch_ms: Option<u64>,
+    pub local_tier1_reserved: bool,
+    pub updated_at: String,
+}
+
+/// Stored `team_admission_peer_state` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredTeamAdmissionPeer {
+    pub workspace_id: String,
+    pub peer_id: String,
+    pub in_flight_requests: u32,
+    pub malformed_frame_count: u32,
+    pub policy_denial_count: u32,
+    pub backoff_until_epoch_ms: Option<u64>,
+    pub local_tier1_reserved: bool,
+    pub updated_at: String,
+}
+
 /// Stored `team_idp_policy` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredTeamIdpPolicy {
@@ -14960,6 +15009,38 @@ fn stored_team_removal_ack_from_row(row: &Row) -> Result<StoredTeamRemovalAck> {
             .to_string(),
         acknowledged_at: optional_text(row, 6)?.map(str::to_string),
         created_at: required_text(row, 7, DbOperation::Query, "created_at")?.to_string(),
+    })
+}
+
+fn stored_team_admission_peer_from_row(row: &Row) -> Result<StoredTeamAdmissionPeer> {
+    Ok(StoredTeamAdmissionPeer {
+        workspace_id: required_text(row, 0, DbOperation::Query, "workspace_id")?.to_string(),
+        peer_id: required_text(row, 1, DbOperation::Query, "peer_id")?.to_string(),
+        in_flight_requests: u32::try_from(required_u64(
+            row,
+            2,
+            DbOperation::Query,
+            "in_flight_requests",
+        )?)
+        .unwrap_or(u32::MAX),
+        malformed_frame_count: u32::try_from(required_u64(
+            row,
+            3,
+            DbOperation::Query,
+            "malformed_frame_count",
+        )?)
+        .unwrap_or(u32::MAX),
+        policy_denial_count: u32::try_from(required_u64(
+            row,
+            4,
+            DbOperation::Query,
+            "policy_denial_count",
+        )?)
+        .unwrap_or(u32::MAX),
+        backoff_until_epoch_ms: optional_u64(row, 5, DbOperation::Query, "backoff_until_epoch_ms")?,
+        local_tier1_reserved: required_u64(row, 6, DbOperation::Query, "local_tier1_reserved")?
+            != 0,
+        updated_at: required_text(row, 7, DbOperation::Query, "updated_at")?.to_string(),
     })
 }
 
@@ -16923,6 +17004,66 @@ impl DbConnection {
             ],
         )?;
         Ok(usize::try_from(changed).unwrap_or(0))
+    }
+
+    /// Persist one authenticated admission peer snapshot.
+    pub fn upsert_team_admission_peer(&self, input: &UpsertTeamAdmissionPeerInput) -> Result<()> {
+        let in_flight = i64::from(input.in_flight_requests);
+        let malformed = i64::from(input.malformed_frame_count);
+        let denials = i64::from(input.policy_denial_count);
+        let backoff = input
+            .backoff_until_epoch_ms
+            .map(|value| {
+                i64::try_from(value).map_err(|_| DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "backoff_until_epoch_ms must fit i64".to_owned(),
+                })
+            })
+            .transpose()?;
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO team_admission_peer_state (
+                workspace_id, peer_id, in_flight_requests, malformed_frame_count,
+                policy_denial_count, backoff_until_epoch_ms, local_tier1_reserved, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(workspace_id, peer_id) DO UPDATE SET
+                in_flight_requests = excluded.in_flight_requests,
+                malformed_frame_count = excluded.malformed_frame_count,
+                policy_denial_count = excluded.policy_denial_count,
+                backoff_until_epoch_ms = excluded.backoff_until_epoch_ms,
+                local_tier1_reserved = excluded.local_tier1_reserved,
+                updated_at = excluded.updated_at",
+            &[
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.peer_id.clone()),
+                Value::BigInt(in_flight),
+                Value::BigInt(malformed),
+                Value::BigInt(denials),
+                backoff.map_or(Value::Null, Value::BigInt),
+                Value::BigInt(i64::from(input.local_tier1_reserved)),
+                Value::Text(input.updated_at.clone()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// List persisted admission peer snapshots for one workspace.
+    pub fn list_team_admission_peers(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredTeamAdmissionPeer>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, peer_id, in_flight_requests, malformed_frame_count,
+                    policy_denial_count, backoff_until_epoch_ms, local_tier1_reserved, updated_at
+             FROM team_admission_peer_state
+             WHERE workspace_id = ?1
+             ORDER BY peer_id ASC",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        rows.iter()
+            .map(stored_team_admission_peer_from_row)
+            .collect()
     }
 
     /// Persist or advance the team's IdP policy generation.
