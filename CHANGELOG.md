@@ -91,6 +91,10 @@ future changelog pass expands those rows into full capability sections.
   quarantines. `ee team doctor` reports `inbound_body_fetches`.
   Omitted history share stays body-free. The import ledger records
   the producer `body_cache_key`.
+  Join enrolls the inviter under the pair-key handle so EventFetch
+  can find the invite TCP endpoint. `retry_pending_team_body_fetches`
+  calls fetch only when the durable body lane is Allow, then applies
+  nonce-checked bytes.
   `ee team invite --wait --resume <invite-id>` continues a pending
   waiter without re-emitting the secret.
   `ee team steward once` is the canonical steward verb (`run-once`
