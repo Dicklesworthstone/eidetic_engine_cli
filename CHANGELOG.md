@@ -58,8 +58,13 @@ future changelog pass expands those rows into full capability sections.
   `docs/mesh/perf_budgets.md` and `docs/mesh/verification_matrix.md`.
 - Body publication is confirm-gated and fails closed with
   `mesh_body_cache_lifecycle_failed` when the T2.1 secure-file adapter
-  is missing. Windows remains client-only; no SID/DACL adapter has been
-  proven.
+  is missing. `ee team share bodies --representation already_redacted`
+  is a distinct signed publication; redact-over-exact is refused.
+  BodyFetch requires a durable Body-lane Allow and refuses substituted
+  cache bytes. `ee team doctor` reports `index_rematerialization` and
+  `origin_outbox`. Windows inbound listen stays client-only; the
+  `HardenedWindows` SID/DACL/reparse adapter compiles but has no
+  Windows-host runtime soak.
 - Authenticated responder sessions now apply
   `MeshAdmissionLimits::conservative_default()` before EventFetch,
   BodyFetch, Summary, and `identity_attest`.

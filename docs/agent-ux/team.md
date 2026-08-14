@@ -14,8 +14,10 @@ ee team members list --workspace . --json
 Treat any `degraded[]` or doctor `error` as a stop. Repair strings on
 those surfaces are the next command, not a prompt to invent one.
 `ee team doctor` also reports `admission`, `key_store`, `broker_port`,
-`client_only`, `whois`, and `body_cache_lifecycle`. Staging or
-`invalidated_pending_purge` rows are a warning, not a successful fetch.
+`client_only`, `whois`, `body_cache_lifecycle`, `index_rematerialization`,
+and `origin_outbox`. Staging, `invalidated_pending_purge`, pending index
+jobs, or behind/blocked/quarantined peer cursors are a warning, not a
+successful fetch.
 
 ## Mutations
 
@@ -23,7 +25,8 @@ those surfaces are the next command, not a prompt to invent one.
   `unshare`, `leave`, `pause`, `resume`, `idp set`, `idp attest`, and
   `daemon install --confirm` are durable writes.
 - Default `ee team share bodies` is a **preview**. It must stay
-  token-free and must not publish cache bytes.
+  token-free and must not publish cache bytes. `--representation
+  already_redacted` is allowed; redact-over-exact is refused.
 - Robot confirm consumes `--token-stdin`. Never put an `eeap1_` bearer
   on the argv, in env, or in a support bundle.
 - `ee team idp device --execute` uses constrained HTTPS (absolute curl,
