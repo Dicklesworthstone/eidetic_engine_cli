@@ -6391,7 +6391,7 @@ mod tests {
         .expect("create");
         connection
             .insert_memory(
-                "mem_teamsubst0000000000000001",
+                "mem_teamsubst00000000000000001",
                 &crate::db::CreateMemoryInput {
                     workspace_id: "wsp_persistfixture000000000001".to_owned(),
                     level: "semantic".to_owned(),
@@ -6421,7 +6421,7 @@ mod tests {
             None,
         )
         .expect("share");
-        let key = team_body_cache_key("mem_teamsubst0000000000000001");
+        let key = team_body_cache_key("mem_teamsubst00000000000000001");
         let cache_dir = workspace.path().join(".ee").join("mesh-body-cache");
         let cache =
             crate::mesh::key_store::SecureLocalDir::open_existing(workspace.path(), &cache_dir)
