@@ -152,9 +152,52 @@ pub struct TeamStatusReport {
     pub nodes: Vec<TeamMemberNodeRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_invites: Vec<TeamPendingInviteRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_removal_acks: Vec<TeamRemovalAckRecord>,
+    pub admission: TeamAdmissionStatus,
     pub paused: bool,
     pub steward_would_sync: bool,
     pub mesh_primitives: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamRemovalAckRecord {
+    pub removal_event_hash: String,
+    pub audience_origin_node_id: String,
+    pub removal_seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acknowledged_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamAdmissionStatus {
+    pub max_event_batch_count: u32,
+    pub max_event_batch_bytes: u64,
+    pub max_body_fetch_bytes: u64,
+    pub max_index_jobs_per_round: u32,
+    pub local_tier1_unaffected: bool,
+}
+
+/// Team doctor warns when the workspace volume has less than this free.
+pub const TEAM_FREE_SPACE_FLOOR_BYTES: u64 = 64 * 1024 * 1024;
+
+#[cfg(unix)]
+fn workspace_available_bytes(path: &std::path::Path) -> Option<u64> {
+    let candidate = if path.exists() { path } else { path.parent()? };
+    let stat = rustix::fs::statvfs(candidate).ok()?;
+    let block = if stat.f_frsize == 0 {
+        stat.f_bsize
+    } else {
+        stat.f_frsize
+    };
+    Some(stat.f_bavail.saturating_mul(block))
+}
+
+#[cfg(not(unix))]
+fn workspace_available_bytes(_path: &std::path::Path) -> Option<u64> {
+    None
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -680,6 +723,7 @@ pub fn local_team_status(connection: &DbConnection) -> Result<TeamStatusReport, 
         .map(|plan| plan.ran_sync)
         .unwrap_or(false);
     let mut pending_invites = Vec::new();
+    let mut pending_removal_acks = Vec::new();
     for team in &teams {
         pending_invites.extend(
             connection
@@ -695,7 +739,21 @@ pub fn local_team_status(connection: &DbConnection) -> Result<TeamStatusReport, 
                     endpoint: invite.endpoint,
                 }),
         );
+        pending_removal_acks.extend(
+            connection
+                .list_team_removal_acks(&team.team_id)
+                .map_err(|error| OriginStreamError::Db(error.to_string()))?
+                .into_iter()
+                .filter(|ack| ack.acknowledged_at.is_none())
+                .map(|ack| TeamRemovalAckRecord {
+                    removal_event_hash: ack.removal_event_hash,
+                    audience_origin_node_id: ack.audience_origin_node_id,
+                    removal_seq: ack.removal_seq,
+                    acknowledged_at: ack.acknowledged_at,
+                }),
+        );
     }
+    let limits = crate::mesh::admission::MeshAdmissionLimits::conservative_default();
     Ok(TeamStatusReport {
         schema: TEAM_STATUS_SCHEMA_V1,
         command: "team status",
@@ -704,6 +762,14 @@ pub fn local_team_status(connection: &DbConnection) -> Result<TeamStatusReport, 
         members,
         nodes,
         pending_invites,
+        pending_removal_acks,
+        admission: TeamAdmissionStatus {
+            max_event_batch_count: limits.max_event_batch_count,
+            max_event_batch_bytes: limits.max_event_batch_bytes,
+            max_body_fetch_bytes: limits.max_body_fetch_bytes,
+            max_index_jobs_per_round: limits.max_index_jobs_per_round,
+            local_tier1_unaffected: true,
+        },
         paused,
         steward_would_sync,
         mesh_primitives: vec![
@@ -712,6 +778,8 @@ pub fn local_team_status(connection: &DbConnection) -> Result<TeamStatusReport, 
             "team_members",
             "team_member_nodes",
             "team_pending_invites",
+            "team_removal_acknowledgements",
+            "mesh_admission_control",
             "team_posture",
             "steward_decision",
         ],
@@ -2433,7 +2501,7 @@ pub fn inspect_team_health(
         name: "admission".to_owned(),
         status: "ok".to_owned(),
         message: format!(
-            "authenticated caps: event_batch<={} events/{} bytes; body_fetch<={} bytes; index_jobs<={}",
+            "authenticated caps: event_batch<={} events/{} bytes; body_fetch<={} bytes; index_jobs<={}; local_tier1_unaffected=true; no live peer snapshot",
             limits.max_event_batch_count,
             limits.max_event_batch_bytes,
             limits.max_body_fetch_bytes,
@@ -2441,6 +2509,33 @@ pub fn inspect_team_health(
         ),
         repair: None,
     });
+    if let Some(path) = workspace_path {
+        match workspace_available_bytes(path) {
+            Some(available) if available < TEAM_FREE_SPACE_FLOOR_BYTES => {
+                checks.push(TeamDoctorCheck {
+                    name: "free_space".to_owned(),
+                    status: "warning".to_owned(),
+                    message: format!(
+                        "{available} bytes free; floor is {TEAM_FREE_SPACE_FLOOR_BYTES}"
+                    ),
+                    repair: Some(
+                        "free local disk before accepting peer event or body transfers".to_owned(),
+                    ),
+                });
+            }
+            Some(available) => {
+                checks.push(TeamDoctorCheck {
+                    name: "free_space".to_owned(),
+                    status: "ok".to_owned(),
+                    message: format!(
+                        "{available} bytes free; floor is {TEAM_FREE_SPACE_FLOOR_BYTES}"
+                    ),
+                    repair: None,
+                });
+            }
+            None => {}
+        }
+    }
     let cached_bodies = connection
         .mesh_storage_status(workspace_id)
         .map(|status| status.cached_body_count)
@@ -6112,6 +6207,15 @@ mod tests {
                 && check.status == "warning"
                 && check.repair.as_deref() == Some("ee team steward once --workspace .")
         }));
+        let listed = local_team_status(&connection).expect("status");
+        assert_eq!(listed.pending_removal_acks.len(), 1);
+        assert_eq!(
+            listed.pending_removal_acks[0].audience_origin_node_id,
+            "node_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert!(listed.admission.local_tier1_unaffected);
+        assert_eq!(listed.admission.max_event_batch_count, 512);
+        assert_eq!(listed.admission.max_body_fetch_bytes, 512 * 1024);
         let marked = acknowledge_team_removal_audience(
             &connection,
             "node_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -7287,12 +7391,9 @@ mod tests {
             .expect("healthy");
         assert_eq!(healthy.posture, "ok");
         assert!(healthy.checks.iter().any(|check| check.name == "genesis"));
-        assert!(
-            healthy
-                .checks
-                .iter()
-                .any(|check| check.name == "admission" && check.status == "ok")
-        );
+        assert!(healthy.checks.iter().any(|check| check.name == "admission"
+            && check.status == "ok"
+            && check.message.contains("local_tier1_unaffected=true")));
         assert!(
             healthy
                 .checks
@@ -7369,6 +7470,30 @@ mod tests {
         let paused = inspect_team_health(&connection, "wsp_persistfixture000000000001", None)
             .expect("paused");
         assert_eq!(paused.posture, "paused");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_team_health_reports_free_space_above_the_floor() {
+        let workspace = tempfile::tempdir().unwrap();
+        let connection = open_db();
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let report = inspect_team_health(
+            &connection,
+            "wsp_persistfixture000000000001",
+            Some(workspace.path()),
+        )
+        .expect("doctor");
+        assert!(report.checks.iter().any(|check| {
+            check.name == "free_space" && check.status == "ok" && check.message.contains("floor is")
+        }));
+        assert_eq!(TEAM_FREE_SPACE_FLOOR_BYTES, 64 * 1024 * 1024);
     }
 
     #[test]
