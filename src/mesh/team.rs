@@ -22,10 +22,13 @@ use crate::mesh::bootstrap_envelope::{
 };
 use crate::mesh::hello_responder::configured_hello_port;
 use crate::mesh::idp::{
-    IdentityRevalidationPosture, IdpProviderCapability, classify_identity_revalidation,
+    IDENTITY_ATTEST_FRAME_SCHEMA_V1, IdentityAttestFrameV1, IdentityRevalidationPosture,
+    IdpProviderCapability, classify_id_token_claims, classify_identity_revalidation,
     classify_oidc_provider, decide_device_poll, device_poll_deadline_secs,
-    discovery_https_endpoint, parse_device_authorization, plan_constrained_https_post,
-    reduce_id_token_claims,
+    discovery_https_endpoint, execute_constrained_https, form_urlencoded,
+    identity_attest_frame_leaks_bearer, json_carries_bearer_fields, parse_device_authorization,
+    pin_constrained_https_ca, plan_constrained_https_post, reduce_id_token_claims,
+    verify_compact_jwt_with_jwks,
 };
 use crate::mesh::origin_stream::{
     Ed25519OriginSigner, InboundOriginEvent, ManifestEventPayload, MemoryEventOperation,
@@ -69,6 +72,7 @@ pub const TEAM_IDP_SCHEMA_V1: &str = "ee.team.idp.v1";
 pub const TEAM_IDP_REVALIDATE_SCHEMA_V1: &str = "ee.team.idp.revalidate.v1";
 pub const TEAM_IDP_SET_SCHEMA_V1: &str = "ee.team.idp.set.v1";
 pub const TEAM_IDP_DEVICE_SCHEMA_V1: &str = "ee.team.idp.device.v1";
+pub const TEAM_IDP_POLL_SCHEMA_V1: &str = "ee.team.idp.poll.v1";
 pub const TEAM_IDP_ATTEST_SCHEMA_V1: &str = "ee.team.idp.attest.v1";
 pub const TEAM_IDP_POLICY_SET_OPERATION: &str = "teamIdpPolicySet";
 pub const TEAM_IDP_ATTESTED_OPERATION: &str = "identityAttested";
@@ -397,6 +401,24 @@ pub struct TeamIdpDeviceReport {
     pub deadline_secs: u64,
     pub first_wait_secs: u64,
     pub curl_argv: Vec<String>,
+    pub mesh_primitives: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamIdpPollReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub team_id: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub curl_exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwt: Option<String>,
+    pub has_access_token: bool,
+    pub has_refresh_token: bool,
     pub mesh_primitives: Vec<&'static str>,
 }
 
@@ -1596,6 +1618,15 @@ pub fn share_team_bodies(
         })?;
         verify_body_share_token(store_path, workspace_id, &consent_hash, token)?;
     }
+    if confirm {
+        crate::mesh::key_store::require_mesh_credential_store_platform("publish team body cache")
+            .map_err(|error| {
+            OriginStreamError::Encode(format!(
+                "{}: {error}",
+                crate::mesh::cache::MESH_BODY_CACHE_LIFECYCLE_FAILED_CODE
+            ))
+        })?;
+    }
     if !confirm {
         let token = if issue_token {
             let store_path = workspace_path.ok_or_else(|| {
@@ -1702,28 +1733,34 @@ pub fn share_team_bodies(
             },
         )?;
         let key = body_cache_key(&memory.id);
+        let local_body_hash = format!(
+            "blake3:{}",
+            blake3::hash(memory.content.as_bytes()).to_hex()
+        );
+        let mut meta = UpsertMeshBodyCacheMetadataInput {
+            workspace_id: workspace_id.to_owned(),
+            body_cache_key: key.clone(),
+            origin_node_id: team.origin_node_id.clone(),
+            origin_workspace_id: workspace_id.to_owned(),
+            logical_memory_id: memory.id.clone(),
+            content_hash: commitment,
+            body_ref_json: None,
+            preview_hash: None,
+            size_bytes: Some(u64::try_from(memory.content.len()).unwrap_or(0)),
+            cache_status: "staging".to_owned(),
+            local_body_hash: Some(local_body_hash),
+            cached_at: Some(produced_at.to_owned()),
+            expires_at: None,
+        };
+        connection
+            .upsert_mesh_body_cache_metadata(&meta)
+            .map_err(|error| OriginStreamError::Db(error.to_string()))?;
         cache
             .write_replace(&key, memory.content.as_bytes())
             .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+        meta.cache_status = "available".to_owned();
         connection
-            .upsert_mesh_body_cache_metadata(&UpsertMeshBodyCacheMetadataInput {
-                workspace_id: workspace_id.to_owned(),
-                body_cache_key: key,
-                origin_node_id: team.origin_node_id.clone(),
-                origin_workspace_id: workspace_id.to_owned(),
-                logical_memory_id: memory.id.clone(),
-                content_hash: commitment,
-                body_ref_json: None,
-                preview_hash: None,
-                size_bytes: Some(u64::try_from(memory.content.len()).unwrap_or(0)),
-                cache_status: "available".to_owned(),
-                local_body_hash: Some(format!(
-                    "blake3:{}",
-                    blake3::hash(memory.content.as_bytes()).to_hex()
-                )),
-                cached_at: Some(produced_at.to_owned()),
-                expires_at: None,
-            })
+            .upsert_mesh_body_cache_metadata(&meta)
             .map_err(|error| OriginStreamError::Db(error.to_string()))?;
         published = published.saturating_add(1);
         out.push(TeamBodyShareItem {
@@ -1826,7 +1863,10 @@ pub fn unshare_team_bodies(
             continue;
         };
         let revision_id = history_revision_id(&memory.id, &memory.updated_at);
-        if existing.cache_status != "available" {
+        if existing.cache_status != "available"
+            && existing.cache_status != "staging"
+            && existing.cache_status != "invalidated_pending_purge"
+        {
             items.push(TeamBodyShareItem {
                 memory_id: memory.id,
                 revision_id,
@@ -1835,22 +1875,27 @@ pub fn unshare_team_bodies(
             });
             continue;
         }
+        let mut meta = UpsertMeshBodyCacheMetadataInput {
+            workspace_id: workspace_id.to_owned(),
+            body_cache_key: key,
+            origin_node_id: existing.origin_node_id,
+            origin_workspace_id: existing.origin_workspace_id,
+            logical_memory_id: existing.logical_memory_id,
+            content_hash: existing.content_hash,
+            body_ref_json: existing.body_ref_json,
+            preview_hash: existing.preview_hash,
+            size_bytes: existing.size_bytes,
+            cache_status: "invalidated_pending_purge".to_owned(),
+            local_body_hash: existing.local_body_hash,
+            cached_at: Some(produced_at.to_owned()),
+            expires_at: existing.expires_at,
+        };
         connection
-            .upsert_mesh_body_cache_metadata(&UpsertMeshBodyCacheMetadataInput {
-                workspace_id: workspace_id.to_owned(),
-                body_cache_key: key,
-                origin_node_id: existing.origin_node_id,
-                origin_workspace_id: existing.origin_workspace_id,
-                logical_memory_id: existing.logical_memory_id,
-                content_hash: existing.content_hash,
-                body_ref_json: existing.body_ref_json,
-                preview_hash: existing.preview_hash,
-                size_bytes: existing.size_bytes,
-                cache_status: "evicted".to_owned(),
-                local_body_hash: existing.local_body_hash,
-                cached_at: Some(produced_at.to_owned()),
-                expires_at: existing.expires_at,
-            })
+            .upsert_mesh_body_cache_metadata(&meta)
+            .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+        meta.cache_status = "evicted".to_owned();
+        connection
+            .upsert_mesh_body_cache_metadata(&meta)
             .map_err(|error| OriginStreamError::Db(error.to_string()))?;
         published = published.saturating_add(1);
         items.push(TeamBodyShareItem {
@@ -1876,6 +1921,78 @@ pub fn unshare_team_bodies(
         approval_token: None,
         mesh_primitives: vec!["mesh_body_cache_metadata"],
     })
+}
+
+/// Fold crash-retained body-cache rows. Filesystem presence is never authority.
+pub fn reconcile_team_body_cache(
+    connection: &DbConnection,
+    workspace_id: &str,
+    workspace_path: Option<&std::path::Path>,
+    produced_at: &str,
+) -> Result<usize, OriginStreamError> {
+    let rows = connection
+        .list_mesh_body_cache_metadata(workspace_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    let cache = workspace_path.and_then(|path| {
+        let cache_dir = path.join(".ee").join("mesh-body-cache");
+        crate::mesh::key_store::SecureLocalDir::open_existing(path, &cache_dir)
+            .ok()
+            .flatten()
+    });
+    let mut changed = 0_usize;
+    for row in rows {
+        let next = match row.cache_status.as_str() {
+            "invalidated_pending_purge" => Some("evicted"),
+            "staging" => {
+                let present = cache
+                    .as_ref()
+                    .and_then(|dir| dir.read(&row.body_cache_key).ok().flatten())
+                    .is_some();
+                Some(if present {
+                    "available"
+                } else {
+                    "metadata_only"
+                })
+            }
+            "available" => {
+                let present = cache
+                    .as_ref()
+                    .and_then(|dir| dir.read(&row.body_cache_key).ok().flatten())
+                    .is_some();
+                if workspace_path.is_some() && !present {
+                    Some("metadata_only")
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let Some(next) = next else {
+            continue;
+        };
+        if next == row.cache_status {
+            continue;
+        }
+        connection
+            .upsert_mesh_body_cache_metadata(&UpsertMeshBodyCacheMetadataInput {
+                workspace_id: row.workspace_id,
+                body_cache_key: row.body_cache_key,
+                origin_node_id: row.origin_node_id,
+                origin_workspace_id: row.origin_workspace_id,
+                logical_memory_id: row.logical_memory_id,
+                content_hash: row.content_hash,
+                body_ref_json: row.body_ref_json,
+                preview_hash: row.preview_hash,
+                size_bytes: row.size_bytes,
+                cache_status: next.to_owned(),
+                local_body_hash: row.local_body_hash,
+                cached_at: Some(produced_at.to_owned()),
+                expires_at: row.expires_at,
+            })
+            .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+        changed = changed.saturating_add(1);
+    }
+    Ok(changed)
 }
 
 /// Decide whether one foreground steward pass should run mesh sync.
@@ -1931,6 +2048,20 @@ pub fn plan_team_steward_once(
                 "steward_decision",
             ],
         });
+    }
+    if let Some(workspace_id) = connection
+        .list_all_team_members()
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .into_iter()
+        .find(|member| member.is_self)
+        .map(|member| member.workspace_id)
+    {
+        reconcile_team_body_cache(
+            connection,
+            &workspace_id,
+            None,
+            &chrono::Utc::now().to_rfc3339(),
+        )?;
     }
     let decision = crate::mesh::steward_decision::decide_steward_outcome(
         &crate::mesh::steward_decision::StewardDecisionInput {
@@ -2035,6 +2166,19 @@ pub fn inspect_team_health(
         ),
         repair: None,
     });
+    let limits = crate::mesh::admission::MeshAdmissionLimits::conservative_default();
+    checks.push(TeamDoctorCheck {
+        name: "admission".to_owned(),
+        status: "ok".to_owned(),
+        message: format!(
+            "authenticated caps: event_batch<={} events/{} bytes; body_fetch<={} bytes; index_jobs<={}",
+            limits.max_event_batch_count,
+            limits.max_event_batch_bytes,
+            limits.max_body_fetch_bytes,
+            limits.max_index_jobs_per_round
+        ),
+        repair: None,
+    });
     let cached_bodies = connection
         .mesh_storage_status(workspace_id)
         .map(|status| status.cached_body_count)
@@ -2042,11 +2186,50 @@ pub fn inspect_team_health(
     let cache_dir_present = workspace_path
         .map(|path| path.join(".ee").join("mesh-body-cache").is_dir())
         .unwrap_or(false);
+    let cache_platform = crate::mesh::key_store::mesh_credential_store_platform();
+    checks.push(TeamDoctorCheck {
+        name: "key_store".to_owned(),
+        status: if cache_platform
+            == crate::mesh::key_store::MeshCredentialStorePlatform::HardenedUnix
+        {
+            "ok".to_owned()
+        } else {
+            "error".to_owned()
+        },
+        message: match cache_platform {
+            crate::mesh::key_store::MeshCredentialStorePlatform::HardenedUnix => {
+                "hardened Unix secure-file adapter".to_owned()
+            }
+            crate::mesh::key_store::MeshCredentialStorePlatform::Unsupported => {
+                "mesh_key_store_unavailable; Windows remains fail-closed".to_owned()
+            }
+        },
+        repair: (cache_platform
+            == crate::mesh::key_store::MeshCredentialStorePlatform::Unsupported)
+            .then(|| "use a Unix host or wait for Windows secure-file parity".to_owned()),
+    });
     checks.push(TeamDoctorCheck {
         name: "body_cache".to_owned(),
-        status: "ok".to_owned(),
-        message: format!("{cached_bodies} body cache row(s); dir_present={cache_dir_present}"),
-        repair: None,
+        status: if cache_platform
+            == crate::mesh::key_store::MeshCredentialStorePlatform::HardenedUnix
+        {
+            "ok".to_owned()
+        } else {
+            "error".to_owned()
+        },
+        message: format!(
+            "{cached_bodies} body cache row(s); dir_present={cache_dir_present}; platform={}",
+            match cache_platform {
+                crate::mesh::key_store::MeshCredentialStorePlatform::HardenedUnix =>
+                    "hardened_unix",
+                crate::mesh::key_store::MeshCredentialStorePlatform::Unsupported => {
+                    crate::mesh::cache::MESH_BODY_CACHE_LIFECYCLE_FAILED_CODE
+                }
+            }
+        ),
+        repair: (cache_platform
+            == crate::mesh::key_store::MeshCredentialStorePlatform::Unsupported)
+            .then(|| "use a Unix host or wait for Windows secure-file parity".to_owned()),
     });
     if let Some(path) = workspace_path {
         let keys = crate::policy::store_auth::workspace_keys_dir(path);
@@ -2157,6 +2340,7 @@ pub fn inspect_team_health(
             "mesh_body_cache_metadata",
             "steward_decision",
             "team_idp_policy",
+            "mesh_admission_control",
         ],
     })
 }
@@ -2247,17 +2431,85 @@ pub fn require_tailnet_attested(
     })
 }
 
+/// Apply a token-free identity-attest frame from an authenticated peer.
+pub fn apply_identity_attest_frame(
+    connection: &DbConnection,
+    payload: &serde_json::Value,
+) -> Result<IdentityAttestFrameV1, OriginStreamError> {
+    if json_carries_bearer_fields(payload) {
+        return Err(OriginStreamError::Encode(
+            "identity_attest frame must not carry bearer material".to_owned(),
+        ));
+    }
+    let frame: IdentityAttestFrameV1 =
+        serde_json::from_value(payload.clone()).map_err(|error| {
+            OriginStreamError::Encode(format!("identity_attest malformed: {error}"))
+        })?;
+    if frame.schema != IDENTITY_ATTEST_FRAME_SCHEMA_V1 || identity_attest_frame_leaks_bearer(&frame)
+    {
+        return Err(OriginStreamError::Encode(
+            "identity_attest frame is not token-free".to_owned(),
+        ));
+    }
+    if !frame.token_hash.starts_with("blake3:") || frame.token_hash.len() != 71 {
+        return Err(OriginStreamError::Encode(
+            "identity_attest token hash is not a blake3 digest".to_owned(),
+        ));
+    }
+    let member = connection
+        .get_team_member(&frame.member_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .ok_or_else(|| OriginStreamError::Encode("identity_attest member is unknown".to_owned()))?;
+    if member.team_id != frame.team_id {
+        return Err(OriginStreamError::Encode(
+            "identity_attest member is not on the named team".to_owned(),
+        ));
+    }
+    let consumed = connection
+        .insert_team_idp_token_replay(
+            &frame.token_hash,
+            &frame.team_id,
+            &frame.member_id,
+            &frame.checked_at,
+        )
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    if !consumed {
+        return Err(OriginStreamError::Encode(
+            "id token hash was already consumed".to_owned(),
+        ));
+    }
+    let login = frame.email.clone().unwrap_or_else(|| frame.subject.clone());
+    record_member_tailnet_identity(
+        connection,
+        &frame.member_id,
+        &login,
+        Some(&frame.subject),
+        &frame.checked_at,
+    )?;
+    Ok(frame)
+}
+
 /// Reduce a compact ID token and bind the allowlisted claims to the local self member.
 pub fn attest_local_id_token(
     connection: &DbConnection,
     token: &str,
     configured_groups: &[&str],
     checked_at: &str,
+    jwks: Option<&serde_json::Value>,
 ) -> Result<TeamIdpAttestReport, OriginStreamError> {
     if any_local_team_paused(connection)? {
         return Err(OriginStreamError::Encode(
             "team is paused; resume before attesting identity".to_owned(),
         ));
+    }
+    if let Some(jwks) = jwks {
+        let verified = verify_compact_jwt_with_jwks(token, jwks);
+        if !verified.accepted() {
+            return Err(OriginStreamError::Encode(format!(
+                "id token signature {}",
+                verified.as_str()
+            )));
+        }
     }
     let claims = reduce_id_token_claims(token, configured_groups).map_err(|disposition| {
         OriginStreamError::Encode(format!("id token is {}", disposition.as_str()))
@@ -2268,6 +2520,21 @@ pub fn attest_local_id_token(
         .into_iter()
         .find(|member| member.is_self && member.state == "active")
         .ok_or_else(|| OriginStreamError::Encode("no active self member".to_owned()))?;
+    if let Some(oidc) = connection
+        .get_team_idp_oidc(&self_member.team_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+    {
+        let now = chrono::DateTime::parse_from_rfc3339(checked_at)
+            .map(|value| value.timestamp())
+            .unwrap_or_else(|_| chrono::Utc::now().timestamp());
+        let disposition = classify_id_token_claims(token, &oidc.issuer, &oidc.client_id, now);
+        if !disposition.accepted() {
+            return Err(OriginStreamError::Encode(format!(
+                "id token claims {}",
+                disposition.as_str()
+            )));
+        }
+    }
     let login = claims
         .email
         .clone()
@@ -2396,6 +2663,71 @@ pub fn plan_team_idp_device(
         first_wait_secs,
         curl_argv: curl.argv,
         mesh_primitives: vec!["team_idp_oidc", "rfc8628"],
+    })
+}
+
+/// Execute one constrained HTTPS token poll. Raw tokens stay off the report.
+pub fn execute_team_idp_token_poll(
+    connection: &DbConnection,
+    discovery: &serde_json::Value,
+    authorization: &serde_json::Value,
+    curl_binary: &str,
+    ca_bundle: Option<&str>,
+) -> Result<TeamIdpPollReport, OriginStreamError> {
+    let planned = plan_team_idp_device(connection, discovery, authorization, curl_binary)?;
+    let oidc = connection
+        .get_team_idp_oidc(&planned.team_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .ok_or_else(|| {
+            OriginStreamError::Encode(
+                "OIDC provider must be set before a live token poll".to_owned(),
+            )
+        })?;
+    let grant = parse_device_authorization(authorization)
+        .map_err(|reason| OriginStreamError::Encode(format!("device authorization {reason}")))?;
+    let token_url = discovery_https_endpoint(discovery, "token_endpoint").ok_or_else(|| {
+        OriginStreamError::Encode("discovery is missing an https token_endpoint".to_owned())
+    })?;
+    let mut plan = plan_constrained_https_post(curl_binary, &token_url, 15).ok_or_else(|| {
+        OriginStreamError::Encode(
+            "constrained curl plan requires an absolute curl binary and https token URL".to_owned(),
+        )
+    })?;
+    if let Some(ca_bundle) = ca_bundle {
+        plan = pin_constrained_https_ca(plan, ca_bundle).ok_or_else(|| {
+            OriginStreamError::Encode(
+                "constrained curl CA pin requires an absolute existing CA bundle".to_owned(),
+            )
+        })?;
+    }
+    let body = form_urlencoded(&[
+        ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+        ("device_code", &grant.device_code),
+        ("client_id", &oidc.client_id),
+    ]);
+    let executed = execute_constrained_https(&plan, Some(body.as_bytes()))
+        .map_err(OriginStreamError::Encode)?;
+    let parsed = serde_json::from_slice::<serde_json::Value>(&executed.stdout).ok();
+    let token_error = parsed
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let gate = parsed
+        .as_ref()
+        .and_then(|value| crate::mesh::idp::classify_token_response(value).ok());
+    Ok(TeamIdpPollReport {
+        schema: TEAM_IDP_POLL_SCHEMA_V1,
+        command: "team idp device --execute",
+        team_id: planned.team_id,
+        user_code: planned.user_code,
+        verification_uri: planned.verification_uri,
+        curl_exit_code: executed.exit_code,
+        token_error,
+        jwt: gate.as_ref().map(|value| value.jwt.as_str().to_owned()),
+        has_access_token: gate.as_ref().is_some_and(|value| value.has_access_token),
+        has_refresh_token: gate.as_ref().is_some_and(|value| value.has_refresh_token),
+        mesh_primitives: vec!["team_idp_oidc", "rfc8628", "constrained_https"],
     })
 }
 
@@ -5216,6 +5548,41 @@ mod tests {
         .expect("denied");
         assert_eq!(denied.cache_status, "evicted");
         assert!(denied.body_hex.is_none());
+        let key = team_body_cache_key("mem_teambodies0000000000000001");
+        let existing = connection
+            .get_mesh_body_cache_metadata("wsp_persistfixture000000000001", &key)
+            .expect("row")
+            .expect("present");
+        connection
+            .upsert_mesh_body_cache_metadata(&UpsertMeshBodyCacheMetadataInput {
+                workspace_id: existing.workspace_id,
+                body_cache_key: existing.body_cache_key.clone(),
+                origin_node_id: existing.origin_node_id,
+                origin_workspace_id: existing.origin_workspace_id,
+                logical_memory_id: existing.logical_memory_id,
+                content_hash: existing.content_hash,
+                body_ref_json: existing.body_ref_json,
+                preview_hash: existing.preview_hash,
+                size_bytes: existing.size_bytes,
+                cache_status: "staging".to_owned(),
+                local_body_hash: existing.local_body_hash,
+                cached_at: Some("2026-08-13T14:04:00Z".to_owned()),
+                expires_at: existing.expires_at,
+            })
+            .expect("stage");
+        let folded = reconcile_team_body_cache(
+            &connection,
+            "wsp_persistfixture000000000001",
+            Some(workspace.path()),
+            "2026-08-13T14:05:00Z",
+        )
+        .expect("reconcile");
+        assert_eq!(folded, 1);
+        let after = connection
+            .get_mesh_body_cache_metadata("wsp_persistfixture000000000001", &key)
+            .expect("reload")
+            .expect("present");
+        assert_eq!(after.cache_status, "available");
     }
 
     #[cfg(unix)]
@@ -5352,6 +5719,18 @@ mod tests {
             .expect("healthy");
         assert_eq!(healthy.posture, "ok");
         assert!(healthy.checks.iter().any(|check| check.name == "genesis"));
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| check.name == "admission" && check.status == "ok")
+        );
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| check.name == "key_store" && check.status == "ok")
+        );
         set_local_team_paused(&connection, true, "2026-08-13T17:00:00Z").expect("pause");
         let paused = inspect_team_health(&connection, "wsp_persistfixture000000000001", None)
             .expect("paused");
@@ -5569,8 +5948,9 @@ mod tests {
             ),
             crate::mesh::idp::encode_unpadded_base64url(b"sig"),
         );
-        let report = attest_local_id_token(&connection, &token, &["eng"], "2026-08-13T20:00:00Z")
-            .expect("attest");
+        let report =
+            attest_local_id_token(&connection, &token, &["eng"], "2026-08-13T20:00:00Z", None)
+                .expect("attest");
         assert_eq!(report.email.as_deref(), Some("alice@acme.com"));
         assert_eq!(report.matched_groups, vec!["eng".to_owned()]);
         let json = serde_json::to_string(&report).expect("json");
@@ -5589,8 +5969,55 @@ mod tests {
                 && event.payload_json.contains("alice@acme.com")
                 && !event.payload_json.contains(&token)
         }));
-        let replayed = attest_local_id_token(&connection, &token, &["eng"], "2026-08-13T20:01:00Z")
-            .expect_err("replay");
+        let replayed =
+            attest_local_id_token(&connection, &token, &["eng"], "2026-08-13T20:01:00Z", None)
+                .expect_err("replay");
         assert!(replayed.to_string().contains("already consumed"));
+    }
+
+    #[test]
+    fn apply_identity_attest_frame_rejects_bearer_and_accepts_hash_only() {
+        let connection = open_db();
+        let created = create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let member = connection
+            .list_all_team_members()
+            .expect("members")
+            .into_iter()
+            .next()
+            .expect("self");
+        let forbidden = serde_json::json!({
+            "schema": IDENTITY_ATTEST_FRAME_SCHEMA_V1,
+            "teamId": member.team_id,
+            "memberId": member.member_id,
+            "subject": "user-1",
+            "matchedGroups": ["eng"],
+            "tokenHash": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "checkedAt": "2026-08-13T21:00:00Z",
+            "idToken": "eyJhbGciOiJSUzI1NiJ9.e30.c2ln"
+        });
+        let err = apply_identity_attest_frame(&connection, &forbidden).expect_err("bearer");
+        assert!(err.to_string().contains("bearer"));
+        let ok = apply_identity_attest_frame(
+            &connection,
+            &serde_json::json!({
+                "schema": IDENTITY_ATTEST_FRAME_SCHEMA_V1,
+                "teamId": member.team_id,
+                "memberId": member.member_id,
+                "subject": "user-1",
+                "email": "alice@acme.com",
+                "matchedGroups": ["eng"],
+                "tokenHash": "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "checkedAt": "2026-08-13T21:00:00Z"
+            }),
+        )
+        .expect("apply");
+        assert_eq!(ok.subject, "user-1");
+        let _ = created;
     }
 }
