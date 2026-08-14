@@ -52,7 +52,8 @@ use crate::mesh::tailscale_autodiscovery::{
     TailscaleAutodiscoveryDegradation, TailscaleAutodiscoveryReport,
 };
 use crate::mesh::transport_session::{
-    FrameCapability, InitiatorSessionConfig, SessionMessage, connect_authenticated_session,
+    FrameCapability, HandshakeObservations, InitiatorSessionConfig, SessionBinding,
+    SessionCapabilities, SessionChannelLimits, SessionMessage, connect_authenticated_session,
 };
 use crate::policy::{
     MeshExportPolicyAttestation, MeshExportSecretScanReport, MeshExportSecretScanSubject,
@@ -2347,7 +2348,10 @@ pub fn run_mesh_sync_once_from_paths(
         })
         .map_err(|error| format!("spawn mesh sync: {error}"))?;
     match runtime.block_on(join) {
-        Outcome::Ok(report) => Ok(report),
+        Outcome::Ok(report) => {
+            let _ = fetch_pending_team_bodies_from_paths(workspace_path, database_path);
+            Ok(report)
+        }
         Outcome::Err(message) => Err(message),
         Outcome::Cancelled(reason) => Err(format!(
             "mesh sync cancelled: {}",
@@ -2355,6 +2359,144 @@ pub fn run_mesh_sync_once_from_paths(
         )),
         Outcome::Panicked(payload) => Err(format!("mesh sync panicked: {payload}")),
     }
+}
+
+/// Grant-gated BodyFetch after the Send supervisor returns. Pair-key
+/// sessions are `!Send`; `block_on` on this thread does not require Send.
+pub fn fetch_pending_team_bodies_from_paths(workspace_path: &Path, database_path: &Path) -> usize {
+    let Ok(snapshot) = MeshForegroundSnapshot::from_paths(workspace_path, database_path) else {
+        return 0;
+    };
+    if !snapshot.initialized || snapshot.database_path.is_empty() {
+        return 0;
+    }
+    let Ok(runtime) = crate::core::build_cli_runtime() else {
+        return 0;
+    };
+    runtime.block_on(async move {
+        let Some(cx) = Cx::current() else {
+            return 0_usize;
+        };
+        fetch_pending_team_bodies_after_sync(&cx, &snapshot).await
+    })
+}
+
+async fn fetch_pending_team_bodies_after_sync(cx: &Cx, snapshot: &MeshForegroundSnapshot) -> usize {
+    let Ok(connection) = DbConnection::open_file(&snapshot.database_path) else {
+        return 0;
+    };
+    let Ok(keys) =
+        crate::mesh::team::pending_team_body_fetch_keys(&connection, &snapshot.workspace_id)
+    else {
+        return 0;
+    };
+    if keys.is_empty() {
+        return 0;
+    }
+    let Ok(teams) = crate::mesh::team::load_local_teams(&connection) else {
+        return 0;
+    };
+    let Some(team) = teams.into_iter().next() else {
+        return 0;
+    };
+    let workspace_path = Path::new(&snapshot.workspace_path);
+    let Ok(Some(store)) = crate::mesh::key_store::MeshKeyStore::open_existing(workspace_path)
+    else {
+        return 0;
+    };
+    let Ok(peers) = connection.list_mesh_peers(&snapshot.workspace_id) else {
+        return 0;
+    };
+    let mut applied = 0_usize;
+    for key in keys {
+        for peer in &peers {
+            if !peer.enabled
+                || !crate::mesh::team::body_lane_allows_fetch(
+                    &connection,
+                    &snapshot.workspace_id,
+                    &peer.peer_id,
+                )
+            {
+                continue;
+            }
+            let Some(record) = peer
+                .policy_summary_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<MeshPeerRecord>(json).ok())
+            else {
+                continue;
+            };
+            let Some(binding) = crate::mesh::team::plan_team_body_fetch_binding(
+                &snapshot.workspace_id,
+                &team.origin_node_id,
+                &team.team_id,
+                &peer.origin_node_id,
+                &record.origin_workspace_id,
+                &record.endpoint.tailnet_id,
+            ) else {
+                continue;
+            };
+            let Some(address) =
+                parse_live_peer_endpoint(&record.endpoint.endpoint, configured_hello_port())
+            else {
+                continue;
+            };
+            if !address.ip().is_loopback() {
+                continue;
+            }
+            let Ok(Some(pair)) =
+                store.load_pair_key(&peer.peer_id, crate::mesh::key_store::PairKeyClass::Current)
+            else {
+                continue;
+            };
+            let local_address = if address.is_ipv4() {
+                "127.0.0.1:0".parse()
+            } else {
+                "[::1]:0".parse()
+            };
+            let Ok(local_address) = local_address else {
+                continue;
+            };
+            let config = InitiatorSessionConfig {
+                local_address,
+                binding: SessionBinding {
+                    team_id: binding.team_id,
+                    tailnet_id: binding.tailnet_id,
+                    initiator_node_id: binding.initiator_node_id,
+                    responder_node_id: binding.responder_node_id,
+                    initiator_workspace_id: binding.initiator_workspace_id,
+                    responder_workspace_id: binding.responder_workspace_id,
+                    initiator_stable_id: format!("stable-{}", snapshot.workspace_id),
+                    responder_stable_id: format!("stable-{}", peer.peer_id),
+                    session_id: "replaced-by-connect".to_owned(),
+                },
+                pair_key: crate::mesh::key_store::SecretBytes::new(*pair.key.as_bytes()),
+                pair_key_generation: pair.generation.get(),
+                observations: HandshakeObservations {
+                    initiator_node_pubkey: format!("nodekey:{}", snapshot.workspace_id),
+                    responder_node_pubkey: record.endpoint.tailscale_node_key.clone(),
+                },
+                capabilities: SessionCapabilities::base(),
+                limits: SessionChannelLimits::default(),
+            };
+            let Ok(fetched) = contact_authenticated_body_fetch(cx, address, config, &key).await
+            else {
+                continue;
+            };
+            if crate::mesh::team::apply_fetched_team_body(
+                &connection,
+                &snapshot.workspace_id,
+                workspace_path,
+                &fetched,
+            )
+            .is_ok_and(|published| published.cache_status == "available")
+            {
+                applied = applied.saturating_add(1);
+                break;
+            }
+        }
+    }
+    applied
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3557,10 +3699,10 @@ mod tests {
         MeshPeerRow, MeshStorageCounts, MeshSyncSupervisorOptions, REPAIR_ACTION_GRAPH_SCHEMA_V1,
         TcpMeshForegroundSyncTransport, apply_outbound_artifact_metadata_policy,
         apply_outbound_export_policy, auto_enrollment_status_for_snapshot,
-        canonical_mesh_event_hash, canonicalize_mesh_event_json, local_sync_round_request,
-        mesh_event_id_from_hash, persist_sync_round_events, project_canonical_mesh_event,
-        run_mesh_sync_once_from_paths, run_mesh_sync_supervisor_supervised,
-        run_mesh_sync_supervisor_supervised_with_transport,
+        canonical_mesh_event_hash, canonicalize_mesh_event_json,
+        fetch_pending_team_bodies_from_paths, local_sync_round_request, mesh_event_id_from_hash,
+        persist_sync_round_events, project_canonical_mesh_event, run_mesh_sync_once_from_paths,
+        run_mesh_sync_supervisor_supervised, run_mesh_sync_supervisor_supervised_with_transport,
     };
     use crate::config::ConfigFile;
     use crate::core::tailscale_probe::TailscaleLocalReport;
@@ -3603,6 +3745,10 @@ mod tests {
         assert!(!snapshot.mesh_enabled);
         let report = run_mesh_sync_once_from_paths(dir.path(), &database).expect("sync");
         assert!(!report.contacted_peers);
+        assert_eq!(
+            fetch_pending_team_bodies_from_paths(dir.path(), &database),
+            0
+        );
     }
 
     /// A `[[mesh.peer_policies]]` entry that allows metadata for `peer_target`

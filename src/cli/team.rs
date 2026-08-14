@@ -1863,6 +1863,14 @@ where
         }
     };
     if !plan.ran_sync {
+        let database = args
+            .database
+            .clone()
+            .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+        let _ = crate::mesh::foreground_cli::fetch_pending_team_bodies_from_paths(
+            &workspace_path,
+            &database,
+        );
         return write_team_report(
             cli,
             &plan,
