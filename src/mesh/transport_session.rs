@@ -1901,6 +1901,7 @@ impl SessionCapabilities {
                 "body_fetch".to_owned(),
                 "event_fetch".to_owned(),
                 "hello".to_owned(),
+                "identity_attest".to_owned(),
                 "summary".to_owned(),
             ],
         }
