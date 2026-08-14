@@ -5,6 +5,7 @@
 //! workspace that has no mesh rows yet.
 
 use std::collections::BTreeSet;
+use std::net::{SocketAddr, UdpSocket};
 use std::path::Path;
 use std::time::Duration;
 
@@ -2441,20 +2442,12 @@ async fn fetch_pending_team_bodies_after_sync(cx: &Cx, snapshot: &MeshForeground
             else {
                 continue;
             };
-            if !address.ip().is_loopback() {
+            let Some(local_address) = ephemeral_source_for(address) else {
                 continue;
-            }
+            };
             let Ok(Some(pair)) =
                 store.load_pair_key(&peer.peer_id, crate::mesh::key_store::PairKeyClass::Current)
             else {
-                continue;
-            };
-            let local_address = if address.is_ipv4() {
-                "127.0.0.1:0".parse()
-            } else {
-                "[::1]:0".parse()
-            };
-            let Ok(local_address) = local_address else {
                 continue;
             };
             let config = InitiatorSessionConfig {
@@ -2497,6 +2490,35 @@ async fn fetch_pending_team_bodies_after_sync(cx: &Cx, snapshot: &MeshForeground
         }
     }
     applied
+}
+
+/// Concrete same-family source for an authenticated connect. Loopback stays
+/// on loopback. Routed remotes use a UDP connect to pick the local IP, then
+/// bind TCP with an ephemeral port.
+#[must_use]
+pub fn ephemeral_source_for(remote: SocketAddr) -> Option<SocketAddr> {
+    if remote.ip().is_unspecified() {
+        return None;
+    }
+    if remote.ip().is_loopback() {
+        return if remote.is_ipv4() {
+            "127.0.0.1:0".parse().ok()
+        } else {
+            "[::1]:0".parse().ok()
+        };
+    }
+    let bind = if remote.is_ipv4() {
+        SocketAddr::from(([0, 0, 0, 0], 0))
+    } else {
+        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0))
+    };
+    let socket = UdpSocket::bind(bind).ok()?;
+    socket.connect(remote).ok()?;
+    let local = socket.local_addr().ok()?;
+    if local.ip().is_unspecified() || local.is_ipv4() != remote.is_ipv4() {
+        return None;
+    }
+    Some(SocketAddr::new(local.ip(), 0))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3699,7 +3721,7 @@ mod tests {
         MeshPeerRow, MeshStorageCounts, MeshSyncSupervisorOptions, REPAIR_ACTION_GRAPH_SCHEMA_V1,
         TcpMeshForegroundSyncTransport, apply_outbound_artifact_metadata_policy,
         apply_outbound_export_policy, auto_enrollment_status_for_snapshot,
-        canonical_mesh_event_hash, canonicalize_mesh_event_json,
+        canonical_mesh_event_hash, canonicalize_mesh_event_json, ephemeral_source_for,
         fetch_pending_team_bodies_from_paths, local_sync_round_request, mesh_event_id_from_hash,
         persist_sync_round_events, project_canonical_mesh_event, run_mesh_sync_once_from_paths,
         run_mesh_sync_supervisor_supervised, run_mesh_sync_supervisor_supervised_with_transport,
@@ -3749,6 +3771,26 @@ mod tests {
             fetch_pending_team_bodies_from_paths(dir.path(), &database),
             0
         );
+    }
+
+    #[test]
+    fn ephemeral_source_for_loopback_and_routed_remotes() {
+        let loop_v4 =
+            ephemeral_source_for("127.0.0.1:41641".parse().expect("v4 loop")).expect("loop v4");
+        assert!(loop_v4.ip().is_loopback());
+        assert!(loop_v4.is_ipv4());
+        assert_eq!(loop_v4.port(), 0);
+        let loop_v6 =
+            ephemeral_source_for("[::1]:41641".parse().expect("v6 loop")).expect("loop v6");
+        assert!(loop_v6.ip().is_loopback());
+        assert!(loop_v6.is_ipv6());
+        assert_eq!(loop_v6.port(), 0);
+        assert!(ephemeral_source_for("0.0.0.0:41641".parse().expect("unspec")).is_none());
+        if let Some(routed) = ephemeral_source_for("192.0.2.1:41641".parse().expect("test-net")) {
+            assert!(routed.is_ipv4());
+            assert!(!routed.ip().is_unspecified());
+            assert_eq!(routed.port(), 0);
+        }
     }
 
     /// A `[[mesh.peer_policies]]` entry that allows metadata for `peer_target`
