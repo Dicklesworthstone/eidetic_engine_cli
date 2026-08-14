@@ -283,6 +283,9 @@ pub struct TeamStewardReport {
     pub outcome: String,
     pub reason: String,
     pub ran_sync: bool,
+    pub applied_additions: usize,
+    pub applied_removals: usize,
+    pub stalled_cursors: usize,
     pub mesh_primitives: Vec<&'static str>,
 }
 
@@ -2084,7 +2087,29 @@ pub fn reconcile_team_body_cache(
     Ok(changed)
 }
 
+fn self_workspace_id(connection: &DbConnection) -> Result<Option<String>, OriginStreamError> {
+    Ok(connection
+        .list_all_team_members()
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .into_iter()
+        .find(|member| member.is_self)
+        .map(|member| member.workspace_id))
+}
+
+fn stalled_peer_cursor_count(
+    connection: &DbConnection,
+    workspace_id: &str,
+) -> Result<usize, OriginStreamError> {
+    Ok(connection
+        .list_mesh_peer_cursors(workspace_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .into_iter()
+        .filter(|cursor| matches!(cursor.status.as_str(), "behind" | "blocked" | "quarantined"))
+        .count())
+}
+
 /// Decide whether one foreground steward pass should run mesh sync.
+/// Read-only: doctor and status must not mutate membership or the body cache.
 pub fn plan_team_steward_once(
     connection: &DbConnection,
 ) -> Result<TeamStewardReport, OriginStreamError> {
@@ -2099,6 +2124,10 @@ pub fn plan_team_steward_once(
         .into_iter()
         .filter(|member| member.state == "active")
         .count();
+    let stalled_cursors = self_workspace_id(connection)?
+        .map(|workspace_id| stalled_peer_cursor_count(connection, &workspace_id))
+        .transpose()?
+        .unwrap_or(0);
     if paused {
         return Ok(TeamStewardReport {
             schema: TEAM_STEWARD_SCHEMA_V1,
@@ -2109,6 +2138,9 @@ pub fn plan_team_steward_once(
             outcome: "no_op".to_owned(),
             reason: "team_paused".to_owned(),
             ran_sync: false,
+            applied_additions: 0,
+            applied_removals: 0,
+            stalled_cursors,
             mesh_primitives: vec!["team_posture", "steward_decision"],
         });
     }
@@ -2131,6 +2163,9 @@ pub fn plan_team_steward_once(
             outcome: "no_op".to_owned(),
             reason: "identity_revalidation_failed".to_owned(),
             ran_sync: false,
+            applied_additions: 0,
+            applied_removals: 0,
+            stalled_cursors,
             mesh_primitives: vec![
                 "team_idp_policy",
                 "team_member_identity",
@@ -2138,33 +2173,27 @@ pub fn plan_team_steward_once(
             ],
         });
     }
-    if let Some(workspace_id) = connection
-        .list_all_team_members()
-        .map_err(|error| OriginStreamError::Db(error.to_string()))?
-        .into_iter()
-        .find(|member| member.is_self)
-        .map(|member| member.workspace_id)
-    {
-        reconcile_team_body_cache(
-            connection,
-            &workspace_id,
-            None,
-            &chrono::Utc::now().to_rfc3339(),
-        )?;
-    }
+    let (drift_severity, drift_kind) = if active_member_count > 1 {
+        (
+            crate::mesh::steward_decision::DriftSeverity::Warning,
+            crate::mesh::steward_decision::DriftKind::NewPeersAvailable,
+        )
+    } else if stalled_cursors > 0 {
+        (
+            crate::mesh::steward_decision::DriftSeverity::Warning,
+            crate::mesh::steward_decision::DriftKind::StalePeersInConfig,
+        )
+    } else {
+        (
+            crate::mesh::steward_decision::DriftSeverity::None,
+            crate::mesh::steward_decision::DriftKind::None,
+        )
+    };
     let decision = crate::mesh::steward_decision::decide_steward_outcome(
         &crate::mesh::steward_decision::StewardDecisionInput {
             enabled: true,
-            drift_severity: if active_member_count > 1 {
-                crate::mesh::steward_decision::DriftSeverity::Warning
-            } else {
-                crate::mesh::steward_decision::DriftSeverity::None
-            },
-            drift_kind: if active_member_count > 1 {
-                crate::mesh::steward_decision::DriftKind::NewPeersAvailable
-            } else {
-                crate::mesh::steward_decision::DriftKind::None
-            },
+            drift_severity,
+            drift_kind,
             reconciliations_today: 0,
             max_daily: crate::mesh::steward_decision::STEWARD_DEFAULT_MAX_DAILY,
         },
@@ -2178,8 +2207,42 @@ pub fn plan_team_steward_once(
         outcome: decision.outcome.as_str().to_owned(),
         reason: decision.reason.to_owned(),
         ran_sync: decision.outcome == crate::mesh::steward_decision::StewardOutcome::Triggered,
+        applied_additions: 0,
+        applied_removals: 0,
+        stalled_cursors,
         mesh_primitives: vec!["team_members", "steward_decision", "mesh_sync"],
     })
+}
+
+/// Apply local steward repairs: membership fanout and body-cache lifecycle.
+/// Network sync stays with `ee mesh sync --once` after this returns `ran_sync`.
+pub fn execute_team_steward_once(
+    connection: &DbConnection,
+) -> Result<TeamStewardReport, OriginStreamError> {
+    let mut report = plan_team_steward_once(connection)?;
+    if report.paused || report.reason == "identity_revalidation_failed" {
+        return Ok(report);
+    }
+    let Some(workspace_id) = self_workspace_id(connection)? else {
+        return Ok(report);
+    };
+    let reconciled = reconcile_local_team_membership(connection, &workspace_id)?;
+    report.applied_additions = reconciled.applied_additions;
+    report.applied_removals = reconciled.applied_removals;
+    reconcile_team_body_cache(
+        connection,
+        &workspace_id,
+        None,
+        &chrono::Utc::now().to_rfc3339(),
+    )?;
+    report.stalled_cursors = stalled_peer_cursor_count(connection, &workspace_id)?;
+    report.mesh_primitives = vec![
+        "team_members",
+        "mesh_body_cache_metadata",
+        "steward_decision",
+        "mesh_sync",
+    ];
+    Ok(report)
 }
 
 /// Read-only team health for `ee team doctor`.
@@ -6469,6 +6532,44 @@ mod tests {
         let ready = plan_team_steward_once(&connection).expect("ready");
         assert!(ready.ran_sync);
         assert_eq!(ready.reason, "new_peers");
+    }
+
+    #[test]
+    fn execute_team_steward_once_reapplies_a_missed_member_removal() {
+        let connection = open_db();
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let left = leave_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T09:00:00Z",
+            None,
+        )
+        .expect("leave");
+        connection
+            .set_team_member_state(&left.member_id, "active")
+            .expect("rewind");
+        let planned = plan_team_steward_once(&connection).expect("plan");
+        assert_eq!(planned.applied_removals, 0);
+        assert!(
+            origin_node_is_active_member(&connection, &left.origin_node_id)
+                .expect("authz")
+                .expect("members")
+        );
+        let executed = execute_team_steward_once(&connection).expect("execute");
+        assert_eq!(executed.applied_removals, 1);
+        assert!(
+            !origin_node_is_active_member(&connection, &left.origin_node_id)
+                .expect("authz after")
+                .expect("members")
+        );
+        let again = execute_team_steward_once(&connection).expect("idempotent");
+        assert_eq!(again.applied_removals, 0);
     }
 
     #[test]

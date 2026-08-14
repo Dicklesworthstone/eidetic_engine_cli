@@ -524,7 +524,7 @@ pub enum JobType {
     /// Refresh the retrieval-affinity accumulation and snapshot
     /// (ADR 0066 §2 / bd-3a1op.2).
     RetrievalAffinityRefresh,
-    /// Plan one team-confed steward pass (T6.1).
+    /// Apply team-confed membership fanout and body-cache repair (T6.1).
     TeamSteward,
     /// Custom job type for extensions.
     Custom,
@@ -620,7 +620,9 @@ impl JobType {
             Self::RetrievalAffinityRefresh => {
                 "Accumulate retrieval co-occurrence evidence and refresh the affinity snapshot"
             }
-            Self::TeamSteward => "Plan one team-confed steward pass and record the decision",
+            Self::TeamSteward => {
+                "Apply membership fanout and body-cache repair; record whether mesh sync is due"
+            }
             Self::Custom => "Custom job type",
         }
     }
@@ -6346,7 +6348,11 @@ impl ManualRunner {
                 );
             }
         };
-        let plan = match crate::mesh::team::plan_team_steward_once(&connection) {
+        let plan = match if self.options.dry_run {
+            crate::mesh::team::plan_team_steward_once(&connection)
+        } else {
+            crate::mesh::team::execute_team_steward_once(&connection)
+        } {
             Ok(plan) => plan,
             Err(error) => {
                 return (
@@ -6383,7 +6389,11 @@ impl ManualRunner {
                 "activeMemberCount": plan.active_member_count,
                 "workspace": workspace_path.display().to_string(),
                 "dryRun": self.options.dry_run,
-                "durableMutation": false,
+                "durableMutation": !self.options.dry_run
+                    && (plan.applied_additions > 0 || plan.applied_removals > 0),
+                "appliedAdditions": plan.applied_additions,
+                "appliedRemovals": plan.applied_removals,
+                "stalledCursors": plan.stalled_cursors,
             })),
         )
     }
@@ -7649,8 +7659,11 @@ const BACKGROUND_SCHEDULER_SLEEP_SLICE_MS: u64 = 500;
 
 /// Job types run by the background scheduler on every tick. These are the
 /// low-overhead jobs safe to run unattended inside the daemon process.
-const BACKGROUND_SCHEDULER_JOB_TYPES: &[JobType] =
-    &[JobType::DecaySweep, JobType::HealthCheck, JobType::TeamSteward];
+const BACKGROUND_SCHEDULER_JOB_TYPES: &[JobType] = &[
+    JobType::DecaySweep,
+    JobType::HealthCheck,
+    JobType::TeamSteward,
+];
 
 /// Run the steward scheduler indefinitely on a background cadence.
 ///

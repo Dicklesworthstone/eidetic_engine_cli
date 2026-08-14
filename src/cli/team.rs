@@ -9,10 +9,10 @@ use serde_json::json;
 use crate::db::DbConnection;
 use crate::mesh::team::{
     add_local_team_node, adopt_team_project, any_local_team_paused, attest_local_id_token,
-    create_local_team_with_store, execute_team_idp_token_poll, fetch_local_team_body,
-    inspect_team_health, join_team_with_code_on_store, leave_local_team, list_team_activity,
-    list_team_projects, local_team_status, mint_team_invite_with_store, plan_team_idp_device,
-    plan_team_steward_once, reconcile_local_team_membership, remove_team_member,
+    create_local_team_with_store, execute_team_idp_token_poll, execute_team_steward_once,
+    fetch_local_team_body, inspect_team_health, join_team_with_code_on_store, leave_local_team,
+    list_team_activity, list_team_projects, local_team_status, mint_team_invite_with_store,
+    plan_team_idp_device, reconcile_local_team_membership, remove_team_member,
     require_tailnet_attested, revalidate_team_identities, revoke_team_invite,
     rotate_local_signing_key, serve_one_bootstrap_join_with_store, set_local_team_paused,
     set_team_oidc_provider, share_team_bodies_represented, share_team_history, share_team_project,
@@ -1652,12 +1652,12 @@ where
         Ok(opened) => opened,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    let plan = match plan_team_steward_once(&connection) {
+    let plan = match execute_team_steward_once(&connection) {
         Ok(plan) => plan,
         Err(error) => {
             return write_domain_error(
                 &DomainError::Storage {
-                    message: format!("Failed to plan team steward: {error}"),
+                    message: format!("Failed to run team steward: {error}"),
                     repair: Some("ee team status --workspace . --json".to_owned()),
                 },
                 cli.wants_json(),
