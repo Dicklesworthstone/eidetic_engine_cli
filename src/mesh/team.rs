@@ -446,6 +446,8 @@ pub struct TeamStewardReport {
     pub applied_additions: usize,
     pub applied_removals: usize,
     pub stalled_cursors: usize,
+    pub deferred_pairings: usize,
+    pub applied_pair_promotions: usize,
     pub mesh_primitives: Vec<&'static str>,
 }
 
@@ -2404,6 +2406,8 @@ pub fn plan_team_steward_once(
             applied_additions: 0,
             applied_removals: 0,
             stalled_cursors,
+            deferred_pairings: 0,
+            applied_pair_promotions: 0,
             mesh_primitives: vec!["team_posture", "steward_decision"],
         });
     }
@@ -2429,6 +2433,8 @@ pub fn plan_team_steward_once(
             applied_additions: 0,
             applied_removals: 0,
             stalled_cursors,
+            deferred_pairings: 0,
+            applied_pair_promotions: 0,
             mesh_primitives: vec![
                 "team_idp_policy",
                 "team_member_identity",
@@ -2473,14 +2479,18 @@ pub fn plan_team_steward_once(
         applied_additions: 0,
         applied_removals: 0,
         stalled_cursors,
+        deferred_pairings: 0,
+        applied_pair_promotions: 0,
         mesh_primitives: vec!["team_members", "steward_decision", "mesh_sync"],
     })
 }
 
-/// Apply local steward repairs: membership fanout and body-cache lifecycle.
-/// Network sync stays with `ee mesh sync --once` after this returns `ran_sync`.
+/// Apply local steward repairs: membership fanout, body-cache lifecycle,
+/// and crash-orphaned Next pair keys. Network sync stays with
+/// `ee mesh sync --once` after this returns `ran_sync`.
 pub fn execute_team_steward_once(
     connection: &DbConnection,
+    workspace_path: Option<&std::path::Path>,
 ) -> Result<TeamStewardReport, OriginStreamError> {
     let mut report = plan_team_steward_once(connection)?;
     if report.paused || report.reason == "identity_revalidation_failed" {
@@ -2506,16 +2516,74 @@ pub fn execute_team_steward_once(
         &workspace_id,
         &chrono::Utc::now().to_rfc3339(),
     )?;
+    if let Some(path) = workspace_path {
+        let (deferred, promoted) = retry_deferred_pairings(connection, &workspace_id, path)?;
+        report.deferred_pairings = deferred;
+        report.applied_pair_promotions = promoted;
+    }
     report.stalled_cursors = stalled_peer_cursor_count(connection, &workspace_id)?;
     report.mesh_primitives = vec![
         "team_members",
         "team_projects",
         "mesh_body_cache_metadata",
         "team_removal_acknowledgements",
+        "mesh_key_store",
         "steward_decision",
         "mesh_sync",
     ];
     Ok(report)
+}
+
+/// Promote a Next pair key when Current is missing (crash during rotation).
+/// A staged Next beside a live Current stays deferred for the peer ceremony.
+fn retry_deferred_pairings(
+    _connection: &DbConnection,
+    _workspace_id: &str,
+    workspace_path: &std::path::Path,
+) -> Result<(usize, usize), OriginStreamError> {
+    let Ok(Some(store)) = crate::mesh::key_store::MeshKeyStore::open_existing(workspace_path)
+    else {
+        return Ok((0, 0));
+    };
+    let handles = store
+        .list_next_pair_peer_handles()
+        .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+    let mut deferred = 0_usize;
+    let mut promoted = 0_usize;
+    for handle in handles {
+        let next = store
+            .load_pair_key(&handle, crate::mesh::key_store::PairKeyClass::Next)
+            .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+        let Some(next) = next else {
+            continue;
+        };
+        deferred = deferred.saturating_add(1);
+        let current = store
+            .load_pair_key(&handle, crate::mesh::key_store::PairKeyClass::Current)
+            .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+        if current.is_some() {
+            continue;
+        }
+        store
+            .store_pair_key(
+                &handle,
+                crate::mesh::key_store::PairKeyClass::Current,
+                next.generation,
+                &crate::mesh::key_store::SecretBytes::new(*next.key.as_bytes()),
+                &next.created_at,
+                true,
+            )
+            .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+        store
+            .retire_pair_key(
+                &handle,
+                crate::mesh::key_store::PairKeyClass::Next,
+                "steward-promote",
+            )
+            .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+        promoted = promoted.saturating_add(1);
+    }
+    Ok((deferred, promoted))
 }
 
 /// Read-only team health for `ee team doctor`.
@@ -7481,15 +7549,62 @@ mod tests {
                 .expect("authz")
                 .expect("members")
         );
-        let executed = execute_team_steward_once(&connection).expect("execute");
+        let executed = execute_team_steward_once(&connection, None).expect("execute");
         assert_eq!(executed.applied_removals, 1);
         assert!(
             !origin_node_is_active_member(&connection, &left.origin_node_id)
                 .expect("authz after")
                 .expect("members")
         );
-        let again = execute_team_steward_once(&connection).expect("idempotent");
+        let again = execute_team_steward_once(&connection, None).expect("idempotent");
         assert_eq!(again.applied_removals, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_team_steward_once_promotes_orphaned_next_pair_key() {
+        let workspace = tempfile::tempdir().unwrap();
+        let store =
+            crate::mesh::key_store::MeshKeyStore::open_or_create(workspace.path()).expect("store");
+        let key = crate::mesh::key_store::SecretBytes::new([9_u8; 32]);
+        store
+            .store_pair_key(
+                "peer-a1",
+                crate::mesh::key_store::PairKeyClass::Next,
+                std::num::NonZeroU64::MIN,
+                &key,
+                "2026-08-13T00:00:00Z",
+                false,
+            )
+            .expect("stage next");
+        let connection = open_db();
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let executed =
+            execute_team_steward_once(&connection, Some(workspace.path())).expect("execute");
+        assert_eq!(executed.deferred_pairings, 1);
+        assert_eq!(executed.applied_pair_promotions, 1);
+        assert!(
+            store
+                .load_pair_key("peer-a1", crate::mesh::key_store::PairKeyClass::Current)
+                .expect("current")
+                .is_some()
+        );
+        assert!(
+            store
+                .load_pair_key("peer-a1", crate::mesh::key_store::PairKeyClass::Next)
+                .expect("next")
+                .is_none()
+        );
+        let again =
+            execute_team_steward_once(&connection, Some(workspace.path())).expect("idempotent");
+        assert_eq!(again.deferred_pairings, 0);
+        assert_eq!(again.applied_pair_promotions, 0);
     }
 
     #[test]
