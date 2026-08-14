@@ -6540,6 +6540,23 @@ mod tests {
         assert_eq!(planned[0].peer_handle, handle);
         assert_eq!(planned[0].team_id, created.team.team_id);
         assert_eq!(planned[0].responder_node_id, created.team.origin_node_id);
+        let api = crate::mesh::responder_broker::TeamJoinLocalApi::from_registrations(
+            &connection,
+            &planned,
+        )
+        .expect("team-join local api");
+        let who = api
+            .identity_for_source(
+                format!("127.0.0.1:{}", created.team.hello_port)
+                    .parse()
+                    .expect("addr"),
+            )
+            .expect("whois");
+        assert_eq!(who.current_node_pubkey, created.team.origin_node_id);
+        assert!(
+            api.identity_for_source("8.8.8.8:41888".parse().expect("other"))
+                .is_none()
+        );
     }
 
     #[cfg(unix)]
