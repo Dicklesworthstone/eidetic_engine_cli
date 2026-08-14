@@ -11,11 +11,11 @@ use crate::core::tailscale_probe::{
     TailnetOwnerDisposition, TailscaleLocalReport, TailscaleUserProfile, evaluate_tailnet_owner,
 };
 use crate::db::{
-    CreateMemoryInput, DbConnection, InsertTeamHistoryProjectionInput, InsertTeamMemberInput,
-    InsertTeamMemberNodeInput, InsertTeamPendingInviteInput, InsertTeamProjectInput,
-    InsertTeamRemovalAckInput, StoredMeshOriginEvent, StoredTeamMember, StoredTeamMemberIdentity,
-    StoredTeamProject, UpsertMeshBodyCacheMetadataInput, UpsertTeamAdmissionPeerInput,
-    UpsertTeamJoinAttemptInput,
+    CreateMemoryInput, CreateSearchIndexJobInput, DbConnection, InsertTeamHistoryProjectionInput,
+    InsertTeamMemberInput, InsertTeamMemberNodeInput, InsertTeamPendingInviteInput,
+    InsertTeamProjectInput, InsertTeamRemovalAckInput, SearchIndexJobType, StoredMeshOriginEvent,
+    StoredTeamMember, StoredTeamMemberIdentity, StoredTeamProject,
+    UpsertMeshBodyCacheMetadataInput, UpsertTeamAdmissionPeerInput, UpsertTeamJoinAttemptInput,
 };
 use crate::mesh::bootstrap_envelope::{
     BOOTSTRAP_DECLINE_SCHEMA_V1, BootstrapCapability, BootstrapDeclineV1, decode_envelope,
@@ -4342,7 +4342,37 @@ pub fn project_inbound_team_memory(
             },
         )
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    enqueue_inbound_memory_index_job(connection, workspace_id, &memory_id)?;
     Ok(Some(memory_id))
+}
+
+fn enqueue_inbound_memory_index_job(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+) -> Result<(), OriginStreamError> {
+    let hex = blake3::hash(format!("team-inbound:{workspace_id}:{memory_id}").as_bytes()).to_hex();
+    let job_id = format!("sidx_{}", &hex.as_str()[..26]);
+    if connection
+        .get_search_index_job(&job_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .is_some()
+    {
+        return Ok(());
+    }
+    connection
+        .insert_search_index_job(
+            &job_id,
+            &CreateSearchIndexJobInput {
+                workspace_id: workspace_id.to_owned(),
+                job_type: SearchIndexJobType::SingleDocument,
+                document_source: Some("memory".to_owned()),
+                document_id: Some(memory_id.to_owned()),
+                documents_total: 1,
+            },
+        )
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    Ok(())
 }
 
 fn inbound_team_memory_id(event_hash: &str) -> Option<String> {
@@ -6409,6 +6439,15 @@ mod tests {
         let stored = connection.get_memory(&stub_id).expect("get").expect("row");
         assert!(stored.content.starts_with("[ee.team.history]"));
         assert!(!stored.content.contains("secret body"));
+        let jobs = connection
+            .list_search_index_jobs(
+                "wsp_persistfixture000000000001",
+                Some(crate::db::SearchIndexJobStatus::Pending),
+            )
+            .expect("jobs");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].document_id.as_deref(), Some(stub_id.as_str()));
+        assert_eq!(jobs[0].document_source.as_deref(), Some("memory"));
         let again = reconcile_inbound_team_memories(&connection, "wsp_persistfixture000000000001")
             .expect("idempotent");
         assert_eq!(again.applied_additions, 0);
