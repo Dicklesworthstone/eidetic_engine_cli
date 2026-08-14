@@ -2676,7 +2676,7 @@ pub fn inspect_team_health(
             invites
                 .iter()
                 .filter(|invite| {
-                    invite.status == "pending" && invite.created_at.as_str() < floor_at
+                    invite.status == "pending" && invite.created_at.as_str() < floor_at.as_str()
                 })
                 .count()
         })
