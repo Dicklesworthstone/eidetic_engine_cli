@@ -776,7 +776,7 @@ mod tests {
         let limits = MeshAdmissionLimits::conservative_default();
         let mut state = MeshPeerAdmissionState::new("peer-noisy");
         let oversize = limits.max_body_fetch_bytes.saturating_add(1);
-        for _ in 0..limits.max_malformed_frames_before_backoff {
+        for _ in 0..=limits.max_malformed_frames_before_backoff {
             let decision = admit_authenticated_mesh_capability_with_state(
                 &state,
                 MeshAdmissionRequestKind::BodyFetch,
@@ -790,14 +790,14 @@ mod tests {
         }
         let throttled = admit_authenticated_mesh_capability_with_state(
             &state,
-            MeshAdmissionRequestKind::Summary,
+            MeshAdmissionRequestKind::TipAdvertise,
             8,
             0,
             0,
             NOW,
         );
         assert!(!throttled.allowed());
-        assert_eq!(throttled.reason, MeshAdmissionReason::PeerThrottled);
+        assert_eq!(throttled.reason, MeshAdmissionReason::BackoffActive);
         assert!(state.backoff_until_epoch_ms.is_some());
         release_authenticated_admission(&mut state);
         assert_eq!(state.in_flight_requests, 0);
