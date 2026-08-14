@@ -211,16 +211,15 @@ This is a live Unix EE-to-EE ledger, not a bead-closing ceremony.
 | T6.2 daemon install | **Proven on Linux and macOS user supervisors** | Linux: `systemctl --user start ee-team-confed-proof.service` → `ActiveState=active` at 2026-08-14T01:47:44Z. macOS: `launchctl bootstrap gui/501/ai.eideticengine.ee-team-confed-proof` → `active count = 1` / `state = xpcproxy` at 2026-08-14T02:14:58Z. Both units quarantined by rename. | Real `ee` binary KeepAlive service was not left running; Windows remains client-only |
 | T6.3 admission | **Proven** | Authenticated serve folds decisions into a broker-owned per-peer map and persists a V118 snapshot. Isolated 2026-08-14: `persisted_admission_snapshot_warns_doctor_and_status` 56.71s exit 0; inspect 56.12s exit 0. Status/doctor report throttled/exhausted counts and coalesced exhaustion after the broker exits. | Windows inbound listen remains out of scope |
 | T6.4 doctor | **Proven** | Isolated 2026-08-14: floor 46.91s, inspect 50.86s, removal rematerialize 50.80s, `removal_acknowledgement_matrix_stays_pending_until_audience_applies` 55.88s, all exit 0. V117 persists the removal audience; doctor warns on pending acks and does not claim bounded fanout. Steward advances acks from peer cursors. | Windows inbound listen remains out of scope |
-| T6.5 budgets | **Documented + unit-enforced** | `docs/mesh/perf_budgets.md`; conservative-limit unit test | No Criterion `[[bench]]` for join/relay; compile cost dominates |
+| T6.5 budgets | **Proven** | `ee team status` emits `budgets` (`ee.team.budgets.v1`) naming join event-batch count, signed-relay batch bytes, body fetch bytes, and index jobs/round. Isolated 2026-08-14: `team_confed_budget_profile_names_join_relay_body_and_index_caps` 53.51s exit 0. At-cap EventBatch is allowed; +1 is rejected with `local_tier1_unaffected`. | Criterion `[[bench]]` remains opt-in; compile cost dominates |
 | T6.6 docs | **Landed** | `docs/team/quickstart.md`, `trusted_vs_contractor.md`, `docs/agent-ux/team.md`, CHANGELOG | — |
 | T7.1–T7.6 IdP | **Proven** | Fake-IdP HTTPS RS256 1.40s; live TCP identity_attest 88.42s compile+test | No production IdP vendor soak |
 | T7 Windows / client-only | **Fail-closed** | Same as T5.9 | — |
 
 Campaign is **done as live Unix EE-to-EE capability**, including
-T5.10, T6.2, T6.3 V118 admission snapshots + 64 MiB free-space
-floor, T6.4 invite-floor / project rematerialization / V117
-removal-ack matrix, and `ee team status` `pendingRemovalAcks[]`.
-Isolated 2026-08-14T15:15–15:44Z: admission snapshot 56.71s,
-inspect 56.12s, all exit 0. Windows inbound listen and a
-Windows-host DACL soak remain out of scope. Do not self-close
-beads from this ledger.
+T5.10, T6.2, T6.3 V118 admission snapshots, T6.4 invite-floor /
+V117 removal acks, and T6.5 `ee.team.budgets.v1` on
+`ee team status`. Isolated 2026-08-14T16:03–16:34Z: budget
+profile 53.51s exit 0. Windows inbound listen and a Windows-host
+DACL soak remain out of scope. Do not self-close beads from this
+ledger.

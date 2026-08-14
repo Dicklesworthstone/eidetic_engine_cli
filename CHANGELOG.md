@@ -74,7 +74,9 @@ future changelog pass expands those rows into full capability sections.
   free-space floor when a workspace path is present. Authenticated
   serve persists a V118 per-peer admission snapshot so doctor/status
   can report throttled/exhausted counts and coalesced exhaustion
-  after the broker exits.
+  after the broker exits. `ee team status` emits `budgets`
+  (`ee.team.budgets.v1`) naming join, signed-relay, body, and
+  index amplification caps.
   `ee team revoke --all-before-floor` is the invite-floor repair.
   Team create and join raise the invite-authorization floor.
   `ee team status` lists `pendingInvites[]` so a revoke can name an id.

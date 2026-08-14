@@ -16,6 +16,8 @@ those surfaces are the next command, not a prompt to invent one.
 `ee team status` admission fields include `peerSnapshotCount`,
 `throttledPeerCount`, `budgetExhaustedPeerCount`, and
 `coalescedExhaustion` from the last persisted broker snapshot.
+`data.budgets` is the T6.5 join/relay/body/index profile
+(`ee.team.budgets.v1`).
 `ee team doctor` also reports `admission`, `key_store`, `broker_port`,
 `client_only`, `whois`, `body_cache_lifecycle`, `index_rematerialization`,
 `origin_outbox`, `invite_auth_floor`, `pending_invites`,

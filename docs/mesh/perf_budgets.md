@@ -1,7 +1,10 @@
 # Team-confed performance budgets (T6.5)
 
 These are **structural caps plus measured isolated-host proofs**, not a
-Criterion wall-time gate. Full `cargo bench` remains opt-in via
+Criterion wall-time gate. The same profile is emitted on
+`ee team status --json` as `budgets` (`ee.team.budgets.v1`): join event
+batch count, signed-relay batch bytes, body fetch bytes, and index jobs
+per round. Full `cargo bench` remains opt-in via
 `./scripts/verify.sh --include-bench`.
 
 ## Structural caps (enforced)
