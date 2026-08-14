@@ -23,7 +23,7 @@ use std::future::Future;
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::net::Shutdown;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -138,6 +138,11 @@ pub trait TailscaleLocalApi: Send + Sync {
         cx: &'a Cx,
         source: SocketAddr,
     ) -> TailscaleLocalApiFuture<'a, WhoIsIdentity>;
+
+    /// Team-join TCP may bind loopback when tailscaled is not present.
+    fn allows_loopback_bind(&self) -> bool {
+        false
+    }
 }
 
 impl<T: TailscaleLocalApi + ?Sized> TailscaleLocalApi for Arc<T> {
@@ -159,6 +164,10 @@ impl<T: TailscaleLocalApi + ?Sized> TailscaleLocalApi for Arc<T> {
         source: SocketAddr,
     ) -> TailscaleLocalApiFuture<'a, WhoIsIdentity> {
         (**self).who_is(cx, source)
+    }
+
+    fn allows_loopback_bind(&self) -> bool {
+        (**self).allows_loopback_bind()
     }
 }
 
@@ -349,6 +358,199 @@ impl TailscaleLocalApi for TailscaleLocalApiClient {
                 })
             }
         })
+    }
+}
+
+/// WhoIs row for one team-join enrolled peer endpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TeamJoinWhoIsPeer {
+    ip: IpAddr,
+    stable_id: String,
+    current_node_pubkey: String,
+}
+
+/// LocalAPI stand-in for team-join TCP when tailscaled is absent.
+#[derive(Clone, Debug)]
+pub struct TeamJoinLocalApi {
+    identity: LocalTailscaleIdentity,
+    addresses: Vec<IpAddr>,
+    peers: Vec<TeamJoinWhoIsPeer>,
+}
+
+impl TeamJoinLocalApi {
+    /// Build from enrolled team-join peers only. Mixed tailnet peers fail.
+    pub fn from_registrations(
+        connection: &DbConnection,
+        registrations: &[DurableResponderRegistration],
+    ) -> Result<Self, ResponderBrokerError> {
+        if registrations.is_empty() {
+            return Err(ResponderBrokerError::InvalidConfiguration);
+        }
+        let responder_node_id = registrations[0].responder_node_id.clone();
+        if registrations
+            .iter()
+            .any(|registration| registration.responder_node_id != responder_node_id)
+        {
+            return Err(ResponderBrokerError::InvalidConfiguration);
+        }
+        let mut peers = Vec::new();
+        for registration in registrations {
+            let peer = connection
+                .get_mesh_peer(&registration.workspace_id, &registration.peer_handle)
+                .map_err(|_| ResponderBrokerError::RouteUnavailable)?
+                .filter(|peer| peer.enabled)
+                .ok_or(ResponderBrokerError::RouteUnavailable)?;
+            let policy = peer
+                .policy_summary_json
+                .as_deref()
+                .ok_or(ResponderBrokerError::IdentityUpgradeRequired)
+                .and_then(|json| {
+                    serde_json::from_str::<MeshPeerRecord>(json)
+                        .map_err(|_| ResponderBrokerError::IdentityUpgradeRequired)
+                })?;
+            if !crate::mesh::team::team_join_allows_ungranted_route(&policy) {
+                return Err(ResponderBrokerError::RouteUnavailable);
+            }
+            let endpoint = peer_endpoint_for_whois(&policy.endpoint.endpoint)?;
+            peers.push(TeamJoinWhoIsPeer {
+                ip: endpoint.ip(),
+                stable_id: format!("team-join-{}", peer.origin_node_id),
+                current_node_pubkey: policy.endpoint.tailscale_node_key,
+            });
+        }
+        Ok(Self {
+            identity: LocalTailscaleIdentity {
+                stable_id: format!("team-join-{responder_node_id}"),
+                current_node_pubkey: format!("nodekey:{responder_node_id}"),
+                tailnet_id: crate::mesh::team::TEAM_JOIN_TAILNET_ID.to_owned(),
+            },
+            addresses: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+            peers,
+        })
+    }
+
+    #[must_use]
+    pub fn identity_for_source(&self, source: SocketAddr) -> Option<WhoIsIdentity> {
+        self.peers
+            .iter()
+            .find(|peer| peer.ip == source.ip())
+            .map(|peer| WhoIsIdentity {
+                stable_id: peer.stable_id.clone(),
+                current_node_pubkey: peer.current_node_pubkey.clone(),
+                login_name: None,
+                display_name: None,
+                user_id: None,
+            })
+    }
+}
+
+impl TailscaleLocalApi for TeamJoinLocalApi {
+    fn local_status<'a>(
+        &'a self,
+        _cx: &'a Cx,
+    ) -> TailscaleLocalApiFuture<'a, LocalTailscaleStatus> {
+        Box::pin(async move {
+            Ok(LocalTailscaleStatus {
+                identity: self.identity.clone(),
+                addresses: self.addresses.clone(),
+            })
+        })
+    }
+
+    fn verify_local_address<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        address: SocketAddr,
+    ) -> TailscaleLocalApiFuture<'a, LocalTailscaleIdentity> {
+        Box::pin(async move {
+            if address.ip().is_loopback() || self.addresses.contains(&address.ip()) {
+                Ok(self.identity.clone())
+            } else {
+                Err(ResponderBrokerError::WhoIsUnverified)
+            }
+        })
+    }
+
+    fn who_is<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        source: SocketAddr,
+    ) -> TailscaleLocalApiFuture<'a, WhoIsIdentity> {
+        Box::pin(async move {
+            self.identity_for_source(source)
+                .ok_or(ResponderBrokerError::WhoIsUnverified)
+        })
+    }
+
+    fn allows_loopback_bind(&self) -> bool {
+        true
+    }
+}
+
+/// Production LocalAPI or the team-join loopback stand-in.
+#[derive(Clone, Debug)]
+pub enum InboundLocalApi {
+    Tailscale(TailscaleLocalApiClient),
+    TeamJoin(TeamJoinLocalApi),
+}
+
+impl InboundLocalApi {
+    #[must_use]
+    pub fn prefer(
+        connection: &DbConnection,
+        registrations: &[DurableResponderRegistration],
+        localapi_socket: Option<&Path>,
+    ) -> Option<Self> {
+        if let Some(path) = localapi_socket {
+            return Some(Self::Tailscale(TailscaleLocalApiClient::new(
+                path,
+                Duration::from_secs(2),
+            )));
+        }
+        if let Some(client) = TailscaleLocalApiClient::discover(Duration::from_secs(2)) {
+            return Some(Self::Tailscale(client));
+        }
+        TeamJoinLocalApi::from_registrations(connection, registrations)
+            .ok()
+            .map(Self::TeamJoin)
+    }
+}
+
+impl TailscaleLocalApi for InboundLocalApi {
+    fn local_status<'a>(&'a self, cx: &'a Cx) -> TailscaleLocalApiFuture<'a, LocalTailscaleStatus> {
+        match self {
+            Self::Tailscale(client) => client.local_status(cx),
+            Self::TeamJoin(api) => api.local_status(cx),
+        }
+    }
+
+    fn verify_local_address<'a>(
+        &'a self,
+        cx: &'a Cx,
+        address: SocketAddr,
+    ) -> TailscaleLocalApiFuture<'a, LocalTailscaleIdentity> {
+        match self {
+            Self::Tailscale(client) => client.verify_local_address(cx, address),
+            Self::TeamJoin(api) => api.verify_local_address(cx, address),
+        }
+    }
+
+    fn who_is<'a>(
+        &'a self,
+        cx: &'a Cx,
+        source: SocketAddr,
+    ) -> TailscaleLocalApiFuture<'a, WhoIsIdentity> {
+        match self {
+            Self::Tailscale(client) => client.who_is(cx, source),
+            Self::TeamJoin(api) => api.who_is(cx, source),
+        }
+    }
+
+    fn allows_loopback_bind(&self) -> bool {
+        match self {
+            Self::Tailscale(_) => false,
+            Self::TeamJoin(api) => api.allows_loopback_bind(),
+        }
     }
 }
 
@@ -1870,9 +2072,10 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
         desired.sort();
         desired.dedup();
         if desired.is_empty()
-            || desired
-                .iter()
-                .any(|address| address.ip().is_unspecified() || address.ip().is_loopback())
+            || desired.iter().any(|address| {
+                address.ip().is_unspecified()
+                    || (address.ip().is_loopback() && !self.local_api.allows_loopback_bind())
+            })
         {
             self.shutdown_listeners();
             return Err(ResponderBrokerError::TransportUnavailable);

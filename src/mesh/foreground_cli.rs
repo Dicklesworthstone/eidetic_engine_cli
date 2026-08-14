@@ -2420,7 +2420,7 @@ fn spawn_team_responder_owner_unix(workspace_path: &Path, database_path: &Path) 
         return false;
     }
     let Some(local_api) =
-        crate::mesh::responder_broker::TailscaleLocalApiClient::discover(Duration::from_secs(2))
+        crate::mesh::responder_broker::InboundLocalApi::prefer(&connection, &registrations, None)
     else {
         return false;
     };

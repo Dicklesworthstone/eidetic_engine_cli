@@ -66,9 +66,9 @@ use crate::mesh::peer::{
 #[cfg(unix)]
 use crate::mesh::responder_broker::submit_responder_control_request;
 use crate::mesh::responder_broker::{
-    DurableResponderRegistration, PreAuthAdmissionLimits, RESPONDER_CONTROL_SCHEMA_V1,
-    ResponderBrokerError, ResponderBrokerOwner, ResponderControlOp, ResponderControlRequest,
-    TailscaleLocalApiClient, default_responder_control_socket_path,
+    DurableResponderRegistration, InboundLocalApi, PreAuthAdmissionLimits,
+    RESPONDER_CONTROL_SCHEMA_V1, ResponderBrokerError, ResponderBrokerOwner, ResponderControlOp,
+    ResponderControlRequest, default_responder_control_socket_path,
     plan_team_responder_registrations, responder_control_status_request,
 };
 use crate::mesh::tailscale_autodiscovery::{
@@ -3538,19 +3538,6 @@ where
             );
         }
     };
-    let local_api = args
-        .localapi_socket
-        .as_ref()
-        .map(|path| TailscaleLocalApiClient::new(path, Duration::from_secs(2)))
-        .or_else(|| TailscaleLocalApiClient::discover(Duration::from_secs(2)));
-    let Some(local_api) = local_api else {
-        return write_responder_broker_error(
-            &ResponderBrokerError::TransportUnavailable,
-            cli,
-            stdout,
-            stderr,
-        );
-    };
     #[cfg(unix)]
     let control_socket = args
         .control_socket
@@ -3621,6 +3608,16 @@ where
             stderr,
         );
     }
+    let Some(local_api) =
+        InboundLocalApi::prefer(&connection, &registrations, args.localapi_socket.as_deref())
+    else {
+        return write_responder_broker_error(
+            &ResponderBrokerError::TransportUnavailable,
+            cli,
+            stdout,
+            stderr,
+        );
+    };
     let mut owner = match crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| {
         let local_api = local_api.clone();
         let registrations = registrations.clone();
