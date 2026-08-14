@@ -3029,6 +3029,57 @@ async fn answer_sync_round(
     write_asupersync_framed(cx, stream, io_timeout, &reply).await
 }
 
+fn admit_authenticated_capability(
+    peer_id: &str,
+    capability: &FrameCapability,
+    payload: &serde_json::Value,
+) -> Result<crate::mesh::admission::MeshAdmissionDecision, ResponderBrokerError> {
+    use crate::mesh::admission::{MeshAdmissionRequestKind, admit_authenticated_mesh_capability};
+    let kind = match capability {
+        FrameCapability::BodyFetch => MeshAdmissionRequestKind::BodyFetch,
+        FrameCapability::EventFetch => MeshAdmissionRequestKind::EventBatch,
+        FrameCapability::Summary => MeshAdmissionRequestKind::TipAdvertise,
+        FrameCapability::Extension(name) if name == "identity_attest" => {
+            MeshAdmissionRequestKind::Hello
+        }
+        _ => MeshAdmissionRequestKind::Hello,
+    };
+    let payload_bytes = u64::try_from(payload.to_string().len()).unwrap_or(u64::MAX);
+    let now_epoch_ms = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX);
+    let event_count = if kind == MeshAdmissionRequestKind::EventBatch {
+        serde_json::to_vec(payload)
+            .ok()
+            .and_then(|bytes| parse_sync_round_request(&bytes))
+            .map(|parsed| parsed.max_events)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let body_fetch_bytes = if kind == MeshAdmissionRequestKind::BodyFetch {
+        payload_bytes
+    } else {
+        0
+    };
+    let decision = admit_authenticated_mesh_capability(
+        peer_id,
+        kind,
+        payload_bytes,
+        event_count,
+        body_fetch_bytes,
+        now_epoch_ms,
+    );
+    if !decision.allowed() {
+        return Err(ResponderBrokerError::AdmissionLimited);
+    }
+    Ok(decision)
+}
+
 async fn serve_authenticated_sync_round(
     cx: &Cx,
     session: &mut AuthenticatedTransportSession,
@@ -3045,11 +3096,30 @@ async fn serve_authenticated_sync_round(
         if matches!(
             request.capability,
             FrameCapability::Summary | FrameCapability::EventFetch | FrameCapability::BodyFetch
+        ) || matches!(
+            &request.capability,
+            FrameCapability::Extension(name) if name == "identity_attest"
         ) {
             break request;
         }
     };
-    let payload = if request.capability == FrameCapability::BodyFetch {
+    admit_authenticated_capability(
+        &session.binding().initiator_node_id,
+        &request.capability,
+        &request.payload,
+    )?;
+    let payload = if matches!(
+        &request.capability,
+        FrameCapability::Extension(name) if name == "identity_attest"
+    ) {
+        let processed = session
+            .process_request(cx, &request, async {
+                load_identity_attest_response(routes, &request.payload)
+            })
+            .await
+            .map_err(ResponderBrokerError::Session)?;
+        serde_json::to_value(&processed).map_err(|_| ResponderBrokerError::TransportUnavailable)?
+    } else if request.capability == FrameCapability::BodyFetch {
         let processed = session
             .process_request(cx, &request, async {
                 load_body_fetch_response(routes, &request.payload)
@@ -3147,6 +3217,34 @@ fn load_sync_round_response(
         }],
         events,
     }
+}
+
+fn load_identity_attest_response(
+    routes: &ResponderRouteRegistry,
+    payload: &serde_json::Value,
+) -> crate::mesh::idp::IdentityAttestFrameV1 {
+    let rejected = crate::mesh::idp::IdentityAttestFrameV1 {
+        schema: crate::mesh::idp::IDENTITY_ATTEST_FRAME_SCHEMA_V1.to_owned(),
+        team_id: String::new(),
+        member_id: String::new(),
+        subject: "rejected".to_owned(),
+        email: None,
+        matched_groups: Vec::new(),
+        token_hash: "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+            .to_owned(),
+        checked_at: String::new(),
+    };
+    let Some(database_path) = routes
+        .routes
+        .values()
+        .find_map(|route| route.database_path.clone())
+    else {
+        return rejected;
+    };
+    let Ok(connection) = DbConnection::open_file(database_path) else {
+        return rejected;
+    };
+    crate::mesh::team::apply_identity_attest_frame(&connection, payload).unwrap_or(rejected)
 }
 
 fn load_body_fetch_response(
@@ -3462,6 +3560,25 @@ mod tests {
         let error = load_route_pair_key(&route)
             .expect_err("route generation one must not consume durable generation two");
         assert!(matches!(error, ResponderBrokerError::PairingRequired));
+    }
+
+    #[test]
+    fn authenticated_admission_rejects_oversized_body_fetch() {
+        let oversize = serde_json::json!({
+            "schema": "ee.mesh.body_fetch.request.v1",
+            "bodyCacheKey": "x".repeat(600 * 1024),
+        });
+        let error =
+            admit_authenticated_capability("peer-noisy", &FrameCapability::BodyFetch, &oversize)
+                .expect_err("oversized body fetch");
+        assert!(matches!(error, ResponderBrokerError::AdmissionLimited));
+        let ok = admit_authenticated_capability(
+            "peer-ok",
+            &FrameCapability::Summary,
+            &serde_json::json!({"schema": "ee.mesh.sync_round.v1"}),
+        )
+        .expect("summary stays inside budget");
+        assert!(ok.allowed());
     }
 
     #[test]

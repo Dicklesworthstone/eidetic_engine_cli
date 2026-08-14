@@ -31,8 +31,12 @@ use ee::mesh::bootstrap_envelope::{
     BOOTSTRAP_DECLINE_SCHEMA_V1, BootstrapCapability, BootstrapDeclineV1, SyncRoundRequest,
     decode_envelope, encode_envelope, exchange_bootstrap_hello, exchange_live_mesh_round,
 };
-use ee::mesh::foreground_cli::{contact_authenticated_body_fetch, contact_authenticated_mesh_peer};
+use ee::mesh::foreground_cli::{
+    contact_authenticated_body_fetch, contact_authenticated_identity_attest,
+    contact_authenticated_mesh_peer,
+};
 use ee::mesh::hello::{build_request, parse_hello_response, serialize_within_budget};
+use ee::mesh::idp::{IDENTITY_ATTEST_FRAME_SCHEMA_V1, IdentityAttestFrameV1};
 use ee::mesh::key_store::{MeshKeyStore, PairKeyClass, SecretBytes, SecureLocalDir};
 use ee::mesh::peer::{
     MeshPeerCapabilityProfile, MeshPeerEndpoint, MeshPeerEnrollInput, MeshPeerHandshake,
@@ -1578,6 +1582,132 @@ fn production_broker_serves_authenticated_body_fetch_from_local_cache() -> TestR
     if fetched.body_hex.as_deref() != Some(expected.as_str()) {
         return Err(format!("BodyFetch hex mismatch: {fetched:?}"));
     }
+    Ok(())
+}
+
+#[test]
+fn production_broker_applies_authenticated_identity_attest_without_bearer() -> TestResult {
+    let workspace = tempfile::tempdir().map_err(|error| format!("temp workspace: {error}"))?;
+    let store = MeshKeyStore::open_or_create(workspace.path())
+        .map_err(|error| format!("preprovision key store: {error}"))?;
+    store
+        .store_pair_key(
+            PEER_HANDLE,
+            PairKeyClass::Current,
+            NonZeroU64::new(7).expect("test generation is nonzero"),
+            &pair_key(),
+            CREATED_AT,
+            false,
+        )
+        .map_err(|error| format!("preprovision pair key: {error}"))?;
+    let database_path = workspace.path().join("ee.db");
+    seed_loopback_origin_event(&database_path)?;
+    seed_loopback_route_authority(&database_path)?;
+    let (team_id, member_id) = {
+        let connection = DbConnection::open_file(&database_path)
+            .map_err(|error| format!("open attest db: {error}"))?;
+        ee::mesh::team::create_local_team_with_store(
+            &connection,
+            LOOPBACK_RESPONDER_WORKSPACE_ID,
+            "Analysts",
+            CREATED_AT,
+            Some(workspace.path()),
+        )
+        .map_err(|error| format!("create attest team: {error}"))?;
+        let member = connection
+            .list_all_team_members()
+            .map_err(|error| format!("list attest members: {error}"))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "attest team has no member".to_owned())?;
+        (member.team_id, member.member_id)
+    };
+
+    let local_api_dir = tempfile::tempdir().map_err(|error| format!("temp localapi: {error}"))?;
+    let fake = FakeLocalApi::spawn(local_api_dir.path(), 2)?;
+    let port = available_nonprivileged_port()?;
+    let bind_address: SocketAddr = format!("127.0.0.1:{port}")
+        .parse()
+        .map_err(|error| format!("parse bind address: {error}"))?;
+    let registry = ResponderRouteRegistry::new([route_with_database(
+        workspace.path().to_path_buf(),
+        database_path.clone(),
+        port,
+    )])
+    .map_err(|error| error.to_string())?;
+    let (address_tx, address_rx) = mpsc::sync_channel(1);
+    let server = thread::spawn(move || {
+        let result = run_runtime_with(Duration::from_secs(30), |cx| async move {
+            let client = TailscaleLocalApiClient::new(fake.socket_path.clone(), LOCAL_API_TIMEOUT);
+            let broker = ResponderBroker::bind(
+                &cx,
+                bind_address,
+                client,
+                registry,
+                PreAuthAdmissionLimits::default(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            address_tx
+                .send(broker.local_addr())
+                .map_err(|error| format!("publish broker address: {error}"))?;
+            broker
+                .accept_authenticated_and_serve(&cx)
+                .await
+                .map_err(|error| format!("authenticated serve: {error}"))?;
+            fake.finish()?;
+            Ok(())
+        });
+        result
+    });
+    let address = address_rx
+        .recv_timeout(Duration::from_secs(30))
+        .map_err(|error| format!("wait for broker bind: {error}"))?;
+    let frame = IdentityAttestFrameV1 {
+        schema: IDENTITY_ATTEST_FRAME_SCHEMA_V1.to_owned(),
+        team_id: team_id.clone(),
+        member_id: member_id.clone(),
+        subject: "user-1".to_owned(),
+        email: Some("alice@acme.com".to_owned()),
+        matched_groups: vec!["eng".to_owned()],
+        token_hash: "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            .to_owned(),
+        checked_at: "2026-08-13T22:00:00Z".to_owned(),
+    };
+    let client = run_runtime_with(Duration::from_secs(30), |cx| async move {
+        contact_authenticated_identity_attest(
+            &cx,
+            address,
+            origin_capable_initiator_config(),
+            &frame,
+        )
+        .await
+        .map_err(|error| format!("authenticated identity_attest client: {error}"))
+    });
+    let server = server
+        .join()
+        .map_err(|_| "authenticated identity attest serve thread panicked".to_owned())?;
+    let applied = match (client, server) {
+        (Ok(applied), Ok(())) => applied,
+        (client, server) => {
+            return Err(format!(
+                "authenticated identity_attest failed client={client:?} server={server:?}"
+            ));
+        }
+    };
+    if applied.subject != "user-1" || applied.member_id != member_id {
+        return Err(format!("identity_attest did not apply: {applied:?}"));
+    }
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("reopen attest db: {error}"))?;
+    let identity = connection
+        .get_team_member_identity(&member_id)
+        .map_err(|error| format!("load attest identity: {error}"))?
+        .ok_or_else(|| "identity row missing after live attest".to_owned())?;
+    if identity.login != "alice@acme.com" {
+        return Err(format!("live attest stored unexpected login: {identity:?}"));
+    }
+    let _ = team_id;
     Ok(())
 }
 

@@ -36,6 +36,7 @@ use crate::mesh::identity_change_guard::{
     AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE, AUTO_ENROLLMENT_TAILNET_CHANGED_CODE, BoundIdentity,
     CurrentIdentity, IdentityGuardVerdict, evaluate_identity_guard,
 };
+use crate::mesh::idp::IdentityAttestFrameV1;
 use crate::mesh::peer::{MESH_PEER_RECORD_SCHEMA_V1, MeshPeerRecord};
 use crate::mesh::policy::MeshPeerPolicyRegistry;
 use crate::mesh::repair_action_graph::{
@@ -1593,6 +1594,39 @@ pub async fn contact_authenticated_body_fetch(
     session.close();
     serde_json::from_value(reply.payload)
         .map_err(|error| format!("authenticated peer did not return body fetch: {error}"))
+}
+
+/// Apply a token-free identity-attest frame over an authenticated session.
+pub async fn contact_authenticated_identity_attest(
+    cx: &Cx,
+    address: std::net::SocketAddr,
+    config: InitiatorSessionConfig,
+    frame: &IdentityAttestFrameV1,
+) -> Result<IdentityAttestFrameV1, String> {
+    let mut session = connect_authenticated_session(cx, address, config)
+        .await
+        .map_err(|error| error.to_string())?;
+    let correlation_id = "identity-attest-1".to_owned();
+    let payload = serde_json::to_value(frame).map_err(|error| error.to_string())?;
+    session
+        .send_request(
+            cx,
+            SessionMessage {
+                correlation_id: correlation_id.clone(),
+                capability: FrameCapability::Extension("identity_attest".to_owned()),
+                requested_budget_ms: 10_000,
+                payload,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let reply = session
+        .receive_response(cx, &correlation_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    session.close();
+    serde_json::from_value(reply.payload)
+        .map_err(|error| format!("authenticated peer did not return identity attest: {error}"))
 }
 
 fn local_sync_round_request(
