@@ -5,6 +5,7 @@
 //! workspace that has no mesh rows yet.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::time::Duration;
 
 use asupersync::runtime::yield_now::yield_now;
@@ -12,7 +13,9 @@ use asupersync::time::sleep as asupersync_sleep;
 use asupersync::{CancelReason, Cx, Outcome};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{MeshLane, MeshLaneDecision, workspace_config};
+use crate::config::{
+    EnvVar, MeshCommandMode, MeshLane, MeshLaneDecision, read_env_var, workspace_config,
+};
 use crate::core::memory_scope::{
     MeshEventValidity, MeshImportDecisionInput, MeshImportDecisionKind,
     MeshOutboundPolicyDecisionInput, decide_mesh_import, parse_mesh_lane,
@@ -2199,6 +2202,147 @@ pub struct MeshForegroundSnapshot {
     pub degraded: Vec<MeshCliDegradation>,
 }
 
+impl MeshForegroundSnapshot {
+    /// Build a daemon/CLI-free snapshot from a workspace and database path.
+    pub fn from_paths(workspace_path: &Path, database_path: &Path) -> Result<Self, String> {
+        let (mesh_enabled, mode) = mesh_enabled_and_mode(workspace_path);
+        let workspace_path_string = workspace_path.display().to_string();
+        if !database_path.is_file() {
+            return Ok(Self {
+                workspace_id: String::new(),
+                workspace_path: workspace_path_string,
+                database_path: database_path.display().to_string(),
+                initialized: false,
+                mesh_enabled,
+                mode,
+                storage: MeshStorageCounts::default(),
+                peers: Vec::new(),
+                cursors: Vec::new(),
+                events: Vec::new(),
+                degraded: Vec::new(),
+            });
+        }
+        let connection = DbConnection::open_file(database_path)
+            .map_err(|error| format!("open mesh store: {error}"))?;
+        let workspace_id = resolve_workspace_id_from_path(&connection, workspace_path)?;
+        let storage = connection
+            .mesh_storage_status(&workspace_id)
+            .map_err(|error| format!("mesh storage status: {error}"))?;
+        let peers = connection
+            .list_mesh_peers(&workspace_id)
+            .map_err(|error| format!("list mesh peers: {error}"))?
+            .iter()
+            .map(Into::into)
+            .collect();
+        let cursors = connection
+            .list_mesh_peer_cursors(&workspace_id)
+            .map_err(|error| format!("list mesh cursors: {error}"))?
+            .iter()
+            .map(Into::into)
+            .collect();
+        let events = connection
+            .list_mesh_import_ledger_events_for_workspace(&workspace_id)
+            .map_err(|error| format!("list mesh import ledger: {error}"))?
+            .iter()
+            .map(Into::into)
+            .collect();
+        Ok(Self {
+            workspace_id,
+            workspace_path: workspace_path_string,
+            database_path: database_path.display().to_string(),
+            initialized: true,
+            mesh_enabled,
+            mode,
+            storage: MeshStorageCounts::from(&storage),
+            peers,
+            cursors,
+            events,
+            degraded: Vec::new(),
+        })
+    }
+}
+
+fn mesh_enabled_and_mode(workspace_path: &Path) -> (bool, String) {
+    let configured = workspace_config(workspace_path);
+    let enabled = read_env_var(EnvVar::MeshEnabled)
+        .as_deref()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or_else(|| {
+            configured
+                .as_ref()
+                .and_then(|config| config.mesh.enabled)
+                .unwrap_or(false)
+        });
+    let mode = read_env_var(EnvVar::MeshMode)
+        .as_deref()
+        .and_then(|value| value.trim().parse::<MeshCommandMode>().ok())
+        .or_else(|| configured.and_then(|config| config.mesh.command_mode))
+        .unwrap_or_default()
+        .as_str()
+        .to_owned();
+    (enabled, mode)
+}
+
+fn resolve_workspace_id_from_path(
+    connection: &DbConnection,
+    workspace_path: &Path,
+) -> Result<String, String> {
+    let primary = workspace_path.to_string_lossy().into_owned();
+    if let Some(workspace) = connection
+        .get_workspace_by_path(&primary)
+        .map_err(|error| format!("query workspace: {error}"))?
+    {
+        return Ok(workspace.id);
+    }
+    let canonical = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let canonical_str = canonical.to_string_lossy().into_owned();
+    if canonical_str != primary
+        && let Some(workspace) = connection
+            .get_workspace_by_path(&canonical_str)
+            .map_err(|error| format!("query workspace: {error}"))?
+    {
+        return Ok(workspace.id);
+    }
+    Err(format!("workspace row missing for {primary}"))
+}
+
+/// One bounded sync tick for the team steward / daemon. Same supervisor as
+/// `ee mesh sync --once`; no CLI stdout.
+pub fn run_mesh_sync_once_from_paths(
+    workspace_path: &Path,
+    database_path: &Path,
+) -> Result<MeshSyncSupervisorReport, String> {
+    let snapshot = MeshForegroundSnapshot::from_paths(workspace_path, database_path)?;
+    let options = MeshSyncSupervisorOptions::default();
+    let runtime =
+        crate::core::build_cli_runtime().map_err(|error| format!("mesh sync runtime: {error}"))?;
+    let join = runtime
+        .handle()
+        .try_spawn(async move {
+            let Some(cx) = Cx::current() else {
+                return Outcome::Err("mesh sync started without an ambient Cx".to_owned());
+            };
+            run_mesh_sync_supervisor_supervised(&cx, &snapshot, &options).await
+        })
+        .map_err(|error| format!("spawn mesh sync: {error}"))?;
+    match runtime.block_on(join) {
+        Outcome::Ok(report) => Ok(report),
+        Outcome::Err(message) => Err(message),
+        Outcome::Cancelled(reason) => Err(format!(
+            "mesh sync cancelled: {}",
+            crate::core::outcome::cancel_message(&reason)
+        )),
+        Outcome::Panicked(payload) => Err(format!("mesh sync panicked: {payload}")),
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MeshCheckedExportArtifact {
     pub artifact: MeshExportArtifact,
@@ -3401,7 +3545,8 @@ mod tests {
         apply_outbound_export_policy, auto_enrollment_status_for_snapshot,
         canonical_mesh_event_hash, canonicalize_mesh_event_json, local_sync_round_request,
         mesh_event_id_from_hash, persist_sync_round_events, project_canonical_mesh_event,
-        run_mesh_sync_supervisor_supervised, run_mesh_sync_supervisor_supervised_with_transport,
+        run_mesh_sync_once_from_paths, run_mesh_sync_supervisor_supervised,
+        run_mesh_sync_supervisor_supervised_with_transport,
     };
     use crate::config::ConfigFile;
     use crate::core::tailscale_probe::TailscaleLocalReport;
@@ -3411,6 +3556,40 @@ mod tests {
         MeshPeerEndpoint, MeshPeerHandshake, MeshPeerKey, MeshPeerRecord, MeshPeerState,
     };
     use crate::mesh::policy::MeshPeerPolicyRegistry;
+
+    #[test]
+    fn snapshot_from_paths_loads_peers_and_sync_once_stays_deferred_when_mesh_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("ee.db");
+        let connection = DbConnection::open_file(&database).expect("open");
+        connection.migrate().expect("migrate");
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &CreateWorkspaceInput {
+                    path: dir.path().display().to_string(),
+                    name: Some("steward-sync".to_owned()),
+                },
+            )
+            .expect("workspace");
+        connection
+            .upsert_mesh_peer(&crate::db::UpsertMeshPeerInput {
+                workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                peer_id: "peer_stewardsync0000000001".to_owned(),
+                origin_node_id: "node_stewardsync0000000001".to_owned(),
+                display_name: Some("peer".to_owned()),
+                policy_summary_json: None,
+                enabled: true,
+                last_seen_at: Some("2026-08-14T00:00:00Z".to_owned()),
+            })
+            .expect("peer");
+        let snapshot = MeshForegroundSnapshot::from_paths(dir.path(), &database).expect("snapshot");
+        assert!(snapshot.initialized);
+        assert_eq!(snapshot.peers.len(), 1);
+        assert!(!snapshot.mesh_enabled);
+        let report = run_mesh_sync_once_from_paths(dir.path(), &database).expect("sync");
+        assert!(!report.contacted_peers);
+    }
 
     /// A `[[mesh.peer_policies]]` entry that allows metadata for `peer_target`
     /// but denies the body lane — the canonical body:deny export policy.

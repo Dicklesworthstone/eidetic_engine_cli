@@ -6371,6 +6371,17 @@ impl ManualRunner {
                 );
             }
         };
+        let mut sync_contacted = false;
+        let mut sync_error = None;
+        if !self.options.dry_run && plan.ran_sync {
+            match crate::mesh::foreground_cli::run_mesh_sync_once_from_paths(
+                &workspace_path,
+                &database_path,
+            ) {
+                Ok(report) => sync_contacted = report.contacted_peers,
+                Err(error) => sync_error = Some(error),
+            }
+        }
         budget.record(ResourceType::Items, 1);
         budget.record(ResourceType::TimeMs, millis_to_u64(started.elapsed()));
         (
@@ -6385,6 +6396,9 @@ impl ManualRunner {
                 "outcome": plan.outcome,
                 "reason": plan.reason,
                 "wouldSync": plan.ran_sync,
+                "syncAttempted": !self.options.dry_run && plan.ran_sync,
+                "syncContacted": sync_contacted,
+                "syncError": sync_error,
                 "paused": plan.paused,
                 "activeMemberCount": plan.active_member_count,
                 "workspace": workspace_path.display().to_string(),
