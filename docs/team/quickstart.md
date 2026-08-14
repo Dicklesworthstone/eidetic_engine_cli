@@ -67,11 +67,14 @@ ee team idp attest --id-token - --jwks-url "$JWKS" --ca-bundle "$PINNED_CA" --wo
 
 ## Operations
 
-Foreground steward is enough for a two-node lab. User-scoped install is
-optional and never requires root.
+Foreground steward is enough for a two-node lab. After join, inbound
+listen is `ee mesh hello-responder run --workspace .` (loads enrolled
+peers). User-scoped install is optional and never requires root; the
+loaded daemon starts that owner when mesh is on and peers exist.
 
 ```bash
 ee team steward once --workspace . --json
+ee mesh hello-responder run --workspace . --json
 ee team projects reconcile --workspace . --json
 ee team revoke --all-before-floor --workspace . --json
 ee daemon install --confirm --json          # write launchd / systemd --user unit

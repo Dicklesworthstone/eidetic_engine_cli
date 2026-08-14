@@ -110,6 +110,13 @@ future changelog pass expands those rows into full capability sections.
   routed remotes instead of skipping anything that is not loopback.
   `ee team invite --wait --resume <invite-id>` continues a pending
   waiter without re-emitting the secret.
+  `ee mesh hello-responder run --workspace .` loads enrolled pair-key
+  peers when `--peer` is omitted. `ee daemon --foreground` starts that
+  inbound owner (not `--once`) when mesh is on and peers exist.
+  Team-join enroll uses `tailnet-team-join`; resolve binds it to the
+  current LocalAPI tailnet and allows inbound EventFetch without a
+  formal lane-grant generation. BodyFetch still requires durable
+  Body-lane Allow.
   `ee team steward once` is the canonical steward verb (`run-once`
   remains an alias). Windows inbound listen stays client-only; the
   `HardenedWindows` SID/DACL/reparse adapter compiles but has no

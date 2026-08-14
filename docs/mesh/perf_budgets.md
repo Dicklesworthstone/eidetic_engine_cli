@@ -40,6 +40,8 @@ Host: `ubuntu@38.242.134.66`, isolated tree
 | Live TCP identity_attest | `production_broker_applies_authenticated_identity_attest_without_bearer` | 88.42s (includes compile of loopback test) | 0 |
 | Inviter enrolls joiner from accept | `enroll_joiner_from_accept_uses_source_ip_and_advertised_port` | 12m 31s compile + 56.40s test | 0 |
 | Live TCP join enrolls joiner peer | `serve_one_bootstrap_join_redeems_and_records_the_joiner` | 11m 00s compile + 107.21s test | 0 |
+| Plan inbound routes from enroll | `enroll_team_pair_peer_uses_the_pair_key_handle` | 13m 13s compile + 70.39s test | 0 |
+| Missing store skips responder spawn | `spawn_team_responder_owner_skips_missing_store` | 16.89s compile + 0.20s test | 0 |
 
 Join, signed relay, and body fetch were previously proven on the same
 host in this campaign (live TCP hello, sync_round, join, BodyFetch).
