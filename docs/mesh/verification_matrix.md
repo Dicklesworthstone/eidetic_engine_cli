@@ -210,16 +210,14 @@ This is a live Unix EE-to-EE ledger, not a bead-closing ceremony.
 | T6.1 steward | **Proven** | Isolated 2026-08-14: membership execute 51.59s; daemon sync tick; project rematerialize. `execute_team_steward_once_promotes_orphaned_next_pair_key` 61.46s exit 0: Next-without-Current is promoted; Next-beside-Current stays deferred. | Live contact still needs mesh enabled + reachable peers |
 | T6.2 daemon install | **Proven on Linux and macOS user supervisors** | Linux: `systemctl --user start ee-team-confed-proof.service` → `ActiveState=active` at 2026-08-14T01:47:44Z. macOS: `launchctl bootstrap gui/501/ai.eideticengine.ee-team-confed-proof` → `active count = 1` / `state = xpcproxy` at 2026-08-14T02:14:58Z. Both units quarantined by rename. | Real `ee` binary KeepAlive service was not left running; Windows remains client-only |
 | T6.3 admission | **Proven** | Authenticated serve folds decisions into a broker-owned per-peer map and persists a V118 snapshot. Isolated 2026-08-14: `persisted_admission_snapshot_warns_doctor_and_status` 56.71s exit 0; inspect 56.12s exit 0. Status/doctor report throttled/exhausted counts and coalesced exhaustion after the broker exits. | Windows inbound listen remains out of scope |
-| T6.4 doctor | **Proven** | Isolated 2026-08-14: floor 46.91s, inspect 50.86s, removal rematerialize 50.80s, `removal_acknowledgement_matrix_stays_pending_until_audience_applies` 55.88s, all exit 0. V117 persists the removal audience; doctor warns on pending acks and does not claim bounded fanout. Steward advances acks from peer cursors. | Windows inbound listen remains out of scope |
+| T6.4 doctor | **Proven** | Isolated 2026-08-14: `inspect_team_health_reports_no_team_then_ok_then_paused` 65.39s exit 0. `broker_port` now compares genesis hello port to `EE_MESH_HELLO_PORT`; mismatch is a warning. `whois` no longer claims a live Tailscale probe. | Windows inbound listen remains out of scope |
 | T6.5 budgets | **Proven** | `ee team status` emits `budgets` (`ee.team.budgets.v1`) naming join event-batch count, signed-relay batch bytes, body fetch bytes, and index jobs/round. Isolated 2026-08-14: `team_confed_budget_profile_names_join_relay_body_and_index_caps` 53.51s exit 0. At-cap EventBatch is allowed; +1 is rejected with `local_tier1_unaffected`. | Criterion `[[bench]]` remains opt-in; compile cost dominates |
 | T6.6 docs | **Landed** | `docs/team/quickstart.md`, `trusted_vs_contractor.md`, `docs/agent-ux/team.md`, CHANGELOG | — |
 | T7.1–T7.6 IdP | **Proven** | Fake-IdP HTTPS RS256 1.40s; live TCP identity_attest 88.42s compile+test | No production IdP vendor soak |
 | T7 Windows / client-only | **Fail-closed** | Same as T5.9 | — |
 
 Campaign is **done as live Unix EE-to-EE capability**, including
-T5.10, T6.1 orphaned Next pair promotion, T6.2, T6.3 V118
-admission snapshots, T6.4 V117 removal acks, and T6.5
-`ee.team.budgets.v1`. Isolated 2026-08-14T16:38–17:07Z: pair
-promote 61.46s, removal rematerialize 54.48s, all exit 0.
+T5.10, T6.1–T6.5, V117/V118, and a real `broker_port` doctor
+row. Isolated 2026-08-14T17:14–17:25Z: inspect 65.39s exit 0.
 Windows inbound listen and a Windows-host DACL soak remain out
 of scope. Do not self-close beads from this ledger.
