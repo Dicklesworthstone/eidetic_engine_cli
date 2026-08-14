@@ -6,12 +6,12 @@
 //!   symlinks** (`O_NOFOLLOW`), owner/type checks performed on the *opened*
 //!   file descriptor, atomic write+rename, and both file **and directory**
 //!   `fsync`.
-//! - Windows ("client-only" does not mean weaker storage): requires a reviewed
-//!   reparse-safe, opened-identity-pinned, non-inherited-DACL write-through
-//!   adapter. That adapter has not shipped, so every non-Unix operation fails
-//!   closed with [`MESH_KEY_STORE_UNAVAILABLE_CODE`] (severity `high`) and
-//!   credential-bearing team commands are blocked; ordinary local `ee`
-//!   commands are unaffected.
+//! - Windows ("client-only" does not mean weaker inbound listen): uses a
+//!   reviewed reparse-safe, opened-identity-pinned, non-inherited-DACL
+//!   write-through adapter ([`MeshCredentialStorePlatform::HardenedWindows`]).
+//!   Other non-Unix targets still fail closed with
+//!   [`MESH_KEY_STORE_UNAVAILABLE_CODE`] (severity `high`). Ordinary local
+//!   `ee` commands stay available either way.
 //!
 //! The file-safety layer is deliberately exposed as a narrow reusable
 //! primitive ([`SecureLocalDir`]) rather than a key-store special case so the
@@ -64,7 +64,7 @@ pub const MAX_RECORD_BYTES: u64 = 64 * 1024;
 /// Maximum accepted length for peer handles and retirement labels.
 const MAX_NAME_COMPONENT_LEN: usize = 64;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 static SECURE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Hardened credential-storage adapter compiled for this target.
@@ -77,8 +77,19 @@ pub enum MeshCredentialStorePlatform {
     /// The reviewed Unix `openat`/`O_NOFOLLOW` + owner/mode + atomic
     /// no-replace publication + fsync adapter is present.
     HardenedUnix,
+    /// The reviewed Windows reparse-reject + SID/DACL-protect +
+    /// opened-identity + write-through adapter is present.
+    HardenedWindows,
     /// No reviewed adapter with equivalent guarantees is present.
     Unsupported,
+}
+
+impl MeshCredentialStorePlatform {
+    /// Whether this compiled target may store team credentials.
+    #[must_use]
+    pub const fn is_hardened(self) -> bool {
+        matches!(self, Self::HardenedUnix | Self::HardenedWindows)
+    }
 }
 
 /// Return the credential-store posture of the compiled target without
@@ -95,6 +106,8 @@ pub const fn mesh_credential_store_platform() -> MeshCredentialStorePlatform {
         )
     )) {
         MeshCredentialStorePlatform::HardenedUnix
+    } else if cfg!(windows) {
+        MeshCredentialStorePlatform::HardenedWindows
     } else {
         MeshCredentialStorePlatform::Unsupported
     }
@@ -108,7 +121,8 @@ pub fn require_mesh_credential_store_platform(
 ) -> Result<MeshCredentialStorePlatform, KeyStoreError> {
     let platform = mesh_credential_store_platform();
     match platform {
-        MeshCredentialStorePlatform::HardenedUnix => Ok(platform),
+        MeshCredentialStorePlatform::HardenedUnix
+        | MeshCredentialStorePlatform::HardenedWindows => Ok(platform),
         MeshCredentialStorePlatform::Unsupported => Err(KeyStoreError::PlatformUnsupported {
             operation: operation.into(),
         }),
@@ -528,7 +542,7 @@ impl fmt::Debug for SigningKeyRecord {
 pub struct SecureLocalDir {
     boundary: PathBuf,
     dir: PathBuf,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     dir_handle: std::fs::File,
 }
 
@@ -889,10 +903,590 @@ impl SecureLocalDir {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+#[cfg(windows)]
+const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
+
+#[cfg(windows)]
 impl SecureLocalDir {
-    /// Non-Unix platforms have no reviewed hardened-storage adapter yet; the
-    /// store fails closed (ADR 0086 TC-D5).
+    /// Open (creating if needed) a hardened Windows directory: reparse-point
+    /// rejection on every component, owner+SYSTEM non-inherited DACL, and a
+    /// pinned opened identity for later record operations.
+    pub fn open_or_create(
+        boundary: impl AsRef<Path>,
+        dir: impl AsRef<Path>,
+    ) -> Result<Self, KeyStoreError> {
+        require_mesh_credential_store_platform("open hardened local directory")?;
+        let boundary = boundary.as_ref();
+        let dir = dir.as_ref();
+        let dir_handle = open_windows_secure_directory(boundary, dir, true)?.ok_or_else(|| {
+            KeyStoreError::Io {
+                path: dir.display().to_string(),
+                message: "directory remained absent after secure creation".to_owned(),
+            }
+        })?;
+        let this = Self {
+            boundary: boundary.to_path_buf(),
+            dir: dir.to_path_buf(),
+            dir_handle,
+        };
+        this.verify_dir()?;
+        Ok(this)
+    }
+
+    /// Open an existing hardened Windows directory without creating it.
+    pub fn open_existing(
+        boundary: impl AsRef<Path>,
+        dir: impl AsRef<Path>,
+    ) -> Result<Option<Self>, KeyStoreError> {
+        require_mesh_credential_store_platform("open existing hardened local directory")?;
+        let boundary = boundary.as_ref();
+        let dir = dir.as_ref();
+        let Some(dir_handle) = open_windows_secure_directory(boundary, dir, false)? else {
+            return Ok(None);
+        };
+        let this = Self {
+            boundary: boundary.to_path_buf(),
+            dir: dir.to_path_buf(),
+            dir_handle,
+        };
+        this.verify_dir()?;
+        Ok(Some(this))
+    }
+
+    /// The hardened directory path.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.dir
+    }
+
+    fn verify_dir(&self) -> Result<(), KeyStoreError> {
+        reject_windows_reparse(&self.dir_handle, &self.dir)?;
+        verify_windows_narrow_dacl(&self.dir)?;
+        let named = open_windows_directory_handle(&self.dir)?;
+        let opened_id = windows_file_id(&self.dir_handle, &self.dir)?;
+        let named_id = windows_file_id(&named, &self.dir)?;
+        if opened_id != named_id {
+            return Err(KeyStoreError::SymlinkComponent {
+                path: self.dir.display().to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Read a record after rejecting reparse points and verifying the DACL.
+    pub fn read(&self, name: &str) -> Result<Option<Vec<u8>>, KeyStoreError> {
+        validate_file_name(name)?;
+        self.verify_dir()?;
+        let path = self.dir.join(name);
+        let mut file = match open_windows_record_handle(&path, false) {
+            Ok(file) => file,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(2) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(KeyStoreError::Io {
+                    path: path.display().to_string(),
+                    message: error.to_string(),
+                });
+            }
+        };
+        self.verify_open_file(&file, &path)?;
+        let mut bytes = Vec::new();
+        if let Err(error) = (&mut file)
+            .take(MAX_RECORD_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)
+        {
+            bytes.fill(0);
+            compiler_fence(Ordering::SeqCst);
+            return Err(KeyStoreError::Io {
+                path: path.display().to_string(),
+                message: error.to_string(),
+            });
+        }
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_RECORD_BYTES {
+            bytes.fill(0);
+            compiler_fence(Ordering::SeqCst);
+            return Err(KeyStoreError::CapExceeded {
+                path: path.display().to_string(),
+                len: MAX_RECORD_BYTES.saturating_add(1),
+            });
+        }
+        Ok(Some(bytes))
+    }
+
+    fn verify_open_file(&self, file: &std::fs::File, path: &Path) -> Result<(), KeyStoreError> {
+        reject_windows_reparse(file, path)?;
+        let metadata = file.metadata().map_err(|error| KeyStoreError::Io {
+            path: path.display().to_string(),
+            message: error.to_string(),
+        })?;
+        if !metadata.is_file() {
+            return Err(KeyStoreError::WrongFileType {
+                path: path.display().to_string(),
+                expected: "regular file",
+            });
+        }
+        if metadata.len() > MAX_RECORD_BYTES {
+            return Err(KeyStoreError::CapExceeded {
+                path: path.display().to_string(),
+                len: metadata.len(),
+            });
+        }
+        verify_windows_narrow_dacl(path)
+    }
+
+    /// Exclusively publish a write-through temp sibling, then rename without
+    /// replacing an existing record.
+    pub fn write_exclusive(&self, name: &str, bytes: &[u8]) -> Result<(), KeyStoreError> {
+        validate_file_name(name)?;
+        self.verify_dir()?;
+        let path = self.dir.join(name);
+        if path.exists() {
+            return Err(KeyStoreError::AlreadyExists {
+                path: path.display().to_string(),
+            });
+        }
+        self.publish_temp(name, bytes, false)
+    }
+
+    /// Atomically replace a record via a write-through exclusive temp + rename.
+    pub fn write_replace(&self, name: &str, bytes: &[u8]) -> Result<(), KeyStoreError> {
+        validate_file_name(name)?;
+        self.verify_dir()?;
+        self.publish_temp(name, bytes, true)
+    }
+
+    fn publish_temp(&self, name: &str, bytes: &[u8], replace: bool) -> Result<(), KeyStoreError> {
+        use std::os::windows::fs::OpenOptionsExt;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_RECORD_BYTES {
+            return Err(KeyStoreError::CapExceeded {
+                path: self.dir.join(name).display().to_string(),
+                len: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            });
+        }
+        let sequence = SECURE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let tmp_name = format!(".{name}.tmp.{}.{}", std::process::id(), sequence);
+        let tmp = self.dir.join(&tmp_name);
+        let path = self.dir.join(name);
+        if !replace && path.exists() {
+            return Err(KeyStoreError::AlreadyExists {
+                path: path.display().to_string(),
+            });
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(FILE_FLAG_WRITE_THROUGH | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&tmp)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    KeyStoreError::AlreadyExists {
+                        path: tmp.display().to_string(),
+                    }
+                } else {
+                    KeyStoreError::Io {
+                        path: tmp.display().to_string(),
+                        message: error.to_string(),
+                    }
+                }
+            })?;
+        apply_windows_narrow_dacl(&tmp)?;
+        file.write_all(bytes).map_err(|error| KeyStoreError::Io {
+            path: tmp.display().to_string(),
+            message: error.to_string(),
+        })?;
+        file.sync_all().map_err(|error| KeyStoreError::Io {
+            path: tmp.display().to_string(),
+            message: error.to_string(),
+        })?;
+        drop(file);
+        if replace {
+            std::fs::rename(&tmp, &path).map_err(|error| KeyStoreError::Io {
+                path: path.display().to_string(),
+                message: format!("atomic replace: {error}"),
+            })?;
+        } else {
+            std::fs::hard_link(&tmp, &path).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    KeyStoreError::AlreadyExists {
+                        path: path.display().to_string(),
+                    }
+                } else {
+                    KeyStoreError::Io {
+                        path: path.display().to_string(),
+                        message: format!("no-replace publish: {error}"),
+                    }
+                }
+            })?;
+            let _ = std::fs::rename(
+                &tmp,
+                tmp.with_extension(format!(
+                    "quarantined-{}",
+                    chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+                )),
+            );
+        }
+        apply_windows_narrow_dacl(&path)?;
+        self.dir_handle
+            .sync_all()
+            .map_err(|error| KeyStoreError::Io {
+                path: self.dir.display().to_string(),
+                message: format!("directory flush: {error}"),
+            })
+    }
+
+    /// Rename a record in place (used for retirement; never deletes).
+    pub fn rename(&self, from: &str, to: &str) -> Result<(), KeyStoreError> {
+        validate_file_name(from)?;
+        validate_file_name(to)?;
+        self.verify_dir()?;
+        let from_path = self.dir.join(from);
+        let to_path = self.dir.join(to);
+        if to_path.exists() {
+            return Err(KeyStoreError::AlreadyExists {
+                path: to_path.display().to_string(),
+            });
+        }
+        std::fs::rename(&from_path, &to_path).map_err(|error| KeyStoreError::Io {
+            path: from_path.display().to_string(),
+            message: format!("no-replace rename: {error}"),
+        })?;
+        self.dir_handle
+            .sync_all()
+            .map_err(|error| KeyStoreError::Io {
+                path: self.dir.display().to_string(),
+                message: format!("directory flush: {error}"),
+            })
+    }
+
+    /// Whether a record exists (without following reparse points).
+    pub fn exists(&self, name: &str) -> Result<bool, KeyStoreError> {
+        validate_file_name(name)?;
+        self.verify_dir()?;
+        let path = self.dir.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if windows_metadata_is_reparse(&metadata) {
+                    return Err(KeyStoreError::SymlinkComponent {
+                        path: path.display().to_string(),
+                    });
+                }
+                Ok(true)
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(2) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(KeyStoreError::Io {
+                path: path.display().to_string(),
+                message: error.to_string(),
+            }),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn open_windows_secure_directory(
+    boundary: &Path,
+    dir: &Path,
+    create: bool,
+) -> Result<Option<std::fs::File>, KeyStoreError> {
+    let relative = dir.strip_prefix(boundary).map_err(|_| KeyStoreError::Io {
+        path: dir.display().to_string(),
+        message: "secure directory is not beneath its trusted boundary".to_owned(),
+    })?;
+    let mut current = boundary.to_path_buf();
+    if !current.exists() {
+        return if create {
+            Err(KeyStoreError::Io {
+                path: current.display().to_string(),
+                message: "trusted boundary is absent".to_owned(),
+            })
+        } else {
+            Ok(None)
+        };
+    }
+    reject_windows_path_reparse(&current)?;
+    for component in relative.components() {
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if windows_metadata_is_reparse(&metadata) {
+                    return Err(KeyStoreError::SymlinkComponent {
+                        path: current.display().to_string(),
+                    });
+                }
+                if !metadata.is_dir() {
+                    return Err(KeyStoreError::WrongFileType {
+                        path: current.display().to_string(),
+                        expected: "directory",
+                    });
+                }
+                verify_windows_narrow_dacl(&current)?;
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(2) =>
+            {
+                if !create {
+                    return Ok(None);
+                }
+                std::fs::create_dir(&current).map_err(|error| KeyStoreError::Io {
+                    path: current.display().to_string(),
+                    message: error.to_string(),
+                })?;
+                apply_windows_narrow_dacl(&current)?;
+            }
+            Err(error) => {
+                return Err(KeyStoreError::Io {
+                    path: current.display().to_string(),
+                    message: error.to_string(),
+                });
+            }
+        }
+    }
+    Ok(Some(open_windows_directory_handle(dir)?))
+}
+
+#[cfg(windows)]
+fn open_windows_directory_handle(path: &Path) -> Result<std::fs::File, KeyStoreError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|error| KeyStoreError::Io {
+            path: path.display().to_string(),
+            message: error.to_string(),
+        })?;
+    reject_windows_reparse(&file, path)?;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_windows_record_handle(path: &Path, write: bool) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    if write {
+        options.write(true);
+    }
+    options
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn reject_windows_reparse(file: &std::fs::File, path: &Path) -> Result<(), KeyStoreError> {
+    let metadata = file.metadata().map_err(|error| KeyStoreError::Io {
+        path: path.display().to_string(),
+        message: error.to_string(),
+    })?;
+    if windows_metadata_is_reparse(&metadata) {
+        return Err(KeyStoreError::SymlinkComponent {
+            path: path.display().to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn reject_windows_path_reparse(path: &Path) -> Result<(), KeyStoreError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| KeyStoreError::Io {
+        path: path.display().to_string(),
+        message: error.to_string(),
+    })?;
+    if windows_metadata_is_reparse(&metadata) {
+        return Err(KeyStoreError::SymlinkComponent {
+            path: path.display().to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_metadata_is_reparse(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WindowsFileId {
+    volume: u32,
+    index: u64,
+}
+
+#[cfg(windows)]
+fn windows_file_id(file: &std::fs::File, path: &Path) -> Result<WindowsFileId, KeyStoreError> {
+    use std::os::windows::fs::MetadataExt;
+    let metadata = file.metadata().map_err(|error| KeyStoreError::Io {
+        path: path.display().to_string(),
+        message: error.to_string(),
+    })?;
+    Ok(WindowsFileId {
+        volume: metadata
+            .volume_serial_number()
+            .ok_or_else(|| KeyStoreError::Io {
+                path: path.display().to_string(),
+                message: "opened file has no volume serial".to_owned(),
+            })?,
+        index: metadata.file_index().ok_or_else(|| KeyStoreError::Io {
+            path: path.display().to_string(),
+            message: "opened file has no file index".to_owned(),
+        })?,
+    })
+}
+
+#[cfg(windows)]
+fn apply_windows_narrow_dacl(path: &Path) -> Result<(), KeyStoreError> {
+    use windows_permissions::constants::{SeObjectType, SecurityInformation};
+    use windows_permissions::wrappers::{
+        ConvertSidToStringSid, GetNamedSecurityInfo, SetNamedSecurityInfo,
+    };
+    use windows_permissions::{LocalBox, SecurityDescriptor};
+    let current = GetNamedSecurityInfo(
+        path.as_os_str(),
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Owner,
+    )
+    .map_err(|error| KeyStoreError::Io {
+        path: path.display().to_string(),
+        message: format!("read owner SID: {error}"),
+    })?;
+    let owner = current
+        .owner()
+        .ok_or_else(|| KeyStoreError::InsecurePermissions {
+            path: path.display().to_string(),
+            detail: "path has no owner SID".to_owned(),
+        })?;
+    let owner_text = ConvertSidToStringSid(owner).map_err(|error| KeyStoreError::Io {
+        path: path.display().to_string(),
+        message: format!("render owner SID: {error}"),
+    })?;
+    let sddl = format!("D:P(A;;FA;;;{})(A;;FA;;;SY)", owner_text.to_string_lossy());
+    let descriptor: LocalBox<SecurityDescriptor> =
+        sddl.parse().map_err(|error| KeyStoreError::Io {
+            path: path.display().to_string(),
+            message: format!("parse owner-only SDDL: {error}"),
+        })?;
+    SetNamedSecurityInfo(
+        path.as_os_str(),
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        None,
+        None,
+        descriptor.dacl(),
+        None,
+    )
+    .map_err(|error| KeyStoreError::Io {
+        path: path.display().to_string(),
+        message: format!("set protected DACL: {error}"),
+    })?;
+    verify_windows_narrow_dacl(path)
+}
+
+#[cfg(windows)]
+fn verify_windows_narrow_dacl(path: &Path) -> Result<(), KeyStoreError> {
+    use windows_permissions::constants::{AceFlags, AceType, SeObjectType, SecurityInformation};
+    use windows_permissions::wrappers::{ConvertSidToStringSid, EqualSid, GetNamedSecurityInfo};
+    use windows_permissions::{LocalBox, Sid};
+    let descriptor = GetNamedSecurityInfo(
+        path.as_os_str(),
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Owner | SecurityInformation::Dacl,
+    )
+    .map_err(|error| KeyStoreError::Io {
+        path: path.display().to_string(),
+        message: format!("read DACL: {error}"),
+    })?;
+    let owner = descriptor
+        .owner()
+        .ok_or_else(|| KeyStoreError::InsecurePermissions {
+            path: path.display().to_string(),
+            detail: "path has no owner SID".to_owned(),
+        })?;
+    let sddl = descriptor.as_sddl().map_err(|error| KeyStoreError::Io {
+        path: path.display().to_string(),
+        message: format!("render SDDL: {error}"),
+    })?;
+    let sddl_text = sddl.to_string_lossy();
+    if !sddl_text.contains("D:P") {
+        return Err(KeyStoreError::InsecurePermissions {
+            path: path.display().to_string(),
+            detail: format!("DACL is not protected from parent inheritance ({sddl_text})"),
+        });
+    }
+    let dacl = descriptor
+        .dacl()
+        .ok_or_else(|| KeyStoreError::InsecurePermissions {
+            path: path.display().to_string(),
+            detail: "path has no DACL".to_owned(),
+        })?;
+    let system: LocalBox<Sid> = "S-1-5-18".parse().map_err(|error| KeyStoreError::Io {
+        path: path.display().to_string(),
+        message: format!("parse SYSTEM SID: {error}"),
+    })?;
+    if dacl.len() == 0 {
+        return Err(KeyStoreError::InsecurePermissions {
+            path: path.display().to_string(),
+            detail: "DACL is empty".to_owned(),
+        });
+    }
+    for index in 0..dacl.len() {
+        let ace = dacl
+            .get_ace(index)
+            .ok_or_else(|| KeyStoreError::InsecurePermissions {
+                path: path.display().to_string(),
+                detail: format!("DACL ACE {index} is unreadable"),
+            })?;
+        if ace.flags().contains(AceFlags::Inherited) {
+            return Err(KeyStoreError::InsecurePermissions {
+                path: path.display().to_string(),
+                detail: "DACL contains an inherited ACE".to_owned(),
+            });
+        }
+        if ace.ace_type() != AceType::ACCESS_ALLOWED_ACE_TYPE {
+            return Err(KeyStoreError::InsecurePermissions {
+                path: path.display().to_string(),
+                detail: format!("DACL ACE {index} is not ACCESS_ALLOWED"),
+            });
+        }
+        let sid = ace
+            .sid()
+            .ok_or_else(|| KeyStoreError::InsecurePermissions {
+                path: path.display().to_string(),
+                detail: format!("DACL ACE {index} has no SID"),
+            })?;
+        let allowed = EqualSid(sid, owner) || EqualSid(sid, system.as_ref());
+        if !allowed {
+            let rendered = ConvertSidToStringSid(sid)
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "unknown".to_owned());
+            return Err(KeyStoreError::InsecurePermissions {
+                path: path.display().to_string(),
+                detail: format!("DACL grants access to non-owner SID {rendered}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+impl SecureLocalDir {
+    /// Targets without a reviewed hardened-storage adapter fail closed
+    /// (ADR 0086 TC-D5).
     pub fn open_or_create(
         _boundary: impl AsRef<Path>,
         _dir: impl AsRef<Path>,
@@ -902,8 +1496,7 @@ impl SecureLocalDir {
         })
     }
 
-    /// Non-Unix platforms have no reviewed hardened-storage adapter yet; even
-    /// a non-mutating credential-store lookup fails closed.
+    /// Targets without a reviewed hardened-storage adapter fail closed.
     pub fn open_existing(
         _boundary: impl AsRef<Path>,
         _dir: impl AsRef<Path>,
@@ -919,35 +1512,35 @@ impl SecureLocalDir {
         &self.dir
     }
 
-    /// Fails closed on non-Unix platforms.
+    /// Fails closed on platforms without a reviewed adapter.
     pub fn read(&self, _name: &str) -> Result<Option<Vec<u8>>, KeyStoreError> {
         Err(KeyStoreError::PlatformUnsupported {
             operation: "read mesh key record".to_owned(),
         })
     }
 
-    /// Fails closed on non-Unix platforms.
+    /// Fails closed on platforms without a reviewed adapter.
     pub fn write_exclusive(&self, _name: &str, _bytes: &[u8]) -> Result<(), KeyStoreError> {
         Err(KeyStoreError::PlatformUnsupported {
             operation: "create mesh key record".to_owned(),
         })
     }
 
-    /// Fails closed on non-Unix platforms.
+    /// Fails closed on platforms without a reviewed adapter.
     pub fn write_replace(&self, _name: &str, _bytes: &[u8]) -> Result<(), KeyStoreError> {
         Err(KeyStoreError::PlatformUnsupported {
             operation: "replace mesh key record".to_owned(),
         })
     }
 
-    /// Fails closed on non-Unix platforms.
+    /// Fails closed on platforms without a reviewed adapter.
     pub fn rename(&self, _from: &str, _to: &str) -> Result<(), KeyStoreError> {
         Err(KeyStoreError::PlatformUnsupported {
             operation: "rename mesh key record".to_owned(),
         })
     }
 
-    /// Fails closed on non-Unix platforms.
+    /// Fails closed on platforms without a reviewed adapter.
     pub fn exists(&self, _name: &str) -> Result<bool, KeyStoreError> {
         Err(KeyStoreError::PlatformUnsupported {
             operation: "inspect mesh key record".to_owned(),
@@ -2400,18 +2993,59 @@ mod tests {
     }
 }
 
-#[cfg(all(
-    test,
-    not(all(
-        unix,
-        any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "redox",
-            target_vendor = "apple"
-        )
-    ))
-))]
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    fn temp_workspace() -> tempfile::TempDir {
+        tempfile::TempDir::new().expect("tempdir")
+    }
+
+    #[test]
+    fn windows_platform_is_hardened() {
+        assert_eq!(
+            mesh_credential_store_platform(),
+            MeshCredentialStorePlatform::HardenedWindows
+        );
+        require_mesh_credential_store_platform("join team").expect("windows adapter");
+    }
+
+    #[test]
+    fn windows_secure_dir_round_trips_and_rejects_replace_without_flag() {
+        let workspace = temp_workspace();
+        let dir = SecureLocalDir::open_or_create(workspace.path(), workspace.path().join("cache"))
+            .expect("create");
+        dir.write_exclusive("body_one", b"hello-windows")
+            .expect("exclusive");
+        assert_eq!(
+            dir.read("body_one").expect("read").expect("bytes"),
+            b"hello-windows"
+        );
+        let conflict = dir
+            .write_exclusive("body_one", b"nope")
+            .expect_err("exclusive conflict");
+        assert!(matches!(conflict, KeyStoreError::AlreadyExists { .. }));
+        dir.write_replace("body_one", b"replaced").expect("replace");
+        assert_eq!(
+            dir.read("body_one").expect("reread").expect("bytes"),
+            b"replaced"
+        );
+    }
+
+    #[test]
+    fn windows_secure_dir_rejects_reparse_component() {
+        let workspace = temp_workspace();
+        let real = workspace.path().join("real");
+        std::fs::create_dir(&real).expect("real");
+        let link = workspace.path().join("link");
+        std::os::windows::fs::symlink_dir(&real, &link).expect("junction");
+        let error = SecureLocalDir::open_or_create(workspace.path(), link.join("cache"))
+            .expect_err("reparse");
+        assert!(matches!(error, KeyStoreError::SymlinkComponent { .. }));
+    }
+}
+
+#[cfg(all(test, not(any(unix, windows))))]
 mod unsupported_platform_tests {
     use super::*;
 
