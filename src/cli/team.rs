@@ -170,8 +170,9 @@ pub struct TeamStatusArgs {
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct TeamInviteArgs {
     /// Live TCP locator the joiner should contact (IP or IP:port).
+    /// When omitted, the local Tailscale IPv4 address is used if present.
     #[arg(long)]
-    pub endpoint: String,
+    pub endpoint: Option<String>,
 
     /// Bind the advertised locator and accept one join before exiting.
     #[arg(long)]
@@ -778,9 +779,34 @@ where
     let produced_at = chrono::Utc::now().to_rfc3339();
     let expires_at = (chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339();
     let workspace_path = cli.resolve_workspace();
+    let endpoint = match args
+        .endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(explicit) => explicit.to_owned(),
+        None => match probe_local_tailscale_for_team().self_tailscale_ip {
+            Some(ip) if !ip.is_empty() => ip,
+            _ => {
+                return write_domain_error(
+                    &DomainError::Usage {
+                        message: "invite needs --endpoint or a reachable Tailscale self IP"
+                            .to_owned(),
+                        repair: Some(
+                            "ee team invite --endpoint <tailscale-ip> --workspace .".to_owned(),
+                        ),
+                    },
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                );
+            }
+        },
+    };
     match mint_team_invite_with_store(
         &connection,
-        &args.endpoint,
+        &endpoint,
         &produced_at,
         &expires_at,
         Some(&workspace_path),
