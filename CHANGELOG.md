@@ -64,9 +64,11 @@ future changelog pass expands those rows into full capability sections.
   cache bytes. `ee team doctor` reports `index_rematerialization`,
   `origin_outbox`, `invite_auth_floor`, `pending_invites`,
   `delegated_members`, `signing_rotation`, `pair_rotation`,
-  `projects`, and `removal_acknowledgements`. A signed removal
-  plus stalled peer cursors is a warning: fanout is not bounded
-  until those peers apply the event.
+  `projects`, and `removal_acknowledgements`. Removal seeds a durable
+  V117 acknowledgement matrix of the active audience at that moment.
+  Pending rows stay a warning; fanout is not claimed bounded until
+  those members apply the event. `ee team steward once` advances
+  acknowledgements from peer cursors.
   `ee team revoke --all-before-floor` is the invite-floor repair.
   Team create and join raise the invite-authorization floor.
   `ee team status` lists `pendingInvites[]` so a revoke can name an id.

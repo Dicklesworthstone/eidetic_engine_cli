@@ -19,9 +19,10 @@ those surfaces are the next command, not a prompt to invent one.
 `delegated_members`, `signing_rotation`, `pair_rotation`, `projects`,
 and `removal_acknowledgements`. Staging, `invalidated_pending_purge`,
 pending index jobs, or behind/blocked/quarantined peer cursors are a
-warning, not a successful fetch. A signed removal with remaining members
-and stalled cursors is also a warning: fanout is not bounded until those
-peers apply the event. Pending invites created before the authorization
+warning, not a successful fetch. A signed removal seeds a durable
+audience matrix; pending acknowledgements are a warning and fanout is
+not bounded until those members apply the event. Repair is
+`ee team steward once`. Pending invites created before the authorization
 floor are an error; the repair is `ee team revoke --all-before-floor`.
 
 ## Mutations

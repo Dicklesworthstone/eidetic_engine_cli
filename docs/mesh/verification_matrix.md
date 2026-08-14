@@ -210,7 +210,7 @@ This is a live Unix EE-to-EE ledger, not a bead-closing ceremony.
 | T6.1 steward | **Proven** | Isolated 2026-08-14: membership execute 51.59s; `snapshot_from_paths_loads_peers_and_sync_once_stays_deferred_when_mesh_off` 107.15s. Daemon calls `run_mesh_sync_once_from_paths` when `ran_sync`. Execute also rematerializes origin project shares. | Live contact still needs mesh enabled + reachable peers |
 | T6.2 daemon install | **Proven on Linux and macOS user supervisors** | Linux: `systemctl --user start ee-team-confed-proof.service` → `ActiveState=active` at 2026-08-14T01:47:44Z. macOS: `launchctl bootstrap gui/501/ai.eideticengine.ee-team-confed-proof` → `active count = 1` / `state = xpcproxy` at 2026-08-14T02:14:58Z. Both units quarantined by rename. | Real `ee` binary KeepAlive service was not left running; Windows remains client-only |
 | T6.3 admission | **Wired + persisted** | Authenticated serve folds decisions into a broker-owned per-peer map; repeated oversized BodyFetch raises malformed counts and backs off; in-flight is released after the response | — |
-| T6.4 doctor | **Proven** | Isolated 2026-08-14: `revoke_before_floor_clears_stale_pending_invites` 46.91s exit 0; `inspect_team_health_reports_no_team_then_ok_then_paused` 58.07s exit 0; `reconcile_reapplies_a_missed_member_removal` 54.08s exit 0. Rows include invite_auth_floor, pending_invites, delegated_members, signing_rotation, pair_rotation, projects, and `removal_acknowledgements` (signed removal + stalled cursors is a warning; fanout is not claimed bounded). | No durable per-member ack matrix table; doctor derives from origin events + peer cursors |
+| T6.4 doctor | **Proven** | Isolated 2026-08-14: floor 46.91s, inspect 50.86s, removal rematerialize 50.80s, `removal_acknowledgement_matrix_stays_pending_until_audience_applies` 55.88s, all exit 0. V117 persists the removal audience; doctor warns on pending acks and does not claim bounded fanout. Steward advances acks from peer cursors. | Windows inbound listen remains out of scope |
 | T6.5 budgets | **Documented + unit-enforced** | `docs/mesh/perf_budgets.md`; conservative-limit unit test | No Criterion `[[bench]]` for join/relay; compile cost dominates |
 | T6.6 docs | **Landed** | `docs/team/quickstart.md`, `trusted_vs_contractor.md`, `docs/agent-ux/team.md`, CHANGELOG | — |
 | T7.1–T7.6 IdP | **Proven** | Fake-IdP HTTPS RS256 1.40s; live TCP identity_attest 88.42s compile+test | No production IdP vendor soak |
@@ -219,12 +219,9 @@ This is a live Unix EE-to-EE ledger, not a bead-closing ceremony.
 Campaign is **done as live Unix EE-to-EE capability**, including
 T5.10 crash/token/`already_redacted`/grant-revoke/hash-checked fetch
 proofs, T6.2 supervisor load on Linux and macOS, T6.4
-invite-floor / pending-invite / project rematerialization /
-removal-acknowledgement doctor rows, and a reviewed
-`HardenedWindows` secure-file adapter in tree. Isolated T6.4
-re-proof on `ubuntu@38.242.134.66` 2026-08-14T14:05–14:21Z:
-floor 46.91s, inspect 58.07s, project 60.95s, resume 51.71s,
-removal 54.08s, all exit 0. Windows inbound listen and a
-Windows-host runtime proof of the DACL adapter remain out of
-scope for this campaign's Unix isolated harness. Do not
-self-close beads from this ledger.
+invite-floor / pending-invite / project rematerialization, and a
+durable V117 removal-acknowledgement matrix. Isolated proof
+2026-08-14T14:29–14:52Z: ack matrix 55.88s, inspect 50.86s,
+removal rematerialize 50.80s, all exit 0. Windows inbound listen
+and a Windows-host runtime proof of the DACL adapter remain out
+of scope. Do not self-close beads from this ledger.
