@@ -2501,9 +2501,11 @@ pub fn execute_team_steward_once(
     };
     let reconciled = reconcile_local_team_membership(connection, &workspace_id)?;
     let projects = reconcile_local_team_projects(connection)?;
+    let memories = reconcile_inbound_team_memories(connection, &workspace_id)?;
     report.applied_additions = reconciled
         .applied_additions
-        .saturating_add(projects.applied_additions);
+        .saturating_add(projects.applied_additions)
+        .saturating_add(memories.applied_additions);
     report.applied_removals = reconciled.applied_removals;
     reconcile_team_body_cache(
         connection,
@@ -2525,6 +2527,7 @@ pub fn execute_team_steward_once(
     report.mesh_primitives = vec![
         "team_members",
         "team_projects",
+        "mesh_import_ledger",
         "mesh_body_cache_metadata",
         "team_removal_acknowledgements",
         "mesh_key_store",
@@ -3093,6 +3096,27 @@ pub fn inspect_team_health(
         repair: (missing_projects > 0)
             .then(|| "ee team projects reconcile --workspace .".to_owned()),
     });
+    let missing_inbound_memories = connection
+        .list_mesh_import_ledger_events_for_workspace(workspace_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|row| row.import_decision == "allow")
+        .filter_map(|row| inbound_team_memory_id(&row.event_hash))
+        .filter(|memory_id| connection.get_memory(memory_id).ok().flatten().is_none())
+        .count();
+    checks.push(TeamDoctorCheck {
+        name: "inbound_memories".to_owned(),
+        status: if missing_inbound_memories == 0 {
+            "ok".to_owned()
+        } else {
+            "warning".to_owned()
+        },
+        message: format!(
+            "{missing_inbound_memories} allowed import-ledger event(s) missing a local memory stub"
+        ),
+        repair: (missing_inbound_memories > 0)
+            .then(|| "ee team steward once --workspace .".to_owned()),
+    });
     let stuck_signing = connection
         .list_all_team_member_nodes()
         .unwrap_or_default()
@@ -3244,6 +3268,7 @@ pub fn inspect_team_health(
             "team_invite_auth_floor",
             "team_projects",
             "team_removal_acknowledgements",
+            "mesh_import_ledger",
         ],
     })
 }
@@ -4318,6 +4343,67 @@ pub fn project_inbound_team_memory(
         )
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
     Ok(Some(memory_id))
+}
+
+fn inbound_team_memory_id(event_hash: &str) -> Option<String> {
+    let hex = event_hash
+        .trim_start_matches("blake3:")
+        .chars()
+        .take(26)
+        .collect::<String>();
+    (hex.len() == 26).then(|| format!("mem_{hex}"))
+}
+
+/// Replay allowed import-ledger memory events onto local stub rows.
+///
+/// Sync may persist the ledger and crash before `project_inbound_team_memory`.
+/// Steward rematerializes those stubs; body bytes stay off the wire.
+pub fn reconcile_inbound_team_memories(
+    connection: &DbConnection,
+    workspace_id: &str,
+) -> Result<TeamReconcileReport, OriginStreamError> {
+    let team = load_local_teams(connection)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| OriginStreamError::Encode("no local team genesis".to_owned()))?;
+    let rows = connection
+        .list_mesh_import_ledger_events_for_workspace(workspace_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    let mut applied_additions = 0_usize;
+    let mut inspected = 0_usize;
+    for row in rows {
+        if row.import_decision != "allow" {
+            continue;
+        }
+        inspected = inspected.saturating_add(1);
+        let Some(memory_id) = inbound_team_memory_id(&row.event_hash) else {
+            continue;
+        };
+        if connection
+            .get_memory(&memory_id)
+            .map_err(|error| OriginStreamError::Db(error.to_string()))?
+            .is_some()
+        {
+            continue;
+        }
+        let inbound = serde_json::from_str::<InboundOriginEvent>(&row.event_json)
+            .map_err(|error| OriginStreamError::PayloadInvalid(error.to_string()));
+        let Ok(inbound) = inbound else {
+            continue;
+        };
+        if project_inbound_team_memory(connection, workspace_id, &inbound)?.is_some() {
+            applied_additions = applied_additions.saturating_add(1);
+        }
+    }
+    Ok(TeamReconcileReport {
+        schema: TEAM_RECONCILE_SCHEMA_V1,
+        command: "team memories reconcile",
+        team_id: team.team_id,
+        applied_additions,
+        applied_removals: 0,
+        inspected_events: inspected,
+        mesh_primitives: vec!["mesh_import_ledger", "memories"],
+    })
 }
 
 /// Bind a new local node to the self member.
@@ -6212,6 +6298,131 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_inbound_team_memories_replays_allowed_import_ledger_events() {
+        let connection = open_db();
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-team-inbound".to_owned(),
+                    name: Some("inbound".to_owned()),
+                },
+            )
+            .expect("workspace");
+        let created = create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        connection
+            .insert_memory(
+                "mem_sharehistory00000000000001",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "secret body must not land on the receiver".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("remember");
+        share_team_history(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T07:01:00Z",
+            true,
+            8,
+            None,
+        )
+        .expect("share");
+        let rows = connection
+            .list_mesh_origin_events(&created.team.team_id, &created.team.origin_node_id, 0, 16)
+            .expect("chain");
+        let memory_row = rows
+            .iter()
+            .find(|row| row.payload_schema == "ee.mesh.memory_event.v1")
+            .expect("memory event");
+        let inbound = crate::mesh::origin_stream::inbound_from_stored(memory_row).expect("inbound");
+        let stub_id = inbound_team_memory_id(&inbound.event_hash).expect("id");
+        connection
+            .insert_mesh_import_ledger_event(&crate::db::InsertMeshImportLedgerEventInput {
+                workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                event_id: format!(
+                    "mesh_evt_{}",
+                    inbound
+                        .event_hash
+                        .trim_start_matches("blake3:")
+                        .chars()
+                        .take(24)
+                        .collect::<String>()
+                ),
+                origin_node_id: inbound.origin_node_id.clone(),
+                origin_workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                producer_peer_id: None,
+                seq: inbound.seq.max(1),
+                prev_event_hash: inbound.prev_event_hash.clone(),
+                event_hash: inbound.event_hash.clone(),
+                event_kind: "create".to_owned(),
+                logical_memory_id: format!(
+                    "mem_{}",
+                    inbound
+                        .event_hash
+                        .trim_start_matches("blake3:")
+                        .chars()
+                        .take(24)
+                        .collect::<String>()
+                ),
+                content_hash: inbound.event_hash.clone(),
+                material_lane: "metadata".to_owned(),
+                redaction_class: "metadataOnly".to_owned(),
+                trust_lane: "peerAgent".to_owned(),
+                import_decision: "allow".to_owned(),
+                local_memory_id: None,
+                body_cache_key: None,
+                policy_failure_surface_json: None,
+                policy_decision_json: None,
+                event_json: serde_json::to_string(&inbound).expect("json"),
+                imported_at: None,
+            })
+            .expect("ledger");
+        let sick =
+            inspect_team_health(&connection, "wsp_persistfixture000000000001", None).expect("sick");
+        assert!(sick.checks.iter().any(|check| {
+            check.name == "inbound_memories"
+                && check.status == "warning"
+                && check.repair.as_deref() == Some("ee team steward once --workspace .")
+        }));
+        let first = reconcile_inbound_team_memories(&connection, "wsp_persistfixture000000000001")
+            .expect("reconcile");
+        assert_eq!(first.applied_additions, 1);
+        let stored = connection.get_memory(&stub_id).expect("get").expect("row");
+        assert!(stored.content.starts_with("[ee.team.history]"));
+        assert!(!stored.content.contains("secret body"));
+        let again = reconcile_inbound_team_memories(&connection, "wsp_persistfixture000000000001")
+            .expect("idempotent");
+        assert_eq!(again.applied_additions, 0);
+        let healthy =
+            inspect_team_health(&connection, "wsp_persistfixture000000000001", None).expect("ok");
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| check.name == "inbound_memories" && check.status == "ok")
+        );
+    }
+
+    #[test]
     fn granted_join_attempt_resumes_without_a_live_socket() {
         let connection = open_db();
         let created = create_local_team(
@@ -7707,6 +7918,12 @@ mod tests {
                 .checks
                 .iter()
                 .any(|check| check.name == "projects" && check.status == "ok")
+        );
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| check.name == "inbound_memories" && check.status == "ok")
         );
         assert!(
             healthy
