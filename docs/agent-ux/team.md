@@ -13,6 +13,9 @@ ee team members list --workspace . --json
 
 Treat any `degraded[]` or doctor `error` as a stop. Repair strings on
 those surfaces are the next command, not a prompt to invent one.
+`ee team status` admission fields include `peerSnapshotCount`,
+`throttledPeerCount`, `budgetExhaustedPeerCount`, and
+`coalescedExhaustion` from the last persisted broker snapshot.
 `ee team doctor` also reports `admission`, `key_store`, `broker_port`,
 `client_only`, `whois`, `body_cache_lifecycle`, `index_rematerialization`,
 `origin_outbox`, `invite_auth_floor`, `pending_invites`,

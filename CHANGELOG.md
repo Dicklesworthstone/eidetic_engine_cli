@@ -71,7 +71,10 @@ future changelog pass expands those rows into full capability sections.
   acknowledgements from peer cursors. `ee team status` lists
   `pendingRemovalAcks[]` plus the conservative admission caps and
   `localTier1Unaffected`. `ee team doctor` reports a 64 MiB
-  free-space floor when a workspace path is present.
+  free-space floor when a workspace path is present. Authenticated
+  serve persists a V118 per-peer admission snapshot so doctor/status
+  can report throttled/exhausted counts and coalesced exhaustion
+  after the broker exits.
   `ee team revoke --all-before-floor` is the invite-floor repair.
   Team create and join raise the invite-authorization floor.
   `ee team status` lists `pendingInvites[]` so a revoke can name an id.
