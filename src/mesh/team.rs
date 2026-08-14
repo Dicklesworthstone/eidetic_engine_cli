@@ -68,6 +68,12 @@ pub const TEAM_STEWARD_SCHEMA_V1: &str = "ee.team.steward.v1";
 pub const TEAM_DOCTOR_SCHEMA_V1: &str = "ee.team.doctor.v1";
 pub const TEAM_PROJECTS_SCHEMA_V1: &str = "ee.team.projects.v1";
 pub const TEAM_PROJECT_SHARED_OPERATION: &str = "teamProjectShared";
+const TEAM_PROJECT_ID_PREFIX: &str = "prj_tm_";
+const TEAM_PROJECT_ID_LEN: usize = 33;
+
+fn is_team_project_id(project_id: &str) -> bool {
+    project_id.starts_with(TEAM_PROJECT_ID_PREFIX) && project_id.len() == TEAM_PROJECT_ID_LEN
+}
 pub const TEAM_IDP_SCHEMA_V1: &str = "ee.team.idp.v1";
 pub const TEAM_IDP_REVALIDATE_SCHEMA_V1: &str = "ee.team.idp.revalidate.v1";
 pub const TEAM_IDP_SET_SCHEMA_V1: &str = "ee.team.idp.set.v1";
@@ -2635,25 +2641,32 @@ pub fn inspect_team_health(
             repair: (!jobs.is_empty()).then(|| "ee index rebuild --workspace .".to_owned()),
         });
     }
-    if let Ok(cursors) = connection.list_mesh_peer_cursors(workspace_id) {
-        let stalled = cursors
-            .iter()
-            .filter(|cursor| matches!(cursor.status.as_str(), "behind" | "blocked" | "quarantined"))
-            .count();
-        checks.push(TeamDoctorCheck {
-            name: "origin_outbox".to_owned(),
-            status: if stalled == 0 {
-                "ok".to_owned()
-            } else {
-                "warning".to_owned()
-            },
-            message: format!(
-                "{} peer cursor(s); {stalled} behind/blocked/quarantined",
-                cursors.len()
-            ),
-            repair: (stalled > 0).then(|| "ee team steward once --workspace .".to_owned()),
-        });
-    }
+    let stalled_cursors = connection
+        .list_mesh_peer_cursors(workspace_id)
+        .ok()
+        .map(|cursors| {
+            let stalled = cursors
+                .iter()
+                .filter(|cursor| {
+                    matches!(cursor.status.as_str(), "behind" | "blocked" | "quarantined")
+                })
+                .count();
+            checks.push(TeamDoctorCheck {
+                name: "origin_outbox".to_owned(),
+                status: if stalled == 0 {
+                    "ok".to_owned()
+                } else {
+                    "warning".to_owned()
+                },
+                message: format!(
+                    "{} peer cursor(s); {stalled} behind/blocked/quarantined",
+                    cursors.len()
+                ),
+                repair: (stalled > 0).then(|| "ee team steward once --workspace .".to_owned()),
+            });
+            stalled
+        })
+        .unwrap_or(0);
     let floor = connection
         .team_invite_auth_floor(&team.team_id)
         .ok()
@@ -2754,6 +2767,8 @@ pub fn inspect_team_health(
                 .document_payload
                 .get("projectId")
                 .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|project_id| is_team_project_id(project_id))
                 .map(str::to_owned)
         })
         .filter(|project_id| {
@@ -2790,6 +2805,55 @@ pub fn inspect_team_health(
         },
         message: format!("{stuck_signing} non-active member-node signing binding(s)"),
         repair: (stuck_signing > 0).then(|| "ee team members rotate-key --workspace .".to_owned()),
+    });
+    let signed_removals = connection
+        .list_mesh_manifest_origin_events(256)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|row| {
+            matches!(
+                parse_stored_payload(row),
+                Ok(OriginEventPayload::Manifest(payload))
+                    if matches!(
+                        payload.operation.as_str(),
+                        TEAM_MEMBER_REMOVED_OPERATION | TEAM_LEFT_OPERATION
+                    )
+            )
+        })
+        .count();
+    checks.push(if signed_removals == 0 {
+        TeamDoctorCheck {
+            name: "removal_acknowledgements".to_owned(),
+            status: "ok".to_owned(),
+            message: "no signed removals awaiting acknowledgement".to_owned(),
+            repair: None,
+        }
+    } else if delegated == 0 {
+        TeamDoctorCheck {
+            name: "removal_acknowledgements".to_owned(),
+            status: "ok".to_owned(),
+            message: format!(
+                "{signed_removals} signed removal(s); no remaining members to acknowledge"
+            ),
+            repair: None,
+        }
+    } else if stalled_cursors > 0 {
+        TeamDoctorCheck {
+            name: "removal_acknowledgements".to_owned(),
+            status: "warning".to_owned(),
+            message: format!(
+                "{signed_removals} signed removal(s); {stalled_cursors} peer cursor(s) \
+behind/blocked/quarantined; fanout is not bounded until those peers apply the event"
+            ),
+            repair: Some("ee team steward once --workspace .".to_owned()),
+        }
+    } else {
+        TeamDoctorCheck {
+            name: "removal_acknowledgements".to_owned(),
+            status: "ok".to_owned(),
+            message: format!("{signed_removals} signed removal(s); no stalled peer cursors"),
+            repair: None,
+        }
     });
     if let Some(path) = workspace_path
         && let Ok(Some(store)) = crate::mesh::key_store::MeshKeyStore::open_existing(path)
@@ -2861,6 +2925,8 @@ pub fn inspect_team_health(
             "steward_decision",
             "team_idp_policy",
             "mesh_admission_control",
+            "team_invite_auth_floor",
+            "team_projects",
         ],
     })
 }
@@ -4365,7 +4431,7 @@ pub fn reconcile_local_team_projects(
         else {
             continue;
         };
-        if !project_id.starts_with("prj_tm_") || project_id.len() != 33 {
+        if !is_team_project_id(project_id) {
             continue;
         }
         if connection
@@ -4515,7 +4581,7 @@ pub fn adopt_team_project(
     let project_id = project_id.trim();
     let name = display_name.trim();
     let path = local_path.trim();
-    if !project_id.starts_with("prj_tm_") || project_id.len() != 33 {
+    if !is_team_project_id(project_id) {
         return Err(OriginStreamError::Encode(
             "project id must be prj_tm_ plus 26 chars".to_owned(),
         ));
@@ -5872,6 +5938,13 @@ mod tests {
             .expect("idempotent");
         assert_eq!(again.applied_removals, 0);
         assert_eq!(again.applied_additions, 0);
+        let doctor = inspect_team_health(&connection, "wsp_persistfixture000000000001", None)
+            .expect("doctor");
+        assert!(doctor.checks.iter().any(|check| {
+            check.name == "removal_acknowledgements"
+                && check.status == "ok"
+                && check.message.contains("signed removal")
+        }));
     }
 
     #[test]
@@ -6083,7 +6156,7 @@ mod tests {
             "2026-08-13T00:00:00Z",
         )
         .expect("create");
-        let project_id = "prj_tm_reconcile00000000000001";
+        let project_id = "prj_tm_reconcile00000000000000001";
         let payload = OriginEventPayload::Manifest(ManifestEventPayload {
             operation: TEAM_PROJECT_SHARED_OPERATION.to_owned(),
             document_id: "tdoc_projectreconcile000001".to_owned(),
@@ -7102,6 +7175,12 @@ mod tests {
                 .checks
                 .iter()
                 .any(|check| check.name == "projects" && check.status == "ok")
+        );
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| check.name == "removal_acknowledgements" && check.status == "ok")
         );
         set_local_team_paused(&connection, true, "2026-08-13T17:00:00Z").expect("pause");
         let paused = inspect_team_health(&connection, "wsp_persistfixture000000000001", None)
