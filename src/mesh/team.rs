@@ -156,9 +156,42 @@ pub struct TeamStatusReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_removal_acks: Vec<TeamRemovalAckRecord>,
     pub admission: TeamAdmissionStatus,
+    pub budgets: TeamConfedBudgetProfile,
     pub paused: bool,
     pub steward_would_sync: bool,
     pub mesh_primitives: Vec<&'static str>,
+}
+
+pub const TEAM_BUDGETS_SCHEMA_V1: &str = "ee.team.budgets.v1";
+
+/// Published T6.5 join / signed-relay / body / index amplification profile.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamConfedBudgetProfile {
+    pub schema: &'static str,
+    pub join_event_batch_count: u32,
+    pub signed_relay_event_batch_bytes: u64,
+    pub body_fetch_bytes: u64,
+    pub index_jobs_per_round: u32,
+    pub concurrent_requests_per_peer: u32,
+    pub free_space_floor_bytes: u64,
+    pub local_tier1_unaffected: bool,
+}
+
+/// Conservative join/relay/body/index caps. Same numbers `decide_admission` enforces.
+#[must_use]
+pub fn team_confed_budget_profile() -> TeamConfedBudgetProfile {
+    let limits = crate::mesh::admission::MeshAdmissionLimits::conservative_default();
+    TeamConfedBudgetProfile {
+        schema: TEAM_BUDGETS_SCHEMA_V1,
+        join_event_batch_count: limits.max_event_batch_count,
+        signed_relay_event_batch_bytes: limits.max_event_batch_bytes,
+        body_fetch_bytes: limits.max_body_fetch_bytes,
+        index_jobs_per_round: limits.max_index_jobs_per_round,
+        concurrent_requests_per_peer: limits.max_concurrent_requests_per_peer,
+        free_space_floor_bytes: TEAM_FREE_SPACE_FLOOR_BYTES,
+        local_tier1_unaffected: true,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -830,6 +863,7 @@ pub fn local_team_status(connection: &DbConnection) -> Result<TeamStatusReport, 
         pending_invites,
         pending_removal_acks,
         admission,
+        budgets: team_confed_budget_profile(),
         paused,
         steward_would_sync,
         mesh_primitives: vec![
@@ -840,6 +874,7 @@ pub fn local_team_status(connection: &DbConnection) -> Result<TeamStatusReport, 
             "team_pending_invites",
             "team_removal_acknowledgements",
             "mesh_admission_control",
+            "ee.team.budgets.v1",
             "team_posture",
             "steward_decision",
         ],
@@ -7613,6 +7648,64 @@ mod tests {
         assert_eq!(status.admission.throttled_peer_count, 1);
         assert!(status.admission.coalesced_exhaustion);
         assert!(status.admission.local_tier1_unaffected);
+    }
+
+    #[test]
+    fn team_confed_budget_profile_names_join_relay_body_and_index_caps() {
+        let limits = crate::mesh::admission::MeshAdmissionLimits::conservative_default();
+        let profile = team_confed_budget_profile();
+        assert_eq!(profile.schema, TEAM_BUDGETS_SCHEMA_V1);
+        assert_eq!(profile.join_event_batch_count, limits.max_event_batch_count);
+        assert_eq!(
+            profile.signed_relay_event_batch_bytes,
+            limits.max_event_batch_bytes
+        );
+        assert_eq!(profile.body_fetch_bytes, limits.max_body_fetch_bytes);
+        assert_eq!(
+            profile.index_jobs_per_round,
+            limits.max_index_jobs_per_round
+        );
+        assert_eq!(
+            profile.concurrent_requests_per_peer,
+            limits.max_concurrent_requests_per_peer
+        );
+        assert_eq!(profile.free_space_floor_bytes, TEAM_FREE_SPACE_FLOOR_BYTES);
+        assert!(profile.local_tier1_unaffected);
+        let connection = open_db();
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let status = local_team_status(&connection).expect("status");
+        assert_eq!(status.budgets, profile);
+        let at_cap = crate::mesh::admission::decide_admission(
+            limits,
+            &crate::mesh::admission::MeshPeerAdmissionState::new("peer-join"),
+            &crate::mesh::admission::MeshAdmissionRequest::new(
+                "peer-join",
+                crate::mesh::admission::MeshAdmissionRequestKind::EventBatch,
+                0,
+            )
+            .with_event_count(profile.join_event_batch_count)
+            .with_payload(profile.signed_relay_event_batch_bytes),
+        );
+        assert!(at_cap.allowed());
+        assert!(at_cap.local_tier1_unaffected);
+        let over = crate::mesh::admission::decide_admission(
+            limits,
+            &crate::mesh::admission::MeshPeerAdmissionState::new("peer-join"),
+            &crate::mesh::admission::MeshAdmissionRequest::new(
+                "peer-join",
+                crate::mesh::admission::MeshAdmissionRequestKind::EventBatch,
+                0,
+            )
+            .with_event_count(profile.join_event_batch_count.saturating_add(1)),
+        );
+        assert!(!over.allowed());
+        assert!(over.local_tier1_unaffected);
     }
 
     #[test]
