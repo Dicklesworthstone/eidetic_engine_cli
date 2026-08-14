@@ -7043,6 +7043,12 @@ mod tests {
                 .iter()
                 .any(|check| check.name == "signing_rotation" && check.status == "ok")
         );
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| check.name == "projects" && check.status == "ok")
+        );
         set_local_team_paused(&connection, true, "2026-08-13T17:00:00Z").expect("pause");
         let paused = inspect_team_health(&connection, "wsp_persistfixture000000000001", None)
             .expect("paused");
