@@ -145,6 +145,17 @@ fn insert_reranker_entry(
     name: &str,
     status: ModelRegistryStatus,
 ) -> TestResult {
+    insert_reranker_entry_with_metadata(database_path, workspace_id, id, name, status, None)
+}
+
+fn insert_reranker_entry_with_metadata(
+    database_path: &Path,
+    workspace_id: &str,
+    id: &str,
+    name: &str,
+    status: ModelRegistryStatus,
+    metadata_json: Option<String>,
+) -> TestResult {
     let connection =
         DbConnection::open_file(database_path).map_err(|error| format!("reopen db: {error}"))?;
     connection
@@ -161,12 +172,37 @@ fn insert_reranker_entry(
                 version: Some("v1".to_string()),
                 source_uri: None,
                 content_hash: None,
-                metadata_json: None,
+                metadata_json,
                 last_checked_at: None,
             },
         )
         .map_err(|error| format!("insert registry entry: {error}"))?;
     Ok(())
+}
+
+/// The metadata payload `fetch_rerank_model` writes for a registered reranker.
+fn rerank_registry_metadata_json() -> String {
+    serde_json::json!({
+        "schema": "ee.rerank_model_registry_metadata.v1",
+        "manifest": {
+            "modelId": "rerank-default-v1",
+            "quantization": "int8",
+        },
+        "storedPath": "/home/user/.local/share/ee/models/rerank-default-v1.bin",
+    })
+    .to_string()
+}
+
+fn lifecycle_row<'a>(
+    json: &'a serde_json::Value,
+    model_id: &str,
+) -> Result<&'a serde_json::Value, String> {
+    json.pointer("/modelLifecycle/models")
+        .and_then(|value| value.as_array())
+        .ok_or("models array")?
+        .iter()
+        .find(|model| model.get("modelId").and_then(|value| value.as_str()) == Some(model_id))
+        .ok_or_else(|| format!("lifecycle row {model_id} missing"))
 }
 
 #[test]
@@ -499,6 +535,109 @@ fn model_status_reports_reranker_registry_separately() -> TestResult {
     ensure(
         json["reranker"]["availableModelIds"] == serde_json::json!(["ms-marco-minilm-l-6-v2"]),
         "reranker availableModelIds JSON",
+    )?;
+    Ok(())
+}
+
+/// GH#26 regression: a registered reranker with valid
+/// `ee.rerank_model_registry_metadata.v1` metadata must not be misclassified
+/// as corrupt by the embedding metadata validator.
+#[test]
+fn model_status_accepts_valid_reranker_metadata_without_corruption() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace_path = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| format!("canonicalize: {error}"))?;
+    let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+    insert_reranker_entry_with_metadata(
+        &database_path,
+        &workspace_id,
+        "mdl_01HQ3K5Z000000000000000032",
+        "rerank-default-v1",
+        ModelRegistryStatus::Available,
+        Some(rerank_registry_metadata_json()),
+    )?;
+
+    let report = build_model_status_report(&ModelStatusOptions {
+        workspace_path: &workspace_path,
+        database_path: None,
+    })
+    .map_err(|error| format!("status report: {error:?}"))?;
+    ensure(report.reranker.available_count == 1, "reranker available")?;
+
+    let json = report.data_json();
+    let lifecycle_degraded = json
+        .pointer("/modelLifecycle/degraded")
+        .and_then(|value| value.as_array())
+        .ok_or("lifecycle degraded array")?;
+    ensure(
+        !lifecycle_degraded.iter().any(|entry| {
+            entry.get("code").and_then(|value| value.as_str()) == Some("model_asset_corrupt")
+        }),
+        "valid reranker metadata must not be reported as model_asset_corrupt",
+    )?;
+
+    let row = lifecycle_row(&json, "mdl_01HQ3K5Z000000000000000032")?;
+    ensure(
+        row.get("state").and_then(|value| value.as_str()) == Some("available"),
+        "reranker lifecycle row should be available",
+    )?;
+    ensure(
+        row.pointer("/assetProvenance/provenanceComplete")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false),
+        "reranker row without content_hash keeps provenance incomplete",
+    )?;
+    Ok(())
+}
+
+/// GH#26 companion: genuinely malformed reranker metadata still surfaces
+/// `model_asset_corrupt`, with a reranker-specific message and repair.
+#[test]
+fn model_status_flags_malformed_reranker_metadata_as_corrupt() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace_path = temp
+        .path()
+        .canonicalize()
+        .map_err(|error| format!("canonicalize: {error}"))?;
+    let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
+    insert_reranker_entry_with_metadata(
+        &database_path,
+        &workspace_id,
+        "mdl_01HQ3K5Z000000000000000033",
+        "rerank-default-v1",
+        ModelRegistryStatus::Available,
+        Some("{\"schema\":\"not-a-rerank-schema\"}".to_string()),
+    )?;
+
+    let report = build_model_status_report(&ModelStatusOptions {
+        workspace_path: &workspace_path,
+        database_path: None,
+    })
+    .map_err(|error| format!("status report: {error:?}"))?;
+    let json = report.data_json();
+    let row = lifecycle_row(&json, "mdl_01HQ3K5Z000000000000000033")?;
+    let corrupt = row
+        .get("degraded")
+        .and_then(|value| value.as_array())
+        .ok_or("row degraded array")?
+        .iter()
+        .find(|entry| {
+            entry.get("code").and_then(|value| value.as_str()) == Some("model_asset_corrupt")
+        })
+        .ok_or("malformed reranker metadata should surface model_asset_corrupt")?;
+    ensure(
+        corrupt
+            .get("message")
+            .and_then(|value| value.as_str())
+            .is_some_and(|message| message.starts_with("Reranker metadata")),
+        "corruption message should name reranker metadata, not embedding metadata",
+    )?;
+    ensure(
+        corrupt.get("repair").and_then(|value| value.as_str())
+            == Some("ee model fetch rerank-default --workspace ."),
+        "corruption repair should point at the reranker fetch command",
     )?;
     Ok(())
 }

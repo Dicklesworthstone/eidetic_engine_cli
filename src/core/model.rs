@@ -1114,26 +1114,61 @@ fn model_lifecycle_row(
     index_metadata: &ModelLifecycleIndexMetadata,
     selected: bool,
 ) -> ModelLifecycleModelRow {
-    let parsed_metadata = entry
-        .metadata_json
-        .as_deref()
-        .map(EmbeddingMetadataRecord::from_json)
-        .transpose();
+    // GH#26: `metadata_json` is purpose-specific. Embedding rows carry an
+    // `EmbeddingMetadataRecord`; reranker rows carry the
+    // `ee.rerank_model_registry_metadata.v1` payload written by
+    // `fetch_rerank_model` (no `dimension`, no embedding fields). Parsing every
+    // row as embedding metadata misclassified valid reranker metadata as
+    // `model_asset_corrupt`.
     let mut degraded = Vec::new();
-    let metadata = match parsed_metadata {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            degraded.push(ModelLifecycleDegradation::new(
-                "model_asset_corrupt",
-                "high",
-                format!(
-                    "Embedding metadata for registry row {} is invalid: {error}",
-                    entry.id
-                ),
-                Some("repair the model registry row so embedding metadata validates"),
-            ));
-            None
-        }
+    let (metadata, metadata_valid) = match entry.purpose {
+        ModelPurpose::Embedding => match entry
+            .metadata_json
+            .as_deref()
+            .map(EmbeddingMetadataRecord::from_json)
+            .transpose()
+        {
+            Ok(metadata) => {
+                let valid = metadata.is_some();
+                (metadata, valid)
+            }
+            Err(error) => {
+                degraded.push(ModelLifecycleDegradation::new(
+                    "model_asset_corrupt",
+                    "high",
+                    format!(
+                        "Embedding metadata for registry row {} is invalid: {error}",
+                        entry.id
+                    ),
+                    Some("repair the model registry row so embedding metadata validates"),
+                ));
+                (None, false)
+            }
+        },
+        ModelPurpose::Reranker => match entry
+            .metadata_json
+            .as_deref()
+            .map(validate_rerank_registry_metadata)
+            .transpose()
+        {
+            Ok(validated) => (None, validated.is_some()),
+            Err(error) => {
+                degraded.push(ModelLifecycleDegradation::new(
+                    "model_asset_corrupt",
+                    "high",
+                    format!(
+                        "Reranker metadata for registry row {} is invalid: {error}",
+                        entry.id
+                    ),
+                    Some("ee model fetch rerank-default --workspace ."),
+                ));
+                (None, false)
+            }
+        },
+        // No metadata schema is defined for these purposes yet; do not force
+        // the embedding schema onto them, and do not claim complete
+        // metadata-backed provenance either.
+        ModelPurpose::Classifier | ModelPurpose::Other => (None, false),
     };
     let asset = inspect_model_lifecycle_asset(entry, workspace_path);
     degraded.extend(asset.degraded.clone());
@@ -1178,7 +1213,7 @@ fn model_lifecycle_row(
                 .last_checked_at
                 .clone()
                 .or_else(|| Some(generated_at.to_string())),
-            provenance_complete: asset.provenance_complete && metadata.is_some(),
+            provenance_complete: asset.provenance_complete && metadata_valid,
         },
         embedding_metadata,
         dimension_compatibility,
@@ -3255,12 +3290,56 @@ fn model_content_hash_matches_manifest(hash: &str, manifest: &RerankModelManifes
         .is_some_and(|value| value.eq_ignore_ascii_case(&manifest.hash_blake3))
 }
 
+/// Schema id stamped on reranker registry metadata by [`fetch_rerank_model`].
+const RERANK_MODEL_REGISTRY_METADATA_SCHEMA: &str = "ee.rerank_model_registry_metadata.v1";
+
+/// Validate a reranker registry row's `metadata_json` against the reranker
+/// metadata payload written by [`rerank_model_metadata_json`].
+///
+/// Reranker metadata intentionally carries no embedding fields (`dimension`,
+/// `distanceMetric`, ...), so it must never be validated as an
+/// `EmbeddingMetadataRecord` (GH#26).
+fn validate_rerank_registry_metadata(input: &str) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(input)
+        .map_err(|error| format!("invalid reranker metadata JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "reranker metadata must be a JSON object".to_string())?;
+    match object.get("schema").and_then(serde_json::Value::as_str) {
+        Some(RERANK_MODEL_REGISTRY_METADATA_SCHEMA) => {}
+        Some(schema) => {
+            return Err(format!(
+                "unexpected reranker metadata schema `{schema}`; expected `{RERANK_MODEL_REGISTRY_METADATA_SCHEMA}`"
+            ));
+        }
+        None => {
+            return Err(format!(
+                "reranker metadata is missing the `schema` field; expected `{RERANK_MODEL_REGISTRY_METADATA_SCHEMA}`"
+            ));
+        }
+    }
+    if !object
+        .get("manifest")
+        .is_some_and(serde_json::Value::is_object)
+    {
+        return Err("reranker metadata is missing the `manifest` object".to_string());
+    }
+    if !object
+        .get("storedPath")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|path| !path.is_empty())
+    {
+        return Err("reranker metadata is missing the `storedPath` field".to_string());
+    }
+    Ok(())
+}
+
 fn rerank_model_metadata_json(
     manifest: &RerankModelManifest,
     stored_path: &Path,
 ) -> Result<String, DomainError> {
     serde_json::to_string(&serde_json::json!({
-        "schema": "ee.rerank_model_registry_metadata.v1",
+        "schema": RERANK_MODEL_REGISTRY_METADATA_SCHEMA,
         "manifest": manifest.data_json(),
         "storedPath": stored_path.to_string_lossy(),
     }))
@@ -3449,6 +3528,65 @@ mod tests {
         } else {
             Err(message.into())
         }
+    }
+
+    #[test]
+    fn rerank_registry_metadata_round_trips_through_validator() -> TestResult {
+        let manifest = bundled_rerank_model_manifest()
+            .map_err(|error| format!("bundled manifest: {error:?}"))?;
+        let metadata = rerank_model_metadata_json(&manifest, Path::new("/tmp/rerank.bin"))
+            .map_err(|error| format!("metadata json: {error:?}"))?;
+        validate_rerank_registry_metadata(&metadata)
+            .map_err(|error| format!("fetch-written reranker metadata must validate: {error}"))
+    }
+
+    #[test]
+    fn rerank_registry_metadata_validator_rejects_malformed_payloads() -> TestResult {
+        ensure(
+            validate_rerank_registry_metadata("not json")
+                .is_err_and(|error| error.contains("invalid reranker metadata JSON")),
+            "non-JSON input should be rejected",
+        )?;
+        ensure(
+            validate_rerank_registry_metadata("[]").is_err(),
+            "non-object input should be rejected",
+        )?;
+        ensure(
+            validate_rerank_registry_metadata(
+                &serde_json::json!({
+                    "schema": "ee.embedding_metadata.v1",
+                    "manifest": {},
+                    "storedPath": "/x",
+                })
+                .to_string(),
+            )
+            .is_err_and(|error| error.contains("unexpected reranker metadata schema")),
+            "wrong schema id should be rejected",
+        )?;
+        ensure(
+            validate_rerank_registry_metadata(
+                &serde_json::json!({
+                    "schema": RERANK_MODEL_REGISTRY_METADATA_SCHEMA,
+                    "storedPath": "/x",
+                })
+                .to_string(),
+            )
+            .is_err_and(|error| error.contains("missing the `manifest` object")),
+            "missing manifest should be rejected",
+        )?;
+        ensure(
+            validate_rerank_registry_metadata(
+                &serde_json::json!({
+                    "schema": RERANK_MODEL_REGISTRY_METADATA_SCHEMA,
+                    "manifest": {},
+                    "storedPath": "",
+                })
+                .to_string(),
+            )
+            .is_err_and(|error| error.contains("missing the `storedPath` field")),
+            "empty storedPath should be rejected",
+        )?;
+        Ok(())
     }
 
     fn fresh_db_for_workspace(workspace_path: &Path) -> Result<(PathBuf, String), String> {

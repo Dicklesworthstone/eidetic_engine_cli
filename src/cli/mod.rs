@@ -20121,11 +20121,32 @@ where
 }
 
 fn model_response_envelope(data: serde_json::Value) -> serde_json::Value {
+    // GH#26: mirror both the report-level `degradations` and the nested
+    // `modelLifecycle.degraded` entries into the top-level envelope so a
+    // high-severity lifecycle degradation can never coexist with an empty
+    // top-level `degraded[]`.
+    let mut entries = data
+        .get("degradations")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(lifecycle) = data
+        .get("modelLifecycle")
+        .and_then(|lifecycle| lifecycle.get("degraded"))
+        .and_then(serde_json::Value::as_array)
+    {
+        for entry in lifecycle {
+            let duplicate = entries.iter().any(|existing| {
+                existing.get("code") == entry.get("code")
+                    && existing.get("message") == entry.get("message")
+            });
+            if !duplicate {
+                entries.push(entry.clone());
+            }
+        }
+    }
     let degraded = crate::output::response_degraded_from_data(&serde_json::json!({
-        "degraded": data
-            .get("degradations")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!([])),
+        "degraded": entries,
     }));
     serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
@@ -67624,6 +67645,48 @@ mod tests {
 
     use crate::core::agent_docs::{AGENT_CORE_COMMANDS, AgentDocsTopic};
     use crate::core::init::{InitOptions, init_workspace};
+
+    /// GH#26: `ee model status` must mirror high-severity
+    /// `modelLifecycle.degraded[]` entries into the top-level envelope instead
+    /// of pinning `degraded: []`.
+    #[test]
+    fn model_response_envelope_mirrors_lifecycle_degradations() {
+        let data = serde_json::json!({
+            "degradations": [
+                {
+                    "code": "rerank_model_missing",
+                    "severity": "warning",
+                    "message": "Reranker registered but unavailable.",
+                    "repair": "ee model fetch rerank-default",
+                }
+            ],
+            "modelLifecycle": {
+                "degraded": [
+                    {
+                        "code": "model_asset_corrupt",
+                        "severity": "high",
+                        "message": "Reranker metadata for registry row x is invalid.",
+                        "repair": "ee model fetch rerank-default --workspace .",
+                    },
+                    {
+                        "code": "rerank_model_missing",
+                        "severity": "warning",
+                        "message": "Reranker registered but unavailable.",
+                        "repair": "ee model fetch rerank-default",
+                    }
+                ]
+            }
+        });
+        let envelope = super::model_response_envelope(data);
+        let degraded = envelope["degraded"]
+            .as_array()
+            .expect("envelope degraded array");
+        let codes = degraded
+            .iter()
+            .map(|entry| entry["code"].as_str().expect("degraded code"))
+            .collect::<Vec<_>>();
+        assert_eq!(codes, vec!["rerank_model_missing", "model_asset_corrupt"]);
+    }
 
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, AttestCommand, AuditCommand, BackupCommand,
