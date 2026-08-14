@@ -41,7 +41,9 @@ floor are an error; the repair is `ee team revoke --all-before-floor`.
   defaults the locator to the local Tailscale IPv4 address; pass
   `--endpoint` when Tailscale is absent. `ee team status` lists
   `pendingInvites[]` for `ee team revoke --invite-id` and
-  `pendingRemovalAcks[]` for unsigned removal fanout. Origin project
+  `pendingRemovalAcks[]` for unsigned removal fanout. Allowed import-ledger memory events rematerialize as local stubs
+via `ee team steward once` if sync crashed after the ledger write.
+Origin project
   shares rematerialize with `ee team projects reconcile`; adopt binds
   a local path afterward.
 - Default `ee team share bodies` is a **preview**. It must stay
