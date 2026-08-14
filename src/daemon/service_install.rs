@@ -201,19 +201,26 @@ pub fn activate_daemon_service(
 
 /// Start a uniquely named oneshot user unit, assert it became active, then
 /// stop it and quarantine the unit file. Proves the T6.2 supervisor-load path
-/// without taking over [`SYSTEMD_UNIT_NAME`].
+/// without taking over [`SYSTEMD_UNIT_NAME`] or [`LAUNCHD_LABEL`].
 pub fn prove_user_supervisor_load(home: &Path, unit_stem: &str) -> Result<String, String> {
-    if current_service_kind() != DaemonServiceKind::SystemdUser {
-        return Err("user supervisor proof requires systemd --user".to_owned());
-    }
     if unit_stem.is_empty()
         || unit_stem.len() > 48
         || !unit_stem
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
     {
-        return Err("unit stem is not a safe systemd name".to_owned());
+        return Err("unit stem is not a safe service name".to_owned());
     }
+    match current_service_kind() {
+        DaemonServiceKind::SystemdUser => prove_systemd_user_supervisor_load(home, unit_stem),
+        DaemonServiceKind::Launchd => prove_launchd_user_supervisor_load(home, unit_stem),
+        DaemonServiceKind::Unsupported => {
+            Err("no user service supervisor on this platform".to_owned())
+        }
+    }
+}
+
+fn prove_systemd_user_supervisor_load(home: &Path, unit_stem: &str) -> Result<String, String> {
     let unit_name = format!("{unit_stem}.service");
     let path = home
         .join(".config")
@@ -257,6 +264,86 @@ pub fn prove_user_supervisor_load(home: &Path, unit_stem: &str) -> Result<String
         return Err(format!("unit was not active after start: {status}"));
     }
     Ok(status)
+}
+
+fn prove_launchd_user_supervisor_load(home: &Path, unit_stem: &str) -> Result<String, String> {
+    let label = format!("ai.eideticengine.{unit_stem}");
+    let path = home
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{label}.plist"));
+    write_unit_file(
+        &path,
+        &format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/true</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
+"#
+        ),
+    )?;
+    let uid = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|text| text.trim().to_owned())
+        .unwrap_or_else(|| "501".to_owned());
+    let domain = format!("gui/{uid}");
+    let service = format!("{domain}/{label}");
+    let _ = std::process::Command::new("launchctl")
+        .args(["bootout", &service])
+        .output();
+    let bootstrap = std::process::Command::new("launchctl")
+        .args(["bootstrap", &domain, &path.display().to_string()])
+        .output()
+        .map_err(|error| format!("launchctl bootstrap: {error}"))?;
+    if !bootstrap.status.success() {
+        let load = std::process::Command::new("launchctl")
+            .args(["load", &path.display().to_string()])
+            .output()
+            .map_err(|error| format!("launchctl load: {error}"))?;
+        if !load.status.success() {
+            let _ = quarantine_unit_file(&path);
+            return Err(format!(
+                "launchctl bootstrap/load failed: {} {}",
+                String::from_utf8_lossy(&bootstrap.stderr),
+                String::from_utf8_lossy(&load.stderr)
+            ));
+        }
+    }
+    let printed = std::process::Command::new("launchctl")
+        .args(["print", &service])
+        .output()
+        .map_err(|error| format!("launchctl print: {error}"))?;
+    let listed = std::process::Command::new("launchctl")
+        .args(["list", &label])
+        .output()
+        .map_err(|error| format!("launchctl list: {error}"))?;
+    let _ = std::process::Command::new("launchctl")
+        .args(["bootout", &service])
+        .output();
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", &path.display().to_string()])
+        .output();
+    let _ = quarantine_unit_file(&path);
+    if printed.status.success() || listed.status.success() {
+        return Ok("active".to_owned());
+    }
+    Err(format!(
+        "launchd unit was not visible after load: {}",
+        String::from_utf8_lossy(&printed.stderr)
+    ))
 }
 
 /// Write the unit file. Callers must have already confirmed.
@@ -342,17 +429,24 @@ mod tests {
     fn prove_user_supervisor_load_refuses_unsafe_stem() {
         let error =
             prove_user_supervisor_load(Path::new("/tmp"), "../escape").expect_err("unsafe stem");
-        assert!(error.contains("safe systemd name") || error.contains("systemd --user"));
+        assert!(error.contains("safe service name"));
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn prove_user_supervisor_load_when_user_manager_exists() {
-        let has_manager = std::process::Command::new("systemctl")
-            .args(["--user", "is-system-running"])
-            .output()
-            .is_ok_and(|output| output.status.success());
-        if !has_manager {
+        let ready = match current_service_kind() {
+            DaemonServiceKind::SystemdUser => std::process::Command::new("systemctl")
+                .args(["--user", "is-system-running"])
+                .output()
+                .is_ok_and(|output| output.status.success()),
+            DaemonServiceKind::Launchd => {
+                std::path::Path::new("/bin/launchctl").is_file()
+                    || std::path::Path::new("/usr/bin/launchctl").is_file()
+            }
+            DaemonServiceKind::Unsupported => false,
+        };
+        if !ready {
             return;
         }
         let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME"));

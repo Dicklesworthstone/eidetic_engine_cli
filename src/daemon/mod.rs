@@ -58,6 +58,26 @@ pub mod metrics;
 #[cfg(unix)]
 pub mod server;
 
+/// Windows/client-only stub so search fallback types stay nameable without a
+/// Unix daemon listener.
+#[cfg(not(unix))]
+pub mod server {
+    /// Minimal stand-in for the Unix daemon search rendering bundle.
+    #[derive(Clone, Debug)]
+    pub struct DaemonSearchRenderings {
+        /// Envelope JSON.
+        pub response: serde_json::Value,
+        /// Optional performance block.
+        pub performance: Option<serde_json::Value>,
+        /// Human rendering.
+        pub human: String,
+        /// Reuse-contract JSON.
+        pub reuse_contract: serde_json::Value,
+        /// Timing JSON.
+        pub timing: serde_json::Value,
+    }
+}
+
 /// Schema id pinned in `docs/schemas/ee.daemon.request.v1.json`.
 pub const DAEMON_REQUEST_SCHEMA_V1: &str = "ee.daemon.request.v1";
 
