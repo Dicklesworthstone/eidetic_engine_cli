@@ -209,7 +209,7 @@ This is a live Unix EE-to-EE ledger, not a bead-closing ceremony.
 | T5.10 US-6 E2E | **Proven (Unix product harness)** | Token bind/drift/expiry/wrong-store, unlinkable previews, crash lifecycle. Isolated 2026-08-14: `already_redacted` 58.60s, `body_lane_grant_then_revoke_gates_fetch` 61.08s, `inspect_team_health` origin_outbox 52.54s, `substituted_body_cache_bytes_stay_metadata_only` 54.58s. `ee team share bodies --representation`; hash-checked fetch | No Windows-host crash killer |
 | T6.1 steward | **Proven** | Isolated 2026-08-14: membership execute 51.59s; `snapshot_from_paths_loads_peers_and_sync_once_stays_deferred_when_mesh_off` 107.15s. Daemon calls `run_mesh_sync_once_from_paths` when `ran_sync`. Execute also rematerializes origin project shares. | Live contact still needs mesh enabled + reachable peers |
 | T6.2 daemon install | **Proven on Linux and macOS user supervisors** | Linux: `systemctl --user start ee-team-confed-proof.service` → `ActiveState=active` at 2026-08-14T01:47:44Z. macOS: `launchctl bootstrap gui/501/ai.eideticengine.ee-team-confed-proof` → `active count = 1` / `state = xpcproxy` at 2026-08-14T02:14:58Z. Both units quarantined by rename. | Real `ee` binary KeepAlive service was not left running; Windows remains client-only |
-| T6.3 admission | **Proven** | Authenticated serve folds decisions into a broker-owned per-peer map; `ee team status` reports conservative caps plus `localTier1Unaffected`; doctor admission names those caps and says there is no live peer snapshot. Isolated 2026-08-14: `inspect_team_health_reports_free_space_above_the_floor` 51.69s exit 0 (64 MiB floor). | Live per-peer usage still requires a running broker |
+| T6.3 admission | **Proven** | Authenticated serve folds decisions into a broker-owned per-peer map and persists a V118 snapshot. Isolated 2026-08-14: `persisted_admission_snapshot_warns_doctor_and_status` 56.71s exit 0; inspect 56.12s exit 0. Status/doctor report throttled/exhausted counts and coalesced exhaustion after the broker exits. | Windows inbound listen remains out of scope |
 | T6.4 doctor | **Proven** | Isolated 2026-08-14: floor 46.91s, inspect 50.86s, removal rematerialize 50.80s, `removal_acknowledgement_matrix_stays_pending_until_audience_applies` 55.88s, all exit 0. V117 persists the removal audience; doctor warns on pending acks and does not claim bounded fanout. Steward advances acks from peer cursors. | Windows inbound listen remains out of scope |
 | T6.5 budgets | **Documented + unit-enforced** | `docs/mesh/perf_budgets.md`; conservative-limit unit test | No Criterion `[[bench]]` for join/relay; compile cost dominates |
 | T6.6 docs | **Landed** | `docs/team/quickstart.md`, `trusted_vs_contractor.md`, `docs/agent-ux/team.md`, CHANGELOG | — |
@@ -217,10 +217,10 @@ This is a live Unix EE-to-EE ledger, not a bead-closing ceremony.
 | T7 Windows / client-only | **Fail-closed** | Same as T5.9 | — |
 
 Campaign is **done as live Unix EE-to-EE capability**, including
-T5.10, T6.2, T6.3 status/doctor admission + 64 MiB free-space
+T5.10, T6.2, T6.3 V118 admission snapshots + 64 MiB free-space
 floor, T6.4 invite-floor / project rematerialization / V117
 removal-ack matrix, and `ee team status` `pendingRemovalAcks[]`.
-Isolated 2026-08-14T14:55–15:12Z: free-space 51.69s, ack+status
-52.82s, inspect 52.40s, all exit 0. Windows inbound listen and a
+Isolated 2026-08-14T15:15–15:44Z: admission snapshot 56.71s,
+inspect 56.12s, all exit 0. Windows inbound listen and a
 Windows-host DACL soak remain out of scope. Do not self-close
 beads from this ledger.
