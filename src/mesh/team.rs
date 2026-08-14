@@ -144,9 +144,22 @@ pub struct TeamStatusReport {
     pub members: Vec<TeamMemberRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<TeamMemberNodeRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_invites: Vec<TeamPendingInviteRecord>,
     pub paused: bool,
     pub steward_would_sync: bool,
     pub mesh_primitives: Vec<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamPendingInviteRecord {
+    pub invite_id: String,
+    pub team_id: String,
+    pub status: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub endpoint: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -660,6 +673,23 @@ pub fn local_team_status(connection: &DbConnection) -> Result<TeamStatusReport, 
     let steward_would_sync = plan_team_steward_once(connection)
         .map(|plan| plan.ran_sync)
         .unwrap_or(false);
+    let mut pending_invites = Vec::new();
+    for team in &teams {
+        pending_invites.extend(
+            connection
+                .list_team_pending_invites(&team.team_id)
+                .map_err(|error| OriginStreamError::Db(error.to_string()))?
+                .into_iter()
+                .map(|invite| TeamPendingInviteRecord {
+                    invite_id: invite.invite_id,
+                    team_id: invite.team_id,
+                    status: invite.status,
+                    created_at: invite.created_at,
+                    expires_at: invite.expires_at,
+                    endpoint: invite.endpoint,
+                }),
+        );
+    }
     Ok(TeamStatusReport {
         schema: TEAM_STATUS_SCHEMA_V1,
         command: "team status",
@@ -667,6 +697,7 @@ pub fn local_team_status(connection: &DbConnection) -> Result<TeamStatusReport, 
         teams,
         members,
         nodes,
+        pending_invites,
         paused,
         steward_would_sync,
         mesh_primitives: vec![
@@ -674,6 +705,7 @@ pub fn local_team_status(connection: &DbConnection) -> Result<TeamStatusReport, 
             "ee.team.manifest_event.v1",
             "team_members",
             "team_member_nodes",
+            "team_pending_invites",
             "team_posture",
             "steward_decision",
         ],
@@ -4960,6 +4992,13 @@ mod tests {
         )
         .expect("mint");
         assert!(minted.invite_code.starts_with("eeteam1-"));
+        let listed = local_team_status(&connection).expect("status");
+        assert!(
+            listed
+                .pending_invites
+                .iter()
+                .any(|invite| invite.invite_id == minted.invite_id && invite.status == "pending")
+        );
         let parsed = parse_team_invite_code(&minted.invite_code).expect("parse");
         assert_eq!(parsed.invite_id, minted.invite_id);
         let granted = redeem_team_invite(

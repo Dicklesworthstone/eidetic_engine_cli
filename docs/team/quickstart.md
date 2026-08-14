@@ -18,6 +18,7 @@ ee team join --code "$INVITE" --endpoint "$HANA_ADDR" --workspace . --json
 ee team status --workspace . --json
 ee team members list --workspace . --json
 ee team doctor --workspace . --json
+# status.pendingInvites[] carries inviteId for ee team revoke --invite-id
 ```
 
 Share metadata first. Bodies are a separate, confirm-gated publication.
