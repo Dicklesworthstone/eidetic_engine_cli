@@ -97,7 +97,9 @@ future changelog pass expands those rows into full capability sections.
   nonce-checked bytes. Invite codes and join grants carry
   `originWorkspaceId`. Enroll stores it on the peer record.
   `plan_team_body_fetch_binding` is Some only when local and remote
-  workspaces and nodes are distinct.
+  workspaces and nodes are distinct. After EventFetch, `ee mesh sync`
+  and `ee team steward once` run grant-gated BodyFetch on the current
+  thread so pair-key sessions do not have to be Send.
   `ee team invite --wait --resume <invite-id>` continues a pending
   waiter without re-emitting the secret.
   `ee team steward once` is the canonical steward verb (`run-once`
