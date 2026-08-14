@@ -76,7 +76,9 @@ future changelog pass expands those rows into full capability sections.
   can report throttled/exhausted counts and coalesced exhaustion
   after the broker exits. `ee team status` emits `budgets`
   (`ee.team.budgets.v1`) naming join, signed-relay, body, and
-  index amplification caps.
+  index amplification caps. `ee team steward once` promotes a staged
+  Next pair key when Current is missing (crash during rotation) and
+  leaves a Next-beside-Current pairing deferred for the peer ceremony.
   `ee team revoke --all-before-floor` is the invite-floor repair.
   Team create and join raise the invite-authorization floor.
   `ee team status` lists `pendingInvites[]` so a revoke can name an id.
