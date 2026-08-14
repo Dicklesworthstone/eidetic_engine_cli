@@ -98,7 +98,7 @@ impl MeshAdmissionLimits {
     pub const fn conservative_default() -> Self {
         Self {
             max_concurrent_requests_per_peer: 4,
-            max_event_batch_count: 128,
+            max_event_batch_count: 512,
             max_event_batch_bytes: 4 * 1024 * 1024,
             max_body_fetch_bytes: 512 * 1024,
             max_index_jobs_per_round: 16,
@@ -346,6 +346,29 @@ pub struct MeshAdmissionTestEvent {
 }
 
 #[must_use]
+/// Authenticated-session wrapper used by the production responder. Pre-auth
+/// concurrency still lives in the broker; this applies the post-handshake
+/// payload/index caps from [`MeshAdmissionLimits::conservative_default`].
+#[must_use]
+pub fn admit_authenticated_mesh_capability(
+    peer_id: &str,
+    kind: MeshAdmissionRequestKind,
+    payload_bytes: u64,
+    event_count: u32,
+    body_fetch_bytes: u64,
+    now_epoch_ms: u64,
+) -> MeshAdmissionDecision {
+    let request = MeshAdmissionRequest::new(peer_id, kind, now_epoch_ms)
+        .with_payload(payload_bytes)
+        .with_event_count(event_count)
+        .with_body_fetch_bytes(body_fetch_bytes);
+    decide_admission(
+        MeshAdmissionLimits::conservative_default(),
+        &MeshPeerAdmissionState::new(peer_id),
+        &request,
+    )
+}
+
 pub fn decide_admission(
     limits: MeshAdmissionLimits,
     state: &MeshPeerAdmissionState,
@@ -684,6 +707,40 @@ mod tests {
 
     fn request(kind: MeshAdmissionRequestKind) -> MeshAdmissionRequest {
         MeshAdmissionRequest::new("peer-noisy", kind, NOW)
+    }
+
+    #[test]
+    fn conservative_limits_match_published_team_confed_budgets() {
+        let limits = MeshAdmissionLimits::conservative_default();
+        assert_eq!(limits.max_event_batch_count, 512);
+        assert_eq!(limits.max_event_batch_bytes, 4 * 1024 * 1024);
+        assert_eq!(limits.max_body_fetch_bytes, 512 * 1024);
+        assert_eq!(limits.max_index_jobs_per_round, 16);
+        assert_eq!(limits.max_concurrent_requests_per_peer, 4);
+    }
+
+    #[test]
+    fn authenticated_wrapper_rejects_oversized_body_fetch() {
+        let limits = MeshAdmissionLimits::conservative_default();
+        let allowed = admit_authenticated_mesh_capability(
+            "peer-ok",
+            MeshAdmissionRequestKind::BodyFetch,
+            32,
+            0,
+            32,
+            NOW,
+        );
+        assert!(allowed.allowed());
+        let rejected = admit_authenticated_mesh_capability(
+            "peer-noisy",
+            MeshAdmissionRequestKind::BodyFetch,
+            limits.max_body_fetch_bytes + 1,
+            0,
+            limits.max_body_fetch_bytes + 1,
+            NOW,
+        );
+        assert!(!rejected.allowed());
+        assert_eq!(rejected.reason, MeshAdmissionReason::PayloadRejected);
     }
 
     #[test]
