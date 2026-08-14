@@ -2241,6 +2241,7 @@ impl MeshForegroundSnapshot {
         }
         let connection = DbConnection::open_file(database_path)
             .map_err(|error| format!("open mesh store: {error}"))?;
+        let (mesh_enabled, mode) = mesh_enabled_for_store(workspace_path, &connection);
         let workspace_id = resolve_workspace_id_from_path(&connection, workspace_path)?;
         let storage = connection
             .mesh_storage_status(&workspace_id)
@@ -2277,6 +2278,32 @@ impl MeshForegroundSnapshot {
             degraded: Vec::new(),
         })
     }
+}
+
+fn mesh_explicitly_disabled(workspace_path: &Path) -> bool {
+    if let Some(value) = read_env_var(EnvVar::MeshEnabled) {
+        return matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        );
+    }
+    workspace_config(workspace_path).and_then(|config| config.mesh.enabled) == Some(false)
+}
+
+/// Team create/join is the inbound opt-in. Explicit `EE_MESH_ENABLED=0` or
+/// `mesh.enabled = false` still wins.
+fn mesh_enabled_for_store(workspace_path: &Path, connection: &DbConnection) -> (bool, String) {
+    let (configured_on, mode) = mesh_enabled_and_mode(workspace_path);
+    if mesh_explicitly_disabled(workspace_path) {
+        return (false, mode);
+    }
+    if configured_on {
+        return (true, mode);
+    }
+    let has_team = crate::mesh::team::load_local_teams(connection)
+        .ok()
+        .is_some_and(|teams| !teams.is_empty());
+    (has_team, mode)
 }
 
 fn mesh_enabled_and_mode(workspace_path: &Path) -> (bool, String) {
@@ -2387,10 +2414,6 @@ fn spawn_team_responder_owner_unix(workspace_path: &Path, database_path: &Path) 
     {
         return false;
     }
-    let (mesh_enabled, _) = mesh_enabled_and_mode(workspace_path);
-    if !mesh_enabled {
-        return false;
-    }
     let Ok(workspace_path) = workspace_path.canonicalize() else {
         return false;
     };
@@ -2403,7 +2426,7 @@ fn spawn_team_responder_owner_unix(workspace_path: &Path, database_path: &Path) 
     let Ok(snapshot) = MeshForegroundSnapshot::from_paths(&workspace_path, &database_path) else {
         return false;
     };
-    if !snapshot.initialized {
+    if !snapshot.initialized || !snapshot.mesh_enabled {
         return false;
     }
     let Ok(connection) = DbConnection::open_file(&database_path) else {
@@ -3863,6 +3886,36 @@ mod tests {
         assert_eq!(
             fetch_pending_team_bodies_from_paths(dir.path(), &database),
             0
+        );
+    }
+
+    #[test]
+    fn local_team_enables_mesh_unless_explicitly_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("ee.db");
+        let connection = DbConnection::open_file(&database).expect("open");
+        connection.migrate().expect("migrate");
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &CreateWorkspaceInput {
+                    path: dir.path().display().to_string(),
+                    name: Some("team-mesh-on".to_owned()),
+                },
+            )
+            .expect("workspace");
+        crate::mesh::team::create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-14T00:00:00Z",
+        )
+        .expect("create");
+        let snapshot = MeshForegroundSnapshot::from_paths(dir.path(), &database).expect("snapshot");
+        assert!(snapshot.initialized);
+        assert!(
+            snapshot.mesh_enabled,
+            "a local team is the mesh opt-in when mesh.enabled is unset"
         );
     }
 
