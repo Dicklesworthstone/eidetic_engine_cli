@@ -900,6 +900,25 @@ struct AdmissionState {
     inflight_global: usize,
     inflight_by_source: BTreeMap<IpAddr, usize>,
     rate: BootstrapAdmission,
+    peers: BTreeMap<String, crate::mesh::admission::MeshPeerAdmissionState>,
+}
+
+impl AdmissionState {
+    fn new(limits: PreAuthAdmissionLimits) -> Self {
+        Self {
+            limits,
+            started_at: Instant::now(),
+            inflight_global: 0,
+            inflight_by_source: BTreeMap::new(),
+            rate: BootstrapAdmission::with_limits(
+                limits.window_ms,
+                limits.max_source_per_window,
+                limits.max_global_per_window,
+                limits.max_tracked_sources,
+            ),
+            peers: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1233,18 +1252,7 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
                 listener: Some(listener),
                 local_api,
                 routes: Arc::new(routes),
-                admission: Arc::new(Mutex::new(AdmissionState {
-                    limits: admission_limits,
-                    started_at: Instant::now(),
-                    inflight_global: 0,
-                    inflight_by_source: BTreeMap::new(),
-                    rate: BootstrapAdmission::with_limits(
-                        admission_limits.window_ms,
-                        admission_limits.max_source_per_window,
-                        admission_limits.max_global_per_window,
-                        admission_limits.max_tracked_sources,
-                    ),
-                })),
+                admission: Arc::new(Mutex::new(AdmissionState::new(admission_limits))),
                 runtime: Arc::new(Mutex::new(RuntimeStatus::listening())),
                 bound_address,
             })
@@ -1416,7 +1424,8 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
         cx: &Cx,
     ) -> Result<(), ResponderBrokerError> {
         let mut session = self.accept_authenticated(cx).await?;
-        let result = serve_authenticated_sync_round(cx, &mut session, &self.routes).await;
+        let result =
+            serve_authenticated_sync_round(cx, &mut session, &self.routes, &self.admission).await;
         session.close();
         result
     }
@@ -1593,18 +1602,7 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             routes,
             durable_registrations: None,
             admission_limits,
-            admission: Arc::new(Mutex::new(AdmissionState {
-                limits: admission_limits,
-                started_at: Instant::now(),
-                inflight_global: 0,
-                inflight_by_source: BTreeMap::new(),
-                rate: BootstrapAdmission::with_limits(
-                    admission_limits.window_ms,
-                    admission_limits.max_source_per_window,
-                    admission_limits.max_global_per_window,
-                    admission_limits.max_tracked_sources,
-                ),
-            })),
+            admission: Arc::new(Mutex::new(AdmissionState::new(admission_limits))),
             brokers: Vec::new(),
             bound_addresses: Vec::new(),
             revalidate_interval,
@@ -1657,18 +1655,7 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             routes,
             durable_registrations: None,
             admission_limits,
-            admission: Arc::new(Mutex::new(AdmissionState {
-                limits: admission_limits,
-                started_at: Instant::now(),
-                inflight_global: 0,
-                inflight_by_source: BTreeMap::new(),
-                rate: BootstrapAdmission::with_limits(
-                    admission_limits.window_ms,
-                    admission_limits.max_source_per_window,
-                    admission_limits.max_global_per_window,
-                    admission_limits.max_tracked_sources,
-                ),
-            })),
+            admission: Arc::new(Mutex::new(AdmissionState::new(admission_limits))),
             brokers: Vec::new(),
             bound_addresses: Vec::new(),
             revalidate_interval,
@@ -2356,18 +2343,26 @@ fn owner_safe_canonical_path(path: &Path) -> Result<PathBuf, ResponderBrokerErro
     if !path.is_absolute() {
         return Err(ResponderBrokerError::InvalidConfiguration);
     }
-    let metadata =
-        fs::symlink_metadata(path).map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
-    if metadata.file_type().is_symlink() || metadata.uid() != current_responder_euid() {
-        return Err(ResponderBrokerError::InvalidConfiguration);
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        return Err(ResponderBrokerError::PlatformUnsupported);
     }
-    let canonical = path
-        .canonicalize()
-        .map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
-    if canonical != path {
-        return Err(ResponderBrokerError::InvalidConfiguration);
+    #[cfg(unix)]
+    {
+        let metadata =
+            fs::symlink_metadata(path).map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+        if metadata.file_type().is_symlink() || metadata.uid() != current_responder_euid() {
+            return Err(ResponderBrokerError::InvalidConfiguration);
+        }
+        let canonical = path
+            .canonicalize()
+            .map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+        if canonical != path {
+            return Err(ResponderBrokerError::InvalidConfiguration);
+        }
+        Ok(canonical)
     }
-    Ok(canonical)
 }
 
 fn materialize_control_registrations(
@@ -3033,8 +3028,12 @@ fn admit_authenticated_capability(
     peer_id: &str,
     capability: &FrameCapability,
     payload: &serde_json::Value,
+    peer_state: &mut crate::mesh::admission::MeshPeerAdmissionState,
 ) -> Result<crate::mesh::admission::MeshAdmissionDecision, ResponderBrokerError> {
-    use crate::mesh::admission::{MeshAdmissionRequestKind, admit_authenticated_mesh_capability};
+    use crate::mesh::admission::{
+        MeshAdmissionRequestKind, admit_authenticated_mesh_capability_with_state,
+        record_authenticated_admission,
+    };
     let kind = match capability {
         FrameCapability::BodyFetch => MeshAdmissionRequestKind::BodyFetch,
         FrameCapability::EventFetch => MeshAdmissionRequestKind::EventBatch,
@@ -3066,14 +3065,15 @@ fn admit_authenticated_capability(
     } else {
         0
     };
-    let decision = admit_authenticated_mesh_capability(
-        peer_id,
+    let decision = admit_authenticated_mesh_capability_with_state(
+        peer_state,
         kind,
         payload_bytes,
         event_count,
         body_fetch_bytes,
         now_epoch_ms,
     );
+    record_authenticated_admission(peer_state, &decision, now_epoch_ms);
     if !decision.allowed() {
         return Err(ResponderBrokerError::AdmissionLimited);
     }
@@ -3084,6 +3084,7 @@ async fn serve_authenticated_sync_round(
     cx: &Cx,
     session: &mut AuthenticatedTransportSession,
     routes: &ResponderRouteRegistry,
+    admission: &Arc<Mutex<AdmissionState>>,
 ) -> Result<(), ResponderBrokerError> {
     let request = loop {
         let Some(request) = session
@@ -3103,11 +3104,17 @@ async fn serve_authenticated_sync_round(
             break request;
         }
     };
-    admit_authenticated_capability(
-        &session.binding().initiator_node_id,
-        &request.capability,
-        &request.payload,
-    )?;
+    let peer_id = session.binding().initiator_node_id.clone();
+    {
+        let mut state = admission
+            .lock()
+            .map_err(|_| ResponderBrokerError::AdmissionLimited)?;
+        let peer = state
+            .peers
+            .entry(peer_id.clone())
+            .or_insert_with(|| crate::mesh::admission::MeshPeerAdmissionState::new(&peer_id));
+        admit_authenticated_capability(&peer_id, &request.capability, &request.payload, peer)?;
+    }
     let payload = if matches!(
         &request.capability,
         FrameCapability::Extension(name) if name == "identity_attest"
@@ -3141,7 +3148,7 @@ async fn serve_authenticated_sync_round(
             .map_err(ResponderBrokerError::Session)?;
         serde_json::to_value(&processed).map_err(|_| ResponderBrokerError::TransportUnavailable)?
     };
-    session
+    let result = session
         .send_response(
             cx,
             SessionMessage {
@@ -3152,7 +3159,13 @@ async fn serve_authenticated_sync_round(
             },
         )
         .await
-        .map_err(ResponderBrokerError::Session)
+        .map_err(ResponderBrokerError::Session);
+    if let Ok(mut state) = admission.lock()
+        && let Some(peer) = state.peers.get_mut(&peer_id)
+    {
+        crate::mesh::admission::release_authenticated_admission(peer);
+    }
+    result
 }
 
 fn load_sync_round_response(
@@ -3568,17 +3581,26 @@ mod tests {
             "schema": "ee.mesh.body_fetch.request.v1",
             "bodyCacheKey": "x".repeat(600 * 1024),
         });
-        let error =
-            admit_authenticated_capability("peer-noisy", &FrameCapability::BodyFetch, &oversize)
-                .expect_err("oversized body fetch");
+        let mut noisy = crate::mesh::admission::MeshPeerAdmissionState::new("peer-noisy");
+        let error = admit_authenticated_capability(
+            "peer-noisy",
+            &FrameCapability::BodyFetch,
+            &oversize,
+            &mut noisy,
+        )
+        .expect_err("oversized body fetch");
         assert!(matches!(error, ResponderBrokerError::AdmissionLimited));
+        assert!(noisy.malformed_frame_count > 0);
+        let mut ok_peer = crate::mesh::admission::MeshPeerAdmissionState::new("peer-ok");
         let ok = admit_authenticated_capability(
             "peer-ok",
             &FrameCapability::Summary,
             &serde_json::json!({"schema": "ee.mesh.sync_round.v1"}),
+            &mut ok_peer,
         )
         .expect("summary stays inside budget");
         assert!(ok.allowed());
+        assert_eq!(ok_peer.in_flight_requests, 1);
     }
 
     #[test]

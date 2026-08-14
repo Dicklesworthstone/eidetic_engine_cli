@@ -62,11 +62,13 @@ use crate::mesh::peer::{
     generate_peer_origin_node_id, list_peers, revoke_peer, rotate_peer_key, show_peer,
     unknown_peer_attempt_report,
 };
+#[cfg(unix)]
+use crate::mesh::responder_broker::submit_responder_control_request;
 use crate::mesh::responder_broker::{
     DurableResponderRegistration, PreAuthAdmissionLimits, RESPONDER_CONTROL_SCHEMA_V1,
     ResponderBrokerError, ResponderBrokerOwner, ResponderControlOp, ResponderControlRequest,
     TailscaleLocalApiClient, default_responder_control_socket_path,
-    responder_control_status_request, submit_responder_control_request,
+    responder_control_status_request,
 };
 use crate::mesh::tailscale_autodiscovery::{
     TailscaleAutodiscoveryConfig, TailscaleAutodiscoveryReport, TcpBootstrapHelloProbe,
@@ -3789,6 +3791,22 @@ where
             .control_socket
             .clone()
             .unwrap_or_else(default_responder_control_socket_path);
+        #[cfg(not(unix))]
+        {
+            let _ = (socket, request);
+            return write_domain_error(
+                &DomainError::Configuration {
+                    message: "responder control requires a Unix host".to_owned(),
+                    repair: Some(
+                        "use a Unix host for ee mesh responder register/unregister".to_owned(),
+                    ),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+        #[cfg(unix)]
         match submit_responder_control_request(&socket, &request) {
             Ok(response) if response.ok => {
                 let mut status = HelloResponderStatusReport::from_runtime(
