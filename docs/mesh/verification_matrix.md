@@ -207,7 +207,7 @@ This is a live Unix EE-to-EE ledger, not a bead-closing ceremony.
 | T5.9 Unix body product | **Proven** | `share_team_bodies_publishes_then_unshare_stops_serving` exit 0; live BodyFetch; confirm gated on secure-file | Files never deleted; reconcile does not resurrect |
 | T5.9 Windows SID/DACL/reparse | **Adapter compiles (`HardenedWindows`)** | Isolated `cargo check --target x86_64-pc-windows-gnu --lib` Finished in 9m 44s after enabling `windows_by_handle`, gating Unix-only responder control, and stubbing the Windows daemon search type. Adapter rejects reparse points, pins file identity, applies/verifies protected owner+SYSTEM DACL, write-through publish. | No Windows-host runtime DACL soak; inbound responder remains Unix-only. |
 | T5.10 US-6 E2E | **Proven (Unix product harness)** | Token bind/drift/expiry/wrong-store, unlinkable previews, crash lifecycle. Isolated 2026-08-14: `already_redacted` 58.60s, `body_lane_grant_then_revoke_gates_fetch` 61.08s, `inspect_team_health` origin_outbox 52.54s, `substituted_body_cache_bytes_stay_metadata_only` 54.58s. `ee team share bodies --representation`; hash-checked fetch | No Windows-host crash killer |
-| T6.1 steward | **Proven** | Isolated 2026-08-14: membership, projects, orphaned Next pair, and inbound memory rematerialize. `reconcile_inbound_team_memories_replays_allowed_import_ledger_events` 57.39s exit 0. Doctor `inbound_memories` warns when an allowed ledger event has no local stub. | Live contact still needs mesh enabled + reachable peers |
+| T6.1 steward | **Proven** | Isolated 2026-08-14: membership, projects, orphaned Next pair, inbound memory rematerialize, and SingleDocument index enqueue. `reconcile_inbound_team_memories_replays_allowed_import_ledger_events` 72.43s exit 0. Rematerialized stubs enqueue `sidx_*` so team search/pack do not wait on a full rebuild. | Live contact still needs mesh enabled + reachable peers |
 | T6.2 daemon install | **Proven on Linux and macOS user supervisors** | Linux: `systemctl --user start ee-team-confed-proof.service` → `ActiveState=active` at 2026-08-14T01:47:44Z. macOS: `launchctl bootstrap gui/501/ai.eideticengine.ee-team-confed-proof` → `active count = 1` / `state = xpcproxy` at 2026-08-14T02:14:58Z. Both units quarantined by rename. | Real `ee` binary KeepAlive service was not left running; Windows remains client-only |
 | T6.3 admission | **Proven** | Authenticated serve folds decisions into a broker-owned per-peer map and persists a V118 snapshot. Isolated 2026-08-14: `persisted_admission_snapshot_warns_doctor_and_status` 56.71s exit 0; inspect 56.12s exit 0. Status/doctor report throttled/exhausted counts and coalesced exhaustion after the broker exits. | Windows inbound listen remains out of scope |
 | T6.4 doctor | **Proven** | Isolated 2026-08-14: `inspect_team_health_reports_no_team_then_ok_then_paused` 65.39s exit 0. `broker_port` now compares genesis hello port to `EE_MESH_HELLO_PORT`; mismatch is a warning. `whois` no longer claims a live Tailscale probe. | Windows inbound listen remains out of scope |
@@ -217,7 +217,8 @@ This is a live Unix EE-to-EE ledger, not a bead-closing ceremony.
 | T7 Windows / client-only | **Fail-closed** | Same as T5.9 | — |
 
 Campaign is **done as live Unix EE-to-EE capability**, including
-inbound-memory rematerialize after a sync crash. Isolated
-2026-08-14T17:46–17:59Z: inbound memories 57.39s, inspect 56.05s,
-all exit 0. Windows inbound listen and a Windows-host DACL soak
-remain out of scope. Do not self-close beads from this ledger.
+inbound-memory rematerialize plus SingleDocument index enqueue.
+Isolated 2026-08-14T18:14–18:31Z: rematerialize 72.43s, project
+78.90s, all exit 0. Windows inbound listen and a Windows-host
+DACL soak remain out of scope. Do not self-close beads from this
+ledger.
