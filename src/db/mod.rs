@@ -9966,6 +9966,45 @@ CREATE INDEX idx_team_projects_team ON team_projects(team_id, display_name);
     "blake3:v116_team_projects_reconciled_2026_08_14",
 );
 
+/// V117: durable per-member removal acknowledgement matrix (T4.6 / T6.4).
+pub const V117_TEAM_REMOVAL_ACKS: Migration = Migration::new(
+    117,
+    "team_removal_acknowledgements",
+    r#"
+CREATE TABLE team_removal_acknowledgements (
+    removal_event_hash TEXT NOT NULL CHECK (
+        removal_event_hash GLOB 'blake3:*' AND length(removal_event_hash) = 71
+    ),
+    team_id TEXT NOT NULL CHECK (
+        team_id GLOB 'team_*'
+        AND length(trim(team_id)) > 5
+        AND team_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    removal_origin_node_id TEXT NOT NULL CHECK (
+        removal_origin_node_id GLOB 'node_*'
+        AND length(trim(removal_origin_node_id)) > 5
+        AND removal_origin_node_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    removal_seq INTEGER NOT NULL CHECK (removal_seq >= 0),
+    audience_origin_node_id TEXT NOT NULL CHECK (
+        audience_origin_node_id GLOB 'node_*'
+        AND length(trim(audience_origin_node_id)) > 5
+        AND audience_origin_node_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    audience_member_id TEXT NOT NULL CHECK (
+        length(audience_member_id) = 36 AND audience_member_id GLOB 'mbr_*'
+        AND substr(audience_member_id, 5) NOT GLOB '*[^0-9a-f]*'
+    ),
+    acknowledged_at TEXT,
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    PRIMARY KEY (removal_event_hash, audience_origin_node_id)
+);
+CREATE INDEX idx_team_removal_acks_pending
+    ON team_removal_acknowledgements(team_id, acknowledged_at);
+"#,
+    "blake3:v117_team_removal_acks_2026_08_14",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -10084,6 +10123,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V114_TEAM_IDP_TOKEN_REPLAY,
     V115_MESH_BODY_CACHE_LIFECYCLE,
     V116_TEAM_PROJECTS_RECONCILED,
+    V117_TEAM_REMOVAL_ACKS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -14652,6 +14692,32 @@ pub struct StoredTeamProject {
     pub created_at: String,
 }
 
+/// Input for one removal-acknowledgement audience row.
+#[derive(Debug, Clone)]
+pub struct InsertTeamRemovalAckInput {
+    pub removal_event_hash: String,
+    pub team_id: String,
+    pub removal_origin_node_id: String,
+    pub removal_seq: u64,
+    pub audience_origin_node_id: String,
+    pub audience_member_id: String,
+    pub acknowledged_at: Option<String>,
+    pub created_at: String,
+}
+
+/// Stored `team_removal_acknowledgements` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredTeamRemovalAck {
+    pub removal_event_hash: String,
+    pub team_id: String,
+    pub removal_origin_node_id: String,
+    pub removal_seq: u64,
+    pub audience_origin_node_id: String,
+    pub audience_member_id: String,
+    pub acknowledged_at: Option<String>,
+    pub created_at: String,
+}
+
 /// Stored `team_idp_policy` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredTeamIdpPolicy {
@@ -14867,6 +14933,33 @@ fn stored_team_project_from_row(row: &Row) -> Result<StoredTeamProject> {
         local_path: required_text(row, 3, DbOperation::Query, "local_path")?.to_string(),
         source: required_text(row, 4, DbOperation::Query, "source")?.to_string(),
         created_at: required_text(row, 5, DbOperation::Query, "created_at")?.to_string(),
+    })
+}
+
+fn stored_team_removal_ack_from_row(row: &Row) -> Result<StoredTeamRemovalAck> {
+    Ok(StoredTeamRemovalAck {
+        removal_event_hash: required_text(row, 0, DbOperation::Query, "removal_event_hash")?
+            .to_string(),
+        team_id: required_text(row, 1, DbOperation::Query, "team_id")?.to_string(),
+        removal_origin_node_id: required_text(
+            row,
+            2,
+            DbOperation::Query,
+            "removal_origin_node_id",
+        )?
+        .to_string(),
+        removal_seq: required_u64(row, 3, DbOperation::Query, "removal_seq")?,
+        audience_origin_node_id: required_text(
+            row,
+            4,
+            DbOperation::Query,
+            "audience_origin_node_id",
+        )?
+        .to_string(),
+        audience_member_id: required_text(row, 5, DbOperation::Query, "audience_member_id")?
+            .to_string(),
+        acknowledged_at: optional_text(row, 6)?.map(str::to_string),
+        created_at: required_text(row, 7, DbOperation::Query, "created_at")?.to_string(),
     })
 }
 
@@ -16759,6 +16852,77 @@ impl DbConnection {
             &[Value::Text(team_id.to_owned())],
         )?;
         rows.iter().map(stored_team_project_from_row).collect()
+    }
+
+    /// Persist one removal-acknowledgement audience row. Duplicate is a no-op.
+    pub fn insert_team_removal_ack(&self, input: &InsertTeamRemovalAckInput) -> Result<bool> {
+        let removal_seq = i64::try_from(input.removal_seq).map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "removal_seq must fit i64".to_owned(),
+        })?;
+        let changed = self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO team_removal_acknowledgements (
+                removal_event_hash, team_id, removal_origin_node_id, removal_seq,
+                audience_origin_node_id, audience_member_id, acknowledged_at, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(removal_event_hash, audience_origin_node_id) DO NOTHING",
+            &[
+                Value::Text(input.removal_event_hash.clone()),
+                Value::Text(input.team_id.clone()),
+                Value::Text(input.removal_origin_node_id.clone()),
+                Value::BigInt(removal_seq),
+                Value::Text(input.audience_origin_node_id.clone()),
+                Value::Text(input.audience_member_id.clone()),
+                input
+                    .acknowledged_at
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                Value::Text(input.created_at.clone()),
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// List acknowledgement rows for one team, pending first.
+    pub fn list_team_removal_acks(&self, team_id: &str) -> Result<Vec<StoredTeamRemovalAck>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT removal_event_hash, team_id, removal_origin_node_id, removal_seq,
+                    audience_origin_node_id, audience_member_id, acknowledged_at, created_at
+             FROM team_removal_acknowledgements
+             WHERE team_id = ?1
+             ORDER BY acknowledged_at IS NOT NULL ASC, created_at ASC, audience_origin_node_id ASC",
+            &[Value::Text(team_id.to_owned())],
+        )?;
+        rows.iter().map(stored_team_removal_ack_from_row).collect()
+    }
+
+    /// Mark pending audience rows applied once `applied_seq` covers the removal.
+    pub fn acknowledge_team_removal_acks_for_origin(
+        &self,
+        audience_origin_node_id: &str,
+        applied_seq: u64,
+        acknowledged_at: &str,
+    ) -> Result<usize> {
+        let applied_seq = i64::try_from(applied_seq).map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "applied_seq must fit i64".to_owned(),
+        })?;
+        let changed = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE team_removal_acknowledgements
+             SET acknowledged_at = ?3
+             WHERE audience_origin_node_id = ?1
+               AND acknowledged_at IS NULL
+               AND removal_seq <= ?2",
+            &[
+                Value::Text(audience_origin_node_id.to_owned()),
+                Value::BigInt(applied_seq),
+                Value::Text(acknowledged_at.to_owned()),
+            ],
+        )?;
+        Ok(usize::try_from(changed).unwrap_or(0))
     }
 
     /// Persist or advance the team's IdP policy generation.

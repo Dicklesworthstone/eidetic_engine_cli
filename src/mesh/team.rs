@@ -13,8 +13,8 @@ use crate::core::tailscale_probe::{
 use crate::db::{
     CreateMemoryInput, DbConnection, InsertTeamHistoryProjectionInput, InsertTeamMemberInput,
     InsertTeamMemberNodeInput, InsertTeamPendingInviteInput, InsertTeamProjectInput,
-    StoredMeshOriginEvent, StoredTeamMember, StoredTeamMemberIdentity, StoredTeamProject,
-    UpsertMeshBodyCacheMetadataInput, UpsertTeamJoinAttemptInput,
+    InsertTeamRemovalAckInput, StoredMeshOriginEvent, StoredTeamMember, StoredTeamMemberIdentity,
+    StoredTeamProject, UpsertMeshBodyCacheMetadataInput, UpsertTeamJoinAttemptInput,
 };
 use crate::mesh::bootstrap_envelope::{
     BOOTSTRAP_DECLINE_SCHEMA_V1, BootstrapCapability, BootstrapDeclineV1, decode_envelope,
@@ -2338,11 +2338,17 @@ pub fn execute_team_steward_once(
         None,
         &chrono::Utc::now().to_rfc3339(),
     )?;
+    advance_team_removal_acknowledgements(
+        connection,
+        &workspace_id,
+        &chrono::Utc::now().to_rfc3339(),
+    )?;
     report.stalled_cursors = stalled_peer_cursor_count(connection, &workspace_id)?;
     report.mesh_primitives = vec![
         "team_members",
         "team_projects",
         "mesh_body_cache_metadata",
+        "team_removal_acknowledgements",
         "steward_decision",
         "mesh_sync",
     ];
@@ -2821,38 +2827,51 @@ pub fn inspect_team_health(
             )
         })
         .count();
-    checks.push(if signed_removals == 0 {
+    let acks = connection
+        .list_team_removal_acks(&team.team_id)
+        .unwrap_or_default();
+    let audience = acks.len();
+    let pending_acks = acks
+        .iter()
+        .filter(|ack| ack.acknowledged_at.is_none())
+        .count();
+    checks.push(if signed_removals == 0 && audience == 0 {
         TeamDoctorCheck {
             name: "removal_acknowledgements".to_owned(),
             status: "ok".to_owned(),
             message: "no signed removals awaiting acknowledgement".to_owned(),
             repair: None,
         }
-    } else if delegated == 0 {
+    } else if pending_acks == 0 {
         TeamDoctorCheck {
             name: "removal_acknowledgements".to_owned(),
             status: "ok".to_owned(),
-            message: format!(
-                "{signed_removals} signed removal(s); no remaining members to acknowledge"
-            ),
+            message: if audience == 0 {
+                format!(
+                    "{signed_removals} signed removal(s); no remaining members to acknowledge"
+                )
+            } else {
+                format!("{signed_removals} signed removal(s); 0/{audience} acknowledgements pending")
+            },
             repair: None,
         }
-    } else if stalled_cursors > 0 {
+    } else if pending_acks == audience {
         TeamDoctorCheck {
             name: "removal_acknowledgements".to_owned(),
             status: "warning".to_owned(),
             message: format!(
-                "{signed_removals} signed removal(s); {stalled_cursors} peer cursor(s) \
-behind/blocked/quarantined; fanout is not bounded until those peers apply the event"
+                "{pending_acks}/{audience} acknowledgement(s) pending; nobody has applied the removal; fanout is not bounded"
             ),
             repair: Some("ee team steward once --workspace .".to_owned()),
         }
     } else {
         TeamDoctorCheck {
             name: "removal_acknowledgements".to_owned(),
-            status: "ok".to_owned(),
-            message: format!("{signed_removals} signed removal(s); no stalled peer cursors"),
-            repair: None,
+            status: "warning".to_owned(),
+            message: format!(
+                "{pending_acks}/{audience} acknowledgement(s) pending; {stalled_cursors} stalled cursor(s)"
+            ),
+            repair: Some("ee team steward once --workspace .".to_owned()),
         }
     });
     if let Some(path) = workspace_path
@@ -2927,6 +2946,7 @@ behind/blocked/quarantined; fanout is not bounded until those peers apply the ev
             "mesh_admission_control",
             "team_invite_auth_floor",
             "team_projects",
+            "team_removal_acknowledgements",
         ],
     })
 }
@@ -3776,13 +3796,18 @@ fn mutate_member_state(
             "team is paused; resume before changing membership".to_owned(),
         ));
     }
-    let local_origin = connection
+    let members = connection
         .list_all_team_members()
-        .map_err(|error| OriginStreamError::Db(error.to_string()))?
-        .into_iter()
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    let local_origin = members
+        .iter()
         .find(|row| row.is_self)
-        .map(|row| row.origin_node_id)
+        .map(|row| row.origin_node_id.clone())
         .unwrap_or_else(|| member.origin_node_id.clone());
+    let audience = members
+        .into_iter()
+        .filter(|row| row.state == "active" && row.member_id != member.member_id)
+        .collect::<Vec<_>>();
     let hex = blake3::hash(format!("{}:{operation}:{}", member.member_id, produced_at).as_bytes())
         .to_hex();
     let payload = OriginEventPayload::Manifest(ManifestEventPayload {
@@ -3803,7 +3828,7 @@ fn mutate_member_state(
         .as_ref()
         .map(|signer| signer as &dyn OriginSigner)
         .unwrap_or(&mac);
-    append_origin_event(
+    let appended = append_origin_event(
         connection,
         signer,
         &OriginAppendRequest {
@@ -3824,6 +3849,17 @@ fn mutate_member_state(
     connection
         .raise_team_invite_auth_floor(&member.team_id, produced_at, produced_at)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    if state == "removed" {
+        seed_team_removal_acknowledgements(
+            connection,
+            &member.team_id,
+            &local_origin,
+            &appended.event_hash,
+            appended.seq,
+            &audience,
+            produced_at,
+        )?;
+    }
     Ok(TeamMemberMutationReport {
         schema,
         command,
@@ -3836,8 +3872,78 @@ fn mutate_member_state(
             "team_members",
             "team_member_nodes",
             "team_invite_auth_floor",
+            "team_removal_acknowledgements",
         ],
     })
+}
+
+fn seed_team_removal_acknowledgements(
+    connection: &DbConnection,
+    team_id: &str,
+    removal_origin_node_id: &str,
+    removal_event_hash: &str,
+    removal_seq: u64,
+    audience: &[StoredTeamMember],
+    produced_at: &str,
+) -> Result<(), OriginStreamError> {
+    for member in audience {
+        connection
+            .insert_team_removal_ack(&InsertTeamRemovalAckInput {
+                removal_event_hash: removal_event_hash.to_owned(),
+                team_id: team_id.to_owned(),
+                removal_origin_node_id: removal_origin_node_id.to_owned(),
+                removal_seq,
+                audience_origin_node_id: member.origin_node_id.clone(),
+                audience_member_id: member.member_id.clone(),
+                acknowledged_at: member.is_self.then(|| produced_at.to_owned()),
+                created_at: produced_at.to_owned(),
+            })
+            .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Mark audience rows applied once a peer cursor covers the removal seq.
+pub fn advance_team_removal_acknowledgements(
+    connection: &DbConnection,
+    workspace_id: &str,
+    acknowledged_at: &str,
+) -> Result<usize, OriginStreamError> {
+    let cursors = connection
+        .list_mesh_peer_cursors(workspace_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    let mut marked = 0_usize;
+    for cursor in cursors {
+        if matches!(cursor.status.as_str(), "blocked" | "quarantined") {
+            continue;
+        }
+        marked = marked.saturating_add(
+            connection
+                .acknowledge_team_removal_acks_for_origin(
+                    &cursor.origin_node_id,
+                    cursor.last_seq,
+                    acknowledged_at,
+                )
+                .map_err(|error| OriginStreamError::Db(error.to_string()))?,
+        );
+    }
+    Ok(marked)
+}
+
+/// Mark audience rows applied for one origin without a peer-cursor row.
+pub fn acknowledge_team_removal_audience(
+    connection: &DbConnection,
+    audience_origin_node_id: &str,
+    applied_seq: u64,
+    acknowledged_at: &str,
+) -> Result<usize, OriginStreamError> {
+    connection
+        .acknowledge_team_removal_acks_for_origin(
+            audience_origin_node_id,
+            applied_seq,
+            acknowledged_at,
+        )
+        .map_err(|error| OriginStreamError::Db(error.to_string()))
 }
 
 /// Project an applied inbound memory event into the local memory table.
@@ -5945,6 +6051,83 @@ mod tests {
                 && check.status == "ok"
                 && check.message.contains("signed removal")
         }));
+    }
+
+    #[test]
+    fn removal_acknowledgement_matrix_stays_pending_until_audience_applies() {
+        let connection = open_db();
+        let created = create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        persist_team_member(
+            &connection,
+            "wsp_persistfixture000000000002",
+            &created.team.team_id,
+            "node_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "Priya",
+            false,
+            "invite_ceremony",
+            "2026-08-13T01:00:00Z",
+            None,
+        )
+        .expect("peer a");
+        let target = persist_team_member(
+            &connection,
+            "wsp_persistfixture000000000003",
+            &created.team.team_id,
+            "node_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "Omar",
+            false,
+            "invite_ceremony",
+            "2026-08-13T01:05:00Z",
+            None,
+        )
+        .expect("peer b");
+        remove_team_member(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &target,
+            "2026-08-13T02:00:00Z",
+            None,
+        )
+        .expect("remove");
+        let acks = connection
+            .list_team_removal_acks(&created.team.team_id)
+            .expect("acks");
+        assert_eq!(acks.len(), 2);
+        assert_eq!(
+            acks.iter()
+                .filter(|ack| ack.acknowledged_at.is_none())
+                .count(),
+            1
+        );
+        let sick =
+            inspect_team_health(&connection, "wsp_persistfixture000000000001", None).expect("sick");
+        assert!(sick.checks.iter().any(|check| {
+            check.name == "removal_acknowledgements"
+                && check.status == "warning"
+                && check.repair.as_deref() == Some("ee team steward once --workspace .")
+        }));
+        let marked = acknowledge_team_removal_audience(
+            &connection,
+            "node_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            32,
+            "2026-08-13T02:30:00Z",
+        )
+        .expect("ack");
+        assert_eq!(marked, 1);
+        let healthy = inspect_team_health(&connection, "wsp_persistfixture000000000001", None)
+            .expect("healthy");
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| check.name == "removal_acknowledgements" && check.status == "ok")
+        );
     }
 
     #[test]
