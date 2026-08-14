@@ -100,6 +100,8 @@ future changelog pass expands those rows into full capability sections.
   workspaces and nodes are distinct. After EventFetch, `ee mesh sync`
   and `ee team steward once` run grant-gated BodyFetch on the current
   thread so pair-key sessions do not have to be Send.
+  `ephemeral_source_for` picks a concrete same-family source IP for
+  routed remotes instead of skipping anything that is not loopback.
   `ee team invite --wait --resume <invite-id>` continues a pending
   waiter without re-emitting the secret.
   `ee team steward once` is the canonical steward verb (`run-once`
