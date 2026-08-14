@@ -3311,6 +3311,7 @@ fn load_body_fetch_response(
             cache_status: "metadata_only".to_owned(),
             size_bytes: 0,
             body_hex: None,
+            nonce_hex: None,
         };
     }
     let workspace_id = routes
@@ -3330,6 +3331,7 @@ fn load_body_fetch_response(
             cache_status: "metadata_only".to_owned(),
             size_bytes: 0,
             body_hex: None,
+            nonce_hex: None,
         };
     };
     let Ok(connection) = DbConnection::open_file_read_only(database_path) else {
@@ -3339,6 +3341,7 @@ fn load_body_fetch_response(
             cache_status: "metadata_only".to_owned(),
             size_bytes: 0,
             body_hex: None,
+            nonce_hex: None,
         };
     };
     if let Some(peer_id) = routes
@@ -3354,6 +3357,7 @@ fn load_body_fetch_response(
             cache_status: "metadata_only".to_owned(),
             size_bytes: 0,
             body_hex: None,
+            nonce_hex: None,
         };
     }
     crate::mesh::team::fetch_local_team_body(&connection, &workspace_id, &workspace_path, key)
@@ -3363,6 +3367,7 @@ fn load_body_fetch_response(
             cache_status: "metadata_only".to_owned(),
             size_bytes: 0,
             body_hex: None,
+            nonce_hex: None,
         })
 }
 

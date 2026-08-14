@@ -1790,6 +1790,7 @@ pub fn fetch_local_team_body(
         cache_status: status.to_owned(),
         size_bytes: size,
         body_hex: None,
+        nonce_hex: None,
     };
     if body_cache_key.is_empty() {
         return Ok(empty("metadata_only", 0));
@@ -1825,6 +1826,7 @@ pub fn fetch_local_team_body(
                 cache_status: "available".to_owned(),
                 size_bytes: u64::try_from(bytes.len()).unwrap_or(0),
                 body_hex: Some(hex_encode(&bytes)),
+                nonce_hex: nonce_hex_for_body_row(connection, &row),
             })
         }
         Ok(None) | Err(_) => Ok(empty("metadata_only", row.size_bytes.unwrap_or(0))),
@@ -1851,6 +1853,200 @@ pub fn body_lane_allows_fetch(
                     Some(crate::config::MeshLaneDecision::Allow)
                 )
         })
+}
+
+fn nonce_hex_for_body_row(
+    connection: &DbConnection,
+    row: &crate::db::StoredMeshBodyCacheMetadata,
+) -> Option<String> {
+    let event_id = row
+        .body_ref_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|value| {
+            value
+                .get("originEventId")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })?;
+    connection.mesh_origin_event_nonce(&event_id).ok().flatten()
+}
+
+fn inbound_body_is_fetchable(representation: Option<&str>) -> bool {
+    matches!(representation, Some("exact" | "already_redacted"))
+}
+
+fn record_inbound_body_placeholder(
+    connection: &DbConnection,
+    workspace_id: &str,
+    inbound: &InboundOriginEvent,
+    payload: &MemoryEventPayload,
+) -> Result<(), OriginStreamError> {
+    if !inbound_body_is_fetchable(payload.body_representation.as_deref()) {
+        return Ok(());
+    }
+    if !payload.logical_memory_id.starts_with("mem_") || payload.logical_memory_id.len() <= 6 {
+        return Ok(());
+    }
+    if !payload.body_commitment.starts_with("blake3:") {
+        return Ok(());
+    }
+    let key = team_body_cache_key(&payload.logical_memory_id);
+    if connection
+        .get_mesh_body_cache_metadata(workspace_id, &key)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .is_some()
+    {
+        return Ok(());
+    }
+    connection
+        .upsert_mesh_body_cache_metadata(&UpsertMeshBodyCacheMetadataInput {
+            workspace_id: workspace_id.to_owned(),
+            body_cache_key: key,
+            origin_node_id: inbound.origin_node_id.clone(),
+            origin_workspace_id: workspace_id.to_owned(),
+            logical_memory_id: payload.logical_memory_id.clone(),
+            content_hash: payload.body_commitment.clone(),
+            body_ref_json: Some(
+                serde_json::json!({ "originEventId": inbound.event_id }).to_string(),
+            ),
+            preview_hash: None,
+            size_bytes: None,
+            cache_status: "metadata_only".to_owned(),
+            local_body_hash: None,
+            cached_at: Some(inbound.produced_at.clone()),
+            expires_at: None,
+        })
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    Ok(())
+}
+
+/// Verify an authorized BodyFetch against the inbound placeholder commitment
+/// and publish bytes through staging → available. Wrong nonce or body stays
+/// metadata-only or quarantined; the nonce is not persisted.
+pub fn apply_fetched_team_body(
+    connection: &DbConnection,
+    workspace_id: &str,
+    workspace_path: &std::path::Path,
+    fetched: &crate::mesh::bootstrap_envelope::BodyFetchResponse,
+) -> Result<crate::mesh::bootstrap_envelope::BodyFetchResponse, OriginStreamError> {
+    use crate::mesh::bootstrap_envelope::{BODY_FETCH_RESPONSE_SCHEMA_V1, BodyFetchResponse};
+    let unchanged = fetched.clone();
+    if fetched.cache_status != "available" {
+        return Ok(unchanged);
+    }
+    let Some(body_hex) = fetched.body_hex.as_deref() else {
+        return Ok(unchanged);
+    };
+    let Some(nonce_hex) = fetched.nonce_hex.as_deref() else {
+        return Ok(unchanged);
+    };
+    let Some(bytes) = hex_decode(body_hex) else {
+        return Ok(unchanged);
+    };
+    let Some(nonce) = hex_decode(nonce_hex).and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+    else {
+        return Ok(unchanged);
+    };
+    let Some(row) = connection
+        .get_mesh_body_cache_metadata(workspace_id, &fetched.body_cache_key)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+    else {
+        return Ok(unchanged);
+    };
+    if row.cache_status == "available" {
+        return fetch_local_team_body(
+            connection,
+            workspace_id,
+            workspace_path,
+            &fetched.body_cache_key,
+        );
+    }
+    let expected = body_commitment(&nonce, &bytes);
+    if expected != row.content_hash {
+        connection
+            .upsert_mesh_body_cache_metadata(&UpsertMeshBodyCacheMetadataInput {
+                workspace_id: row.workspace_id,
+                body_cache_key: row.body_cache_key,
+                origin_node_id: row.origin_node_id,
+                origin_workspace_id: row.origin_workspace_id,
+                logical_memory_id: row.logical_memory_id,
+                content_hash: row.content_hash,
+                body_ref_json: row.body_ref_json,
+                preview_hash: row.preview_hash,
+                size_bytes: row.size_bytes,
+                cache_status: "quarantined".to_owned(),
+                local_body_hash: None,
+                cached_at: Some(chrono::Utc::now().to_rfc3339()),
+                expires_at: row.expires_at,
+            })
+            .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+        return Ok(BodyFetchResponse {
+            schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
+            body_cache_key: fetched.body_cache_key.clone(),
+            cache_status: "quarantined".to_owned(),
+            size_bytes: row.size_bytes.unwrap_or(0),
+            body_hex: None,
+            nonce_hex: None,
+        });
+    }
+    crate::mesh::key_store::require_mesh_credential_store_platform("publish fetched team body")
+        .map_err(|error| {
+            OriginStreamError::Encode(format!(
+                "{}: {error}",
+                crate::mesh::cache::MESH_BODY_CACHE_LIFECYCLE_FAILED_CODE
+            ))
+        })?;
+    let cache_dir = workspace_path.join(".ee").join("mesh-body-cache");
+    let cache = crate::mesh::key_store::SecureLocalDir::open_or_create(workspace_path, &cache_dir)
+        .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+    let local_body_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
+    let mut meta = UpsertMeshBodyCacheMetadataInput {
+        workspace_id: row.workspace_id,
+        body_cache_key: row.body_cache_key.clone(),
+        origin_node_id: row.origin_node_id,
+        origin_workspace_id: row.origin_workspace_id,
+        logical_memory_id: row.logical_memory_id,
+        content_hash: row.content_hash,
+        body_ref_json: row.body_ref_json,
+        preview_hash: row.preview_hash,
+        size_bytes: Some(u64::try_from(bytes.len()).unwrap_or(0)),
+        cache_status: "staging".to_owned(),
+        local_body_hash: Some(local_body_hash),
+        cached_at: Some(chrono::Utc::now().to_rfc3339()),
+        expires_at: row.expires_at,
+    };
+    connection
+        .upsert_mesh_body_cache_metadata(&meta)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    cache
+        .write_replace(&row.body_cache_key, &bytes)
+        .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+    meta.cache_status = "available".to_owned();
+    connection
+        .upsert_mesh_body_cache_metadata(&meta)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    fetch_local_team_body(
+        connection,
+        workspace_id,
+        workspace_path,
+        &fetched.body_cache_key,
+    )
+}
+
+/// Body-cache keys waiting on an authorized fetch. Filesystem presence is
+/// not authority; only `metadata_only` rows are returned.
+pub fn pending_team_body_fetch_keys(
+    connection: &DbConnection,
+    workspace_id: &str,
+) -> Result<Vec<String>, OriginStreamError> {
+    Ok(connection
+        .list_mesh_body_cache_metadata(workspace_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .into_iter()
+        .filter(|row| row.cache_status == "metadata_only")
+        .map(|row| row.body_cache_key)
+        .collect())
 }
 
 fn bodies_consent_hash(team_id: &str, items: &[TeamBodyShareItem]) -> String {
@@ -2061,7 +2257,7 @@ pub fn share_team_bodies_represented(
                 .then(|| "origin_already_redacted".to_owned()),
             body_commitment: commitment.clone(),
         });
-        append_origin_event(
+        let appended = append_origin_event(
             connection,
             &signer_store,
             &OriginAppendRequest {
@@ -2085,7 +2281,9 @@ pub fn share_team_bodies_represented(
             origin_workspace_id: workspace_id.to_owned(),
             logical_memory_id: memory.id.clone(),
             content_hash: commitment,
-            body_ref_json: None,
+            body_ref_json: Some(
+                serde_json::json!({ "originEventId": appended.event_id }).to_string(),
+            ),
             preview_hash: None,
             size_bytes: Some(u64::try_from(memory.content.len()).unwrap_or(0)),
             cache_status: "staging".to_owned(),
@@ -3242,6 +3440,20 @@ pub fn inspect_team_health(
             repair: (staging > 0 || pending_purge > 0)
                 .then(|| "ee team steward once --workspace .".to_owned()),
         });
+        let pending_fetches = rows
+            .iter()
+            .filter(|row| row.cache_status == "metadata_only")
+            .count();
+        checks.push(TeamDoctorCheck {
+            name: "inbound_body_fetches".to_owned(),
+            status: if pending_fetches == 0 {
+                "ok".to_owned()
+            } else {
+                "warning".to_owned()
+            },
+            message: format!("{pending_fetches} inbound body placeholder(s) still metadata_only"),
+            repair: (pending_fetches > 0).then(|| "ee team steward once --workspace .".to_owned()),
+        });
     }
     let posture = if paused {
         "paused"
@@ -4302,6 +4514,7 @@ pub fn project_inbound_team_memory(
         .map_err(|error| OriginStreamError::Db(error.to_string()))?
         .is_some()
     {
+        record_inbound_body_placeholder(connection, workspace_id, inbound, &payload)?;
         return Ok(Some(memory_id));
     }
     let producer = connection
@@ -4342,6 +4555,7 @@ pub fn project_inbound_team_memory(
             },
         )
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    record_inbound_body_placeholder(connection, workspace_id, inbound, &payload)?;
     enqueue_inbound_memory_index_job(connection, workspace_id, &memory_id)?;
     Ok(Some(memory_id))
 }
@@ -6325,6 +6539,12 @@ mod tests {
         assert!(!stored.content.contains("secret body"));
         assert_eq!(stored.trust_class, "peer_human_attested");
         assert_eq!(stored.trust_subclass.as_deref(), Some("agent:Analysts"));
+        assert!(
+            pending_team_body_fetch_keys(&connection, "wsp_persistfixture000000000001")
+                .expect("pending")
+                .is_empty(),
+            "omitted history share must not create a body-fetch placeholder"
+        );
     }
 
     #[test]
@@ -6459,6 +6679,186 @@ mod tests {
                 .iter()
                 .any(|check| check.name == "inbound_memories" && check.status == "ok")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbound_body_placeholder_verifies_nonce_before_publication() {
+        use crate::mesh::bootstrap_envelope::{BODY_FETCH_RESPONSE_SCHEMA_V1, BodyFetchResponse};
+
+        let producer_dir = tempfile::tempdir().unwrap();
+        let producer = open_db();
+        producer
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: producer_dir.path().display().to_string(),
+                    name: Some("producer".to_owned()),
+                },
+            )
+            .expect("workspace");
+        let created = create_local_team_with_store(
+            &producer,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+            Some(producer_dir.path()),
+        )
+        .expect("create");
+        producer
+            .insert_memory(
+                "mem_teambodies0000000000000001",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "secret body stays off the metadata event".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("remember");
+        share_team_bodies(
+            &producer,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T15:00:00Z",
+            true,
+            8,
+            Some(producer_dir.path()),
+            false,
+            None,
+        )
+        .expect("publish");
+        let rows = producer
+            .list_mesh_origin_events(&created.team.team_id, &created.team.origin_node_id, 0, 16)
+            .expect("chain");
+        let memory_row = rows
+            .iter()
+            .find(|row| row.payload_schema == "ee.mesh.memory_event.v1")
+            .expect("memory event");
+        let inbound = crate::mesh::origin_stream::inbound_from_stored(memory_row).expect("inbound");
+
+        let receiver_dir = tempfile::tempdir().unwrap();
+        let receiver = open_db();
+        receiver
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: receiver_dir.path().display().to_string(),
+                    name: Some("receiver".to_owned()),
+                },
+            )
+            .expect("receiver workspace");
+        create_local_team(
+            &receiver,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("receiver team");
+        let projected =
+            project_inbound_team_memory(&receiver, "wsp_persistfixture000000000001", &inbound)
+                .expect("project")
+                .expect("id");
+        assert_ne!(projected, "mem_teambodies0000000000000001");
+        let key = team_body_cache_key("mem_teambodies0000000000000001");
+        assert_eq!(
+            pending_team_body_fetch_keys(&receiver, "wsp_persistfixture000000000001")
+                .expect("pending"),
+            vec![key.clone()]
+        );
+        let sick =
+            inspect_team_health(&receiver, "wsp_persistfixture000000000001", None).expect("sick");
+        assert!(sick.checks.iter().any(|check| {
+            check.name == "inbound_body_fetches"
+                && check.status == "warning"
+                && check.repair.as_deref() == Some("ee team steward once --workspace .")
+        }));
+
+        let fetched = fetch_local_team_body(
+            &producer,
+            "wsp_persistfixture000000000001",
+            producer_dir.path(),
+            &key,
+        )
+        .expect("producer fetch");
+        assert_eq!(fetched.cache_status, "available");
+        assert!(fetched.nonce_hex.is_some());
+
+        let wrong = apply_fetched_team_body(
+            &receiver,
+            "wsp_persistfixture000000000001",
+            receiver_dir.path(),
+            &BodyFetchResponse {
+                schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
+                body_cache_key: key.clone(),
+                cache_status: "available".to_owned(),
+                size_bytes: 4,
+                body_hex: Some(hex_encode(b"nope")),
+                nonce_hex: fetched.nonce_hex.clone(),
+            },
+        )
+        .expect("mismatch");
+        assert_eq!(wrong.cache_status, "quarantined");
+        assert!(wrong.body_hex.is_none());
+        assert!(wrong.nonce_hex.is_none());
+
+        receiver
+            .upsert_mesh_body_cache_metadata(&UpsertMeshBodyCacheMetadataInput {
+                workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                body_cache_key: key.clone(),
+                origin_node_id: inbound.origin_node_id.clone(),
+                origin_workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                logical_memory_id: "mem_teambodies0000000000000001".to_owned(),
+                content_hash: serde_json::from_value::<MemoryEventPayload>(inbound.payload.clone())
+                    .expect("payload")
+                    .body_commitment,
+                body_ref_json: Some(
+                    serde_json::json!({ "originEventId": inbound.event_id }).to_string(),
+                ),
+                preview_hash: None,
+                size_bytes: None,
+                cache_status: "metadata_only".to_owned(),
+                local_body_hash: None,
+                cached_at: Some("2026-08-13T15:01:00Z".to_owned()),
+                expires_at: None,
+            })
+            .expect("reset placeholder");
+
+        let applied = apply_fetched_team_body(
+            &receiver,
+            "wsp_persistfixture000000000001",
+            receiver_dir.path(),
+            &fetched,
+        )
+        .expect("apply");
+        assert_eq!(applied.cache_status, "available");
+        assert_eq!(
+            applied.body_hex.as_deref(),
+            Some(hex_encode(b"secret body stays off the metadata event").as_str())
+        );
+        assert!(
+            pending_team_body_fetch_keys(&receiver, "wsp_persistfixture000000000001")
+                .expect("drained")
+                .is_empty()
+        );
+        let local = fetch_local_team_body(
+            &receiver,
+            "wsp_persistfixture000000000001",
+            receiver_dir.path(),
+            &key,
+        )
+        .expect("receiver fetch");
+        assert_eq!(local.cache_status, "available");
+        assert_eq!(local.body_hex, applied.body_hex);
     }
 
     #[test]
@@ -7043,6 +7443,13 @@ mod tests {
         assert_eq!(fetched.cache_status, "available");
         let body = fetched.body_hex.expect("bytes");
         assert_eq!(body, hex_encode(b"body bytes stay in the hardened cache"));
+        assert!(
+            fetched
+                .nonce_hex
+                .as_deref()
+                .is_some_and(|nonce| nonce.len() == 64),
+            "authorized serve must release the commitment nonce"
+        );
         let unshared = unshare_team_bodies(
             &connection,
             "wsp_persistfixture000000000001",

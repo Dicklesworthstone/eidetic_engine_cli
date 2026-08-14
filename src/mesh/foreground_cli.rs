@@ -1836,7 +1836,21 @@ fn persist_sync_round_events(
                 trust_lane: "peerAgent".to_owned(),
                 import_decision: import_decision.to_owned(),
                 local_memory_id: None,
-                body_cache_key: None,
+                body_cache_key: inbound.as_ref().and_then(|event| {
+                    serde_json::from_value::<crate::mesh::origin_stream::MemoryEventPayload>(
+                        event.payload.clone(),
+                    )
+                    .ok()
+                    .filter(|payload| {
+                        matches!(
+                            payload.body_representation.as_deref(),
+                            Some("exact" | "already_redacted")
+                        ) && payload.logical_memory_id.starts_with("mem_")
+                    })
+                    .map(|payload| {
+                        crate::mesh::team::team_body_cache_key(&payload.logical_memory_id)
+                    })
+                }),
                 policy_failure_surface_json: None,
                 policy_decision_json: None,
                 event_json: event.payload_json.clone(),

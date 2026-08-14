@@ -329,6 +329,9 @@ pub struct BodyFetchRequest {
 }
 
 /// Responder → caller. `body_hex` is present only when the cache is available.
+/// `nonce_hex` is released only with authorized body bytes so the receiver
+/// can recompute the event-signed commitment. It is never stored on the
+/// receiver after verification.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BodyFetchResponse {
@@ -338,6 +341,8 @@ pub struct BodyFetchResponse {
     pub size_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nonce_hex: Option<String>,
 }
 
 /// Caller → responder after hello.
