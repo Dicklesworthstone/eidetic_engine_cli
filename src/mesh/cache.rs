@@ -10,6 +10,9 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MESH_CACHE_RETENTION_SCHEMA_V1: &str = "ee.mesh.cache_retention.v1";
+/// High-severity fail-closed code when body-cache publication cannot prove
+/// the T2.1 secure-file contract. Retrieval stays metadata-only.
+pub const MESH_BODY_CACHE_LIFECYCLE_FAILED_CODE: &str = "mesh_body_cache_lifecycle_failed";
 pub const MESH_WITHDRAWAL_PURGE_SCHEMA_V1: &str = "ee.mesh.withdrawal_purge.v1";
 pub const MESH_CACHE_EVICT_AUDIT_ACTION: &str = "mesh.cache.evict";
 pub const MESH_CACHE_PURGE_AUDIT_ACTION: &str = "mesh.cache.purge";
@@ -47,10 +50,13 @@ impl MeshCacheLane {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum MeshCacheStatus {
     MetadataOnly,
+    Staging,
     Available,
     Quarantined,
+    InvalidatedPendingPurge,
     Evicted,
     Expired,
+    Purged,
 }
 
 impl MeshCacheStatus {
@@ -58,15 +64,18 @@ impl MeshCacheStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::MetadataOnly => "metadata_only",
+            Self::Staging => "staging",
             Self::Available => "available",
             Self::Quarantined => "quarantined",
+            Self::InvalidatedPendingPurge => "invalidated_pending_purge",
             Self::Evicted => "evicted",
             Self::Expired => "expired",
+            Self::Purged => "purged",
         }
     }
 
     const fn has_cache_bytes(self) -> bool {
-        !matches!(self, Self::Evicted)
+        !matches!(self, Self::Evicted | Self::Purged)
     }
 }
 
@@ -1326,6 +1335,14 @@ fn compare_quota_warning(left: &MeshCacheQuotaWarning, right: &MeshCacheQuotaWar
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn body_cache_lifecycle_failed_code_is_stable() {
+        assert_eq!(
+            MESH_BODY_CACHE_LIFECYCLE_FAILED_CODE,
+            "mesh_body_cache_lifecycle_failed"
+        );
+    }
 
     #[test]
     fn global_quota_uses_score_lru_then_lane_order() {
