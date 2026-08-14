@@ -15,7 +15,8 @@ use asupersync::{CancelReason, Cx, Outcome};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
-    EnvVar, MeshCommandMode, MeshLane, MeshLaneDecision, read_env_var, workspace_config,
+    EnvVar, MeshCommandMode, MeshLane, MeshLaneDecision, parse_env_bool_flag, read_env_var,
+    workspace_config,
 };
 use crate::core::memory_scope::{
     MeshEventValidity, MeshImportDecisionInput, MeshImportDecisionKind,
@@ -2362,6 +2363,89 @@ pub fn run_mesh_sync_once_from_paths(
     }
 }
 
+/// Start the inbound team responder in a current-thread owner if enrolled
+/// peers exist. Returns false when mesh is off, disabled, or no route exists.
+#[must_use]
+pub fn spawn_team_responder_owner_if_needed(workspace_path: &Path, database_path: &Path) -> bool {
+    #[cfg(not(unix))]
+    {
+        let _ = (workspace_path, database_path);
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        spawn_team_responder_owner_unix(workspace_path, database_path)
+    }
+}
+
+#[cfg(unix)]
+fn spawn_team_responder_owner_unix(workspace_path: &Path, database_path: &Path) -> bool {
+    if read_env_var(EnvVar::MeshHelloResponderDisabled)
+        .as_deref()
+        .and_then(parse_env_bool_flag)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    let (mesh_enabled, _) = mesh_enabled_and_mode(workspace_path);
+    if !mesh_enabled {
+        return false;
+    }
+    let Ok(workspace_path) = workspace_path.canonicalize() else {
+        return false;
+    };
+    let Ok(database_path) = database_path.canonicalize() else {
+        return false;
+    };
+    if !database_path.is_file() {
+        return false;
+    }
+    let Ok(snapshot) = MeshForegroundSnapshot::from_paths(&workspace_path, &database_path) else {
+        return false;
+    };
+    if !snapshot.initialized {
+        return false;
+    }
+    let Ok(connection) = DbConnection::open_file(&database_path) else {
+        return false;
+    };
+    let registrations = crate::mesh::responder_broker::plan_team_responder_registrations(
+        &connection,
+        &snapshot.workspace_id,
+        &workspace_path,
+        &database_path,
+        configured_hello_port(),
+    );
+    if registrations.is_empty() {
+        return false;
+    }
+    let Some(local_api) =
+        crate::mesh::responder_broker::TailscaleLocalApiClient::discover(Duration::from_secs(2))
+    else {
+        return false;
+    };
+    std::thread::Builder::new()
+        .name("ee-team-responder".to_owned())
+        .spawn(move || {
+            let _ = crate::core::run_cli_with_cx(
+                Duration::from_secs(365 * 24 * 60 * 60),
+                |cx| async move {
+                    let mut owner =
+                        crate::mesh::responder_broker::ResponderBrokerOwner::start_durable(
+                            &cx,
+                            local_api,
+                            registrations,
+                            crate::mesh::responder_broker::PreAuthAdmissionLimits::default(),
+                            Duration::from_millis(2_000),
+                        )
+                        .await?;
+                    owner.serve_until_cancelled(&cx).await
+                },
+            );
+        })
+        .is_ok()
+}
+
 /// Grant-gated BodyFetch after the Send supervisor returns. Pair-key
 /// sessions are `!Send`; `block_on` on this thread does not require Send.
 pub fn fetch_pending_team_bodies_from_paths(workspace_path: &Path, database_path: &Path) -> usize {
@@ -3725,6 +3809,7 @@ mod tests {
         fetch_pending_team_bodies_from_paths, local_sync_round_request, mesh_event_id_from_hash,
         persist_sync_round_events, project_canonical_mesh_event, run_mesh_sync_once_from_paths,
         run_mesh_sync_supervisor_supervised, run_mesh_sync_supervisor_supervised_with_transport,
+        spawn_team_responder_owner_if_needed,
     };
     use crate::config::ConfigFile;
     use crate::core::tailscale_probe::TailscaleLocalReport;
@@ -3734,6 +3819,14 @@ mod tests {
         MeshPeerEndpoint, MeshPeerHandshake, MeshPeerKey, MeshPeerRecord, MeshPeerState,
     };
     use crate::mesh::policy::MeshPeerPolicyRegistry;
+
+    #[test]
+    fn spawn_team_responder_owner_skips_missing_store() {
+        assert!(!spawn_team_responder_owner_if_needed(
+            std::path::Path::new("/tmp/ee-missing-team-responder"),
+            std::path::Path::new("/tmp/ee-missing-team-responder/ee.db"),
+        ));
+    }
 
     #[test]
     fn snapshot_from_paths_loads_peers_and_sync_once_stays_deferred_when_mesh_off() {

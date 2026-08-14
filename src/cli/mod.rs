@@ -60630,6 +60630,14 @@ where
         }
     };
 
+    if !args.once && !args.dry_run {
+        let database = workspace_path.join(".ee").join("ee.db");
+        let _ = crate::mesh::foreground_cli::spawn_team_responder_owner_if_needed(
+            &workspace_path,
+            &database,
+        );
+    }
+
     match crate::steward::run_daemon_foreground(&options) {
         Ok(report) => {
             if let Err(message) = crate::serve::record_daemon_foreground_report(

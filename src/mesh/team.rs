@@ -48,6 +48,8 @@ pub const TEAM_JOIN_CHALLENGE_SCHEMA_V1: &str = "ee.team.join_challenge.v1";
 pub const TEAM_JOIN_PROVE_SCHEMA_V1: &str = "ee.team.join_prove.v1";
 pub const TEAM_JOIN_GRANTED_SCHEMA_V1: &str = "ee.team.join_granted.v1";
 pub const TEAM_PAIR_TRANSCRIPT_DOMAIN: &str = "ee.team.pair.transcript.v1";
+/// Placeholder tailnet on team-join enroll until LocalAPI observes the real one.
+pub const TEAM_JOIN_TAILNET_ID: &str = "tailnet-team-join";
 pub const TEAM_PAIR_KDF_DOMAIN: &str = "ee.team.pair.v1";
 pub const TEAM_JOIN_CHALLENGE_DOMAIN: &str = "ee.team.join_challenge.signature.v1";
 pub const TEAM_SHARE_HISTORY_SCHEMA_V1: &str = "ee.team.share_history.v1";
@@ -892,10 +894,7 @@ fn team_create_report(team: TeamRecord, created: bool) -> TeamCreateReport {
         created,
         next_commands: vec![
             format!("ee team status {workspace_flag} --json"),
-            format!(
-                "ee mesh hello-responder run {workspace_flag} --team-id {} --responder-node-id {} --peer <peer-id> --json",
-                team.team_id, team.origin_node_id
-            ),
+            format!("ee mesh hello-responder run {workspace_flag} --json"),
             format!("ee team invite {workspace_flag} --json"),
             format!("ee mesh sync --once {workspace_flag} --json"),
             format!("ee daemon install {workspace_flag} --json"),
@@ -2118,7 +2117,7 @@ pub fn enroll_team_pair_peer(
         origin_workspace_id: origin_workspace_id.to_owned(),
         endpoint: crate::mesh::peer::MeshPeerEndpoint {
             tailscale_node_key: remote_node_id.to_owned(),
-            tailnet_id: "tailnet-team-join".to_owned(),
+            tailnet_id: TEAM_JOIN_TAILNET_ID.to_owned(),
             tailnet_display_name: None,
             endpoint: locator,
             magic_dns_name: None,
@@ -2190,6 +2189,22 @@ pub fn enroll_joiner_from_accept(
         produced_at,
         joiner_workspace_id,
     )
+}
+
+/// Team-join enroll stores [`TEAM_JOIN_TAILNET_ID`] until LocalAPI observes
+/// the real tailnet. Resolve treats that placeholder as the current tailnet.
+#[must_use]
+pub fn team_join_tailnet_matches(peer_tailnet: &str, local_tailnet: &str) -> bool {
+    peer_tailnet == local_tailnet || peer_tailnet == TEAM_JOIN_TAILNET_ID
+}
+
+/// Team-join handshake is enough for inbound EventFetch. BodyFetch still
+/// requires a durable Body-lane Allow at serve time.
+#[must_use]
+pub fn team_join_allows_ungranted_route(policy: &crate::mesh::peer::MeshPeerRecord) -> bool {
+    policy.handshake.granted
+        && policy.handshake.discovery_consent
+        && policy.handshake.request_id == "team-join"
 }
 
 /// Grant-gated BodyFetch retry. `fetch` is called only for peers whose
@@ -6507,6 +6522,24 @@ mod tests {
             fallback_record.endpoint.endpoint,
             format!("198.51.100.17:{}", configured_hello_port())
         );
+        assert!(team_join_tailnet_matches(
+            TEAM_JOIN_TAILNET_ID,
+            "tailnet-real"
+        ));
+        assert!(team_join_tailnet_matches("tailnet-real", "tailnet-real"));
+        assert!(!team_join_tailnet_matches("tailnet-other", "tailnet-real"));
+        assert!(team_join_allows_ungranted_route(&record));
+        let planned = crate::mesh::responder_broker::plan_team_responder_registrations(
+            &connection,
+            "wsp_persistfixture000000000001",
+            std::path::Path::new("/tmp/ee-team-enroll"),
+            std::path::Path::new("/tmp/ee-team-enroll/ee.db"),
+            created.team.hello_port,
+        );
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].peer_handle, handle);
+        assert_eq!(planned[0].team_id, created.team.team_id);
+        assert_eq!(planned[0].responder_node_id, created.team.origin_node_id);
     }
 
     #[cfg(unix)]

@@ -69,7 +69,7 @@ use crate::mesh::responder_broker::{
     DurableResponderRegistration, PreAuthAdmissionLimits, RESPONDER_CONTROL_SCHEMA_V1,
     ResponderBrokerError, ResponderBrokerOwner, ResponderControlOp, ResponderControlRequest,
     TailscaleLocalApiClient, default_responder_control_socket_path,
-    responder_control_status_request,
+    plan_team_responder_registrations, responder_control_status_request,
 };
 use crate::mesh::tailscale_autodiscovery::{
     TailscaleAutodiscoveryConfig, TailscaleAutodiscoveryReport, TcpBootstrapHelloProbe,
@@ -300,16 +300,17 @@ pub struct MeshHelloResponderRunArgs {
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 
-    /// Locally configured team route identifier.
+    /// Locally configured team route identifier. Defaults to the local team.
     #[arg(long = "team-id", value_name = "TEAM_ID")]
-    pub team_id: String,
+    pub team_id: Option<String>,
 
-    /// This ee installation's durable node identifier.
+    /// This ee installation's durable node identifier. Defaults to the local origin node.
     #[arg(long = "responder-node-id", value_name = "NODE_ID")]
-    pub responder_node_id: String,
+    pub responder_node_id: Option<String>,
 
     /// Opaque enrolled peer handle. Repeat to register multiple exact routes.
-    #[arg(long = "peer", value_name = "PEER_ID", action = ArgAction::Append, required = true)]
+    /// Omit to load every enrolled team pair-key peer.
+    #[arg(long = "peer", value_name = "PEER_ID", action = ArgAction::Append)]
     pub peers: Vec<String>,
 
     /// Committed nonprivileged responder port; defaults to EE_MESH_HELLO_PORT, then 41888.
@@ -3555,21 +3556,71 @@ where
         .control_socket
         .clone()
         .unwrap_or_else(default_responder_control_socket_path);
-    let registrations = args
-        .peers
-        .iter()
-        .map(|peer| DurableResponderRegistration {
-            workspace_path: workspace_path.clone(),
-            database_path: database_path.clone(),
-            workspace_id: snapshot.workspace_id.clone(),
-            team_id: args.team_id.clone(),
-            responder_node_id: args.responder_node_id.clone(),
-            peer_handle: peer.clone(),
-            committed_port: port,
-            capabilities: SessionCapabilities::base(),
-            limits: SessionChannelLimits::default(),
-        })
-        .collect::<Vec<_>>();
+    let registrations = if args.peers.is_empty() {
+        plan_team_responder_registrations(
+            &connection,
+            &snapshot.workspace_id,
+            &workspace_path,
+            &database_path,
+            port,
+        )
+    } else {
+        let (team_id, responder_node_id) = match (
+            args.team_id.clone(),
+            args.responder_node_id.clone(),
+        ) {
+            (Some(team_id), Some(responder_node_id)) => (team_id, responder_node_id),
+            _ => match crate::mesh::team::load_local_teams(&connection)
+                .ok()
+                .and_then(|teams| teams.into_iter().next())
+            {
+                Some(team) => (
+                    args.team_id.clone().unwrap_or(team.team_id),
+                    args.responder_node_id
+                        .clone()
+                        .unwrap_or(team.origin_node_id),
+                ),
+                None => {
+                    return write_domain_error(
+                        &DomainError::Usage {
+                            message: "hello-responder run needs a local team or --team-id and --responder-node-id".to_owned(),
+                            repair: Some(
+                                "ee team create --name \"<team>\" --workspace . --json".to_owned(),
+                            ),
+                        },
+                        cli.wants_json(),
+                        stdout,
+                        stderr,
+                    );
+                }
+            },
+        };
+        args.peers
+            .iter()
+            .map(|peer| DurableResponderRegistration {
+                workspace_path: workspace_path.clone(),
+                database_path: database_path.clone(),
+                workspace_id: snapshot.workspace_id.clone(),
+                team_id: team_id.clone(),
+                responder_node_id: responder_node_id.clone(),
+                peer_handle: peer.clone(),
+                committed_port: port,
+                capabilities: SessionCapabilities::base(),
+                limits: SessionChannelLimits::default(),
+            })
+            .collect::<Vec<_>>()
+    };
+    if registrations.is_empty() {
+        return write_domain_error(
+            &DomainError::Usage {
+                message: "hello-responder run needs an enrolled team peer".to_owned(),
+                repair: Some("ee team join --invite <code> --workspace . --json".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
     let mut owner = match crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| {
         let local_api = local_api.clone();
         let registrations = registrations.clone();

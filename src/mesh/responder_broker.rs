@@ -509,6 +509,44 @@ pub struct DurableResponderRegistration {
     pub limits: SessionChannelLimits,
 }
 
+/// Enrolled team pair-key peers become durable inbound routes.
+pub fn plan_team_responder_registrations(
+    connection: &DbConnection,
+    workspace_id: &str,
+    workspace_path: &Path,
+    database_path: &Path,
+    committed_port: u16,
+) -> Vec<DurableResponderRegistration> {
+    let Ok(teams) = crate::mesh::team::load_local_teams(connection) else {
+        return Vec::new();
+    };
+    let Ok(peers) = connection.list_mesh_peers(workspace_id) else {
+        return Vec::new();
+    };
+    let mut registrations = Vec::new();
+    for team in &teams {
+        for peer in peers.iter().filter(|peer| peer.enabled) {
+            if crate::mesh::team::team_pair_peer_handle(&team.team_id, &peer.origin_node_id)
+                != peer.peer_id
+            {
+                continue;
+            }
+            registrations.push(DurableResponderRegistration {
+                workspace_path: workspace_path.to_path_buf(),
+                database_path: database_path.to_path_buf(),
+                workspace_id: workspace_id.to_owned(),
+                team_id: team.team_id.clone(),
+                responder_node_id: team.origin_node_id.clone(),
+                peer_handle: peer.peer_id.clone(),
+                committed_port,
+                capabilities: SessionCapabilities::base(),
+                limits: SessionChannelLimits::default(),
+            });
+        }
+    }
+    registrations
+}
+
 /// Same-EUID control-channel operation. Network frames never carry these.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -595,7 +633,10 @@ pub async fn resolve_durable_registration<A: TailscaleLocalApi>(
         || policy.state != MeshPeerState::Active
         || !policy.handshake.granted
         || !policy.handshake.discovery_consent
-        || policy.endpoint.tailnet_id != local_status.identity.tailnet_id
+        || !crate::mesh::team::team_join_tailnet_matches(
+            &policy.endpoint.tailnet_id,
+            &local_status.identity.tailnet_id,
+        )
     {
         return Err(ResponderBrokerError::RouteUnavailable);
     }
@@ -620,10 +661,12 @@ pub async fn resolve_durable_registration<A: TailscaleLocalApi>(
     let transport_identity = peer
         .transport_identity
         .ok_or(ResponderBrokerError::IdentityUpgradeRequired)?;
-    let grant = connection
+    let grant_generation = connection
         .get_mesh_lane_grant_state(&registration.workspace_id, &registration.peer_handle)
         .map_err(|_| ResponderBrokerError::RouteUnavailable)?
         .filter(|grant| grant.target_matches_current_peer && grant.grant_generation > 0)
+        .map(|grant| grant.grant_generation)
+        .or_else(|| crate::mesh::team::team_join_allows_ungranted_route(&policy).then_some(0))
         .ok_or(ResponderBrokerError::RouteUnavailable)?;
     let pair_record = MeshKeyStore::open_existing(&registration.workspace_path)
         .map_err(map_key_store_error)?
@@ -649,7 +692,7 @@ pub async fn resolve_durable_registration<A: TailscaleLocalApi>(
         },
         responder_node_pubkey: local_status.identity.current_node_pubkey.clone(),
         peer_transport_key_generation: transport_identity.key_generation,
-        grant_generation: grant.grant_generation,
+        grant_generation,
         capabilities: registration.capabilities.clone(),
         limits: registration.limits,
     };
@@ -2134,11 +2177,18 @@ fn refresh_durable_route_authority(
             &route.expectations.responder_workspace_id,
             &route.peer_handle,
         )
-        .map_err(|_| ResponderBrokerError::RouteUnavailable)?
-        .filter(|grant| {
-            grant.target_matches_current_peer && grant.grant_generation == route.grant_generation
-        })
-        .ok_or(ResponderBrokerError::RouteUnavailable)?;
+        .map_err(|_| ResponderBrokerError::RouteUnavailable)?;
+    if route.grant_generation == 0 {
+        if grant.is_some_and(|grant| grant.grant_generation > 0) {
+            return Err(ResponderBrokerError::RouteUnavailable);
+        }
+        return Ok(());
+    }
+    let Some(grant) = grant.filter(|grant| {
+        grant.target_matches_current_peer && grant.grant_generation == route.grant_generation
+    }) else {
+        return Err(ResponderBrokerError::RouteUnavailable);
+    };
     if grant.target_adapter.peer_id != route.peer_handle
         || grant.target_adapter.origin_node_id != route.expectations.initiator_node_id
     {
