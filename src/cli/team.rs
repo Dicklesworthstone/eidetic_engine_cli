@@ -9,14 +9,14 @@ use serde_json::json;
 use crate::db::DbConnection;
 use crate::mesh::team::{
     add_local_team_node, adopt_team_project, any_local_team_paused, attest_local_id_token,
-    create_local_team_with_store, fetch_local_team_body, inspect_team_health,
-    join_team_with_code_on_store, leave_local_team, list_team_activity, list_team_projects,
-    local_team_status, mint_team_invite_with_store, plan_team_idp_device, plan_team_steward_once,
-    reconcile_local_team_membership, remove_team_member, require_tailnet_attested,
-    revalidate_team_identities, revoke_team_invite, rotate_local_signing_key,
-    serve_one_bootstrap_join_with_store, set_local_team_paused, set_team_oidc_provider,
-    share_team_bodies, share_team_history, share_team_project, team_idp_status,
-    unshare_team_bodies,
+    create_local_team_with_store, execute_team_idp_token_poll, fetch_local_team_body,
+    inspect_team_health, join_team_with_code_on_store, leave_local_team, list_team_activity,
+    list_team_projects, local_team_status, mint_team_invite_with_store, plan_team_idp_device,
+    plan_team_steward_once, reconcile_local_team_membership, remove_team_member,
+    require_tailnet_attested, revalidate_team_identities, revoke_team_invite,
+    rotate_local_signing_key, serve_one_bootstrap_join_with_store, set_local_team_paused,
+    set_team_oidc_provider, share_team_bodies, share_team_history, share_team_project,
+    team_idp_status, unshare_team_bodies,
 };
 use crate::models::{DomainError, ProcessExitCode};
 use crate::output;
@@ -499,6 +499,14 @@ pub struct TeamIdpDeviceArgs {
     #[arg(long, value_name = "PATH", default_value = "/usr/bin/curl")]
     pub curl: PathBuf,
 
+    /// Run one constrained HTTPS token poll. Raw tokens are not printed.
+    #[arg(long)]
+    pub execute: bool,
+
+    /// Absolute CA bundle used to pin TLS for `--execute`. Never `--insecure`.
+    #[arg(long, value_name = "PATH")]
+    pub ca_bundle: Option<PathBuf>,
+
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
@@ -514,6 +522,22 @@ pub struct TeamIdpAttestArgs {
     /// Configured group to match. Repeatable. Unlisted groups are dropped.
     #[arg(long = "group")]
     pub groups: Vec<String>,
+
+    /// Local JWKS JSON used to verify the ID token signature. Optional.
+    #[arg(long, value_name = "PATH")]
+    pub jwks_json: Option<PathBuf>,
+
+    /// HTTPS JWKS URL fetched with constrained curl. Optional.
+    #[arg(long, value_name = "URL")]
+    pub jwks_url: Option<String>,
+
+    /// Absolute CA bundle used to pin TLS for `--jwks-url`. Never `--insecure`.
+    #[arg(long, value_name = "PATH")]
+    pub ca_bundle: Option<PathBuf>,
+
+    /// Absolute curl binary. Defaults to /usr/bin/curl.
+    #[arg(long, value_name = "PATH", default_value = "/usr/bin/curl")]
+    pub curl: PathBuf,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -1866,6 +1890,41 @@ where
             return write_domain_error(&error, cli.wants_json(), stdout, stderr);
         }
     };
+    if args.execute {
+        let ca_bundle = args
+            .ca_bundle
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        return match execute_team_idp_token_poll(
+            &connection,
+            &discovery,
+            &authorization,
+            &args.curl.to_string_lossy(),
+            ca_bundle.as_deref(),
+        ) {
+            Ok(report) => write_team_report(
+                cli,
+                &report,
+                &format!(
+                    "Team device poll {}\n  uri: {}\n  exit: {}\n",
+                    report.user_code, report.verification_uri, report.curl_exit_code
+                ),
+                stdout,
+            ),
+            Err(error) => write_domain_error(
+                &DomainError::Storage {
+                    message: format!("Failed to execute device poll: {error}"),
+                    repair: Some(
+                        "ee team idp set then ee team idp device --execute --workspace ."
+                            .to_owned(),
+                    ),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            ),
+        };
+    }
     match plan_team_idp_device(
         &connection,
         &discovery,
@@ -1935,7 +1994,49 @@ where
     };
     let groups = args.groups.iter().map(String::as_str).collect::<Vec<_>>();
     let checked_at = chrono::Utc::now().to_rfc3339();
-    match attest_local_id_token(&connection, token.trim(), &groups, &checked_at) {
+    let mut jwks = match args.jwks_json.as_ref() {
+        Some(path) => match read_json_file(path) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
+        },
+        None => None,
+    };
+    if let Some(url) = args.jwks_url.as_deref() {
+        let ca = args
+            .ca_bundle
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        match crate::mesh::idp::fetch_jwks_document(
+            &args.curl.to_string_lossy(),
+            url,
+            ca.as_deref(),
+        ) {
+            Ok(value) => jwks = Some(value),
+            Err(error) => {
+                return write_domain_error(
+                    &DomainError::Usage {
+                        message: format!("Failed to fetch JWKS: {error}"),
+                        repair: Some(
+                            "ee team idp attest --jwks-url https://idp.example/jwks --ca-bundle <pem> --workspace ."
+                                .to_owned(),
+                        ),
+                    },
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                );
+            }
+        }
+    }
+    match attest_local_id_token(
+        &connection,
+        token.trim(),
+        &groups,
+        &checked_at,
+        jwks.as_ref(),
+    ) {
         Ok(report) => write_team_report(
             cli,
             &report,
