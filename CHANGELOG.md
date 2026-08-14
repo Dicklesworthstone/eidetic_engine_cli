@@ -94,7 +94,10 @@ future changelog pass expands those rows into full capability sections.
   Join enrolls the inviter under the pair-key handle so EventFetch
   can find the invite TCP endpoint. `retry_pending_team_body_fetches`
   calls fetch only when the durable body lane is Allow, then applies
-  nonce-checked bytes.
+  nonce-checked bytes. Invite codes and join grants carry
+  `originWorkspaceId`. Enroll stores it on the peer record.
+  `plan_team_body_fetch_binding` is Some only when local and remote
+  workspaces and nodes are distinct.
   `ee team invite --wait --resume <invite-id>` continues a pending
   waiter without re-emitting the secret.
   `ee team steward once` is the canonical steward verb (`run-once`
