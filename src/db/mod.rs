@@ -16501,6 +16501,18 @@ impl DbConnection {
             .transpose()
     }
 
+    /// List pending invites for one team in deterministic order.
+    pub fn list_team_pending_invites(&self, team_id: &str) -> Result<Vec<StoredTeamPendingInvite>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT invite_id, team_id, origin_node_id, hello_port, endpoint, genesis_event_hash, secret_hash, status, created_at, expires_at, redeemed_at FROM team_pending_invites WHERE team_id = ?1 ORDER BY created_at ASC, invite_id ASC",
+            &[Value::Text(team_id.to_owned())],
+        )?;
+        rows.iter()
+            .map(stored_team_pending_invite_from_row)
+            .collect()
+    }
+
     /// Mark a pending invite revoked exactly once.
     pub fn revoke_team_pending_invite(&self, invite_id: &str, revoked_at: &str) -> Result<bool> {
         let changed = self.execute_for(
