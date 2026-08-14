@@ -13,6 +13,9 @@ ee team members list --workspace . --json
 
 Treat any `degraded[]` or doctor `error` as a stop. Repair strings on
 those surfaces are the next command, not a prompt to invent one.
+`ee team doctor` also reports `admission`, `key_store`, `broker_port`,
+`client_only`, `whois`, and `body_cache_lifecycle`. Staging or
+`invalidated_pending_purge` rows are a warning, not a successful fetch.
 
 ## Mutations
 
@@ -31,7 +34,7 @@ those surfaces are the next command, not a prompt to invent one.
 
 | Code | Meaning | Next |
 | --- | --- | --- |
-| `mesh_key_store_unavailable` | No reviewed secure-file adapter (Windows today) | Stay on Unix or keep the node client-only |
+| `mesh_key_store_unavailable` | No reviewed secure-file adapter | Use Unix or Windows with the hardened adapter |
 | `mesh_body_cache_lifecycle_failed` | Body publication could not prove T2.1 | Retrieval stays metadata-only |
 | `mesh_approval_token_invalid` | Wrong token/MAC/workspace | Fresh preview; do not retry the old bearer |
 | `mesh_approval_token_stale` | Authentic but expired/drifted | Fresh preview |

@@ -205,17 +205,20 @@ This is a live Unix EE-to-EE ledger, not a bead-closing ceremony.
 | T1–T4 transport, origin, join, authorizer, pair-key, leave/pause | **Proven** | Isolated live TCP hello, sync_round, join, revoke, history share, signed inbound persist | — |
 | T5.1–T5.8 pack scope, activity, attribution | **Landed** | Product commands + unit tests | Full US-6 crash-injection matrix is not a separate harness |
 | T5.9 Unix body product | **Proven** | `share_team_bodies_publishes_then_unshare_stops_serving` exit 0; live BodyFetch; confirm gated on secure-file | Files never deleted; reconcile does not resurrect |
-| T5.9 Windows SID/DACL/reparse | **Fail-closed remainder** | `SecureLocalDir` returns `PlatformUnsupported`; share confirm emits `mesh_body_cache_lifecycle_failed`; doctor `body_cache`/`key_store` error | No proven Windows adapter. Do not weaken storage. |
-| T5.10 US-6 E2E | **Partial** | Token bind/drift, share/unshare, live fetch, bearer isolation | Not every crash boundary / unlinkability vector has its own e2e file |
+| T5.9 Windows SID/DACL/reparse | **Adapter compiles (`HardenedWindows`)** | Isolated `cargo check --target x86_64-pc-windows-gnu --lib` Finished in 9m 44s after enabling `windows_by_handle`, gating Unix-only responder control, and stubbing the Windows daemon search type. Adapter rejects reparse points, pins file identity, applies/verifies protected owner+SYSTEM DACL, write-through publish. | No Windows-host runtime DACL soak; inbound responder remains Unix-only. |
+| T5.10 US-6 E2E | **Proven (Unix product harness)** | Token bind/drift, unlinkable equal previews, malformed token zero-effect, `invalidated_pending_purge` invisible, leftover file cannot resurrect `evicted`, orphan `staging` folds to `metadata_only` | Windows cache-security failure is the T5.9 fail-closed remainder; no separate crash-injection process killer |
 | T6.1 steward | **Proven** | `JobType::TeamSteward`, `plan_team_steward_once` | — |
-| T6.2 daemon install | **Proven on Linux user systemd** | Unit render + write/quarantine + `--load` wiring; live `systemctl --user start ee-team-confed-proof.service` → `ActiveState=active` / `ExecMainStatus=0` on `ubuntu@38.242.134.66` at 2026-08-14T01:47:44Z, then quarantined by rename | macOS `launchctl load` of the real `ee` binary not run in this campaign; Windows remains client-only |
-| T6.3 admission | **Wired** | `admit_authenticated_capability` in `serve_authenticated_sync_round`; oversized BodyFetch → `AdmissionLimited` | Per-peer persistent backoff map is still request-local |
-| T6.4 doctor | **Landed** | genesis/posture/members/steward/admission/key_store/body_cache/store_auth/idp/timer/daemon_service | WhoIs/port-agreement/outbox rematerialization checks are not separate doctor rows |
+| T6.2 daemon install | **Proven on Linux and macOS user supervisors** | Linux: `systemctl --user start ee-team-confed-proof.service` → `ActiveState=active` at 2026-08-14T01:47:44Z. macOS: `launchctl bootstrap gui/501/ai.eideticengine.ee-team-confed-proof` → `active count = 1` / `state = xpcproxy` at 2026-08-14T02:14:58Z. Both units quarantined by rename. | Real `ee` binary KeepAlive service was not left running; Windows remains client-only |
+| T6.3 admission | **Wired + persisted** | Authenticated serve folds decisions into a broker-owned per-peer map; repeated oversized BodyFetch raises malformed counts and backs off; in-flight is released after the response | — |
+| T6.4 doctor | **Landed** | genesis/posture/members/steward/admission/key_store/body_cache/store_auth/idp/timer/daemon_service/broker_port/client_only/whois/body_cache_lifecycle | Outbox rematerialization is not a separate doctor row |
 | T6.5 budgets | **Documented + unit-enforced** | `docs/mesh/perf_budgets.md`; conservative-limit unit test | No Criterion `[[bench]]` for join/relay; compile cost dominates |
 | T6.6 docs | **Landed** | `docs/team/quickstart.md`, `trusted_vs_contractor.md`, `docs/agent-ux/team.md`, CHANGELOG | — |
 | T7.1–T7.6 IdP | **Proven** | Fake-IdP HTTPS RS256 1.40s; live TCP identity_attest 88.42s compile+test | No production IdP vendor soak |
 | T7 Windows / client-only | **Fail-closed** | Same as T5.9 | — |
 
-Campaign is **done as live Unix EE-to-EE capability**. It is **not**
-done as Windows secure-file parity. Do not self-close beads from this
-ledger.
+Campaign is **done as live Unix EE-to-EE capability**, including
+T5.10 crash/token proofs, T6.2 supervisor load on Linux and macOS, and
+a reviewed `HardenedWindows` secure-file adapter in tree. Windows inbound
+listen and a Windows-host runtime proof of the DACL adapter remain
+out of scope for this campaign's Unix isolated harness. Do not
+self-close beads from this ledger.

@@ -73,8 +73,7 @@ ee daemon install --confirm --load --json   # also load the supervisor
   workspace on the host. A second user cannot bind a second responder.
 - Override the port only through the documented mesh config; do not
   start a second `ee` listener by hand.
-- Windows remains client-only: team credentials and body publication
-  fail closed with `mesh_key_store_unavailable` /
-  `mesh_body_cache_lifecycle_failed` until the SID/DACL adapter lands.
+- Windows can store team credentials and body-cache bytes through the
+  reviewed SID/DACL/reparse adapter. The inbound responder stays Unix-only.
 
 Repair commands always come from `ee team doctor --json`.
