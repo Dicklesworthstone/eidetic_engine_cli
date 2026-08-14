@@ -207,7 +207,7 @@ This is a live Unix EE-to-EE ledger, not a bead-closing ceremony.
 | T5.9 Unix body product | **Proven** | `share_team_bodies_publishes_then_unshare_stops_serving` exit 0; live BodyFetch; confirm gated on secure-file | Files never deleted; reconcile does not resurrect |
 | T5.9 Windows SID/DACL/reparse | **Adapter compiles (`HardenedWindows`)** | Isolated `cargo check --target x86_64-pc-windows-gnu --lib` Finished in 9m 44s after enabling `windows_by_handle`, gating Unix-only responder control, and stubbing the Windows daemon search type. Adapter rejects reparse points, pins file identity, applies/verifies protected owner+SYSTEM DACL, write-through publish. | No Windows-host runtime DACL soak; inbound responder remains Unix-only. |
 | T5.10 US-6 E2E | **Proven (Unix product harness)** | Token bind/drift/expiry/wrong-store, unlinkable previews, crash lifecycle. Isolated 2026-08-14: `already_redacted` 58.60s, `body_lane_grant_then_revoke_gates_fetch` 61.08s, `inspect_team_health` origin_outbox 52.54s, `substituted_body_cache_bytes_stay_metadata_only` 54.58s. `ee team share bodies --representation`; hash-checked fetch | No Windows-host crash killer |
-| T6.1 steward | **Proven** | Isolated 2026-08-14: membership execute 51.59s; `snapshot_from_paths_loads_peers_and_sync_once_stays_deferred_when_mesh_off` 107.15s. Daemon calls `run_mesh_sync_once_from_paths` when `ran_sync`. Execute also rematerializes origin project shares. | Live contact still needs mesh enabled + reachable peers |
+| T6.1 steward | **Proven** | Isolated 2026-08-14: membership execute 51.59s; daemon sync tick; project rematerialize. `execute_team_steward_once_promotes_orphaned_next_pair_key` 61.46s exit 0: Next-without-Current is promoted; Next-beside-Current stays deferred. | Live contact still needs mesh enabled + reachable peers |
 | T6.2 daemon install | **Proven on Linux and macOS user supervisors** | Linux: `systemctl --user start ee-team-confed-proof.service` → `ActiveState=active` at 2026-08-14T01:47:44Z. macOS: `launchctl bootstrap gui/501/ai.eideticengine.ee-team-confed-proof` → `active count = 1` / `state = xpcproxy` at 2026-08-14T02:14:58Z. Both units quarantined by rename. | Real `ee` binary KeepAlive service was not left running; Windows remains client-only |
 | T6.3 admission | **Proven** | Authenticated serve folds decisions into a broker-owned per-peer map and persists a V118 snapshot. Isolated 2026-08-14: `persisted_admission_snapshot_warns_doctor_and_status` 56.71s exit 0; inspect 56.12s exit 0. Status/doctor report throttled/exhausted counts and coalesced exhaustion after the broker exits. | Windows inbound listen remains out of scope |
 | T6.4 doctor | **Proven** | Isolated 2026-08-14: floor 46.91s, inspect 50.86s, removal rematerialize 50.80s, `removal_acknowledgement_matrix_stays_pending_until_audience_applies` 55.88s, all exit 0. V117 persists the removal audience; doctor warns on pending acks and does not claim bounded fanout. Steward advances acks from peer cursors. | Windows inbound listen remains out of scope |
@@ -217,9 +217,9 @@ This is a live Unix EE-to-EE ledger, not a bead-closing ceremony.
 | T7 Windows / client-only | **Fail-closed** | Same as T5.9 | — |
 
 Campaign is **done as live Unix EE-to-EE capability**, including
-T5.10, T6.2, T6.3 V118 admission snapshots, T6.4 invite-floor /
-V117 removal acks, and T6.5 `ee.team.budgets.v1` on
-`ee team status`. Isolated 2026-08-14T16:03–16:34Z: budget
-profile 53.51s exit 0. Windows inbound listen and a Windows-host
-DACL soak remain out of scope. Do not self-close beads from this
-ledger.
+T5.10, T6.1 orphaned Next pair promotion, T6.2, T6.3 V118
+admission snapshots, T6.4 V117 removal acks, and T6.5
+`ee.team.budgets.v1`. Isolated 2026-08-14T16:38–17:07Z: pair
+promote 61.46s, removal rematerialize 54.48s, all exit 0.
+Windows inbound listen and a Windows-host DACL soak remain out
+of scope. Do not self-close beads from this ledger.
