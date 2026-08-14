@@ -1622,6 +1622,39 @@ impl MeshKeyStore {
         result
     }
 
+    /// Peer handles that have a staged Next pair key on disk.
+    pub fn list_next_pair_peer_handles(&self) -> Result<Vec<String>, KeyStoreError> {
+        let mut handles = Vec::new();
+        let dir = self.secure_dir().path();
+        let entries = std::fs::read_dir(dir).map_err(|error| KeyStoreError::Io {
+            path: dir.display().to_string(),
+            message: format!("list pair keys: {error}"),
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| KeyStoreError::Io {
+                path: dir.display().to_string(),
+                message: format!("read pair key entry: {error}"),
+            })?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let Some(handle) = name
+                .strip_prefix("pair.")
+                .and_then(|rest| rest.strip_suffix(".next.json"))
+            else {
+                continue;
+            };
+            if handle.is_empty() || handle.starts_with("retired.") {
+                continue;
+            }
+            handles.push(handle.to_owned());
+        }
+        handles.sort();
+        handles.dedup();
+        Ok(handles)
+    }
+
     /// Load the pair key for `(peer_handle, class)`. `Ok(None)` when absent.
     pub fn load_pair_key(
         &self,
