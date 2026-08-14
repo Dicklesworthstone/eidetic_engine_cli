@@ -6351,7 +6351,7 @@ impl ManualRunner {
         let plan = match if self.options.dry_run {
             crate::mesh::team::plan_team_steward_once(&connection)
         } else {
-            crate::mesh::team::execute_team_steward_once(&connection)
+            crate::mesh::team::execute_team_steward_once(&connection, Some(&workspace_path))
         } {
             Ok(plan) => plan,
             Err(error) => {

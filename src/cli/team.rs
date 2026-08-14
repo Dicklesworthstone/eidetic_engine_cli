@@ -1847,7 +1847,8 @@ where
         Ok(opened) => opened,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    let plan = match execute_team_steward_once(&connection) {
+    let workspace_path = cli.resolve_workspace();
+    let plan = match execute_team_steward_once(&connection, Some(&workspace_path)) {
         Ok(plan) => plan,
         Err(error) => {
             return write_domain_error(
