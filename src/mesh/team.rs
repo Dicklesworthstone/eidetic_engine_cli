@@ -1273,6 +1273,36 @@ pub fn revoke_team_invite(
     Ok(changed)
 }
 
+/// Revoke every pending invite created before the authorization floor.
+pub fn revoke_team_invites_before_floor(
+    connection: &DbConnection,
+    produced_at: &str,
+) -> Result<usize, OriginStreamError> {
+    let team = load_local_teams(connection)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| OriginStreamError::Encode("no local team genesis".to_owned()))?;
+    let Some(floor_at) = connection
+        .team_invite_auth_floor(&team.team_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+    else {
+        return Ok(0);
+    };
+    let invites = connection
+        .list_team_pending_invites(&team.team_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    let mut revoked = 0_usize;
+    for invite in invites {
+        if invite.status != "pending" || invite.created_at.as_str() >= floor_at.as_str() {
+            continue;
+        }
+        if revoke_team_invite(connection, &invite.invite_id, produced_at)? {
+            revoked = revoked.saturating_add(1);
+        }
+    }
+    Ok(revoked)
+}
+
 /// Redeem a pending invite after the secret is proved.
 pub fn redeem_team_invite(
     connection: &DbConnection,
@@ -2554,6 +2584,112 @@ pub fn inspect_team_health(
                 cursors.len()
             ),
             repair: (stalled > 0).then(|| "ee team steward once --workspace .".to_owned()),
+        });
+    }
+    let floor = connection
+        .team_invite_auth_floor(&team.team_id)
+        .ok()
+        .flatten();
+    let invites = connection
+        .list_team_pending_invites(&team.team_id)
+        .unwrap_or_default();
+    let pending = invites
+        .iter()
+        .filter(|invite| invite.status == "pending")
+        .count();
+    let now = chrono::Utc::now().to_rfc3339();
+    let expired_pending = invites
+        .iter()
+        .filter(|invite| invite.status == "pending" && invite.expires_at.as_str() < now.as_str())
+        .count();
+    let below_floor = floor
+        .as_ref()
+        .map(|floor_at| {
+            invites
+                .iter()
+                .filter(|invite| {
+                    invite.status == "pending" && invite.created_at.as_str() < floor_at
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    checks.push(TeamDoctorCheck {
+        name: "invite_auth_floor".to_owned(),
+        status: if below_floor == 0 {
+            "ok".to_owned()
+        } else {
+            "error".to_owned()
+        },
+        message: match floor.as_deref() {
+            Some(floor_at) => format!(
+                "floor {floor_at}; {below_floor} pending invite(s) created before the floor"
+            ),
+            None => "no invite-authorization floor recorded".to_owned(),
+        },
+        repair: (below_floor > 0)
+            .then(|| "ee team invite revoke --all-before-floor --workspace .".to_owned()),
+    });
+    checks.push(TeamDoctorCheck {
+        name: "pending_invites".to_owned(),
+        status: if expired_pending == 0 {
+            "ok".to_owned()
+        } else {
+            "warning".to_owned()
+        },
+        message: format!("{pending} pending invite(s); {expired_pending} expired"),
+        repair: (expired_pending > 0).then(|| "ee team invite revoke --workspace .".to_owned()),
+    });
+    let delegated = connection
+        .list_all_team_members()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|member| member.state == "active" && !member.is_self)
+        .count();
+    checks.push(TeamDoctorCheck {
+        name: "delegated_members".to_owned(),
+        status: "ok".to_owned(),
+        message: format!("{delegated} active non-self member(s) to review"),
+        repair: None,
+    });
+    let stuck_signing = connection
+        .list_all_team_member_nodes()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|node| node.state != "active")
+        .count();
+    checks.push(TeamDoctorCheck {
+        name: "signing_rotation".to_owned(),
+        status: if stuck_signing == 0 {
+            "ok".to_owned()
+        } else {
+            "warning".to_owned()
+        },
+        message: format!("{stuck_signing} non-active member-node signing binding(s)"),
+        repair: (stuck_signing > 0).then(|| "ee team members rotate-key --workspace .".to_owned()),
+    });
+    if let Some(path) = workspace_path
+        && let Ok(Some(store)) = crate::mesh::key_store::MeshKeyStore::open_existing(path)
+        && let Ok(peers) = connection.list_mesh_peers(workspace_id)
+    {
+        let stuck_next = peers
+            .iter()
+            .filter(|peer| {
+                store
+                    .load_pair_key(&peer.peer_id, crate::mesh::key_store::PairKeyClass::Next)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            })
+            .count();
+        checks.push(TeamDoctorCheck {
+            name: "pair_rotation".to_owned(),
+            status: if stuck_next == 0 {
+                "ok".to_owned()
+            } else {
+                "warning".to_owned()
+            },
+            message: format!("{stuck_next} peer(s) have a staged Next pair key"),
+            repair: (stuck_next > 0).then(|| "ee mesh peer rotate --workspace .".to_owned()),
         });
     }
     if let Ok(rows) = connection.list_mesh_body_cache_metadata(workspace_id) {
@@ -6631,10 +6767,78 @@ mod tests {
                 .iter()
                 .any(|check| check.name == "origin_outbox" && check.status == "ok")
         );
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| check.name == "invite_auth_floor" && check.status == "ok")
+        );
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| check.name == "pending_invites" && check.status == "ok")
+        );
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| check.name == "delegated_members" && check.status == "ok")
+        );
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| check.name == "signing_rotation" && check.status == "ok")
+        );
         set_local_team_paused(&connection, true, "2026-08-13T17:00:00Z").expect("pause");
         let paused = inspect_team_health(&connection, "wsp_persistfixture000000000001", None)
             .expect("paused");
         assert_eq!(paused.posture, "paused");
+    }
+
+    #[test]
+    fn revoke_before_floor_clears_stale_pending_invites() {
+        let connection = open_db();
+        let created = create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        connection
+            .insert_team_pending_invite(&crate::db::InsertTeamPendingInviteInput {
+                invite_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                team_id: created.team.team_id.clone(),
+                origin_node_id: created.team.origin_node_id.clone(),
+                hello_port: 7421,
+                endpoint: "127.0.0.1".to_owned(),
+                genesis_event_hash: created.team.genesis_event_hash.clone(),
+                secret_hash: format!("blake3:{}", "c".repeat(64)),
+                status: "pending".to_owned(),
+                created_at: "2026-08-12T00:00:00Z".to_owned(),
+                expires_at: "2026-08-20T00:00:00Z".to_owned(),
+            })
+            .expect("invite");
+        let sick =
+            inspect_team_health(&connection, "wsp_persistfixture000000000001", None).expect("sick");
+        assert!(
+            sick.checks
+                .iter()
+                .any(|check| check.name == "invite_auth_floor" && check.status == "error")
+        );
+        let revoked =
+            revoke_team_invites_before_floor(&connection, "2026-08-13T12:00:00Z").expect("revoke");
+        assert_eq!(revoked, 1);
+        let healthy = inspect_team_health(&connection, "wsp_persistfixture000000000001", None)
+            .expect("healthy");
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| check.name == "invite_auth_floor" && check.status == "ok")
+        );
     }
 
     fn tailnet_report(self_login: &str, peer_login: Option<(&str, &str)>) -> TailscaleLocalReport {
