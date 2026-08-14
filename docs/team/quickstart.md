@@ -9,10 +9,10 @@ the daemon. JSON is the agent-facing surface.
 ```bash
 # Hana — create the origin team and mint a one-use invite
 ee team create --name "Analysts" --workspace . --json
-ee team invite --workspace . --json
+ee team invite --endpoint "$HANA_ADDR" --workspace . --json
 
 # Priya — join over live TCP using the invite code
-ee team join --code "$INVITE" --endpoint "$HANA_ADDR" --workspace . --json
+ee team join --invite "$INVITE" --workspace . --json
 
 # Either side — status, members, health
 ee team status --workspace . --json
