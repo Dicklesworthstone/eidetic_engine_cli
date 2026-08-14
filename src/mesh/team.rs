@@ -14,7 +14,8 @@ use crate::db::{
     CreateMemoryInput, DbConnection, InsertTeamHistoryProjectionInput, InsertTeamMemberInput,
     InsertTeamMemberNodeInput, InsertTeamPendingInviteInput, InsertTeamProjectInput,
     InsertTeamRemovalAckInput, StoredMeshOriginEvent, StoredTeamMember, StoredTeamMemberIdentity,
-    StoredTeamProject, UpsertMeshBodyCacheMetadataInput, UpsertTeamJoinAttemptInput,
+    StoredTeamProject, UpsertMeshBodyCacheMetadataInput, UpsertTeamAdmissionPeerInput,
+    UpsertTeamJoinAttemptInput,
 };
 use crate::mesh::bootstrap_envelope::{
     BOOTSTRAP_DECLINE_SCHEMA_V1, BootstrapCapability, BootstrapDeclineV1, decode_envelope,
@@ -178,6 +179,10 @@ pub struct TeamAdmissionStatus {
     pub max_body_fetch_bytes: u64,
     pub max_index_jobs_per_round: u32,
     pub local_tier1_unaffected: bool,
+    pub peer_snapshot_count: usize,
+    pub throttled_peer_count: usize,
+    pub budget_exhausted_peer_count: usize,
+    pub coalesced_exhaustion: bool,
 }
 
 /// Team doctor warns when the workspace volume has less than this free.
@@ -198,6 +203,66 @@ fn workspace_available_bytes(path: &std::path::Path) -> Option<u64> {
 #[cfg(not(unix))]
 fn workspace_available_bytes(_path: &std::path::Path) -> Option<u64> {
     None
+}
+
+/// Persist the authenticated admission map so doctor/status can report usage
+/// after the broker process exits.
+pub fn persist_team_admission_states(
+    connection: &DbConnection,
+    workspace_id: &str,
+    peers: &[crate::mesh::admission::MeshPeerAdmissionState],
+    updated_at: &str,
+) -> Result<usize, OriginStreamError> {
+    let mut written = 0_usize;
+    for peer in peers {
+        connection
+            .upsert_team_admission_peer(&UpsertTeamAdmissionPeerInput {
+                workspace_id: workspace_id.to_owned(),
+                peer_id: peer.peer_id.clone(),
+                in_flight_requests: peer.in_flight_requests,
+                malformed_frame_count: peer.malformed_frame_count,
+                policy_denial_count: peer.policy_denial_count,
+                backoff_until_epoch_ms: peer.backoff_until_epoch_ms,
+                local_tier1_reserved: peer.local_tier1_reserved,
+                updated_at: updated_at.to_owned(),
+            })
+            .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+        written = written.saturating_add(1);
+    }
+    Ok(written)
+}
+
+fn load_team_admission_status(
+    connection: &DbConnection,
+    limits: crate::mesh::admission::MeshAdmissionLimits,
+) -> TeamAdmissionStatus {
+    let workspace_id = self_workspace_id(connection).ok().flatten();
+    let peers = workspace_id
+        .as_deref()
+        .and_then(|workspace_id| connection.list_team_admission_peers(workspace_id).ok())
+        .unwrap_or_default();
+    let throttled_peer_count = peers
+        .iter()
+        .filter(|peer| peer.backoff_until_epoch_ms.is_some() || peer.malformed_frame_count > 0)
+        .count();
+    let budget_exhausted_peer_count = peers
+        .iter()
+        .filter(|peer| peer.policy_denial_count > 0)
+        .count();
+    let coalesced_exhaustion = throttled_peer_count > 0 || budget_exhausted_peer_count > 0;
+    let local_tier1_unaffected =
+        peers.is_empty() || peers.iter().all(|peer| peer.local_tier1_reserved);
+    TeamAdmissionStatus {
+        max_event_batch_count: limits.max_event_batch_count,
+        max_event_batch_bytes: limits.max_event_batch_bytes,
+        max_body_fetch_bytes: limits.max_body_fetch_bytes,
+        max_index_jobs_per_round: limits.max_index_jobs_per_round,
+        local_tier1_unaffected,
+        peer_snapshot_count: peers.len(),
+        throttled_peer_count,
+        budget_exhausted_peer_count,
+        coalesced_exhaustion,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -754,6 +819,7 @@ pub fn local_team_status(connection: &DbConnection) -> Result<TeamStatusReport, 
         );
     }
     let limits = crate::mesh::admission::MeshAdmissionLimits::conservative_default();
+    let admission = load_team_admission_status(connection, limits);
     Ok(TeamStatusReport {
         schema: TEAM_STATUS_SCHEMA_V1,
         command: "team status",
@@ -763,13 +829,7 @@ pub fn local_team_status(connection: &DbConnection) -> Result<TeamStatusReport, 
         nodes,
         pending_invites,
         pending_removal_acks,
-        admission: TeamAdmissionStatus {
-            max_event_batch_count: limits.max_event_batch_count,
-            max_event_batch_bytes: limits.max_event_batch_bytes,
-            max_body_fetch_bytes: limits.max_body_fetch_bytes,
-            max_index_jobs_per_round: limits.max_index_jobs_per_round,
-            local_tier1_unaffected: true,
-        },
+        admission,
         paused,
         steward_would_sync,
         mesh_primitives: vec![
@@ -2497,17 +2557,40 @@ pub fn inspect_team_health(
         repair: None,
     });
     let limits = crate::mesh::admission::MeshAdmissionLimits::conservative_default();
+    let admission = load_team_admission_status(connection, limits);
     checks.push(TeamDoctorCheck {
         name: "admission".to_owned(),
-        status: "ok".to_owned(),
-        message: format!(
-            "authenticated caps: event_batch<={} events/{} bytes; body_fetch<={} bytes; index_jobs<={}; local_tier1_unaffected=true; no live peer snapshot",
-            limits.max_event_batch_count,
-            limits.max_event_batch_bytes,
-            limits.max_body_fetch_bytes,
-            limits.max_index_jobs_per_round
-        ),
-        repair: None,
+        status: if admission.coalesced_exhaustion {
+            "warning".to_owned()
+        } else {
+            "ok".to_owned()
+        },
+        message: if admission.peer_snapshot_count == 0 {
+            format!(
+                "authenticated caps: event_batch<={} events/{} bytes; body_fetch<={} bytes; index_jobs<={}; local_tier1_unaffected={}; no peer snapshot",
+                admission.max_event_batch_count,
+                admission.max_event_batch_bytes,
+                admission.max_body_fetch_bytes,
+                admission.max_index_jobs_per_round,
+                admission.local_tier1_unaffected
+            )
+        } else {
+            format!(
+                "authenticated caps: event_batch<={} events/{} bytes; body_fetch<={} bytes; index_jobs<={}; local_tier1_unaffected={}; {} peer snapshot(s); {} throttled; {} exhausted; coalesced_exhaustion={}",
+                admission.max_event_batch_count,
+                admission.max_event_batch_bytes,
+                admission.max_body_fetch_bytes,
+                admission.max_index_jobs_per_round,
+                admission.local_tier1_unaffected,
+                admission.peer_snapshot_count,
+                admission.throttled_peer_count,
+                admission.budget_exhausted_peer_count,
+                admission.coalesced_exhaustion
+            )
+        },
+        repair: admission.coalesced_exhaustion.then(|| {
+            "wait for peer backoff, then retry a smaller EventFetch or BodyFetch".to_owned()
+        }),
     });
     if let Some(path) = workspace_path {
         match workspace_available_bytes(path) {
@@ -7494,6 +7577,42 @@ mod tests {
             check.name == "free_space" && check.status == "ok" && check.message.contains("floor is")
         }));
         assert_eq!(TEAM_FREE_SPACE_FLOOR_BYTES, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn persisted_admission_snapshot_warns_doctor_and_status() {
+        let connection = open_db();
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let mut peer = crate::mesh::admission::MeshPeerAdmissionState::new("peer_noisy_000001");
+        peer = peer
+            .with_policy_denial_count(2)
+            .with_malformed_frame_count(1);
+        persist_team_admission_states(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &[peer],
+            "2026-08-14T15:00:00Z",
+        )
+        .expect("persist");
+        let doctor = inspect_team_health(&connection, "wsp_persistfixture000000000001", None)
+            .expect("doctor");
+        assert!(doctor.checks.iter().any(|check| {
+            check.name == "admission"
+                && check.status == "warning"
+                && check.message.contains("coalesced_exhaustion=true")
+        }));
+        let status = local_team_status(&connection).expect("status");
+        assert_eq!(status.admission.peer_snapshot_count, 1);
+        assert_eq!(status.admission.budget_exhausted_peer_count, 1);
+        assert_eq!(status.admission.throttled_peer_count, 1);
+        assert!(status.admission.coalesced_exhaustion);
+        assert!(status.admission.local_tier1_unaffected);
     }
 
     #[test]
