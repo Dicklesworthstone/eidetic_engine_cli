@@ -32,7 +32,8 @@ floor are an error; the repair is `ee team revoke --all-before-floor`.
   `daemon install --confirm` are durable writes. `ee team invite`
   defaults the locator to the local Tailscale IPv4 address; pass
   `--endpoint` when Tailscale is absent. `ee team status` lists
-  `pendingInvites[]` for `ee team revoke --invite-id`. Origin project
+  `pendingInvites[]` for `ee team revoke --invite-id` and
+  `pendingRemovalAcks[]` for unsigned removal fanout. Origin project
   shares rematerialize with `ee team projects reconcile`; adopt binds
   a local path afterward.
 - Default `ee team share bodies` is a **preview**. It must stay
