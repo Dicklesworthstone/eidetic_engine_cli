@@ -4,8 +4,8 @@
  "gateBead": "bd-1n0np.23.1",
  "manifestOwner": "tests/contracts/dueling_wizards_migration_registry.rs",
  "sourceOfTruth": "src/db/mod.rs::MIGRATIONS",
- "currentLastCompiledMigration": 114,
- "nextPlannedMigration": 115,
+ "currentLastCompiledMigration": 115,
+ "nextPlannedMigration": 116,
  "boundaryMigrationE2e": "scripts/e2e_boundary_migration.sh",
  "backupCoverageBead": "bd-1n0np.23.2",
  "policy": {
@@ -57,7 +57,8 @@
     "V111": "V111_TEAM_PROJECTS (bd-tc-epic-qzk7o T4.8 minted/adopted team project identity)",
     "V112": "V112_TEAM_IDP_POLICY (bd-tc-epic-qzk7o T7.2 tailnet-attested IdP policy and member identity)",
     "V113": "V113_TEAM_IDP_OIDC (bd-tc-epic-qzk7o T7.4 secretless public OIDC provider pin)",
-    "V114": "V114_TEAM_IDP_TOKEN_REPLAY (bd-tc-epic-qzk7o T7.5 single-use ID-token hash ledger)"
+    "V114": "V114_TEAM_IDP_TOKEN_REPLAY (bd-tc-epic-qzk7o T7.5 single-use ID-token hash ledger)",
+    "V115": "V115_MESH_BODY_CACHE_LIFECYCLE (bd-tc-epic-qzk7o T5.9 staging/invalidation body-cache statuses)"
    }
   }
  },

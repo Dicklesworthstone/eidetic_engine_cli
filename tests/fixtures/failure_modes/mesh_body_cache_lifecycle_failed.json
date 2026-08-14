@@ -1,0 +1,20 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_body_cache_lifecycle_failed",
+  "introduced_by": { "bead": "bd-tc-epic-qzk7o", "epic_letter": "TC" },
+  "surfaces": ["team share bodies", "team doctor"],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "Body-cache publication cannot prove the T2.1 secure-file contract, so no body bytes are written and retrieval stays metadata-only.",
+    "setup_commands": ["attempt ee team share bodies --confirm on a host without the reviewed Unix secure-file adapter"],
+    "invocation": "ee team share bodies --confirm --workspace ."
+  },
+  "expected_emission": {
+    "code": "mesh_body_cache_lifecycle_failed",
+    "severity": "high",
+    "message_contains": ["secure-file", "metadata-only"],
+    "repair_contains": "Unix host",
+    "repair_string": "use a Unix host or wait for Windows secure-file parity"
+  }
+}

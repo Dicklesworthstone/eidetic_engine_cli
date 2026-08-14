@@ -9876,6 +9876,60 @@ CREATE INDEX idx_team_idp_token_replay_team ON team_idp_token_replay(team_id, co
     "blake3:v114_team_idp_token_replay_2026_08_13",
 );
 
+/// V115: crash-safe body-cache statuses for T5.9 publication/invalidation.
+pub const V115_MESH_BODY_CACHE_LIFECYCLE: Migration = Migration::new(
+    115,
+    "mesh_body_cache_lifecycle",
+    r#"
+CREATE TABLE mesh_body_cache_metadata_v115 (
+    workspace_id TEXT NOT NULL CHECK (workspace_id GLOB 'wsp_*' AND length(trim(workspace_id)) > 6),
+    body_cache_key TEXT NOT NULL CHECK (length(trim(body_cache_key)) > 0),
+    origin_node_id TEXT NOT NULL CHECK (origin_node_id GLOB 'node_*' AND length(trim(origin_node_id)) > 6),
+    origin_workspace_id TEXT NOT NULL CHECK (origin_workspace_id GLOB 'wsp_*' AND length(trim(origin_workspace_id)) > 6),
+    logical_memory_id TEXT NOT NULL CHECK (logical_memory_id GLOB 'mem_*' AND length(trim(logical_memory_id)) > 6),
+    content_hash TEXT NOT NULL CHECK (content_hash GLOB 'blake3:*'),
+    body_ref_json TEXT CHECK (body_ref_json IS NULL OR json_valid(body_ref_json)),
+    preview_hash TEXT CHECK (preview_hash IS NULL OR preview_hash GLOB 'blake3:*'),
+    size_bytes INTEGER CHECK (size_bytes IS NULL OR size_bytes >= 0),
+    cache_status TEXT NOT NULL DEFAULT 'metadata_only' CHECK (
+        cache_status IN (
+            'metadata_only',
+            'staging',
+            'available',
+            'quarantined',
+            'invalidated_pending_purge',
+            'evicted',
+            'expired',
+            'purged'
+        )
+    ),
+    local_body_hash TEXT CHECK (local_body_hash IS NULL OR local_body_hash GLOB 'blake3:*'),
+    cached_at TEXT NOT NULL CHECK (length(trim(cached_at)) > 0),
+    expires_at TEXT CHECK (expires_at IS NULL OR length(trim(expires_at)) > 0),
+    PRIMARY KEY (workspace_id, body_cache_key)
+);
+INSERT INTO mesh_body_cache_metadata_v115 (
+    workspace_id, body_cache_key, origin_node_id, origin_workspace_id,
+    logical_memory_id, content_hash, body_ref_json, preview_hash,
+    size_bytes, cache_status, local_body_hash, cached_at, expires_at
+)
+SELECT
+    workspace_id, body_cache_key, origin_node_id, origin_workspace_id,
+    logical_memory_id, content_hash, body_ref_json, preview_hash,
+    size_bytes, cache_status, local_body_hash, cached_at, expires_at
+FROM mesh_body_cache_metadata;
+DROP TABLE mesh_body_cache_metadata;
+ALTER TABLE mesh_body_cache_metadata_v115 RENAME TO mesh_body_cache_metadata;
+CREATE INDEX idx_mesh_body_cache_origin
+    ON mesh_body_cache_metadata(workspace_id, origin_node_id, origin_workspace_id, logical_memory_id);
+CREATE INDEX idx_mesh_body_cache_content
+    ON mesh_body_cache_metadata(workspace_id, content_hash);
+CREATE INDEX idx_mesh_body_cache_status
+    ON mesh_body_cache_metadata(workspace_id, cache_status, expires_at);
+"#,
+    "blake3:v115_mesh_body_cache_lifecycle_2026_08_13",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -9992,6 +10046,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V112_TEAM_IDP_POLICY,
     V113_TEAM_IDP_OIDC,
     V114_TEAM_IDP_TOKEN_REPLAY,
+    V115_MESH_BODY_CACHE_LIFECYCLE,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -17980,6 +18035,26 @@ impl DbConnection {
         rows.first()
             .map(stored_mesh_body_cache_metadata_from_row)
             .transpose()
+    }
+
+    /// List body-cache metadata for one workspace. Filesystem presence is not consulted.
+    pub fn list_mesh_body_cache_metadata(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredMeshBodyCacheMetadata>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT workspace_id, body_cache_key, origin_node_id, origin_workspace_id,
+                    logical_memory_id, content_hash, body_ref_json, preview_hash,
+                    size_bytes, cache_status, local_body_hash, cached_at, expires_at
+             FROM mesh_body_cache_metadata
+             WHERE workspace_id = ?1
+             ORDER BY body_cache_key ASC",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        rows.iter()
+            .map(stored_mesh_body_cache_metadata_from_row)
+            .collect()
     }
 
     /// Return redaction-safe mesh storage posture counts for status surfaces.
