@@ -42,6 +42,8 @@ pub struct DaemonServicePlan {
     pub already_installed: bool,
     pub confirmed: bool,
     pub written: bool,
+    pub loaded: bool,
+    pub load_output: Option<String>,
     pub next_commands: Vec<String>,
     pub mesh_primitives: Vec<&'static str>,
 }
@@ -153,9 +155,108 @@ pub fn plan_daemon_service(
         already_installed,
         confirmed: confirm,
         written: false,
+        loaded: false,
+        load_output: None,
         next_commands,
         mesh_primitives: vec!["team_steward", "daemon_service"],
     }
+}
+
+/// Load the written unit into launchd or systemd --user.
+pub fn activate_daemon_service(
+    kind: DaemonServiceKind,
+    unit_path: &Path,
+) -> Result<String, String> {
+    let output = match kind {
+        DaemonServiceKind::Launchd => std::process::Command::new("launchctl")
+            .args(["load", &unit_path.display().to_string()])
+            .output(),
+        DaemonServiceKind::SystemdUser => {
+            let reload = std::process::Command::new("systemctl")
+                .args(["--user", "daemon-reload"])
+                .output()
+                .map_err(|error| format!("systemctl daemon-reload: {error}"))?;
+            if !reload.status.success() {
+                return Err(format!(
+                    "systemctl daemon-reload failed: {}",
+                    String::from_utf8_lossy(&reload.stderr)
+                ));
+            }
+            std::process::Command::new("systemctl")
+                .args(["--user", "enable", "--now", SYSTEMD_UNIT_NAME])
+                .output()
+        }
+        DaemonServiceKind::Unsupported => {
+            return Err("no user service supervisor on this platform".to_owned());
+        }
+    };
+    let output = output.map_err(|error| error.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if !output.status.success() {
+        return Err(if stderr.is_empty() { stdout } else { stderr });
+    }
+    Ok(if stdout.is_empty() { stderr } else { stdout })
+}
+
+/// Start a uniquely named oneshot user unit, assert it became active, then
+/// stop it and quarantine the unit file. Proves the T6.2 supervisor-load path
+/// without taking over [`SYSTEMD_UNIT_NAME`].
+pub fn prove_user_supervisor_load(home: &Path, unit_stem: &str) -> Result<String, String> {
+    if current_service_kind() != DaemonServiceKind::SystemdUser {
+        return Err("user supervisor proof requires systemd --user".to_owned());
+    }
+    if unit_stem.is_empty()
+        || unit_stem.len() > 48
+        || !unit_stem
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err("unit stem is not a safe systemd name".to_owned());
+    }
+    let unit_name = format!("{unit_stem}.service");
+    let path = home
+        .join(".config")
+        .join("systemd")
+        .join("user")
+        .join(&unit_name);
+    write_unit_file(
+        &path,
+        "[Unit]\nDescription=ee team-confed supervisor proof\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n\n[Install]\nWantedBy=default.target\n",
+    )?;
+    let reload = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .output()
+        .map_err(|error| format!("systemctl daemon-reload: {error}"))?;
+    if !reload.status.success() {
+        return Err(format!(
+            "systemctl daemon-reload failed: {}",
+            String::from_utf8_lossy(&reload.stderr)
+        ));
+    }
+    let start = std::process::Command::new("systemctl")
+        .args(["--user", "start", &unit_name])
+        .output()
+        .map_err(|error| format!("systemctl start: {error}"))?;
+    if !start.status.success() {
+        return Err(format!(
+            "systemctl start failed: {}",
+            String::from_utf8_lossy(&start.stderr)
+        ));
+    }
+    let active = std::process::Command::new("systemctl")
+        .args(["--user", "is-active", &unit_name])
+        .output()
+        .map_err(|error| format!("systemctl is-active: {error}"))?;
+    let status = String::from_utf8_lossy(&active.stdout).trim().to_owned();
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "stop", &unit_name])
+        .output();
+    let _ = quarantine_unit_file(&path);
+    if status != "active" {
+        return Err(format!("unit was not active after start: {status}"));
+    }
+    Ok(status)
 }
 
 /// Write the unit file. Callers must have already confirmed.
@@ -212,6 +313,7 @@ mod tests {
         );
         assert!(plan.unit_path.is_none());
         assert!(!plan.written);
+        assert!(!plan.loaded);
         assert!(
             plan.next_commands
                 .iter()
@@ -234,5 +336,38 @@ mod tests {
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.contains("quarantined-"))
         );
+    }
+
+    #[test]
+    fn prove_user_supervisor_load_refuses_unsafe_stem() {
+        let error =
+            prove_user_supervisor_load(Path::new("/tmp"), "../escape").expect_err("unsafe stem");
+        assert!(error.contains("safe systemd name") || error.contains("systemd --user"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn prove_user_supervisor_load_when_user_manager_exists() {
+        let has_manager = std::process::Command::new("systemctl")
+            .args(["--user", "is-system-running"])
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !has_manager {
+            return;
+        }
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+        let status =
+            prove_user_supervisor_load(&home, "ee-team-confed-proof").expect("supervisor load");
+        assert_eq!(status, "active");
+    }
+
+    #[test]
+    fn activate_unsupported_is_refused() {
+        let error = activate_daemon_service(
+            DaemonServiceKind::Unsupported,
+            Path::new("/tmp/ee-daemon.service"),
+        )
+        .expect_err("unsupported");
+        assert!(error.contains("no user service"));
     }
 }

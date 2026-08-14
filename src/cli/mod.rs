@@ -2630,6 +2630,10 @@ pub struct DaemonServiceInstallArgs {
     /// Write the unit file. Without this flag the command is a dry-run.
     #[arg(long, action = ArgAction::SetTrue)]
     pub confirm: bool,
+
+    /// After writing, load the unit via launchctl or systemctl --user.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub load: bool,
 }
 
 /// Arguments for `ee daemon uninstall`.
@@ -60741,7 +60745,15 @@ where
     W: Write,
     E: Write,
 {
-    handle_daemon_service_plan(cli, "daemon install", args.confirm, false, stdout, stderr)
+    handle_daemon_service_plan(
+        cli,
+        "daemon install",
+        args.confirm,
+        false,
+        args.load,
+        stdout,
+        stderr,
+    )
 }
 
 fn handle_daemon_service_uninstall<W, E>(
@@ -60754,7 +60766,15 @@ where
     W: Write,
     E: Write,
 {
-    handle_daemon_service_plan(cli, "daemon uninstall", args.confirm, true, stdout, stderr)
+    handle_daemon_service_plan(
+        cli,
+        "daemon uninstall",
+        args.confirm,
+        true,
+        false,
+        stdout,
+        stderr,
+    )
 }
 
 fn handle_daemon_service_plan<W, E>(
@@ -60762,6 +60782,7 @@ fn handle_daemon_service_plan<W, E>(
     command: &'static str,
     confirm: bool,
     uninstall: bool,
+    load: bool,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -60835,6 +60856,27 @@ where
                         stdout,
                         stderr,
                     );
+                }
+            }
+            if load {
+                match crate::daemon::service_install::activate_daemon_service(kind, &path) {
+                    Ok(output) => {
+                        plan.loaded = true;
+                        plan.load_output = Some(output);
+                    }
+                    Err(error) => {
+                        return write_domain_error(
+                            &DomainError::Storage {
+                                message: format!("Failed to load daemon unit: {error}"),
+                                repair: Some(
+                                    "ee daemon install --confirm --load --json".to_owned(),
+                                ),
+                            },
+                            cli.wants_json(),
+                            stdout,
+                            stderr,
+                        );
+                    }
                 }
             }
         }
