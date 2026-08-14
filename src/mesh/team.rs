@@ -955,6 +955,9 @@ pub struct TeamInviteCodeV1 {
     pub genesis_event_hash: String,
     pub secret: String,
     pub inviter_verifying_key: String,
+    /// Inviter workspace. Empty on pre-campaign invites.
+    #[serde(default)]
+    pub origin_workspace_id: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1021,6 +1024,9 @@ pub struct TeamJoinGrantedV1 {
     pub hello_port: u16,
     pub genesis_event_hash: String,
     pub pair_confirmation: String,
+    /// Inviter workspace. Empty on pre-campaign grants.
+    #[serde(default)]
+    pub origin_workspace_id: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1096,6 +1102,7 @@ pub fn mint_team_invite_with_store(
         }
         None => String::new(),
     };
+    let origin_workspace_id = self_workspace_id(connection)?.unwrap_or_default();
     let code = encode_invite_code(&TeamInviteCodeV1 {
         schema: TEAM_INVITE_SCHEMA_V1.to_owned(),
         invite_id: invite_id.clone(),
@@ -1106,6 +1113,7 @@ pub fn mint_team_invite_with_store(
         genesis_event_hash: team.genesis_event_hash,
         secret,
         inviter_verifying_key,
+        origin_workspace_id,
     })?;
     Ok(TeamInviteReport {
         schema: TEAM_INVITE_SCHEMA_V1,
@@ -1599,6 +1607,7 @@ pub fn redeem_team_invite(
         hello_port: invite.hello_port,
         genesis_event_hash: invite.genesis_event_hash,
         pair_confirmation: String::new(),
+        origin_workspace_id: self_workspace_id(connection)?.unwrap_or_default(),
     })
 }
 
@@ -2067,6 +2076,7 @@ pub fn enroll_team_pair_peer(
     endpoint: &str,
     hello_port: u16,
     produced_at: &str,
+    origin_workspace_id: &str,
 ) -> Result<String, OriginStreamError> {
     let peer_id = team_pair_peer_handle(team_id, remote_node_id);
     if connection
@@ -2086,6 +2096,7 @@ pub fn enroll_team_pair_peer(
         peer_id: peer_id.clone(),
         alias: display_name.to_owned(),
         workspace_id: workspace_id.to_owned(),
+        origin_workspace_id: origin_workspace_id.to_owned(),
         endpoint: crate::mesh::peer::MeshPeerEndpoint {
             tailscale_node_key: remote_node_id.to_owned(),
             tailnet_id: "tailnet-team-join".to_owned(),
@@ -2167,6 +2178,48 @@ pub fn retry_pending_team_body_fetches(
         }
     }
     Ok(applied)
+}
+
+/// Session binding for BodyFetch. Distinct workspaces and nodes are required
+/// so initiator and responder cannot collide on the handshake.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TeamBodyFetchBinding {
+    pub team_id: String,
+    pub tailnet_id: String,
+    pub initiator_node_id: String,
+    pub responder_node_id: String,
+    pub initiator_workspace_id: String,
+    pub responder_workspace_id: String,
+}
+
+#[must_use]
+pub fn plan_team_body_fetch_binding(
+    local_workspace_id: &str,
+    local_origin_node_id: &str,
+    team_id: &str,
+    remote_node_id: &str,
+    remote_workspace_id: &str,
+    tailnet_id: &str,
+) -> Option<TeamBodyFetchBinding> {
+    if local_workspace_id.is_empty()
+        || remote_workspace_id.is_empty()
+        || local_workspace_id == remote_workspace_id
+        || local_origin_node_id.is_empty()
+        || remote_node_id.is_empty()
+        || local_origin_node_id == remote_node_id
+        || team_id.is_empty()
+        || tailnet_id.is_empty()
+    {
+        return None;
+    }
+    Some(TeamBodyFetchBinding {
+        team_id: team_id.to_owned(),
+        tailnet_id: tailnet_id.to_owned(),
+        initiator_node_id: local_origin_node_id.to_owned(),
+        responder_node_id: remote_node_id.to_owned(),
+        initiator_workspace_id: local_workspace_id.to_owned(),
+        responder_workspace_id: remote_workspace_id.to_owned(),
+    })
 }
 
 fn bodies_consent_hash(team_id: &str, items: &[TeamBodyShareItem]) -> String {
@@ -5685,6 +5738,11 @@ pub fn join_team_with_code_on_store(
             &parsed.endpoint,
             granted.hello_port,
             produced_at,
+            if granted.origin_workspace_id.is_empty() {
+                parsed.origin_workspace_id.as_str()
+            } else {
+                granted.origin_workspace_id.as_str()
+            },
         )?;
     }
     let granted_json = serde_json::to_string(&granted)
@@ -6092,6 +6150,7 @@ mod tests {
         );
         let parsed = parse_team_invite_code(&minted.invite_code).expect("parse");
         assert_eq!(parsed.invite_id, minted.invite_id);
+        assert_eq!(parsed.origin_workspace_id, "wsp_persistfixture000000000001");
         let granted = redeem_team_invite(
             &connection,
             &parsed.invite_id,
@@ -6100,6 +6159,10 @@ mod tests {
         )
         .expect("redeem");
         assert_eq!(granted.team_id, minted.team_id);
+        assert_eq!(
+            granted.origin_workspace_id,
+            "wsp_persistfixture000000000001"
+        );
         let second = mint_team_invite(
             &connection,
             "127.0.0.1",
@@ -6200,6 +6263,7 @@ mod tests {
                 hello_port: created.team.hello_port,
                 genesis_event_hash: created.team.genesis_event_hash.clone(),
                 pair_confirmation: String::new(),
+                origin_workspace_id: "wsp_persistfixture000000000001".to_owned(),
             },
             "node_joinpersist000000000000000001",
             "Priya",
@@ -6254,6 +6318,7 @@ mod tests {
             "127.0.0.1",
             created.team.hello_port,
             "2026-08-13T04:00:00Z",
+            "wsp_joinworkspace0000000000001",
         )
         .expect("enroll");
         assert_eq!(
@@ -6276,6 +6341,29 @@ mod tests {
             record.endpoint.endpoint,
             "127.0.0.1:".to_owned() + &created.team.hello_port.to_string()
         );
+        assert_eq!(record.origin_workspace_id, "wsp_joinworkspace0000000000001");
+        assert!(
+            plan_team_body_fetch_binding(
+                "wsp_persistfixture000000000001",
+                "node_local0000000000000000000001",
+                &created.team.team_id,
+                &created.team.origin_node_id,
+                &record.origin_workspace_id,
+                "tailnet-team-join",
+            )
+            .is_some()
+        );
+        assert!(
+            plan_team_body_fetch_binding(
+                "wsp_persistfixture000000000001",
+                &created.team.origin_node_id,
+                &created.team.team_id,
+                &created.team.origin_node_id,
+                &record.origin_workspace_id,
+                "tailnet-team-join",
+            )
+            .is_none()
+        );
         let again = enroll_team_pair_peer(
             &connection,
             "wsp_persistfixture000000000001",
@@ -6285,6 +6373,7 @@ mod tests {
             "127.0.0.1",
             created.team.hello_port,
             "2026-08-13T04:01:00Z",
+            "wsp_joinworkspace0000000000001",
         )
         .expect("idempotent");
         assert_eq!(again, handle);
@@ -7108,6 +7197,7 @@ mod tests {
             "127.0.0.1",
             created.team.hello_port,
             "2026-08-13T16:00:00Z",
+            "wsp_joinworkspace0000000000001",
         )
         .expect("enroll");
         let mut fetch_calls = 0_usize;
@@ -7190,6 +7280,7 @@ mod tests {
             hello_port: created.team.hello_port,
             genesis_event_hash: created.team.genesis_event_hash.clone(),
             pair_confirmation: "blake3:dead".to_owned(),
+            origin_workspace_id: "wsp_persistfixture000000000001".to_owned(),
         };
         let joiner = open_db();
         joiner
