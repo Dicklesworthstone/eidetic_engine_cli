@@ -26,7 +26,10 @@ is `ee team revoke --all-before-floor`.
 
 - `ee team create`, `invite`, `join`, `share bodies --confirm`,
   `unshare`, `leave`, `pause`, `resume`, `idp set`, `idp attest`, and
-  `daemon install --confirm` are durable writes.
+  `daemon install --confirm` are durable writes. `ee team invite`
+  defaults the locator to the local Tailscale IPv4 address; pass
+  `--endpoint` when Tailscale is absent. `ee team status` lists
+  `pendingInvites[]` for `ee team revoke --invite-id`.
 - Default `ee team share bodies` is a **preview**. It must stay
   token-free and must not publish cache bytes. `--representation
   already_redacted` is allowed; redact-over-exact is refused.
