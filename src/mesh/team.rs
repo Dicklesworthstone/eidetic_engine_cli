@@ -949,6 +949,34 @@ pub fn mint_team_invite_with_store(
     })
 }
 
+/// Reload a pending invite locator without re-emitting the secret.
+pub fn resume_pending_invite(
+    connection: &DbConnection,
+    invite_id: &str,
+) -> Result<TeamInviteReport, OriginStreamError> {
+    let invite = connection
+        .get_team_pending_invite(invite_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+        .ok_or_else(|| OriginStreamError::Encode("unknown invite".to_owned()))?;
+    if invite.status != "pending" {
+        return Err(OriginStreamError::Encode(
+            "invite is not pending".to_owned(),
+        ));
+    }
+    Ok(TeamInviteReport {
+        schema: TEAM_INVITE_SCHEMA_V1,
+        command: "team invite",
+        invite_id: invite.invite_id,
+        team_id: invite.team_id,
+        hello_port: invite.hello_port,
+        endpoint: invite.endpoint,
+        expires_at: invite.expires_at,
+        invite_code: String::new(),
+        granted: None,
+        mesh_primitives: vec!["team_pending_invites", "team_join_attempts"],
+    })
+}
+
 /// Accept one unsigned bootstrap join on an already-bound listener.
 pub fn serve_one_bootstrap_join(
     connection: &DbConnection,
@@ -5160,6 +5188,32 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn resume_pending_invite_omits_the_secret() {
+        let connection = open_db();
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let minted = mint_team_invite(
+            &connection,
+            "127.0.0.1",
+            "2026-08-13T00:00:00Z",
+            "2026-08-20T00:00:00Z",
+        )
+        .expect("mint");
+        let resumed = resume_pending_invite(&connection, &minted.invite_id).expect("resume");
+        assert_eq!(resumed.invite_id, minted.invite_id);
+        assert_eq!(resumed.endpoint, minted.endpoint);
+        assert_eq!(resumed.hello_port, minted.hello_port);
+        assert!(resumed.invite_code.is_empty());
+        revoke_team_invite(&connection, &minted.invite_id, "2026-08-13T00:30:00Z").expect("revoke");
+        assert!(resume_pending_invite(&connection, &minted.invite_id).is_err());
     }
 
     #[test]

@@ -8,13 +8,14 @@ use serde_json::json;
 
 use crate::db::DbConnection;
 use crate::mesh::team::{
-    add_local_team_node, adopt_team_project, any_local_team_paused, attest_local_id_token,
-    create_local_team_with_store, execute_team_idp_token_poll, execute_team_steward_once,
-    fetch_local_team_body, inspect_team_health, join_team_with_code_on_store, leave_local_team,
-    list_team_activity, list_team_projects, local_team_status, mint_team_invite_with_store,
-    plan_team_idp_device, reconcile_local_team_membership, reconcile_local_team_projects,
-    remove_team_member, require_tailnet_attested, revalidate_team_identities, revoke_team_invite,
-    revoke_team_invites_before_floor, rotate_local_signing_key,
+    TeamInviteReport, add_local_team_node, adopt_team_project, any_local_team_paused,
+    attest_local_id_token, create_local_team_with_store, execute_team_idp_token_poll,
+    execute_team_steward_once, fetch_local_team_body, inspect_team_health,
+    join_team_with_code_on_store, leave_local_team, list_team_activity, list_team_projects,
+    local_team_status, mint_team_invite_with_store, plan_team_idp_device,
+    reconcile_local_team_membership, reconcile_local_team_projects, remove_team_member,
+    require_tailnet_attested, resume_pending_invite, revalidate_team_identities,
+    revoke_team_invite, revoke_team_invites_before_floor, rotate_local_signing_key,
     serve_one_bootstrap_join_with_store, set_local_team_paused, set_team_oidc_provider,
     share_team_bodies_represented, share_team_history, share_team_project, team_idp_status,
     unshare_team_bodies,
@@ -179,6 +180,10 @@ pub struct TeamInviteArgs {
     /// Bind the advertised locator and accept one join before exiting.
     #[arg(long)]
     pub wait: bool,
+
+    /// Resume waiting on an existing pending invite without re-emitting the secret.
+    #[arg(long, value_name = "INVITE_ID")]
+    pub resume: Option<String>,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -775,6 +780,82 @@ where
     }
 }
 
+fn wait_for_invite_join<W, E>(
+    cli: &Cli,
+    connection: &crate::db::DbConnection,
+    workspace_id: &str,
+    workspace_path: &std::path::Path,
+    mut report: TeamInviteReport,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let Some(bind) = crate::mesh::bootstrap_envelope::parse_live_peer_endpoint(
+        &report.endpoint,
+        report.hello_port,
+    ) else {
+        return write_domain_error(
+            &DomainError::Storage {
+                message: "Invite wait needs a live TCP endpoint".to_owned(),
+                repair: Some("ee team invite --endpoint <ip-or-ip:port> --wait".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    };
+    let listener = match std::net::TcpListener::bind(bind) {
+        Ok(listener) => listener,
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::Storage {
+                    message: format!("Failed to bind invite waiter: {error}"),
+                    repair: Some("ee mesh hello-responder run --workspace .".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+    match serve_one_bootstrap_join_with_store(
+        connection,
+        workspace_id,
+        &listener,
+        std::time::Duration::from_secs(300),
+        Some(workspace_path),
+    ) {
+        Ok(granted) => report.granted = Some(granted),
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::Storage {
+                    message: format!("Invite wait failed: {error}"),
+                    repair: Some(
+                        "ee team invite --wait --resume <invite-id> --workspace .".to_owned(),
+                    ),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    }
+    let human = match &report.granted {
+        Some(granted) => format!(
+            "Invite redeemed by join\n  invite_id: {}\n  team_id: {}\n  joiner recorded for {}\n",
+            report.invite_id, granted.team_id, granted.display_name
+        ),
+        None => format!(
+            "Resumed invite waiter\n  invite_id: {}\n  endpoint: {}:{}\n",
+            report.invite_id, report.endpoint, report.hello_port
+        ),
+    };
+    write_team_report(cli, &report, &human, stdout)
+}
+
 fn handle_team_invite<W, E>(
     cli: &Cli,
     args: &TeamInviteArgs,
@@ -792,6 +873,46 @@ where
     let produced_at = chrono::Utc::now().to_rfc3339();
     let expires_at = (chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339();
     let workspace_path = cli.resolve_workspace();
+    if let Some(invite_id) = args
+        .resume
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        if !args.wait {
+            return write_domain_error(
+                &DomainError::Usage {
+                    message: "invite --resume requires --wait".to_owned(),
+                    repair: Some(
+                        "ee team invite --wait --resume <invite-id> --workspace .".to_owned(),
+                    ),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+        return match resume_pending_invite(&connection, invite_id) {
+            Ok(report) => wait_for_invite_join(
+                cli,
+                &connection,
+                &workspace_id,
+                &workspace_path,
+                report,
+                stdout,
+                stderr,
+            ),
+            Err(error) => write_domain_error(
+                &DomainError::Storage {
+                    message: format!("Failed to resume invite: {error}"),
+                    repair: Some("ee team status --workspace . --json".to_owned()),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            ),
+        };
+    }
     let endpoint = match args
         .endpoint
         .as_deref()
@@ -824,80 +945,33 @@ where
         &expires_at,
         Some(&workspace_path),
     ) {
-        Ok(mut report) => {
+        Ok(report) => {
             if args.wait {
-                let Some(bind) = crate::mesh::bootstrap_envelope::parse_live_peer_endpoint(
-                    &report.endpoint,
-                    report.hello_port,
-                ) else {
-                    return write_domain_error(
-                        &DomainError::Storage {
-                            message: "Invite wait needs a live TCP endpoint".to_owned(),
-                            repair: Some(
-                                "ee team invite --endpoint <ip-or-ip:port> --wait".to_owned(),
-                            ),
-                        },
-                        cli.wants_json(),
-                        stdout,
-                        stderr,
-                    );
-                };
-                let listener = match std::net::TcpListener::bind(bind) {
-                    Ok(listener) => listener,
-                    Err(error) => {
-                        return write_domain_error(
-                            &DomainError::Storage {
-                                message: format!("Failed to bind invite waiter: {error}"),
-                                repair: Some(
-                                    "ee mesh hello-responder run --workspace .".to_owned(),
-                                ),
-                            },
-                            cli.wants_json(),
-                            stdout,
-                            stderr,
-                        );
-                    }
-                };
-                match serve_one_bootstrap_join_with_store(
+                return wait_for_invite_join(
+                    cli,
                     &connection,
                     &workspace_id,
-                    &listener,
-                    std::time::Duration::from_secs(300),
-                    Some(&workspace_path),
-                ) {
-                    Ok(granted) => report.granted = Some(granted),
-                    Err(error) => {
-                        return write_domain_error(
-                            &DomainError::Storage {
-                                message: format!("Invite wait failed: {error}"),
-                                repair: Some(
-                                    "ee team join --invite <code> --workspace .".to_owned(),
-                                ),
-                            },
-                            cli.wants_json(),
-                            stdout,
-                            stderr,
-                        );
-                    }
-                }
+                    &workspace_path,
+                    report,
+                    stdout,
+                    stderr,
+                );
             }
-            let human = match &report.granted {
-                Some(granted) => format!(
-                    "Invite redeemed by join\n  invite_id: {}\n  team_id: {}\n  joiner recorded for {}\n  code: {}\n",
-                    report.invite_id, granted.team_id, granted.display_name, report.invite_code
-                ),
-                None => format!(
-                    "Invite minted for {}\n  invite_id: {}\n  endpoint: {}:{}\n  expires: {}\n  code: {}\nNext:\n  ee team join --invite <code> --workspace . --json\n  ee team invite --endpoint {} --wait --workspace .\n",
+            write_team_report(
+                cli,
+                &report,
+                &format!(
+                    "Invite minted for {}\n  invite_id: {}\n  endpoint: {}:{}\n  expires: {}\n  code: {}\nNext:\n  ee team join --invite <code> --workspace . --json\n  ee team invite --wait --resume {} --workspace .\n",
                     report.team_id,
                     report.invite_id,
                     report.endpoint,
                     report.hello_port,
                     report.expires_at,
                     report.invite_code,
-                    report.endpoint
+                    report.invite_id
                 ),
-            };
-            write_team_report(cli, &report, &human, stdout)
+                stdout,
+            )
         }
         Err(error) => write_domain_error(
             &DomainError::Storage {

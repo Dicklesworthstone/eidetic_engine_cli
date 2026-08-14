@@ -11,6 +11,8 @@ the daemon. JSON is the agent-facing surface.
 ee team create --name "Analysts" --workspace . --json
 ee team invite --workspace . --json
 # or pin the locator: ee team invite --endpoint "$HANA_ADDR" --workspace . --json
+# crash-resume the waiter without re-emitting the secret:
+# ee team invite --wait --resume "$INVITE_ID" --workspace . --json
 
 # Priya — join over live TCP using the invite code
 ee team join --invite "$INVITE" --workspace . --json

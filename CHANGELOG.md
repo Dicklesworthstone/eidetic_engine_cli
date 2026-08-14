@@ -69,6 +69,8 @@ future changelog pass expands those rows into full capability sections.
   `ee team status` lists `pendingInvites[]` so a revoke can name an id.
   `ee team projects reconcile` rematerializes origin `teamProjectShared`
   events onto local project rows.
+  `ee team invite --wait --resume <invite-id>` continues a pending
+  waiter without re-emitting the secret.
   `ee team steward once` is the canonical steward verb (`run-once`
   remains an alias). Windows inbound listen stays client-only; the
   `HardenedWindows` SID/DACL/reparse adapter compiles but has no
