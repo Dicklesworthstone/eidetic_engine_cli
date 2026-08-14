@@ -2293,7 +2293,10 @@ pub fn execute_team_steward_once(
         return Ok(report);
     };
     let reconciled = reconcile_local_team_membership(connection, &workspace_id)?;
-    report.applied_additions = reconciled.applied_additions;
+    let projects = reconcile_local_team_projects(connection)?;
+    report.applied_additions = reconciled
+        .applied_additions
+        .saturating_add(projects.applied_additions);
     report.applied_removals = reconciled.applied_removals;
     reconcile_team_body_cache(
         connection,
@@ -2304,6 +2307,7 @@ pub fn execute_team_steward_once(
     report.stalled_cursors = stalled_peer_cursor_count(connection, &workspace_id)?;
     report.mesh_primitives = vec![
         "team_members",
+        "team_projects",
         "mesh_body_cache_metadata",
         "steward_decision",
         "mesh_sync",
@@ -2706,6 +2710,42 @@ pub fn inspect_team_health(
         status: "ok".to_owned(),
         message: format!("{delegated} active non-self member(s) to review"),
         repair: None,
+    });
+    let missing_projects = connection
+        .list_mesh_manifest_origin_events(256)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|row| {
+            let Ok(OriginEventPayload::Manifest(payload)) = parse_stored_payload(&row) else {
+                return None;
+            };
+            if payload.operation != TEAM_PROJECT_SHARED_OPERATION {
+                return None;
+            }
+            payload
+                .document_payload
+                .get("projectId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .filter(|project_id| {
+            connection
+                .get_team_project(project_id)
+                .ok()
+                .flatten()
+                .is_none()
+        })
+        .count();
+    checks.push(TeamDoctorCheck {
+        name: "projects".to_owned(),
+        status: if missing_projects == 0 {
+            "ok".to_owned()
+        } else {
+            "warning".to_owned()
+        },
+        message: format!("{missing_projects} origin project share(s) missing a local row"),
+        repair: (missing_projects > 0)
+            .then(|| "ee team projects reconcile --workspace .".to_owned()),
     });
     let stuck_signing = connection
         .list_all_team_member_nodes()
@@ -4262,6 +4302,80 @@ pub fn list_team_projects(
         project_count: projects.len(),
         projects,
         mesh_primitives: vec!["team_projects"],
+    })
+}
+
+/// Replay origin `teamProjectShared` events onto local `team_projects` rows.
+///
+/// Local path stays empty until `ee team projects adopt`. Existing minted or
+/// adopted rows are left alone.
+pub fn reconcile_local_team_projects(
+    connection: &DbConnection,
+) -> Result<TeamReconcileReport, OriginStreamError> {
+    let team = load_local_teams(connection)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| OriginStreamError::Encode("no local team genesis".to_owned()))?;
+    let rows = connection
+        .list_mesh_manifest_origin_events(256)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    let mut applied_additions = 0_usize;
+    let mut inspected = 0_usize;
+    for row in rows {
+        let Ok(OriginEventPayload::Manifest(payload)) = parse_stored_payload(&row) else {
+            continue;
+        };
+        if payload.operation != TEAM_PROJECT_SHARED_OPERATION {
+            continue;
+        }
+        inspected = inspected.saturating_add(1);
+        let Some(project_id) = payload
+            .document_payload
+            .get("projectId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+        else {
+            continue;
+        };
+        if !project_id.starts_with("prj_tm_") || project_id.len() != 33 {
+            continue;
+        }
+        if connection
+            .get_team_project(project_id)
+            .map_err(|error| OriginStreamError::Db(error.to_string()))?
+            .is_some()
+        {
+            continue;
+        }
+        let display_name = payload
+            .document_payload
+            .get("displayName")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(project_id);
+        let inserted = connection
+            .insert_team_project(&InsertTeamProjectInput {
+                project_id: project_id.to_owned(),
+                team_id: team.team_id.clone(),
+                display_name: display_name.to_owned(),
+                local_path: String::new(),
+                source: "reconciled".to_owned(),
+                created_at: row.produced_at.clone(),
+            })
+            .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+        if inserted {
+            applied_additions = applied_additions.saturating_add(1);
+        }
+    }
+    Ok(TeamReconcileReport {
+        schema: TEAM_RECONCILE_SCHEMA_V1,
+        command: "team projects reconcile",
+        team_id: team.team_id,
+        applied_additions,
+        applied_removals: 0,
+        inspected_events: inspected,
+        mesh_primitives: vec!["mesh_origin_events", "team_projects"],
     })
 }
 
@@ -5903,6 +6017,72 @@ mod tests {
         let listed = list_team_projects(&connection).expect("list");
         assert_eq!(listed.project_count, 1);
         assert_eq!(listed.projects[0].local_path, "/tmp/clients/acme");
+    }
+
+    #[test]
+    fn reconcile_rematerializes_origin_project_shares() {
+        let connection = open_db();
+        let created = create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let project_id = "prj_tm_reconcile00000000000001";
+        let payload = OriginEventPayload::Manifest(ManifestEventPayload {
+            operation: TEAM_PROJECT_SHARED_OPERATION.to_owned(),
+            document_id: "tdoc_projectreconcile000001".to_owned(),
+            predecessor_revision_id: None,
+            document_payload: serde_json::json!({
+                "projectId": project_id,
+                "displayName": "acme-analysis",
+            }),
+        });
+        let signer = LocalOriginSigner::for_workspace("wsp_persistfixture000000000001");
+        append_origin_event(
+            &connection,
+            &signer,
+            &OriginAppendRequest {
+                team_id: &created.team.team_id,
+                origin_node_id: &created.team.origin_node_id,
+                payload,
+                required_features: Vec::new(),
+                produced_at: "2026-08-13T13:30:00Z",
+                body_nonce: None,
+            },
+        )
+        .expect("append");
+        assert_eq!(
+            list_team_projects(&connection)
+                .expect("empty")
+                .project_count,
+            0
+        );
+        let sick =
+            inspect_team_health(&connection, "wsp_persistfixture000000000001", None).expect("sick");
+        assert!(sick.checks.iter().any(|check| {
+            check.name == "projects"
+                && check.status == "warning"
+                && check.repair.as_deref() == Some("ee team projects reconcile --workspace .")
+        }));
+        let first = reconcile_local_team_projects(&connection).expect("reconcile");
+        assert_eq!(first.applied_additions, 1);
+        let listed = list_team_projects(&connection).expect("listed");
+        assert_eq!(listed.project_count, 1);
+        assert_eq!(listed.projects[0].project_id, project_id);
+        assert_eq!(listed.projects[0].source, "reconciled");
+        assert!(listed.projects[0].local_path.is_empty());
+        let again = reconcile_local_team_projects(&connection).expect("idempotent");
+        assert_eq!(again.applied_additions, 0);
+        let healthy = inspect_team_health(&connection, "wsp_persistfixture000000000001", None)
+            .expect("healthy");
+        assert!(
+            healthy
+                .checks
+                .iter()
+                .any(|check| check.name == "projects" && check.status == "ok")
+        );
     }
 
     #[cfg(unix)]

@@ -70,6 +70,7 @@ optional and never requires root.
 
 ```bash
 ee team steward once --workspace . --json
+ee team projects reconcile --workspace . --json
 ee team revoke --all-before-floor --workspace . --json
 ee daemon install --confirm --json          # write launchd / systemd --user unit
 ee daemon install --confirm --load --json   # also load the supervisor

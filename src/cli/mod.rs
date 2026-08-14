@@ -66502,6 +66502,9 @@ impl NormalizedInvocation {
                     team::TeamCommand::Projects(team::TeamProjectsCommand::List(_)) => {
                         "team projects list".to_string()
                     }
+                    team::TeamCommand::Projects(team::TeamProjectsCommand::Reconcile(_)) => {
+                        "team projects reconcile".to_string()
+                    }
                     team::TeamCommand::Fetch(team::TeamFetchCommand::Body(_)) => {
                         "team fetch body".to_string()
                     }

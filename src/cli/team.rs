@@ -12,8 +12,8 @@ use crate::mesh::team::{
     create_local_team_with_store, execute_team_idp_token_poll, execute_team_steward_once,
     fetch_local_team_body, inspect_team_health, join_team_with_code_on_store, leave_local_team,
     list_team_activity, list_team_projects, local_team_status, mint_team_invite_with_store,
-    plan_team_idp_device, reconcile_local_team_membership, remove_team_member,
-    require_tailnet_attested, revalidate_team_identities, revoke_team_invite,
+    plan_team_idp_device, reconcile_local_team_membership, reconcile_local_team_projects,
+    remove_team_member, require_tailnet_attested, revalidate_team_identities, revoke_team_invite,
     revoke_team_invites_before_floor, rotate_local_signing_key,
     serve_one_bootstrap_join_with_store, set_local_team_paused, set_team_oidc_provider,
     share_team_bodies_represented, share_team_history, share_team_project, team_idp_status,
@@ -96,6 +96,8 @@ pub enum TeamProjectsCommand {
     Adopt(TeamProjectsAdoptArgs),
     /// List minted and adopted projects.
     List(TeamProjectsListArgs),
+    /// Replay origin project shares onto local rows.
+    Reconcile(TeamProjectsReconcileArgs),
 }
 
 /// Nested `ee team members` verbs.
@@ -424,6 +426,14 @@ pub struct TeamProjectsListArgs {
     pub database: Option<PathBuf>,
 }
 
+/// Arguments for `ee team projects reconcile`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamProjectsReconcileArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
 /// Arguments for `ee team fetch body`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct TeamFetchBodyArgs {
@@ -635,6 +645,9 @@ where
         }
         TeamCommand::Projects(TeamProjectsCommand::List(args)) => {
             handle_team_projects_list(cli, args, stdout, stderr)
+        }
+        TeamCommand::Projects(TeamProjectsCommand::Reconcile(args)) => {
+            handle_team_projects_reconcile(cli, args, stdout, stderr)
         }
         TeamCommand::Fetch(TeamFetchCommand::Body(args)) => {
             handle_team_fetch_body(cli, args, stdout, stderr)
@@ -1659,6 +1672,42 @@ where
         Err(error) => write_domain_error(
             &DomainError::Storage {
                 message: format!("Failed to list projects: {error}"),
+                repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_projects_reconcile<W, E>(
+    cli: &Cli,
+    args: &TeamProjectsReconcileArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    match reconcile_local_team_projects(&connection) {
+        Ok(report) => write_team_report(
+            cli,
+            &report,
+            &format!(
+                "Reconciled {} project row(s) from origin\n",
+                report.applied_additions
+            ),
+            stdout,
+        ),
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to reconcile projects: {error}"),
                 repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
             },
             cli.wants_json(),

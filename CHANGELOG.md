@@ -67,6 +67,8 @@ future changelog pass expands those rows into full capability sections.
   `ee team revoke --all-before-floor` is the invite-floor repair.
   Team create and join raise the invite-authorization floor.
   `ee team status` lists `pendingInvites[]` so a revoke can name an id.
+  `ee team projects reconcile` rematerializes origin `teamProjectShared`
+  events onto local project rows.
   `ee team steward once` is the canonical steward verb (`run-once`
   remains an alias). Windows inbound listen stays client-only; the
   `HardenedWindows` SID/DACL/reparse adapter compiles but has no

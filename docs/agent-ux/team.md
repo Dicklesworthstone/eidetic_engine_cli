@@ -29,7 +29,9 @@ is `ee team revoke --all-before-floor`.
   `daemon install --confirm` are durable writes. `ee team invite`
   defaults the locator to the local Tailscale IPv4 address; pass
   `--endpoint` when Tailscale is absent. `ee team status` lists
-  `pendingInvites[]` for `ee team revoke --invite-id`.
+  `pendingInvites[]` for `ee team revoke --invite-id`. Origin project
+  shares rematerialize with `ee team projects reconcile`; adopt binds
+  a local path afterward.
 - Default `ee team share bodies` is a **preview**. It must stay
   token-free and must not publish cache bytes. `--representation
   already_redacted` is allowed; redact-over-exact is refused.
