@@ -135,6 +135,7 @@ future changelog pass expands those rows into full capability sections.
   dominated (~34 s). After TeamJoin bind, authenticated pair-key
   EventFetch returns the genesis origin event. Grant-gated BodyFetch
   through the same inbound owner returns the published body bytes.
+  Without Body-lane Allow the same fetch stays metadata-only.
   `ee team steward once` is the canonical steward verb (`run-once`
   remains an alias). Windows inbound listen stays client-only; the
   `HardenedWindows` SID/DACL/reparse adapter compiles but has no

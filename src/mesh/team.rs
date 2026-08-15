@@ -7137,6 +7137,191 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn team_join_start_durable_denies_ungranted_body_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().canonicalize().expect("canon workspace");
+        let database = workspace.join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database).expect("open");
+        connection.migrate().expect("migrate");
+        let database = database.canonicalize().expect("canon db");
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("bind".to_owned()),
+                },
+            )
+            .expect("workspace");
+        let created = create_local_team_with_store(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+            Some(workspace.as_path()),
+        )
+        .expect("create");
+        let team_id = created.team.team_id.clone();
+        let origin_node = created.team.origin_node_id.clone();
+        connection
+            .insert_memory(
+                "mem_teamjoinungr00000000000001",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "secret team-join body".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("remember");
+        share_team_bodies(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T22:00:00Z",
+            true,
+            16,
+            Some(workspace.as_path()),
+            false,
+            None,
+        )
+        .expect("share");
+        let cache_key = team_body_cache_key("mem_teamjoinungr00000000000001");
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
+            listener.local_addr().expect("addr").port()
+        };
+        assert!(port >= 1024);
+        let joiner_node = "node_0123456789abcdef0123456789abcdef";
+        let peer_id = enroll_team_pair_peer(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &team_id,
+            joiner_node,
+            "Priya",
+            "127.0.0.1",
+            port,
+            "2026-08-13T04:00:00Z",
+            "wsp_joinworkspace0000000000001",
+        )
+        .expect("enroll");
+        persist_pair_key(
+            &workspace,
+            &team_id,
+            joiner_node,
+            &[7_u8; 32],
+            "2026-08-13T04:00:00Z",
+        )
+        .expect("pair");
+        assert!(!body_lane_allows_fetch(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &peer_id
+        ));
+        let registrations = crate::mesh::responder_broker::plan_team_responder_registrations(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &workspace,
+            &database,
+            port,
+        );
+        assert_eq!(registrations.len(), 1);
+        let api = crate::mesh::responder_broker::TeamJoinLocalApi::from_registrations(
+            &connection,
+            &registrations,
+        )
+        .expect("api");
+        let mut owner = crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| {
+            let api = api.clone();
+            let registrations = registrations.clone();
+            async move {
+                crate::mesh::responder_broker::ResponderBrokerOwner::start_durable(
+                    &cx,
+                    api,
+                    registrations,
+                    crate::mesh::responder_broker::PreAuthAdmissionLimits::default(),
+                    std::time::Duration::from_millis(250),
+                )
+                .await
+            }
+        })
+        .expect("runtime")
+        .expect("start");
+        let bound = *owner
+            .bound_addresses()
+            .iter()
+            .find(|address| address.ip().is_loopback() && address.port() == port)
+            .expect("loopback bound");
+        let client = std::thread::spawn(move || {
+            let config = crate::mesh::transport_session::InitiatorSessionConfig {
+                local_address: "127.0.0.1:0".parse().expect("loopback source"),
+                binding: crate::mesh::transport_session::SessionBinding {
+                    team_id,
+                    tailnet_id: TEAM_JOIN_TAILNET_ID.to_owned(),
+                    initiator_node_id: joiner_node.to_owned(),
+                    responder_node_id: origin_node.clone(),
+                    initiator_workspace_id: "wsp_joinworkspace0000000000001".to_owned(),
+                    responder_workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    initiator_stable_id: format!("team-join-{joiner_node}"),
+                    responder_stable_id: format!("team-join-{origin_node}"),
+                    session_id: "replaced-by-connect".to_owned(),
+                },
+                pair_key: crate::mesh::key_store::SecretBytes::new([7_u8; 32]),
+                pair_key_generation: 1,
+                observations: crate::mesh::transport_session::HandshakeObservations {
+                    initiator_node_pubkey: format!("nodekey:{joiner_node}"),
+                    responder_node_pubkey: format!("nodekey:{origin_node}"),
+                },
+                capabilities: crate::mesh::transport_session::SessionCapabilities::base(),
+                limits: crate::mesh::transport_session::SessionChannelLimits {
+                    connect_timeout: std::time::Duration::from_secs(20),
+                    io_timeout: std::time::Duration::from_secs(20),
+                    max_requested_budget_ms: 10_000,
+                    max_authenticated_frames: 128,
+                    max_authenticated_bytes: 1024 * 1024,
+                },
+            };
+            crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
+                crate::mesh::foreground_cli::contact_authenticated_body_fetch(
+                    &cx, bound, config, &cache_key,
+                )
+                .await
+            })
+        });
+        let served = crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| {
+            let owner = &owner;
+            async move { owner.serve_one(&cx).await }
+        })
+        .expect("serve runtime");
+        let fetched = client
+            .join()
+            .expect("client thread")
+            .expect("client runtime");
+        let fetched = match (served, fetched) {
+            (_, Ok(fetched)) => fetched,
+            (served, Err(error)) => {
+                panic!("ungranted BodyFetch failed client={error:?} served={served:?}")
+            }
+        };
+        assert_eq!(fetched.cache_status, "metadata_only");
+        assert!(
+            fetched.body_hex.is_none(),
+            "ungranted TeamJoin BodyFetch leaked bytes: {fetched:?}"
+        );
+        owner.shutdown();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn create_local_team_with_store_signs_genesis_with_ed25519() {
         let workspace = tempfile::tempdir().unwrap();
         let connection = open_db();
