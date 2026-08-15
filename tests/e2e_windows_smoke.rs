@@ -103,6 +103,26 @@ mod windows {
         run_success(&workspace, &["why", &memory_id], "why")?;
         run_success(&workspace, &["status"], "status")?;
         run_success(&workspace, &["doctor"], "doctor")?;
+        let created = run_success(
+            &workspace,
+            &["team", "create", "--name", "Windows Smoke"],
+            "team create",
+        )?;
+        let team_id = created
+            .pointer("/data/team/teamId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("team create missing teamId: {created}"))?;
+        assert!(
+            team_id.starts_with("team_"),
+            "team create should persist a team_ id: {created}"
+        );
+        assert_eq!(
+            created.pointer("/data/created").and_then(Value::as_bool),
+            Some(true),
+            "team create should mint a local genesis: {created}"
+        );
+        run_success(&workspace, &["team", "status"], "team status")?;
+        run_success(&workspace, &["team", "doctor"], "team doctor")?;
 
         let export_dir = workspace.join("export");
         run_success(
@@ -203,6 +223,10 @@ fn powershell_smoke_preserves_machine_stream_and_artifact_contracts() {
     assert!(
         script.contains("Invoke-Ee -Name \"04-pack\" -Arguments @(\"pack\""),
         "PowerShell smoke must exercise the canonical pack command"
+    );
+    assert!(
+        script.contains("Invoke-Ee -Name \"07b-team-create\" -Arguments @(\"team\", \"create\""),
+        "PowerShell smoke must create a local team through the hardened Windows key store"
     );
     assert!(
         script.contains("remember response did not contain data.memory_id"),

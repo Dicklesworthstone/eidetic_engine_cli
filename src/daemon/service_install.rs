@@ -143,7 +143,7 @@ pub fn plan_daemon_service(
             "ee daemon --status --json".to_owned(),
         ],
         DaemonServiceKind::Unsupported => {
-            vec!["Windows remains client-only until credential-store parity lands".to_owned()]
+            vec!["ee mesh hello-responder run --workspace . --json".to_owned()]
         }
     };
     DaemonServicePlan {
@@ -404,7 +404,7 @@ mod tests {
         assert!(
             plan.next_commands
                 .iter()
-                .any(|cmd| cmd.contains("client-only"))
+                .any(|cmd| cmd.contains("hello-responder"))
         );
     }
 

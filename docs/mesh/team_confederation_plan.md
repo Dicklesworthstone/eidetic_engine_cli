@@ -18,9 +18,10 @@ on unless explicitly disabled, and `ee mesh hello-responder run` /
 tailscaled is absent). `ee mesh sync --once` and `ee team fetch body`
 run grant-gated EventFetch/BodyFetch over authenticated frame-v2 TCP.
 Sneakernet export/import remains available. The live proof ledger is
-`docs/mesh/verification_matrix.md`. Remaining environment soaks:
-Windows inbound/DACL soak, production IdP vendor soak. Criterion
-`team_confed` wall-time is recorded in `docs/mesh/perf_budgets.md`.
+`docs/mesh/verification_matrix.md`. Windows inbound uses TeamJoin TCP (Tailscale LocalAPI stays Unix).
+A Windows-host DACL soak and production IdP vendor soak remain
+environment remainders. Criterion `team_confed` wall-time is
+recorded in `docs/mesh/perf_budgets.md`.
 
 This plan turns that foundation into **team confederation**: N human users, each
 running `ee` locally on their own machine, forming a trusted mesh over a shared
@@ -78,7 +79,7 @@ unless explicitly disabled, binds inbound (Tailscale LocalAPI or TeamJoin
 loopback), and moves metadata plus grant-gated bodies with `ee mesh sync`
 / `ee team fetch body`. Tailscale is still the production auth substrate;
 loopback TeamJoin is the no-tailscaled lab path. Sneakernet export/import
-remains available. Windows inbound listen is still client-only.
+remains available. Windows inbound listen uses TeamJoin TCP; Tailscale LocalAPI WhoIs stays Unix.
 
 ### 1.2 The product goal
 
@@ -194,7 +195,7 @@ and `cache.rs` get theirs in the body-lane milestone (P4.6), not before.
    is the foreground supervisor transport. `ee mesh hello-responder run` and
    `ee daemon --foreground` construct `ResponderBrokerOwner` from durable
    enrollments. `NoopMeshForegroundSyncTransport` remains a test double only.
-   Windows inbound listen is still client-only.
+   Windows inbound listen uses TeamJoin TCP; Tailscale LocalAPI WhoIs stays Unix.
 2. **Discovery reads metadata nobody publishes.** The production hello probe
    (`TailscaleStatusCapabilityHelloProbe`,
    `src/mesh/tailscale_autodiscovery.rs:194–237`) performs no I/O; it parses

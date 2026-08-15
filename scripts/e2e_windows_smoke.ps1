@@ -118,6 +118,13 @@ Invoke-Ee -Name "04-pack" -Arguments @("pack", "prepare Windows release") | Out-
 Invoke-Ee -Name "05-why" -Arguments @("why", $memoryId) | Out-Null
 Invoke-Ee -Name "06-status" -Arguments @("status") | Out-Null
 Invoke-Ee -Name "07-doctor" -Arguments @("doctor") | Out-Null
+$created = Invoke-Ee -Name "07b-team-create" -Arguments @("team", "create", "--name", "Windows Smoke")
+$teamId = $created.data.team.teamId
+if ([string]::IsNullOrWhiteSpace($teamId) -or -not $teamId.StartsWith("team_")) {
+    throw "team create response did not contain data.team.teamId"
+}
+Invoke-Ee -Name "07c-team-status" -Arguments @("team", "status") | Out-Null
+Invoke-Ee -Name "07d-team-doctor" -Arguments @("team", "doctor") | Out-Null
 Invoke-Ee -Name "08-export" -Arguments @("export", "--output-dir", (Join-Path $WorkspaceRoot "export"), "--redaction", "none") | Out-Null
 $backup = Invoke-Ee -Name "09-backup-create" -Arguments @(
     "backup",

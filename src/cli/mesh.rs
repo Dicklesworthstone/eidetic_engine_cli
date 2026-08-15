@@ -63,13 +63,14 @@ use crate::mesh::peer::{
     generate_peer_origin_node_id, list_peers, revoke_peer, rotate_peer_key, show_peer,
     unknown_peer_attempt_report,
 };
-#[cfg(unix)]
-use crate::mesh::responder_broker::submit_responder_control_request;
 use crate::mesh::responder_broker::{
-    DurableResponderRegistration, InboundLocalApi, PreAuthAdmissionLimits,
-    RESPONDER_CONTROL_SCHEMA_V1, ResponderBrokerError, ResponderBrokerOwner, ResponderControlOp,
-    ResponderControlRequest, default_responder_control_socket_path,
-    plan_team_responder_registrations, responder_control_status_request,
+    DurableResponderRegistration, InboundLocalApi, PreAuthAdmissionLimits, ResponderBrokerError,
+    ResponderBrokerOwner, ResponderControlOp, plan_team_responder_registrations,
+};
+#[cfg(unix)]
+use crate::mesh::responder_broker::{
+    RESPONDER_CONTROL_SCHEMA_V1, ResponderControlRequest, default_responder_control_socket_path,
+    responder_control_status_request, submit_responder_control_request,
 };
 use crate::mesh::tailscale_autodiscovery::{
     TailscaleAutodiscoveryConfig, TailscaleAutodiscoveryReport, TcpBootstrapHelloProbe,
@@ -3941,6 +3942,7 @@ where
         Ok(snapshot) => snapshot,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut report = match HelloResponderStatusReport::from_environment(snapshot.mesh_enabled) {
         Ok(report) => report,
         Err(error) => {

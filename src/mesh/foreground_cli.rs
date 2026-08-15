@@ -2394,19 +2394,6 @@ pub fn run_mesh_sync_once_from_paths(
 /// peers exist. Returns false when mesh is off, disabled, or no route exists.
 #[must_use]
 pub fn spawn_team_responder_owner_if_needed(workspace_path: &Path, database_path: &Path) -> bool {
-    #[cfg(not(unix))]
-    {
-        let _ = (workspace_path, database_path);
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        spawn_team_responder_owner_unix(workspace_path, database_path)
-    }
-}
-
-#[cfg(unix)]
-fn spawn_team_responder_owner_unix(workspace_path: &Path, database_path: &Path) -> bool {
     if read_env_var(EnvVar::MeshHelloResponderDisabled)
         .as_deref()
         .and_then(parse_env_bool_flag)

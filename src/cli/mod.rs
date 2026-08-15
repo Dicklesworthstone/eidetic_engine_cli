@@ -60841,8 +60841,10 @@ where
     if kind == crate::daemon::service_install::DaemonServiceKind::Unsupported {
         return write_domain_error(
             &DomainError::Configuration {
-                message: "Windows remains client-only for the team daemon until credential-store parity lands".to_owned(),
-                repair: Some("use ee team sync --workspace . on this node".to_owned()),
+                message:
+                    "Windows has no launchd/systemd unit; run the inbound owner in the foreground"
+                        .to_owned(),
+                repair: Some("ee mesh hello-responder run --workspace . --json".to_owned()),
             },
             cli.wants_json(),
             stdout,

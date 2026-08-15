@@ -3345,7 +3345,7 @@ pub fn inspect_team_health(
                 "this host can run the inbound responder".to_owned()
             }
             crate::mesh::key_store::MeshCredentialStorePlatform::HardenedWindows => {
-                "Windows remains inbound client-only; credentials use the hardened DACL adapter"
+                "Windows inbound uses TeamJoin; credentials use the hardened DACL adapter"
                     .to_owned()
             }
             crate::mesh::key_store::MeshCredentialStorePlatform::Unsupported => {
@@ -3355,7 +3355,7 @@ pub fn inspect_team_health(
         repair: match cache_platform {
             crate::mesh::key_store::MeshCredentialStorePlatform::HardenedUnix => None,
             crate::mesh::key_store::MeshCredentialStorePlatform::HardenedWindows => {
-                Some("use a Unix host for the inbound responder".to_owned())
+                Some("ee mesh hello-responder run --workspace . --json".to_owned())
             }
             crate::mesh::key_store::MeshCredentialStorePlatform::Unsupported => {
                 Some("use a Unix or Windows host with the reviewed secure-file adapter".to_owned())

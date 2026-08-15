@@ -137,11 +137,11 @@ future changelog pass expands those rows into full capability sections.
   through the same inbound owner returns the published body bytes.
   Without Body-lane Allow the same fetch stays metadata-only.
   Token-free identity_attest over the same inbound owner persists
-  the member login on the origin store.
+  the member login on the origin store. Windows inbound listen uses
+  the same TeamJoin TCP path; Tailscale LocalAPI WhoIs stays Unix.
   `ee team steward once` is the canonical steward verb (`run-once`
-  remains an alias). Windows inbound listen stays client-only; the
-  `HardenedWindows` SID/DACL/reparse adapter compiles but has no
-  Windows-host runtime soak.
+  remains an alias). The `HardenedWindows` SID/DACL/reparse adapter
+  compiles; a Windows-host runtime soak remains an environment remainder.
 - Authenticated responder sessions now apply
   `MeshAdmissionLimits::conservative_default()` before EventFetch,
   BodyFetch, Summary, and `identity_attest`.

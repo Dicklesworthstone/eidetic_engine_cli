@@ -1,4 +1,4 @@
-//! Accepted-side Unix responder broker for authenticated mesh sessions.
+//! Accepted-side responder broker for authenticated mesh sessions.
 //!
 //! This T2.2 production path (`bd-tc-epic-qzk7o.3.3`) owns the complete
 //! LocalAPI-reported Tailscale address set on one port, revalidates and rebinds
@@ -19,9 +19,7 @@ use std::fmt;
 #[cfg(unix)]
 use std::fs;
 use std::future::Future;
-#[cfg(unix)]
-use std::io::{self, Read, Write};
-#[cfg(unix)]
+use std::io;
 use std::net::Shutdown;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 #[cfg(unix)]
@@ -33,13 +31,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use asupersync::Cx;
-#[cfg(unix)]
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use asupersync::net::unix::{UnixListener, UnixStream};
-#[cfg(unix)]
 use asupersync::net::{TcpListener, TcpStream};
-#[cfg(unix)]
 use asupersync::time::BudgetTimeExt;
 use asupersync::time::{sleep as asupersync_sleep, timeout, wall_now};
 use serde::{Deserialize, Serialize};
@@ -1422,7 +1417,7 @@ impl ResponderBrokerError {
     pub const fn repair(&self) -> &'static str {
         match self {
             Self::PlatformUnsupported => {
-                "Use a Unix responder host; Windows remains client-only and fail-closed in v1."
+                "Use TeamJoin inbound (`ee mesh hello-responder run`) on this host, or Tailscale LocalAPI on Unix."
             }
             Self::PortConflict => {
                 "Stop the conflicting responder owner or align the user-scoped broker on the committed port."
@@ -1463,7 +1458,6 @@ impl std::error::Error for ResponderBrokerError {}
 
 /// Single listener owner for the bounded accepted-side production path.
 pub struct ResponderBroker<A> {
-    #[cfg(unix)]
     listener: Option<TcpListener>,
     local_api: A,
     routes: Arc<ResponderRouteRegistry>,
@@ -1480,49 +1474,41 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
         routes: ResponderRouteRegistry,
         admission_limits: PreAuthAdmissionLimits,
     ) -> Result<Self, ResponderBrokerError> {
-        #[cfg(not(unix))]
+        checkpoint(cx, "responder bind")?;
+        refuse_if_transport_disabled()?;
+        let admission_limits = admission_limits.validate()?;
+        if address.ip().is_unspecified()
+            || address.port() < 1024
+            || address.port() != routes.committed_port
         {
-            let _ = (cx, address, local_api, routes, admission_limits);
-            return Err(ResponderBrokerError::PlatformUnsupported);
+            return Err(ResponderBrokerError::InvalidConfiguration);
         }
-        #[cfg(unix)]
+        let local_identity = local_api.verify_local_address(cx, address).await?;
+        if local_identity.stable_id != routes.responder_stable_id
+            || local_identity.current_node_pubkey != routes.responder_node_pubkey
+            || local_identity.tailnet_id != routes.tailnet_id
         {
-            checkpoint(cx, "responder bind")?;
-            refuse_if_transport_disabled()?;
-            let admission_limits = admission_limits.validate()?;
-            if address.ip().is_unspecified()
-                || address.port() < 1024
-                || address.port() != routes.committed_port
-            {
-                return Err(ResponderBrokerError::InvalidConfiguration);
-            }
-            let local_identity = local_api.verify_local_address(cx, address).await?;
-            if local_identity.stable_id != routes.responder_stable_id
-                || local_identity.current_node_pubkey != routes.responder_node_pubkey
-                || local_identity.tailnet_id != routes.tailnet_id
-            {
-                return Err(ResponderBrokerError::WhoIsUnverified);
-            }
-            let _ambient = Cx::set_current(Some(cx.clone()));
-            let listener = TcpListener::bind(address).await.map_err(|error| {
-                if error.kind() == io::ErrorKind::AddrInUse {
-                    ResponderBrokerError::PortConflict
-                } else {
-                    ResponderBrokerError::TransportUnavailable
-                }
-            })?;
-            let bound_address = listener
-                .local_addr()
-                .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
-            Ok(Self {
-                listener: Some(listener),
-                local_api,
-                routes: Arc::new(routes),
-                admission: Arc::new(Mutex::new(AdmissionState::new(admission_limits))),
-                runtime: Arc::new(Mutex::new(RuntimeStatus::listening())),
-                bound_address,
-            })
+            return Err(ResponderBrokerError::WhoIsUnverified);
         }
+        let _ambient = Cx::set_current(Some(cx.clone()));
+        let listener = TcpListener::bind(address).await.map_err(|error| {
+            if error.kind() == io::ErrorKind::AddrInUse {
+                ResponderBrokerError::PortConflict
+            } else {
+                ResponderBrokerError::TransportUnavailable
+            }
+        })?;
+        let bound_address = listener
+            .local_addr()
+            .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+        Ok(Self {
+            listener: Some(listener),
+            local_api,
+            routes: Arc::new(routes),
+            admission: Arc::new(Mutex::new(AdmissionState::new(admission_limits))),
+            runtime: Arc::new(Mutex::new(RuntimeStatus::listening())),
+            bound_address,
+        })
     }
 
     #[must_use]
@@ -1537,154 +1523,140 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
         &self,
         cx: &Cx,
     ) -> Result<AuthenticatedTransportSession, ResponderBrokerError> {
-        #[cfg(not(unix))]
-        {
-            let _ = cx;
-            return Err(ResponderBrokerError::PlatformUnsupported);
-        }
-        #[cfg(unix)]
-        {
-            checkpoint(cx, "responder accept")?;
-            let listener = self
-                .listener
-                .as_ref()
-                .ok_or(ResponderBrokerError::TransportUnavailable)?;
-            let _ambient = Cx::set_current(Some(cx.clone()));
-            let (stream, kernel_source) = match listener.accept().await {
-                Ok(accepted) => accepted,
-                Err(error) => {
-                    let broker_error = if error.kind() == io::ErrorKind::Interrupted {
-                        ResponderBrokerError::Cancelled
-                    } else {
-                        ResponderBrokerError::TransportUnavailable
-                    };
-                    self.record_error(&broker_error, false, false);
-                    return Err(broker_error);
-                }
-            };
-            {
-                let mut runtime = self
-                    .runtime
-                    .lock()
-                    .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
-                runtime.accepted_connections = runtime.accepted_connections.saturating_add(1);
-            }
-            let permit = match self.admit(kernel_source.ip()) {
-                Ok(permit) => permit,
-                Err(error) => {
-                    let _ = stream.shutdown(Shutdown::Both);
-                    self.record_error(&error, false, true);
-                    return Err(error);
-                }
-            };
-            let routes = Arc::clone(&self.routes);
-            let local_api = &self.local_api;
-            let resolution_error = Arc::new(Mutex::new(None));
-            let error_slot = Arc::clone(&resolution_error);
-            let route_selected = Arc::new(AtomicBool::new(false));
-            let selected_slot = Arc::clone(&route_selected);
-            let limits = self.routes.limits;
-            let mut stream = stream;
-            let first_packet =
-                match read_asupersync_framed(cx, &mut stream, limits.io_timeout).await {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        let _ = stream.shutdown(Shutdown::Both);
-                        self.record_error(&error, false, true);
-                        return Err(error);
-                    }
+        checkpoint(cx, "responder accept")?;
+        let listener = self
+            .listener
+            .as_ref()
+            .ok_or(ResponderBrokerError::TransportUnavailable)?;
+        let _ambient = Cx::set_current(Some(cx.clone()));
+        let (stream, kernel_source) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                let broker_error = if error.kind() == io::ErrorKind::Interrupted {
+                    ResponderBrokerError::Cancelled
+                } else {
+                    ResponderBrokerError::TransportUnavailable
                 };
-            if decode_envelope(&first_packet)
-                .ok()
-                .is_some_and(|envelope| envelope.capability == BootstrapCapability::Join)
-            {
-                if let Err(error) = answer_bootstrap_join(
-                    cx,
-                    &mut stream,
-                    &self.routes,
-                    &first_packet,
-                    kernel_source,
-                )
-                .await
-                {
-                    let _ = stream.shutdown(Shutdown::Write);
-                    self.record_error(&error, false, true);
-                    return Err(error);
-                }
-                let _ = stream.shutdown(Shutdown::Write);
-                if let Ok(mut runtime) = self.runtime.lock() {
-                    runtime.application_hello_performed = true;
-                    runtime.record("bootstrap_join", None, false, false, false);
-                }
-                return Err(ResponderBrokerError::BootstrapHelloAnswered);
+                self.record_error(&broker_error, false, false);
+                return Err(broker_error);
             }
-            if decode_envelope(&first_packet)
-                .ok()
-                .is_some_and(|envelope| envelope.capability == BootstrapCapability::Hello)
-            {
-                if let Err(error) =
-                    answer_bootstrap_hello(cx, &mut stream, &self.routes, &first_packet).await
-                {
-                    let _ = stream.shutdown(Shutdown::Both);
-                    self.record_error(&error, false, true);
-                    return Err(error);
-                }
-                let _ = answer_sync_round(cx, &mut stream, &self.routes).await;
+        };
+        {
+            let mut runtime = self
+                .runtime
+                .lock()
+                .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+            runtime.accepted_connections = runtime.accepted_connections.saturating_add(1);
+        }
+        let permit = match self.admit(kernel_source.ip()) {
+            Ok(permit) => permit,
+            Err(error) => {
                 let _ = stream.shutdown(Shutdown::Both);
-                if let Ok(mut runtime) = self.runtime.lock() {
-                    runtime.application_hello_performed = true;
-                    runtime.record("bootstrap_hello", None, false, false, false);
-                }
-                return Err(ResponderBrokerError::BootstrapHelloAnswered);
+                self.record_error(&error, false, true);
+                return Err(error);
             }
-            let accepted = accept_authenticated_session_with_open_bytes(
-                cx,
-                stream,
-                limits,
-                first_packet,
-                move |route_cx, observed_source, selectors| {
-                    let error_slot = Arc::clone(&error_slot);
-                    async move {
-                        match resolve_route(
-                            &route_cx,
-                            local_api,
-                            &routes,
-                            observed_source,
-                            &selectors,
-                            permit,
-                            &selected_slot,
-                        )
-                        .await
-                        {
-                            Ok(route) => Ok(route),
-                            Err(error) => {
-                                if let Ok(mut slot) = error_slot.lock() {
-                                    *slot = Some(error);
-                                }
-                                Err(SessionChannelError::Authentication {
-                                    message: "accepted responder route could not be verified"
-                                        .to_owned(),
-                                })
+        };
+        let routes = Arc::clone(&self.routes);
+        let local_api = &self.local_api;
+        let resolution_error = Arc::new(Mutex::new(None));
+        let error_slot = Arc::clone(&resolution_error);
+        let route_selected = Arc::new(AtomicBool::new(false));
+        let selected_slot = Arc::clone(&route_selected);
+        let limits = self.routes.limits;
+        let mut stream = stream;
+        let first_packet = match read_asupersync_framed(cx, &mut stream, limits.io_timeout).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = stream.shutdown(Shutdown::Both);
+                self.record_error(&error, false, true);
+                return Err(error);
+            }
+        };
+        if decode_envelope(&first_packet)
+            .ok()
+            .is_some_and(|envelope| envelope.capability == BootstrapCapability::Join)
+        {
+            if let Err(error) =
+                answer_bootstrap_join(cx, &mut stream, &self.routes, &first_packet, kernel_source)
+                    .await
+            {
+                let _ = stream.shutdown(Shutdown::Write);
+                self.record_error(&error, false, true);
+                return Err(error);
+            }
+            let _ = stream.shutdown(Shutdown::Write);
+            if let Ok(mut runtime) = self.runtime.lock() {
+                runtime.application_hello_performed = true;
+                runtime.record("bootstrap_join", None, false, false, false);
+            }
+            return Err(ResponderBrokerError::BootstrapHelloAnswered);
+        }
+        if decode_envelope(&first_packet)
+            .ok()
+            .is_some_and(|envelope| envelope.capability == BootstrapCapability::Hello)
+        {
+            if let Err(error) =
+                answer_bootstrap_hello(cx, &mut stream, &self.routes, &first_packet).await
+            {
+                let _ = stream.shutdown(Shutdown::Both);
+                self.record_error(&error, false, true);
+                return Err(error);
+            }
+            let _ = answer_sync_round(cx, &mut stream, &self.routes).await;
+            let _ = stream.shutdown(Shutdown::Both);
+            if let Ok(mut runtime) = self.runtime.lock() {
+                runtime.application_hello_performed = true;
+                runtime.record("bootstrap_hello", None, false, false, false);
+            }
+            return Err(ResponderBrokerError::BootstrapHelloAnswered);
+        }
+        let accepted = accept_authenticated_session_with_open_bytes(
+            cx,
+            stream,
+            limits,
+            first_packet,
+            move |route_cx, observed_source, selectors| {
+                let error_slot = Arc::clone(&error_slot);
+                async move {
+                    match resolve_route(
+                        &route_cx,
+                        local_api,
+                        &routes,
+                        observed_source,
+                        &selectors,
+                        permit,
+                        &selected_slot,
+                    )
+                    .await
+                    {
+                        Ok(route) => Ok(route),
+                        Err(error) => {
+                            if let Ok(mut slot) = error_slot.lock() {
+                                *slot = Some(error);
                             }
+                            Err(SessionChannelError::Authentication {
+                                message: "accepted responder route could not be verified"
+                                    .to_owned(),
+                            })
                         }
                     }
-                },
-            )
-            .await;
-            match accepted {
-                Ok(session) => {
-                    self.record_success();
-                    Ok(session)
                 }
-                Err(session_error) => {
-                    let broker_error = resolution_error
-                        .lock()
-                        .ok()
-                        .and_then(|mut slot| slot.take())
-                        .unwrap_or_else(|| ResponderBrokerError::Session(session_error));
-                    self.record_error(&broker_error, route_selected.load(Ordering::Acquire), true);
-                    Err(broker_error)
-                }
+            },
+        )
+        .await;
+        match accepted {
+            Ok(session) => {
+                self.record_success();
+                Ok(session)
+            }
+            Err(session_error) => {
+                let broker_error = resolution_error
+                    .lock()
+                    .ok()
+                    .and_then(|mut slot| slot.take())
+                    .unwrap_or_else(|| ResponderBrokerError::Session(session_error));
+                self.record_error(&broker_error, route_selected.load(Ordering::Acquire), true);
+                Err(broker_error)
             }
         }
     }
@@ -1821,16 +1793,9 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
     /// Stop future accepts and drop the listener. An in-flight accept is
     /// stopped by cancelling its `Cx`; callers then invoke this after join.
     pub fn shutdown(&mut self) {
-        #[cfg(unix)]
-        {
-            self.listener.take();
-        }
+        self.listener.take();
         if let Ok(mut runtime) = self.runtime.lock() {
-            runtime.state = if cfg!(unix) {
-                ResponderBrokerState::Shutdown
-            } else {
-                ResponderBrokerState::Unsupported
-            };
+            runtime.state = ResponderBrokerState::Shutdown;
         }
     }
 }
@@ -3009,7 +2974,6 @@ where
     }
 }
 
-#[cfg(unix)]
 async fn read_asupersync_framed(
     cx: &Cx,
     stream: &mut TcpStream,
@@ -3058,7 +3022,6 @@ async fn read_asupersync_framed(
     Ok(bytes)
 }
 
-#[cfg(unix)]
 async fn write_asupersync_framed(
     cx: &Cx,
     stream: &mut TcpStream,
@@ -3098,7 +3061,6 @@ async fn write_asupersync_framed(
     Ok(())
 }
 
-#[cfg(unix)]
 async fn write_bootstrap_decline(
     cx: &Cx,
     stream: &mut TcpStream,
@@ -3114,7 +3076,6 @@ async fn write_bootstrap_decline(
     write_asupersync_framed(cx, stream, duration, &bytes).await
 }
 
-#[cfg(unix)]
 async fn answer_bootstrap_hello(
     cx: &Cx,
     stream: &mut TcpStream,
@@ -3168,7 +3129,6 @@ async fn answer_bootstrap_hello(
     write_asupersync_framed(cx, stream, io_timeout, &reply).await
 }
 
-#[cfg(unix)]
 async fn answer_bootstrap_join(
     cx: &Cx,
     stream: &mut TcpStream,
@@ -3314,7 +3274,6 @@ async fn answer_bootstrap_join(
     write_asupersync_framed(cx, stream, io_timeout, &reply).await
 }
 
-#[cfg(unix)]
 async fn answer_sync_round(
     cx: &Cx,
     stream: &mut TcpStream,

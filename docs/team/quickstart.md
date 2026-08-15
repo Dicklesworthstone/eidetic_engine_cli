@@ -1,7 +1,7 @@
 # Team Confederation Quickstart
 
 Personas: Hana (origin, trusted teammate) and Priya (joiner on a second
-Unix host). Both already run local `ee`. Neither command below requires
+host). Both already run local `ee`. Neither command below requires
 the daemon. JSON is the agent-facing surface.
 
 ## Cold path
@@ -90,7 +90,9 @@ ee daemon install --confirm --load --json   # also load the supervisor
   workspace on the host. A second user cannot bind a second responder.
 - Override the port only through the documented mesh config; do not
   start a second `ee` listener by hand.
-- Windows can store team credentials and body-cache bytes through the
-  reviewed SID/DACL/reparse adapter. The inbound responder stays Unix-only.
+- Windows stores team credentials through the reviewed SID/DACL/reparse
+  adapter and listens inbound on TeamJoin TCP
+  (`ee mesh hello-responder run`). Tailscale LocalAPI WhoIs stays Unix.
+  launchd/systemd install stays Unix.
 
 Repair commands always come from `ee team doctor --json`.
