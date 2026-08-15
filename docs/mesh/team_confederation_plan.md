@@ -17,6 +17,8 @@ on unless explicitly disabled, and `ee mesh hello-responder run` /
 `TeamJoinLocalApi` loopback when every enrolled endpoint is loopback or
 tailscaled is absent). `ee mesh sync --once` and `ee team fetch body`
 run grant-gated EventFetch/BodyFetch over authenticated frame-v2 TCP.
+Authorized BodyFetch hydrates the receiver's `peer_human_attested` stub
+so `--memory-scope team` search/pack can recall teammate text.
 Sneakernet export/import remains available. The live proof ledger is
 `docs/mesh/verification_matrix.md`. Windows inbound uses TeamJoin TCP (Tailscale LocalAPI stays Unix).
 A Windows-host DACL soak and production IdP vendor soak remain

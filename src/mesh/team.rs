@@ -1915,6 +1915,7 @@ fn record_inbound_body_placeholder(
     workspace_id: &str,
     inbound: &InboundOriginEvent,
     payload: &MemoryEventPayload,
+    local_memory_id: &str,
 ) -> Result<(), OriginStreamError> {
     if !inbound_body_is_fetchable(payload.body_representation.as_deref()) {
         return Ok(());
@@ -1942,7 +1943,11 @@ fn record_inbound_body_placeholder(
             logical_memory_id: payload.logical_memory_id.clone(),
             content_hash: payload.body_commitment.clone(),
             body_ref_json: Some(
-                serde_json::json!({ "originEventId": inbound.event_id }).to_string(),
+                serde_json::json!({
+                    "originEventId": inbound.event_id,
+                    "localMemoryId": local_memory_id,
+                })
+                .to_string(),
             ),
             preview_hash: None,
             size_bytes: None,
@@ -1953,6 +1958,81 @@ fn record_inbound_body_placeholder(
         })
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
     Ok(())
+}
+
+fn body_ref_field(row: &crate::db::StoredMeshBodyCacheMetadata, field: &str) -> Option<String> {
+    row.body_ref_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|value| {
+            value
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn local_inbound_memory_id_for_body_row(
+    connection: &DbConnection,
+    workspace_id: &str,
+    row: &crate::db::StoredMeshBodyCacheMetadata,
+) -> Option<String> {
+    if let Some(local_id) =
+        body_ref_field(row, "localMemoryId").filter(|id| id.starts_with("mem_") && id.len() == 30)
+    {
+        return Some(local_id);
+    }
+    let event_id = body_ref_field(row, "originEventId")?;
+    connection
+        .list_memories(workspace_id, None, false)
+        .ok()?
+        .into_iter()
+        .find(|memory| {
+            memory.trust_class == "peer_human_attested"
+                && memory.provenance_uri.as_deref() == Some(event_id.as_str())
+        })
+        .map(|memory| memory.id)
+}
+
+/// After an authorized body lands in cache, replace the metadata stub so
+/// `ee search --memory-scope team` / `ee pack --memory-scope team` can
+/// recall the teammate's text. Non-UTF-8 or non-stub rows stay metadata-only.
+fn hydrate_inbound_team_memory_body(
+    connection: &DbConnection,
+    workspace_id: &str,
+    row: &crate::db::StoredMeshBodyCacheMetadata,
+    bytes: &[u8],
+) -> Result<(), OriginStreamError> {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Ok(());
+    };
+    let Some(local_id) = local_inbound_memory_id_for_body_row(connection, workspace_id, row) else {
+        return Ok(());
+    };
+    let Some(existing) = connection
+        .get_memory(&local_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?
+    else {
+        return Ok(());
+    };
+    if existing.workspace_id != workspace_id
+        || existing.trust_class != "peer_human_attested"
+        || !existing.content.starts_with("[ee.team.history]")
+    {
+        return Ok(());
+    }
+    connection
+        .apply_memory_curation_update(
+            &local_id,
+            &crate::db::ApplyMemoryCurationInput {
+                workspace_id: workspace_id.to_owned(),
+                content: text.to_owned(),
+                confidence: existing.confidence,
+                trust_class: existing.trust_class,
+            },
+        )
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    enqueue_inbound_memory_index_job(connection, workspace_id, &local_id, "team-inbound-body")
 }
 
 /// Verify an authorized BodyFetch against the inbound placeholder commitment
@@ -2036,19 +2116,19 @@ pub fn apply_fetched_team_body(
         .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
     let local_body_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
     let mut meta = UpsertMeshBodyCacheMetadataInput {
-        workspace_id: row.workspace_id,
+        workspace_id: row.workspace_id.clone(),
         body_cache_key: row.body_cache_key.clone(),
-        origin_node_id: row.origin_node_id,
-        origin_workspace_id: row.origin_workspace_id,
-        logical_memory_id: row.logical_memory_id,
-        content_hash: row.content_hash,
-        body_ref_json: row.body_ref_json,
-        preview_hash: row.preview_hash,
+        origin_node_id: row.origin_node_id.clone(),
+        origin_workspace_id: row.origin_workspace_id.clone(),
+        logical_memory_id: row.logical_memory_id.clone(),
+        content_hash: row.content_hash.clone(),
+        body_ref_json: row.body_ref_json.clone(),
+        preview_hash: row.preview_hash.clone(),
         size_bytes: Some(u64::try_from(bytes.len()).unwrap_or(0)),
         cache_status: "staging".to_owned(),
         local_body_hash: Some(local_body_hash),
         cached_at: Some(chrono::Utc::now().to_rfc3339()),
-        expires_at: row.expires_at,
+        expires_at: row.expires_at.clone(),
     };
     connection
         .upsert_mesh_body_cache_metadata(&meta)
@@ -2060,6 +2140,7 @@ pub fn apply_fetched_team_body(
     connection
         .upsert_mesh_body_cache_metadata(&meta)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    hydrate_inbound_team_memory_body(connection, workspace_id, &row, &bytes)?;
     fetch_local_team_body(
         connection,
         workspace_id,
@@ -4752,7 +4833,7 @@ pub fn project_inbound_team_memory(
         .map_err(|error| OriginStreamError::Db(error.to_string()))?
         .is_some()
     {
-        record_inbound_body_placeholder(connection, workspace_id, inbound, &payload)?;
+        record_inbound_body_placeholder(connection, workspace_id, inbound, &payload, &memory_id)?;
         return Ok(Some(memory_id));
     }
     let producer = connection
@@ -4793,8 +4874,8 @@ pub fn project_inbound_team_memory(
             },
         )
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
-    record_inbound_body_placeholder(connection, workspace_id, inbound, &payload)?;
-    enqueue_inbound_memory_index_job(connection, workspace_id, &memory_id)?;
+    record_inbound_body_placeholder(connection, workspace_id, inbound, &payload, &memory_id)?;
+    enqueue_inbound_memory_index_job(connection, workspace_id, &memory_id, "team-inbound")?;
     Ok(Some(memory_id))
 }
 
@@ -4802,8 +4883,9 @@ fn enqueue_inbound_memory_index_job(
     connection: &DbConnection,
     workspace_id: &str,
     memory_id: &str,
+    reason: &str,
 ) -> Result<(), OriginStreamError> {
-    let hex = blake3::hash(format!("team-inbound:{workspace_id}:{memory_id}").as_bytes()).to_hex();
+    let hex = blake3::hash(format!("{reason}:{workspace_id}:{memory_id}").as_bytes()).to_hex();
     let job_id = format!("sidx_{}", &hex.as_str()[..26]);
     if connection
         .get_search_index_job(&job_id)
@@ -7975,6 +8057,102 @@ mod tests {
     }
 
     #[test]
+    fn hydrate_inbound_team_memory_body_replaces_history_stub() {
+        let connection = open_db();
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-team-hydrate".to_owned(),
+                    name: Some("hydrate".to_owned()),
+                },
+            )
+            .expect("workspace");
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let stub_id = "mem_teamhydrate000000000000001";
+        connection
+            .insert_memory(
+                stub_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "[ee.team.history] note blake3:deadbeef".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.5,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("evt_teamhydrate".to_owned()),
+                    trust_class: "peer_human_attested".to_owned(),
+                    trust_subclass: Some("agent:Analysts".to_owned()),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("stub");
+        let row = crate::db::StoredMeshBodyCacheMetadata {
+            workspace_id: "wsp_persistfixture000000000001".to_owned(),
+            body_cache_key: "body_teamhydrate00000000000001".to_owned(),
+            origin_node_id: "node_hydrate".to_owned(),
+            origin_workspace_id: "wsp_persistfixture000000000001".to_owned(),
+            logical_memory_id: "mem_originbody0000000000000001".to_owned(),
+            content_hash: "blake3:deadbeef".to_owned(),
+            body_ref_json: Some(
+                serde_json::json!({
+                    "originEventId": "evt_teamhydrate",
+                    "localMemoryId": stub_id,
+                })
+                .to_string(),
+            ),
+            preview_hash: None,
+            size_bytes: None,
+            cache_status: "available".to_owned(),
+            local_body_hash: None,
+            cached_at: "2026-08-15T00:00:00Z".to_owned(),
+            expires_at: None,
+        };
+        hydrate_inbound_team_memory_body(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &row,
+            b"Acme Corp analysis from Priya",
+        )
+        .expect("hydrate");
+        let stored = connection.get_memory(stub_id).expect("get").expect("row");
+        assert_eq!(stored.content, "Acme Corp analysis from Priya");
+        assert_eq!(stored.trust_class, "peer_human_attested");
+        assert_eq!(stored.trust_subclass.as_deref(), Some("agent:Analysts"));
+        let context = crate::core::memory_scope::MemoryScopeContext {
+            scope: crate::models::MemoryScope::Team,
+            strict_scope: false,
+            current_agent: Some("local".to_owned()),
+            team_members: std::collections::BTreeSet::from(["Analysts".to_owned()]),
+        };
+        assert!(
+            context.memory_in_scope(&stored),
+            "hydrated teammate memory must pass --memory-scope team"
+        );
+        let jobs = connection
+            .list_search_index_jobs(
+                "wsp_persistfixture000000000001",
+                Some(crate::db::SearchIndexJobStatus::Pending),
+            )
+            .expect("jobs");
+        assert!(
+            jobs.iter()
+                .any(|job| job.document_id.as_deref() == Some(stub_id)),
+            "hydrate must enqueue a SingleDocument job so search can see the body"
+        );
+    }
+
+    #[test]
     fn reconcile_inbound_team_memories_replays_allowed_import_ledger_events() {
         let connection = open_db();
         connection
@@ -8286,6 +8464,15 @@ mod tests {
         .expect("receiver fetch");
         assert_eq!(local.cache_status, "available");
         assert_eq!(local.body_hex, applied.body_hex);
+        let hydrated = receiver
+            .get_memory(&projected)
+            .expect("hydrated get")
+            .expect("hydrated row");
+        assert_eq!(
+            hydrated.content, "secret body stays off the metadata event",
+            "authorized BodyFetch must hydrate the team stub so search/pack can recall it"
+        );
+        assert_eq!(hydrated.trust_class, "peer_human_attested");
     }
 
     #[cfg(unix)]
