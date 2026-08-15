@@ -6669,6 +6669,127 @@ mod tests {
         owner.shutdown();
     }
 
+    #[test]
+    fn team_join_start_durable_serves_unsigned_hello_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().canonicalize().expect("canon workspace");
+        let database = workspace.join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database).expect("open");
+        connection.migrate().expect("migrate");
+        let database = database.canonicalize().expect("canon db");
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("bind".to_owned()),
+                },
+            )
+            .expect("workspace");
+        let created = create_local_team_with_store(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+            Some(workspace.as_path()),
+        )
+        .expect("create");
+        let expected_hash = created.team.genesis_event_hash.clone();
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
+            listener.local_addr().expect("addr").port()
+        };
+        assert!(port >= 1024);
+        let joiner_node = "node_joiner0000000000000000000001";
+        enroll_team_pair_peer(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &created.team.team_id,
+            joiner_node,
+            "Priya",
+            "127.0.0.1",
+            port,
+            "2026-08-13T04:00:00Z",
+            "wsp_joinworkspace0000000000001",
+        )
+        .expect("enroll");
+        persist_pair_key(
+            &workspace,
+            &created.team.team_id,
+            joiner_node,
+            &[7_u8; 32],
+            "2026-08-13T04:00:00Z",
+        )
+        .expect("pair");
+        let registrations = crate::mesh::responder_broker::plan_team_responder_registrations(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &workspace,
+            &database,
+            port,
+        );
+        assert_eq!(registrations.len(), 1);
+        let api = crate::mesh::responder_broker::TeamJoinLocalApi::from_registrations(
+            &connection,
+            &registrations,
+        )
+        .expect("api");
+        let mut owner = crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| {
+            let api = api.clone();
+            let registrations = registrations.clone();
+            async move {
+                crate::mesh::responder_broker::ResponderBrokerOwner::start_durable(
+                    &cx,
+                    api,
+                    registrations,
+                    crate::mesh::responder_broker::PreAuthAdmissionLimits::default(),
+                    std::time::Duration::from_millis(250),
+                )
+                .await
+            }
+        })
+        .expect("runtime")
+        .expect("start");
+        let bound = *owner
+            .bound_addresses()
+            .iter()
+            .find(|address| address.ip().is_loopback() && address.port() == port)
+            .expect("loopback bound");
+        let client = std::thread::spawn(move || {
+            let request = crate::mesh::hello::build_request(
+                "team-join-hello-sync",
+                format!("nodekey:{joiner_node}"),
+                env!("CARGO_PKG_VERSION"),
+                vec!["wsp_joinworkspace0000000000001".to_owned()],
+                vec!["hello".to_owned(), "sync".to_owned()],
+                Vec::new(),
+            );
+            let payload_bytes =
+                crate::mesh::hello::serialize_within_budget(&request).expect("serialize hello");
+            let payload = serde_json::from_slice(&payload_bytes).expect("hello json");
+            crate::mesh::bootstrap_envelope::exchange_live_mesh_round(
+                bound,
+                std::time::Duration::from_secs(8),
+                payload,
+                &crate::mesh::bootstrap_envelope::SyncRoundRequest::new(Vec::new(), 0, 8),
+            )
+        });
+        crate::core::run_cli_with_cx(std::time::Duration::from_secs(15), |cx| {
+            let owner = &owner;
+            async move { owner.serve_one(&cx).await }
+        })
+        .expect("serve runtime")
+        .expect("serve one");
+        let (_hello, sync) = client.join().expect("client thread").expect("live round");
+        assert!(
+            sync.events
+                .iter()
+                .any(|event| event.event_hash == expected_hash),
+            "unsigned hello sync did not return genesis {expected_hash}: {sync:?}"
+        );
+        owner.shutdown();
+    }
+
     #[cfg(unix)]
     #[test]
     fn create_local_team_with_store_signs_genesis_with_ed25519() {

@@ -72,11 +72,13 @@ exactly the question this plan answers:
 > now just locally based on one team member? If I want to run an analysis on
 > another company how will I know and refer to what another team member ran?"
 
-The honest current answer is: each analyst has a separate local `ee` memory;
-confederation machinery exists in skeletal/specified form but has to be set up
-explicitly, requires a Tailscale network for authentication, and — critically —
-does not yet actually move data between machines without manually copying
-export files.
+The honest current answer is: each analyst has a separate local `ee` memory.
+Unix team-confed on `main` now creates/joins over signed TCP, turns mesh on
+unless explicitly disabled, binds inbound (Tailscale LocalAPI or TeamJoin
+loopback), and moves metadata plus grant-gated bodies with `ee mesh sync`
+/ `ee team fetch body`. Tailscale is still the production auth substrate;
+loopback TeamJoin is the no-tailscaled lab path. Sneakernet export/import
+remains available. Windows inbound listen is still client-only.
 
 ### 1.2 The product goal
 
@@ -160,14 +162,14 @@ map, design docs/ADRs, trust/identity surfaces, beads inventory).
 | Anti-entropy protocol math: tips, cursors, bounded range planner, retry/backoff (1s→60s, max 5), digests, redaction-safe sync summary | `src/mesh/anti_entropy_protocol.rs` | Complete + tested. `MeshRangePlanner` has no production caller; file import advances cursors only after destination-local contiguous accepted replay proves the claimed tip. |
 | Anti-entropy executable model + 13 pinned scenarios | `src/mesh/anti_entropy_model.rs`, ADR 0041 | The contract to satisfy, not code to run. |
 | Signed bounded frame-codec scaffold: blake3-keyed signatures, capability allowlist (`hello`/`summary`/`event_fetch`/`body_fetch`), 64 KiB frame / 32 KiB payload budgets, constant-time compare | `src/mesh/tailscale_transport.rs` (794 LOC) | **Entirely dead — zero callers.** Budgets/enums are reusable; v1's rotating `sourceNodeKey`/`targetNodeKey` identity and long-term-key MAC are not production-safe and are superseded by T2.1 frame v2. |
-| Authenticated frame-v2 session and responder-accept substrate | `src/mesh/transport_session.rs`, `src/mesh/key_store.rs`, `src/mesh/responder_broker.rs` | Real Asupersync TCP, replay-safe directional framing, hardened local key reads, exact-source LocalAPI WhoIs, pre-auth admission, and status-derived tailnet binding are exercised by real-socket integration tests. **Still library-only:** no foreground/daemon owner or registration channel constructs the broker, no anti-entropy round runs over it, and route/key-generation/grant state is not yet derived from the durable peer registry. |
-| Hello wire protocol (`ee.mesh.hello.v1` / `.response.v1` / `.error.v1`), ≤4096-byte payloads, version negotiation, privacy-preserving decline | `src/mesh/hello.rs`; `decide_hello_response` at `:405` | Complete; **zero non-test callers**. |
+| Authenticated frame-v2 session and responder-accept substrate | `src/mesh/transport_session.rs`, `src/mesh/key_store.rs`, `src/mesh/responder_broker.rs` | Production path: `ee mesh hello-responder run` / `ee daemon --foreground` construct `ResponderBrokerOwner` from durable enrollments; `ee mesh sync --once` / `ee team steward once` run `TcpMeshForegroundSyncTransport` EventFetch plus grant-gated BodyFetch. TeamJoin LocalAPI binds loopback when tailscaled is absent or every enrolled endpoint is loopback. |
+| Hello wire protocol (`ee.mesh.hello.v1` / `.response.v1` / `.error.v1`), ≤4096-byte payloads, version negotiation, privacy-preserving decline | `src/mesh/hello.rs`; `decide_hello_response` at `:405` | Production: unsigned hello+sync is the daemonless first-contact path (`TcpMeshForegroundSyncTransport` / `ResponderBrokerOwner::serve_one`). |
 | Discovery policy: `service_tag` (default) / `auto_admit` / `allowlist` on both caller and responder axes; denylist overrides all; TOML files under `<ws>/.ee/` | `src/mesh/discovery_policy.rs`; CLI `src/cli/mesh.rs:1322–1477` | Real and wired for policy *decisions*. |
 | Auto-enrollment: 13-step fail-closed flow, forensic audit-before-write, tailnet/node-key identity guard, rollback | `src/mesh/auto_enrollment.rs`, `auto_enrollment_safety.rs`, `identity_change_guard.rs`; CLI `src/cli/mesh.rs:1164–1320` | Real, transactional. But see trust dead-end in §3.3. |
-| Mesh policy engine: per-peer per-lane per-origin-workspace inbound/outbound decisions, trust-lane ceilings, side-effect booleans | `src/core/memory_scope.rs`; facade `src/mesh/policy.rs`; production callers in `src/mesh/foreground_cli.rs` and `src/cli/mesh.rs` | Complete, tested, and load-bearing for file export/import plus consent previews; live network transport remains deferred. |
+| Mesh policy engine: per-peer per-lane per-origin-workspace inbound/outbound decisions, trust-lane ceilings, side-effect booleans | `src/core/memory_scope.rs`; facade `src/mesh/policy.rs`; production callers in `src/mesh/foreground_cli.rs` and `src/cli/mesh.rs` | Complete and load-bearing for file export/import, consent previews, live EventFetch/BodyFetch, and inbound serve. |
 | Authenticated lane-grant consent (DB-backed counts, revision-pinned candidates, redacted samples, cautions, grant/revoke) | `src/mesh/lane_grant_preview.rs`, `src/mesh/lane_grant.rs`; CLI wiring in `src/cli/mesh.rs` | T1.4 is wired: ordinary previews are deterministic and token-free; explicit robot issuance binds the complete eligible memory and mesh-ledger candidate set, and grant/revoke mutate generation plus audit atomically. |
 | Pre-export secret scan (hard-denies `ee mesh export` with `mesh_secret_export_denied`) | `src/policy/mod.rs` | Real and enforced. The pure detector remains deterministic and value-free; the command boundary decorates findings with fresh opaque CSPRNG-backed `findingId` values before error/audit projection. |
-| `ee mesh export` / `ee mesh import`: bounded, schema-gated, idempotent, ledger-writing, index-job-enqueuing file exchange | `src/cli/mesh.rs` | Real. Import artifacts cannot enroll or re-enable peers, overwrite local peer policy, or advance cursors without durable contiguous accepted replay. **This is the only working peer data path today.** |
+| `ee mesh export` / `ee mesh import`: bounded, schema-gated, idempotent, ledger-writing, index-job-enqueuing file exchange | `src/cli/mesh.rs` | Real sneakernet path. Import artifacts cannot enroll or re-enable peers, overwrite local peer policy, or advance cursors without durable contiguous accepted replay. Live TCP EventFetch/BodyFetch is the primary team-confed path on Unix. |
 | `ee share preview`: DB-backed counts and redacted examples | `src/cli/share.rs`, `src/policy/mod.rs` | Real, read-only, and policy-backed. Public content/aggregate hashes and `--record-consent` are removed; unknown peers fail closed with an explicit degraded signal. |
 | Emergency disable/reenable, workspace-scoped, honest `PeerScopeNotDurable` for `--peer` | `src/mesh/emergency_disable.rs`; CLI `src/cli/mesh.rs:923–1012` | Real (peer-scoped containment owed under bd-3mw86, in progress by another agent). |
 | Read-side visibility filter for mesh-derived hits | `src/core/search.rs:9816–9830`, `src/core/context.rs:6484` | Real and wired. |
@@ -188,15 +190,11 @@ and `cache.rs` get theirs in the body-lane milestone (P4.6), not before.
 
 ### 3.3 Missing primitives and load-bearing blockers
 
-1. **No production transport owner.** `NoopMeshForegroundSyncTransport` remains
-   the only implementation reached by the foreground supervisor. The newer
-   frame-v2/session and responder-broker modules can bind and authenticate real
-   sockets in integration tests, but no CLI, steward, daemon, or service startup
-   path constructs the broker or routes a sync round through it. The missing
-   same-EUID registration channel, durable peer/grant/key-generation lookup,
-   network-map rebind ownership, and anti-entropy caller are therefore still
-   release blockers; a successful `ee mesh sync --once` still proves no peer
-   contact.
+1. **Production transport owner is wired on Unix.** `TcpMeshForegroundSyncTransport`
+   is the foreground supervisor transport. `ee mesh hello-responder run` and
+   `ee daemon --foreground` construct `ResponderBrokerOwner` from durable
+   enrollments. `NoopMeshForegroundSyncTransport` remains a test double only.
+   Windows inbound listen is still client-only.
 2. **Discovery reads metadata nobody publishes.** The production hello probe
    (`TailscaleStatusCapabilityHelloProbe`,
    `src/mesh/tailscale_autodiscovery.rs:194–237`) performs no I/O; it parses

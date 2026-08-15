@@ -127,6 +127,9 @@ future changelog pass expands those rows into full capability sections.
   tailscaled is installed. `[[bench]] team_confed` profiles pair-key
   derive, at-cap EventBatch/BodyFetch admission, and create+enroll.
   The loopback inbound test TCP-connects the bound port.
+  After bind, `ResponderBrokerOwner::serve_one` answers unsigned hello
+  plus a sync round from the origin store, so `ee mesh sync --once`
+  over TeamJoin loopback returns the genesis event.
   `ee team steward once` is the canonical steward verb (`run-once`
   remains an alias). Windows inbound listen stays client-only; the
   `HardenedWindows` SID/DACL/reparse adapter compiles but has no

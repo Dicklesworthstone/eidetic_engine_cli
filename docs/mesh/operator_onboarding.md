@@ -36,8 +36,9 @@ Use mesh when the operator deliberately wants one of these behaviors:
 | --- | --- | --- |
 | One developer, one machine | No | Local `ee` already has the source of truth and derived indexes. |
 | Several machines owned by the same operator | Sometimes | Mesh can share metadata, revision notices, or redacted evidence across trusted nodes. |
+| Trusted small team (2–20 humans) | Yes, via `ee team` | Signed invite/join, inbound listen, EventFetch, and grant-gated BodyFetch. See `docs/team/quickstart.md`. |
 | Large agent swarm split across hosts | Yes, with policy | Mesh can reduce repeated rediscovery, but every lane still needs explicit grants. |
-| A contractor or untrusted peer | No by default | Reachability is not authorization, and peer material imports as peer evidence. |
+| A contractor or untrusted peer | No by default | Reachability is not authorization. Use a separate tightly-scoped team, not the trusted-team profile. |
 | Emergency incident response | Only after review | Start with metadata-only and audit logs; avoid body or embedding lanes until approved. |
 
 Do not enable mesh just to make `ee pack` faster on one host. Use local

@@ -49,6 +49,7 @@ Host: `ubuntu@38.242.134.66`, isolated tree
 | TeamJoin start_durable binds loopback | `team_join_local_api_start_durable_binds_loopback` | 7m 53s compile + 96.48s test | 0 |
 | Prefer TeamJoin on all-loopback enroll | `enroll_team_pair_peer_uses_the_pair_key_handle` | 11m 47s compile + 61.01s test | 0 |
 | Inbound TCP connect after bind | `team_join_local_api_start_durable_binds_loopback` | 8m 29s compile + 99.62s test | 0 |
+| TeamJoin start_durable serves hello+sync | `team_join_start_durable_serves_unsigned_hello_sync` | 11m 13s compile + 94.45s test | 0 |
 | team_confed Criterion bench compiles | `cargo test --bench team_confed --no-run` | 19m 21s | 0 |
 
 Join, signed relay, and body fetch were previously proven on the same

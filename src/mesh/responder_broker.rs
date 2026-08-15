@@ -1986,6 +1986,23 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             .map(|control| control.socket_path.as_path())
     }
 
+    /// Accept and answer one inbound connection, then return.
+    ///
+    /// Unsigned hello/join is a successful one-shot: the reply is written
+    /// before `BootstrapHelloAnswered`. Authenticated EventFetch/Summary
+    /// runs the same serve path as [`Self::serve_until_cancelled`].
+    pub async fn serve_one(&self, cx: &Cx) -> Result<(), ResponderBrokerError> {
+        let broker = self
+            .brokers
+            .first()
+            .ok_or(ResponderBrokerError::TransportUnavailable)?;
+        match broker.accept_authenticated_and_serve(cx).await {
+            Ok(()) => Ok(()),
+            Err(ResponderBrokerError::BootstrapHelloAnswered) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Serve authenticated transport sessions until the caller context is
     /// cancelled. Each accepted session answers one EventFetch/Summary
     /// sync-round from the registered origin store, then closes.
