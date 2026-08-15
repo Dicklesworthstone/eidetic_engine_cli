@@ -64,6 +64,7 @@ Host: `ubuntu@38.242.134.66`, isolated tree
 | TeamJoin start_durable authenticated EventFetch | `team_join_start_durable_serves_authenticated_event_fetch` | 8m 31s compile + 111.87s test | 0 |
 | TeamJoin start_durable authenticated BodyFetch | `team_join_start_durable_serves_authenticated_body_fetch` | 12m 35s compile + 170.26s test | 0 |
 | TeamJoin start_durable denies ungranted BodyFetch | `team_join_start_durable_denies_ungranted_body_fetch` | 10m 08s compile + 110.73s test | 0 |
+| TeamJoin start_durable identity_attest | `team_join_start_durable_applies_authenticated_identity_attest` | 9m 22s compile + 116.34s test | 0 |
 | team_confed Criterion wall-time | `cargo bench --bench team_confed` | 68m 21s compile + measure, EXIT 0 | 0 |
 
 Join, signed relay, and body fetch were previously proven on the same

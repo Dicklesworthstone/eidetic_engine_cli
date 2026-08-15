@@ -136,6 +136,8 @@ future changelog pass expands those rows into full capability sections.
   EventFetch returns the genesis origin event. Grant-gated BodyFetch
   through the same inbound owner returns the published body bytes.
   Without Body-lane Allow the same fetch stays metadata-only.
+  Token-free identity_attest over the same inbound owner persists
+  the member login on the origin store.
   `ee team steward once` is the canonical steward verb (`run-once`
   remains an alias). Windows inbound listen stays client-only; the
   `HardenedWindows` SID/DACL/reparse adapter compiles but has no
