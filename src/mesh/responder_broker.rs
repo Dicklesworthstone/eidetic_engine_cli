@@ -20,6 +20,8 @@ use std::fmt;
 use std::fs;
 use std::future::Future;
 use std::io;
+#[cfg(unix)]
+use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 #[cfg(unix)]
