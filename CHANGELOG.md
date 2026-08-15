@@ -120,7 +120,9 @@ future changelog pass expands those rows into full capability sections.
   answers WhoIs from the enrolled endpoint IP and allows loopback bind
   so `ee mesh hello-responder run` and the daemon owner still listen.
   Creating or joining a local team turns mesh on for that workspace
-  unless `EE_MESH_ENABLED=0` or `mesh.enabled = false`.
+  unless `EE_MESH_ENABLED=0` or `mesh.enabled = false`. Team-join
+  WhoIs uses a `nodekey:` transport key and grant generation 0 so
+  `start_durable` actually binds loopback after join.
   `ee team steward once` is the canonical steward verb (`run-once`
   remains an alias). Windows inbound listen stays client-only; the
   `HardenedWindows` SID/DACL/reparse adapter compiles but has no

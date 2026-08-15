@@ -44,6 +44,7 @@ Host: `ubuntu@38.242.134.66`, isolated tree
 | Missing store skips responder spawn | `spawn_team_responder_owner_skips_missing_store` | 16.89s compile + 0.20s test | 0 |
 | TeamJoin LocalAPI WhoIs | `enroll_team_pair_peer_uses_the_pair_key_handle` | 22m 52s compile + 59.44s test | 0 |
 | Local team enables mesh | `local_team_enables_mesh_unless_explicitly_disabled` | 13m 57s compile + 123.79s test | 0 |
+| TeamJoin start_durable binds loopback | `team_join_local_api_start_durable_binds_loopback` | 7m 53s compile + 96.48s test | 0 |
 
 Join, signed relay, and body fetch were previously proven on the same
 host in this campaign (live TCP hello, sync_round, join, BodyFetch).
