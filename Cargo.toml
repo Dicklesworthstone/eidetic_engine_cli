@@ -233,6 +233,10 @@ name = "workspace_init"
 harness = false
 
 [[bench]]
+name = "team_confed"
+harness = false
+
+[[bench]]
 name = "audit_query"
 harness = false
 

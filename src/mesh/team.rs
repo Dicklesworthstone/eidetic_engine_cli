@@ -6659,6 +6659,13 @@ mod tests {
             "bound {:?}",
             owner.bound_addresses()
         );
+        let bound = *owner
+            .bound_addresses()
+            .iter()
+            .find(|address| address.ip().is_loopback() && address.port() == port)
+            .expect("loopback bound");
+        std::net::TcpStream::connect_timeout(&bound, std::time::Duration::from_secs(1))
+            .expect("connect to team-join inbound");
         owner.shutdown();
     }
 
