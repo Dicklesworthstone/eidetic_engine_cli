@@ -4306,6 +4306,32 @@ impl ContextResponseData {
     }
 }
 
+fn team_pack_attribution_suffix(trust: &PackTrustSignal) -> Option<String> {
+    if trust.class != TrustClass::PeerHumanAttested {
+        return None;
+    }
+    let subclass = trust.subclass.as_deref()?;
+    let member = subclass
+        .split([';', ',', '|'])
+        .map(str::trim)
+        .find_map(|part| {
+            part.strip_prefix("agent:")
+                .or_else(|| part.strip_prefix("agent="))
+        })
+        .map(str::trim)
+        .filter(|name| !name.is_empty())?;
+    let produced_at = subclass
+        .split([';', ',', '|'])
+        .map(str::trim)
+        .find_map(|part| {
+            part.strip_prefix("produced_at=")
+                .or_else(|| part.strip_prefix("producedAt="))
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(format!("· from {member} · {produced_at}"))
+}
+
 /// Render a context response as the canonical Markdown prompt fragment.
 #[must_use]
 pub fn render_context_response_markdown(response: &ContextResponse) -> String {
@@ -4498,6 +4524,9 @@ pub fn render_context_markdown_with_analysis(
                     item.trust.class.as_str(),
                     item.trust.posture().as_str()
                 ));
+                if let Some(suffix) = team_pack_attribution_suffix(&item.trust) {
+                    output.push_str(&format!("{}\n\n", escape_markdown_text(&suffix)));
+                }
 
                 if !item.provenance.is_empty() {
                     output.push_str("**Provenance:**\n");
@@ -9384,6 +9413,25 @@ mod tests {
         );
         assert_eq!(escape_markdown_text("--- not a rule"), "--- not a rule");
         assert_eq!(escape_markdown_text("1. first item"), "1\\. first item");
+    }
+
+    #[test]
+    fn team_pack_attribution_suffix_renders_member_and_origin_time() {
+        let trust = PackTrustSignal::new(
+            crate::models::TrustClass::PeerHumanAttested,
+            Some("agent:Priya; produced_at=2026-07-30T14:02:00Z".to_owned()),
+        );
+        assert_eq!(
+            super::team_pack_attribution_suffix(&trust).as_deref(),
+            Some("· from Priya · 2026-07-30T14:02:00Z")
+        );
+        assert!(
+            super::team_pack_attribution_suffix(&PackTrustSignal::new(
+                crate::models::TrustClass::HumanExplicit,
+                Some("agent:Priya; produced_at=2026-07-30T14:02:00Z".to_owned()),
+            ))
+            .is_none()
+        );
     }
 
     #[test]

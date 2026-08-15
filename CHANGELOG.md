@@ -147,6 +147,9 @@ future changelog pass expands those rows into full capability sections.
   can recall teammate text. Metadata-only share still stays a stub.
   Apply and `ee team steward once` drain the inbound SingleDocument
   index job so a joiner without a prior local index can still search.
+  Team-scoped search hits now carry `teamProvenance` (member display
+  name, member-attested `producedAt`); pack markdown prints
+  `· from <member> · <producedAt>`.
 - Authenticated responder sessions now apply
   `MeshAdmissionLimits::conservative_default()` before EventFetch,
   BodyFetch, Summary, and `identity_attest`.

@@ -1398,6 +1398,72 @@ fn memory_scope_path_has_symlink_component(path: &Path) -> io::Result<bool> {
     Ok(false)
 }
 
+/// Receiver-derived attribution for a team-synced memory. Present only for
+/// `peer_human_attested` rows; origin time is provenance, not ranking.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TeamProvenance {
+    pub member_display_name: String,
+    pub project_name: Option<String>,
+    pub origin_trust_class: &'static str,
+    pub produced_at: String,
+    pub origin_time_assurance: &'static str,
+}
+
+impl TeamProvenance {
+    #[must_use]
+    pub fn compact_suffix(&self) -> String {
+        match self.project_name.as_deref() {
+            Some(project) if !project.is_empty() => format!(
+                "· from {} / {} · {}",
+                self.member_display_name, project, self.produced_at
+            ),
+            _ => format!("· from {} · {}", self.member_display_name, self.produced_at),
+        }
+    }
+
+    #[must_use]
+    pub fn to_json(&self) -> JsonValue {
+        json!({
+            "schema": "ee.team.provenance.v1",
+            "memberDisplayName": self.member_display_name,
+            "projectName": self.project_name,
+            "originTrustClass": self.origin_trust_class,
+            "producedAt": self.produced_at,
+            "originTimeAssurance": self.origin_time_assurance,
+        })
+    }
+}
+
+/// Build attribution from a projected teammate memory. Missing member name
+/// or origin time means the row is not yet attributable.
+#[must_use]
+pub fn team_provenance_from_memory(memory: &StoredMemory) -> Option<TeamProvenance> {
+    if memory.trust_class != "peer_human_attested" {
+        return None;
+    }
+    let member_display_name = memory_producer_agent(memory)?;
+    let produced_at = produced_at_from_trust_subclass(memory.trust_subclass.as_deref()?)?;
+    Some(TeamProvenance {
+        member_display_name,
+        project_name: None,
+        origin_trust_class: "peer_human_attested",
+        produced_at,
+        origin_time_assurance: "member_attested",
+    })
+}
+
+fn produced_at_from_trust_subclass(value: &str) -> Option<String> {
+    value
+        .split([';', ',', '|'])
+        .map(str::trim)
+        .find_map(|part| {
+            part.strip_prefix("produced_at=")
+                .or_else(|| part.strip_prefix("producedAt="))
+                .map(str::to_owned)
+        })
+        .and_then(normalized_non_empty)
+}
+
 fn agent_from_trust_subclass(value: &str) -> Option<String> {
     value
         .split([';', ',', '|'])
@@ -1782,6 +1848,33 @@ mod tests {
             valid_from: None,
             valid_to: None,
         }
+    }
+
+    #[test]
+    fn team_provenance_from_peer_human_attested_memory() {
+        let memory = memory_with_scope(
+            TrustClass::PeerHumanAttested,
+            Some("agent:Priya; produced_at=2026-07-30T14:02:00Z"),
+        );
+        let provenance = super::team_provenance_from_memory(&memory).expect("attributable");
+        assert_eq!(provenance.member_display_name, "Priya");
+        assert_eq!(provenance.produced_at, "2026-07-30T14:02:00Z");
+        assert_eq!(provenance.origin_time_assurance, "member_attested");
+        assert_eq!(
+            provenance.compact_suffix(),
+            "· from Priya · 2026-07-30T14:02:00Z"
+        );
+        let json = provenance.to_json();
+        assert_eq!(json["schema"], "ee.team.provenance.v1");
+        assert_eq!(json["memberDisplayName"], "Priya");
+        assert_eq!(json["originTimeAssurance"], "member_attested");
+        assert!(
+            super::team_provenance_from_memory(&memory_with_scope(
+                TrustClass::HumanExplicit,
+                Some("agent:Priya; produced_at=2026-07-30T14:02:00Z"),
+            ))
+            .is_none()
+        );
     }
 
     #[test]

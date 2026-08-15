@@ -5511,8 +5511,8 @@ fn search_hit_pack_trust(metadata: &serde_json::Value) -> PackTrustSignal {
     let trust_class = metadata_string(metadata, "trust_class")
         .and_then(|value| TrustClass::from_str(value).ok())
         .unwrap_or(TrustClass::AgentAssertion);
-    let producer = metadata_string(metadata, "producerAgent")
-        .or_else(|| metadata_string(metadata, "trust_subclass"))
+    let producer = metadata_string(metadata, "trust_subclass")
+        .or_else(|| metadata_string(metadata, "producerAgent"))
         .map(str::to_string);
     PackTrustSignal::new(trust_class, producer)
 }
@@ -11918,6 +11918,9 @@ fn mark_hit_scope(hit: &mut SearchHit, scope: MemoryScope, memory: &crate::db::S
         }
         if let Some(agent) = super::memory_scope::memory_producer_agent(memory) {
             object.insert("producerAgent".to_string(), serde_json::json!(agent));
+        }
+        if let Some(provenance) = super::memory_scope::team_provenance_from_memory(memory) {
+            object.insert("teamProvenance".to_string(), provenance.to_json());
         }
     }
     hit.metadata = Some(metadata);

@@ -4887,7 +4887,10 @@ pub fn project_inbound_team_memory(
                 importance: 0.5,
                 provenance_uri: Some(inbound.event_id.clone()),
                 trust_class: "peer_human_attested".to_owned(),
-                trust_subclass: Some(format!("agent:{producer}")),
+                trust_subclass: Some(format!(
+                    "agent:{producer}; produced_at={}",
+                    inbound.produced_at
+                )),
                 tags: Vec::new(),
                 valid_from: payload.valid_from.clone(),
                 valid_to: payload.valid_until.clone(),
@@ -5374,15 +5377,13 @@ pub fn list_team_activity(
         {
             continue;
         }
-        let origin_node_id = members
-            .iter()
-            .find(|member| {
-                memory
-                    .trust_subclass
-                    .as_deref()
-                    .is_some_and(|subclass| subclass == format!("agent:{}", member.display_name))
+        let origin_node_id = crate::core::memory_scope::memory_producer_agent(&memory)
+            .and_then(|producer| {
+                members
+                    .iter()
+                    .find(|member| member.display_name == producer)
+                    .map(|member| member.origin_node_id.clone())
             })
-            .map(|member| member.origin_node_id.clone())
             .unwrap_or_default();
         let item = TeamActivityItem {
             event_id: memory
@@ -8067,7 +8068,15 @@ mod tests {
         assert!(stored.content.starts_with("[ee.team.history]"));
         assert!(!stored.content.contains("secret body"));
         assert_eq!(stored.trust_class, "peer_human_attested");
-        assert_eq!(stored.trust_subclass.as_deref(), Some("agent:Analysts"));
+        assert_eq!(
+            crate::core::memory_scope::memory_producer_agent(&stored).as_deref(),
+            Some("Analysts")
+        );
+        let provenance = crate::core::memory_scope::team_provenance_from_memory(&stored)
+            .expect("inbound stub is attributable");
+        assert_eq!(provenance.member_display_name, "Analysts");
+        assert_eq!(provenance.origin_time_assurance, "member_attested");
+        assert!(!provenance.produced_at.is_empty());
         assert!(
             pending_team_body_fetch_keys(&connection, "wsp_persistfixture000000000001")
                 .expect("pending")
@@ -8110,7 +8119,9 @@ mod tests {
                     importance: 0.5,
                     provenance_uri: Some("evt_teamhydrate".to_owned()),
                     trust_class: "peer_human_attested".to_owned(),
-                    trust_subclass: Some("agent:Analysts".to_owned()),
+                    trust_subclass: Some(
+                        "agent:Analysts; produced_at=2026-08-13T11:00:00Z".to_owned(),
+                    ),
                     tags: Vec::new(),
                     valid_from: None,
                     valid_to: None,
@@ -8148,7 +8159,10 @@ mod tests {
         let stored = connection.get_memory(stub_id).expect("get").expect("row");
         assert_eq!(stored.content, "Acme Corp analysis from Priya");
         assert_eq!(stored.trust_class, "peer_human_attested");
-        assert_eq!(stored.trust_subclass.as_deref(), Some("agent:Analysts"));
+        assert_eq!(
+            crate::core::memory_scope::memory_producer_agent(&stored).as_deref(),
+            Some("Analysts")
+        );
         let context = crate::core::memory_scope::MemoryScopeContext {
             scope: crate::models::MemoryScope::Team,
             strict_scope: false,
@@ -8211,7 +8225,9 @@ mod tests {
                     importance: 0.5,
                     provenance_uri: Some("evt_teamhydratesearch".to_owned()),
                     trust_class: "peer_human_attested".to_owned(),
-                    trust_subclass: Some("agent:Analysts".to_owned()),
+                    trust_subclass: Some(
+                        "agent:Analysts; produced_at=2026-08-13T11:00:00Z".to_owned(),
+                    ),
                     tags: Vec::new(),
                     valid_from: None,
                     valid_to: None,
@@ -8289,10 +8305,24 @@ mod tests {
             strict_scope: false,
         })
         .expect("search");
-        assert!(
-            search.results.iter().any(|hit| hit.doc_id == stub_id),
-            "ee search --memory-scope team must return the hydrated teammate memory: {search:?}"
-        );
+        let hit = search
+            .results
+            .iter()
+            .find(|hit| hit.doc_id == stub_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "ee search --memory-scope team must return the hydrated teammate memory: {search:?}"
+                )
+            });
+        let provenance = hit
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("teamProvenance"))
+            .expect("search hit must carry teamProvenance");
+        assert_eq!(provenance["schema"], "ee.team.provenance.v1");
+        assert_eq!(provenance["memberDisplayName"], "Analysts");
+        assert_eq!(provenance["originTimeAssurance"], "member_attested");
+        assert_eq!(provenance["producedAt"], "2026-08-13T11:00:00Z");
     }
 
     #[test]
