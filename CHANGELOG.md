@@ -130,6 +130,9 @@ future changelog pass expands those rows into full capability sections.
   After bind, `ResponderBrokerOwner::serve_one` answers unsigned hello
   plus a sync round from the origin store, so `ee mesh sync --once`
   over TeamJoin loopback returns the genesis event.
+  Isolated `cargo bench --bench team_confed` measured derive_pair_key
+  at ~2 µs and at-cap admission at ~80 ns; create+enroll is migrate
+  dominated (~34 s).
   `ee team steward once` is the canonical steward verb (`run-once`
   remains an alias). Windows inbound listen stays client-only; the
   `HardenedWindows` SID/DACL/reparse adapter compiles but has no

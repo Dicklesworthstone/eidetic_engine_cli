@@ -6,7 +6,18 @@ Criterion wall-time gate. The same profile is emitted on
 batch count, signed-relay batch bytes, body fetch bytes, and index jobs
 per round. `[[bench]] team_confed` (`benches/team_confed.rs`) profiles
 pair-key derive, at-cap EventBatch/BodyFetch admission, and
-create+enroll. Full `cargo bench` wall-time remains opt-in via
+create+enroll. Isolated 2026-08-15 `cargo bench --bench team_confed`
+(sample-size 10, warm-up 1s, measurement 1s) Finished in 68m 21s, EXIT 0:
+
+| Function | time (low / mid / high) |
+| --- | --- |
+| `derive_pair_key` | 1.8701 µs / 1.9927 µs / 2.1394 µs |
+| `admission_event_batch_at_cap` | 71.793 ns / 81.631 ns / 91.356 ns |
+| `admission_body_fetch_at_cap` | 70.391 ns / 78.189 ns / 84.817 ns |
+| `create_and_enroll` | 30.757 s / 34.113 s / 38.303 s |
+
+`create_and_enroll` is dominated by temp-dir migrate + genesis + enroll,
+not pair-key or admission. Repeat via
 `./scripts/verify.sh --include-bench`.
 
 ## Structural caps (enforced)
@@ -50,7 +61,7 @@ Host: `ubuntu@38.242.134.66`, isolated tree
 | Prefer TeamJoin on all-loopback enroll | `enroll_team_pair_peer_uses_the_pair_key_handle` | 11m 47s compile + 61.01s test | 0 |
 | Inbound TCP connect after bind | `team_join_local_api_start_durable_binds_loopback` | 8m 29s compile + 99.62s test | 0 |
 | TeamJoin start_durable serves hello+sync | `team_join_start_durable_serves_unsigned_hello_sync` | 11m 13s compile + 94.45s test | 0 |
-| team_confed Criterion bench compiles | `cargo test --bench team_confed --no-run` | 19m 21s | 0 |
+| team_confed Criterion wall-time | `cargo bench --bench team_confed` | 68m 21s compile + measure, EXIT 0 | 0 |
 
 Join, signed relay, and body fetch were previously proven on the same
 host in this campaign (live TCP hello, sync_round, join, BodyFetch).
