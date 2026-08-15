@@ -19,7 +19,8 @@ tailscaled is absent). `ee mesh sync --once` and `ee team fetch body`
 run grant-gated EventFetch/BodyFetch over authenticated frame-v2 TCP.
 Sneakernet export/import remains available. The live proof ledger is
 `docs/mesh/verification_matrix.md`. Remaining environment soaks:
-Windows inbound/DACL, Criterion `[[bench]]`, production IdP vendors.
+Windows inbound/DACL, Criterion wall-time (the `team_confed` bench
+compiles), production IdP vendors.
 
 This plan turns that foundation into **team confederation**: N human users, each
 running `ee` locally on their own machine, forming a trusted mesh over a shared

@@ -4,7 +4,9 @@ These are **structural caps plus measured isolated-host proofs**, not a
 Criterion wall-time gate. The same profile is emitted on
 `ee team status --json` as `budgets` (`ee.team.budgets.v1`): join event
 batch count, signed-relay batch bytes, body fetch bytes, and index jobs
-per round. Full `cargo bench` remains opt-in via
+per round. `[[bench]] team_confed` (`benches/team_confed.rs`) profiles
+pair-key derive, at-cap EventBatch/BodyFetch admission, and
+create+enroll. Full `cargo bench` wall-time remains opt-in via
 `./scripts/verify.sh --include-bench`.
 
 ## Structural caps (enforced)
@@ -46,6 +48,8 @@ Host: `ubuntu@38.242.134.66`, isolated tree
 | Local team enables mesh | `local_team_enables_mesh_unless_explicitly_disabled` | 13m 57s compile + 123.79s test | 0 |
 | TeamJoin start_durable binds loopback | `team_join_local_api_start_durable_binds_loopback` | 7m 53s compile + 96.48s test | 0 |
 | Prefer TeamJoin on all-loopback enroll | `enroll_team_pair_peer_uses_the_pair_key_handle` | 11m 47s compile + 61.01s test | 0 |
+| Inbound TCP connect after bind | `team_join_local_api_start_durable_binds_loopback` | 8m 29s compile + 99.62s test | 0 |
+| team_confed Criterion bench compiles | `cargo test --bench team_confed --no-run` | 19m 21s | 0 |
 
 Join, signed relay, and body fetch were previously proven on the same
 host in this campaign (live TCP hello, sync_round, join, BodyFetch).

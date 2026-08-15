@@ -124,7 +124,9 @@ future changelog pass expands those rows into full capability sections.
   WhoIs uses a `nodekey:` transport key and grant generation 0 so
   `start_durable` actually binds loopback after join. If every enrolled
   endpoint is loopback, inbound prefer uses TeamJoin even when
-  tailscaled is installed.
+  tailscaled is installed. `[[bench]] team_confed` profiles pair-key
+  derive, at-cap EventBatch/BodyFetch admission, and create+enroll.
+  The loopback inbound test TCP-connects the bound port.
   `ee team steward once` is the canonical steward verb (`run-once`
   remains an alias). Windows inbound listen stays client-only; the
   `HardenedWindows` SID/DACL/reparse adapter compiles but has no
