@@ -10,16 +10,16 @@ Date: 2026-07-30
 
 ## 0. TL;DR
 
-`ee` today is a single-operator, single-machine memory substrate with an optional
-"mesh" subsystem that is meticulously specified, extensively unit-tested — and
-**not connected to a network**. There is no listener anywhere in the tree, `ee
-mesh sync --once` is wired to a no-op transport that always emits
-`mesh_sync_once_network_deferred`, discovery reads Tailscale ACL capability
-metadata that no code ever publishes, and the mesh policy engine
-(`decide_mesh_peer_policy` / `decide_mesh_outbound_policy` / `decide_mesh_import`)
-now gates the authenticated file-transfer and consent surfaces, but no live
-network transport calls it. The working peer data path today is sneakernet:
-`ee mesh export --peer <peer-id>` → copy file → `ee mesh import`.
+Unix live EE-to-EE team confederation is on `main`. `ee team create` /
+`invite` / `join` run a signed TCP ceremony, enroll both sides, turn mesh
+on unless explicitly disabled, and `ee mesh hello-responder run` /
+`ee daemon --foreground` bind inbound (Tailscale LocalAPI when present;
+`TeamJoinLocalApi` loopback when every enrolled endpoint is loopback or
+tailscaled is absent). `ee mesh sync --once` and `ee team fetch body`
+run grant-gated EventFetch/BodyFetch over authenticated frame-v2 TCP.
+Sneakernet export/import remains available. The live proof ledger is
+`docs/mesh/verification_matrix.md`. Remaining environment soaks:
+Windows inbound/DACL, Criterion `[[bench]]`, production IdP vendors.
 
 This plan turns that foundation into **team confederation**: N human users, each
 running `ee` locally on their own machine, forming a trusted mesh over a shared
