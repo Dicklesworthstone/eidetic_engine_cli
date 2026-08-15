@@ -67,12 +67,13 @@ ee team idp attest --id-token - --jwks-url "$JWKS" --ca-bundle "$PINNED_CA" --wo
 
 ## Operations
 
-Foreground steward is enough for a two-node lab. After join, inbound
-listen is `ee mesh hello-responder run --workspace .` (loads enrolled
-peers). Tailscale LocalAPI is used when present; otherwise the owner
-binds loopback and answers WhoIs from the enrolled endpoint. User-scoped
-install is optional and never requires root; the loaded daemon starts
-that owner when mesh is on and peers exist.
+Foreground steward is enough for a two-node lab. `ee team create` /
+`ee team join` turn mesh on unless it was explicitly disabled. After
+join, inbound listen is `ee mesh hello-responder run --workspace .`
+(loads enrolled peers). Tailscale LocalAPI is used when present;
+otherwise the owner binds loopback and answers WhoIs from the enrolled
+endpoint. User-scoped install is optional and never requires root; the
+loaded daemon starts that owner when mesh is on and peers exist.
 
 ```bash
 ee team steward once --workspace . --json

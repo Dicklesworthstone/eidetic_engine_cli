@@ -119,6 +119,8 @@ future changelog pass expands those rows into full capability sections.
   Body-lane Allow. When tailscaled is absent, `TeamJoinLocalApi`
   answers WhoIs from the enrolled endpoint IP and allows loopback bind
   so `ee mesh hello-responder run` and the daemon owner still listen.
+  Creating or joining a local team turns mesh on for that workspace
+  unless `EE_MESH_ENABLED=0` or `mesh.enabled = false`.
   `ee team steward once` is the canonical steward verb (`run-once`
   remains an alias). Windows inbound listen stays client-only; the
   `HardenedWindows` SID/DACL/reparse adapter compiles but has no
