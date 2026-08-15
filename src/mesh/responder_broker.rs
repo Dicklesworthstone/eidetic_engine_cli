@@ -412,10 +412,16 @@ impl TeamJoinLocalApi {
                 return Err(ResponderBrokerError::RouteUnavailable);
             }
             let endpoint = peer_endpoint_for_whois(&policy.endpoint.endpoint)?;
+            let current_node_pubkey = if policy.endpoint.tailscale_node_key.starts_with("nodekey:")
+            {
+                policy.endpoint.tailscale_node_key.clone()
+            } else {
+                format!("nodekey:{}", policy.endpoint.tailscale_node_key)
+            };
             peers.push(TeamJoinWhoIsPeer {
                 ip: endpoint.ip(),
                 stable_id: format!("team-join-{}", peer.origin_node_id),
-                current_node_pubkey: policy.endpoint.tailscale_node_key,
+                current_node_pubkey,
             });
         }
         Ok(Self {
@@ -845,9 +851,10 @@ pub async fn resolve_durable_registration<A: TailscaleLocalApi>(
 
     let endpoint = peer_endpoint_for_whois(&policy.endpoint.endpoint)?;
     let who_is = local_api.who_is(cx, endpoint).await?;
-    if peer.transport_identity.is_none()
-        && who_is.current_node_pubkey != policy.endpoint.tailscale_node_key
-    {
+    let expected_key = &policy.endpoint.tailscale_node_key;
+    let who_matches_key = who_is.current_node_pubkey == *expected_key
+        || who_is.current_node_pubkey == format!("nodekey:{expected_key}");
+    if peer.transport_identity.is_none() && !who_matches_key {
         return Err(ResponderBrokerError::WhoIsUnverified);
     }
     let peer = connection
@@ -983,7 +990,6 @@ impl RegisteredResponderRoute {
             || !valid_node_key(&self.responder_node_pubkey)
             || self.expectations.pair_key_generation == 0
             || self.peer_transport_key_generation == 0
-            || self.grant_generation == 0
         {
             return Err(ResponderBrokerError::InvalidConfiguration);
         }

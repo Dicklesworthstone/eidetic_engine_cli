@@ -6552,11 +6552,106 @@ mod tests {
                     .expect("addr"),
             )
             .expect("whois");
-        assert_eq!(who.current_node_pubkey, created.team.origin_node_id);
+        assert_eq!(
+            who.current_node_pubkey,
+            format!("nodekey:{}", created.team.origin_node_id)
+        );
         assert!(
             api.identity_for_source("8.8.8.8:41888".parse().expect("other"))
                 .is_none()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn team_join_local_api_start_durable_binds_loopback() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().canonicalize().expect("canon workspace");
+        let database = workspace.join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database).expect("open");
+        connection.migrate().expect("migrate");
+        let database = database.canonicalize().expect("canon db");
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("bind".to_owned()),
+                },
+            )
+            .expect("workspace");
+        let created = create_local_team_with_store(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+            Some(workspace.as_path()),
+        )
+        .expect("create");
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
+            listener.local_addr().expect("addr").port()
+        };
+        assert!(port >= 1024);
+        let joiner_node = "node_joiner0000000000000000000001";
+        enroll_team_pair_peer(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &created.team.team_id,
+            joiner_node,
+            "Priya",
+            "127.0.0.1",
+            port,
+            "2026-08-13T04:00:00Z",
+            "wsp_joinworkspace0000000000001",
+        )
+        .expect("enroll");
+        persist_pair_key(
+            &workspace,
+            &created.team.team_id,
+            joiner_node,
+            &[7_u8; 32],
+            "2026-08-13T04:00:00Z",
+        )
+        .expect("pair");
+        let registrations = crate::mesh::responder_broker::plan_team_responder_registrations(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &workspace,
+            &database,
+            port,
+        );
+        assert_eq!(registrations.len(), 1);
+        let api = crate::mesh::responder_broker::TeamJoinLocalApi::from_registrations(
+            &connection,
+            &registrations,
+        )
+        .expect("api");
+        let mut owner = crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| {
+            let api = api.clone();
+            let registrations = registrations.clone();
+            async move {
+                crate::mesh::responder_broker::ResponderBrokerOwner::start_durable(
+                    &cx,
+                    api,
+                    registrations,
+                    crate::mesh::responder_broker::PreAuthAdmissionLimits::default(),
+                    std::time::Duration::from_millis(250),
+                )
+                .await
+            }
+        })
+        .expect("runtime")
+        .expect("start");
+        assert!(
+            owner
+                .bound_addresses()
+                .iter()
+                .any(|address| address.ip().is_loopback() && address.port() == port),
+            "bound {:?}",
+            owner.bound_addresses()
+        );
+        owner.shutdown();
     }
 
     #[cfg(unix)]
