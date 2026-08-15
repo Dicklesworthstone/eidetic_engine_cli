@@ -145,6 +145,8 @@ future changelog pass expands those rows into full capability sections.
   Authorized BodyFetch now hydrates the local `peer_human_attested` stub
   so `ee search --memory-scope team` / `ee pack --memory-scope team`
   can recall teammate text. Metadata-only share still stays a stub.
+  Apply and `ee team steward once` drain the inbound SingleDocument
+  index job so a joiner without a prior local index can still search.
 - Authenticated responder sessions now apply
   `MeshAdmissionLimits::conservative_default()` before EventFetch,
   BodyFetch, Summary, and `identity_attest`.

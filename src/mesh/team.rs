@@ -2035,6 +2035,24 @@ fn hydrate_inbound_team_memory_body(
     enqueue_inbound_memory_index_job(connection, workspace_id, &local_id, "team-inbound-body")
 }
 
+/// Drain SingleDocument jobs so `--memory-scope team` search/pack can see
+/// rematerialized or hydrated teammate text.
+fn drain_team_inbound_search_index(
+    connection: &DbConnection,
+    workspace_id: &str,
+    workspace_path: &std::path::Path,
+) -> Result<usize, OriginStreamError> {
+    let index_dir = workspace_path.join(".ee").join("index");
+    crate::core::index::process_pending_index_jobs_coalesced(
+        connection,
+        workspace_id,
+        &index_dir,
+        None,
+    )
+    .map(|reports| reports.len())
+    .map_err(|error| OriginStreamError::Encode(error.to_string()))
+}
+
 /// Verify an authorized BodyFetch against the inbound placeholder commitment
 /// and publish bytes through staging → available. Wrong nonce or body stays
 /// metadata-only or quarantined; the nonce is not persisted.
@@ -2141,6 +2159,7 @@ pub fn apply_fetched_team_body(
         .upsert_mesh_body_cache_metadata(&meta)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
     hydrate_inbound_team_memory_body(connection, workspace_id, &row, &bytes)?;
+    let _ = drain_team_inbound_search_index(connection, workspace_id, workspace_path);
     fetch_local_team_body(
         connection,
         workspace_id,
@@ -3039,6 +3058,7 @@ pub fn execute_team_steward_once(
         let (deferred, promoted) = retry_deferred_pairings(connection, &workspace_id, path)?;
         report.deferred_pairings = deferred;
         report.applied_pair_promotions = promoted;
+        let _ = drain_team_inbound_search_index(connection, &workspace_id, path);
     }
     report.stalled_cursors = stalled_peer_cursor_count(connection, &workspace_id)?;
     report.mesh_primitives = vec![
@@ -8149,6 +8169,129 @@ mod tests {
             jobs.iter()
                 .any(|job| job.document_id.as_deref() == Some(stub_id)),
             "hydrate must enqueue a SingleDocument job so search can see the body"
+        );
+    }
+
+    #[test]
+    fn hydrated_team_memory_is_searchable_under_team_scope() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let ee_dir = workspace.path().join(".ee");
+        std::fs::create_dir_all(&ee_dir).expect("ee dir");
+        let database = ee_dir.join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database).expect("open");
+        connection.migrate().expect("migrate");
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: Some("hydrate-search".to_owned()),
+                },
+            )
+            .expect("workspace");
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let stub_id = "mem_teamhydrate000000000000001";
+        connection
+            .insert_memory(
+                stub_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "[ee.team.history] note blake3:deadbeef".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.5,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("evt_teamhydratesearch".to_owned()),
+                    trust_class: "peer_human_attested".to_owned(),
+                    trust_subclass: Some("agent:Analysts".to_owned()),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("stub");
+        let row = crate::db::StoredMeshBodyCacheMetadata {
+            workspace_id: "wsp_persistfixture000000000001".to_owned(),
+            body_cache_key: "body_teamhydrate000000000000001".to_owned(),
+            origin_node_id: "node_hydrate".to_owned(),
+            origin_workspace_id: "wsp_persistfixture000000000001".to_owned(),
+            logical_memory_id: "mem_originbody0000000000000001".to_owned(),
+            content_hash: "blake3:deadbeef".to_owned(),
+            body_ref_json: Some(
+                serde_json::json!({
+                    "originEventId": "evt_teamhydratesearch",
+                    "localMemoryId": stub_id,
+                })
+                .to_string(),
+            ),
+            preview_hash: None,
+            size_bytes: None,
+            cache_status: "available".to_owned(),
+            local_body_hash: None,
+            cached_at: "2026-08-15T00:00:00Z".to_owned(),
+            expires_at: None,
+        };
+        hydrate_inbound_team_memory_body(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &row,
+            b"Acme Corp analysis from Priya",
+        )
+        .expect("hydrate");
+        let pending_before = connection
+            .list_search_index_jobs(
+                "wsp_persistfixture000000000001",
+                Some(crate::db::SearchIndexJobStatus::Pending),
+            )
+            .expect("pending jobs");
+        assert!(
+            pending_before
+                .iter()
+                .any(|job| job.document_id.as_deref() == Some(stub_id)),
+            "hydrate must enqueue a SingleDocument job: {pending_before:?}"
+        );
+        let drained = drain_team_inbound_search_index(
+            &connection,
+            "wsp_persistfixture000000000001",
+            workspace.path(),
+        )
+        .unwrap_or_else(|error| panic!("drain failed: {error}"));
+        assert!(
+            drained > 0,
+            "hydrate must leave a drainable SingleDocument job ({pending_before:?})"
+        );
+        let search = crate::core::search::run_search(&crate::core::search::SearchOptions {
+            workspace_path: workspace.path().to_path_buf(),
+            database_path: Some(database),
+            index_dir: Some(ee_dir.join("index")),
+            query: "Acme Corp".to_owned(),
+            limit: 10,
+            speed: crate::search::SpeedMode::Instant,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            dedup_mode: crate::core::search::SearchDedupMode::DocId,
+            source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+            strict_source_mode: true,
+            memory_scope: crate::models::MemoryScope::Team,
+            strict_scope: false,
+        })
+        .expect("search");
+        assert!(
+            search.results.iter().any(|hit| hit.doc_id == stub_id),
+            "ee search --memory-scope team must return the hydrated teammate memory: {search:?}"
         );
     }
 
