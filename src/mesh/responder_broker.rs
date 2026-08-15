@@ -436,6 +436,11 @@ impl TeamJoinLocalApi {
     }
 
     #[must_use]
+    pub fn all_loopback(&self) -> bool {
+        !self.peers.is_empty() && self.peers.iter().all(|peer| peer.ip.is_loopback())
+    }
+
+    #[must_use]
     pub fn identity_for_source(&self, source: SocketAddr) -> Option<WhoIsIdentity> {
         self.peers
             .iter()
@@ -513,12 +518,22 @@ impl InboundLocalApi {
                 Duration::from_secs(2),
             )));
         }
+        let team_join = TeamJoinLocalApi::from_registrations(connection, registrations).ok();
+        if team_join
+            .as_ref()
+            .is_some_and(TeamJoinLocalApi::all_loopback)
+        {
+            return team_join.map(Self::TeamJoin);
+        }
         if let Some(client) = TailscaleLocalApiClient::discover(Duration::from_secs(2)) {
             return Some(Self::Tailscale(client));
         }
-        TeamJoinLocalApi::from_registrations(connection, registrations)
-            .ok()
-            .map(Self::TeamJoin)
+        team_join.map(Self::TeamJoin)
+    }
+
+    #[must_use]
+    pub const fn is_team_join(&self) -> bool {
+        matches!(self, Self::TeamJoin(_))
     }
 }
 

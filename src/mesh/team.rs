@@ -6560,6 +6560,14 @@ mod tests {
             api.identity_for_source("8.8.8.8:41888".parse().expect("other"))
                 .is_none()
         );
+        assert!(api.all_loopback());
+        let selected =
+            crate::mesh::responder_broker::InboundLocalApi::prefer(&connection, &planned, None)
+                .expect("prefer");
+        assert!(
+            selected.is_team_join(),
+            "loopback team-join enroll must not prefer tailscaled"
+        );
     }
 
     #[cfg(unix)]
