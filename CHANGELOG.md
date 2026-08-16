@@ -112,6 +112,9 @@ future changelog pass expands those rows into full capability sections.
   `team_lane_conflict_deferred` and get distinct diversity keys so
   rank cannot hide one side. A sealed or missing teammate body emits
   `team_lane_conflict_unassessed` instead of a false no-conflict.
+  `ee why` and `ee ask` now emit the same `teamProvenance` block
+  search and pack already carry, so teammate text is attributed on
+  every unified-recall surface.
   The inviter enrolls the accepted
   joiner at the join TCP source IP and the advertised `joinerHelloPort`
   (hello also carries `joinerWorkspaceId`) so EventFetch/BodyFetch
