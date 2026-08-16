@@ -254,13 +254,38 @@ pub fn resolve_global_inclusion(input: &GlobalInclusionInput) -> GlobalInclusion
 }
 
 /// Which store a retrieval candidate came from.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryLane {
     /// The current workspace store.
     Workspace,
+    /// Team-synced inbound or teammate-attributed rows.
+    Team,
     /// The user-global store.
     Global,
+}
+
+impl MemoryLane {
+    /// Stable machine token for the lane.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Team => "team",
+            Self::Global => "global",
+        }
+    }
+}
+
+/// ADR 0086 TC-D16 / bd-1bfwa: lower rank is more specific.
+/// Local workspace beats team beats global on overlap.
+#[must_use]
+pub const fn lane_specificity_rank(lane: MemoryLane) -> u8 {
+    match lane {
+        MemoryLane::Workspace => 0,
+        MemoryLane::Team => 1,
+        MemoryLane::Global => 2,
+    }
 }
 
 /// A minimal view of a retrieval candidate for cross-lane conflict analysis.
@@ -361,6 +386,7 @@ pub fn surface_lane_conflicts(candidates: &[LaneCandidate]) -> Vec<LaneConflict>
         match candidate.lane {
             MemoryLane::Workspace => entry.0.push(candidate),
             MemoryLane::Global => entry.1.push(candidate),
+            MemoryLane::Team => {}
         }
     }
 
@@ -390,6 +416,130 @@ pub fn surface_lane_conflicts(candidates: &[LaneCandidate]) -> Vec<LaneConflict>
             .cmp(&b.conflict_key)
             .then_with(|| a.workspace_id.cmp(&b.workspace_id))
             .then_with(|| a.global_id.cmp(&b.global_id))
+    });
+    out
+}
+
+/// A surfaced relationship between two different lanes on a shared subject.
+///
+/// Workspace × global pairs still also project through [`LaneConflict`]. This
+/// type is the three-lane surface cited by ADR 0086 TC-D16: more-specific
+/// context wins on overlap; contradiction keeps both sides and records that
+/// neither auto-wins.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrecedenceConflict {
+    /// The shared subject the two rows collide on.
+    pub conflict_key: String,
+    /// Corroboration vs contradiction.
+    pub kind: LaneConflictKind,
+    /// More-specific lane in the TC-D16 chain.
+    pub more_specific_lane: MemoryLane,
+    /// Memory id on the more-specific lane.
+    pub more_specific_id: String,
+    /// Less-specific lane in the TC-D16 chain.
+    pub less_specific_lane: MemoryLane,
+    /// Memory id on the less-specific lane.
+    pub less_specific_id: String,
+    /// Whether both rows remain visible. Always `true`.
+    pub both_surfaced: bool,
+    /// Whether the more-specific row takes recorded precedence. `true` only
+    /// for corroboration; `false` for contradiction.
+    pub more_specific_overrides: bool,
+}
+
+impl PrecedenceConflict {
+    /// Render as a redaction-safe JSON marker (ids/keys/kind/lanes only).
+    #[must_use]
+    pub fn data_json(&self) -> Value {
+        json!({
+            "conflictKey": self.conflict_key,
+            "kind": self.kind.as_str(),
+            "moreSpecificLane": self.more_specific_lane.as_str(),
+            "moreSpecificId": self.more_specific_id,
+            "lessSpecificLane": self.less_specific_lane.as_str(),
+            "lessSpecificId": self.less_specific_id,
+            "bothSurfaced": self.both_surfaced,
+            "moreSpecificOverrides": self.more_specific_overrides,
+        })
+    }
+}
+
+/// Surface cross-lane conflicts across workspace, team, and global.
+///
+/// Deterministic and insertion-order independent. Every pair of distinct
+/// lanes that share a `conflict_key` is classified. Same content hash →
+/// corroboration (more-specific wins, recorded); divergent content →
+/// contradiction (both surfaced, no silent resolution). Output is sorted by
+/// `(conflict_key, more_specific_id, less_specific_id, more_specific_lane,
+/// less_specific_lane)`.
+#[must_use]
+pub fn surface_precedence_conflicts(candidates: &[LaneCandidate]) -> Vec<PrecedenceConflict> {
+    let mut by_key: BTreeMap<&str, BTreeMap<MemoryLane, Vec<&LaneCandidate>>> = BTreeMap::new();
+    for candidate in candidates {
+        by_key
+            .entry(candidate.conflict_key.as_str())
+            .or_default()
+            .entry(candidate.lane)
+            .or_default()
+            .push(candidate);
+    }
+
+    let lanes = [MemoryLane::Workspace, MemoryLane::Team, MemoryLane::Global];
+    let mut out = Vec::new();
+    for (key, by_lane) in by_key {
+        for (left_index, left_lane) in lanes.iter().enumerate() {
+            for right_lane in lanes.iter().skip(left_index.saturating_add(1)) {
+                let Some(left_rows) = by_lane.get(left_lane) else {
+                    continue;
+                };
+                let Some(right_rows) = by_lane.get(right_lane) else {
+                    continue;
+                };
+                for left in left_rows {
+                    for right in right_rows {
+                        // Iteration order is workspace, team, global, so
+                        // `left_lane` is always more specific.
+                        let (more, less) = (*left, *right);
+                        let kind = if more.content_hash == less.content_hash {
+                            LaneConflictKind::Corroboration
+                        } else {
+                            LaneConflictKind::Contradiction
+                        };
+                        out.push(PrecedenceConflict {
+                            conflict_key: key.to_owned(),
+                            kind,
+                            more_specific_lane: more.lane,
+                            more_specific_id: more.id.clone(),
+                            less_specific_lane: less.lane,
+                            less_specific_id: less.id.clone(),
+                            both_surfaced: true,
+                            more_specific_overrides: matches!(
+                                kind,
+                                LaneConflictKind::Corroboration
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    out.sort_by(|left, right| {
+        left.conflict_key
+            .cmp(&right.conflict_key)
+            .then_with(|| left.more_specific_id.cmp(&right.more_specific_id))
+            .then_with(|| left.less_specific_id.cmp(&right.less_specific_id))
+            .then_with(|| {
+                left.more_specific_lane
+                    .as_str()
+                    .cmp(right.more_specific_lane.as_str())
+            })
+            .then_with(|| {
+                left.less_specific_lane
+                    .as_str()
+                    .cmp(right.less_specific_lane.as_str())
+            })
     });
     out
 }
@@ -889,6 +1039,91 @@ mod tests {
         ]);
         assert_eq!(forward, reversed, "conflict output must be deterministic");
         assert_eq!(forward.len(), 2, "one corroboration + one contradiction");
+    }
+
+    #[test]
+    fn lane_specificity_is_workspace_then_team_then_global() {
+        assert!(
+            lane_specificity_rank(MemoryLane::Workspace) < lane_specificity_rank(MemoryLane::Team)
+        );
+        assert!(
+            lane_specificity_rank(MemoryLane::Team) < lane_specificity_rank(MemoryLane::Global)
+        );
+    }
+
+    #[test]
+    fn identical_content_across_workspace_and_team_is_local_override() {
+        let conflicts = surface_precedence_conflicts(&[
+            candidate("ws1", MemoryLane::Workspace, "fmt-before-release", "h1"),
+            candidate("tm1", MemoryLane::Team, "fmt-before-release", "h1"),
+        ]);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].kind, LaneConflictKind::Corroboration);
+        assert_eq!(conflicts[0].more_specific_lane, MemoryLane::Workspace);
+        assert_eq!(conflicts[0].less_specific_lane, MemoryLane::Team);
+        assert!(conflicts[0].both_surfaced);
+        assert!(
+            conflicts[0].more_specific_overrides,
+            "local workspace wins on overlap with team"
+        );
+    }
+
+    #[test]
+    fn identical_content_across_team_and_global_is_team_override() {
+        let conflicts = surface_precedence_conflicts(&[
+            candidate("tm1", MemoryLane::Team, "fmt-before-release", "h1"),
+            candidate("gl1", MemoryLane::Global, "fmt-before-release", "h1"),
+        ]);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].more_specific_lane, MemoryLane::Team);
+        assert_eq!(conflicts[0].less_specific_lane, MemoryLane::Global);
+        assert!(conflicts[0].more_specific_overrides);
+    }
+
+    #[test]
+    fn workspace_team_contradiction_does_not_auto_resolve() {
+        let conflicts = surface_precedence_conflicts(&[
+            candidate(
+                "ws1",
+                MemoryLane::Workspace,
+                "rebase-policy",
+                "rebase-always",
+            ),
+            candidate("tm1", MemoryLane::Team, "rebase-policy", "rebase-never"),
+        ]);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].kind, LaneConflictKind::Contradiction);
+        assert!(conflicts[0].both_surfaced);
+        assert!(
+            !conflicts[0].more_specific_overrides,
+            "cross-lane contradiction must not silently pick a winner"
+        );
+    }
+
+    #[test]
+    fn three_lane_overlap_is_insertion_order_independent() {
+        let forward = surface_precedence_conflicts(&[
+            candidate("ws1", MemoryLane::Workspace, "k", "a"),
+            candidate("tm1", MemoryLane::Team, "k", "a"),
+            candidate("gl1", MemoryLane::Global, "k", "b"),
+        ]);
+        let reversed = surface_precedence_conflicts(&[
+            candidate("gl1", MemoryLane::Global, "k", "b"),
+            candidate("tm1", MemoryLane::Team, "k", "a"),
+            candidate("ws1", MemoryLane::Workspace, "k", "a"),
+        ]);
+        assert_eq!(forward, reversed);
+        assert_eq!(forward.len(), 3);
+        assert!(forward.iter().any(|conflict| conflict.more_specific_lane
+            == MemoryLane::Workspace
+            && conflict.less_specific_lane == MemoryLane::Team
+            && conflict.kind == LaneConflictKind::Corroboration));
+        assert!(
+            forward
+                .iter()
+                .any(|conflict| conflict.kind == LaneConflictKind::Contradiction
+                    && !conflict.more_specific_overrides)
+        );
     }
 
     #[test]

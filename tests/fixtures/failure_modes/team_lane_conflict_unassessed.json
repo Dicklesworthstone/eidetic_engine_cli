@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "team_lane_conflict_unassessed",
+  "introduced_by": {
+    "bead": "bd-tc-epic-qzk7o"
+  },
+  "surfaces": [
+    "pack"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Pack assembly saw a teammate row whose body is sealed or missing. The peer-conflict detector refuses to treat that as agreement and emits an unassessed posture instead of a false no-conflict.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember \"Always run cargo fmt before release.\" --workspace . --level procedural --kind rule"
+    ],
+    "invocation": "ee pack \"format before release\" --workspace . --memory-scope team --json"
+  },
+  "expected_emission": {
+    "code": "team_lane_conflict_unassessed",
+    "severity": "info",
+    "message_contains": [
+      "unassessed",
+      "body is missing or sealed"
+    ],
+    "repair_contains": "Fetch or reveal the team body"
+  }
+}

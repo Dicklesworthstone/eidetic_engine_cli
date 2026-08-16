@@ -105,6 +105,13 @@ future changelog pass expands those rows into full capability sections.
   `--memory-scope team` no longer admits unauthenticated
   `trust.team_members` nicknames from `.ee/config.toml`; only durable
   `team_members` rows count.
+  Team pack now applies ADR 0086 TC-D16 precedence (local workspace >
+  team > global) on overlap and keeps both sides of a cross-lane
+  contradiction. `detect_peer_memory_conflicts` annotates pack `why`
+  with hashed `peerConflict` markers. Contradictions emit
+  `team_lane_conflict_deferred` and get distinct diversity keys so
+  rank cannot hide one side. A sealed or missing teammate body emits
+  `team_lane_conflict_unassessed` instead of a false no-conflict.
   The inviter enrolls the accepted
   joiner at the join TCP source IP and the advertised `joinerHelloPort`
   (hello also carries `joinerWorkspaceId`) so EventFetch/BodyFetch

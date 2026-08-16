@@ -2070,9 +2070,10 @@ surface labeled by lane, and pack assembly never resolves cross-lane
 contradictions by rank. This mirrors bd-1bfwa's rule exactly, so the three
 lanes compose associatively. The
 SRR6.37 peer duplicate/near-duplicate/contradiction detector (wire shape
-pinned in `ee.peer_conflict.v1`, detector never implemented) is implemented
-here for team-synced rows; conflicts appear in `ee insights` and pack DNA-style
-explanations rather than being silently ranked away. Coordinate the
+pinned in `ee.peer_conflict.v1`) is implemented
+here for team-synced rows; conflicts appear in pack `why` / `degraded[]`
+(`team_lane_conflict_deferred`, `team_lane_conflict_unassessed`) and
+the shared `surface_precedence_conflicts` surface rather than being silently ranked away. Coordinate the
 `memory_in_scope_with_tags` chokepoint edits with bd-1bfwa.3 (same file) —
 the later implementer works from the then-current `main` and preserves the
 earlier change; the precedence constant lives in one place both cite.

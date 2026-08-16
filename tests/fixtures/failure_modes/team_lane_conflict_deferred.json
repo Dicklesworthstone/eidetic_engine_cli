@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "team_lane_conflict_deferred",
+  "introduced_by": {
+    "bead": "bd-tc-epic-qzk7o"
+  },
+  "surfaces": [
+    "pack"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Pack assembly found a local workspace memory and a teammate memory contradicting each other on the same subject. Neither side is silently dropped or resolved by rank: both stay in the candidate pool with teamLane and peerConflict markers.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember \"Always rebase in shared checkouts.\" --workspace . --level procedural --kind rule",
+      "ee remember \"Never rebase in shared checkouts.\" --workspace . --level procedural --kind rule --trust-class peer_human_attested"
+    ],
+    "invocation": "ee pack \"rebase policy\" --workspace . --memory-scope team --json"
+  },
+  "expected_emission": {
+    "code": "team_lane_conflict_deferred",
+    "severity": "info",
+    "message_contains": [
+      "lane contradiction detected",
+      "teamLane markers",
+      "not resolved by rank"
+    ],
+    "repair_contains": "tombstone or revise the stale lane row"
+  }
+}

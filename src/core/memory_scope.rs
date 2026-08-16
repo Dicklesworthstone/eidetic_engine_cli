@@ -1208,6 +1208,9 @@ impl MemoryScopeContext {
                 .current_agent
                 .as_deref()
                 .is_some_and(|agent| memory_producer_agent(memory).as_deref() == Some(agent)),
+            // Admission only. Overlap precedence vs the global lane is
+            // `crate::core::global_store::lane_specificity_rank` (ADR 0086
+            // TC-D16): local workspace > team > global.
             MemoryScope::Team => memory_producer_agent(memory).is_some_and(|producer| {
                 self.current_agent.as_deref() == Some(producer.as_str())
                     || self.team_members.contains(&producer)

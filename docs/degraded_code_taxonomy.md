@@ -202,6 +202,8 @@ Current conventions:
 | `focus` | `ee focus` passive focus-state degradation. |
 | `git` | Swarm brief Git source degradation. |
 | `global_lane_conflict_deferred` | info | bd-1bfwa.3 |
+| `team_lane_conflict_deferred` | info | bd-tc-epic-qzk7o (P4.4) |
+| `team_lane_conflict_unassessed` | info | bd-tc-epic-qzk7o (P4.4) |
 | `resume_no_session_evidence` | info | bd-resume-verb-v0f57 |
 | `retrieval_affinity_cold` | info | bd-3a1op.2 (ADR 0066) |
 | `suggest_links_insufficient_graph` | info | bd-3a1op.3 (ADR 0066) |
@@ -276,6 +278,12 @@ memory bodies in `sources[]`.
 | `search_unavailable` | status, dependency contract | Build-time: `frankensearch`. Response-time: index manifest missing. Split per E5. |
 
 ### `response_time` codes — stay in `degraded[]`
+
+#### Team lane conflicts (2)
+| Code | Severity (canonical) | Bead |
+|------|----------------------|------|
+| `team_lane_conflict_deferred` | info | bd-tc-epic-qzk7o (P4.4) |
+| `team_lane_conflict_unassessed` | info | bd-tc-epic-qzk7o (P4.4) |
 
 #### Cache hotset collection (13)
 | Code | Severity (canonical) | Bead |

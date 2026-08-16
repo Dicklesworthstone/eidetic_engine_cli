@@ -3000,6 +3000,7 @@ async fn run_context_pack_with_performance_inner(
         trace.filter_input_count = trace.filter_input_count.max(scope_filter_input_count);
         trace.filtered_count = trace.filtered_count.saturating_add(global_fan_in_filtered);
     }
+    apply_team_lane_pack_policy(&mut candidates, &global_store_memory_ids, &mut degraded);
 
     let redaction_filter_input_count =
         candidate_filter_input_count.saturating_add(trace.focus_candidate_count);
@@ -5298,6 +5299,362 @@ fn push_global_lane_conflict_degradation(
                 .to_string(),
         ),
     );
+}
+
+const TEAM_LANE_CONFLICT_DEFERRED_CODE: &str = "team_lane_conflict_deferred";
+const TEAM_LANE_CONFLICT_UNASSESSED_CODE: &str = "team_lane_conflict_unassessed";
+const TEAM_LANE_CORROBORATION_DEMOTE: f32 = 0.85;
+const TEAM_PEER_CONFLICT_OBSERVED_AT: &str = "1970-01-01T00:00:00Z";
+
+fn apply_team_lane_pack_policy(
+    candidates: &mut [PackCandidate],
+    global_store_memory_ids: &BTreeSet<String>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) {
+    if candidates.len() < 2 {
+        return;
+    }
+    let lane_candidates = team_lane_candidates(candidates, global_store_memory_ids);
+    if !lane_candidates
+        .iter()
+        .any(|candidate| candidate.lane == crate::core::global_store::MemoryLane::Team)
+    {
+        return;
+    }
+
+    let conflicts = crate::core::global_store::surface_precedence_conflicts(&lane_candidates);
+    annotate_precedence_conflicts(candidates, &conflicts);
+    isolate_contradiction_diversity(candidates, &conflicts);
+    demote_less_specific_corroborations(candidates, &conflicts);
+
+    let unassessed = apply_team_peer_conflict_detector(candidates, &lane_candidates);
+    push_team_lane_conflict_degradation(degraded, &conflicts);
+    if unassessed > 0 {
+        let suffix = if unassessed == 1 { "" } else { "s" };
+        push_degradation(
+            degraded,
+            TEAM_LANE_CONFLICT_UNASSESSED_CODE,
+            ContextResponseSeverity::Info,
+            format!(
+                "Team-lane peer conflict detector left {unassessed} memory{suffix} unassessed because the body is missing or sealed."
+            ),
+            Some(
+                "Fetch or reveal the team body before treating absence of a conflict as agreement."
+                    .to_string(),
+            ),
+        );
+    }
+}
+
+fn team_lane_candidates(
+    candidates: &[PackCandidate],
+    global_store_memory_ids: &BTreeSet<String>,
+) -> Vec<crate::core::global_store::LaneCandidate> {
+    candidates
+        .iter()
+        .map(|candidate| crate::core::global_store::LaneCandidate {
+            lane: pack_candidate_memory_lane(candidate, global_store_memory_ids),
+            conflict_key: global_lane_conflict_key(candidate),
+            content_hash: global_lane_content_hash(&candidate.content),
+            id: candidate.memory_id.to_string(),
+        })
+        .collect()
+}
+
+fn pack_candidate_memory_lane(
+    candidate: &PackCandidate,
+    global_store_memory_ids: &BTreeSet<String>,
+) -> crate::core::global_store::MemoryLane {
+    let id = candidate.memory_id.to_string();
+    if global_store_memory_ids.contains(&id) {
+        crate::core::global_store::MemoryLane::Global
+    } else if candidate.trust.class == TrustClass::PeerHumanAttested {
+        crate::core::global_store::MemoryLane::Team
+    } else {
+        crate::core::global_store::MemoryLane::Workspace
+    }
+}
+
+fn annotate_precedence_conflicts(
+    candidates: &mut [PackCandidate],
+    conflicts: &[crate::core::global_store::PrecedenceConflict],
+) {
+    if conflicts.is_empty() {
+        return;
+    }
+    let mut by_memory_id: BTreeMap<String, Vec<&crate::core::global_store::PrecedenceConflict>> =
+        BTreeMap::new();
+    for conflict in conflicts {
+        by_memory_id
+            .entry(conflict.more_specific_id.clone())
+            .or_default()
+            .push(conflict);
+        by_memory_id
+            .entry(conflict.less_specific_id.clone())
+            .or_default()
+            .push(conflict);
+    }
+    for candidate in candidates {
+        let memory_id = candidate.memory_id.to_string();
+        let Some(conflicts) = by_memory_id.get(&memory_id) else {
+            continue;
+        };
+        let markers = conflicts
+            .iter()
+            .map(|conflict| {
+                format!(
+                    "key={} kind={} moreSpecificLane={} moreSpecificId={} lessSpecificLane={} lessSpecificId={} bothSurfaced={} moreSpecificOverrides={}",
+                    conflict.conflict_key,
+                    conflict.kind.as_str(),
+                    conflict.more_specific_lane.as_str(),
+                    conflict.more_specific_id,
+                    conflict.less_specific_lane.as_str(),
+                    conflict.less_specific_id,
+                    conflict.both_surfaced,
+                    conflict.more_specific_overrides,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        candidate.why = format!("{} teamLane={markers}.", candidate.why);
+    }
+}
+
+fn isolate_contradiction_diversity(
+    candidates: &mut [PackCandidate],
+    conflicts: &[crate::core::global_store::PrecedenceConflict],
+) {
+    let contradiction_ids = conflicts
+        .iter()
+        .filter(|conflict| {
+            matches!(
+                conflict.kind,
+                crate::core::global_store::LaneConflictKind::Contradiction
+            )
+        })
+        .flat_map(|conflict| {
+            [
+                conflict.more_specific_id.as_str(),
+                conflict.less_specific_id.as_str(),
+            ]
+        })
+        .collect::<BTreeSet<_>>();
+    if contradiction_ids.is_empty() {
+        return;
+    }
+    for candidate in candidates {
+        let memory_id = candidate.memory_id.to_string();
+        if contradiction_ids.contains(memory_id.as_str()) {
+            candidate.diversity_key = Some(format!("lane-conflict:{memory_id}"));
+        }
+    }
+}
+
+fn demote_less_specific_corroborations(
+    candidates: &mut [PackCandidate],
+    conflicts: &[crate::core::global_store::PrecedenceConflict],
+) {
+    let demote_ids = conflicts
+        .iter()
+        .filter(|conflict| conflict.more_specific_overrides)
+        .map(|conflict| conflict.less_specific_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if demote_ids.is_empty() {
+        return;
+    }
+    for candidate in candidates {
+        if !demote_ids.contains(candidate.memory_id.to_string().as_str()) {
+            continue;
+        }
+        let demoted = candidate.relevance.into_inner() * TEAM_LANE_CORROBORATION_DEMOTE;
+        if let Ok(score) = UnitScore::parse(demoted) {
+            candidate.relevance = score;
+        }
+    }
+}
+
+fn apply_team_peer_conflict_detector(
+    candidates: &mut [PackCandidate],
+    lane_candidates: &[crate::core::global_store::LaneCandidate],
+) -> usize {
+    let mut unassessed = 0_usize;
+    let mut facts = Vec::new();
+    for candidate in candidates.iter() {
+        if !pack_candidate_body_assessable(candidate) {
+            if matches!(
+                pack_candidate_lane_from_id(&candidate.memory_id.to_string(), lane_candidates),
+                Some(crate::core::global_store::MemoryLane::Team)
+            ) {
+                unassessed = unassessed.saturating_add(1);
+            }
+            continue;
+        }
+        let memory_id = candidate.memory_id.to_string();
+        facts.push(TeamPeerConflictFact {
+            memory_id: memory_id.clone(),
+            memory_hash: crate::core::memory::peer_conflict_hash("memory", &memory_id),
+            content_hash: crate::core::memory::peer_conflict_content_hash(&candidate.content),
+            content: candidate.content.clone(),
+            simhash: crate::search::simhash::simhash_128(&candidate.content),
+            trust_class: candidate.trust.class.as_str().to_owned(),
+            lane: pack_candidate_lane_from_id(&memory_id, lane_candidates)
+                .unwrap_or(crate::core::global_store::MemoryLane::Workspace),
+        });
+    }
+
+    let workspace_facts = facts
+        .iter()
+        .filter(|fact| fact.lane == crate::core::global_store::MemoryLane::Workspace)
+        .collect::<Vec<_>>();
+    let team_facts = facts
+        .iter()
+        .filter(|fact| fact.lane == crate::core::global_store::MemoryLane::Team)
+        .collect::<Vec<_>>();
+    if workspace_facts.is_empty() || team_facts.is_empty() {
+        return unassessed;
+    }
+
+    let workspace_hash = crate::core::memory::peer_conflict_hash("workspace", "pack");
+    let options = crate::core::memory::PeerConflictDetectionOptions::new(
+        &workspace_hash,
+        TEAM_PEER_CONFLICT_OBSERVED_AT,
+    );
+    let mut events_by_id: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut contradiction_ids = BTreeSet::new();
+    for primary in &workspace_facts {
+        let primary_view = crate::core::memory::PeerConflictMemory::new(
+            &primary.memory_hash,
+            &primary.content_hash,
+            &primary.content,
+            primary.simhash,
+            &primary.trust_class,
+        );
+        let peer_views = team_facts
+            .iter()
+            .map(|peer| {
+                crate::core::memory::PeerConflictMemory::new(
+                    &peer.memory_hash,
+                    &peer.content_hash,
+                    &peer.content,
+                    peer.simhash,
+                    &peer.trust_class,
+                )
+            })
+            .collect::<Vec<_>>();
+        for event in
+            crate::core::memory::detect_peer_memory_conflicts(&primary_view, &peer_views, &options)
+        {
+            let marker = format!(
+                "kind={} verdict={} policy={}",
+                event.kind, event.detector_verdict, event.rendering_policy
+            );
+            events_by_id
+                .entry(primary.memory_id.clone())
+                .or_default()
+                .push(marker.clone());
+            if event.detector_verdict == "contradiction" {
+                contradiction_ids.insert(primary.memory_id.clone());
+            }
+            for peer in &team_facts {
+                if event
+                    .peer_memory_hashes
+                    .iter()
+                    .any(|hash| hash == &peer.memory_hash)
+                {
+                    events_by_id
+                        .entry(peer.memory_id.clone())
+                        .or_default()
+                        .push(marker.clone());
+                    if event.detector_verdict == "contradiction" {
+                        contradiction_ids.insert(peer.memory_id.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    for candidate in candidates.iter_mut() {
+        let memory_id = candidate.memory_id.to_string();
+        if let Some(markers) = events_by_id.get(&memory_id) {
+            let joined = markers.join("; ");
+            candidate.why = format!("{} peerConflict={joined}.", candidate.why);
+        }
+        if contradiction_ids.contains(&memory_id) {
+            candidate.diversity_key = Some(format!("lane-conflict:{memory_id}"));
+        }
+    }
+    unassessed
+}
+
+fn pack_candidate_lane_from_id(
+    memory_id: &str,
+    lane_candidates: &[crate::core::global_store::LaneCandidate],
+) -> Option<crate::core::global_store::MemoryLane> {
+    lane_candidates
+        .iter()
+        .find(|candidate| candidate.id == memory_id)
+        .map(|candidate| candidate.lane)
+}
+
+fn pack_candidate_body_assessable(candidate: &PackCandidate) -> bool {
+    let content = candidate.content.trim();
+    !content.is_empty()
+        && content != crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+        && !content.eq_ignore_ascii_case("[metadata-only]")
+        && !content.starts_with("[body unavailable]")
+}
+
+fn push_team_lane_conflict_degradation(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    conflicts: &[crate::core::global_store::PrecedenceConflict],
+) {
+    let contradiction_keys = conflicts
+        .iter()
+        .filter(|conflict| {
+            matches!(
+                conflict.kind,
+                crate::core::global_store::LaneConflictKind::Contradiction
+            )
+        })
+        .map(|conflict| conflict.conflict_key.clone())
+        .collect::<BTreeSet<_>>();
+    if contradiction_keys.is_empty() {
+        return;
+    }
+    let keys = contradiction_keys
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let subject_suffix = if contradiction_keys.len() == 1 {
+        ""
+    } else {
+        "s"
+    };
+    push_degradation(
+        degraded,
+        TEAM_LANE_CONFLICT_DEFERRED_CODE,
+        ContextResponseSeverity::Info,
+        format!(
+            "Team/workspace/global lane contradiction detected for {} subject{subject_suffix} ({keys}); both sides remain in the pack candidate pool with teamLane markers and are not resolved by rank.",
+            contradiction_keys.len(),
+        ),
+        Some(
+            "Review the conflicting local and teammate memories and tombstone or revise the stale lane row."
+                .to_string(),
+        ),
+    );
+}
+
+struct TeamPeerConflictFact {
+    memory_id: String,
+    memory_hash: String,
+    content_hash: String,
+    content: String,
+    simhash: crate::search::simhash::SimHash128,
+    trust_class: String,
+    lane: crate::core::global_store::MemoryLane,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -12020,7 +12377,8 @@ mod tests {
         ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponseDegradation,
         ContextResponseSeverity, PACK_COMMAND, PackAssemblyOptions, PackCandidate,
         PackCandidateInput, PackProvenance, PackResourceProfile, PackScoreBreakdown, PackSection,
-        TokenBudget, assemble_draft_with_profile, assemble_draft_with_profile_and_options,
+        PackTrustSignal, TokenBudget, assemble_draft_with_profile,
+        assemble_draft_with_profile_and_options,
     };
 
     #[test]
@@ -13326,6 +13684,133 @@ mod tests {
             degraded
                 .iter()
                 .any(|entry| entry.code == "global_lane_conflict_deferred")
+        );
+        Ok(())
+    }
+
+    fn team_policy_candidate(
+        seed: u128,
+        content: &str,
+        estimated_tokens: u32,
+    ) -> Result<PackCandidate, String> {
+        Ok(
+            global_policy_candidate(seed, content, estimated_tokens)?.with_trust_signal(
+                PackTrustSignal::new(
+                    TrustClass::PeerHumanAttested,
+                    Some("agent:Analysts; produced_at=2026-08-16T00:00:00Z".to_owned()),
+                ),
+            ),
+        )
+    }
+
+    #[test]
+    fn team_lane_pack_policy_keeps_and_marks_cross_lane_contradiction() -> Result<(), String> {
+        let workspace = global_policy_candidate(210, "Always rebase in shared checkouts.", 10)?;
+        let team = team_policy_candidate(211, "Never rebase in shared checkouts.", 10)?;
+        let workspace_id = workspace.memory_id.to_string();
+        let team_id = team.memory_id.to_string();
+        let mut candidates = vec![workspace, team];
+        let mut degraded = Vec::new();
+
+        super::apply_team_lane_pack_policy(&mut candidates, &BTreeSet::new(), &mut degraded);
+
+        assert_eq!(candidates.len(), 2, "contradiction must keep both sides");
+        let workspace_candidate = candidates
+            .iter()
+            .find(|candidate| candidate.memory_id.to_string() == workspace_id)
+            .ok_or_else(|| "workspace candidate missing".to_string())?;
+        let team_candidate = candidates
+            .iter()
+            .find(|candidate| candidate.memory_id.to_string() == team_id)
+            .ok_or_else(|| "team candidate missing".to_string())?;
+        assert!(
+            workspace_candidate.why.contains("teamLane=")
+                && workspace_candidate.why.contains("kind=contradiction")
+                && workspace_candidate
+                    .why
+                    .contains("moreSpecificOverrides=false"),
+            "workspace contradiction marker: {}",
+            workspace_candidate.why
+        );
+        assert!(
+            team_candidate.why.contains("teamLane=")
+                && team_candidate.why.contains("kind=contradiction"),
+            "team contradiction marker: {}",
+            team_candidate.why
+        );
+        assert!(
+            workspace_candidate.why.contains("peerConflict=")
+                && workspace_candidate.why.contains("verdict=contradiction"),
+            "peer detector must label the inversion: {}",
+            workspace_candidate.why
+        );
+        assert_ne!(
+            workspace_candidate.diversity_key, team_candidate.diversity_key,
+            "contradiction sides must not share a diversity key"
+        );
+        assert!(
+            degraded
+                .iter()
+                .any(|entry| entry.code == "team_lane_conflict_deferred")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn team_lane_pack_policy_records_local_override_on_overlap() -> Result<(), String> {
+        let workspace = global_policy_candidate(220, "Run cargo fmt before release.", 10)?;
+        let team = team_policy_candidate(221, "Run cargo fmt before release.", 10)?;
+        let workspace_relevance = workspace.relevance.into_inner();
+        let team_id = team.memory_id.to_string();
+        let mut candidates = vec![workspace, team];
+        let mut degraded = Vec::new();
+
+        super::apply_team_lane_pack_policy(&mut candidates, &BTreeSet::new(), &mut degraded);
+
+        let team_candidate = candidates
+            .iter()
+            .find(|candidate| candidate.memory_id.to_string() == team_id)
+            .ok_or_else(|| "team candidate missing".to_string())?;
+        assert!(
+            team_candidate.why.contains("kind=corroboration")
+                && team_candidate.why.contains("moreSpecificOverrides=true"),
+            "overlap must record the local override: {}",
+            team_candidate.why
+        );
+        assert!(
+            team_candidate.relevance.into_inner() < workspace_relevance,
+            "less-specific overlap must lose rank to the local row"
+        );
+        assert!(
+            !degraded
+                .iter()
+                .any(|entry| entry.code == "team_lane_conflict_deferred"),
+            "overlap is not a contradiction"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn team_lane_pack_policy_does_not_treat_missing_body_as_agreement() -> Result<(), String> {
+        let workspace = global_policy_candidate(230, "Always run cargo fmt before release.", 10)?;
+        let team = team_policy_candidate(231, crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT, 10)?;
+        let mut candidates = vec![workspace, team];
+        let mut degraded = Vec::new();
+
+        super::apply_team_lane_pack_policy(&mut candidates, &BTreeSet::new(), &mut degraded);
+
+        assert!(
+            degraded
+                .iter()
+                .any(|entry| entry.code == "team_lane_conflict_unassessed"
+                    && entry.message.contains("unassessed")),
+            "missing team body must stay unassessed: {degraded:?}"
+        );
+        assert!(
+            !degraded
+                .iter()
+                .any(|entry| entry.code == "team_lane_conflict_deferred"),
+            "sealed body must not invent a contradiction"
         );
         Ok(())
     }
