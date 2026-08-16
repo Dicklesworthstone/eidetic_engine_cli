@@ -4306,52 +4306,24 @@ impl ContextResponseData {
     }
 }
 
-fn team_pack_attribution(trust: &PackTrustSignal) -> Option<(String, String)> {
-    if trust.class != TrustClass::PeerHumanAttested {
-        return None;
-    }
-    let subclass = trust.subclass.as_deref()?;
-    let member = subclass
-        .split([';', ',', '|'])
-        .map(str::trim)
-        .find_map(|part| {
-            part.strip_prefix("agent:")
-                .or_else(|| part.strip_prefix("agent="))
-        })
-        .map(str::trim)
-        .filter(|name| !name.is_empty())?
-        .to_owned();
-    let produced_at = subclass
-        .split([';', ',', '|'])
-        .map(str::trim)
-        .find_map(|part| {
-            part.strip_prefix("produced_at=")
-                .or_else(|| part.strip_prefix("producedAt="))
-        })
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?
-        .to_owned();
-    Some((member, produced_at))
+fn team_pack_provenance(
+    trust: &PackTrustSignal,
+) -> Option<crate::core::memory_scope::TeamProvenance> {
+    crate::core::memory_scope::team_provenance_from_trust(
+        trust.class.as_str(),
+        trust.subclass.as_deref(),
+        None,
+    )
 }
 
 fn team_pack_attribution_suffix(trust: &PackTrustSignal) -> Option<String> {
-    let (member, produced_at) = team_pack_attribution(trust)?;
-    Some(format!("· from {member} · {produced_at}"))
+    Some(team_pack_provenance(trust)?.compact_suffix())
 }
 
 /// JSON `teamProvenance` for pack items. Same block search emits on hits.
 #[must_use]
 pub fn team_pack_provenance_json(trust: &PackTrustSignal) -> Option<String> {
-    let (member, produced_at) = team_pack_attribution(trust)?;
-    serde_json::to_string(&serde_json::json!({
-        "schema": "ee.team.provenance.v1",
-        "memberDisplayName": member,
-        "projectName": null,
-        "originTrustClass": "peer_human_attested",
-        "producedAt": produced_at,
-        "originTimeAssurance": "member_attested",
-    }))
-    .ok()
+    serde_json::to_string(&team_pack_provenance(trust)?.to_json()).ok()
 }
 
 /// Render a context response as the canonical Markdown prompt fragment.
@@ -9458,8 +9430,20 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
         assert_eq!(value["schema"], "ee.team.provenance.v1");
         assert_eq!(value["memberDisplayName"], "Priya");
+        assert_eq!(value["projectName"], serde_json::Value::Null);
         assert_eq!(value["producedAt"], "2026-07-30T14:02:00Z");
         assert_eq!(value["originTimeAssurance"], "member_attested");
+        let bound = PackTrustSignal::new(
+            crate::models::TrustClass::PeerHumanAttested,
+            Some("agent:Priya; produced_at=2026-07-30T14:02:00Z; project=acme-analysis".to_owned()),
+        );
+        assert_eq!(
+            super::team_pack_attribution_suffix(&bound).as_deref(),
+            Some("· from Priya / acme-analysis · 2026-07-30T14:02:00Z")
+        );
+        let bound_json = super::team_pack_provenance_json(&bound).expect("pack json");
+        let bound_value: serde_json::Value = serde_json::from_str(&bound_json).expect("parse");
+        assert_eq!(bound_value["projectName"], "acme-analysis");
     }
 
     #[test]
