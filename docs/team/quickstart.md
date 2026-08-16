@@ -53,6 +53,7 @@ ee team activity --as-of "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --workspace . --json
 ee team activity --project acme-analysis --as-of "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --workspace . --json
 ee team activity --member Priya --as-of "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --workspace . --json
 ee team activity --since 2026-08-13T00:00:00Z --as-of "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --workspace . --json
+ee team activity --limit 100 --cursor "$NEXT" --as-of "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --workspace . --json
 # search/pack carry teamProvenance; activity lists member + project + origin time + bodyAvailable
 ```
 
