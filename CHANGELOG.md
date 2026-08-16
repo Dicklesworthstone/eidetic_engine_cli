@@ -97,6 +97,11 @@ future changelog pass expands those rows into full capability sections.
   admits teammate text without a hand-edited `trust.team_members`
   config. `persist_team_member` is idempotent on origin node so
   enroll-then-join does not insert a duplicate.
+  `ee team join` now runs the first metadata sync round after
+  membership persist and reports `firstSync` (`complete`,
+  `importedEvents`). A one-shot invite waiter is gone before that
+  round, so `complete` stays false until `ee mesh hello-responder
+  run` or `ee mesh sync --once` is listening.
   The inviter enrolls the accepted
   joiner at the join TCP source IP and the advertised `joinerHelloPort`
   (hello also carries `joinerWorkspaceId`) so EventFetch/BodyFetch

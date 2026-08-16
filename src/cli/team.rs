@@ -2574,11 +2574,16 @@ where
     ) {
         Ok(report) => {
             let human = format!(
-                "Joined {}: {}\n  team_id: {}\n  origin_node_id: {}\nNext:\n  ee team status --workspace . --json\n  ee mesh hello-responder run --workspace . --json\n  ee mesh sync --once --workspace . --json\n",
+                "Joined {}: {}\n  team_id: {}\n  origin_node_id: {}\n  first_sync: {}\nNext:\n  ee team status --workspace . --json\n  ee mesh hello-responder run --workspace . --json\n  ee mesh sync --once --workspace . --json\n",
                 report.team.display_name,
                 if report.joined { "ok" } else { "already local" },
                 report.team.team_id,
-                report.team.origin_node_id
+                report.team.origin_node_id,
+                if report.first_sync.complete {
+                    format!("{} events", report.first_sync.imported_events)
+                } else {
+                    "incomplete — run ee mesh sync --once".to_owned()
+                }
             );
             write_team_report(cli, &report, &human, stdout)
         }

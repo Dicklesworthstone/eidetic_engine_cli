@@ -11,16 +11,16 @@ use crate::core::tailscale_probe::{
     TailnetOwnerDisposition, TailscaleLocalReport, TailscaleUserProfile, evaluate_tailnet_owner,
 };
 use crate::db::{
-    CreateMemoryInput, CreateSearchIndexJobInput, DbConnection, InsertTeamHistoryProjectionInput,
-    InsertTeamMemberInput, InsertTeamMemberNodeInput, InsertTeamPendingInviteInput,
-    InsertTeamProjectInput, InsertTeamRemovalAckInput, SearchIndexJobType, StoredMeshOriginEvent,
-    StoredTeamMember, StoredTeamMemberIdentity, StoredTeamProject,
-    UpsertMeshBodyCacheMetadataInput, UpsertMeshPeerInput, UpsertTeamAdmissionPeerInput,
-    UpsertTeamJoinAttemptInput,
+    CreateMemoryInput, CreateSearchIndexJobInput, DbConnection, InsertMeshImportLedgerEventInput,
+    InsertTeamHistoryProjectionInput, InsertTeamMemberInput, InsertTeamMemberNodeInput,
+    InsertTeamPendingInviteInput, InsertTeamProjectInput, InsertTeamRemovalAckInput,
+    SearchIndexJobType, StoredMeshOriginEvent, StoredTeamMember, StoredTeamMemberIdentity,
+    StoredTeamProject, UpsertMeshBodyCacheMetadataInput, UpsertMeshPeerInput,
+    UpsertTeamAdmissionPeerInput, UpsertTeamJoinAttemptInput,
 };
 use crate::mesh::bootstrap_envelope::{
-    BOOTSTRAP_DECLINE_SCHEMA_V1, BootstrapCapability, BootstrapDeclineV1, decode_envelope,
-    encode_envelope, read_std_framed, write_std_framed,
+    BOOTSTRAP_DECLINE_SCHEMA_V1, BootstrapCapability, BootstrapDeclineV1, SyncRoundRequest,
+    decode_envelope, encode_envelope, exchange_live_mesh_round, read_std_framed, write_std_framed,
 };
 use crate::mesh::hello_responder::configured_hello_port;
 use crate::mesh::idp::{
@@ -33,10 +33,10 @@ use crate::mesh::idp::{
     verify_compact_jwt_with_jwks,
 };
 use crate::mesh::origin_stream::{
-    Ed25519OriginSigner, InboundOriginEvent, ManifestEventPayload, MemoryEventOperation,
-    MemoryEventPayload, OriginAppendRequest, OriginEventPayload, OriginSignatureVerifier,
-    OriginSigner, OriginStreamError, append_origin_event, body_commitment, parse_stored_payload,
-    verify_ed25519_origin_signature,
+    Ed25519OriginSigner, InboundOriginEvent, IngestDisposition, ManifestEventPayload,
+    MemoryEventOperation, MemoryEventPayload, OriginAppendRequest, OriginEventPayload,
+    OriginSignatureVerifier, OriginSigner, OriginStreamError, append_origin_event, body_commitment,
+    ingest_origin_event, parse_stored_payload, verify_ed25519_origin_signature,
 };
 
 pub const TEAM_CREATE_SCHEMA_V1: &str = "ee.team.create.v1";
@@ -1046,11 +1046,29 @@ pub struct TeamJoinGrantedV1 {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TeamJoinFirstSync {
+    pub complete: bool,
+    pub imported_events: u32,
+}
+
+impl TeamJoinFirstSync {
+    #[must_use]
+    pub const fn incomplete() -> Self {
+        Self {
+            complete: false,
+            imported_events: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TeamJoinReport {
     pub schema: &'static str,
     pub command: &'static str,
     pub joined: bool,
     pub team: TeamRecord,
+    pub first_sync: TeamJoinFirstSync,
     pub mesh_primitives: Vec<&'static str>,
 }
 
@@ -6014,11 +6032,11 @@ pub fn join_team_with_code_on_store(
     if let Some(attempt) = connection
         .get_team_join_attempt(&parsed.invite_id)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?
-        && attempt.phase == "granted"
+        && (attempt.phase == "granted" || attempt.phase == "first_sync_complete")
         && let Some(granted_json) = attempt.granted_json.as_deref()
         && let Ok(granted) = serde_json::from_str::<TeamJoinGrantedV1>(granted_json)
     {
-        return persist_granted_join_with_store(
+        let report = persist_granted_join_with_store(
             connection,
             workspace_id,
             &granted,
@@ -6027,6 +6045,26 @@ pub fn join_team_with_code_on_store(
             produced_at,
             workspace_path,
             Some(parsed.inviter_verifying_key.as_str()).filter(|key| key.len() == 64),
+        )?;
+        if attempt.phase == "first_sync_complete" {
+            return Ok(TeamJoinReport {
+                first_sync: TeamJoinFirstSync {
+                    complete: true,
+                    imported_events: 0,
+                },
+                ..report
+            });
+        }
+        return complete_join_first_sync(
+            connection,
+            workspace_id,
+            address,
+            &parsed.invite_id,
+            &granted,
+            &attempt.joiner_node_id,
+            produced_at,
+            timeout,
+            report,
         );
     }
     if parsed.inviter_verifying_key.len() != 64 {
@@ -6172,7 +6210,7 @@ pub fn join_team_with_code_on_store(
             updated_at: produced_at.to_owned(),
         })
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
-    persist_granted_join_with_store(
+    let report = persist_granted_join_with_store(
         connection,
         workspace_id,
         &granted,
@@ -6181,7 +6219,205 @@ pub fn join_team_with_code_on_store(
         produced_at,
         workspace_path,
         Some(parsed.inviter_verifying_key.as_str()).filter(|key| key.len() == 64),
+    )?;
+    complete_join_first_sync(
+        connection,
+        workspace_id,
+        address,
+        &parsed.invite_id,
+        &granted,
+        &joiner_node_id,
+        produced_at,
+        timeout,
+        report,
     )
+}
+
+fn complete_join_first_sync(
+    connection: &DbConnection,
+    workspace_id: &str,
+    address: std::net::SocketAddr,
+    invite_id: &str,
+    granted: &TeamJoinGrantedV1,
+    joiner_node_id: &str,
+    produced_at: &str,
+    timeout: std::time::Duration,
+    mut report: TeamJoinReport,
+) -> Result<TeamJoinReport, OriginStreamError> {
+    match run_join_first_sync(
+        connection,
+        workspace_id,
+        address,
+        &granted.team_id,
+        &granted.origin_node_id,
+        joiner_node_id,
+        timeout,
+    ) {
+        Ok(imported) => {
+            report.first_sync = TeamJoinFirstSync {
+                complete: true,
+                imported_events: imported,
+            };
+            if !report
+                .mesh_primitives
+                .iter()
+                .any(|item| *item == "mesh_sync")
+            {
+                report.mesh_primitives.push("mesh_sync");
+            }
+            let granted_json = serde_json::to_string(granted)
+                .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+            let existing = connection
+                .get_team_join_attempt(invite_id)
+                .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+            connection
+                .upsert_team_join_attempt(&UpsertTeamJoinAttemptInput {
+                    invite_id: invite_id.to_owned(),
+                    team_id: granted.team_id.clone(),
+                    joiner_node_id: joiner_node_id.to_owned(),
+                    joiner_nonce: existing
+                        .as_ref()
+                        .map(|attempt| attempt.joiner_nonce.clone())
+                        .unwrap_or_default(),
+                    inviter_nonce: existing.and_then(|attempt| attempt.inviter_nonce),
+                    phase: "first_sync_complete".to_owned(),
+                    granted_json: Some(granted_json),
+                    updated_at: produced_at.to_owned(),
+                })
+                .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+        }
+        Err(_) => {}
+    }
+    Ok(report)
+}
+
+fn run_join_first_sync(
+    connection: &DbConnection,
+    workspace_id: &str,
+    address: std::net::SocketAddr,
+    team_id: &str,
+    origin_node_id: &str,
+    joiner_node_id: &str,
+    timeout: std::time::Duration,
+) -> Result<u32, OriginStreamError> {
+    let request = crate::mesh::hello::build_request(
+        "team-join-first-sync",
+        format!("nodekey:{joiner_node_id}"),
+        env!("CARGO_PKG_VERSION"),
+        vec![workspace_id.to_owned()],
+        vec!["hello".to_owned(), "sync".to_owned()],
+        Vec::new(),
+    );
+    let payload_bytes = crate::mesh::hello::serialize_within_budget(&request)
+        .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+    let payload = serde_json::from_slice(&payload_bytes)
+        .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+    let (_, sync) = exchange_live_mesh_round(
+        address,
+        timeout,
+        payload,
+        &SyncRoundRequest::new(Vec::new(), 0, 32),
+    )
+    .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+    Ok(apply_join_first_sync_events(
+        connection,
+        workspace_id,
+        team_id,
+        origin_node_id,
+        &sync.events,
+    ))
+}
+
+fn apply_join_first_sync_events(
+    connection: &DbConnection,
+    workspace_id: &str,
+    team_id: &str,
+    origin_node_id: &str,
+    events: &[crate::mesh::bootstrap_envelope::SyncRoundEvent],
+) -> u32 {
+    let producer_peer_id = team_pair_peer_handle(team_id, origin_node_id);
+    let own_origin = connection
+        .list_all_team_members()
+        .ok()
+        .and_then(|members| {
+            members
+                .into_iter()
+                .find(|member| member.is_self)
+                .map(|member| member.origin_node_id)
+        })
+        .unwrap_or_default();
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut imported = 0_u32;
+    for event in events {
+        if matches!(
+            origin_node_is_active_member(connection, &event.origin_node_id),
+            Ok(Some(false))
+        ) {
+            continue;
+        }
+        let inbound = serde_json::from_str::<InboundOriginEvent>(&event.payload_json).ok();
+        if let Some(inbound) = inbound.as_ref() {
+            let verifier = TeamMemberKeyVerifier { connection };
+            match ingest_origin_event(
+                connection,
+                &verifier,
+                &own_origin,
+                &std::collections::BTreeSet::new(),
+                inbound,
+                now.as_str(),
+            ) {
+                Ok(IngestDisposition::Applied) => {}
+                Ok(_) | Err(_) => continue,
+            }
+            let _ = project_inbound_team_memory(connection, workspace_id, inbound);
+        }
+        let parsed = serde_json::from_str::<serde_json::Value>(&event.payload_json).ok();
+        let raw_event_id = parsed
+            .as_ref()
+            .and_then(|value| value.get("eventId").and_then(serde_json::Value::as_str))
+            .unwrap_or(event.event_hash.as_str());
+        let suffix = event.event_hash.trim_start_matches("blake3:");
+        let compact = suffix.chars().take(24).collect::<String>();
+        let event_id = if raw_event_id.starts_with("mesh_evt_") {
+            raw_event_id.to_owned()
+        } else {
+            format!("mesh_evt_{compact}")
+        };
+        if connection
+            .insert_mesh_import_ledger_event(&InsertMeshImportLedgerEventInput {
+                workspace_id: workspace_id.to_owned(),
+                event_id,
+                origin_node_id: event.origin_node_id.clone(),
+                origin_workspace_id: event.origin_workspace_id.clone(),
+                producer_peer_id: Some(producer_peer_id.to_owned()),
+                seq: event.seq.max(1),
+                prev_event_hash: parsed.as_ref().and_then(|value| {
+                    value
+                        .get("prevEventHash")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                }),
+                event_hash: event.event_hash.clone(),
+                event_kind: "create".to_owned(),
+                logical_memory_id: format!("mem_{compact}"),
+                content_hash: event.event_hash.clone(),
+                material_lane: "metadata".to_owned(),
+                redaction_class: "metadataOnly".to_owned(),
+                trust_lane: "peerAgent".to_owned(),
+                import_decision: "allow".to_owned(),
+                local_memory_id: None,
+                body_cache_key: None,
+                policy_failure_surface_json: None,
+                policy_decision_json: None,
+                event_json: event.payload_json.clone(),
+                imported_at: None,
+            })
+            .is_ok()
+        {
+            imported = imported.saturating_add(1);
+        }
+    }
+    imported
 }
 
 /// Persist a granted join as a local `teamJoined` origin event.
@@ -6229,6 +6465,7 @@ pub fn persist_granted_join_with_store(
             command: "team join",
             joined: false,
             team,
+            first_sync: TeamJoinFirstSync::incomplete(),
             mesh_primitives: vec!["ee.team.manifest_event.v1"],
         });
     }
@@ -6305,6 +6542,7 @@ pub fn persist_granted_join_with_store(
             seq: appended.seq,
             produced_at: produced_at.to_owned(),
         },
+        first_sync: TeamJoinFirstSync::incomplete(),
         mesh_primitives: vec![
             "mesh_origin_events.append",
             "teamJoined",
@@ -8241,6 +8479,10 @@ mod tests {
         let joined = client.join().expect("client thread").expect("join");
         assert!(joined.joined);
         assert_eq!(joined.team.team_id, granted.team_id);
+        assert!(
+            !joined.first_sync.complete,
+            "one-shot invite waiter is gone before first sync: {joined:?}"
+        );
         assert!(!granted.pair_confirmation.is_empty());
         let inviter_status = local_team_status(&inviter).expect("status");
         let members = inviter_status.members;
@@ -8266,6 +8508,88 @@ mod tests {
         .expect("record");
         assert!(record.endpoint.endpoint.starts_with("127.0.0.1:"));
         assert_eq!(record.origin_workspace_id, "wsp_joinworkspace0000000000001");
+    }
+
+    #[test]
+    fn join_team_first_sync_imports_origin_genesis() {
+        let origin = open_db();
+        origin
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-team-first-sync-origin".to_owned(),
+                    name: Some("origin".to_owned()),
+                },
+            )
+            .expect("origin workspace");
+        let created = create_local_team(
+            &origin,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let genesis = origin
+            .list_mesh_manifest_origin_events(8)
+            .expect("origin events")
+            .into_iter()
+            .find(|row| row.event_hash == created.team.genesis_event_hash)
+            .expect("genesis row");
+        let joiner = open_db();
+        joiner
+            .insert_workspace(
+                "wsp_joinworkspace0000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-team-first-sync-joiner".to_owned(),
+                    name: Some("Priya".to_owned()),
+                },
+            )
+            .expect("joiner workspace");
+        persist_granted_join(
+            &joiner,
+            "wsp_joinworkspace0000000000001",
+            &TeamJoinGrantedV1 {
+                schema: TEAM_JOIN_GRANTED_SCHEMA_V1.to_owned(),
+                team_id: created.team.team_id.clone(),
+                origin_node_id: created.team.origin_node_id.clone(),
+                display_name: created.team.display_name.clone(),
+                hello_port: created.team.hello_port,
+                genesis_event_hash: created.team.genesis_event_hash.clone(),
+                pair_confirmation: String::new(),
+                origin_workspace_id: "wsp_persistfixture000000000001".to_owned(),
+            },
+            "node_joinerself00000000000000001",
+            "Priya",
+            "2026-08-13T04:00:00Z",
+        )
+        .expect("persist join");
+        let imported = apply_join_first_sync_events(
+            &joiner,
+            "wsp_joinworkspace0000000000001",
+            &created.team.team_id,
+            &created.team.origin_node_id,
+            &[crate::mesh::bootstrap_envelope::SyncRoundEvent {
+                origin_node_id: genesis.origin_node_id.clone(),
+                origin_workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                seq: genesis.seq,
+                event_hash: genesis.event_hash.clone(),
+                payload_json: genesis.payload_json.clone(),
+            }],
+        );
+        assert!(
+            imported >= 1,
+            "first sync must import the origin genesis {}: imported={imported}",
+            created.team.genesis_event_hash
+        );
+        let ledger = joiner
+            .list_mesh_import_ledger_events_for_workspace("wsp_joinworkspace0000000000001")
+            .expect("ledger");
+        assert!(
+            ledger
+                .iter()
+                .any(|row| row.event_hash == created.team.genesis_event_hash),
+            "import ledger must record the genesis hash: {ledger:?}"
+        );
     }
 
     #[test]
