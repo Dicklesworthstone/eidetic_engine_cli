@@ -102,6 +102,9 @@ future changelog pass expands those rows into full capability sections.
   `importedEvents`). `ee team invite --wait` stays up after redeem
   and serves that hello+sync round so the joiner can import origin
   events before either side exits.
+  `--memory-scope team` no longer admits unauthenticated
+  `trust.team_members` nicknames from `.ee/config.toml`; only durable
+  `team_members` rows count.
   The inviter enrolls the accepted
   joiner at the join TCP source IP and the advertised `joinerHelloPort`
   (hello also carries `joinerWorkspaceId`) so EventFetch/BodyFetch

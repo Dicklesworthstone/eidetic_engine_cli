@@ -1258,19 +1258,10 @@ pub fn is_verified_memory(memory: &StoredMemory) -> bool {
 
 fn load_team_members(workspace_path: &Path) -> BTreeSet<String> {
     let mut members = BTreeSet::new();
-    let config_path = workspace_path.join(".ee").join("config.toml");
-    if let Some(contents) = read_memory_scope_config(&config_path)
-        && let Ok(config) = ConfigFile::parse(&contents)
-    {
-        members.extend(
-            config
-                .trust
-                .team_members
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(normalized_non_empty),
-        );
-    }
+    // Bound-read config so symlink/oversize paths stay fail-closed. The
+    // unauthenticated [trust] team_members list is not an authorization
+    // source; Team scope admits only durable team_members rows.
+    let _ = read_memory_scope_config(&workspace_path.join(".ee").join("config.toml"));
     let database_path = workspace_path.join(".ee").join("ee.db");
     if database_path.is_file()
         && let Ok(connection) = crate::db::DbConnection::open_file_read_only(&database_path)
@@ -2057,7 +2048,7 @@ mod tests {
     }
 
     #[test]
-    fn team_scope_loads_configured_team_members_from_workspace_config() -> Result<(), String> {
+    fn team_scope_ignores_unauthenticated_workspace_config_team_members() -> Result<(), String> {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let config_dir = tempdir.path().join(".ee");
         std::fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
@@ -2072,10 +2063,15 @@ team_members = ["GreenField", "  ", "BlueLake"]
 
         let context = MemoryScopeContext::for_workspace(tempdir.path(), MemoryScope::Team, false);
 
-        assert_eq!(
-            context.team_members,
-            BTreeSet::from(["BlueLake".to_owned(), "GreenField".to_owned()])
+        assert!(
+            context.team_members.is_empty(),
+            "Team scope must not admit unauthenticated trust.team_members: {:?}",
+            context.team_members
         );
+        assert!(!context.memory_in_scope(&memory_with_scope(
+            TrustClass::PeerHumanAttested,
+            Some("agent:GreenField; produced_at=2026-08-13T22:00:00Z")
+        )));
         Ok(())
     }
 
