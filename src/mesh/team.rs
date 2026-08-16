@@ -7330,6 +7330,8 @@ mod tests {
         )
         .expect("share");
         let cache_key = team_body_cache_key("mem_teamjoinbody00000000000001");
+        let origin_node_for_client = origin_node.clone();
+        let cache_key_for_client = cache_key.clone();
         let port = {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
             listener.local_addr().expect("addr").port()
@@ -7414,18 +7416,18 @@ mod tests {
                     team_id,
                     tailnet_id: TEAM_JOIN_TAILNET_ID.to_owned(),
                     initiator_node_id: joiner_node.to_owned(),
-                    responder_node_id: origin_node.clone(),
+                    responder_node_id: origin_node_for_client.clone(),
                     initiator_workspace_id: "wsp_joinworkspace0000000000001".to_owned(),
                     responder_workspace_id: "wsp_persistfixture000000000001".to_owned(),
                     initiator_stable_id: format!("team-join-{joiner_node}"),
-                    responder_stable_id: format!("team-join-{origin_node}"),
+                    responder_stable_id: format!("team-join-{origin_node_for_client}"),
                     session_id: "replaced-by-connect".to_owned(),
                 },
                 pair_key: crate::mesh::key_store::SecretBytes::new([7_u8; 32]),
                 pair_key_generation: 1,
                 observations: crate::mesh::transport_session::HandshakeObservations {
                     initiator_node_pubkey: format!("nodekey:{joiner_node}"),
-                    responder_node_pubkey: format!("nodekey:{origin_node}"),
+                    responder_node_pubkey: format!("nodekey:{origin_node_for_client}"),
                 },
                 capabilities: crate::mesh::transport_session::SessionCapabilities::base(),
                 limits: crate::mesh::transport_session::SessionChannelLimits {
@@ -7438,7 +7440,10 @@ mod tests {
             };
             crate::core::run_cli_with_cx(std::time::Duration::from_secs(30), |cx| async move {
                 crate::mesh::foreground_cli::contact_authenticated_body_fetch(
-                    &cx, bound, config, &cache_key,
+                    &cx,
+                    bound,
+                    config,
+                    &cache_key_for_client,
                 )
                 .await
             })
@@ -7465,6 +7470,177 @@ mod tests {
             "TeamJoin inbound BodyFetch did not return published bytes: {fetched:?}"
         );
         owner.shutdown();
+
+        let joiner_dir = tempfile::tempdir().unwrap();
+        let joiner_ee = joiner_dir.path().join(".ee");
+        std::fs::create_dir_all(&joiner_ee).expect("joiner ee");
+        std::fs::write(
+            joiner_ee.join("config.toml"),
+            "[trust]\nteam_members = [\"Analysts\"]\n",
+        )
+        .expect("team members");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&joiner_ee, std::fs::Permissions::from_mode(0o700))
+                .expect("joiner mode");
+        }
+        let joiner_db = joiner_ee.join("ee.db");
+        let joiner = crate::db::DbConnection::open_file(&joiner_db).expect("joiner open");
+        joiner.migrate().expect("joiner migrate");
+        joiner
+            .insert_workspace(
+                "wsp_joinworkspace0000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: joiner_dir.path().display().to_string(),
+                    name: Some("joiner".to_owned()),
+                },
+            )
+            .expect("joiner workspace");
+        let joiner_team = create_local_team(
+            &joiner,
+            "wsp_joinworkspace0000000000001",
+            "Priya",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("joiner team");
+        enroll_team_pair_peer(
+            &joiner,
+            "wsp_joinworkspace0000000000001",
+            &joiner_team.team.team_id,
+            &origin_node,
+            "Analysts",
+            "127.0.0.1",
+            41888,
+            "2026-08-13T04:00:00Z",
+            "wsp_persistfixture000000000001",
+        )
+        .expect("admit Analysts");
+        let stub_id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0x21)).to_string();
+        joiner
+            .insert_memory(
+                &stub_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_joinworkspace0000000000001".to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "[ee.team.history] note blake3:deadbeef".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.5,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("evt_teamjoinbody".to_owned()),
+                    trust_class: "peer_human_attested".to_owned(),
+                    trust_subclass: Some(
+                        "agent:Analysts; produced_at=2026-08-13T22:00:00Z".to_owned(),
+                    ),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("stub");
+        let nonce = hex_decode(fetched.nonce_hex.as_deref().expect("nonce"))
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+            .expect("nonce32");
+        let body = hex_decode(fetched.body_hex.as_deref().expect("body")).expect("body bytes");
+        joiner
+            .upsert_mesh_body_cache_metadata(&UpsertMeshBodyCacheMetadataInput {
+                workspace_id: "wsp_joinworkspace0000000000001".to_owned(),
+                body_cache_key: cache_key.clone(),
+                origin_node_id: origin_node.clone(),
+                origin_workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                logical_memory_id: "mem_teamjoinbody00000000000001".to_owned(),
+                content_hash: body_commitment(&nonce, &body),
+                body_ref_json: Some(
+                    serde_json::json!({
+                        "originEventId": "evt_teamjoinbody",
+                        "localMemoryId": stub_id,
+                    })
+                    .to_string(),
+                ),
+                preview_hash: None,
+                size_bytes: None,
+                cache_status: "metadata_only".to_owned(),
+                local_body_hash: None,
+                cached_at: Some("2026-08-13T22:02:00Z".to_owned()),
+                expires_at: None,
+            })
+            .expect("placeholder");
+        let applied = apply_fetched_team_body(
+            &joiner,
+            "wsp_joinworkspace0000000000001",
+            joiner_dir.path(),
+            &fetched,
+        )
+        .expect("apply live fetch");
+        assert_eq!(applied.cache_status, "available");
+        let stored = joiner.get_memory(&stub_id).expect("get").expect("row");
+        assert_eq!(stored.content, "team-join body");
+        let _ = drain_team_inbound_search_index(
+            &joiner,
+            "wsp_joinworkspace0000000000001",
+            joiner_dir.path(),
+        );
+        let packed =
+            crate::core::context::run_context_pack(&crate::core::context::ContextPackOptions {
+                workspace_path: joiner_dir.path().to_path_buf(),
+                database_path: Some(joiner_db),
+                index_dir: Some(joiner_ee.join("index")),
+                query: "team-join body".to_owned(),
+                speed: crate::search::SpeedMode::Instant,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                filters: crate::models::QueryFilters::default(),
+                profile: Some(crate::pack::ContextPackProfile::Balanced),
+                max_tokens: Some(800),
+                candidate_pool: Some(8),
+                max_results: Some(4),
+                include_tombstoned: false,
+                as_of: None,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                redaction_level: crate::models::RedactionLevel::Minimal,
+                memory_scope: crate::models::MemoryScope::Team,
+                strict_scope: false,
+                ppr_weight: None,
+                changed_symbols: Vec::new(),
+                changed_symbols_from_git: false,
+                pagination: None,
+                coordination_snapshot_path: None,
+                coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+                task_lens: None,
+                require_fresh_sentinels: false,
+                output_options: crate::core::context::ContextPackOutputOptions::default(),
+                persist_pack: false,
+                baseline_write: None,
+                no_lod: true,
+            })
+            .expect("pack");
+        assert!(
+            packed
+                .data
+                .pack
+                .items
+                .iter()
+                .any(|item| item.memory_id.to_string() == stub_id),
+            "live BodyFetch then pack --memory-scope team must select the teammate memory: items={:?} degraded={:?}",
+            packed
+                .data
+                .pack
+                .items
+                .iter()
+                .map(|item| item.memory_id.to_string())
+                .collect::<Vec<_>>(),
+            packed.data.degraded
+        );
+        let pack_json = crate::output::render_context_response_json(&packed);
+        assert!(
+            pack_json.contains("\"teamProvenance\"") && pack_json.contains("Analysts"),
+            "live joiner pack JSON must attribute the teammate: {pack_json}"
+        );
     }
 
     #[cfg(unix)]

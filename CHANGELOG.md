@@ -167,6 +167,9 @@ future changelog pass expands those rows into full capability sections.
   `timeFilterBasis=member_attested` and `sequenceComplete=false`.
   `--cursor` resumes an `ee.cursor.v1` page; invalid or param-mismatched
   tokens return an empty page plus `cursorError=cursor_invalid`.
+  A live TeamJoin BodyFetch now applies onto a joiner store and
+  `ee pack --memory-scope team` selects the teammate text with
+  `teamProvenance`.
 - Authenticated responder sessions now apply
   `MeshAdmissionLimits::conservative_default()` before EventFetch,
   BodyFetch, Summary, and `identity_attest`.
