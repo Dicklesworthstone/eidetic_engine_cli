@@ -4306,7 +4306,7 @@ impl ContextResponseData {
     }
 }
 
-fn team_pack_attribution_suffix(trust: &PackTrustSignal) -> Option<String> {
+fn team_pack_attribution(trust: &PackTrustSignal) -> Option<(String, String)> {
     if trust.class != TrustClass::PeerHumanAttested {
         return None;
     }
@@ -4319,7 +4319,8 @@ fn team_pack_attribution_suffix(trust: &PackTrustSignal) -> Option<String> {
                 .or_else(|| part.strip_prefix("agent="))
         })
         .map(str::trim)
-        .filter(|name| !name.is_empty())?;
+        .filter(|name| !name.is_empty())?
+        .to_owned();
     let produced_at = subclass
         .split([';', ',', '|'])
         .map(str::trim)
@@ -4328,8 +4329,29 @@ fn team_pack_attribution_suffix(trust: &PackTrustSignal) -> Option<String> {
                 .or_else(|| part.strip_prefix("producedAt="))
         })
         .map(str::trim)
-        .filter(|value| !value.is_empty())?;
+        .filter(|value| !value.is_empty())?
+        .to_owned();
+    Some((member, produced_at))
+}
+
+fn team_pack_attribution_suffix(trust: &PackTrustSignal) -> Option<String> {
+    let (member, produced_at) = team_pack_attribution(trust)?;
     Some(format!("· from {member} · {produced_at}"))
+}
+
+/// JSON `teamProvenance` for pack items. Same block search emits on hits.
+#[must_use]
+pub fn team_pack_provenance_json(trust: &PackTrustSignal) -> Option<String> {
+    let (member, produced_at) = team_pack_attribution(trust)?;
+    serde_json::to_string(&serde_json::json!({
+        "schema": "ee.team.provenance.v1",
+        "memberDisplayName": member,
+        "projectName": null,
+        "originTrustClass": "peer_human_attested",
+        "producedAt": produced_at,
+        "originTimeAssurance": "member_attested",
+    }))
+    .ok()
 }
 
 /// Render a context response as the canonical Markdown prompt fragment.
@@ -9432,6 +9454,12 @@ mod tests {
             ))
             .is_none()
         );
+        let json = super::team_pack_provenance_json(&trust).expect("pack json");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert_eq!(value["schema"], "ee.team.provenance.v1");
+        assert_eq!(value["memberDisplayName"], "Priya");
+        assert_eq!(value["producedAt"], "2026-07-30T14:02:00Z");
+        assert_eq!(value["originTimeAssurance"], "member_attested");
     }
 
     #[test]

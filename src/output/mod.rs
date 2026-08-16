@@ -3042,6 +3042,9 @@ pub fn render_context_response_json_with_options(
                     };
                     trust.field_str("posture", item.trust.posture().as_str());
                 });
+                if let Some(provenance) = crate::pack::team_pack_provenance_json(&item.trust) {
+                    obj.field_raw("teamProvenance", &provenance);
+                }
                 let provenance = item.rendered_provenance();
                 obj.field_array_of_objects("provenance", &provenance, build_rendered_provenance);
                 if !item.freshness_facets.is_empty() {
@@ -3402,6 +3405,9 @@ pub fn render_context_response_jsonl(response: &ContextResponse) -> String {
         line.field_u32("estimatedTokens", item.estimated_tokens);
         line.field_str("why", &item.why);
         line.field_str("selectedIn", item.selected_in.as_str());
+        if let Some(team_provenance) = crate::pack::team_pack_provenance_json(&item.trust) {
+            line.field_raw("teamProvenance", &team_provenance);
+        }
         line.field_array_of_objects("provenance", &provenance, build_rendered_provenance);
         lines.push(line.finish());
     }
