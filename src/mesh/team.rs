@@ -5125,9 +5125,10 @@ pub fn project_inbound_team_memory(
                 importance: 0.5,
                 provenance_uri: Some(inbound.event_id.clone()),
                 trust_class: "peer_human_attested".to_owned(),
-                trust_subclass: Some(format!(
-                    "agent:{producer}; produced_at={}",
-                    inbound.produced_at
+                trust_subclass: Some(inbound_team_trust_subclass(
+                    &producer,
+                    &inbound.produced_at,
+                    payload.project_binding.as_deref(),
                 )),
                 tags: Vec::new(),
                 valid_from: payload.valid_from.clone(),
@@ -5138,6 +5139,20 @@ pub fn project_inbound_team_memory(
     record_inbound_body_placeholder(connection, workspace_id, inbound, &payload, &memory_id)?;
     enqueue_inbound_memory_index_job(connection, workspace_id, &memory_id, "team-inbound")?;
     Ok(Some(memory_id))
+}
+
+fn inbound_team_trust_subclass(
+    producer: &str,
+    produced_at: &str,
+    project_binding: Option<&str>,
+) -> String {
+    match project_binding
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(project) => format!("agent:{producer}; produced_at={produced_at}; project={project}"),
+        None => format!("agent:{producer}; produced_at={produced_at}"),
+    }
 }
 
 /// One coalesced Incremental job per inbound source stays inside the
@@ -9153,6 +9168,105 @@ mod tests {
                 .is_empty(),
             "omitted history share must not create a body-fetch placeholder"
         );
+        assert_eq!(
+            provenance.project_name, None,
+            "unbound workspace must not invent a project name"
+        );
+    }
+
+    #[test]
+    fn project_inbound_team_memory_persists_project_binding() {
+        let connection = open_db();
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/acme-analysis".to_owned(),
+                    name: Some("acme".to_owned()),
+                },
+            )
+            .expect("workspace");
+        let created = create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        share_team_project(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "acme-analysis",
+            "/tmp/acme-analysis",
+            "2026-08-13T13:00:00Z",
+            None,
+        )
+        .expect("project");
+        connection
+            .insert_memory(
+                "mem_sharehistory00000000000001",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "secret body must not land on the receiver".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("remember");
+        share_team_history(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T14:00:00Z",
+            true,
+            16,
+            None,
+        )
+        .expect("share");
+        let rows = connection
+            .list_mesh_origin_events(&created.team.team_id, &created.team.origin_node_id, 0, 16)
+            .expect("chain");
+        let memory_row = rows
+            .iter()
+            .find(|row| row.payload_schema == "ee.mesh.memory_event.v1")
+            .expect("memory event");
+        let inbound = crate::mesh::origin_stream::inbound_from_stored(memory_row).expect("inbound");
+        let projected =
+            project_inbound_team_memory(&connection, "wsp_persistfixture000000000001", &inbound)
+                .expect("project")
+                .expect("id");
+        let stored = connection
+            .get_memory(&projected)
+            .expect("get")
+            .expect("row");
+        let provenance = crate::core::memory_scope::team_provenance_from_memory(&stored)
+            .expect("inbound stub is attributable");
+        assert_eq!(provenance.member_display_name, "Analysts");
+        assert_eq!(provenance.project_name.as_deref(), Some("acme-analysis"));
+        assert_eq!(
+            provenance.compact_suffix(),
+            format!(
+                "· from Analysts / acme-analysis · {}",
+                provenance.produced_at
+            )
+        );
+        assert!(
+            stored
+                .trust_subclass
+                .as_deref()
+                .is_some_and(|value| value.contains("project=acme-analysis")),
+            "inbound trust_subclass must persist project=: {:?}",
+            stored.trust_subclass
+        );
     }
 
     #[test]
@@ -9286,7 +9400,7 @@ mod tests {
                 },
             )
             .expect("workspace");
-        for index in 0..20_u32 {
+        for index in 0..500_u32 {
             enqueue_inbound_memory_index_job(
                 &connection,
                 workspace_id,
@@ -9301,7 +9415,7 @@ mod tests {
         assert_eq!(
             jobs.len(),
             1,
-            "a 20-row inbound burst must stay one Incremental job: {jobs:?}"
+            "a 500-row inbound burst must stay one Incremental job: {jobs:?}"
         );
         assert_eq!(jobs[0].job_type, "incremental");
         assert_eq!(jobs[0].document_source.as_deref(), Some("team-inbound"));
