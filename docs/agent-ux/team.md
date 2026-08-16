@@ -5,6 +5,8 @@ origin-owned memory. Local `ee pack` / `ee search` stay the default.
 After a granted BodyFetch (or `ee team steward once`), teammate text
 is recalled with the same commands plus `--memory-scope team`. Hits,
 pack items, `ee ask` citations, and `ee why` carry `teamProvenance`.
+Use `ee insights --section peerConflicts --json` when a teammate row
+overlaps or contradicts a local memory.
 
 ## Safe first commands
 

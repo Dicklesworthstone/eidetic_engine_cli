@@ -115,6 +115,9 @@ future changelog pass expands those rows into full capability sections.
   `ee why` and `ee ask` now emit the same `teamProvenance` block
   search and pack already carry, so teammate text is attributed on
   every unified-recall surface.
+  `ee insights --section peerConflicts` surfaces local/team/global
+  overlap and the evidence-bounded peer-conflict detector so pack
+  disagreements are visible outside a single pack response.
   The inviter enrolls the accepted
   joiner at the join TCP source IP and the advertised `joinerHelloPort`
   (hello also carries `joinerWorkspaceId`) so EventFetch/BodyFetch

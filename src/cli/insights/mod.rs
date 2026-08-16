@@ -73,8 +73,8 @@ pub struct InsightsArgs {
     /// accept both lowercase and canonical-camelCase form. Available:
     /// authorities, blindSpots, bridges, causalBottlenecks, comprehensiveRules,
     /// contradictionClusters, hubs, kCore, kTruss, knowledgeGaps,
-    /// knowledgeSkyline, loadBearingMemories, proximityHotspots, revisionFrontiers,
-    /// topMemories.
+    /// knowledgeSkyline, loadBearingMemories, peerConflicts, proximityHotspots,
+    /// revisionFrontiers, topMemories.
     #[arg(long, value_name = "NAME")]
     pub section: Option<String>,
 
@@ -447,6 +447,7 @@ fn section_registry() -> Vec<SectionRegistryEntry> {
             "loadBearingMemories",
             load_bearing_memories_section,
         ),
+        ("peerconflicts", "peerConflicts", peer_conflicts_section),
         (
             "proximityhotspots",
             "proximityHotspots",
@@ -806,6 +807,10 @@ fn build_registry_section(
         "houseRules" => {
             let inputs = load_house_rules_inputs(workspace, database_path)?;
             Ok(house_rules_section_from_inputs(&inputs))
+        }
+        "peerConflicts" => {
+            let items = load_peer_conflict_items(workspace, database_path)?;
+            Ok(peer_conflicts_section_from_items(&items))
         }
         _ => Ok(builder()),
     }
@@ -3715,6 +3720,223 @@ fn house_rules_section_from_inputs(inputs: &[HouseRuleInsightInput]) -> Insights
     }
 }
 
+const PEER_CONFLICT_INSIGHT_SCHEMA_V1: &str = "ee.insights.peer_conflicts.v1";
+
+fn peer_conflicts_section() -> InsightsSection {
+    peer_conflicts_section_from_items(&[])
+}
+
+fn peer_conflicts_section_from_items(items: &[JsonValue]) -> InsightsSection {
+    InsightsSection {
+        name: "peerConflicts",
+        title: "Peer Conflicts",
+        summary: "Local/team/global overlap and evidence-bounded peer contradictions that pack must not rank away.",
+        why_it_matters: "Team-synced duplicates and contradictions stay visible with provenance so agents do not flatten disagreement into one answer.",
+        items: items.to_vec(),
+        next_commands: vec!["ee insights --section peerConflicts --workspace . --json"],
+    }
+}
+
+fn load_peer_conflict_items(
+    workspace: Option<&Path>,
+    database_path: Option<&Path>,
+) -> Result<Vec<JsonValue>, DomainError> {
+    let Some(workspace) = workspace else {
+        return Ok(Vec::new());
+    };
+    let Some(connection) = open_insights_database(Some(workspace), database_path)? else {
+        return Ok(Vec::new());
+    };
+    let Some(workspace_id) = insights_workspace_id(&connection, workspace)? else {
+        return Ok(Vec::new());
+    };
+    let memories = connection
+        .list_memories(&workspace_id, None, false)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query workspace memories: {error}"),
+            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+        })?;
+    Ok(peer_conflict_items_from_memories(&workspace_id, &memories))
+}
+
+fn peer_conflict_items_from_memories(
+    workspace_id: &str,
+    memories: &[StoredMemory],
+) -> Vec<JsonValue> {
+    let lane_candidates = memories
+        .iter()
+        .map(|memory| crate::core::global_store::LaneCandidate {
+            id: memory.id.clone(),
+            lane: if memory.trust_class == "peer_human_attested" {
+                crate::core::global_store::MemoryLane::Team
+            } else {
+                crate::core::global_store::MemoryLane::Workspace
+            },
+            conflict_key: peer_conflict_subject_key(&memory.content),
+            content_hash: peer_conflict_normalized_hash(&memory.content),
+        })
+        .collect::<Vec<_>>();
+    let mut items = crate::core::global_store::surface_precedence_conflicts(&lane_candidates)
+        .into_iter()
+        .map(|conflict| {
+            let mut payload = conflict.data_json();
+            if let Some(object) = payload.as_object_mut() {
+                object.insert(
+                    "source".to_owned(),
+                    JsonValue::String("precedence".to_owned()),
+                );
+                object.insert(
+                    "schema".to_owned(),
+                    JsonValue::String(PEER_CONFLICT_INSIGHT_SCHEMA_V1.to_owned()),
+                );
+            }
+            payload
+        })
+        .collect::<Vec<_>>();
+
+    let mut facts = Vec::new();
+    let mut unassessed = 0_usize;
+    for memory in memories {
+        if !peer_conflict_body_assessable(&memory.content) {
+            if memory.trust_class == "peer_human_attested" {
+                unassessed = unassessed.saturating_add(1);
+            }
+            continue;
+        }
+        facts.push(PeerConflictInsightFact {
+            memory_hash: crate::core::memory::peer_conflict_hash("memory", &memory.id),
+            content_hash: crate::core::memory::peer_conflict_content_hash(&memory.content),
+            content: memory.content.clone(),
+            simhash: crate::search::simhash::simhash_128(&memory.content),
+            trust_class: memory.trust_class.clone(),
+            is_team: memory.trust_class == "peer_human_attested",
+        });
+    }
+    let workspace_facts = facts
+        .iter()
+        .filter(|fact| !fact.is_team)
+        .collect::<Vec<_>>();
+    let team_facts = facts.iter().filter(|fact| fact.is_team).collect::<Vec<_>>();
+    if !workspace_facts.is_empty() && !team_facts.is_empty() {
+        let workspace_hash = crate::core::memory::peer_conflict_hash("workspace", workspace_id);
+        let options = crate::core::memory::PeerConflictDetectionOptions::new(
+            &workspace_hash,
+            "1970-01-01T00:00:00Z",
+        );
+        for primary in &workspace_facts {
+            let primary_view = crate::core::memory::PeerConflictMemory::new(
+                &primary.memory_hash,
+                &primary.content_hash,
+                &primary.content,
+                primary.simhash,
+                &primary.trust_class,
+            );
+            let peer_views = team_facts
+                .iter()
+                .map(|peer| {
+                    crate::core::memory::PeerConflictMemory::new(
+                        &peer.memory_hash,
+                        &peer.content_hash,
+                        &peer.content,
+                        peer.simhash,
+                        &peer.trust_class,
+                    )
+                })
+                .collect::<Vec<_>>();
+            for event in crate::core::memory::detect_peer_memory_conflicts(
+                &primary_view,
+                &peer_views,
+                &options,
+            ) {
+                if let Ok(mut payload) = serde_json::to_value(&event) {
+                    if let Some(object) = payload.as_object_mut() {
+                        object.insert(
+                            "source".to_owned(),
+                            JsonValue::String("peer_detector".to_owned()),
+                        );
+                    }
+                    items.push(payload);
+                }
+            }
+        }
+    }
+    if unassessed > 0 {
+        items.push(serde_json::json!({
+            "schema": PEER_CONFLICT_INSIGHT_SCHEMA_V1,
+            "source": "unassessed",
+            "kind": "unassessed_missing_body",
+            "count": unassessed,
+        }));
+    }
+    items.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+    items
+}
+
+struct PeerConflictInsightFact {
+    memory_hash: String,
+    content_hash: String,
+    content: String,
+    simhash: crate::search::simhash::SimHash128,
+    trust_class: String,
+    is_team: bool,
+}
+
+fn peer_conflict_body_assessable(content: &str) -> bool {
+    let content = content.trim();
+    !content.is_empty()
+        && content != crate::models::MEMORY_SEAL_PLACEHOLDER_CONTENT
+        && !content.eq_ignore_ascii_case("[metadata-only]")
+        && !content.starts_with("[body unavailable]")
+}
+
+fn peer_conflict_subject_key(content: &str) -> String {
+    content
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(str::trim)
+        .filter(|token| token.len() >= 3)
+        .map(str::to_ascii_lowercase)
+        .find(|token| !peer_conflict_subject_stopword(token))
+        .unwrap_or_else(|| "subject".to_owned())
+}
+
+fn peer_conflict_subject_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "about"
+            | "after"
+            | "again"
+            | "agent"
+            | "always"
+            | "before"
+            | "current"
+            | "global"
+            | "memory"
+            | "must"
+            | "never"
+            | "policy"
+            | "project"
+            | "repo"
+            | "rule"
+            | "shared"
+            | "should"
+            | "that"
+            | "this"
+            | "when"
+            | "with"
+            | "without"
+            | "workspace"
+    )
+}
+
+fn peer_conflict_normalized_hash(content: &str) -> String {
+    let normalized = content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    blake3::hash(normalized.as_bytes()).to_hex().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4114,6 +4336,7 @@ mod tests {
                 "knowledgeGaps",
                 "knowledgeSkyline",
                 "loadBearingMemories",
+                "peerConflicts",
                 "proximityHotspots",
                 "revisionFrontiers",
                 "topMemories"
@@ -4740,6 +4963,101 @@ mod tests {
             "comprehensiveRules should no longer be placeholder-backed"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn peer_conflicts_section_surfaces_team_lane_contradiction() -> TestResult {
+        let workspace = unique_insights_workspace("peer-conflicts")?;
+        let database_path = workspace.join(".ee").join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::curate::stable_workspace_id(&workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("peer conflicts".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000002001",
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Always rebase in shared checkouts.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000002002",
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Never rebase in shared checkouts.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.7,
+                    importance: 0.6,
+                    provenance_uri: None,
+                    trust_class: "peer_human_attested".to_owned(),
+                    trust_subclass: Some(
+                        "agent:Analysts; produced_at=2026-08-16T00:00:00Z".to_owned(),
+                    ),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let report = build_insights_report_with_options(
+            &InsightsArgs {
+                section: Some("peerConflicts".to_owned()),
+                explain: None,
+                limit: DEFAULT_SECTION_LIMIT,
+                offset: 0,
+                json_stream: false,
+                cursor: None,
+            },
+            InsightsBuildOptions {
+                workspace: Some(&workspace),
+                ..InsightsBuildOptions::default()
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(report.selected_section.as_deref(), Some("peerConflicts"));
+        let section = report
+            .sections
+            .first()
+            .ok_or_else(|| "peerConflicts section missing".to_owned())?;
+        assert!(
+            section.items.iter().any(|item| {
+                item.get("kind").and_then(JsonValue::as_str) == Some("contradiction")
+                    || item.get("detectorVerdict").and_then(JsonValue::as_str)
+                        == Some("contradiction")
+            }),
+            "peerConflicts must surface the local/team inversion: {:?}",
+            section.items
+        );
         Ok(())
     }
 
