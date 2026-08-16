@@ -637,6 +637,10 @@ pub struct TeamActivityReport {
     pub event_count: usize,
     pub events: Vec<TeamActivityItem>,
     pub clock_anomalies: Vec<TeamActivityItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor_error: Option<&'static str>,
     pub mesh_primitives: Vec<&'static str>,
 }
 
@@ -5374,6 +5378,7 @@ pub fn list_team_activity(
     member: Option<&str>,
     project: Option<&str>,
     since: Option<&str>,
+    cursor: Option<&str>,
 ) -> Result<TeamActivityReport, OriginStreamError> {
     let team = load_local_teams(connection)?
         .into_iter()
@@ -5411,6 +5416,7 @@ pub fn list_team_activity(
     let origin_rows = connection
         .list_all_mesh_origin_events(&team.team_id, 1000)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    let origin_generation = u64::try_from(origin_rows.len()).unwrap_or(0);
     let mut seen_event_ids = std::collections::BTreeSet::new();
     for row in origin_rows {
         seen_event_ids.insert(row.event_id.clone());
@@ -5543,7 +5549,50 @@ pub fn list_team_activity(
             .cmp(&left.produced_at)
             .then_with(|| left.event_id.cmp(&right.event_id))
     });
+    let params_hash = activity_cursor_params_hash(as_of, since, member, project, cap);
+    let mac_key = activity_cursor_mac_key(&team.team_id);
+    let mut offset = 0_usize;
+    let mut cursor_error = None;
+    if let Some(token) = cursor.filter(|value| !value.is_empty()) {
+        match crate::output::governor::decode_cursor(
+            token,
+            &mac_key,
+            &params_hash,
+            origin_generation,
+        ) {
+            Ok(payload) => {
+                offset = payload.position_key.parse().unwrap_or(0);
+            }
+            Err(crate::output::governor::CursorRejection::Invalid) => {
+                cursor_error = Some("cursor_invalid");
+            }
+            Err(crate::output::governor::CursorRejection::Stale { .. }) => {
+                cursor_error = Some("cursor_stale");
+            }
+        }
+    }
+    if cursor_error.is_some() {
+        events.clear();
+        clock_anomalies.clear();
+    } else if offset > 0 {
+        clock_anomalies.clear();
+        let skip = offset.min(events.len());
+        events.drain(..skip);
+    }
+    let remaining_after_page = events.len().saturating_sub(cap);
     events.truncate(cap);
+    let next_cursor = if remaining_after_page > 0 && cursor_error.is_none() {
+        let next_offset = offset.saturating_add(events.len());
+        activity_encode_cursor(
+            &mac_key,
+            origin_generation,
+            &params_hash,
+            next_offset,
+            remaining_after_page,
+        )
+    } else {
+        None
+    };
     let since_used = since_cutoff.is_some();
     Ok(TeamActivityReport {
         schema: TEAM_ACTIVITY_SCHEMA_V1,
@@ -5560,8 +5609,48 @@ pub fn list_team_activity(
         event_count: events.len(),
         events,
         clock_anomalies,
+        next_cursor,
+        cursor_error,
         mesh_primitives: vec!["mesh_origin_events", "memories", "team_members"],
     })
+}
+
+fn activity_cursor_params_hash(
+    as_of: &str,
+    since: Option<&str>,
+    member: Option<&str>,
+    project: Option<&str>,
+    limit: usize,
+) -> String {
+    crate::output::governor::hash_invocation_params([
+        as_of,
+        since.unwrap_or(""),
+        member.unwrap_or(""),
+        project.unwrap_or(""),
+        &limit.to_string(),
+    ])
+}
+
+fn activity_cursor_mac_key(team_id: &str) -> [u8; 32] {
+    crate::output::governor::derive_workspace_mac_key(&format!("ee.team.activity:{team_id}"))
+}
+
+fn activity_encode_cursor(
+    mac_key: &[u8; 32],
+    db_generation: u64,
+    params_hash: &str,
+    next_offset: usize,
+    remaining: usize,
+) -> Option<String> {
+    let payload = crate::output::governor::CursorPayload {
+        schema: crate::output::governor::CURSOR_SCHEMA_V1.to_owned(),
+        target_schema: TEAM_ACTIVITY_SCHEMA_V1.to_owned(),
+        db_generation,
+        position_key: next_offset.to_string(),
+        dropped_count: u64::try_from(remaining).unwrap_or(0),
+        params_hash: params_hash.to_owned(),
+    };
+    crate::output::governor::encode_cursor(&payload, mac_key).ok()
 }
 
 fn find_member_by_origin_node(
@@ -9548,6 +9637,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("activity");
         assert!(report.event_count >= 2);
@@ -9629,6 +9719,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("activity");
         let inbound = report
@@ -9658,6 +9749,7 @@ mod tests {
             "2026-08-13T12:00:00Z",
             100,
             Some("Hana"),
+            None,
             None,
             None,
         )
@@ -9736,6 +9828,7 @@ mod tests {
             None,
             Some("acme-analysis"),
             None,
+            None,
         )
         .expect("project filter");
         assert!(
@@ -9758,6 +9851,7 @@ mod tests {
             100,
             None,
             Some("other-project"),
+            None,
             None,
         )
         .expect("other");
@@ -9824,6 +9918,7 @@ mod tests {
             None,
             None,
             Some("2026-08-13T10:00:00Z"),
+            None,
         )
         .expect("since");
         assert_eq!(since.time_filter_basis, "member_attested");
@@ -9842,9 +9937,114 @@ mod tests {
             None,
             None,
             Some("2h"),
+            None,
         )
         .expect_err("relative");
         assert!(rejected.to_string().contains("RFC 3339"));
+    }
+
+    #[test]
+    fn list_team_activity_cursor_pages_without_overlap() {
+        let connection = open_db();
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-team-activity-cursor".to_owned(),
+                    name: Some("activity".to_owned()),
+                },
+            )
+            .expect("workspace");
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        connection
+            .insert_memory(
+                "mem_teamactivity00000000000001",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "secret body must stay off activity".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("remember");
+        share_team_history(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T11:00:00Z",
+            true,
+            16,
+            None,
+        )
+        .expect("share");
+        let first = list_team_activity(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T12:00:00Z",
+            1,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("page 1");
+        assert_eq!(first.event_count, 1);
+        let cursor = first.next_cursor.clone().expect("nextCursor");
+        let second = list_team_activity(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T12:00:00Z",
+            1,
+            None,
+            None,
+            None,
+            Some(cursor.as_str()),
+        )
+        .expect("page 2");
+        assert_eq!(second.event_count, 1);
+        assert_ne!(first.events[0].event_id, second.events[0].event_id);
+        assert!(second.cursor_error.is_none());
+        let invalid = list_team_activity(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T12:00:00Z",
+            1,
+            None,
+            None,
+            None,
+            Some("not-a-cursor"),
+        )
+        .expect("invalid");
+        assert!(invalid.events.is_empty());
+        assert_eq!(invalid.cursor_error, Some("cursor_invalid"));
+        let mismatched = list_team_activity(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T12:00:00Z",
+            2,
+            None,
+            None,
+            None,
+            Some(cursor.as_str()),
+        )
+        .expect("params mismatch");
+        assert!(mismatched.events.is_empty());
+        assert_eq!(mismatched.cursor_error, Some("cursor_invalid"));
     }
 
     #[test]
