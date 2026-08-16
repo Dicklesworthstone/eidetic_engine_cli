@@ -2243,6 +2243,9 @@ pub fn pending_team_body_fetch_keys(
 
 /// Enroll the remote join peer under the same handle as the pair key so
 /// sync/BodyFetch can find an endpoint after the ceremony.
+///
+/// Also persists the remote human as an active `team_members` row. Team
+/// scope reads that table; a mesh peer alone cannot admit teammate text.
 pub fn enroll_team_pair_peer(
     connection: &DbConnection,
     workspace_id: &str,
@@ -2255,6 +2258,17 @@ pub fn enroll_team_pair_peer(
     origin_workspace_id: &str,
 ) -> Result<String, OriginStreamError> {
     let peer_id = team_pair_peer_handle(team_id, remote_node_id);
+    persist_team_member(
+        connection,
+        workspace_id,
+        team_id,
+        remote_node_id,
+        display_name,
+        false,
+        "invite_ceremony",
+        produced_at,
+        None,
+    )?;
     if connection
         .get_mesh_peer(workspace_id, &peer_id)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?
@@ -6322,6 +6336,30 @@ fn persist_team_member(
             "team member workspace_id must be wsp_ + 26 chars".to_owned(),
         ));
     }
+    if let Some(existing) = find_member_by_origin_node(connection, origin_node_id)? {
+        if existing.state != "active" {
+            connection
+                .set_team_member_state(&existing.member_id, "active")
+                .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+        }
+        if let Some(key) = verifying_key_hex.filter(|key| key.len() == 64) {
+            connection
+                .insert_team_member_node(&InsertTeamMemberNodeInput {
+                    node_id: origin_node_id.to_owned(),
+                    member_id: existing.member_id.clone(),
+                    team_id: team_id.to_owned(),
+                    verifying_key_hex: key.to_owned(),
+                    signing_key_generation: 1,
+                    state: "active".to_owned(),
+                    bound_at: joined_at.to_owned(),
+                })
+                .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+            connection
+                .insert_team_member_signing_key(origin_node_id, 1, key, joined_at)
+                .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+        }
+        return Ok(existing.member_id);
+    }
     let member_id = format!("mbr_{}", random_hex_32()?);
     connection
         .insert_team_member(&InsertTeamMemberInput {
@@ -6778,6 +6816,115 @@ mod tests {
         )
         .expect("idempotent");
         assert_eq!(again, handle);
+    }
+
+    #[test]
+    fn enroll_team_pair_peer_persists_remote_member_without_config() {
+        let root = tempfile::tempdir().unwrap();
+        let ee = root.path().join(".ee");
+        std::fs::create_dir_all(&ee).expect("ee");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&ee, std::fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        let db = ee.join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&db).expect("open");
+        connection.migrate().expect("migrate");
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: root.path().display().to_string(),
+                    name: Some("enroll-member".to_owned()),
+                },
+            )
+            .expect("workspace");
+        let created = create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Priya",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        enroll_team_pair_peer(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &created.team.team_id,
+            "node_remoteanalyst00000000000001",
+            "Analysts",
+            "127.0.0.1",
+            41888,
+            "2026-08-13T04:00:00Z",
+            "wsp_joinworkspace0000000000001",
+        )
+        .expect("enroll");
+        enroll_team_pair_peer(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &created.team.team_id,
+            "node_remoteanalyst00000000000001",
+            "Analysts",
+            "127.0.0.1",
+            41888,
+            "2026-08-13T04:01:00Z",
+            "wsp_joinworkspace0000000000001",
+        )
+        .expect("idempotent enroll");
+        let members = connection.list_all_team_members().expect("members");
+        let remotes = members
+            .iter()
+            .filter(|member| member.origin_node_id == "node_remoteanalyst00000000000001")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            remotes.len(),
+            1,
+            "enroll must persist the remote human once: {members:?}"
+        );
+        assert!(
+            remotes[0].display_name == "Analysts"
+                && remotes[0].state == "active"
+                && !remotes[0].is_self,
+            "enrolled remote must be an active teammate: {remotes:?}"
+        );
+        let scope = crate::core::memory_scope::MemoryScopeContext::for_workspace(
+            root.path(),
+            crate::models::MemoryScope::Team,
+            false,
+        );
+        assert!(
+            scope.team_members.contains("Analysts"),
+            "Team scope must load the enrolled member from the store without trust.team_members: {:?}",
+            scope.team_members
+        );
+        let inbound = crate::db::StoredMemory {
+            id: crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0x21)).to_string(),
+            workspace_id: "wsp_persistfixture000000000001".to_owned(),
+            level: "semantic".to_owned(),
+            kind: "note".to_owned(),
+            content: "team-join body".to_owned(),
+            workflow_id: None,
+            confidence: 0.5,
+            utility: 0.5,
+            importance: 0.5,
+            provenance_uri: Some("evt_teamjoinbody".to_owned()),
+            trust_class: "peer_human_attested".to_owned(),
+            trust_subclass: Some("agent:Analysts; produced_at=2026-08-13T22:00:00Z".to_owned()),
+            provenance_chain_hash: None,
+            provenance_chain_hash_version: "none".to_owned(),
+            provenance_verification_status: "unverified".to_owned(),
+            provenance_verified_at: None,
+            provenance_verification_note: None,
+            created_at: "2026-08-13T22:00:00Z".to_owned(),
+            updated_at: "2026-08-13T22:00:00Z".to_owned(),
+            tombstoned_at: None,
+            valid_from: None,
+            valid_to: None,
+        };
+        assert!(
+            scope.memory_in_scope(&inbound),
+            "enrolled teammate inbound memory must be in Team scope without config.toml"
+        );
     }
 
     #[test]
@@ -7474,11 +7621,6 @@ mod tests {
         let joiner_dir = tempfile::tempdir().unwrap();
         let joiner_ee = joiner_dir.path().join(".ee");
         std::fs::create_dir_all(&joiner_ee).expect("joiner ee");
-        std::fs::write(
-            joiner_ee.join("config.toml"),
-            "[trust]\nteam_members = [\"Analysts\"]\n",
-        )
-        .expect("team members");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

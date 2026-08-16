@@ -92,7 +92,12 @@ future changelog pass expands those rows into full capability sections.
   Omitted history share stays body-free. The import ledger records
   the producer `body_cache_key`.
   Join enrolls the inviter under the pair-key handle so EventFetch
-  can find the invite TCP endpoint. The inviter enrolls the accepted
+  can find the invite TCP endpoint. Enroll also persists the remote
+  human as an active `team_members` row, so `--memory-scope team`
+  admits teammate text without a hand-edited `trust.team_members`
+  config. `persist_team_member` is idempotent on origin node so
+  enroll-then-join does not insert a duplicate.
+  The inviter enrolls the accepted
   joiner at the join TCP source IP and the advertised `joinerHelloPort`
   (hello also carries `joinerWorkspaceId`) so EventFetch/BodyFetch
   work both ways. `ee team fetch body` retries granted BodyFetch
