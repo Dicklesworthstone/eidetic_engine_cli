@@ -2087,6 +2087,11 @@ pub fn apply_fetched_team_body(
         return Ok(unchanged);
     };
     if row.cache_status == "available" {
+        // Retry/upgrade: the cache may already be published while the
+        // inbound stub is still "[ee.team.history] …". Hydrate from the
+        // local bytes so search/pack can recall teammate text without a
+        // second BodyFetch.
+        hydrate_available_inbound_team_body(connection, workspace_id, workspace_path, &row)?;
         return fetch_local_team_body(
             connection,
             workspace_id,
@@ -2166,6 +2171,49 @@ pub fn apply_fetched_team_body(
         workspace_path,
         &fetched.body_cache_key,
     )
+}
+
+/// Hydrate a still-stub inbound memory from an already-published cache row.
+fn hydrate_available_inbound_team_body(
+    connection: &DbConnection,
+    workspace_id: &str,
+    workspace_path: &std::path::Path,
+    row: &crate::db::StoredMeshBodyCacheMetadata,
+) -> Result<(), OriginStreamError> {
+    let local = fetch_local_team_body(
+        connection,
+        workspace_id,
+        workspace_path,
+        &row.body_cache_key,
+    )?;
+    let Some(bytes) = local.body_hex.as_deref().and_then(hex_decode) else {
+        return Ok(());
+    };
+    hydrate_inbound_team_memory_body(connection, workspace_id, row, &bytes)?;
+    let _ = drain_team_inbound_search_index(connection, workspace_id, workspace_path);
+    Ok(())
+}
+
+/// Walk available inbound cache rows and hydrate leftover history stubs.
+/// Covers the upgrade path after a node already published bytes under the
+/// pre-hydrate apply path.
+fn rematerialize_available_inbound_team_bodies(
+    connection: &DbConnection,
+    workspace_id: &str,
+    workspace_path: &std::path::Path,
+) -> Result<usize, OriginStreamError> {
+    let rows = connection
+        .list_mesh_body_cache_metadata(workspace_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    let mut attempted = 0_usize;
+    for row in rows {
+        if row.cache_status != "available" {
+            continue;
+        }
+        hydrate_available_inbound_team_body(connection, workspace_id, workspace_path, &row)?;
+        attempted = attempted.saturating_add(1);
+    }
+    Ok(attempted)
 }
 
 /// Body-cache keys waiting on an authorized fetch. Filesystem presence is
@@ -3058,6 +3106,7 @@ pub fn execute_team_steward_once(
         let (deferred, promoted) = retry_deferred_pairings(connection, &workspace_id, path)?;
         report.deferred_pairings = deferred;
         report.applied_pair_promotions = promoted;
+        let _ = rematerialize_available_inbound_team_bodies(connection, &workspace_id, path);
         let _ = drain_team_inbound_search_index(connection, &workspace_id, path);
     }
     report.stalled_cursors = stalled_peer_cursor_count(connection, &workspace_id)?;
@@ -4836,18 +4885,9 @@ pub fn project_inbound_team_memory(
     if payload.operation != MemoryEventOperation::Create {
         return Ok(None);
     }
-    let hex = inbound
-        .event_hash
-        .trim_start_matches("blake3:")
-        .chars()
-        .take(26)
-        .collect::<String>();
-    if hex.len() != 26 {
-        return Err(OriginStreamError::Encode(
-            "inbound event hash is too short for a memory id".to_owned(),
-        ));
-    }
-    let memory_id = format!("mem_{hex}");
+    let memory_id = inbound_team_memory_id(&inbound.event_hash).ok_or_else(|| {
+        OriginStreamError::Encode("inbound event hash is too short for a memory id".to_owned())
+    })?;
     if connection
         .get_memory(&memory_id)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?
@@ -4932,13 +4972,19 @@ fn enqueue_inbound_memory_index_job(
     Ok(())
 }
 
+/// Mint a typed `mem_*` Crockford id from the origin event hash so pack
+/// candidate resolution can parse it. Raw blake3 hex overflows the
+/// 26-character payload (first digit must be 0-7).
 fn inbound_team_memory_id(event_hash: &str) -> Option<String> {
-    let hex = event_hash
-        .trim_start_matches("blake3:")
-        .chars()
-        .take(26)
-        .collect::<String>();
-    (hex.len() == 26).then(|| format!("mem_{hex}"))
+    let hex = event_hash.trim_start_matches("blake3:");
+    let mut bytes = [0_u8; 16];
+    for (index, slot) in bytes.iter_mut().enumerate() {
+        let start = index.saturating_mul(2);
+        let end = start.saturating_add(2);
+        let pair = hex.get(start..end)?;
+        *slot = u8::from_str_radix(pair, 16).ok()?;
+    }
+    Some(crate::models::MemoryId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string())
 }
 
 /// Replay allowed import-ledger memory events onto local stub rows.
@@ -5367,7 +5413,21 @@ pub fn list_team_activity(
         {
             continue;
         }
-        let produced_at = memory.created_at.clone();
+        let provenance = crate::core::memory_scope::team_provenance_from_memory(&memory);
+        let member_display_name = provenance
+            .as_ref()
+            .map(|item| item.member_display_name.clone())
+            .or_else(|| crate::core::memory_scope::memory_producer_agent(&memory))
+            .unwrap_or_default();
+        let origin_node_id = members
+            .iter()
+            .find(|member| member.display_name == member_display_name)
+            .map(|member| member.origin_node_id.clone())
+            .unwrap_or_default();
+        let produced_at = provenance
+            .as_ref()
+            .map(|item| item.produced_at.clone())
+            .unwrap_or_else(|| memory.created_at.clone());
         let produced = chrono::DateTime::parse_from_rfc3339(&produced_at)
             .ok()
             .map(|stamp| stamp.with_timezone(&chrono::Utc));
@@ -5377,25 +5437,17 @@ pub fn list_team_activity(
         {
             continue;
         }
-        let origin_node_id = crate::core::memory_scope::memory_producer_agent(&memory)
-            .and_then(|producer| {
-                members
-                    .iter()
-                    .find(|member| member.display_name == producer)
-                    .map(|member| member.origin_node_id.clone())
-            })
-            .unwrap_or_default();
         let item = TeamActivityItem {
             event_id: memory
                 .provenance_uri
                 .clone()
                 .unwrap_or_else(|| memory.id.clone()),
-            origin_node_id: origin_node_id.clone(),
-            member_display_name: display_for(&origin_node_id),
+            origin_node_id,
+            member_display_name,
             kind: memory.kind,
             level: memory.level,
             produced_at,
-            body_available: false,
+            body_available: !memory.content.starts_with("[ee.team.history]"),
             source: "inbound_projection".to_owned(),
         };
         let is_anomaly = produced
@@ -6191,6 +6243,8 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::str::FromStr;
 
     use super::*;
 
@@ -8086,6 +8140,21 @@ mod tests {
     }
 
     #[test]
+    fn inbound_team_memory_id_is_a_parseable_memory_id() {
+        let high = inbound_team_memory_id(
+            "blake3:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        )
+        .expect("id");
+        crate::models::MemoryId::from_str(&high).expect(&high);
+        let mixed = inbound_team_memory_id(
+            "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("id");
+        crate::models::MemoryId::from_str(&mixed).expect(&mixed);
+        assert_ne!(high, mixed);
+    }
+
+    #[test]
     fn hydrate_inbound_team_memory_body_replaces_history_stub() {
         let connection = open_db();
         connection
@@ -8104,10 +8173,10 @@ mod tests {
             "2026-08-13T00:00:00Z",
         )
         .expect("create");
-        let stub_id = "mem_teamhydrate000000000000001";
+        let stub_id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0x11)).to_string();
         connection
             .insert_memory(
-                stub_id,
+                &stub_id,
                 &crate::db::CreateMemoryInput {
                     workspace_id: "wsp_persistfixture000000000001".to_owned(),
                     level: "semantic".to_owned(),
@@ -8156,7 +8225,7 @@ mod tests {
             b"Acme Corp analysis from Priya",
         )
         .expect("hydrate");
-        let stored = connection.get_memory(stub_id).expect("get").expect("row");
+        let stored = connection.get_memory(&stub_id).expect("get").expect("row");
         assert_eq!(stored.content, "Acme Corp analysis from Priya");
         assert_eq!(stored.trust_class, "peer_human_attested");
         assert_eq!(
@@ -8181,8 +8250,210 @@ mod tests {
             .expect("jobs");
         assert!(
             jobs.iter()
-                .any(|job| job.document_id.as_deref() == Some(stub_id)),
+                .any(|job| job.document_id.as_deref() == Some(stub_id.as_str())),
             "hydrate must enqueue a SingleDocument job so search can see the body"
+        );
+    }
+
+    #[test]
+    fn apply_fetched_team_body_hydrates_already_available_cache() {
+        use crate::mesh::bootstrap_envelope::{BODY_FETCH_RESPONSE_SCHEMA_V1, BodyFetchResponse};
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let ee_dir = workspace.path().join(".ee");
+        std::fs::create_dir_all(&ee_dir).expect("ee dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&ee_dir, std::fs::Permissions::from_mode(0o700))
+                .expect("ee mode");
+        }
+        let database = ee_dir.join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database).expect("open");
+        connection.migrate().expect("migrate");
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: Some("hydrate-retry".to_owned()),
+                },
+            )
+            .expect("workspace");
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let stub_id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0x12)).to_string();
+        connection
+            .insert_memory(
+                &stub_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "[ee.team.history] note blake3:deadbeef".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.5,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("evt_teamhydrateretry".to_owned()),
+                    trust_class: "peer_human_attested".to_owned(),
+                    trust_subclass: Some(
+                        "agent:Analysts; produced_at=2026-08-13T11:00:00Z".to_owned(),
+                    ),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("stub");
+        let key = "body_teamhydrateretry0000000001";
+        let body = b"Acme Corp analysis from Priya after retry";
+        let local_body_hash = format!("blake3:{}", blake3::hash(body).to_hex());
+        let cache_dir = workspace.path().join(".ee").join("mesh-body-cache");
+        let cache =
+            crate::mesh::key_store::SecureLocalDir::open_or_create(workspace.path(), &cache_dir)
+                .expect("cache");
+        cache.write_replace(key, body).expect("write cache");
+        connection
+            .upsert_mesh_body_cache_metadata(&UpsertMeshBodyCacheMetadataInput {
+                workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                body_cache_key: key.to_owned(),
+                origin_node_id: "node_hydrate".to_owned(),
+                origin_workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                logical_memory_id: "mem_originbody0000000000000001".to_owned(),
+                content_hash: "blake3:deadbeef".to_owned(),
+                body_ref_json: Some(
+                    serde_json::json!({
+                        "originEventId": "evt_teamhydrateretry",
+                        "localMemoryId": stub_id,
+                    })
+                    .to_string(),
+                ),
+                preview_hash: None,
+                size_bytes: Some(u64::try_from(body.len()).unwrap_or(0)),
+                cache_status: "available".to_owned(),
+                local_body_hash: Some(local_body_hash),
+                cached_at: Some("2026-08-15T00:00:00Z".to_owned()),
+                expires_at: None,
+            })
+            .expect("available row");
+        let applied = apply_fetched_team_body(
+            &connection,
+            "wsp_persistfixture000000000001",
+            workspace.path(),
+            &BodyFetchResponse {
+                schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
+                body_cache_key: key.to_owned(),
+                cache_status: "available".to_owned(),
+                size_bytes: u64::try_from(body.len()).unwrap_or(0),
+                body_hex: Some(hex_encode(body)),
+                nonce_hex: Some(hex_encode(&[7_u8; 32])),
+            },
+        )
+        .expect("apply retry");
+        assert_eq!(applied.cache_status, "available");
+        let stored = connection.get_memory(&stub_id).expect("get").expect("row");
+        assert_eq!(
+            stored.content, "Acme Corp analysis from Priya after retry",
+            "already-available BodyFetch must still hydrate leftover history stubs"
+        );
+    }
+
+    #[test]
+    fn steward_hydrates_leftover_history_stubs_from_available_cache() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let ee_dir = workspace.path().join(".ee");
+        std::fs::create_dir_all(&ee_dir).expect("ee dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&ee_dir, std::fs::Permissions::from_mode(0o700))
+                .expect("ee mode");
+        }
+        let database = ee_dir.join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database).expect("open");
+        connection.migrate().expect("migrate");
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: Some("hydrate-steward".to_owned()),
+                },
+            )
+            .expect("workspace");
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let stub_id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0x13)).to_string();
+        connection
+            .insert_memory(
+                &stub_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "[ee.team.history] note blake3:deadbeef".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.5,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("evt_teamhydratesteward".to_owned()),
+                    trust_class: "peer_human_attested".to_owned(),
+                    trust_subclass: Some(
+                        "agent:Analysts; produced_at=2026-08-13T11:00:00Z".to_owned(),
+                    ),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("stub");
+        let key = "body_teamhydratesteward00000001";
+        let body = b"Acme Corp analysis from Priya via steward";
+        let local_body_hash = format!("blake3:{}", blake3::hash(body).to_hex());
+        let cache_dir = workspace.path().join(".ee").join("mesh-body-cache");
+        let cache =
+            crate::mesh::key_store::SecureLocalDir::open_or_create(workspace.path(), &cache_dir)
+                .expect("cache");
+        cache.write_replace(key, body).expect("write cache");
+        connection
+            .upsert_mesh_body_cache_metadata(&UpsertMeshBodyCacheMetadataInput {
+                workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                body_cache_key: key.to_owned(),
+                origin_node_id: "node_hydrate".to_owned(),
+                origin_workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                logical_memory_id: "mem_originbody0000000000000001".to_owned(),
+                content_hash: "blake3:deadbeef".to_owned(),
+                body_ref_json: Some(
+                    serde_json::json!({
+                        "originEventId": "evt_teamhydratesteward",
+                        "localMemoryId": stub_id,
+                    })
+                    .to_string(),
+                ),
+                preview_hash: None,
+                size_bytes: Some(u64::try_from(body.len()).unwrap_or(0)),
+                cache_status: "available".to_owned(),
+                local_body_hash: Some(local_body_hash),
+                cached_at: Some("2026-08-15T00:00:00Z".to_owned()),
+                expires_at: None,
+            })
+            .expect("available row");
+        execute_team_steward_once(&connection, Some(workspace.path())).expect("steward");
+        let stored = connection.get_memory(&stub_id).expect("get").expect("row");
+        assert_eq!(
+            stored.content, "Acme Corp analysis from Priya via steward",
+            "ee team steward once must hydrate leftover history stubs from available cache"
         );
     }
 
@@ -8210,10 +8481,10 @@ mod tests {
             "2026-08-13T00:00:00Z",
         )
         .expect("create");
-        let stub_id = "mem_teamhydrate000000000000001";
+        let stub_id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0x11)).to_string();
         connection
             .insert_memory(
-                stub_id,
+                &stub_id,
                 &crate::db::CreateMemoryInput {
                     workspace_id: "wsp_persistfixture000000000001".to_owned(),
                     level: "semantic".to_owned(),
@@ -8271,7 +8542,7 @@ mod tests {
         assert!(
             pending_before
                 .iter()
-                .any(|job| job.document_id.as_deref() == Some(stub_id)),
+                .any(|job| job.document_id.as_deref() == Some(stub_id.as_str())),
             "hydrate must enqueue a SingleDocument job: {pending_before:?}"
         );
         let drained = drain_team_inbound_search_index(
@@ -8323,6 +8594,66 @@ mod tests {
         assert_eq!(provenance["memberDisplayName"], "Analysts");
         assert_eq!(provenance["originTimeAssurance"], "member_attested");
         assert_eq!(provenance["producedAt"], "2026-08-13T11:00:00Z");
+
+        let packed =
+            crate::core::context::run_context_pack(&crate::core::context::ContextPackOptions {
+                workspace_path: workspace.path().to_path_buf(),
+                database_path: Some(ee_dir.join("ee.db")),
+                index_dir: Some(ee_dir.join("index")),
+                query: "Acme Corp".to_owned(),
+                speed: crate::search::SpeedMode::Instant,
+                source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+                strict_source_mode: true,
+                filters: crate::models::QueryFilters::default(),
+                profile: Some(crate::pack::ContextPackProfile::Balanced),
+                max_tokens: Some(800),
+                candidate_pool: Some(8),
+                max_results: Some(4),
+                include_tombstoned: false,
+                as_of: None,
+                include_expired: false,
+                include_future: false,
+                include_stale: false,
+                relevance_floor: Some(0.0),
+                redaction_level: crate::models::RedactionLevel::Minimal,
+                memory_scope: crate::models::MemoryScope::Team,
+                strict_scope: false,
+                ppr_weight: None,
+                changed_symbols: Vec::new(),
+                changed_symbols_from_git: false,
+                pagination: None,
+                coordination_snapshot_path: None,
+                coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+                task_lens: None,
+                require_fresh_sentinels: false,
+                output_options: crate::core::context::ContextPackOutputOptions::default(),
+                persist_pack: false,
+                baseline_write: None,
+                no_lod: true,
+            })
+            .expect("pack");
+        assert!(
+            packed
+                .data
+                .pack
+                .items
+                .iter()
+                .any(|item| item.memory_id.to_string() == stub_id),
+            "ee pack --memory-scope team must select the hydrated teammate memory: items={:?} degraded={:?}",
+            packed
+                .data
+                .pack
+                .items
+                .iter()
+                .map(|item| item.memory_id.to_string())
+                .collect::<Vec<_>>(),
+            packed.data.degraded
+        );
+        let pack_json = crate::output::render_context_response_json(&packed);
+        assert!(
+            pack_json.contains("\"teamProvenance\"") && pack_json.contains("Analysts"),
+            "ee pack --json must emit teamProvenance for the teammate item: {pack_json}"
+        );
     }
 
     #[test]
@@ -9136,6 +9467,97 @@ mod tests {
         assert!(report.events.iter().all(|item| !item.body_available));
         let json = serde_json::to_string(&report).expect("json");
         assert!(!json.contains("secret body must stay off activity"));
+    }
+
+    #[test]
+    fn list_team_activity_attributes_hydrated_inbound_memory() {
+        let connection = open_db();
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-team-activity-inbound".to_owned(),
+                    name: Some("activity".to_owned()),
+                },
+            )
+            .expect("workspace");
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Priya",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        connection
+            .insert_memory(
+                "mem_teaminboundact000000000001",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "Acme Corp analysis from Hana".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.5,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("evt_teaminboundact".to_owned()),
+                    trust_class: "peer_human_attested".to_owned(),
+                    trust_subclass: Some("agent:Hana; produced_at=2026-08-13T11:00:00Z".to_owned()),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("inbound");
+        connection
+            .insert_memory(
+                "mem_teaminboundstub00000000001",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "[ee.team.history] note blake3:deadbeef".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.5,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("evt_teaminboundstub".to_owned()),
+                    trust_class: "peer_human_attested".to_owned(),
+                    trust_subclass: Some("agent:Hana; produced_at=2026-08-13T10:00:00Z".to_owned()),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("stub");
+        let report = list_team_activity(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T12:00:00Z",
+            100,
+        )
+        .expect("activity");
+        let inbound = report
+            .events
+            .iter()
+            .find(|item| item.source == "inbound_projection")
+            .expect("inbound activity");
+        assert_eq!(inbound.member_display_name, "Hana");
+        assert_eq!(inbound.produced_at, "2026-08-13T11:00:00Z");
+        assert!(inbound.body_available);
+        assert_eq!(inbound.kind, "note");
+        let stub = report
+            .events
+            .iter()
+            .find(|item| item.event_id == "evt_teaminboundstub")
+            .expect("stub activity");
+        assert_eq!(stub.member_display_name, "Hana");
+        assert!(!stub.body_available);
+        let json = serde_json::to_string(&report).expect("json");
+        assert!(
+            !json.contains("Acme Corp analysis from Hana"),
+            "activity must not leak teammate body text: {json}"
+        );
     }
 
     #[test]
