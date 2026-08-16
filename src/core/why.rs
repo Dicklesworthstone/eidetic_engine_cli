@@ -3538,7 +3538,8 @@ mod tests {
                     provenance_uri: Some("evt_team_origin_analysts_0001".to_owned()),
                     trust_class: "peer_human_attested".to_owned(),
                     trust_subclass: Some(
-                        "agent:Analysts; produced_at=2026-08-16T00:00:00Z".to_owned(),
+                        "agent:Analysts; produced_at=2026-08-16T00:00:00Z; project=acme-analysis"
+                            .to_owned(),
                     ),
                     tags: Vec::new(),
                     valid_from: None,
@@ -3561,6 +3562,11 @@ mod tests {
             provenance.member_display_name.as_str(),
             "Analysts",
             "member display name",
+        )?;
+        ensure(
+            provenance.project_name.as_deref().unwrap_or(""),
+            "acme-analysis",
+            "project name",
         )?;
         ensure(
             provenance.produced_at.as_str(),

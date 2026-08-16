@@ -1469,7 +1469,7 @@ mod tests {
     fn ask_citation_json_includes_team_provenance() {
         let provenance = crate::core::memory_scope::TeamProvenance {
             member_display_name: "Analysts".to_owned(),
-            project_name: None,
+            project_name: Some("acme-analysis".to_owned()),
             origin_trust_class: "peer_human_attested",
             produced_at: "2026-08-16T00:00:00Z".to_owned(),
             origin_time_assurance: "member_attested",
@@ -1508,10 +1508,14 @@ mod tests {
             json["citations"][0]["teamProvenance"]["memberDisplayName"],
             "Analysts"
         );
+        assert_eq!(
+            json["citations"][0]["teamProvenance"]["projectName"],
+            "acme-analysis"
+        );
         let markdown = render_ask_markdown(&report);
         assert!(
-            markdown.contains("from Analysts"),
-            "ask markdown must attribute the teammate: {markdown}"
+            markdown.contains("from Analysts / acme-analysis"),
+            "ask markdown must attribute the teammate and project: {markdown}"
         );
     }
 
