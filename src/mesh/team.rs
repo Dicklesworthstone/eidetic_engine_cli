@@ -2219,8 +2219,8 @@ fn hydrate_inbound_team_memory_body(
     enqueue_inbound_memory_index_job(connection, workspace_id, &local_id, "team-inbound-body")
 }
 
-/// Drain SingleDocument jobs so `--memory-scope team` search/pack can see
-/// rematerialized or hydrated teammate text.
+/// Drain coalesced inbound Incremental jobs so `--memory-scope team`
+/// search/pack can see rematerialized or hydrated teammate text.
 fn drain_team_inbound_search_index(
     connection: &DbConnection,
     workspace_id: &str,
@@ -5140,13 +5140,41 @@ pub fn project_inbound_team_memory(
     Ok(Some(memory_id))
 }
 
+/// One coalesced Incremental job per inbound source stays inside the
+/// 16-job amplification budget even when a round admits hundreds of rows.
+const TEAM_INBOUND_INDEX_JOB_CAP: usize = 16;
+
 fn enqueue_inbound_memory_index_job(
     connection: &DbConnection,
     workspace_id: &str,
-    memory_id: &str,
+    _memory_id: &str,
     reason: &str,
 ) -> Result<(), OriginStreamError> {
-    let hex = blake3::hash(format!("{reason}:{workspace_id}:{memory_id}").as_bytes()).to_hex();
+    let jobs = connection
+        .list_search_index_jobs(workspace_id, None)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    if jobs.iter().any(|job| {
+        job.document_source.as_deref() == Some(reason)
+            && matches!(
+                job.status_enum(),
+                Some(crate::db::SearchIndexJobStatus::Pending)
+                    | Some(crate::db::SearchIndexJobStatus::Running)
+            )
+    }) {
+        return Ok(());
+    }
+    let pending = jobs
+        .iter()
+        .filter(|job| job.status_enum() == Some(crate::db::SearchIndexJobStatus::Pending))
+        .count();
+    if pending >= TEAM_INBOUND_INDEX_JOB_CAP {
+        return Ok(());
+    }
+    let generation = jobs
+        .iter()
+        .filter(|job| job.document_source.as_deref() == Some(reason))
+        .count();
+    let hex = blake3::hash(format!("{reason}:{workspace_id}:{generation}").as_bytes()).to_hex();
     let job_id = format!("sidx_{}", &hex.as_str()[..26]);
     if connection
         .get_search_index_job(&job_id)
@@ -5160,9 +5188,9 @@ fn enqueue_inbound_memory_index_job(
             &job_id,
             &CreateSearchIndexJobInput {
                 workspace_id: workspace_id.to_owned(),
-                job_type: SearchIndexJobType::SingleDocument,
-                document_source: Some("memory".to_owned()),
-                document_id: Some(memory_id.to_owned()),
+                job_type: SearchIndexJobType::Incremental,
+                document_source: Some(reason.to_owned()),
+                document_id: None,
                 documents_total: 1,
             },
         )
@@ -9237,10 +9265,48 @@ mod tests {
             )
             .expect("jobs");
         assert!(
-            jobs.iter()
-                .any(|job| job.document_id.as_deref() == Some(stub_id.as_str())),
-            "hydrate must enqueue a SingleDocument job so search can see the body"
+            jobs.iter().any(|job| {
+                job.document_source.as_deref() == Some("team-inbound-body")
+                    && job.job_type == "incremental"
+            }),
+            "hydrate must enqueue a coalesced Incremental job so search can see the body: {jobs:?}"
         );
+    }
+
+    #[test]
+    fn inbound_index_jobs_coalesce_under_amplification_cap() {
+        let connection = open_db();
+        let workspace_id = "wsp_indexcoalesce000000000001";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-team-index-coalesce".to_owned(),
+                    name: Some("coalesce".to_owned()),
+                },
+            )
+            .expect("workspace");
+        for index in 0..20_u32 {
+            enqueue_inbound_memory_index_job(
+                &connection,
+                workspace_id,
+                &format!("mem_coalesce{index:018}"),
+                "team-inbound",
+            )
+            .expect("enqueue");
+        }
+        let jobs = connection
+            .list_search_index_jobs(workspace_id, None)
+            .expect("jobs");
+        assert_eq!(
+            jobs.len(),
+            1,
+            "a 20-row inbound burst must stay one Incremental job: {jobs:?}"
+        );
+        assert_eq!(jobs[0].job_type, "incremental");
+        assert_eq!(jobs[0].document_source.as_deref(), Some("team-inbound"));
+        assert!(jobs[0].document_id.is_none());
+        assert!(jobs[0].status_enum() == Some(crate::db::SearchIndexJobStatus::Pending));
     }
 
     #[test]
@@ -9528,10 +9594,11 @@ mod tests {
             )
             .expect("pending jobs");
         assert!(
-            pending_before
-                .iter()
-                .any(|job| job.document_id.as_deref() == Some(stub_id.as_str())),
-            "hydrate must enqueue a SingleDocument job: {pending_before:?}"
+            pending_before.iter().any(|job| {
+                job.document_source.as_deref() == Some("team-inbound-body")
+                    && job.job_type == "incremental"
+            }),
+            "hydrate must enqueue a coalesced Incremental job: {pending_before:?}"
         );
         let drained = drain_team_inbound_search_index(
             &connection,
@@ -9541,7 +9608,7 @@ mod tests {
         .unwrap_or_else(|error| panic!("drain failed: {error}"));
         assert!(
             drained > 0,
-            "hydrate must leave a drainable SingleDocument job ({pending_before:?})"
+            "hydrate must leave a drainable Incremental job ({pending_before:?})"
         );
         let search = crate::core::search::run_search(&crate::core::search::SearchOptions {
             workspace_path: workspace.path().to_path_buf(),
@@ -9763,8 +9830,9 @@ mod tests {
             )
             .expect("jobs");
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].document_id.as_deref(), Some(stub_id.as_str()));
-        assert_eq!(jobs[0].document_source.as_deref(), Some("memory"));
+        assert_eq!(jobs[0].document_id.as_deref(), None);
+        assert_eq!(jobs[0].document_source.as_deref(), Some("team-inbound"));
+        assert_eq!(jobs[0].job_type, "incremental");
         let again = reconcile_inbound_team_memories(&connection, "wsp_persistfixture000000000001")
             .expect("idempotent");
         assert_eq!(again.applied_additions, 0);
