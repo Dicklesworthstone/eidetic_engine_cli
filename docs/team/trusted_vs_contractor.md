@@ -11,7 +11,7 @@ workflow belongs on this surface.
 | Body share | Confirm-gated, hardened cache, durable Body-lane Allow, `exact`/`already_redacted` representations, hash-checked fetch, no filesystem resurrection | Never. Bodies are origin-owned secrets of the team. |
 | IdP | Tailnet-attested or secretless OIDC with pinned CA | Do not enroll contractor IdP subjects into the team policy. |
 | Daemon / steward | Optional user-scoped service on Unix | Irrelevant; they should not have a route. |
-| Windows node | Client-only inbound responder; `HardenedWindows` SID/DACL/reparse adapter compiles, no host soak | Same fail-closed rule; do not weaken storage to onboard them. |
+| Windows node | TeamJoin inbound TCP (`ee mesh hello-responder run`); Tailscale LocalAPI WhoIs stays Unix; `HardenedWindows` SID/DACL/reparse adapter compiles, no host soak | Same fail-closed rule; do not weaken storage to onboard them. |
 
 ## What "trusted" means here
 
@@ -29,7 +29,9 @@ workflow belongs on this surface.
 
 - Not a contractor portal.
 - Not a public mesh.
-- Not a replacement for `ee pack` on a single machine.
+- Not a replacement for local `ee pack`. After a granted BodyFetch,
+  `ee search` / `ee pack --memory-scope team` is how a teammate's
+  text is recalled, with `teamProvenance`.
 - Not an excuse to store team keys in an ordinary directory on Windows.
 
 If the other party is a contractor, keep them on local `ee` and send a

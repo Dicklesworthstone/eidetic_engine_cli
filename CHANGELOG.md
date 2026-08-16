@@ -150,7 +150,16 @@ future changelog pass expands those rows into full capability sections.
   Team-scoped search hits now carry `teamProvenance` (member display
   name, member-attested `producedAt`); pack markdown prints
   `· from <member> · <producedAt>`. `ee pack --json` and pack JSONL
-  items emit the same `teamProvenance` block.
+  items emit the same `teamProvenance` block. `ee pack --memory-scope
+  team` selects the hydrated teammate memory. A retry or
+  `ee team steward once` hydrates leftover `[ee.team.history]` stubs
+  from an already-available body cache (upgrade path after a
+  pre-hydrate apply). `ee team activity` attributes inbound
+  projections with member display name, member-attested origin time,
+  and `bodyAvailable` once the stub is hydrated; activity JSON never
+  includes teammate body text. Inbound teammate memory ids are minted
+  as typed Crockford `mem_*` values from the event hash so
+  `ee pack --memory-scope team` can parse and select them.
 - Authenticated responder sessions now apply
   `MeshAdmissionLimits::conservative_default()` before EventFetch,
   BodyFetch, Summary, and `identity_attest`.

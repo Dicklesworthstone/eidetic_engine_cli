@@ -1,7 +1,10 @@
 # Agent notes: `ee team`
 
-Use `ee team` only when two or more trusted Unix `ee` nodes must share
+Use `ee team` only when two or more trusted `ee` nodes must share
 origin-owned memory. Local `ee pack` / `ee search` stay the default.
+After a granted BodyFetch (or `ee team steward once`), teammate text
+is recalled with the same commands plus `--memory-scope team`. Hits
+and pack items carry `teamProvenance`.
 
 ## Safe first commands
 
@@ -9,6 +12,8 @@ origin-owned memory. Local `ee pack` / `ee search` stay the default.
 ee team status --workspace . --json
 ee team doctor --workspace . --json
 ee team members list --workspace . --json
+ee search "<task>" --memory-scope team --workspace . --json
+ee pack "<task>" --memory-scope team --workspace . --json
 ```
 
 Treat any `degraded[]` or doctor `error` as a stop. Repair strings on
@@ -69,7 +74,9 @@ Origin project
 
 - Do not start a second responder port for a second workspace.
 - Do not treat Tailscale WhoIs as team membership.
-- Do not claim Windows DACL/reparse parity; it is fail-closed.
+- Do not claim a Windows-host DACL soak or production IdP vendor soak;
+  those remain environment remainders. TeamJoin inbound TCP compiles
+  and listens on Windows; Tailscale LocalAPI WhoIs stays Unix.
 - Do not close a team-confed bead because a doctor check is green.
 - Do not delete body-cache files. Unshare invalidates; reconcile
   never resurrects from the filesystem.

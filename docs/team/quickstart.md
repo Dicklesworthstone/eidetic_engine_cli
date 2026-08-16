@@ -42,6 +42,15 @@ ee team share bodies --confirm --representation already_redacted --workspace . -
 
 # Priya — fetch a published body through the authenticated session
 ee team fetch body --key "$CACHE_KEY" --workspace . --json
+
+# Priya — or let steward apply pending BodyFetch, hydrate stubs, and index
+ee team steward once --workspace . --json
+
+# Unified recall: teammate text is now a local memory with attribution
+ee search "Acme Corp" --memory-scope team --workspace . --json
+ee pack "Acme Corp" --memory-scope team --workspace . --json
+ee team activity --as-of "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --workspace . --json
+# search/pack carry teamProvenance; activity lists member + origin time + bodyAvailable
 ```
 
 Pause fences network exchange without deleting membership. Resume
