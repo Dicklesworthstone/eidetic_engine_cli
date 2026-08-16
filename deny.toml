@@ -74,9 +74,11 @@ ignore = [
     # RUSTSEC-2025-0134: `rustls-pemfile` is unmaintained (a maintenance
     # advisory, not a vulnerability; RustSec reports "no safe upgrade
     # available"). It is pulled into cargo-deny's all-features graph solely
-    # by asupersync's optional `tls` feature; ee's default feature set does
-    # not enable that feature. Time-boxed exception for v0.13.0: revisit by
-    # 2026-08-10 or sooner when asupersync migrates to rustls-pki-types::pem
-    # (tracked in GH#22).
+    # by asupersync's `tls` feature (reached via frankensearch-embed's
+    # `download` feature -> asupersync `tls-webpki-roots`); ee itself does
+    # not enable it. Re-verified 2026-08-16 against asupersync 0.4.4:
+    # upstream still declares `rustls-pemfile` in its `tls` feature, so the
+    # exception must stay. Time-boxed: revisit by 2026-09-15 or sooner when
+    # asupersync migrates to rustls-pki-types::pem (tracked in GH#22).
     "RUSTSEC-2025-0134",
 ]
