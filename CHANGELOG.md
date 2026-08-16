@@ -149,7 +149,8 @@ future changelog pass expands those rows into full capability sections.
   index job so a joiner without a prior local index can still search.
   Team-scoped search hits now carry `teamProvenance` (member display
   name, member-attested `producedAt`); pack markdown prints
-  `· from <member> · <producedAt>`.
+  `· from <member> · <producedAt>`. `ee pack --json` and pack JSONL
+  items emit the same `teamProvenance` block.
 - Authenticated responder sessions now apply
   `MeshAdmissionLimits::conservative_default()` before EventFetch,
   BodyFetch, Summary, and `identity_attest`.
