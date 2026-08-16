@@ -4,7 +4,8 @@ Use `ee team` only when two or more trusted `ee` nodes must share
 origin-owned memory. Local `ee pack` / `ee search` stay the default.
 After a granted BodyFetch (or `ee team steward once`), teammate text
 is recalled with the same commands plus `--memory-scope team`. Hits,
-pack items, `ee ask` citations, and `ee why` carry `teamProvenance`.
+pack items, `ee ask` citations, and `ee why` carry `teamProvenance`
+(member, optional shared `projectName`, member-attested `producedAt`).
 `ee why` also emits `data.elevation` for teammate rows. Use
 `ee insights --section peerConflicts --json` when a teammate row
 overlaps or contradicts a local memory.

@@ -123,6 +123,12 @@ future changelog pass expands those rows into full capability sections.
   elevated to `peer_human_attested`, with `producedAt` labeled
   member-attested and excluded from ranking. Team pack overlap
   demotion ignores origin and receipt timestamps.
+  Inbound teammate projections now persist the signed
+  `project_binding` into `trust_subclass`, so search/pack/ask/why
+  `teamProvenance.projectName` and the markdown suffix
+  (`· from Priya / acme-analysis · …`) carry the shared project
+  instead of staying null. A 500-row inbound burst still enqueues
+  one Incremental index job.
   The inviter enrolls the accepted
   joiner at the join TCP source IP and the advertised `joinerHelloPort`
   (hello also carries `joinerWorkspaceId`) so EventFetch/BodyFetch
