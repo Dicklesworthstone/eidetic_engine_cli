@@ -1435,11 +1435,31 @@ pub fn team_provenance_from_memory(memory: &StoredMemory) -> Option<TeamProvenan
     if memory.trust_class != "peer_human_attested" {
         return None;
     }
-    let member_display_name = memory_producer_agent(memory)?;
-    let produced_at = produced_at_from_trust_subclass(memory.trust_subclass.as_deref()?)?;
+    team_provenance_from_trust(
+        &memory.trust_class,
+        memory.trust_subclass.as_deref(),
+        memory.provenance_uri.as_deref(),
+    )
+}
+
+/// Build attribution from trust fields. Pack uses the same parser so
+/// search/pack/ask/why stay aligned.
+#[must_use]
+pub fn team_provenance_from_trust(
+    trust_class: &str,
+    trust_subclass: Option<&str>,
+    provenance_uri: Option<&str>,
+) -> Option<TeamProvenance> {
+    if trust_class != "peer_human_attested" {
+        return None;
+    }
+    let subclass = trust_subclass?;
+    let member_display_name = agent_from_trust_subclass(subclass)
+        .or_else(|| provenance_uri.and_then(agent_from_provenance_uri))?;
+    let produced_at = produced_at_from_trust_subclass(subclass)?;
     Some(TeamProvenance {
         member_display_name,
-        project_name: None,
+        project_name: project_from_trust_subclass(subclass),
         origin_trust_class: "peer_human_attested",
         produced_at,
         origin_time_assurance: "member_attested",
@@ -1453,6 +1473,18 @@ fn produced_at_from_trust_subclass(value: &str) -> Option<String> {
         .find_map(|part| {
             part.strip_prefix("produced_at=")
                 .or_else(|| part.strip_prefix("producedAt="))
+                .map(str::to_owned)
+        })
+        .and_then(normalized_non_empty)
+}
+
+fn project_from_trust_subclass(value: &str) -> Option<String> {
+    value
+        .split([';', ',', '|'])
+        .map(str::trim)
+        .find_map(|part| {
+            part.strip_prefix("project=")
+                .or_else(|| part.strip_prefix("project:"))
                 .map(str::to_owned)
         })
         .and_then(normalized_non_empty)
@@ -1853,6 +1885,7 @@ mod tests {
         let provenance = super::team_provenance_from_memory(&memory).expect("attributable");
         assert_eq!(provenance.member_display_name, "Priya");
         assert_eq!(provenance.produced_at, "2026-07-30T14:02:00Z");
+        assert_eq!(provenance.project_name, None);
         assert_eq!(provenance.origin_time_assurance, "member_attested");
         assert_eq!(
             provenance.compact_suffix(),
@@ -1869,6 +1902,21 @@ mod tests {
             ))
             .is_none()
         );
+    }
+
+    #[test]
+    fn team_provenance_includes_project_binding() {
+        let memory = memory_with_scope(
+            TrustClass::PeerHumanAttested,
+            Some("agent:Priya; produced_at=2026-07-30T14:02:00Z; project=acme-analysis"),
+        );
+        let provenance = super::team_provenance_from_memory(&memory).expect("attributable");
+        assert_eq!(provenance.project_name.as_deref(), Some("acme-analysis"));
+        assert_eq!(
+            provenance.compact_suffix(),
+            "· from Priya / acme-analysis · 2026-07-30T14:02:00Z"
+        );
+        assert_eq!(provenance.to_json()["projectName"], "acme-analysis");
     }
 
     #[test]
