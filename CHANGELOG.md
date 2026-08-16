@@ -162,7 +162,9 @@ future changelog pass expands those rows into full capability sections.
   `ee pack --memory-scope team` can parse and select them.
   `ee team activity --member` / `--project` filter the same closed
   metadata. Shared history/body events bind `project` from the
-  workspace's minted team project.
+  workspace's minted team project. `--since` is an inclusive RFC 3339
+  lower bound (JSON rejects `2h`); the report sets
+  `timeFilterBasis=member_attested` and `sequenceComplete=false`.
 - Authenticated responder sessions now apply
   `MeshAdmissionLimits::conservative_default()` before EventFetch,
   BodyFetch, Summary, and `identity_attest`.

@@ -16,6 +16,7 @@ ee search "<task>" --memory-scope team --workspace . --json
 ee pack "<task>" --memory-scope team --workspace . --json
 ee team activity --as-of "<rfc3339>" --workspace . --json
 ee team activity --project "<name>" --member "<name>" --as-of "<rfc3339>" --workspace . --json
+ee team activity --since "<rfc3339>" --as-of "<rfc3339>" --workspace . --json
 ```
 
 Treat any `degraded[]` or doctor `error` as a stop. Repair strings on

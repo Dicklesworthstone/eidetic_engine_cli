@@ -630,6 +630,10 @@ pub struct TeamActivityReport {
     pub command: &'static str,
     pub team_id: String,
     pub as_of: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    pub time_filter_basis: &'static str,
+    pub sequence_complete: bool,
     pub event_count: usize,
     pub events: Vec<TeamActivityItem>,
     pub clock_anomalies: Vec<TeamActivityItem>,
@@ -5369,6 +5373,7 @@ pub fn list_team_activity(
     limit: usize,
     member: Option<&str>,
     project: Option<&str>,
+    since: Option<&str>,
 ) -> Result<TeamActivityReport, OriginStreamError> {
     let team = load_local_teams(connection)?
         .into_iter()
@@ -5390,6 +5395,17 @@ pub fn list_team_activity(
         .ok();
     let anomaly_cutoff =
         as_of_cutoff.map(|stamp| stamp + chrono::Duration::seconds(TEAM_ACTIVITY_CLOCK_SKEW_SECS));
+    let since_cutoff = since
+        .map(|raw| {
+            chrono::DateTime::parse_from_rfc3339(raw)
+                .map(|stamp| stamp.with_timezone(&chrono::Utc))
+                .map_err(|error| {
+                    OriginStreamError::Encode(format!(
+                        "since must be an RFC 3339 timestamp: {error}"
+                    ))
+                })
+        })
+        .transpose()?;
     let mut events = Vec::new();
     let mut clock_anomalies = Vec::new();
     let origin_rows = connection
@@ -5404,6 +5420,11 @@ pub fn list_team_activity(
         if let (Some(produced), Some(as_of_cutoff)) = (produced, as_of_cutoff)
             && produced > as_of_cutoff
             && anomaly_cutoff.is_none_or(|limit| produced <= limit)
+        {
+            continue;
+        }
+        if let (Some(produced), Some(since_cutoff)) = (produced, since_cutoff)
+            && produced < since_cutoff
         {
             continue;
         }
@@ -5484,6 +5505,11 @@ pub fn list_team_activity(
         {
             continue;
         }
+        if let (Some(produced), Some(since_cutoff)) = (produced, since_cutoff)
+            && produced < since_cutoff
+        {
+            continue;
+        }
         let item = TeamActivityItem {
             event_id: memory
                 .provenance_uri
@@ -5518,11 +5544,19 @@ pub fn list_team_activity(
             .then_with(|| left.event_id.cmp(&right.event_id))
     });
     events.truncate(cap);
+    let since_used = since_cutoff.is_some();
     Ok(TeamActivityReport {
         schema: TEAM_ACTIVITY_SCHEMA_V1,
         command: "team activity",
         team_id: team.team_id,
         as_of: as_of.to_owned(),
+        since: since.map(ToOwned::to_owned),
+        time_filter_basis: if since_used {
+            "member_attested"
+        } else {
+            "as_of"
+        },
+        sequence_complete: !since_used,
         event_count: events.len(),
         events,
         clock_anomalies,
@@ -9513,9 +9547,12 @@ mod tests {
             100,
             None,
             None,
+            None,
         )
         .expect("activity");
         assert!(report.event_count >= 2);
+        assert!(report.sequence_complete);
+        assert_eq!(report.time_filter_basis, "as_of");
         assert!(report.events.iter().any(|item| item.kind == "rule"));
         assert!(report.events.iter().any(|item| item.kind == "teamCreated"));
         assert!(report.events.iter().all(|item| !item.body_available));
@@ -9591,6 +9628,7 @@ mod tests {
             100,
             None,
             None,
+            None,
         )
         .expect("activity");
         let inbound = report
@@ -9620,6 +9658,7 @@ mod tests {
             "2026-08-13T12:00:00Z",
             100,
             Some("Hana"),
+            None,
             None,
         )
         .expect("member filter");
@@ -9696,6 +9735,7 @@ mod tests {
             100,
             None,
             Some("acme-analysis"),
+            None,
         )
         .expect("project filter");
         assert!(
@@ -9718,12 +9758,93 @@ mod tests {
             100,
             None,
             Some("other-project"),
+            None,
         )
         .expect("other");
         assert!(
             !other.events.iter().any(|item| item.kind == "rule"),
             "unrelated project filter must not return the shared rule"
         );
+    }
+
+    #[test]
+    fn list_team_activity_since_excludes_earlier_events_and_labels_incompleteness() {
+        let connection = open_db();
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-team-activity-since".to_owned(),
+                    name: Some("activity".to_owned()),
+                },
+            )
+            .expect("workspace");
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        connection
+            .insert_memory(
+                "mem_teamactivity00000000000001",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "secret body must stay off activity".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("remember");
+        share_team_history(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T11:00:00Z",
+            true,
+            16,
+            None,
+        )
+        .expect("share");
+        let since = list_team_activity(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T12:00:00Z",
+            100,
+            None,
+            None,
+            Some("2026-08-13T10:00:00Z"),
+        )
+        .expect("since");
+        assert_eq!(since.time_filter_basis, "member_attested");
+        assert!(!since.sequence_complete);
+        assert_eq!(since.since.as_deref(), Some("2026-08-13T10:00:00Z"));
+        assert!(since.events.iter().any(|item| item.kind == "rule"));
+        assert!(
+            !since.events.iter().any(|item| item.kind == "teamCreated"),
+            "teamCreated at 00:00 must fall before --since 10:00: {since:?}"
+        );
+        let rejected = list_team_activity(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T12:00:00Z",
+            100,
+            None,
+            None,
+            Some("2h"),
+        )
+        .expect_err("relative");
+        assert!(rejected.to_string().contains("RFC 3339"));
     }
 
     #[test]

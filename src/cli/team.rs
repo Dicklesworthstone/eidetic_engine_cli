@@ -386,6 +386,11 @@ pub struct TeamActivityArgs {
     #[arg(long)]
     pub project: Option<String>,
 
+    /// Inclusive lower bound. JSON requires RFC 3339. Human mode also
+    /// accepts a relative duration such as `2h` or `7d`.
+    #[arg(long)]
+    pub since: Option<String>,
+
     /// Maximum events to return (1–1000).
     #[arg(long, default_value_t = 100)]
     pub limit: usize,
@@ -1600,6 +1605,54 @@ where
     handle_team_posture(cli, args.database.as_deref(), false, stdout, stderr)
 }
 
+fn resolve_team_activity_since(
+    raw: Option<&str>,
+    json: bool,
+) -> Result<Option<String>, DomainError> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if let Ok(stamp) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Ok(Some(stamp.with_timezone(&chrono::Utc).to_rfc3339()));
+    }
+    if json {
+        return Err(DomainError::Usage {
+            message: "JSON --since must be an RFC 3339 timestamp.".to_owned(),
+            repair: Some(
+                "Use --since 2026-08-13T00:00:00Z. Relative durations such as 2h are human-only."
+                    .to_owned(),
+            ),
+        });
+    }
+    let now = chrono::Utc::now();
+    let resolved = parse_human_activity_since(raw, now)?;
+    Ok(Some(resolved.to_rfc3339()))
+}
+
+fn parse_human_activity_since(
+    raw: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<chrono::DateTime<chrono::Utc>, DomainError> {
+    let trimmed = raw.trim().strip_prefix('+').unwrap_or(raw.trim());
+    let usage = || DomainError::Usage {
+        message: format!("since must be RFC 3339 or a relative duration such as 2h, not {raw:?}"),
+        repair: Some("Use 2026-08-13T00:00:00Z, 2h, 30m, or 7d.".to_owned()),
+    };
+    let (amount, unit) = trimmed.split_at(trimmed.len().saturating_sub(1));
+    let amount: i64 = amount.parse().map_err(|_| usage())?;
+    if amount < 0 {
+        return Err(usage());
+    }
+    let duration = match unit {
+        "s" => chrono::Duration::seconds(amount),
+        "m" => chrono::Duration::minutes(amount),
+        "h" => chrono::Duration::hours(amount),
+        "d" => chrono::Duration::days(amount),
+        _ => return Err(usage()),
+    };
+    now.checked_sub_signed(duration).ok_or_else(usage)
+}
+
 fn handle_team_activity<W, E>(
     cli: &Cli,
     args: &TeamActivityArgs,
@@ -1614,6 +1667,10 @@ where
         Ok(opened) => opened,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
+    let since = match resolve_team_activity_since(args.since.as_deref(), cli.wants_json()) {
+        Ok(since) => since,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
     match list_team_activity(
         &connection,
         &workspace_id,
@@ -1621,13 +1678,21 @@ where
         args.limit,
         args.member.as_deref(),
         args.project.as_deref(),
+        since.as_deref(),
     ) {
         Ok(report) => write_team_report(
             cli,
             &report,
             &format!(
-                "Team activity {}: {} event(s) as-of {}\n",
-                report.team_id, report.event_count, report.as_of
+                "Team activity {}: {} event(s) as-of {}{}\n",
+                report.team_id,
+                report.event_count,
+                report.as_of,
+                report
+                    .since
+                    .as_deref()
+                    .map(|since| format!(" since {since}"))
+                    .unwrap_or_default()
             ),
             stdout,
         ),
