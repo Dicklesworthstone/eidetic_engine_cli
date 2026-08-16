@@ -6439,6 +6439,13 @@ pub fn render_why_json(report: &WhyReport) -> String {
             data.insert("seal".to_owned(), seal.clone());
         }
     }
+    if let Some(team_provenance) = &report.team_provenance
+        && let Some(data) = json
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        data.insert("teamProvenance".to_owned(), team_provenance.to_json());
+    }
     if let Some(confidence_intervals) = confidence_intervals
         && let Some(data) = json
             .get_mut("data")

@@ -620,6 +620,9 @@ pub struct WhyReport {
     /// (bd-sealed-preregistration-memory-b67be): contentCommitment,
     /// sealedAt, revealedAt, revealVerified. `None` for unsealed memories.
     pub seal: Option<JsonValue>,
+    /// Receiver-derived teammate attribution when this row is a team-synced
+    /// `peer_human_attested` memory. Same block search and pack emit.
+    pub team_provenance: Option<crate::core::memory_scope::TeamProvenance>,
 }
 
 /// Schema id for the `dedupLink` evidence block surfaced by `ee why`,
@@ -711,6 +714,7 @@ impl WhyReport {
             error: None,
             dedup_link: None,
             seal: None,
+            team_provenance: None,
         }
     }
 
@@ -735,6 +739,16 @@ impl WhyReport {
     #[must_use]
     pub fn with_optional_seal(mut self, seal: Option<JsonValue>) -> Self {
         self.seal = seal;
+        self
+    }
+
+    /// Optionally attach receiver-derived teammate attribution.
+    #[must_use]
+    pub fn with_optional_team_provenance(
+        mut self,
+        team_provenance: Option<crate::core::memory_scope::TeamProvenance>,
+    ) -> Self {
+        self.team_provenance = team_provenance;
         self
     }
 
@@ -778,6 +792,7 @@ impl WhyReport {
             error: None,
             dedup_link: None,
             seal: None,
+            team_provenance: None,
         }
     }
 
@@ -813,6 +828,7 @@ impl WhyReport {
             error: Some(message),
             dedup_link: None,
             seal: None,
+            team_provenance: None,
         }
     }
 
@@ -1376,6 +1392,9 @@ pub fn explain_memory_with_connection(options: &WhyOptions<'_>, conn: &DbConnect
             )
             .with_content(memory.content.clone())
             .with_provenance_health(provenance_health.clone())
+            .with_optional_team_provenance(crate::core::memory_scope::team_provenance_from_memory(
+                &memory,
+            ))
             .with_counterfactual_influence(counterfactual_influence);
             trace_why_math_surfaces(
                 &memory.workspace_id,
@@ -1419,7 +1438,10 @@ pub fn explain_memory_with_connection(options: &WhyOptions<'_>, conn: &DbConnect
         },
     )
     .with_content(memory.content.clone())
-    .with_provenance_health(provenance_health);
+    .with_provenance_health(provenance_health)
+    .with_optional_team_provenance(crate::core::memory_scope::team_provenance_from_memory(
+        &memory,
+    ));
     let report = report.with_confidence_intervals(why_conformal_confidence_intervals(
         workspace_path.as_deref(),
         memory_id,
@@ -3396,6 +3418,83 @@ mod tests {
         let score = compute_selection_score(0.8, 0.6, 0.7);
         let expected = 0.5 * 0.8 + 0.3 * 0.6 + 0.2 * 0.7;
         ensure((score - expected).abs() < 0.001, true, "score computation")
+    }
+
+    #[test]
+    fn explain_memory_emits_team_provenance_for_peer_human_attested() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or("database path should have parent")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_00000000000000000000001077";
+        let memory_id = "mem_00000000000000000000001077";
+        let connection =
+            crate::db::DbConnection::open_file(&database_path).map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|e| e.to_string())?;
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: temp.path().display().to_string(),
+                    name: Some("why team provenance".to_owned()),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "Teammate analysis of the checkout.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.7,
+                    importance: 0.6,
+                    provenance_uri: None,
+                    trust_class: "peer_human_attested".to_owned(),
+                    trust_subclass: Some(
+                        "agent:Analysts; produced_at=2026-08-16T00:00:00Z".to_owned(),
+                    ),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        drop(connection);
+
+        let report = explain_memory(&WhyOptions {
+            database_path: &database_path,
+            memory_id,
+            confidence_threshold: 0.5,
+        });
+        let provenance = report
+            .team_provenance
+            .as_ref()
+            .ok_or("expected teamProvenance on teammate memory")?;
+        ensure(
+            provenance.member_display_name.as_str(),
+            "Analysts",
+            "member display name",
+        )?;
+        ensure(
+            provenance.produced_at.as_str(),
+            "2026-08-16T00:00:00Z",
+            "produced at",
+        )?;
+        let json = crate::output::render_why_json(&report);
+        ensure(
+            json.contains("\"teamProvenance\""),
+            true,
+            "why JSON must carry teamProvenance",
+        )?;
+        ensure(json.contains("Analysts"), true, "why JSON member name")
     }
 
     #[test]
