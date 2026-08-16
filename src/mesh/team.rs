@@ -19,8 +19,10 @@ use crate::db::{
     UpsertTeamAdmissionPeerInput, UpsertTeamJoinAttemptInput,
 };
 use crate::mesh::bootstrap_envelope::{
-    BOOTSTRAP_DECLINE_SCHEMA_V1, BootstrapCapability, BootstrapDeclineV1, SyncRoundRequest,
-    decode_envelope, encode_envelope, exchange_live_mesh_round, read_std_framed, write_std_framed,
+    BOOTSTRAP_DECLINE_SCHEMA_V1, BootstrapCapability, BootstrapDeclineV1, SYNC_ROUND_SCHEMA_V1,
+    SyncRoundEvent, SyncRoundRequest, SyncRoundResponse, SyncRoundTip, decode_envelope,
+    encode_envelope, exchange_live_mesh_round, parse_sync_round_request, read_std_framed,
+    write_std_framed,
 };
 use crate::mesh::hello_responder::configured_hello_port;
 use crate::mesh::idp::{
@@ -36,7 +38,8 @@ use crate::mesh::origin_stream::{
     Ed25519OriginSigner, InboundOriginEvent, IngestDisposition, ManifestEventPayload,
     MemoryEventOperation, MemoryEventPayload, OriginAppendRequest, OriginEventPayload,
     OriginSignatureVerifier, OriginSigner, OriginStreamError, append_origin_event, body_commitment,
-    ingest_origin_event, parse_stored_payload, verify_ed25519_origin_signature,
+    inbound_from_stored, ingest_origin_event, parse_stored_payload,
+    verify_ed25519_origin_signature,
 };
 
 pub const TEAM_CREATE_SCHEMA_V1: &str = "ee.team.create.v1";
@@ -982,6 +985,7 @@ pub struct TeamInviteReport {
     pub invite_code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub granted: Option<TeamJoinGrantedV1>,
+    pub first_sync_served: bool,
     pub mesh_primitives: Vec<&'static str>,
 }
 
@@ -1158,6 +1162,7 @@ pub fn mint_team_invite_with_store(
         expires_at: expires_at.to_owned(),
         invite_code: code,
         granted: None,
+        first_sync_served: false,
         mesh_primitives: vec!["team_pending_invites.insert", "eeteam1"],
     })
 }
@@ -1186,6 +1191,7 @@ pub fn resume_pending_invite(
         expires_at: invite.expires_at,
         invite_code: String::new(),
         granted: None,
+        first_sync_served: false,
         mesh_primitives: vec!["team_pending_invites", "team_join_attempts"],
     })
 }
@@ -1323,6 +1329,156 @@ pub fn serve_one_bootstrap_join_with_store(
             .map_err(|error| OriginStreamError::Encode(error.to_string()))?,
     )?;
     Ok(granted)
+}
+
+/// Accept one unsigned hello+sync so the joiner's first metadata round
+/// can complete after `ee team invite --wait` redeems.
+pub fn serve_one_invite_first_sync(
+    connection: &DbConnection,
+    workspace_id: &str,
+    listener: &std::net::TcpListener,
+    timeout: std::time::Duration,
+) -> Result<u32, OriginStreamError> {
+    let (mut stream, _) = accept_one_with_timeout(listener, timeout)?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .and_then(|()| stream.set_write_timeout(Some(timeout)))
+        .map_err(|error| OriginStreamError::Encode(format!("first-sync timeout: {error}")))?;
+    let hello_bytes = read_std_framed(&mut stream)
+        .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+    let envelope = decode_envelope(&hello_bytes)
+        .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+    if envelope.capability != BootstrapCapability::Hello {
+        return Err(OriginStreamError::Encode(
+            "invite first-sync expected hello capability".to_owned(),
+        ));
+    }
+    let request_id = envelope
+        .payload
+        .get("requestId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("team-join-first-sync")
+        .to_owned();
+    let team = load_local_teams(connection)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| OriginStreamError::Encode("no local team genesis".to_owned()))?;
+    let hello = crate::mesh::hello::HelloResponse {
+        schema: crate::mesh::hello::HELLO_RESPONSE_SCHEMA_V1,
+        request_id,
+        responder_node_key: format!("nodekey:{}", team.origin_node_id),
+        responder_ee_version: env!("CARGO_PKG_VERSION").to_owned(),
+        responder_ee_protocol_version: crate::mesh::hello::local_protocol_version_string(),
+        responder_workspace_ids: vec![workspace_id.to_owned()],
+        responder_capabilities: vec!["hello".to_owned(), "sync".to_owned()],
+        responder_advertised_tags: Vec::new(),
+        discovery_consent: true,
+        response_elapsed_micros: 0,
+    };
+    let hello_payload = serde_json::to_value(&hello)
+        .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+    let hello_reply = encode_envelope(BootstrapCapability::Hello, hello_payload)
+        .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+    write_std_framed(&mut stream, &hello_reply)
+        .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+    let sync_bytes = read_std_framed(&mut stream)
+        .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+    let request = parse_sync_round_request(&sync_bytes).ok_or_else(|| {
+        OriginStreamError::Encode("invite first-sync expected ee.mesh.sync_round.v1".to_owned())
+    })?;
+    let events = load_invite_first_sync_events(
+        connection,
+        workspace_id,
+        &team.team_id,
+        &team.origin_node_id,
+        request.range_start_seq,
+        request.max_events,
+    )?;
+    let served = u32::try_from(events.len()).unwrap_or(u32::MAX);
+    let last_seq = events.last().map_or(0, |event| event.seq);
+    let tip_hash = events.last().map(|event| event.event_hash.clone());
+    let response = SyncRoundResponse {
+        schema: SYNC_ROUND_SCHEMA_V1.to_owned(),
+        tips: vec![SyncRoundTip {
+            origin_node_id: team.origin_node_id,
+            origin_workspace_id: workspace_id.to_owned(),
+            last_seq,
+            tip_event_hash: tip_hash,
+        }],
+        events,
+    };
+    let reply = serde_json::to_vec(&response)
+        .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+    write_std_framed(&mut stream, &reply)
+        .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+    Ok(served)
+}
+
+fn accept_one_with_timeout(
+    listener: &std::net::TcpListener,
+    timeout: std::time::Duration,
+) -> Result<(std::net::TcpStream, std::net::SocketAddr), OriginStreamError> {
+    let started = std::time::Instant::now();
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| OriginStreamError::Encode(format!("first-sync listen: {error}")))?;
+    loop {
+        match listener.accept() {
+            Ok((stream, addr)) => {
+                let _ = listener.set_nonblocking(false);
+                let _ = stream.set_nonblocking(false);
+                return Ok((stream, addr));
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::Interrupted =>
+            {
+                if started.elapsed() >= timeout {
+                    let _ = listener.set_nonblocking(false);
+                    return Err(OriginStreamError::Encode(
+                        "first-sync accept timeout".to_owned(),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(error) => {
+                let _ = listener.set_nonblocking(false);
+                return Err(OriginStreamError::Encode(format!(
+                    "first-sync accept: {error}"
+                )));
+            }
+        }
+    }
+}
+
+fn load_invite_first_sync_events(
+    connection: &DbConnection,
+    workspace_id: &str,
+    team_id: &str,
+    origin_node_id: &str,
+    range_start_seq: u64,
+    max_events: u32,
+) -> Result<Vec<SyncRoundEvent>, OriginStreamError> {
+    let limit = max_events.max(1).min(512);
+    let rows = connection
+        .list_mesh_origin_events(team_id, origin_node_id, range_start_seq, limit)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let payload_json = inbound_from_stored(&row)
+                .ok()
+                .and_then(|event| serde_json::to_string(&event).ok())
+                .unwrap_or(row.payload_json);
+            SyncRoundEvent {
+                origin_node_id: row.origin_node_id,
+                origin_workspace_id: workspace_id.to_owned(),
+                seq: row.seq,
+                event_hash: row.event_hash,
+                payload_json,
+            }
+        })
+        .collect())
 }
 
 fn read_join_payload(
@@ -8476,12 +8632,27 @@ mod tests {
             Some(keys.path()),
         )
         .expect("serve");
+        let served = serve_one_invite_first_sync(
+            &inviter,
+            "wsp_persistfixture000000000001",
+            &listener,
+            std::time::Duration::from_secs(8),
+        )
+        .expect("first sync serve");
+        assert!(
+            served >= 1,
+            "invite waiter must serve origin genesis on first sync: served={served}"
+        );
         let joined = client.join().expect("client thread").expect("join");
         assert!(joined.joined);
         assert_eq!(joined.team.team_id, granted.team_id);
         assert!(
-            !joined.first_sync.complete,
-            "one-shot invite waiter is gone before first sync: {joined:?}"
+            joined.first_sync.complete,
+            "invite waiter must stay up for join first sync: {joined:?}"
+        );
+        assert!(
+            joined.first_sync.imported_events >= 1,
+            "join first sync must import origin events: {joined:?}"
         );
         assert!(!granted.pair_confirmation.is_empty());
         let inviter_status = local_team_status(&inviter).expect("status");

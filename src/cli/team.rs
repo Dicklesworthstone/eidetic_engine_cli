@@ -16,9 +16,9 @@ use crate::mesh::team::{
     reconcile_local_team_membership, reconcile_local_team_projects, remove_team_member,
     require_tailnet_attested, resume_pending_invite, revalidate_team_identities,
     revoke_team_invite, revoke_team_invites_before_floor, rotate_local_signing_key,
-    serve_one_bootstrap_join_with_store, set_local_team_paused, set_team_oidc_provider,
-    share_team_bodies_represented, share_team_history, share_team_project, team_idp_status,
-    unshare_team_bodies,
+    serve_one_bootstrap_join_with_store, serve_one_invite_first_sync, set_local_team_paused,
+    set_team_oidc_provider, share_team_bodies_represented, share_team_history, share_team_project,
+    team_idp_status, unshare_team_bodies,
 };
 use crate::models::{DomainError, ProcessExitCode};
 use crate::output;
@@ -861,10 +861,32 @@ where
             );
         }
     }
+    if let Ok(_served) = serve_one_invite_first_sync(
+        connection,
+        workspace_id,
+        &listener,
+        std::time::Duration::from_secs(15),
+    ) {
+        report.first_sync_served = true;
+        if !report
+            .mesh_primitives
+            .iter()
+            .any(|item| *item == "mesh_sync")
+        {
+            report.mesh_primitives.push("mesh_sync");
+        }
+    }
     let human = match &report.granted {
         Some(granted) => format!(
-            "Invite redeemed by join\n  invite_id: {}\n  team_id: {}\n  joiner recorded for {}\n",
-            report.invite_id, granted.team_id, granted.display_name
+            "Invite redeemed by join\n  invite_id: {}\n  team_id: {}\n  joiner recorded for {}\n  first_sync: {}\n",
+            report.invite_id,
+            granted.team_id,
+            granted.display_name,
+            if report.first_sync_served {
+                "served"
+            } else {
+                "joiner did not fetch — start ee mesh hello-responder run"
+            }
         ),
         None => format!(
             "Resumed invite waiter\n  invite_id: {}\n  endpoint: {}:{}\n",
