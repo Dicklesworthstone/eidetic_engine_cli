@@ -472,6 +472,8 @@ pub struct TeamActivityItem {
     pub event_id: String,
     pub origin_node_id: String,
     pub member_display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     pub kind: String,
     pub level: String,
     pub produced_at: String,
@@ -1743,7 +1745,7 @@ pub fn share_team_history(
             memory_kind: Some(memory.kind.clone()),
             valid_from: memory.valid_from.clone(),
             valid_until: memory.valid_to.clone(),
-            project_binding: None,
+            project_binding: project_binding_for_workspace(connection, &team.team_id, workspace_id),
             origin_trust_claim: Some(memory.trust_class.clone()),
             provenance_refs: Vec::new(),
             body_representation: Some("omitted".to_owned()),
@@ -2635,7 +2637,7 @@ pub fn share_team_bodies_represented(
             memory_kind: Some(memory.kind.clone()),
             valid_from: memory.valid_from.clone(),
             valid_until: memory.valid_to.clone(),
-            project_binding: None,
+            project_binding: project_binding_for_workspace(connection, &team.team_id, workspace_id),
             origin_trust_claim: Some(memory.trust_class.clone()),
             provenance_refs: Vec::new(),
             body_representation: Some(representation.to_owned()),
@@ -5322,12 +5324,51 @@ pub fn reconcile_local_team_membership(
     })
 }
 
+fn project_binding_for_workspace(
+    connection: &DbConnection,
+    team_id: &str,
+    workspace_id: &str,
+) -> Option<String> {
+    let workspace = connection.get_workspace(workspace_id).ok().flatten()?;
+    let projects = connection.list_team_projects(team_id).ok()?;
+    projects.into_iter().find_map(|project| {
+        if project.local_path.is_empty() {
+            return None;
+        }
+        let bound = workspace.path == project.local_path
+            || workspace
+                .path
+                .starts_with(&format!("{}/", project.local_path.trim_end_matches('/')));
+        bound.then_some(project.display_name)
+    })
+}
+
+fn activity_item_matches(
+    item: &TeamActivityItem,
+    member: Option<&str>,
+    project: Option<&str>,
+) -> bool {
+    if let Some(member) = member.filter(|value| !value.is_empty())
+        && item.member_display_name != member
+    {
+        return false;
+    }
+    if let Some(project) = project.filter(|value| !value.is_empty())
+        && item.project.as_deref() != Some(project)
+    {
+        return false;
+    }
+    true
+}
+
 /// Closed-metadata team activity over origin events and inbound stubs.
 pub fn list_team_activity(
     connection: &DbConnection,
     workspace_id: &str,
     as_of: &str,
     limit: usize,
+    member: Option<&str>,
+    project: Option<&str>,
 ) -> Result<TeamActivityReport, OriginStreamError> {
     let team = load_local_teams(connection)?
         .into_iter()
@@ -5371,6 +5412,7 @@ pub fn list_team_activity(
                 event_id: row.event_id.clone(),
                 origin_node_id: row.origin_node_id.clone(),
                 member_display_name: display_for(&row.origin_node_id),
+                project: payload.project_binding,
                 kind: payload.memory_kind.unwrap_or_else(|| "note".to_owned()),
                 level: payload.level.unwrap_or_else(|| "semantic".to_owned()),
                 produced_at: row.produced_at.clone(),
@@ -5382,6 +5424,11 @@ pub fn list_team_activity(
                 event_id: row.event_id.clone(),
                 origin_node_id: row.origin_node_id.clone(),
                 member_display_name: display_for(&row.origin_node_id),
+                project: payload
+                    .document_payload
+                    .get("displayName")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned),
                 kind: payload.operation,
                 level: "manifest".to_owned(),
                 produced_at: row.produced_at.clone(),
@@ -5444,6 +5491,9 @@ pub fn list_team_activity(
                 .unwrap_or_else(|| memory.id.clone()),
             origin_node_id,
             member_display_name,
+            project: provenance
+                .as_ref()
+                .and_then(|item| item.project_name.clone()),
             kind: memory.kind,
             level: memory.level,
             produced_at,
@@ -5459,6 +5509,8 @@ pub fn list_team_activity(
             events.push(item);
         }
     }
+    events.retain(|item| activity_item_matches(item, member, project));
+    clock_anomalies.retain(|item| activity_item_matches(item, member, project));
     events.sort_by(|left, right| {
         right
             .produced_at
@@ -9459,6 +9511,8 @@ mod tests {
             "wsp_persistfixture000000000001",
             "2026-08-13T12:00:00Z",
             100,
+            None,
+            None,
         )
         .expect("activity");
         assert!(report.event_count >= 2);
@@ -9535,6 +9589,8 @@ mod tests {
             "wsp_persistfixture000000000001",
             "2026-08-13T12:00:00Z",
             100,
+            None,
+            None,
         )
         .expect("activity");
         let inbound = report
@@ -9557,6 +9613,116 @@ mod tests {
         assert!(
             !json.contains("Acme Corp analysis from Hana"),
             "activity must not leak teammate body text: {json}"
+        );
+        let hana = list_team_activity(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T12:00:00Z",
+            100,
+            Some("Hana"),
+            None,
+        )
+        .expect("member filter");
+        assert!(
+            hana.events
+                .iter()
+                .all(|item| item.member_display_name == "Hana")
+        );
+        assert!(hana.events.iter().any(|item| item.body_available));
+    }
+
+    #[test]
+    fn list_team_activity_filters_by_project_binding() {
+        let connection = open_db();
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/acme-analysis".to_owned(),
+                    name: Some("acme".to_owned()),
+                },
+            )
+            .expect("workspace");
+        create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        share_team_project(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "acme-analysis",
+            "/tmp/acme-analysis",
+            "2026-08-13T13:00:00Z",
+            None,
+        )
+        .expect("project");
+        connection
+            .insert_memory(
+                "mem_teamactivity00000000000001",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "secret body must stay off activity".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("remember");
+        share_team_history(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T14:00:00Z",
+            true,
+            16,
+            None,
+        )
+        .expect("share");
+        let by_project = list_team_activity(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T15:00:00Z",
+            100,
+            None,
+            Some("acme-analysis"),
+        )
+        .expect("project filter");
+        assert!(
+            by_project.events.iter().any(|item| {
+                item.kind == "rule" && item.project.as_deref() == Some("acme-analysis")
+            }),
+            "shared history must carry the workspace project: {:?}",
+            by_project.events
+        );
+        assert!(
+            by_project
+                .events
+                .iter()
+                .any(|item| item.kind == "teamProjectShared")
+        );
+        let other = list_team_activity(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T15:00:00Z",
+            100,
+            None,
+            Some("other-project"),
+        )
+        .expect("other");
+        assert!(
+            !other.events.iter().any(|item| item.kind == "rule"),
+            "unrelated project filter must not return the shared rule"
         );
     }
 

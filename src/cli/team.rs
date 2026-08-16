@@ -378,6 +378,14 @@ pub struct TeamActivityArgs {
     #[arg(long)]
     pub as_of: String,
 
+    /// Restrict to this member display name.
+    #[arg(long)]
+    pub member: Option<String>,
+
+    /// Restrict to this team project display name.
+    #[arg(long)]
+    pub project: Option<String>,
+
     /// Maximum events to return (1–1000).
     #[arg(long, default_value_t = 100)]
     pub limit: usize,
@@ -1606,7 +1614,14 @@ where
         Ok(opened) => opened,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    match list_team_activity(&connection, &workspace_id, &args.as_of, args.limit) {
+    match list_team_activity(
+        &connection,
+        &workspace_id,
+        &args.as_of,
+        args.limit,
+        args.member.as_deref(),
+        args.project.as_deref(),
+    ) {
         Ok(report) => write_team_report(
             cli,
             &report,

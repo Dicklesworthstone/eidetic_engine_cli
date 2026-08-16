@@ -50,7 +50,9 @@ ee team steward once --workspace . --json
 ee search "Acme Corp" --memory-scope team --workspace . --json
 ee pack "Acme Corp" --memory-scope team --workspace . --json
 ee team activity --as-of "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --workspace . --json
-# search/pack carry teamProvenance; activity lists member + origin time + bodyAvailable
+ee team activity --project acme-analysis --as-of "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --workspace . --json
+ee team activity --member Priya --as-of "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --workspace . --json
+# search/pack carry teamProvenance; activity lists member + project + origin time + bodyAvailable
 ```
 
 Pause fences network exchange without deleting membership. Resume

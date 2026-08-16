@@ -160,6 +160,9 @@ future changelog pass expands those rows into full capability sections.
   includes teammate body text. Inbound teammate memory ids are minted
   as typed Crockford `mem_*` values from the event hash so
   `ee pack --memory-scope team` can parse and select them.
+  `ee team activity --member` / `--project` filter the same closed
+  metadata. Shared history/body events bind `project` from the
+  workspace's minted team project.
 - Authenticated responder sessions now apply
   `MeshAdmissionLimits::conservative_default()` before EventFetch,
   BodyFetch, Summary, and `identity_attest`.
