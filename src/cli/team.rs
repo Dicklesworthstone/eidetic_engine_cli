@@ -391,6 +391,11 @@ pub struct TeamActivityArgs {
     #[arg(long)]
     pub since: Option<String>,
 
+    /// Resume from an `ee.cursor.v1` token. Invalid/stale tokens yield
+    /// an empty page plus `cursorError`.
+    #[arg(long)]
+    pub cursor: Option<String>,
+
     /// Maximum events to return (1–1000).
     #[arg(long, default_value_t = 100)]
     pub limit: usize,
@@ -1679,6 +1684,7 @@ where
         args.member.as_deref(),
         args.project.as_deref(),
         since.as_deref(),
+        args.cursor.as_deref(),
     ) {
         Ok(report) => write_team_report(
             cli,

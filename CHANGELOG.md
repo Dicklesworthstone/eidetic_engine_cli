@@ -165,6 +165,8 @@ future changelog pass expands those rows into full capability sections.
   workspace's minted team project. `--since` is an inclusive RFC 3339
   lower bound (JSON rejects `2h`); the report sets
   `timeFilterBasis=member_attested` and `sequenceComplete=false`.
+  `--cursor` resumes an `ee.cursor.v1` page; invalid or param-mismatched
+  tokens return an empty page plus `cursorError=cursor_invalid`.
 - Authenticated responder sessions now apply
   `MeshAdmissionLimits::conservative_default()` before EventFetch,
   BodyFetch, Summary, and `identity_attest`.
