@@ -83,6 +83,9 @@ pub struct AskCandidate {
     pub provenance_uri: Option<String>,
     pub level: String,
     pub kind: String,
+    /// Receiver-derived teammate attribution when the candidate is a
+    /// team-synced `peer_human_attested` memory.
+    pub team_provenance: Option<crate::core::memory_scope::TeamProvenance>,
 }
 
 /// Input to the ask engine (everything the engine needs to be deterministic).
@@ -123,6 +126,7 @@ pub struct AskSpan {
     pub trust_class: String,
     pub memory_confidence: f32,
     pub provenance_uri: Option<String>,
+    pub team_provenance: Option<crate::core::memory_scope::TeamProvenance>,
 }
 
 // ─── output types ────────────────────────────────────────────────────────────
@@ -140,6 +144,7 @@ pub struct AskCitation {
     pub provenance_uri: Option<String>,
     pub trust_class: String,
     pub confidence: f32,
+    pub team_provenance: Option<crate::core::memory_scope::TeamProvenance>,
 }
 
 /// One side of a conflicting answer (conflict mode, ADR §4).
@@ -587,6 +592,7 @@ fn compose_answer(
             provenance_uri: span.provenance_uri.clone(),
             trust_class: span.trust_class.clone(),
             confidence: span.memory_confidence,
+            team_provenance: span.team_provenance.clone(),
         });
     }
 
@@ -632,6 +638,7 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
                 trust_class: candidate.trust_class.clone(),
                 memory_confidence: candidate.confidence,
                 provenance_uri: candidate.provenance_uri.clone(),
+                team_provenance: candidate.team_provenance.clone(),
             });
         }
     }
@@ -746,6 +753,7 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
                     provenance_uri: s.provenance_uri.clone(),
                     trust_class: s.trust_class.clone(),
                     confidence: s.memory_confidence,
+                    team_provenance: s.team_provenance.clone(),
                 });
             }
             AskSide {
@@ -942,7 +950,7 @@ pub fn ask_data_json(report: &AskReport) -> serde_json::Value {
 }
 
 fn citation_to_json(c: &AskCitation) -> serde_json::Value {
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "index": c.index,
         "memoryId": c.memory_id,
         "span": {"byteStart": c.byte_start, "byteEnd": c.byte_end},
@@ -950,7 +958,13 @@ fn citation_to_json(c: &AskCitation) -> serde_json::Value {
         "provenanceUri": c.provenance_uri,
         "trustClass": c.trust_class,
         "confidence": c.confidence,
-    })
+    });
+    if let Some(provenance) = &c.team_provenance
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert("teamProvenance".to_owned(), provenance.to_json());
+    }
+    value
 }
 
 fn side_to_json(s: &AskSide) -> serde_json::Value {
@@ -1170,8 +1184,12 @@ pub fn render_ask_markdown(report: &AskReport) -> String {
         out.push_str("**Sources:**\n");
         for c in &report.citations {
             let prov = c.provenance_uri.as_deref().unwrap_or(&c.memory_id);
+            let suffix = c.team_provenance.as_ref().map_or_else(
+                String::new,
+                crate::core::memory_scope::TeamProvenance::compact_suffix,
+            );
             out.push_str(&format!(
-                "[{}] {} `{}` (conf: {:.2})\n",
+                "[{}] {} `{}` (conf: {:.2}){suffix}\n",
                 c.index, prov, c.trust_class, c.confidence
             ));
         }
@@ -1345,6 +1363,7 @@ mod tests {
             trust_class: "human_explicit".into(),
             memory_confidence: 0.9,
             provenance_uri: None,
+            team_provenance: None,
         };
         let negate = AskSpan {
             memory_id: "m2".into(),
@@ -1355,6 +1374,7 @@ mod tests {
             trust_class: "agent_assertion".into(),
             memory_confidence: 0.7,
             provenance_uri: None,
+            team_provenance: None,
         };
         assert!(detect_contradiction(&[affirm, negate]));
     }
@@ -1389,6 +1409,7 @@ mod tests {
             provenance_uri: Some("ee://mem1".into()),
             level: "procedural".into(),
             kind: "rule".into(),
+            team_provenance: None,
         }];
         let report = evaluate_ask(&request, &candidates);
         // With very low threshold, should produce an answer
@@ -1424,6 +1445,7 @@ mod tests {
                 provenance_uri: None,
                 trust_class: "human_explicit".into(),
                 confidence: 0.9,
+                team_provenance: None,
             }],
             sides: None,
             nearest_evidence: None,
@@ -1441,6 +1463,56 @@ mod tests {
         let cits = json["citations"].as_array().unwrap();
         assert_eq!(cits.len(), 1);
         assert_eq!(cits[0]["memoryId"], "m1");
+    }
+
+    #[test]
+    fn ask_citation_json_includes_team_provenance() {
+        let provenance = crate::core::memory_scope::TeamProvenance {
+            member_display_name: "Analysts".to_owned(),
+            project_name: None,
+            origin_trust_class: "peer_human_attested",
+            produced_at: "2026-08-16T00:00:00Z".to_owned(),
+            origin_time_assurance: "member_attested",
+        };
+        let report = AskReport {
+            question: "who wrote the analysis".into(),
+            abstained: false,
+            answer_text: Some("[1] teammate analysis".into()),
+            confidence: 0.8,
+            confidence_components: AskConfidenceComponents {
+                top_span_score: 0.8,
+                corroboration: 1.0,
+                contradiction_penalty: 0.0,
+            },
+            citations: vec![AskCitation {
+                index: 1,
+                memory_id: "m1".into(),
+                byte_start: 0,
+                byte_end: 19,
+                text: "teammate analysis".into(),
+                provenance_uri: None,
+                trust_class: "peer_human_attested".into(),
+                confidence: 0.9,
+                team_provenance: Some(provenance),
+            }],
+            sides: None,
+            nearest_evidence: None,
+            counterfactual_hint: None,
+            semantic_degraded: false,
+            conflict_detected: false,
+            extractiveness_violated: false,
+            candidates_scanned: 1,
+        };
+        let json = ask_data_json(&report);
+        assert_eq!(
+            json["citations"][0]["teamProvenance"]["memberDisplayName"],
+            "Analysts"
+        );
+        let markdown = render_ask_markdown(&report);
+        assert!(
+            markdown.contains("from Analysts"),
+            "ask markdown must attribute the teammate: {markdown}"
+        );
     }
 
     #[test]

@@ -191,6 +191,19 @@
           "minimum": 0,
           "maximum": 1,
           "description": "Confidence of the source memory."
+        },
+        "teamProvenance": {
+          "type": "object",
+          "description": "Receiver-derived teammate attribution for a peer_human_attested citation. Same ee.team.provenance.v1 block search and pack emit.",
+          "additionalProperties": true,
+          "properties": {
+            "schema": {"type": "string", "const": "ee.team.provenance.v1"},
+            "memberDisplayName": {"type": "string"},
+            "projectName": {"type": ["string", "null"]},
+            "originTrustClass": {"type": "string"},
+            "producedAt": {"type": "string"},
+            "originTimeAssurance": {"type": "string"}
+          }
         }
       }
     },

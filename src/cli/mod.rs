@@ -48371,14 +48371,18 @@ where
 
     let candidates: Vec<crate::core::ask::AskCandidate> = stored
         .into_iter()
-        .map(|m| crate::core::ask::AskCandidate {
-            memory_id: m.id,
-            content: m.content,
-            confidence: m.confidence,
-            trust_class: m.trust_class,
-            provenance_uri: m.provenance_uri,
-            level: m.level,
-            kind: m.kind,
+        .map(|m| {
+            let team_provenance = crate::core::memory_scope::team_provenance_from_memory(&m);
+            crate::core::ask::AskCandidate {
+                memory_id: m.id,
+                content: m.content,
+                confidence: m.confidence,
+                trust_class: m.trust_class,
+                provenance_uri: m.provenance_uri,
+                level: m.level,
+                kind: m.kind,
+                team_provenance,
+            }
         })
         .collect();
 
@@ -52363,6 +52367,19 @@ fn format_why_human(report: &crate::core::why::WhyReport) -> String {
             output.push_str(&format!("  Valid to: {valid_to}\n"));
         }
         output.push('\n');
+    }
+
+    if let Some(ref provenance) = report.team_provenance {
+        output.push_str("Team provenance:\n");
+        output.push_str(&format!("  Member: {}\n", provenance.member_display_name));
+        if let Some(project) = provenance.project_name.as_deref() {
+            output.push_str(&format!("  Project: {project}\n"));
+        }
+        output.push_str(&format!("  Produced at: {}\n", provenance.produced_at));
+        output.push_str(&format!(
+            "  Origin time: {}\n\n",
+            provenance.origin_time_assurance
+        ));
     }
 
     if let Some(ref retrieval) = report.retrieval {
