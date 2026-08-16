@@ -13693,11 +13693,20 @@ mod tests {
         content: &str,
         estimated_tokens: u32,
     ) -> Result<PackCandidate, String> {
+        team_policy_candidate_at(seed, content, estimated_tokens, "2026-08-16T00:00:00Z")
+    }
+
+    fn team_policy_candidate_at(
+        seed: u128,
+        content: &str,
+        estimated_tokens: u32,
+        produced_at: &str,
+    ) -> Result<PackCandidate, String> {
         Ok(
             global_policy_candidate(seed, content, estimated_tokens)?.with_trust_signal(
                 PackTrustSignal::new(
                     TrustClass::PeerHumanAttested,
-                    Some("agent:Analysts; produced_at=2026-08-16T00:00:00Z".to_owned()),
+                    Some(format!("agent:Analysts; produced_at={produced_at}")),
                 ),
             ),
         )
@@ -13811,6 +13820,74 @@ mod tests {
                 .iter()
                 .any(|entry| entry.code == "team_lane_conflict_deferred"),
             "sealed body must not invent a contradiction"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn team_lane_pack_policy_does_not_rerank_on_origin_or_receipt_time() -> Result<(), String> {
+        let workspace = global_policy_candidate(240, "Always rebase in shared checkouts.", 10)?;
+        let older = team_policy_candidate_at(
+            241,
+            "Always rebase in shared checkouts.",
+            10,
+            "2020-01-01T00:00:00Z",
+        )?;
+        let newer = team_policy_candidate_at(
+            242,
+            "Always rebase in shared checkouts.",
+            10,
+            "2026-12-31T23:59:59Z",
+        )?;
+        let older_before = older.relevance.into_inner();
+        let newer_before = newer.relevance.into_inner();
+        let mut older_run = vec![workspace.clone(), older];
+        let mut newer_run = vec![workspace, newer];
+        let mut older_degraded = Vec::new();
+        let mut newer_degraded = Vec::new();
+
+        super::apply_team_lane_pack_policy(&mut older_run, &BTreeSet::new(), &mut older_degraded);
+        super::apply_team_lane_pack_policy(&mut newer_run, &BTreeSet::new(), &mut newer_degraded);
+
+        assert_eq!(
+            older_run[1].relevance.into_inner(),
+            newer_run[1].relevance.into_inner(),
+            "origin producedAt must not change overlap demotion"
+        );
+        assert!(
+            older_run[1].relevance.into_inner() < older_before
+                && newer_run[1].relevance.into_inner() < newer_before,
+            "local overlap still demotes the team row"
+        );
+
+        let distinct_a = team_policy_candidate_at(
+            243,
+            "Prefer rustfmt over hand-edited indentation.",
+            10,
+            "2019-06-01T00:00:00Z",
+        )?;
+        let distinct_b = team_policy_candidate_at(
+            244,
+            "Prefer rustfmt over hand-edited indentation.",
+            10,
+            "2026-06-01T00:00:00Z",
+        )?;
+        let local =
+            global_policy_candidate(245, "Use cargo clippy --all-targets before merge.", 10)?;
+        let a_before = distinct_a.relevance.into_inner();
+        let b_before = distinct_b.relevance.into_inner();
+        let mut a_run = vec![local.clone(), distinct_a];
+        let mut b_run = vec![local, distinct_b];
+        let mut unused = Vec::new();
+        super::apply_team_lane_pack_policy(&mut a_run, &BTreeSet::new(), &mut unused);
+        unused.clear();
+        super::apply_team_lane_pack_policy(&mut b_run, &BTreeSet::new(), &mut unused);
+        assert_eq!(a_run[1].relevance.into_inner(), a_before);
+        assert_eq!(b_run[1].relevance.into_inner(), b_before);
+        assert_eq!(
+            a_run[1].relevance.into_inner(),
+            b_run[1].relevance.into_inner(),
+            "unrelated teammate producedAt must not change pack scores"
         );
         Ok(())
     }

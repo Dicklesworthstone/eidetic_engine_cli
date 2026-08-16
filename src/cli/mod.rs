@@ -52382,6 +52382,15 @@ fn format_why_human(report: &crate::core::why::WhyReport) -> String {
         ));
     }
 
+    if let Some(ref elevation) = report.elevation {
+        output.push_str("Elevation:\n");
+        output.push_str(&format!(
+            "  {} -> {}\n",
+            elevation.from_trust_class, elevation.to_trust_class
+        ));
+        output.push_str(&format!("  {}\n\n", elevation.reason));
+    }
+
     if let Some(ref retrieval) = report.retrieval {
         output.push_str("Retrieval:\n");
         output.push_str(&format!("  Confidence: {:.2}\n", retrieval.confidence));

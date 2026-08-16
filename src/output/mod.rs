@@ -6446,6 +6446,13 @@ pub fn render_why_json(report: &WhyReport) -> String {
     {
         data.insert("teamProvenance".to_owned(), team_provenance.to_json());
     }
+    if let Some(elevation) = &report.elevation
+        && let Some(data) = json
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        data.insert("elevation".to_owned(), elevation.to_json());
+    }
     if let Some(confidence_intervals) = confidence_intervals
         && let Some(data) = json
             .get_mut("data")

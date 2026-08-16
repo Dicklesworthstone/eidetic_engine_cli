@@ -623,6 +623,49 @@ pub struct WhyReport {
     /// Receiver-derived teammate attribution when this row is a team-synced
     /// `peer_human_attested` memory. Same block search and pack emit.
     pub team_provenance: Option<crate::core::memory_scope::TeamProvenance>,
+    /// Why this inbound row was elevated to `peer_human_attested`. Present
+    /// only for team-synced memories. `producedAt` is member-attested
+    /// provenance, never ranking or authorization authority.
+    pub elevation: Option<TeamElevationExplanation>,
+}
+
+/// Structured elevation decision for a team-synced inbound memory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TeamElevationExplanation {
+    /// Stable schema marker.
+    pub schema: &'static str,
+    /// Trust class the origin declared for the source row.
+    pub from_trust_class: &'static str,
+    /// Local trust class after receiver elevation.
+    pub to_trust_class: &'static str,
+    /// Why the receiver elevated the row.
+    pub reason: String,
+    /// Active member display name when attribution is available.
+    pub member_display_name: Option<String>,
+    /// Origin event id when the inbound row recorded one as provenance.
+    pub origin_event_id: Option<String>,
+    /// Member-attested origin time, when present.
+    pub produced_at: Option<String>,
+    /// Assurance label for `produced_at`.
+    pub origin_time_assurance: &'static str,
+}
+
+pub const TEAM_ELEVATION_SCHEMA_V1: &str = "ee.team.elevation.v1";
+
+impl TeamElevationExplanation {
+    #[must_use]
+    pub fn to_json(&self) -> JsonValue {
+        serde_json::json!({
+            "schema": self.schema,
+            "fromTrustClass": self.from_trust_class,
+            "toTrustClass": self.to_trust_class,
+            "reason": self.reason,
+            "memberDisplayName": self.member_display_name,
+            "originEventId": self.origin_event_id,
+            "producedAt": self.produced_at,
+            "originTimeAssurance": self.origin_time_assurance,
+        })
+    }
 }
 
 /// Schema id for the `dedupLink` evidence block surfaced by `ee why`,
@@ -715,6 +758,7 @@ impl WhyReport {
             dedup_link: None,
             seal: None,
             team_provenance: None,
+            elevation: None,
         }
     }
 
@@ -749,6 +793,13 @@ impl WhyReport {
         team_provenance: Option<crate::core::memory_scope::TeamProvenance>,
     ) -> Self {
         self.team_provenance = team_provenance;
+        self
+    }
+
+    /// Optionally attach the team elevation decision.
+    #[must_use]
+    pub fn with_optional_elevation(mut self, elevation: Option<TeamElevationExplanation>) -> Self {
+        self.elevation = elevation;
         self
     }
 
@@ -793,6 +844,7 @@ impl WhyReport {
             dedup_link: None,
             seal: None,
             team_provenance: None,
+            elevation: None,
         }
     }
 
@@ -829,6 +881,7 @@ impl WhyReport {
             dedup_link: None,
             seal: None,
             team_provenance: None,
+            elevation: None,
         }
     }
 
@@ -1395,6 +1448,7 @@ pub fn explain_memory_with_connection(options: &WhyOptions<'_>, conn: &DbConnect
             .with_optional_team_provenance(crate::core::memory_scope::team_provenance_from_memory(
                 &memory,
             ))
+            .with_optional_elevation(team_elevation_from_memory(&memory))
             .with_counterfactual_influence(counterfactual_influence);
             trace_why_math_surfaces(
                 &memory.workspace_id,
@@ -1441,7 +1495,8 @@ pub fn explain_memory_with_connection(options: &WhyOptions<'_>, conn: &DbConnect
     .with_provenance_health(provenance_health)
     .with_optional_team_provenance(crate::core::memory_scope::team_provenance_from_memory(
         &memory,
-    ));
+    ))
+    .with_optional_elevation(team_elevation_from_memory(&memory));
     let report = report.with_confidence_intervals(why_conformal_confidence_intervals(
         workspace_path.as_deref(),
         memory_id,
@@ -2580,6 +2635,30 @@ fn round_graph_score(value: f64) -> f64 {
     }
 }
 
+fn team_elevation_from_memory(
+    memory: &crate::db::StoredMemory,
+) -> Option<TeamElevationExplanation> {
+    if memory.trust_class != "peer_human_attested" {
+        return None;
+    }
+    let provenance = crate::core::memory_scope::team_provenance_from_memory(memory);
+    Some(TeamElevationExplanation {
+        schema: TEAM_ELEVATION_SCHEMA_V1,
+        from_trust_class: "human_explicit",
+        to_trust_class: "peer_human_attested",
+        reason: "valid signed origin event from an active member; elevated to peer_human_attested because the receiver derived the producer from the verified node and authorization position. producedAt is member-attested provenance, not ranking or authorization authority.".to_owned(),
+        member_display_name: provenance
+            .as_ref()
+            .map(|value| value.member_display_name.clone()),
+        origin_event_id: memory.provenance_uri.clone().and_then(|uri| {
+            let trimmed = uri.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        }),
+        produced_at: provenance.as_ref().map(|value| value.produced_at.clone()),
+        origin_time_assurance: "member_attested",
+    })
+}
+
 fn determine_origin(trust_class: &str) -> String {
     match trust_class {
         "human_explicit" => "Explicitly remembered via `ee remember`".to_string(),
@@ -3456,7 +3535,7 @@ mod tests {
                     confidence: 0.8,
                     utility: 0.7,
                     importance: 0.6,
-                    provenance_uri: None,
+                    provenance_uri: Some("evt_team_origin_analysts_0001".to_owned()),
                     trust_class: "peer_human_attested".to_owned(),
                     trust_subclass: Some(
                         "agent:Analysts; produced_at=2026-08-16T00:00:00Z".to_owned(),
@@ -3488,13 +3567,47 @@ mod tests {
             "2026-08-16T00:00:00Z",
             "produced at",
         )?;
+        let elevation = report
+            .elevation
+            .as_ref()
+            .ok_or("expected elevation on teammate memory")?;
+        ensure(
+            elevation.to_trust_class,
+            "peer_human_attested",
+            "elevated trust class",
+        )?;
+        ensure(
+            elevation.from_trust_class,
+            "human_explicit",
+            "origin declared trust class",
+        )?;
+        ensure(
+            elevation.reason.contains("signed origin event"),
+            true,
+            "elevation names the signed origin",
+        )?;
+        ensure(
+            elevation.origin_event_id.as_deref(),
+            Some("evt_team_origin_analysts_0001"),
+            "origin event id",
+        )?;
         let json = crate::output::render_why_json(&report);
         ensure(
             json.contains("\"teamProvenance\""),
             true,
             "why JSON must carry teamProvenance",
         )?;
-        ensure(json.contains("Analysts"), true, "why JSON member name")
+        ensure(json.contains("Analysts"), true, "why JSON member name")?;
+        ensure(
+            json.contains("\"elevation\""),
+            true,
+            "why JSON must carry elevation",
+        )?;
+        ensure(
+            json.contains("peer_human_attested"),
+            true,
+            "why JSON elevation trust class",
+        )
     }
 
     #[test]

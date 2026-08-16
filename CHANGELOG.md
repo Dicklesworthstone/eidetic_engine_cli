@@ -118,6 +118,11 @@ future changelog pass expands those rows into full capability sections.
   `ee insights --section peerConflicts` surfaces local/team/global
   overlap and the evidence-bounded peer-conflict detector so pack
   disagreements are visible outside a single pack response.
+  `ee why` explains team elevation (`data.elevation`,
+  `ee.team.elevation.v1`): signed origin from an active member,
+  elevated to `peer_human_attested`, with `producedAt` labeled
+  member-attested and excluded from ranking. Team pack overlap
+  demotion ignores origin and receipt timestamps.
   The inviter enrolls the accepted
   joiner at the join TCP source IP and the advertised `joinerHelloPort`
   (hello also carries `joinerWorkspaceId`) so EventFetch/BodyFetch
