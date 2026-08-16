@@ -105,7 +105,11 @@ fn fts5_indexes_canonical_documents_with_metadata() -> TestResult {
             .map_err(map_search_error)?;
         search.commit(&cx).await.map_err(map_search_error)?;
 
-        ensure_equal(&search.doc_count(), &documents.len(), "fts5 doc count")?;
+        ensure_equal(
+            &search.doc_count().map_err(map_search_error)?,
+            &documents.len(),
+            "fts5 doc count",
+        )?;
 
         let results = search
             .search(&cx, "fmtcheck", 10)

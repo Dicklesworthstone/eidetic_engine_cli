@@ -85,3 +85,50 @@ Verification is remote-only (RCH pinned bundles) per repo policy.
 - **toon_rust**: pin already at tip; untouched.
 - **Verification:** remote pinned-bundle compile gate at the final pin set;
   the standing bd-022z1 full-suite measure covers behavior.
+
+---
+
+# 2026-08-15 — v0.13.1 cut: reconcile manifest, Cargo.lock, and franken-stack.lock
+
+Main had become unbuildable in a clean environment: `Cargo.toml` pinned
+`ed25519-dalek =3.0.0` and `getrandom 0.4` (used by the mesh signer code)
+while the committed `Cargo.lock` still carried ed25519-dalek 2.2.0 /
+getrandom 0.2 and no curve25519-dalek 5 tree, and the crate pinned
+`asupersync =0.3.10` while `src/mesh` uses 0.4.4-only APIs. `--locked`
+builds and the pinned RCH verify lane both failed.
+
+## Changes
+- **asupersync:** `=0.3.10` → `=0.4.4` (deps + dev-deps). The 2026-08-11
+  transitive wall (frankensearch storage → registry fsqlite 0.1.x →
+  asupersync <0.4) has since cleared: the resolved graph now carries a
+  single asupersync 0.4.4 from the sibling path patch, and the registry
+  0.3.10 line (with franken-kernel/evidence/decision 0.3.10) dropped out
+  of `Cargo.lock` entirely.
+- **sqlmodel-core / sqlmodel-frankensqlite:** req `0.3.0` → `0.4.0` to
+  match the sibling `harmonize/vlsf2-fsqlite03` branch (workspace 0.4.0,
+  fsqlite 0.3 adapter).
+- **Cargo.lock:** regenerated coherently — adds the ed25519-dalek 3.0.0 /
+  ed25519 3.0.0 / signature 3.0.0 / curve25519-dalek 5.0.0 / fiat-crypto
+  0.3.0 tree the manifest already pinned; fsqlite path crates 0.3.0 →
+  0.3.2; no other registry churn.
+- **franken-stack.lock:** refreshed all 7 pins to the sibling revisions the
+  build was actually validated against (all reachable on their GitHub
+  remotes; sqlmodel_rust rides the pushed `harmonize/vlsf2-fsqlite03`
+  branch head 021bd17a).
+- **tests/search_fts5.rs:** frankensearch drift fix — `doc_count()` now
+  returns `Result<usize, SearchError>`; unwrap through `map_search_error`.
+
+## Verification (local darwin, isolated CARGO_TARGET_DIR)
+- `cargo metadata --locked` clean; `cargo check --all-targets` green.
+- Targeted gate: `model_status_contract` (8/10 — the 2 failures are
+  pre-existing sibling-drift/environment failures, identical at HEAD~),
+  `rerank_posture_contract` 7/7, `search_fts5` 4/4, `--lib model` filter
+  855/860. All five GH#26 regression tests pass.
+- Known pre-existing failures (unchanged by this cut, sources untouched by
+  HEAD~..HEAD): `model_status_auto_declares_bundled_embedding_model`,
+  `model_status_picks_first_available_registry_entry`,
+  `cli::tests::model_status_and_list_keep_json_degraded_and_toon_envelopes_in_parity`,
+  `cli::tests::model_status_and_list_toon_errors_match_json_error_envelopes`,
+  `core::model::tests::rerank_model_artifact_read_rejects_length_mismatch_before_hashing`,
+  `core::proof_verify::tests::tla_command_uses_sibling_model_config_when_present`,
+  `models::jsonl::tests::export_record_union_round_trips_line_delimited_jsonl`.
