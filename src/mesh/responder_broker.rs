@@ -23,7 +23,7 @@ use std::io;
 #[cfg(unix)]
 use std::io::{Read, Write};
 use std::net::Shutdown;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -427,7 +427,7 @@ impl TeamJoinLocalApi {
                 current_node_pubkey: format!("nodekey:{responder_node_id}"),
                 tailnet_id: crate::mesh::team::TEAM_JOIN_TAILNET_ID.to_owned(),
             },
-            addresses: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+            addresses: team_join_listen_ips(&peers),
             peers,
         })
     }
@@ -450,6 +450,50 @@ impl TeamJoinLocalApi {
                 user_id: None,
             })
     }
+}
+
+fn team_join_listen_ips(peers: &[TeamJoinWhoIsPeer]) -> Vec<IpAddr> {
+    if peers.is_empty() || peers.iter().all(|peer| peer.ip.is_loopback()) {
+        return vec![IpAddr::V4(Ipv4Addr::LOCALHOST)];
+    }
+    let mut ips = Vec::new();
+    for peer in peers {
+        if let Some(local) = routed_local_ip(SocketAddr::new(peer.ip, 9))
+            && !ips.contains(&local)
+        {
+            ips.push(local);
+        }
+    }
+    if ips.is_empty() {
+        vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]
+    } else {
+        ips
+    }
+}
+
+fn routed_local_ip(remote: SocketAddr) -> Option<IpAddr> {
+    if remote.ip().is_unspecified() {
+        return None;
+    }
+    if remote.ip().is_loopback() {
+        return Some(if remote.is_ipv4() {
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        } else {
+            IpAddr::V6(Ipv6Addr::LOCALHOST)
+        });
+    }
+    let bind = if remote.is_ipv4() {
+        SocketAddr::from(([0, 0, 0, 0], 0))
+    } else {
+        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0))
+    };
+    let socket = UdpSocket::bind(bind).ok()?;
+    socket.connect(remote).ok()?;
+    let local = socket.local_addr().ok()?;
+    if local.ip().is_unspecified() || local.is_ipv4() != remote.is_ipv4() {
+        return None;
+    }
+    Some(local.ip())
 }
 
 impl TailscaleLocalApi for TeamJoinLocalApi {
@@ -869,8 +913,8 @@ pub async fn resolve_durable_registration<A: TailscaleLocalApi>(
     } else {
         format!("nodekey:{expected_key}")
     };
-    let who_matches_key = who_is.current_node_pubkey == *expected_key
-        || who_is.current_node_pubkey == stored_pubkey;
+    let who_matches_key =
+        who_is.current_node_pubkey == *expected_key || who_is.current_node_pubkey == stored_pubkey;
     if peer.transport_identity.is_none()
         && !who_matches_key
         && !crate::mesh::team::team_join_node_pubkey_matches(
