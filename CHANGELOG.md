@@ -128,7 +128,10 @@ future changelog pass expands those rows into full capability sections.
   `teamProvenance.projectName` and the markdown suffix
   (`· from Priya / acme-analysis · …`) carry the shared project
   instead of staying null. A 500-row inbound burst still enqueues
-  one Incremental index job.
+  one Incremental index job. Those jobs persist `document_source =
+  memory` so they pass the search_index_jobs CHECK
+  (`memory|session|rule|import`); the previous `team-inbound*`
+  label made inbound projection fail the insert.
   The inviter enrolls the accepted
   joiner at the join TCP source IP and the advertised `joinerHelloPort`
   (hello also carries `joinerWorkspaceId`) so EventFetch/BodyFetch

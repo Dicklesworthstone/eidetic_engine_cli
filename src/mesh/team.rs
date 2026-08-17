@@ -5159,6 +5159,10 @@ fn inbound_team_trust_subclass(
 /// 16-job amplification budget even when a round admits hundreds of rows.
 const TEAM_INBOUND_INDEX_JOB_CAP: usize = 16;
 
+/// Inbound projections are memory documents. The jobs table CHECK only
+/// allows `memory|session|rule|import`; `team-inbound*` is not a source.
+const TEAM_INBOUND_INDEX_SOURCE: &str = "memory";
+
 fn enqueue_inbound_memory_index_job(
     connection: &DbConnection,
     workspace_id: &str,
@@ -5169,7 +5173,8 @@ fn enqueue_inbound_memory_index_job(
         .list_search_index_jobs(workspace_id, None)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
     if jobs.iter().any(|job| {
-        job.document_source.as_deref() == Some(reason)
+        job.document_source.as_deref() == Some(TEAM_INBOUND_INDEX_SOURCE)
+            && job.document_id.is_none()
             && matches!(
                 job.status_enum(),
                 Some(crate::db::SearchIndexJobStatus::Pending)
@@ -5187,7 +5192,7 @@ fn enqueue_inbound_memory_index_job(
     }
     let generation = jobs
         .iter()
-        .filter(|job| job.document_source.as_deref() == Some(reason))
+        .filter(|job| job.document_source.as_deref() == Some(TEAM_INBOUND_INDEX_SOURCE))
         .count();
     let hex = blake3::hash(format!("{reason}:{workspace_id}:{generation}").as_bytes()).to_hex();
     let job_id = format!("sidx_{}", &hex.as_str()[..26]);
@@ -5204,7 +5209,7 @@ fn enqueue_inbound_memory_index_job(
             &CreateSearchIndexJobInput {
                 workspace_id: workspace_id.to_owned(),
                 job_type: SearchIndexJobType::Incremental,
-                document_source: Some(reason.to_owned()),
+                document_source: Some(TEAM_INBOUND_INDEX_SOURCE.to_owned()),
                 document_id: None,
                 documents_total: 1,
             },
@@ -9380,7 +9385,8 @@ mod tests {
             .expect("jobs");
         assert!(
             jobs.iter().any(|job| {
-                job.document_source.as_deref() == Some("team-inbound-body")
+                job.document_source.as_deref() == Some("memory")
+                    && job.document_id.is_none()
                     && job.job_type == "incremental"
             }),
             "hydrate must enqueue a coalesced Incremental job so search can see the body: {jobs:?}"
@@ -9390,7 +9396,7 @@ mod tests {
     #[test]
     fn inbound_index_jobs_coalesce_under_amplification_cap() {
         let connection = open_db();
-        let workspace_id = "wsp_indexcoalesce000000000001";
+        let workspace_id = "wsp_indexcoalesce0000000000001";
         connection
             .insert_workspace(
                 workspace_id,
@@ -9418,7 +9424,7 @@ mod tests {
             "a 500-row inbound burst must stay one Incremental job: {jobs:?}"
         );
         assert_eq!(jobs[0].job_type, "incremental");
-        assert_eq!(jobs[0].document_source.as_deref(), Some("team-inbound"));
+        assert_eq!(jobs[0].document_source.as_deref(), Some("memory"));
         assert!(jobs[0].document_id.is_none());
         assert!(jobs[0].status_enum() == Some(crate::db::SearchIndexJobStatus::Pending));
     }
@@ -9709,7 +9715,8 @@ mod tests {
             .expect("pending jobs");
         assert!(
             pending_before.iter().any(|job| {
-                job.document_source.as_deref() == Some("team-inbound-body")
+                job.document_source.as_deref() == Some("memory")
+                    && job.document_id.is_none()
                     && job.job_type == "incremental"
             }),
             "hydrate must enqueue a coalesced Incremental job: {pending_before:?}"
@@ -9945,7 +9952,7 @@ mod tests {
             .expect("jobs");
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].document_id.as_deref(), None);
-        assert_eq!(jobs[0].document_source.as_deref(), Some("team-inbound"));
+        assert_eq!(jobs[0].document_source.as_deref(), Some("memory"));
         assert_eq!(jobs[0].job_type, "incremental");
         let again = reconcile_inbound_team_memories(&connection, "wsp_persistfixture000000000001")
             .expect("idempotent");
