@@ -2429,7 +2429,7 @@ impl MeshForegroundSnapshot {
         let connection = DbConnection::open_file(database_path)
             .map_err(|error| format!("open mesh store: {error}"))?;
         let (mesh_enabled, mode) = mesh_enabled_for_store(workspace_path, &connection);
-        let workspace_id = resolve_workspace_id_from_path(&connection, workspace_path)?;
+        let workspace_id = resolve_store_workspace_id(&connection, workspace_path)?;
         let storage = connection
             .mesh_storage_status(&workspace_id)
             .map_err(|error| format!("mesh storage status: {error}"))?;
@@ -2479,7 +2479,8 @@ fn mesh_explicitly_disabled(workspace_path: &Path) -> bool {
 
 /// Team create/join is the inbound opt-in. Explicit `EE_MESH_ENABLED=0` or
 /// `mesh.enabled = false` still wins.
-fn mesh_enabled_for_store(workspace_path: &Path, connection: &DbConnection) -> (bool, String) {
+#[must_use]
+pub fn mesh_enabled_for_store(workspace_path: &Path, connection: &DbConnection) -> (bool, String) {
     let (configured_on, mode) = mesh_enabled_and_mode(workspace_path);
     if mesh_explicitly_disabled(workspace_path) {
         return (false, mode);
@@ -2519,7 +2520,9 @@ fn mesh_enabled_and_mode(workspace_path: &Path) -> (bool, String) {
     (enabled, mode)
 }
 
-fn resolve_workspace_id_from_path(
+/// Resolve the store's workspace id. Team members win over Windows path
+/// spelling (`C:\` vs `\\?\C:\`) so mesh peers stay visible to CLI commands.
+pub fn resolve_store_workspace_id(
     connection: &DbConnection,
     workspace_path: &Path,
 ) -> Result<String, String> {

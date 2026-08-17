@@ -36273,7 +36273,13 @@ fn resolve_graph_workspace_id(
 }
 
 fn stable_cli_workspace_id(path: &Path) -> String {
-    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
+    let rendered = path.to_string_lossy();
+    let rendered = rendered
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .or_else(|| rendered.strip_prefix(r"\\?\").map(str::to_owned))
+        .unwrap_or_else(|| rendered.into_owned());
+    let hash = blake3::hash(format!("workspace:{rendered}").as_bytes());
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&hash.as_bytes()[..16]);
     crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()

@@ -4963,7 +4963,9 @@ fn build_snapshot_from_connection(
     let database_path = database_override
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
-    let (mesh_enabled, mode) = mesh_config_for_workspace(&workspace_path)?;
+    let (_, mode) = mesh_config_for_workspace(&workspace_path)?;
+    let (mesh_enabled, _) =
+        crate::mesh::foreground_cli::mesh_enabled_for_store(&workspace_path, connection);
     let workspace_id = resolve_mesh_workspace_id(connection, &workspace_path)?;
     let storage = connection
         .mesh_storage_status(&workspace_id)
@@ -6766,34 +6768,14 @@ fn resolve_mesh_workspace_id(
     connection: &DbConnection,
     workspace_path: &Path,
 ) -> Result<String, DomainError> {
-    let primary = workspace_path.to_string_lossy().into_owned();
-    if let Some(workspace) = connection
-        .get_workspace_by_path(&primary)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })?
-    {
-        return Ok(workspace.id);
-    }
-
-    let canonical = workspace_path
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_path.to_path_buf());
-    let canonical_str = canonical.to_string_lossy().into_owned();
-    if canonical_str != primary
-        && let Some(workspace) =
-            connection
-                .get_workspace_by_path(&canonical_str)
-                .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to query workspace: {error}"),
-                    repair: Some("ee doctor".to_owned()),
-                })?
-    {
-        return Ok(workspace.id);
-    }
-
-    Ok(super::stable_cli_workspace_id(&canonical))
+    crate::mesh::foreground_cli::resolve_store_workspace_id(connection, workspace_path).or_else(
+        |_| {
+            let canonical = workspace_path
+                .canonicalize()
+                .unwrap_or_else(|_| workspace_path.to_path_buf());
+            Ok(super::stable_cli_workspace_id(&canonical))
+        },
+    )
 }
 
 fn storage_error(context: &str, error: crate::db::DbError) -> DomainError {
