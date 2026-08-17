@@ -1233,12 +1233,14 @@ fn open_windows_secure_directory(
                         expected: "directory",
                     });
                 }
-                // `ee init` may have created `.ee/keys` with an inherited
-                // parent DACL. Harden it in place to the process TokenUser
-                // plus SYSTEM; do not require the directory to have been
-                // born protected, and do not pin the ACL to the
-                // Administrators group that Windows may record as owner.
-                apply_windows_narrow_dacl(&current)?;
+                // Only the secure directory itself is narrowed. Intermediate
+                // ancestors such as `.ee` hold the database and write lock
+                // and must keep their ordinary workspace ACL. `ee init` may
+                // have created the final keys dir with an inherited parent
+                // DACL; harden that leaf in place to TokenUser+SYSTEM.
+                if current.as_path() == dir {
+                    apply_windows_narrow_dacl(&current)?;
+                }
             }
             Err(error)
                 if error.kind() == std::io::ErrorKind::NotFound
