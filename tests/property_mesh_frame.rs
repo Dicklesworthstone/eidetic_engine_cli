@@ -70,6 +70,33 @@ fn signed_hello(counter: u64) -> ee::mesh::transport_session::FrameV2 {
     .expect("sign hello")
 }
 
+fn replay_violation(error: &TransportSessionError) -> Option<CounterViolation> {
+    match error {
+        TransportSessionError::ReplayRejected { violation, .. } => Some(*violation),
+        _ => None,
+    }
+}
+
+fn is_schema_mismatch(error: &TransportSessionError) -> bool {
+    matches!(error, TransportSessionError::SchemaMismatch { .. })
+}
+
+fn is_frame_too_large(error: &TransportSessionError) -> bool {
+    matches!(error, TransportSessionError::FrameTooLarge { .. })
+}
+
+fn is_binding_mismatch(error: &TransportSessionError) -> bool {
+    matches!(error, TransportSessionError::BindingMismatch { .. })
+}
+
+fn is_unsupported_capability(error: &BootstrapEnvelopeError) -> bool {
+    matches!(error, BootstrapEnvelopeError::UnsupportedCapability { .. })
+}
+
+fn is_envelope_over_budget(error: &BootstrapEnvelopeError) -> bool {
+    matches!(error, BootstrapEnvelopeError::OverBudget { .. })
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
@@ -101,9 +128,8 @@ proptest! {
             "schema": format!("ee.mesh.{unknown}"),
         }))
         .expect("encode unknown");
-        prop_assert!(matches!(
-            decode_frame(&other).expect_err("unknown"),
-            TransportSessionError::SchemaMismatch { .. }
+        prop_assert!(is_schema_mismatch(
+            &decode_frame(&other).expect_err("unknown")
         ));
     }
 
@@ -114,9 +140,8 @@ proptest! {
         prop_assert!(decode_frame(&encoded[..cut]).is_err());
 
         let oversize = vec![b'{'; MAX_FRAME_BYTES + 1];
-        prop_assert!(matches!(
-            decode_frame(&oversize).expect_err("oversize"),
-            TransportSessionError::FrameTooLarge { .. }
+        prop_assert!(is_frame_too_large(
+            &decode_frame(&oversize).expect_err("oversize")
         ));
     }
 
@@ -133,13 +158,7 @@ proptest! {
         prop_assert!(!counters.is_closed());
 
         let dup = counters.accept(start).expect_err("duplicate");
-        prop_assert!(matches!(
-            dup,
-            TransportSessionError::ReplayRejected {
-                violation: CounterViolation::Duplicate,
-                ..
-            }
-        ));
+        prop_assert_eq!(replay_violation(&dup), Some(CounterViolation::Duplicate));
         prop_assert!(counters.is_closed());
         prop_assert_eq!(
             counters.accept(start + 1).expect_err("closed"),
@@ -150,13 +169,7 @@ proptest! {
             std::num::NonZeroU64::new(start).expect("start >= 1"),
         );
         let skip = skipped.accept(start.saturating_add(skip_by)).expect_err("skip");
-        prop_assert!(matches!(
-            skip,
-            TransportSessionError::ReplayRejected {
-                violation: CounterViolation::Skipped,
-                ..
-            }
-        ));
+        prop_assert_eq!(replay_violation(&skip), Some(CounterViolation::Skipped));
 
         if start > 1 {
             let mut advanced = SessionCounters::expecting(
@@ -164,13 +177,10 @@ proptest! {
             );
             advanced.accept(start).expect("first");
             let regress = advanced.accept(start - 1).expect_err("regress");
-            prop_assert!(matches!(
-                regress,
-                TransportSessionError::ReplayRejected {
-                    violation: CounterViolation::Regressed,
-                    ..
-                }
-            ));
+            prop_assert_eq!(
+                replay_violation(&regress),
+                Some(CounterViolation::Regressed)
+            );
         }
     }
 
@@ -224,10 +234,7 @@ proptest! {
             &NegotiatedExtensions::none(),
         )
         .expect_err("wrong target");
-        prop_assert!(matches!(
-            error,
-            TransportSessionError::BindingMismatch { .. }
-        ));
+        prop_assert!(is_binding_mismatch(&error));
         prop_assert_eq!(error.degraded_code(), "mesh_frame_target_mismatch");
         prop_assert_eq!(counters.expected_next(), 1);
         prop_assert!(!counters.is_closed());
@@ -247,7 +254,7 @@ proptest! {
             let decoded = decode_envelope(&bytes).expect("decode");
             prop_assert_eq!(decoded.schema, BOOTSTRAP_ENVELOPE_SCHEMA_V1);
             prop_assert_eq!(decoded.capability, capability);
-            prop_assert_eq!(decoded.payload, payload);
+            prop_assert_eq!(decoded.payload, payload.clone());
         }
     }
 
@@ -259,15 +266,13 @@ proptest! {
             "payload": {},
         }))
         .expect("encode");
-        prop_assert!(matches!(
-            decode_envelope(&unknown).expect_err("unknown"),
-            BootstrapEnvelopeError::UnsupportedCapability { .. }
+        prop_assert!(is_unsupported_capability(
+            &decode_envelope(&unknown).expect_err("unknown")
         ));
 
         let oversize = vec![b'{'; BOOTSTRAP_MAX_ENVELOPE_BYTES + 1];
-        prop_assert!(matches!(
-            decode_envelope(&oversize).expect_err("oversize"),
-            BootstrapEnvelopeError::OverBudget { .. }
+        prop_assert!(is_envelope_over_budget(
+            &decode_envelope(&oversize).expect_err("oversize")
         ));
     }
 
