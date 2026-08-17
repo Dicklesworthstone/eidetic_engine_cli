@@ -5094,6 +5094,7 @@ pub fn project_inbound_team_memory(
         .is_some()
     {
         record_inbound_body_placeholder(connection, workspace_id, inbound, &payload, &memory_id)?;
+        enqueue_inbound_memory_index_job(connection, workspace_id, &memory_id, "team-inbound")?;
         return Ok(Some(memory_id));
     }
     let producer = connection
@@ -5279,6 +5280,7 @@ pub fn reconcile_inbound_team_memories(
             .map_err(|error| OriginStreamError::Db(error.to_string()))?
             .is_some()
         {
+            enqueue_inbound_memory_index_job(connection, workspace_id, &memory_id, "team-inbound")?;
             continue;
         }
         let inbound = serde_json::from_str::<InboundOriginEvent>(&row.event_json)
@@ -9990,6 +9992,146 @@ mod tests {
                 .iter()
                 .any(|check| check.name == "inbound_memories" && check.status == "ok")
         );
+    }
+
+    #[test]
+    fn reconcile_existing_inbound_stub_retries_index_enqueue() {
+        let connection = open_db();
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-team-inbound-retry".to_owned(),
+                    name: Some("inbound-retry".to_owned()),
+                },
+            )
+            .expect("workspace");
+        let created = create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        connection
+            .insert_memory(
+                "mem_sharehistory00000000000001",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "secret body must not land on the receiver".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("remember");
+        share_team_history(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "2026-08-13T07:01:00Z",
+            true,
+            8,
+            None,
+        )
+        .expect("share");
+        let rows = connection
+            .list_mesh_origin_events(&created.team.team_id, &created.team.origin_node_id, 0, 16)
+            .expect("chain");
+        let memory_row = rows
+            .iter()
+            .find(|row| row.payload_schema == "ee.mesh.memory_event.v1")
+            .expect("memory event");
+        let inbound = crate::mesh::origin_stream::inbound_from_stored(memory_row).expect("inbound");
+        let stub_id = inbound_team_memory_id(&inbound.event_hash).expect("id");
+        connection
+            .insert_memory(
+                &stub_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: format!("[ee.team.history] rule {}", inbound.event_hash),
+                    workflow_id: None,
+                    confidence: 0.5,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some(inbound.event_id.clone()),
+                    trust_class: "peer_human_attested".to_owned(),
+                    trust_subclass: Some(
+                        "agent:Analysts; produced_at=2026-08-13T07:01:00Z".to_owned(),
+                    ),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("preexisting stub");
+        connection
+            .insert_mesh_import_ledger_event(&crate::db::InsertMeshImportLedgerEventInput {
+                workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                event_id: format!(
+                    "mesh_evt_{}",
+                    inbound
+                        .event_hash
+                        .trim_start_matches("blake3:")
+                        .chars()
+                        .take(24)
+                        .collect::<String>()
+                ),
+                origin_node_id: inbound.origin_node_id.clone(),
+                origin_workspace_id: "wsp_persistfixture000000000001".to_owned(),
+                producer_peer_id: None,
+                seq: inbound.seq.max(1),
+                prev_event_hash: inbound.prev_event_hash.clone(),
+                event_hash: inbound.event_hash.clone(),
+                event_kind: "create".to_owned(),
+                logical_memory_id: stub_id.clone(),
+                content_hash: inbound.event_hash.clone(),
+                material_lane: "metadata".to_owned(),
+                redaction_class: "metadataOnly".to_owned(),
+                trust_lane: "peerAgent".to_owned(),
+                import_decision: "allow".to_owned(),
+                local_memory_id: Some(stub_id.clone()),
+                body_cache_key: None,
+                policy_failure_surface_json: None,
+                policy_decision_json: None,
+                event_json: serde_json::to_string(&inbound).expect("json"),
+                imported_at: None,
+            })
+            .expect("ledger");
+        assert!(
+            connection
+                .list_search_index_jobs("wsp_persistfixture000000000001", None)
+                .expect("jobs")
+                .is_empty(),
+            "fixture must start with no index job"
+        );
+        let report = reconcile_inbound_team_memories(&connection, "wsp_persistfixture000000000001")
+            .expect("reconcile");
+        assert_eq!(report.applied_additions, 0);
+        let jobs = connection
+            .list_search_index_jobs(
+                "wsp_persistfixture000000000001",
+                Some(crate::db::SearchIndexJobStatus::Pending),
+            )
+            .expect("jobs");
+        assert_eq!(
+            jobs.len(),
+            1,
+            "steward rematerialize must retry Incremental enqueue for an already-projected stub: {jobs:?}"
+        );
+        assert_eq!(jobs[0].document_source.as_deref(), Some("memory"));
+        assert_eq!(jobs[0].job_type, "incremental");
+        assert!(jobs[0].document_id.is_none());
     }
 
     #[cfg(unix)]
