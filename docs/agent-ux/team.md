@@ -6,6 +6,8 @@ After a granted BodyFetch (or `ee team steward once`), teammate text
 is recalled with the same commands plus `--memory-scope team`. Hits,
 pack items, `ee ask` citations, and `ee why` carry `teamProvenance`
 (member, optional shared `projectName`, member-attested `producedAt`).
+Human `ee search` prints the same compact suffix on the hit line
+(`· from Priya / acme-analysis · 2026-07-30T14:02:00Z`).
 `ee why` also emits `data.elevation` for teammate rows. Use
 `ee insights --section peerConflicts --json` when a teammate row
 overlaps or contradicts a local memory.
