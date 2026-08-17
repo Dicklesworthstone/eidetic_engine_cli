@@ -106,6 +106,9 @@ future changelog pass expands those rows into full capability sections.
   `trust.team_members` nicknames from `.ee/config.toml`; only durable
   `team_members` rows count. The config key itself is now rejected as
   unknown (`ee team members list` is the membership surface).
+  Steward rematerialize and inbound re-project retry Incremental
+  index enqueue when a teammate stub already exists, so a dropped
+  first job (cap or CHECK) does not leave searchable text missing.
   Team pack now applies ADR 0086 TC-D16 precedence (local workspace >
   team > global) on overlap and keeps both sides of a cross-lane
   contradiction. `detect_peer_memory_conflicts` annotates pack `why`
