@@ -1,6 +1,6 @@
 # Team Memory Confederation Plan
 
-Status: active plan
+Status: Unix live EE-to-EE shipped on `main`; remainders are two-human Tailscale, Windows-host soak, production IdP soak, T2.7 remaining fuzz, and T5.7 fence (`bd-d67os.28`). See `docs/mesh/verification_matrix.md` and `CLOSE_THE_GAP_PLAN.md` Part III.
 Owning ADR: [ADR 0086 — team memory confederation](../adr/0086-team-memory-confederation.md) (decisions TC-D1…TC-D16; where plan and ADR conflict, the ADR wins and the plan gets corrected)
 Related ADRs: 0037 (optional mesh), 0038 (auto-enrollment), 0041 (anti-entropy), 0009 (trust classes), 0069 (global knowledge lane), 0083 (user-global store)
 Related beads: bd-30o6g (closed by T1.1), bd-3mw86 (in progress), bd-2gvgw (blocked on/absorbed by T1.4), bd-1bfwa (open epic + .2/.3/.4/.5)

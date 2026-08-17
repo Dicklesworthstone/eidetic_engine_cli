@@ -479,7 +479,7 @@ Current top-level groups:
 | Storage and derived assets | `db`, `migrate`, `index`, `model`, `schema`, `backup`, `export`, `artifact`, `config`, `workspace` |
 | Diagnostics and release gates | `diag`, `eval`, `perf`, `preflight`, `tripwire`, `verify`, `verification`, `audit`, `claim`, `certificate`, `demo` |
 | Agent integration | `agent`, `agent-docs`, `hook`, `mcp`, `support`, `swarm`, `handoff`, `recorder`, `completion` |
-| Optional adapters and operations | `daemon`, `job`, `maintenance`, `mesh`, `share`, `serve`, `install`, `update`, `version`, `introspect`, `plan` |
+| Optional adapters and operations | `daemon`, `job`, `maintenance`, `mesh`, `team`, `share`, `serve`, `install`, `update`, `version`, `introspect`, `plan` |
 
 ### Core workflow
 
@@ -1101,11 +1101,21 @@ service, mail sender, Beads mutator, or agent loop.
 Mesh is optional. Local-first operation is the default. Use mesh when a trusted
 tailnet or local file-exchange path is part of the agent workflow.
 
-The shipped sharing path is policy-governed file export/import plus local
-Tailscale observation. Live EE-to-EE synchronization is not yet available:
-the production foreground supervisor currently uses a no-op transport, so a
-successful `ee mesh sync --once` cycle does not prove peer contact, network
-hello, anti-entropy exchange, or body transfer.
+On Unix, live EE-to-EE team sync is shipped. `ee team create` / `invite` /
+`join` run a signed TCP ceremony and enroll both sides. `ee mesh hello-responder run`
+and `ee daemon --foreground` bind inbound (Tailscale LocalAPI when present;
+loopback `TeamJoinLocalApi` when every enrolled endpoint is loopback or
+tailscaled is absent). Production `ee mesh sync --once` and
+`ee team steward once` use `TcpMeshForegroundSyncTransport` for EventFetch
+plus grant-gated BodyFetch. Authorized bodies hydrate into local memories so
+`ee search` / `ee pack --memory-scope team` recall teammate text with
+`teamProvenance`. Policy-governed file export/import remains available.
+
+What is **not** yet proven: two distinct humans on a real Tailscale tailnet,
+a Windows-host DACL/crash soak, and a production IdP vendor soak. The opt-in
+`scripts/e2e_overhaul/mesh_tailscale_smoke.sh` still proves local Tailscale
+observation, enrollment, policy, and file export/import. It is not the
+two-human live-sync gate (`bd-tc-epic-qzk7o.3.8`).
 
 | Command | Purpose |
 |---|---|
@@ -1122,7 +1132,7 @@ hello, anti-entropy exchange, or body transfer.
 | `ee mesh revoke-lane <peer-id> --lane <lane> --json` | Deny one lane, always advance its generation, invalidate prior previews, and audit atomically |
 | `ee mesh export --peer <peer-id> --out <file> --json` | Write a redaction-safe artifact for an enrolled, enabled peer; use `ee export` or `ee backup` for local backups |
 | `ee mesh import --file <file> --json` | Import a foreground artifact; peer rows require exact prior local consent, and cursors advance only through locally durable contiguous accepted replay |
-| `ee mesh sync --once --json` | Run one foreground supervisor cycle; the current no-op transport may contact zero peers |
+| `ee mesh sync --once --json` | Run one foreground supervisor cycle through `TcpMeshForegroundSyncTransport` (hello, EventFetch, grant-gated BodyFetch). No eligible peer degrades honestly; it does not fake contact |
 
 Mesh command mode can be selected per command or through `EE_MESH_MODE`:
 
@@ -1169,6 +1179,31 @@ Related docs:
 | [`docs/mesh/operator_onboarding.md`](docs/mesh/operator_onboarding.md) | Operator workflow |
 | [`docs/mesh/command_modes.md`](docs/mesh/command_modes.md) | `off`, `cache`, `revisable`, and `blocking` modes |
 | [`docs/agent-ux/auto_enrollment_onboarding.md`](docs/agent-ux/auto_enrollment_onboarding.md) | Agent auto-enrollment checklist |
+
+### Team confederation
+
+Trusted 2–20 person teams share origin-owned memory over the mesh. Local
+`ee pack` / `ee search` stay the default. After a granted BodyFetch or
+`ee team steward once`, teammate text is a local memory: search, pack, ask,
+and why carry `teamProvenance`. See [`docs/team/quickstart.md`](docs/team/quickstart.md)
+and [`docs/agent-ux/team.md`](docs/agent-ux/team.md).
+
+| Command | Purpose |
+|---|---|
+| `ee team create --name <name> --json` | Create the origin team and turn mesh on unless explicitly disabled |
+| `ee team invite [--wait] --json` | Mint a one-use invite; `--wait` stays until the joiner's first sync |
+| `ee team join --invite <code> --json` | Redeem the invite over live TCP and import origin genesis |
+| `ee team status --json` | Members, pending invites, budgets, last-sync, and reachability |
+| `ee team members list --json` | Receiver-derived membership; not a config nickname list |
+| `ee team doctor --json` | Team health: broker port, admission, invites, projects, rematerialize |
+| `ee team steward once --json` | Apply pending EventFetch/BodyFetch, hydrate stubs, enqueue index jobs |
+| `ee team share history --json` | Preview or share signed origin history (metadata) |
+| `ee team share bodies --json` | Token-free preview; `--confirm --token-stdin` publishes bodies |
+| `ee team fetch body --key <cache-key> --json` | Retry a grant-gated BodyFetch into local cache |
+| `ee team activity --as-of <rfc3339> --json` | Explicit-as-of teammate activity with member/project attribution |
+| `ee team projects reconcile --json` | Rematerialize origin `teamProjectShared` rows |
+| `ee search "<q>" --memory-scope team --json` | Recall hydrated teammate text with `teamProvenance` |
+| `ee pack "<task>" --memory-scope team --json` | Pack the same teammate memories with provenance |
 
 ### Import & ingestion
 
@@ -2077,7 +2112,8 @@ a raw Tailscale node key.
 | Narrow one lane | `ee mesh revoke-lane <peer-id> --lane metadata --json` |
 | Discovery consent | `ee mesh discovery-policy --explain --json` |
 | Share preview | `ee share preview --peer <peer> --json` |
-| Operator docs | [`docs/mesh/share_preview.md`](docs/mesh/share_preview.md), [`docs/mesh/peer_policy.md`](docs/mesh/peer_policy.md) |
+| Trusted-team product | `ee team create` / `invite` / `join`, then `ee team steward once` |
+| Operator docs | [`docs/team/quickstart.md`](docs/team/quickstart.md), [`docs/mesh/share_preview.md`](docs/mesh/share_preview.md), [`docs/mesh/peer_policy.md`](docs/mesh/peer_policy.md) |
 
 ---
 
@@ -2296,8 +2332,12 @@ ee mesh status --json
 ee mesh discovery-policy --explain --json
 ```
 
-For fake-tailnet and operator workflows, see
+For trusted-team create/invite/join, see
+[`docs/team/quickstart.md`](docs/team/quickstart.md). For fake-tailnet and
+operator workflows, see
 [`docs/mesh/operator_onboarding.md`](docs/mesh/operator_onboarding.md).
+The live Unix proof ledger is
+[`docs/mesh/verification_matrix.md`](docs/mesh/verification_matrix.md).
 
 ### Inspect command-risk memory
 
@@ -2342,7 +2382,7 @@ Boundaries to know:
 | Model choice | Embeddings are delegated to Frankensearch. Default installs use the pinned local `potion-multilingual-128M` fast tier; semantic quality follows that model and the derived index unless the operator explicitly changes Frankensearch posture. |
 | MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
 | Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the `curl | bash` installer. Sigstore/provenance verification is enforced when published or explicitly required; asset coverage can vary by release. Homebrew and crates.io publication are still planned. |
-| Mesh | Mesh exchanges redaction-safe rows and posture under policy. FrankenSQLite remains the local source of truth. |
+| Mesh | Unix live EE-to-EE is shipped (`TcpMeshForegroundSyncTransport`). Two-human Tailscale soak, Windows-host DACL/crash soak, and production IdP vendor soak remain environment remainders. FrankenSQLite remains the local source of truth. |
 | Reserved adapters | `serve` and `science-analytics` report capability gaps until their adapters mature. |
 | Doctor repairs | Start with `ee doctor --fix-plan --json`; use `--fix` only after reviewing the run summary and undo path. |
 
@@ -2368,6 +2408,14 @@ The storage layer is FrankenSQLite via SQLModel. `rusqlite` is forbidden in the 
 
 **Can I use `ee` without `cass`?**
 Yes. `cass` is an evidence source, not a hard dependency. Without it, `ee remember`, `ee pack`, `ee search`, curation, graph, and packing all work normally.
+
+**Can two teammates share memory?**
+Yes on Unix. `ee team create` → send the invite → `ee team join`, then run
+`ee mesh hello-responder run` or `ee daemon --foreground` on the origin and
+`ee mesh sync --once` / `ee team steward once` on the joiner. Search and pack
+with `--memory-scope team`. Two distinct humans on a real Tailscale tailnet,
+Windows-host soak, and production IdP vendor soak are still environment
+remainders.
 
 **How big does the database get?**
 On a typical multi-project developer machine, expect 50-500 MB after a year.
