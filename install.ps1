@@ -1175,10 +1175,53 @@ function Main {
                             Invoke-DownloadFile -Url "$effectiveUrl.sigstore.json" -OutFile $sigstorePath
                             Test-Sigstore -TarballPath $tarballPath -BundlePath $sigstorePath
                         } catch {
-                            if ($RequireProvenance) {
-                                Write-ErrorExit "Sigstore bundle unavailable: $($_.Exception.Message). Cannot verify signature (required by -RequireProvenance)."
+                            # Test-Sigstore's own verification failure calls
+                            # Write-ErrorExit, which does a hard `exit` --
+                            # that terminates the process directly and is
+                            # never caught here, so this catch only ever
+                            # sees a genuine download failure from
+                            # Invoke-DownloadFile. Classify it: a definitive
+                            # HTTP 404 means this release genuinely does not
+                            # publish a bundle; anything else (network
+                            # failure, timeout, DNS failure) is unknown, not
+                            # confirmed absence. v0.13.1 ships with no
+                            # Sigstore/SLSA assets for ANY platform, so
+                            # -RequireProvenance always fails against it --
+                            # but until this fix, that failure read
+                            # identically to a transient network blip, and
+                            # an operator could not tell "this release
+                            # genuinely lacks provenance" from "retry, it
+                            # might just be the network."
+                            #
+                            # A 404 throws Microsoft.PowerShell.Commands.
+                            # HttpResponseException, which HAS a Response
+                            # property (StatusCode readable). A timeout
+                            # throws System.Threading.Tasks.
+                            # TaskCanceledException, which has NO Response
+                            # property at all -- not null, absent -- and
+                            # Set-StrictMode -Version Latest (active for
+                            # this whole script) throws on accessing a
+                            # property that doesn't exist. Confirmed on
+                            # real PowerShell 7.6.3 against a real
+                            # unroutable address. Check the property exists
+                            # before reading it.
+                            $statusCode = $null
+                            if ($_.Exception.PSObject.Properties.Name -contains 'Response' `
+                                    -and $_.Exception.Response -and $_.Exception.Response.StatusCode) {
+                                $statusCode = [int]$_.Exception.Response.StatusCode
                             }
-                            Write-Warning2 "Sigstore bundle unavailable: $($_.Exception.Message); skipping signature verification (SHA256 already verified)."
+                            $bundleUrl = "$effectiveUrl.sigstore.json"
+                            if ($statusCode -eq 404) {
+                                if ($RequireProvenance) {
+                                    Write-ErrorExit "Sigstore bundle does not exist at $bundleUrl (HTTP 404). This release genuinely does not publish a signed bundle; strict verification cannot succeed against it."
+                                }
+                                Write-Warning2 "Sigstore bundle not published at $bundleUrl; skipping signature verification (SHA256 already verified)."
+                            } else {
+                                if ($RequireProvenance) {
+                                    Write-ErrorExit "Could not fetch the Sigstore bundle at $bundleUrl ($($_.Exception.Message)) -- not a confirmed-absent 404. This may be transient rather than evidence the release lacks a signed bundle; retry, or re-run without -RequireProvenance."
+                                }
+                                Write-Warning2 "Could not fetch the Sigstore bundle at $bundleUrl ($($_.Exception.Message)) -- not confirmed absent; skipping signature verification (SHA256 already verified)."
+                            }
                             Write-Warning2 "Pass -RequireProvenance to fail the install when a signed bundle is missing."
                         }
                     } elseif ($RequireProvenance) {

@@ -1230,6 +1230,43 @@ verify_checksum() {
   ok "Checksum verified: ${actual:0:16}…"
 }
 
+# Fetch $url to $out, classifying a failure rather than just reporting it.
+# Sets EE_FETCH_CLASSIFICATION to:
+#   "absent"  - a definitive HTTP 404: the resource genuinely does not exist.
+#   "unknown" - anything else (network failure, timeout, DNS failure, or a
+#               5xx that survived ee_curl's own internal retries) -- NOT
+#               evidence the resource is missing, just that we could not
+#               fetch it this run.
+# v0.13.1 ships with no SLSA provenance or Sigstore attestation for ANY
+# platform, so --require-provenance always fails against it -- but until
+# this fix, that failure read identically to a transient network blip. An
+# operator (or a client hitting this during a real incident) could not tell
+# "this release genuinely lacks provenance, stop retrying" from "the network
+# hiccuped, try again" from the message alone. Never let unknown render as
+# confirmed absent.
+EE_FETCH_CLASSIFICATION=""
+fetch_or_classify_absence() {
+  local url="$1" out="$2"
+  EE_FETCH_CLASSIFICATION="unknown"
+  local hdr_file=""
+  hdr_file="$(mktemp "${TMPDIR:-/tmp}/ee-fetch-hdr.XXXXXX" 2>/dev/null || true)"
+  if [ -z "$hdr_file" ]; then
+    # No mktemp available: fetch without headers, cannot classify beyond
+    # "unknown" -- honest about the limitation rather than guessing.
+    ee_curl "$url" -o "$out" 2>/dev/null && return 0
+    return 1
+  fi
+  if ee_curl "$url" -o "$out" -D "$hdr_file" 2>/dev/null; then
+    rm -f "$hdr_file" 2>/dev/null
+    return 0
+  fi
+  local http_status=""
+  http_status=$(grep -oE '^HTTP/[0-9.]+ [0-9]{3}' "$hdr_file" 2>/dev/null | tail -1 | awk '{print $2}')
+  rm -f "$hdr_file" 2>/dev/null
+  [ "$http_status" = "404" ] && EE_FETCH_CLASSIFICATION="absent"
+  return 1
+}
+
 verify_sigstore_bundle() {
   local file="$1" artifact_url="$2"
 
@@ -1251,13 +1288,23 @@ verify_sigstore_bundle() {
   # mismatch and bundle-present-but-invalid both still abort).
   info "Fetching sigstore bundle"
   info "Sigstore bundle: $bundle_url" >&2
-  if ! ee_curl "$bundle_url" -o "$bundle_file" 2>/dev/null; then
+  if ! fetch_or_classify_absence "$bundle_url" "$bundle_file"; then
     if [ "$REQUIRE_PROVENANCE" = "1" ] || [ "$REQUIRE_KEYLESS" = "1" ]; then
-      err "Sigstore bundle not available at $bundle_url."
+      if [ "$EE_FETCH_CLASSIFICATION" = "absent" ]; then
+        err "Sigstore bundle does not exist at $bundle_url (HTTP 404)."
+        err "This release genuinely does not publish a signed bundle; strict verification cannot succeed against it."
+      else
+        err "Could not fetch the Sigstore bundle at $bundle_url (network failure, not a confirmed-absent 404)."
+        err "This may be transient rather than evidence the release lacks a signed bundle -- retry, or re-run without --require-provenance."
+      fi
       err "Strict verification was requested; cannot continue without a signed bundle."
       return 1
     fi
-    warn "Sigstore bundle not available at $bundle_url; skipping signature verification (sha256 already verified)."
+    if [ "$EE_FETCH_CLASSIFICATION" = "absent" ]; then
+      warn "Sigstore bundle not published at $bundle_url; skipping signature verification (sha256 already verified)."
+    else
+      warn "Could not fetch the Sigstore bundle at $bundle_url (network failure, not confirmed absent); skipping signature verification (sha256 already verified)."
+    fi
     warn "Pass --require-provenance to fail the install when a signed bundle is missing."
     return 0
   fi
@@ -1319,13 +1366,25 @@ verify_provenance_bundle() {
 
   info "Fetching SLSA provenance"
   info "Provenance: $provenance_url" >&2
-  if ! ee_curl "$provenance_url" -o "$provenance_file" 2>/dev/null; then
-    err "Provenance JSON not available at $provenance_url."
+  if ! fetch_or_classify_absence "$provenance_url" "$provenance_file"; then
+    if [ "$EE_FETCH_CLASSIFICATION" = "absent" ]; then
+      err "Provenance JSON does not exist at $provenance_url (HTTP 404)."
+      err "This release genuinely does not publish SLSA provenance for this platform."
+    else
+      err "Could not fetch provenance JSON from $provenance_url (network failure, not a confirmed-absent 404)."
+      err "This may be transient rather than evidence the release lacks provenance -- retry, or re-run without --require-provenance."
+    fi
     err "Cannot satisfy --require-provenance."
     return 1
   fi
-  if ! ee_curl "$bundle_url" -o "$bundle_file" 2>/dev/null; then
-    err "Provenance Sigstore bundle not available at $bundle_url."
+  if ! fetch_or_classify_absence "$bundle_url" "$bundle_file"; then
+    if [ "$EE_FETCH_CLASSIFICATION" = "absent" ]; then
+      err "Provenance Sigstore bundle does not exist at $bundle_url (HTTP 404)."
+      err "This release genuinely does not publish a signed provenance bundle for this platform."
+    else
+      err "Could not fetch the provenance Sigstore bundle at $bundle_url (network failure, not a confirmed-absent 404)."
+      err "This may be transient rather than evidence the release lacks a signed bundle -- retry, or re-run without --require-provenance."
+    fi
     err "Cannot satisfy --require-provenance."
     return 1
   fi
