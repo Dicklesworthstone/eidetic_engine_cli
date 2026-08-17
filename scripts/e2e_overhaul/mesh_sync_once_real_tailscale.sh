@@ -412,6 +412,11 @@ assert_jq "$SYNC_ONCE_JSON" '.success == true or (.schema // "" | startswith("ee
 # the offline path; the contacted path should NOT include that code and
 # SHOULD show `contactedPeers >= 1`. Both signals are emitted so a future
 # regression in either direction is readable from the event log.
+#
+# Default opt-in still records both signals (local Tailscale observation
+# without a second `ee` is not a failed transport). Set
+# EE_E2E_REAL_TAILSCALE_REQUIRE_CONTACT=1 to assert a live EE-to-EE round
+# (T2.6 / bd-tc-epic-qzk7o.3.8).
 DEFERRED_PRESENT="$(jq -r '
     [
       (.data.degraded // [])[]?.code,
@@ -420,6 +425,11 @@ DEFERRED_PRESENT="$(jq -r '
     | any(. == "mesh_sync_once_network_deferred")
 ' "$SYNC_ONCE_JSON")"
 CONTACTED_PEERS="$(mesh_contacted_peer_count "$SYNC_ONCE_JSON")"
+if [ "${EE_E2E_REAL_TAILSCALE_REQUIRE_CONTACT:-}" = "1" ]; then
+    if [ "$DEFERRED_PRESENT" = "true" ] || [ "${CONTACTED_PEERS:-0}" = "0" ]; then
+        fail "assert" "real EE-to-EE contact required: deferred=${DEFERRED_PRESENT} contactedPeers=${CONTACTED_PEERS}"
+    fi
+fi
 
 # Scenario C — `ee mesh status --json` after the sync tick. Baseline
 # diff-friendly snapshot.

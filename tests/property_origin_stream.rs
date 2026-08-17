@@ -1,5 +1,6 @@
 //! bd-tc-epic-qzk7o.3.9 (T2.7, origin slice) — property/fuzz coverage for
 //! the T2.0 origin stream shipped in bd-tc-epic-qzk7o.3.1.
+//! Frame/session/bootstrap remainder lives in `property_mesh_frame.rs`.
 //!
 //! Two falsifiable families (canonicalization key-order invariance is pinned
 //! by the in-module unit test + the independent KAT vectors, since
