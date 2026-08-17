@@ -50,8 +50,7 @@ use crate::mesh::foreground_cli::{
     MeshCliExportReport, MeshCliImportReport, MeshCliPeersReport, MeshCliStatusReport,
     MeshCliSyncReport, MeshExportArtifact, MeshForegroundSnapshot, MeshImportLedgerReport,
     MeshStorageCounts, MeshSyncSupervisorOptions, MeshSyncSupervisorReport,
-    apply_outbound_export_policy, fetch_pending_team_bodies_from_paths, foreground_degradations,
-    run_mesh_sync_supervisor_supervised,
+    apply_outbound_export_policy, foreground_degradations, run_mesh_sync_supervisor_supervised,
 };
 use crate::mesh::hello_responder::{
     HelloResponderLifecycleEventKind, HelloResponderStatusReport, configured_hello_port,
@@ -4898,13 +4897,13 @@ fn run_mesh_sync_supervisor(
         })
         .map_err(|error| format!("Failed to spawn Asupersync mesh supervisor: {error}"))?;
     match runtime.block_on(join) {
-        Outcome::Ok(report) => {
-            let _ = fetch_pending_team_bodies_from_paths(
+        Outcome::Ok(report) => Ok(
+            crate::mesh::foreground_cli::complete_team_sync_after_unsigned(
                 Path::new(&snapshot.workspace_path),
                 Path::new(&snapshot.database_path),
-            );
-            Ok(report)
-        }
+                report,
+            ),
+        ),
         Outcome::Err(message) => Err(message),
         Outcome::Cancelled(reason) => Err(format!(
             "Mesh sync supervisor cancelled: {}",

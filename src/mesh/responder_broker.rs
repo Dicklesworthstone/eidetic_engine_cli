@@ -864,9 +864,20 @@ pub async fn resolve_durable_registration<A: TailscaleLocalApi>(
     let endpoint = peer_endpoint_for_whois(&policy.endpoint.endpoint)?;
     let who_is = local_api.who_is(cx, endpoint).await?;
     let expected_key = &policy.endpoint.tailscale_node_key;
+    let stored_pubkey = if expected_key.starts_with("nodekey:") {
+        expected_key.clone()
+    } else {
+        format!("nodekey:{expected_key}")
+    };
     let who_matches_key = who_is.current_node_pubkey == *expected_key
-        || who_is.current_node_pubkey == format!("nodekey:{expected_key}");
-    if peer.transport_identity.is_none() && !who_matches_key {
+        || who_is.current_node_pubkey == stored_pubkey;
+    if peer.transport_identity.is_none()
+        && !who_matches_key
+        && !crate::mesh::team::team_join_node_pubkey_matches(
+            &stored_pubkey,
+            &who_is.current_node_pubkey,
+        )
+    {
         return Err(ResponderBrokerError::WhoIsUnverified);
     }
     let peer = connection
@@ -1486,10 +1497,16 @@ impl<A: TailscaleLocalApi> ResponderBroker<A> {
             return Err(ResponderBrokerError::InvalidConfiguration);
         }
         let local_identity = local_api.verify_local_address(cx, address).await?;
-        if local_identity.stable_id != routes.responder_stable_id
-            || local_identity.current_node_pubkey != routes.responder_node_pubkey
-            || local_identity.tailnet_id != routes.tailnet_id
-        {
+        if !crate::mesh::team::team_join_stable_id_matches(
+            &routes.responder_stable_id,
+            &local_identity.stable_id,
+        ) || !crate::mesh::team::team_join_node_pubkey_matches(
+            &routes.responder_node_pubkey,
+            &local_identity.current_node_pubkey,
+        ) || !crate::mesh::team::team_join_tailnet_matches(
+            &routes.tailnet_id,
+            &local_identity.tailnet_id,
+        ) {
             return Err(ResponderBrokerError::WhoIsUnverified);
         }
         let _ambient = Cx::set_current(Some(cx.clone()));
@@ -2062,9 +2079,13 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
         if let Some(routes) = refreshed_routes {
             self.routes = routes;
         }
-        if status.identity.stable_id != self.routes.responder_stable_id
-            || status.identity.tailnet_id != self.routes.tailnet_id
-        {
+        if !crate::mesh::team::team_join_stable_id_matches(
+            &self.routes.responder_stable_id,
+            &status.identity.stable_id,
+        ) || !crate::mesh::team::team_join_tailnet_matches(
+            &self.routes.tailnet_id,
+            &status.identity.tailnet_id,
+        ) {
             self.shutdown_listeners();
             return Err(ResponderBrokerError::WhoIsUnverified);
         }
@@ -2323,7 +2344,10 @@ async fn resolve_route<A: TailscaleLocalApi>(
         .ok_or(ResponderBrokerError::RouteUnavailable)?;
     route_selected.store(true, Ordering::Release);
     let who_is = local_api.who_is(cx, source).await?;
-    if who_is.stable_id != route.expectations.initiator_stable_id {
+    if !crate::mesh::team::team_join_stable_id_matches(
+        &route.expectations.initiator_stable_id,
+        &who_is.stable_id,
+    ) {
         return Err(ResponderBrokerError::WhoIsUnverified);
     }
     refresh_durable_route_authority(route, &who_is)?;
