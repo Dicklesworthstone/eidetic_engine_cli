@@ -95,6 +95,13 @@ if (-not $RequireProvenance -and $env:EE_REQUIRE_PROVENANCE -eq "1") { $RequireP
 
 $Script:RepoOwner   = "Dicklesworthstone"
 $Script:RepoName    = "eidetic_engine_cli"
+
+# Pinned last-known-good tag: the newest release VERIFIED to publish a complete
+# asset matrix including x86_64-pc-windows-msvc (v0.13.0 ships 5 Windows
+# assets; v0.13.1 shipped ZERO). Used only when the GitHub release API cannot
+# be read at all -- see Get-LatestVersion. Bump this when a newer release is
+# confirmed to carry Windows assets.
+$Script:LastKnownGoodTag = "v0.13.0"
 $Script:BinaryName  = "ee.exe"
 $Script:ProjectName = "ee (Eidetic Engine)"
 
@@ -301,24 +308,91 @@ function Show-DetectedAgents {
 # Version resolution
 # ───────────────────────────────────────────────────────────────────────────
 
+function Invoke-GitHubApi {
+    param([string]$Uri)
+    $params = @{
+        Uri             = $Uri
+        UseBasicParsing = $true
+        UserAgent       = "ee-installer/1.0"
+        TimeoutSec      = 30
+    }
+    $proxy = Get-ProxyUri
+    if ($proxy) { $params.Proxy = $proxy }
+    return Invoke-RestMethod @params
+}
+
+# Resolve the newest release that actually ships an asset for THIS platform.
+#
+# Observed defect (2026-08-17): ee v0.13.1 published only
+# ee-aarch64-apple-darwin and ee-x86_64-unknown-linux-gnu -- no Windows asset
+# at all. `/releases/latest` still returns v0.13.1, so a Windows install
+# resolved that tag and then died at download time with a 404. The crash took
+# down the whole enclosing setup run, so skills never got installed.
+#
+# A release that does not carry your platform's tarball is not a candidate for
+# your platform. Walk back to the newest one that does, and say so loudly --
+# never silently install something older than the user asked for.
 function Get-LatestVersion {
-    Write-Info "Resolving latest version..."
-    $apiUrl = "https://api.github.com/repos/$Script:RepoOwner/$Script:RepoName/releases/latest"
+    $target = Get-PlatformTarget
+    $tarballName = "ee-$target.tar.xz"
+    Write-Info "Resolving latest version carrying $tarballName..."
+
+    $latestTag = $null
     try {
-        $params = @{
-            Uri             = $apiUrl
-            UseBasicParsing = $true
-            UserAgent       = "ee-installer/1.0"
-            TimeoutSec      = 30
-        }
-        $proxy = Get-ProxyUri
-        if ($proxy) { $params.Proxy = $proxy }
-        $response = Invoke-RestMethod @params
-        return $response.tag_name
+        $latestTag = (Invoke-GitHubApi "https://api.github.com/repos/$Script:RepoOwner/$Script:RepoName/releases/latest").tag_name
     }
     catch {
-        Write-ErrorExit "Failed to resolve latest release: $_`nUse -Version vX.Y.Z to install a specific tag."
+        Write-Warn "Could not read /releases/latest: $_"
     }
+
+    # Enumerate recent releases newest-first and pick the first with our asset.
+    $releases = $null
+    try {
+        $releases = Invoke-GitHubApi "https://api.github.com/repos/$Script:RepoOwner/$Script:RepoName/releases?per_page=20"
+    }
+    catch {
+        Write-Warn "Could not enumerate releases: $_"
+    }
+
+    if ($releases) {
+        foreach ($rel in $releases) {
+            if ($rel.draft) { continue }
+            $names = @($rel.assets | ForEach-Object { $_.name })
+            if ($names -contains $tarballName) {
+                if ($latestTag -and $rel.tag_name -ne $latestTag) {
+                    Write-Warn "Latest release $latestTag does not include $tarballName."
+                    Write-Warn "Falling back to $($rel.tag_name), the newest release that does."
+                    Write-Warn "This is an upstream release-matrix gap, not a problem with your machine."
+                }
+                return $rel.tag_name
+            }
+        }
+        Write-Warn "No release in the last 20 ships $tarballName."
+    }
+
+    # Enumeration failed or found nothing: fall back to whatever /latest said
+    # rather than refusing outright, so a transient API problem cannot block a
+    # user who may already have a working asset there.
+    if ($latestTag) {
+        Write-Warn "Proceeding with $latestTag; if its $tarballName is absent the download will fail."
+        return $latestTag
+    }
+
+    # Last resort: the GitHub API is unusable (degradation, or an
+    # unauthenticated rate limit -- measured 2026-08-17: the releases endpoint
+    # returned an EMPTY ARRAY from a Windows host while an authenticated query
+    # from another machine listed six releases). An installer that can only work
+    # when api.github.com is healthy is not robust enough to bootstrap a
+    # machine, so fall through to a pinned tag known to carry a full asset
+    # matrix rather than aborting the enclosing setup run.
+    if ($Script:LastKnownGoodTag) {
+        Write-Warn "GitHub release API returned nothing usable."
+        Write-Warn "Falling back to pinned last-known-good tag $Script:LastKnownGoodTag."
+        Write-Warn "If that is older than you expect, re-run with -Version vX.Y.Z once GitHub recovers."
+        return $Script:LastKnownGoodTag
+    }
+
+    Write-ErrorExit "Could not resolve any release carrying $tarballName.`nUse -Version vX.Y.Z to install a specific tag."
 }
 
 function ConvertTo-TagName {
