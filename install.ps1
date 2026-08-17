@@ -355,19 +355,24 @@ function Get-LatestVersion {
     }
 
     if ($releases) {
+        # Skip drafts AND prereleases. /releases/latest excludes prereleases by
+        # definition, so enumerating /releases (which includes them) must filter
+        # them out too -- otherwise this "fallback" could silently install a
+        # prerelease that the previous code path would never have chosen, which
+        # would be a worse regression than the missing-asset crash it fixes.
         foreach ($rel in $releases) {
-            if ($rel.draft) { continue }
+            if ($rel.draft -or $rel.prerelease) { continue }
             $names = @($rel.assets | ForEach-Object { $_.name })
             if ($names -contains $tarballName) {
                 if ($latestTag -and $rel.tag_name -ne $latestTag) {
                     Write-Warn "Latest release $latestTag does not include $tarballName."
-                    Write-Warn "Falling back to $($rel.tag_name), the newest release that does."
+                    Write-Warn "Falling back to $($rel.tag_name), the newest stable release that does."
                     Write-Warn "This is an upstream release-matrix gap, not a problem with your machine."
                 }
                 return $rel.tag_name
             }
         }
-        Write-Warn "No release in the last 20 ships $tarballName."
+        Write-Warn "No stable release in the last 20 ships $tarballName."
     }
 
     # Enumeration failed or found nothing: fall back to whatever /latest said
