@@ -1237,9 +1237,24 @@ pub fn canonical_workspace_root_or_lexical(path: &Path) -> PathBuf {
 /// reconcile against the bound workspace.
 #[must_use]
 pub fn workspace_fingerprint(path: &Path) -> String {
-    let rendered = path.to_string_lossy();
+    let rendered = normalize_workspace_fingerprint_path(path);
     let hash = blake3::hash(rendered.as_bytes()).to_hex();
     hash.chars().take(24).collect()
+}
+
+/// Strip Windows verbatim prefixes so `C:\foo` and `\\?\C:\foo` (the
+/// form `Path::canonicalize` returns) hash to the same workspace id.
+/// Without this, team enroll writes mesh peers under one id and
+/// `ee mesh hello-responder` looks up another.
+fn normalize_workspace_fingerprint_path(path: &Path) -> String {
+    let rendered = path.to_string_lossy();
+    if let Some(rest) = rendered.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = rendered.strip_prefix(r"\\?\") {
+        return rest.to_owned();
+    }
+    rendered.into_owned()
 }
 
 fn lexical_absolute(base: &Path, path: &Path) -> PathBuf {
@@ -1354,8 +1369,22 @@ mod tests {
         WORKSPACE_ENV_VAR, WORKSPACE_MARKER, WorkspaceError, WorkspaceLocation,
         WorkspaceResolutionMode, WorkspaceResolutionRequest, WorkspaceResolutionSource,
         WorkspaceScopeKind, detect_git_worktree, discover, discover_from_current_dir,
-        installation_salt_path_from_env, resolve_workspace, workspace_scope_from_repository_root,
+        installation_salt_path_from_env, resolve_workspace, workspace_fingerprint,
+        workspace_scope_from_repository_root,
     };
+
+    #[test]
+    fn windows_verbatim_and_drive_paths_share_a_workspace_fingerprint() {
+        let drive = Path::new(r"C:\Users\jeffr\ee-tc-win-soak5");
+        let verbatim = Path::new(r"\\?\C:\Users\jeffr\ee-tc-win-soak5");
+        assert_eq!(
+            workspace_fingerprint(drive),
+            workspace_fingerprint(verbatim)
+        );
+        let unc = Path::new(r"\\?\UNC\server\share\ws");
+        let share = Path::new(r"\\server\share\ws");
+        assert_eq!(workspace_fingerprint(unc), workspace_fingerprint(share));
+    }
 
     type TestResult = Result<(), String>;
 

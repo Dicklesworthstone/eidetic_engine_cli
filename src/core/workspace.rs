@@ -2650,11 +2650,24 @@ fn normalize_lexical(path: &Path) -> PathBuf {
     out
 }
 
+/// Strip Windows `\\?\` / `\\?\UNC\` prefixes so canonicalize() and the
+/// operator-typed drive path hash to the same workspace id.
+fn strip_windows_verbatim_prefix(rendered: &str) -> String {
+    if let Some(rest) = rendered.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = rendered.strip_prefix(r"\\?\") {
+        return rest.to_owned();
+    }
+    rendered.to_owned()
+}
+
 /// Deterministic workspace identity: blake3 over the canonical path string.
 /// Public so integration tests (e.g. the resume contract's perf bridge) can
 /// derive the same id a real workspace would get; pure, no state.
 pub fn stable_workspace_id(path: &Path) -> String {
-    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
+    let rendered = strip_windows_verbatim_prefix(&path.to_string_lossy());
+    let hash = blake3::hash(format!("workspace:{rendered}").as_bytes());
     let mut bytes = [0_u8; 16];
     for (target, source) in bytes.iter_mut().zip(hash.as_bytes().iter().copied()) {
         *target = source;
@@ -3082,6 +3095,14 @@ mod tests {
         assert!(normalize_alias("..foo").is_err());
         assert!(normalize_alias(".bar.").is_err());
         assert!(normalize_alias("foo..").is_ok());
+    }
+
+    #[test]
+    fn stable_workspace_id_ignores_windows_verbatim_prefix() {
+        let drive = Path::new(r"C:\Users\jeffr\ee-tc-win-soak6");
+        let verbatim = Path::new(r"\\?\C:\Users\jeffr\ee-tc-win-soak6");
+        assert_eq!(stable_workspace_id(drive), stable_workspace_id(verbatim));
+        assert!(stable_workspace_id(drive).starts_with("wsp_"));
     }
 
     #[test]
