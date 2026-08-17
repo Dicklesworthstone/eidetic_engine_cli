@@ -132,6 +132,10 @@ future changelog pass expands those rows into full capability sections.
   memory` so they pass the search_index_jobs CHECK
   (`memory|session|rule|import`); the previous `team-inbound*`
   label made inbound projection fail the insert.
+  Inbound `trust_subclass` now also persists the signed
+  `origin_trust_claim`. `teamProvenance.originTrustClass` and
+  `ee why` elevation `fromTrustClass` report that origin class
+  instead of hardcoding `peer_human_attested` / `human_explicit`.
   The inviter enrolls the accepted
   joiner at the join TCP source IP and the advertised `joinerHelloPort`
   (hello also carries `joinerWorkspaceId`) so EventFetch/BodyFetch

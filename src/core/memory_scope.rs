@@ -1460,7 +1460,7 @@ pub fn team_provenance_from_trust(
     Some(TeamProvenance {
         member_display_name,
         project_name: project_from_trust_subclass(subclass),
-        origin_trust_class: "peer_human_attested",
+        origin_trust_class: origin_trust_from_trust_subclass(subclass).unwrap_or("human_explicit"),
         produced_at,
         origin_time_assurance: "member_attested",
     })
@@ -1476,6 +1476,19 @@ fn produced_at_from_trust_subclass(value: &str) -> Option<String> {
                 .map(str::to_owned)
         })
         .and_then(normalized_non_empty)
+}
+
+fn origin_trust_from_trust_subclass(value: &str) -> Option<&'static str> {
+    value
+        .split([';', ',', '|'])
+        .map(str::trim)
+        .find_map(|part| {
+            part.strip_prefix("origin_trust=")
+                .or_else(|| part.strip_prefix("originTrust="))
+                .or_else(|| part.strip_prefix("origin_trust:"))
+        })
+        .and_then(|raw| TrustClass::from_str(raw.trim()).ok())
+        .map(TrustClass::as_str)
 }
 
 fn project_from_trust_subclass(value: &str) -> Option<String> {
@@ -1886,6 +1899,7 @@ mod tests {
         assert_eq!(provenance.member_display_name, "Priya");
         assert_eq!(provenance.produced_at, "2026-07-30T14:02:00Z");
         assert_eq!(provenance.project_name, None);
+        assert_eq!(provenance.origin_trust_class, "human_explicit");
         assert_eq!(provenance.origin_time_assurance, "member_attested");
         assert_eq!(
             provenance.compact_suffix(),
@@ -1917,6 +1931,26 @@ mod tests {
             "· from Priya / acme-analysis · 2026-07-30T14:02:00Z"
         );
         assert_eq!(provenance.to_json()["projectName"], "acme-analysis");
+        assert_eq!(provenance.to_json()["originTrustClass"], "human_explicit");
+    }
+
+    #[test]
+    fn team_provenance_includes_origin_trust_claim() {
+        let memory = memory_with_scope(
+            TrustClass::PeerHumanAttested,
+            Some("agent:Priya; produced_at=2026-07-30T14:02:00Z; origin_trust=agent_assertion"),
+        );
+        let provenance = super::team_provenance_from_memory(&memory).expect("attributable");
+        assert_eq!(provenance.origin_trust_class, "agent_assertion");
+        assert_eq!(provenance.to_json()["originTrustClass"], "agent_assertion");
+        assert!(
+            super::team_provenance_from_memory(&memory_with_scope(
+                TrustClass::PeerHumanAttested,
+                Some("agent:Priya; produced_at=2026-07-30T14:02:00Z; origin_trust=not_a_class"),
+            ))
+            .is_some_and(|item| item.origin_trust_class == "human_explicit"),
+            "unknown origin_trust claims must not become local trust classes"
+        );
     }
 
     #[test]

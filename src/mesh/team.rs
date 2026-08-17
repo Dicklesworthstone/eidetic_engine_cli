@@ -5,6 +5,8 @@
 //! live transcript, and inbound origin events verify against `team_member_nodes`.
 //! This module still does not advertise `mesh.team.memory.v1`.
 
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
 use crate::core::tailscale_probe::{
@@ -5129,6 +5131,7 @@ pub fn project_inbound_team_memory(
                     &producer,
                     &inbound.produced_at,
                     payload.project_binding.as_deref(),
+                    payload.origin_trust_claim.as_deref(),
                 )),
                 tags: Vec::new(),
                 valid_from: payload.valid_from.clone(),
@@ -5145,14 +5148,27 @@ fn inbound_team_trust_subclass(
     producer: &str,
     produced_at: &str,
     project_binding: Option<&str>,
+    origin_trust_claim: Option<&str>,
 ) -> String {
-    match project_binding
+    let mut parts = vec![
+        format!("agent:{producer}"),
+        format!("produced_at={produced_at}"),
+    ];
+    if let Some(project) = project_binding
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        Some(project) => format!("agent:{producer}; produced_at={produced_at}; project={project}"),
-        None => format!("agent:{producer}; produced_at={produced_at}"),
+        parts.push(format!("project={project}"));
     }
+    if let Some(origin) = origin_trust_claim
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|raw| crate::models::TrustClass::from_str(raw).ok())
+        .map(crate::models::TrustClass::as_str)
+    {
+        parts.push(format!("origin_trust={origin}"));
+    }
+    parts.join("; ")
 }
 
 /// One coalesced Incremental job per inbound source stays inside the
@@ -9257,6 +9273,15 @@ mod tests {
             .expect("inbound stub is attributable");
         assert_eq!(provenance.member_display_name, "Analysts");
         assert_eq!(provenance.project_name.as_deref(), Some("acme-analysis"));
+        assert_eq!(provenance.origin_trust_class, "human_explicit");
+        assert!(
+            stored
+                .trust_subclass
+                .as_deref()
+                .is_some_and(|value| value.contains("origin_trust=human_explicit")),
+            "inbound trust_subclass must persist origin_trust=: {:?}",
+            stored.trust_subclass
+        );
         assert_eq!(
             provenance.compact_suffix(),
             format!(

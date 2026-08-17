@@ -9432,6 +9432,7 @@ mod tests {
         assert_eq!(value["memberDisplayName"], "Priya");
         assert_eq!(value["projectName"], serde_json::Value::Null);
         assert_eq!(value["producedAt"], "2026-07-30T14:02:00Z");
+        assert_eq!(value["originTrustClass"], "human_explicit");
         assert_eq!(value["originTimeAssurance"], "member_attested");
         let bound = PackTrustSignal::new(
             crate::models::TrustClass::PeerHumanAttested,

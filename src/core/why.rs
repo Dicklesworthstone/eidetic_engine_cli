@@ -2644,7 +2644,10 @@ fn team_elevation_from_memory(
     let provenance = crate::core::memory_scope::team_provenance_from_memory(memory);
     Some(TeamElevationExplanation {
         schema: TEAM_ELEVATION_SCHEMA_V1,
-        from_trust_class: "human_explicit",
+        from_trust_class: provenance
+            .as_ref()
+            .map(|item| item.origin_trust_class)
+            .unwrap_or("human_explicit"),
         to_trust_class: "peer_human_attested",
         reason: "valid signed origin event from an active member; elevated to peer_human_attested because the receiver derived the producer from the verified node and authorization position. producedAt is member-attested provenance, not ranking or authorization authority.".to_owned(),
         member_display_name: provenance
@@ -2663,8 +2666,7 @@ fn determine_origin(trust_class: &str) -> String {
     match trust_class {
         "human_explicit" => "Explicitly remembered via `ee remember`".to_string(),
         "peer_human_attested" => {
-            "A signed origin from an active member declared the source row human_explicit"
-                .to_string()
+            "A signed origin from an active member, elevated to peer_human_attested".to_string()
         }
         "agent_validated" => "Agent assertion with validated outcome evidence".to_string(),
         "agent_assertion" => "Agent assertion awaiting validation".to_string(),
@@ -3538,7 +3540,7 @@ mod tests {
                     provenance_uri: Some("evt_team_origin_analysts_0001".to_owned()),
                     trust_class: "peer_human_attested".to_owned(),
                     trust_subclass: Some(
-                        "agent:Analysts; produced_at=2026-08-16T00:00:00Z; project=acme-analysis"
+                        "agent:Analysts; produced_at=2026-08-16T00:00:00Z; project=acme-analysis; origin_trust=agent_assertion"
                             .to_owned(),
                     ),
                     tags: Vec::new(),
@@ -3564,6 +3566,11 @@ mod tests {
             "member display name",
         )?;
         ensure(
+            provenance.origin_trust_class,
+            "agent_assertion",
+            "origin trust class",
+        )?;
+        ensure(
             provenance.project_name.as_deref().unwrap_or(""),
             "acme-analysis",
             "project name",
@@ -3584,7 +3591,7 @@ mod tests {
         )?;
         ensure(
             elevation.from_trust_class,
-            "human_explicit",
+            "agent_assertion",
             "origin declared trust class",
         )?;
         ensure(
