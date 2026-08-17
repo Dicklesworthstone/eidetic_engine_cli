@@ -2653,12 +2653,16 @@ fn open_team_store(
             message: format!("Failed to open team database: {error}"),
             repair: Some("ee doctor --json".to_owned()),
         })?;
-    let workspace_id = connection
-        .get_workspace_by_path(&workspace_path.to_string_lossy())
-        .ok()
-        .flatten()
-        .map(|workspace| workspace.id)
-        .unwrap_or_else(|| super::stable_cli_workspace_id(&workspace_path));
+    let workspace_id =
+        crate::mesh::foreground_cli::resolve_store_workspace_id(&connection, &workspace_path)
+            .unwrap_or_else(|_| {
+                connection
+                    .get_workspace_by_path(&workspace_path.to_string_lossy())
+                    .ok()
+                    .flatten()
+                    .map(|workspace| workspace.id)
+                    .unwrap_or_else(|| super::stable_cli_workspace_id(&workspace_path))
+            });
     Ok((connection, workspace_id))
 }
 

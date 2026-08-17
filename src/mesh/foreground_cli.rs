@@ -2526,17 +2526,32 @@ pub fn resolve_store_workspace_id(
     connection: &DbConnection,
     workspace_path: &Path,
 ) -> Result<String, String> {
-    // A local team pins the store. Do not let a second workspaces row
-    // created under a different Windows path spelling hide mesh_peers.
+    let row_id = resolve_workspace_row_id(connection, workspace_path)?;
+    // Team members may record a path-hashed id that never landed in
+    // `workspaces`. `mesh_peers.workspace_id` FKs that table, so an orphan
+    // member id cannot host enrollments. Prefer the member id only when
+    // the matching store row exists.
     if let Ok(members) = connection.list_all_team_members()
         && let Some(member) = members
             .iter()
             .find(|member| member.is_self)
             .or_else(|| members.first())
         && !member.workspace_id.is_empty()
+        && connection
+            .get_workspace(&member.workspace_id)
+            .ok()
+            .flatten()
+            .is_some()
     {
         return Ok(member.workspace_id.clone());
     }
+    Ok(row_id)
+}
+
+fn resolve_workspace_row_id(
+    connection: &DbConnection,
+    workspace_path: &Path,
+) -> Result<String, String> {
     let primary = workspace_path.to_string_lossy().into_owned();
     if let Some(workspace) = connection
         .get_workspace_by_path(&primary)
@@ -2562,7 +2577,6 @@ pub fn resolve_store_workspace_id(
             return Ok(workspace.id);
         }
     }
-    // A store has one workspace. Path spelling must not invent a second id.
     let workspaces = connection
         .list_workspaces()
         .map_err(|error| format!("list workspaces: {error}"))?;
@@ -4068,9 +4082,10 @@ mod tests {
         apply_outbound_export_policy, auto_enrollment_status_for_snapshot,
         canonical_mesh_event_hash, canonicalize_mesh_event_json, ephemeral_source_for,
         fetch_pending_team_bodies_from_paths, local_sync_round_request, mesh_event_id_from_hash,
-        persist_sync_round_events, project_canonical_mesh_event, run_mesh_sync_once_from_paths,
-        run_mesh_sync_supervisor_supervised, run_mesh_sync_supervisor_supervised_with_transport,
-        spawn_team_responder_owner_if_needed, try_authenticated_team_sync_round,
+        persist_sync_round_events, project_canonical_mesh_event, resolve_store_workspace_id,
+        run_mesh_sync_once_from_paths, run_mesh_sync_supervisor_supervised,
+        run_mesh_sync_supervisor_supervised_with_transport, spawn_team_responder_owner_if_needed,
+        try_authenticated_team_sync_round,
     };
     use crate::config::ConfigFile;
     use crate::core::tailscale_probe::TailscaleLocalReport;
@@ -4087,6 +4102,70 @@ mod tests {
             std::path::Path::new("/tmp/ee-missing-team-responder"),
             std::path::Path::new("/tmp/ee-missing-team-responder/ee.db"),
         ));
+    }
+
+    #[test]
+    fn resolve_store_workspace_id_uses_store_row_when_team_member_id_is_orphan() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("ee.db");
+        let connection = DbConnection::open_file(&database).expect("open");
+        connection.migrate().expect("migrate");
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &CreateWorkspaceInput {
+                    path: format!(r"\\?\{}", dir.path().display()),
+                    name: Some("store-row".to_owned()),
+                },
+            )
+            .expect("workspace");
+        connection
+            .insert_team_member(&crate::db::InsertTeamMemberInput {
+                member_id: "mbr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                team_id: "team_orphanfixture0000000001".to_owned(),
+                workspace_id: "wsp_persistfixture000000000002".to_owned(),
+                display_name: "origin".to_owned(),
+                state: "active".to_owned(),
+                is_self: true,
+                origin_node_id: "node_orphanfixture0000000001".to_owned(),
+                bound_via: "team_genesis".to_owned(),
+                joined_at: "2026-08-17T00:00:00Z".to_owned(),
+            })
+            .expect("member");
+        let resolved = resolve_store_workspace_id(&connection, dir.path()).expect("resolve");
+        assert_eq!(resolved, "wsp_persistfixture000000000001");
+    }
+
+    #[test]
+    fn resolve_store_workspace_id_prefers_team_member_id_when_that_row_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("ee.db");
+        let connection = DbConnection::open_file(&database).expect("open");
+        connection.migrate().expect("migrate");
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000003",
+                &CreateWorkspaceInput {
+                    path: dir.path().display().to_string(),
+                    name: Some("team-row".to_owned()),
+                },
+            )
+            .expect("workspace");
+        connection
+            .insert_team_member(&crate::db::InsertTeamMemberInput {
+                member_id: "mbr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+                team_id: "team_teamfixture000000000001".to_owned(),
+                workspace_id: "wsp_persistfixture000000000003".to_owned(),
+                display_name: "origin".to_owned(),
+                state: "active".to_owned(),
+                is_self: true,
+                origin_node_id: "node_teamfixture000000000001".to_owned(),
+                bound_via: "team_genesis".to_owned(),
+                joined_at: "2026-08-17T00:00:00Z".to_owned(),
+            })
+            .expect("member");
+        let resolved = resolve_store_workspace_id(&connection, dir.path()).expect("resolve");
+        assert_eq!(resolved, "wsp_persistfixture000000000003");
     }
 
     #[test]

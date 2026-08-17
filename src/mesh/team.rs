@@ -1312,9 +1312,15 @@ pub fn serve_one_bootstrap_join_with_store(
         &pair,
         &redeemed_at,
     )?;
-    // Invite is already redeemed. Enroll is how the inviter EventFetch/BodyFetch
-    // back; a missing workspace row must not withhold the grant.
-    let _ = enroll_joiner_from_accept(
+    write_join_payload(
+        &mut stream,
+        serde_json::to_value(&granted)
+            .map_err(|error| OriginStreamError::Encode(error.to_string()))?,
+    )?;
+    // Grant is already on the wire. Enroll must still succeed so the
+    // inviter can hello-responder / EventFetch back; do not swallow FK
+    // or path-id failures.
+    enroll_joiner_from_accept(
         connection,
         workspace_id,
         &granted.team_id,
@@ -1324,11 +1330,6 @@ pub fn serve_one_bootstrap_join_with_store(
         &hello.joiner_workspace_id,
         hello.joiner_hello_port,
         &redeemed_at,
-    );
-    write_join_payload(
-        &mut stream,
-        serde_json::to_value(&granted)
-            .map_err(|error| OriginStreamError::Encode(error.to_string()))?,
     )?;
     Ok(granted)
 }
