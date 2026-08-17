@@ -57,7 +57,18 @@
     # One-liner: download the current installer to a file, then run it. Keeping
     # the script inspectable also avoids fragile Invoke-Expression/content-type
     # behavior.
-    $f = Join-Path $env:TEMP 'install-ee.ps1'; $u = "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.ps1?cache=$([guid]::NewGuid())"; iwr -useb $u -OutFile $f; & $f -Verify
+    # Fetch from the jsDelivr mirror first, falling back to raw.githubusercontent.com.
+    # Do NOT append a cache-busting query string: a unique URL per request defeats
+    # the CDN, forces an origin fetch every time, and is the pattern that got a real
+    # client HTTP 429 from raw.githubusercontent.com. Pin a commit SHA in the path
+    # instead if you need an exact revision -- immutable AND cacheable.
+    $f = Join-Path $env:TEMP 'install-ee.ps1'
+    try {
+      Invoke-WebRequest -UseBasicParsing "https://cdn.jsdelivr.net/gh/Dicklesworthstone/eidetic_engine_cli@main/install.ps1" -OutFile $f
+    } catch {
+      Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.ps1" -OutFile $f
+    }
+    if (Test-Path $f) { & $f -Verify } else { Write-Error "Installer download failed - retry in a few minutes" }
 
 .EXAMPLE
     .\install.ps1 -Version 0.1.0 -Verify
@@ -96,11 +107,19 @@ if (-not $RequireProvenance -and $env:EE_REQUIRE_PROVENANCE -eq "1") { $RequireP
 $Script:RepoOwner   = "Dicklesworthstone"
 $Script:RepoName    = "eidetic_engine_cli"
 
-# Pinned last-known-good tag: the newest release VERIFIED to publish a complete
-# asset matrix including x86_64-pc-windows-msvc (v0.13.0 ships 5 Windows
-# assets; v0.13.1 shipped ZERO). Used only when the GitHub release API cannot
-# be read at all -- see Get-LatestVersion. Bump this when a newer release is
-# confirmed to carry Windows assets.
+# Pinned last-known-good tag: the newest release VERIFIED to publish an
+# x86_64-pc-windows-msvc asset. Used ONLY when the GitHub release API cannot be
+# read at all -- see Get-LatestVersion.
+#
+# History, because it explains why this pin exists: v0.13.1 originally shipped
+# with ZERO Windows assets, which crashed a real client's install and took down
+# the enclosing setup run. A Windows binary was subsequently built and uploaded
+# to v0.13.1 (tar.xz + .sha256, hash-verified as served), so v0.13.1 now carries
+# one too. The pin stays at v0.13.0 deliberately: it is the release whose FULL
+# five-asset Windows matrix (incl. provenance + sigstore bundles) was verified,
+# and a last-resort fallback should point at the most complete known-good set,
+# not merely the most recent adequate one. Bump only after verifying the target
+# release's Windows assets directly.
 $Script:LastKnownGoodTag = "v0.13.0"
 $Script:BinaryName  = "ee.exe"
 $Script:ProjectName = "ee (Eidetic Engine)"
@@ -342,7 +361,7 @@ function Get-LatestVersion {
         $latestTag = (Invoke-GitHubApi "https://api.github.com/repos/$Script:RepoOwner/$Script:RepoName/releases/latest").tag_name
     }
     catch {
-        Write-Warn "Could not read /releases/latest: $_"
+        Write-Warning2 "Could not read /releases/latest: $_"
     }
 
     # Enumerate recent releases newest-first and pick the first with our asset.
@@ -351,35 +370,73 @@ function Get-LatestVersion {
         $releases = Invoke-GitHubApi "https://api.github.com/repos/$Script:RepoOwner/$Script:RepoName/releases?per_page=20"
     }
     catch {
-        Write-Warn "Could not enumerate releases: $_"
+        Write-Warning2 "Could not enumerate releases: $_"
     }
 
+    # Three states, not two. (1) A scanned release ships this asset -- return
+    # below. (2) The scan genuinely covered real data and none of it ships
+    # the asset -- a real finding, worth the confident warning. (3) The scan
+    # produced nothing reliable: enumeration threw (caught above, $releases
+    # stays $null), OR it came back empty, OR it came back non-empty but
+    # PARTIAL/degraded.
+    #
+    # PowerShell's own array falsiness already handles the fully-empty case:
+    # `if ($releases)` below is $false for a zero-element array, so an empty
+    # response never even enters this block and falls straight through to
+    # "Proceeding with $latestTag" instead of the confident warning. That is
+    # correct behavior, but it is accidental -- a product of PowerShell
+    # language semantics, not a deliberate check -- so it is called out here
+    # rather than left for the next editor to delete the `if` and lose it.
+    # (install.sh does not get this for free: bash's `[ -n "$releases_json" ]`
+    # tests non-empty STRING, and "[]" is a non-empty string, so bash needed
+    # an explicit records-seen counter to catch the same case.)
+    #
+    # What array-falsiness does NOT catch is a non-empty but PARTIAL list --
+    # measured 2026-08-17: an unauthenticated /releases?per_page=20 call
+    # returned an empty array to one host while an authenticated call from
+    # another machine listed six releases for the same repo at the same
+    # time; a degraded response can just as easily come back truncated
+    # rather than fully empty, which would still be truthy here and still
+    # walk the loop below to a false "no stable release ships this" verdict.
+    #
+    # Cross-check against /releases/latest to catch that case too: a
+    # healthy, complete per_page=20 scan sorted newest-first ALWAYS contains
+    # whatever /releases/latest calls newest, as its first entry. If
+    # $latestTag is not present anywhere in $releases, the enumeration is
+    # incomplete -- unknown, not confirmed absent -- and must not render as
+    # the confident warning.
     if ($releases) {
         # Skip drafts AND prereleases. /releases/latest excludes prereleases by
         # definition, so enumerating /releases (which includes them) must filter
         # them out too -- otherwise this "fallback" could silently install a
         # prerelease that the previous code path would never have chosen, which
         # would be a worse regression than the missing-asset crash it fixes.
+        $sawLatestTagInList = $false
         foreach ($rel in $releases) {
+            if ($latestTag -and $rel.tag_name -eq $latestTag) { $sawLatestTagInList = $true }
             if ($rel.draft -or $rel.prerelease) { continue }
             $names = @($rel.assets | ForEach-Object { $_.name })
             if ($names -contains $tarballName) {
                 if ($latestTag -and $rel.tag_name -ne $latestTag) {
-                    Write-Warn "Latest release $latestTag does not include $tarballName."
-                    Write-Warn "Falling back to $($rel.tag_name), the newest stable release that does."
-                    Write-Warn "This is an upstream release-matrix gap, not a problem with your machine."
+                    Write-Warning2 "Latest release $latestTag does not include $tarballName."
+                    Write-Warning2 "Falling back to $($rel.tag_name), the newest stable release that does."
+                    Write-Warning2 "This is an upstream release-matrix gap, not a problem with your machine."
                 }
                 return $rel.tag_name
             }
         }
-        Write-Warn "No stable release in the last 20 ships $tarballName."
+        if ($latestTag -and -not $sawLatestTagInList) {
+            Write-Warning2 "Release enumeration looks incomplete (missing $latestTag, the release /releases/latest reports as newest); treating asset presence as unknown rather than confirmed absent."
+        } else {
+            Write-Warning2 "No stable release in the last 20 ships $tarballName."
+        }
     }
 
     # Enumeration failed or found nothing: fall back to whatever /latest said
     # rather than refusing outright, so a transient API problem cannot block a
     # user who may already have a working asset there.
     if ($latestTag) {
-        Write-Warn "Proceeding with $latestTag; if its $tarballName is absent the download will fail."
+        Write-Warning2 "Proceeding with $latestTag; if its $tarballName is absent the download will fail."
         return $latestTag
     }
 
@@ -391,9 +448,9 @@ function Get-LatestVersion {
     # machine, so fall through to a pinned tag known to carry a full asset
     # matrix rather than aborting the enclosing setup run.
     if ($Script:LastKnownGoodTag) {
-        Write-Warn "GitHub release API returned nothing usable."
-        Write-Warn "Falling back to pinned last-known-good tag $Script:LastKnownGoodTag."
-        Write-Warn "If that is older than you expect, re-run with -Version vX.Y.Z once GitHub recovers."
+        Write-Warning2 "GitHub release API returned nothing usable."
+        Write-Warning2 "Falling back to pinned last-known-good tag $Script:LastKnownGoodTag."
+        Write-Warning2 "If that is older than you expect, re-run with -Version vX.Y.Z once GitHub recovers."
         return $Script:LastKnownGoodTag
     }
 

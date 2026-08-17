@@ -399,14 +399,30 @@ ee_curl() {
           if [ -n "$http_status" ] && ee_is_retryable_http_status "$http_status"; then
             retryable=1
             server_delay=$(ee_retry_after_seconds "$hdr_file") || server_delay=""
+            # info() writes to stdout (unlike warn/err), but ee_curl's own
+            # stdout is a live data channel for most callers (JSON bodies,
+            # tags, piped installers via `$(ee_curl ...)`), so these must
+            # go to stderr explicitly rather than through plain info -- an
+            # unredirected info() call here would splice status text into
+            # the next successful attempt's captured response body.
             if [ -n "$server_delay" ]; then
-              warn "HTTP $http_status; honouring Retry-After: ${server_delay}s"
+              info "HTTP $http_status; honouring Retry-After: ${server_delay}s" >&2
               sleep "$server_delay"
             else
-              warn "HTTP $http_status; retrying with backoff"
+              info "HTTP $http_status; retrying with backoff" >&2
             fi
           elif [ -n "$http_status" ]; then
-            warn "HTTP $http_status is not retryable"
+            # Informational, not a warning: this is one HTTP transaction's
+            # status, not a verdict on the install. ee_curl has no idea
+            # whether the caller has a fallback (e.g. a compatible release
+            # target) that makes this attempt's failure routine rather than
+            # fatal -- only the caller knows that, and a caller with no
+            # recovery left already surfaces its own warn/err on top of
+            # this. Printing this at warn level unconditionally is what
+            # made a successful musl->gnu fallback install read as broken:
+            # three yellow warnings in a row for a release-matrix gap that
+            # the installer was always going to recover from automatically.
+            info "HTTP $http_status is not retryable" >&2
           fi
         fi
         ;;
@@ -761,6 +777,24 @@ resolve_version() {
     releases_json=$(ee_curl -H "Accept: application/vnd.github.v3+json" "$releases_api" 2>/dev/null) \
       || releases_json=""
 
+    # Three states, not two. (1) Enumeration genuinely succeeded and a
+    # scanned release ships this asset -- tag gets set below. (2)
+    # Enumeration genuinely succeeded and scanned real release records but
+    # NONE of them ship it -- a real finding, worth the confident warning.
+    # (3) Enumeration produced nothing usable: ee_curl failed outright, OR
+    # it returned 200 with a body that parses to zero release records (a
+    # bare "[]", or a truncated/degraded response). (3) is UNKNOWN, not
+    # "confirmed absent", and must never render as (2)'s warning -- an
+    # empty-but-200 response is not evidence the asset is missing. Measured
+    # 2026-08-17: an unauthenticated /releases?per_page=20 call returned an
+    # empty array to one host while an authenticated call from another
+    # machine listed six releases for the same repo at the same time.
+    # records_seen distinguishes (3) from (2): it counts real release
+    # records parsed out of the response (regardless of whether any of them
+    # matched this platform's tarball), so "[]" and "curl failed outright"
+    # both leave it at 0 and converge on the same honest, low-confidence
+    # message.
+    local records_seen=0
     if [ -n "$releases_json" ]; then
       local record="" rel_tag="" rel_draft="" rel_prerelease=""
       # `|| [ -n "$record" ]` matters: the final chunk from the sed split
@@ -773,6 +807,7 @@ resolve_version() {
           | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 \
           | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/') || rel_tag=""
         [ -n "$rel_tag" ] || continue
+        records_seen=$((records_seen + 1))
         rel_draft=$(printf '%s' "$record" \
           | grep -o '"draft"[[:space:]]*:[[:space:]]*[a-z]*' | head -1 \
           | sed -E 's/.*:[[:space:]]*//') || rel_draft=""
@@ -792,12 +827,24 @@ resolve_version() {
           break
         fi
       done < <(printf '%s' "$releases_json" | sed 's/"tag_name"/\n&/g')
+    fi
 
-      if [ -z "$tag" ]; then
+    if [ -z "$tag" ]; then
+      if [ "$records_seen" -eq 0 ]; then
+        # State (3): unknown, not confirmed-absent. Same message whether
+        # ee_curl failed outright or returned an empty/unparseable body.
+        warn "Could not enumerate releases (empty or unusable response); falling through to the latest release."
+      elif [ -n "$FALLBACK_TARGET" ]; then
+        # A compatible fallback target exists (e.g. musl -> gnu on
+        # x86_64 Linux) and download_release_artifact will try it
+        # automatically if the preferred target's download fails. This
+        # is an expected, self-healing path, not a warning: state
+        # plainly what is happening in one sentence instead of the
+        # generic alarm below.
+        info "${tarball_name} is not published for the last 20 releases; using the compatible ${FALLBACK_TARGET} build if needed."
+      else
         warn "No stable release in the last 20 ships ${tarball_name}."
       fi
-    else
-      warn "Could not enumerate releases."
     fi
   fi
 
@@ -805,7 +852,13 @@ resolve_version() {
   # rather than refusing outright, so a transient API problem cannot block a
   # user who may already have a working asset there.
   if [ -z "$tag" ] && [ -n "$latest_tag" ]; then
-    warn "Proceeding with $latest_tag; if its ${tarball_name:-tarball} is absent the download will fail."
+    if [ -z "$FALLBACK_TARGET" ]; then
+      # When a compatible fallback target exists, the asset-presence check
+      # just above already said the one sentence that explains this --
+      # repeating it here in a second line would be redundant chatter, not
+      # extra clarity.
+      warn "Proceeding with $latest_tag; if its ${tarball_name:-tarball} is absent the download will fail."
+    fi
     tag="$latest_tag"
   fi
 
@@ -874,7 +927,13 @@ select_compatible_fallback_target() {
   TARGET="$FALLBACK_TARGET"
   FALLBACK_TARGET=""
   set_artifact_url
-  warn "Release artifact for ${failed_target} was unavailable; trying compatible ${TARGET} artifact"
+  # This firing IS the automatic recovery working as designed -- state
+  # plainly what happened, at info level, not warn: a client watching the
+  # preceding informational lines about the preferred target should read
+  # this as "and here is the compatible build being used", the one
+  # intentional sentence that explains the whole sequence, not a fourth
+  # alarm stacked on three others for an install that is about to succeed.
+  info "${failed_target} not published for this release; using the compatible ${TARGET} build."
   return 0
 }
 
@@ -948,7 +1007,15 @@ check_network() {
   # here and then again during installation. GitHub Release assets honor range
   # requests; mirrors that ignore the range still remain bounded by max-time.
   if ! ee_curl --connect-timeout 3 --max-time 5 --range 0-0 -o /dev/null "$URL" 2>/dev/null; then
-    warn "Network check failed for $URL — continuing; download may fail"
+    if [ -n "$FALLBACK_TARGET" ]; then
+      # Same reasoning as resolve_version's asset-presence check: a
+      # compatible fallback target exists and will be tried automatically,
+      # so a failed probe against the PREFERRED target's URL here is
+      # expected, not a warning.
+      info "Preferred ${TARGET} artifact not reachable at $URL; will try the compatible ${FALLBACK_TARGET} build if needed."
+    else
+      warn "Network check failed for $URL — continuing; download may fail"
+    fi
   fi
 }
 
