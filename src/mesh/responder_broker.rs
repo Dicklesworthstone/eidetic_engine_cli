@@ -559,17 +559,14 @@ impl InboundLocalApi {
                 Duration::from_secs(2),
             )));
         }
-        let team_join = TeamJoinLocalApi::from_registrations(connection, registrations).ok();
-        if team_join
-            .as_ref()
-            .is_some_and(TeamJoinLocalApi::all_loopback)
-        {
-            return team_join.map(Self::TeamJoin);
+        // Team-join enrollments identify peers by accepted source IP.
+        // Prefer that stand-in even when tailscaled is installed: Windows
+        // LocalAPI WhoIs is not the inbound path, and a hanging WhoIs
+        // would leave hello unanswered.
+        if let Ok(api) = TeamJoinLocalApi::from_registrations(connection, registrations) {
+            return Some(Self::TeamJoin(api));
         }
-        if let Some(client) = TailscaleLocalApiClient::discover(Duration::from_secs(2)) {
-            return Some(Self::Tailscale(client));
-        }
-        team_join.map(Self::TeamJoin)
+        TailscaleLocalApiClient::discover(Duration::from_secs(2)).map(Self::Tailscale)
     }
 
     #[must_use]
