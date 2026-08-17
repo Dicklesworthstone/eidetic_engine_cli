@@ -15,7 +15,10 @@
 **Install**
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash -s -- --easy-mode --verify
+f="$(mktemp)"
+curl -fsSL "https://cdn.jsdelivr.net/gh/Dicklesworthstone/eidetic_engine_cli@main/install.sh" -o "$f" \
+  || curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh" -o "$f"
+if [ -s "$f" ]; then bash "$f" --easy-mode --verify; else echo "Installer download failed - retry in a few minutes" >&2; fi
 ```
 
 Always verifies the release binary's SHA-256 checksum, verifies its Sigstore
@@ -308,8 +311,28 @@ Hard constraints. CI fails if any of them break.
 **Recommended — release installer:**
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash -s -- --easy-mode --verify
+f="$(mktemp)"
+curl -fsSL "https://cdn.jsdelivr.net/gh/Dicklesworthstone/eidetic_engine_cli@main/install.sh" -o "$f" \
+  || curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh" -o "$f"
+if [ -s "$f" ]; then bash "$f" --easy-mode --verify; else echo "Installer download failed - retry in a few minutes" >&2; fi
 ```
+
+Fetched from the jsDelivr CDN mirror first, falling back to `raw.githubusercontent.com`.
+Both serve identical bytes; jsDelivr is a separate host with its own limits, so a
+GitHub rate-limit or incident does not block the install.
+
+**Do not add a cache-busting query string** (e.g. `?$(date +%s)`). A unique URL
+per request defeats the CDN and forces an origin fetch every time, which is the
+pattern GitHub's anti-scraping limiter penalises: a real client install failed
+with `429: Too Many Requests` on `raw.githubusercontent.com` for exactly this
+reason. The plain URL is CDN-cacheable and re-reads pick up a new `main` within
+the cache TTL anyway. To force an exact revision instead, pin a commit SHA in
+the path (`.../eidetic_engine_cli@<sha>/install.sh`), which is both immutable
+and cacheable.
+
+The `[ -s "$f" ]` guard matters: without it a failed download is followed by a
+confusing shell error from running a file that was never written (or is empty),
+which reads like two unrelated faults instead of one.
 
 This downloads the latest release binary for your platform, always verifies its
 SHA-256 checksum, verifies its Sigstore bundle when one is published and

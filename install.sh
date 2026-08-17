@@ -3,8 +3,15 @@
 # ee (Eidetic Engine CLI) installer
 # Durable, local-first, explainable memory for coding agents.
 #
-# One-liner install (cache-busted):
-#   curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash
+# One-liner install:
+#   curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh" | bash
+#
+# Do not add a cache-busting query string (e.g. ?$(date +%s)). A unique URL
+# per request defeats the CDN and forces an origin fetch every time, which is
+# the pattern GitHub's anti-scraping limiter penalises -- a real client
+# install failed with 429 Too Many Requests on raw.githubusercontent.com for
+# exactly this reason. The plain URL is CDN-cacheable and re-reads pick up a
+# new main within the cache TTL anyway.
 #
 # Pinned version:
 #   curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.1.0/install.sh | EE_VERSION=v0.1.0 bash
@@ -51,6 +58,15 @@ shopt -s lastpipe 2>/dev/null || true
 # ───────────────────────────────────────────────────────────────────────────
 # Defaults & CLI state
 # ───────────────────────────────────────────────────────────────────────────
+
+# Last resort when the GitHub release API is unusable (degraded, or an
+# unauthenticated rate limit -- measured 2026-08-17: the releases endpoint
+# returned an EMPTY ARRAY to an unauthenticated Windows host while an
+# authenticated query from another machine listed six releases). Pinned to
+# the newest release verified to publish a complete asset matrix, matching
+# install.ps1's $Script:LastKnownGoodTag so the two installers cannot diverge
+# in what they consider known-good.
+EE_LAST_KNOWN_GOOD_TAG="v0.13.0"
 
 OWNER="${OWNER:-Dicklesworthstone}"
 REPO="${REPO:-eidetic_engine_cli}"
@@ -283,8 +299,52 @@ setup_proxy() {
   fi
 }
 
-# Curl wrapper that honors proxy and standard timeouts. Treat as `curl -fsSL`
-# with proxy + retry pre-wired.
+# Backoff schedule for retried requests (seconds before attempt 1, 2, 3).
+# Mirrors ACFS_CURL_RETRY_DELAYS in agentic_coding_flywheel_setup's
+# scripts/lib/security.sh (7a59cb29) so the two installers retry alike.
+EE_CURL_RETRY_DELAYS=(0 5 15)
+
+# Decide whether an HTTP status is worth retrying.
+#
+# curl collapses EVERY HTTP status >= 400 into exit code 22, so the exit
+# code alone cannot tell a rate limit from a genuine 404. Retrying on bare
+# 22 would hammer a missing URL forever; refusing to retry 22 outright
+# treats a rate limit as PERMANENT, which is backwards -- rate limiting is
+# the most retryable failure there is. A real client install died this way:
+# raw.githubusercontent.com answered 429 and the install never started.
+#
+# Retry: 429 (rate limited), 503 (unavailable), 502/504 (transient gateway).
+# Fatal: 404 and 403 -- retrying cannot change those answers.
+ee_is_retryable_http_status() {
+  case "${1:-0}" in
+    429|503|502|504) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Seconds to wait per the server's Retry-After header, echoed on stdout.
+# Empty when absent or unusable. Supports the delta-seconds form only; an
+# HTTP-date form is ignored deliberately rather than mis-parsed into a wrong
+# delay. Clamped so a hostile or absurd header cannot stall an install
+# indefinitely.
+ee_retry_after_seconds() {
+  local headers_file="${1:-}"
+  [ -s "$headers_file" ] || return 0
+  local value=""
+  value=$(grep -i '^retry-after:' "$headers_file" 2>/dev/null | tail -1 \
+    | sed 's/^[Rr]etry-[Aa]fter:[[:space:]]*//; s/[[:space:]]*$//') || value=""
+  case "$value" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "$value" -gt 300 ] 2>/dev/null && value=300
+  printf '%s' "$value"
+}
+
+# Curl wrapper that honors proxy and standard timeouts, and retries transient
+# failures -- both connection-level (DNS/connect/timeout/SSL/empty-reply) and
+# HTTP-status-level (429/503/502/504, classified from the actual response
+# status line since curl's own exit code cannot distinguish those from a
+# fatal 404/403). Treat as `curl -fsSL` with proxy + retry pre-wired.
 #
 # Defaults --connect-timeout / --max-time so a hung proxy or stalled mirror
 # can't make the installer wait indefinitely (the previous shape relied
@@ -301,12 +361,64 @@ ee_curl() {
   # `set -u` raises "unbound variable". The `+word` form expands to zero
   # arguments when PROXY_ARGS is empty and preserves both proxy arguments
   # when it is populated.
-  curl -fsSL \
-    --connect-timeout 15 \
-    --max-time 600 \
-    --retry 2 \
-    --retry-delay 1 \
-    "${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"}" "$@"
+  local attempt=0 status=0 hdr_file="" http_status="" server_delay=""
+  local retryable=0
+
+  while :; do
+    if [ "$attempt" -gt 0 ]; then
+      sleep "${EE_CURL_RETRY_DELAYS[$((attempt - 1))]:-15}"
+    fi
+
+    hdr_file="$(mktemp "${TMPDIR:-/tmp}/ee-curl-hdr.XXXXXX" 2>/dev/null || true)"
+    if [ -n "$hdr_file" ]; then
+      curl -fsSL \
+        --connect-timeout 15 \
+        --max-time 600 \
+        "${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"}" -D "$hdr_file" "$@"
+      status=$?
+    else
+      curl -fsSL \
+        --connect-timeout 15 \
+        --max-time 600 \
+        "${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"}" "$@"
+      status=$?
+    fi
+
+    if [ "$status" -eq 0 ]; then
+      [ -n "$hdr_file" ] && rm -f "$hdr_file" 2>/dev/null
+      return 0
+    fi
+
+    retryable=0
+    case "$status" in
+      6|7|28|35|52|56) retryable=1 ;; # DNS/connect/timeout/SSL/empty-reply/recv-error
+      22)
+        if [ -n "$hdr_file" ] && [ -s "$hdr_file" ]; then
+          http_status=$(grep -oE '^HTTP/[0-9.]+ [0-9]{3}' "$hdr_file" 2>/dev/null \
+            | tail -1 | awk '{print $2}') || http_status=""
+          if [ -n "$http_status" ] && ee_is_retryable_http_status "$http_status"; then
+            retryable=1
+            server_delay=$(ee_retry_after_seconds "$hdr_file") || server_delay=""
+            if [ -n "$server_delay" ]; then
+              warn "HTTP $http_status; honouring Retry-After: ${server_delay}s"
+              sleep "$server_delay"
+            else
+              warn "HTTP $http_status; retrying with backoff"
+            fi
+          elif [ -n "$http_status" ]; then
+            warn "HTTP $http_status is not retryable"
+          fi
+        fi
+        ;;
+    esac
+
+    [ -n "$hdr_file" ] && rm -f "$hdr_file" 2>/dev/null
+    attempt=$((attempt + 1))
+
+    if [ "$retryable" -eq 0 ] || [ "$attempt" -gt "${#EE_CURL_RETRY_DELAYS[@]}" ]; then
+      return "$status"
+    fi
+  done
 }
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -620,12 +732,82 @@ resolve_version() {
   if [ -n "$VERSION" ]; then return 0; fi
   if [ "$FROM_SOURCE" -eq 1 ] || [ -n "$ARTIFACT_URL" ]; then return 0; fi
 
-  info "Resolving latest version…"
-  local api="https://api.github.com/repos/${OWNER}/${REPO}/releases/latest"
-  local tag=""
-  tag=$(ee_curl -H "Accept: application/vnd.github.v3+json" "$api" 2>/dev/null \
+  local tarball_name=""
+  if [ -n "$TARGET" ]; then
+    tarball_name="ee-${TARGET}.tar.xz"
+    info "Resolving latest version carrying ${tarball_name}…"
+  else
+    info "Resolving latest version…"
+  fi
+
+  local latest_api="https://api.github.com/repos/${OWNER}/${REPO}/releases/latest"
+  local latest_tag=""
+  latest_tag=$(ee_curl -H "Accept: application/vnd.github.v3+json" "$latest_api" 2>/dev/null \
         | grep '"tag_name":' | head -1 \
-        | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/') || tag=""
+        | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/') || latest_tag=""
+
+  local tag=""
+
+  # Enumerate recent releases newest-first and pick the first stable one that
+  # actually ships this platform's tarball, skipping drafts and prereleases.
+  # /releases/latest excludes prereleases by GitHub API contract, but says
+  # nothing about which assets that release carries -- v0.13.1 published only
+  # aarch64-apple-darwin and x86_64-unknown-linux-gnu, so /releases/latest
+  # alone would resolve to a tag whose download 404s for every other
+  # platform. Mirrors install.ps1's Get-LatestVersion.
+  if [ -n "$tarball_name" ]; then
+    local releases_api="https://api.github.com/repos/${OWNER}/${REPO}/releases?per_page=20"
+    local releases_json=""
+    releases_json=$(ee_curl -H "Accept: application/vnd.github.v3+json" "$releases_api" 2>/dev/null) \
+      || releases_json=""
+
+    if [ -n "$releases_json" ]; then
+      local record="" rel_tag="" rel_draft="" rel_prerelease=""
+      # `|| [ -n "$record" ]` matters: the final chunk from the sed split
+      # below has no trailing newline, and plain `read` returns nonzero for
+      # an unterminated final line -- silently dropping it from the loop
+      # (and with it, the newest matching release) without this guard.
+      while IFS= read -r record || [ -n "$record" ]; do
+        [ -n "$record" ] || continue
+        rel_tag=$(printf '%s' "$record" \
+          | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 \
+          | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/') || rel_tag=""
+        [ -n "$rel_tag" ] || continue
+        rel_draft=$(printf '%s' "$record" \
+          | grep -o '"draft"[[:space:]]*:[[:space:]]*[a-z]*' | head -1 \
+          | sed -E 's/.*:[[:space:]]*//') || rel_draft=""
+        rel_prerelease=$(printf '%s' "$record" \
+          | grep -o '"prerelease"[[:space:]]*:[[:space:]]*[a-z]*' | head -1 \
+          | sed -E 's/.*:[[:space:]]*//') || rel_prerelease=""
+        [ "$rel_draft" = "true" ] && continue
+        [ "$rel_prerelease" = "true" ] && continue
+        if printf '%s' "$record" | grep -qF "\"name\": \"${tarball_name}\"" \
+          || printf '%s' "$record" | grep -qF "\"name\":\"${tarball_name}\""; then
+          if [ -n "$latest_tag" ] && [ "$rel_tag" != "$latest_tag" ]; then
+            warn "Latest release $latest_tag does not include ${tarball_name}."
+            warn "Falling back to $rel_tag, the newest stable release that does."
+            warn "This is an upstream release-matrix gap, not a problem with your machine."
+          fi
+          tag="$rel_tag"
+          break
+        fi
+      done < <(printf '%s' "$releases_json" | sed 's/"tag_name"/\n&/g')
+
+      if [ -z "$tag" ]; then
+        warn "No stable release in the last 20 ships ${tarball_name}."
+      fi
+    else
+      warn "Could not enumerate releases."
+    fi
+  fi
+
+  # Enumeration failed or found nothing: fall back to whatever /latest said
+  # rather than refusing outright, so a transient API problem cannot block a
+  # user who may already have a working asset there.
+  if [ -z "$tag" ] && [ -n "$latest_tag" ]; then
+    warn "Proceeding with $latest_tag; if its ${tarball_name:-tarball} is absent the download will fail."
+    tag="$latest_tag"
+  fi
 
   if [ -z "$tag" ]; then
     # Redirect fallback: /releases/latest -> /releases/tag/vX.Y.Z
@@ -638,9 +820,18 @@ resolve_version() {
   fi
 
   if [ -z "$tag" ]; then
-    err "Could not resolve latest release."
-    err "Re-run with --version vX.Y.Z, --artifact-url URL, or --from-source."
-    exit 1
+    # Last resort: the GitHub release API is unusable (degraded, or an
+    # unauthenticated rate limit -- measured 2026-08-17: the releases
+    # endpoint returned an EMPTY ARRAY to an unauthenticated Windows host
+    # while an authenticated query from another machine listed six
+    # releases). An installer that can only work when api.github.com is
+    # healthy is not robust enough to bootstrap a fresh machine, so fall
+    # through to a pinned tag known to carry a full asset matrix rather
+    # than refusing outright.
+    warn "GitHub release API returned nothing usable."
+    warn "Falling back to pinned last-known-good tag ${EE_LAST_KNOWN_GOOD_TAG}."
+    warn "If that is older than you expect, re-run with --version vX.Y.Z once GitHub recovers."
+    tag="$EE_LAST_KNOWN_GOOD_TAG"
   fi
 
   VERSION="$tag"
