@@ -2523,6 +2523,17 @@ fn resolve_workspace_id_from_path(
     connection: &DbConnection,
     workspace_path: &Path,
 ) -> Result<String, String> {
+    // A local team pins the store. Do not let a second workspaces row
+    // created under a different Windows path spelling hide mesh_peers.
+    if let Ok(members) = connection.list_all_team_members()
+        && let Some(member) = members
+            .iter()
+            .find(|member| member.is_self)
+            .or_else(|| members.first())
+        && !member.workspace_id.is_empty()
+    {
+        return Ok(member.workspace_id.clone());
+    }
     let primary = workspace_path.to_string_lossy().into_owned();
     if let Some(workspace) = connection
         .get_workspace_by_path(&primary)
