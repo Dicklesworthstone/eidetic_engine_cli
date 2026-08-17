@@ -42,12 +42,14 @@ use crate::mesh::identity_change_guard::{
     CurrentIdentity, IdentityGuardVerdict, evaluate_identity_guard,
 };
 use crate::mesh::idp::IdentityAttestFrameV1;
+use crate::mesh::key_store::{MeshKeyStore, PairKeyClass};
 use crate::mesh::peer::{MESH_PEER_RECORD_SCHEMA_V1, MeshPeerRecord};
 use crate::mesh::policy::MeshPeerPolicyRegistry;
 use crate::mesh::repair_action_graph::{
     ActionKind, ExecutionContext, ExpectedOutcome, Priority, REPAIR_ACTION_GRAPH_SCHEMA_V1,
     RepairAction, RepairActionGraph, build_repair_action_graph,
 };
+use crate::mesh::responder_broker::{InboundLocalApi, TailscaleLocalApi};
 use crate::mesh::sync::{SelectiveSyncConfig, SelectiveSyncStatusSummary};
 use crate::mesh::tailscale_autodiscovery::{
     TAILSCALE_AUTODISCOVERY_SCHEMA_V1, TAILSCALE_PEER_LIST_UNAVAILABLE_CODE,
@@ -1978,6 +1980,191 @@ impl MeshForegroundSyncRound {
     }
 }
 
+fn apply_authenticated_sync_round(
+    mut report: MeshSyncSupervisorReport,
+    round: MeshForegroundSyncRound,
+) -> MeshSyncSupervisorReport {
+    report.contacted_peers = true;
+    report.health = supervisor_health(&report.budget, &report.backpressure, true).to_owned();
+    report.degraded.retain(|item| {
+        item.code != MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE
+            && item.code
+                != crate::mesh::anti_entropy_protocol::degraded_codes::TRANSPORT_UNAVAILABLE
+    });
+    if let Some(tick) = report.ticks.last_mut() {
+        tick.contacted_peers = true;
+        tick.health = report.health.clone();
+        tick.imported_event_count = round.imported_event_count;
+        tick.anti_entropy_summary_count = round.anti_entropy_summary_count;
+        tick.degraded.retain(|item| {
+            item.code != MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE
+                && item.code
+                    != crate::mesh::anti_entropy_protocol::degraded_codes::TRANSPORT_UNAVAILABLE
+        });
+    }
+    report
+}
+
+/// Build an authenticated initiator session from the local pair key plus
+/// live LocalAPI identities. Team-join placeholders stay in the peer record
+/// until WhoIs observes the real Tailscale IDs; the durable responder
+/// handshake requires those observed IDs, not `tailnet-team-join`.
+async fn live_team_initiator_config(
+    cx: &Cx,
+    snapshot: &MeshForegroundSnapshot,
+    peer_id: &str,
+    peer_origin_node_id: &str,
+    peer_record: &MeshPeerRecord,
+    address: SocketAddr,
+) -> Option<InitiatorSessionConfig> {
+    if snapshot.workspace_path.is_empty() || snapshot.database_path.is_empty() {
+        return None;
+    }
+    let workspace = Path::new(&snapshot.workspace_path).canonicalize().ok()?;
+    let database = Path::new(&snapshot.database_path).canonicalize().ok()?;
+    let connection = DbConnection::open_file(&database).ok()?;
+    let teams = crate::mesh::team::load_local_teams(&connection).ok()?;
+    let team = teams.into_iter().next()?;
+    let self_node = connection
+        .list_all_team_members()
+        .ok()?
+        .into_iter()
+        .find(|member| member.is_self)?
+        .origin_node_id;
+    if self_node.is_empty() || self_node == peer_origin_node_id {
+        return None;
+    }
+    let store = MeshKeyStore::open_existing(&workspace).ok().flatten()?;
+    let pair = store
+        .load_pair_key(peer_id, PairKeyClass::Current)
+        .ok()
+        .flatten()?;
+    let registrations = crate::mesh::responder_broker::plan_team_responder_registrations(
+        &connection,
+        &snapshot.workspace_id,
+        &workspace,
+        &database,
+        configured_hello_port(),
+    );
+    let local_api = InboundLocalApi::prefer(&connection, &registrations, None)?;
+    let local_status = local_api.local_status(cx).await.ok()?;
+    let who_is = local_api.who_is(cx, address).await.ok()?;
+    let local_address = ephemeral_source_for(address)?;
+    Some(InitiatorSessionConfig {
+        local_address,
+        binding: SessionBinding {
+            team_id: team.team_id,
+            tailnet_id: local_status.identity.tailnet_id,
+            initiator_node_id: self_node,
+            responder_node_id: peer_origin_node_id.to_owned(),
+            initiator_workspace_id: snapshot.workspace_id.clone(),
+            responder_workspace_id: peer_record.origin_workspace_id.clone(),
+            initiator_stable_id: local_status.identity.stable_id,
+            responder_stable_id: who_is.stable_id,
+            session_id: "replaced-by-connect".to_owned(),
+        },
+        pair_key: crate::mesh::key_store::SecretBytes::new(*pair.key.as_bytes()),
+        pair_key_generation: pair.generation.get(),
+        observations: HandshakeObservations {
+            initiator_node_pubkey: local_status.identity.current_node_pubkey,
+            responder_node_pubkey: who_is.current_node_pubkey,
+        },
+        capabilities: SessionCapabilities::base(),
+        limits: SessionChannelLimits {
+            connect_timeout: Duration::from_secs(8),
+            io_timeout: Duration::from_secs(8),
+            ..SessionChannelLimits::default()
+        },
+    })
+}
+
+async fn try_authenticated_team_sync_round(
+    cx: &Cx,
+    snapshot: &MeshForegroundSnapshot,
+    options: &MeshSyncSupervisorOptions,
+) -> Option<MeshForegroundSyncRound> {
+    if !snapshot.mesh_enabled || snapshot.database_path.is_empty() {
+        return None;
+    }
+    let peer_limit = usize::try_from(options.peer_concurrency).unwrap_or(usize::MAX);
+    if peer_limit == 0 {
+        return None;
+    }
+    let mut eligible_peers = snapshot
+        .peers
+        .iter()
+        .filter_map(|peer| {
+            if !peer.enabled {
+                return None;
+            }
+            let peer_record = foreground_sync_peer_record(peer)?;
+            if !foreground_sync_peer_allowed(peer, &peer_record) {
+                return None;
+            }
+            Some((peer, peer_record))
+        })
+        .collect::<Vec<_>>();
+    eligible_peers.sort_by(|left, right| left.0.peer_id.cmp(&right.0.peer_id));
+
+    let mut peer_outcomes = Vec::new();
+    let mut imported_event_count = snapshot.storage.imported_event_count;
+    let mut contacted = false;
+    for (peer, peer_record) in eligible_peers.into_iter().take(peer_limit) {
+        let Some(address) =
+            parse_live_peer_endpoint(&peer_record.endpoint.endpoint, configured_hello_port())
+        else {
+            continue;
+        };
+        let Some(config) = live_team_initiator_config(
+            cx,
+            snapshot,
+            &peer.peer_id,
+            &peer.origin_node_id,
+            &peer_record,
+            address,
+        )
+        .await
+        else {
+            continue;
+        };
+        let sync_request = local_sync_round_request(snapshot, peer, &peer_record);
+        let Ok(sync) = contact_authenticated_mesh_peer(cx, address, config, &sync_request).await
+        else {
+            continue;
+        };
+        contacted = true;
+        let received = u32::try_from(sync.events.len()).unwrap_or(u32::MAX);
+        let accepted = persist_sync_round_events(snapshot, &peer.peer_id, &sync.events);
+        if accepted > 0 && accepted == received {
+            persist_sync_round_cursor(snapshot, &peer.peer_id, &sync);
+        }
+        imported_event_count = imported_event_count.saturating_add(received);
+        let mut peer_outcome = MeshRoundPeerOutcome::new(&peer.peer_id);
+        peer_outcome.events_accepted = u64::from(accepted);
+        peer_outcome.ranges_requested = 1;
+        peer_outcome.ranges_fulfilled = u64::from(!sync.events.is_empty());
+        peer_outcomes.push(peer_outcome);
+    }
+    if !contacted {
+        return None;
+    }
+    let summary = build_sync_summary(MeshSyncSummaryInput {
+        last_round_completed_at: None,
+        origins_tracked: snapshot.cursors.len(),
+        peer_outcomes,
+        retry_policy: MeshAntiEntropyRetryPolicy::default(),
+        current_attempts: 0,
+        next_retry_after: None,
+        blocked_ranges: Vec::new(),
+        degraded: Vec::new(),
+    });
+    Some(MeshForegroundSyncRound {
+        contacted_peers: true,
+        anti_entropy_summary_count: summary.peer_count.max(1),
+        imported_event_count,
+    })
+}
+
 fn run_mesh_sync_transport_round(
     snapshot: &MeshForegroundSnapshot,
     options: &MeshSyncSupervisorOptions,
@@ -2377,16 +2564,60 @@ pub fn run_mesh_sync_once_from_paths(
         })
         .map_err(|error| format!("spawn mesh sync: {error}"))?;
     match runtime.block_on(join) {
-        Outcome::Ok(report) => {
-            let _ = fetch_pending_team_bodies_from_paths(workspace_path, database_path);
-            Ok(report)
-        }
+        Outcome::Ok(report) => Ok(complete_team_sync_after_unsigned(
+            workspace_path,
+            database_path,
+            report,
+        )),
         Outcome::Err(message) => Err(message),
         Outcome::Cancelled(reason) => Err(format!(
             "mesh sync cancelled: {}",
             crate::core::outcome::cancel_message(&reason)
         )),
         Outcome::Panicked(payload) => Err(format!("mesh sync panicked: {payload}")),
+    }
+}
+
+/// Same-thread EventFetch + BodyFetch after the Send supervisor returns.
+/// LocalAPI and pair-key sessions are `!Send`; `block_on` here does not
+/// require Send, unlike `try_spawn` of the unsigned supervisor.
+#[must_use]
+pub fn complete_team_sync_after_unsigned(
+    workspace_path: &Path,
+    database_path: &Path,
+    report: MeshSyncSupervisorReport,
+) -> MeshSyncSupervisorReport {
+    let report = if report.contacted_peers {
+        report
+    } else if let Ok(snapshot) = MeshForegroundSnapshot::from_paths(workspace_path, database_path) {
+        finish_authenticated_team_sync(snapshot, report)
+    } else {
+        report
+    };
+    let _ = fetch_pending_team_bodies_from_paths(workspace_path, database_path);
+    report
+}
+
+fn finish_authenticated_team_sync(
+    snapshot: MeshForegroundSnapshot,
+    report: MeshSyncSupervisorReport,
+) -> MeshSyncSupervisorReport {
+    if !snapshot.mesh_enabled {
+        return report;
+    }
+    let Ok(runtime) = crate::core::build_cli_runtime() else {
+        return report;
+    };
+    let options = MeshSyncSupervisorOptions::default();
+    let auth = runtime.block_on(async move {
+        let Some(cx) = Cx::current() else {
+            return None;
+        };
+        try_authenticated_team_sync_round(&cx, &snapshot, &options).await
+    });
+    match auth {
+        Some(round) => apply_authenticated_sync_round(report, round),
+        None => report,
     }
 }
 
@@ -2456,6 +2687,14 @@ pub fn spawn_team_responder_owner_if_needed(workspace_path: &Path, database_path
         .is_ok()
 }
 
+/// Team-join enrolls `body_allowed` on the peer record. EventFetch is
+/// ungranted; BodyFetch uses that capability instead of waiting for a
+/// second durable lane-grant row.
+fn team_join_body_fetch_allowed(record: &MeshPeerRecord) -> bool {
+    crate::mesh::team::team_join_allows_ungranted_route(record)
+        && record.capabilities.may_receive.body
+}
+
 /// Grant-gated BodyFetch after the Send supervisor returns. Pair-key
 /// sessions are `!Send`; `block_on` on this thread does not require Send.
 pub fn fetch_pending_team_bodies_from_paths(workspace_path: &Path, database_path: &Path) -> usize {
@@ -2495,25 +2734,12 @@ async fn fetch_pending_team_bodies_after_sync(cx: &Cx, snapshot: &MeshForeground
         return 0;
     };
     let workspace_path = Path::new(&snapshot.workspace_path);
-    let Ok(Some(store)) = crate::mesh::key_store::MeshKeyStore::open_existing(workspace_path)
-    else {
-        return 0;
-    };
     let Ok(peers) = connection.list_mesh_peers(&snapshot.workspace_id) else {
         return 0;
     };
     let mut applied = 0_usize;
     for key in keys {
         for peer in &peers {
-            if !peer.enabled
-                || !crate::mesh::team::body_lane_allows_fetch(
-                    &connection,
-                    &snapshot.workspace_id,
-                    &peer.peer_id,
-                )
-            {
-                continue;
-            }
             let Some(record) = peer
                 .policy_summary_json
                 .as_deref()
@@ -2521,6 +2747,15 @@ async fn fetch_pending_team_bodies_after_sync(cx: &Cx, snapshot: &MeshForeground
             else {
                 continue;
             };
+            if !peer.enabled
+                || !(crate::mesh::team::body_lane_allows_fetch(
+                    &connection,
+                    &snapshot.workspace_id,
+                    &peer.peer_id,
+                ) || team_join_body_fetch_allowed(&record))
+            {
+                continue;
+            }
             let Some(binding) = crate::mesh::team::plan_team_body_fetch_binding(
                 &snapshot.workspace_id,
                 &team.origin_node_id,
@@ -2536,36 +2771,24 @@ async fn fetch_pending_team_bodies_after_sync(cx: &Cx, snapshot: &MeshForeground
             else {
                 continue;
             };
-            let Some(local_address) = ephemeral_source_for(address) else {
-                continue;
-            };
-            let Ok(Some(pair)) =
-                store.load_pair_key(&peer.peer_id, crate::mesh::key_store::PairKeyClass::Current)
+            let Some(config) = live_team_initiator_config(
+                cx,
+                snapshot,
+                &peer.peer_id,
+                &peer.origin_node_id,
+                &record,
+                address,
+            )
+            .await
             else {
                 continue;
             };
-            let config = InitiatorSessionConfig {
-                local_address,
-                binding: SessionBinding {
-                    team_id: binding.team_id,
-                    tailnet_id: binding.tailnet_id,
-                    initiator_node_id: binding.initiator_node_id,
-                    responder_node_id: binding.responder_node_id,
-                    initiator_workspace_id: binding.initiator_workspace_id,
-                    responder_workspace_id: binding.responder_workspace_id,
-                    initiator_stable_id: format!("stable-{}", snapshot.workspace_id),
-                    responder_stable_id: format!("stable-{}", peer.peer_id),
-                    session_id: "replaced-by-connect".to_owned(),
-                },
-                pair_key: crate::mesh::key_store::SecretBytes::new(*pair.key.as_bytes()),
-                pair_key_generation: pair.generation.get(),
-                observations: HandshakeObservations {
-                    initiator_node_pubkey: format!("nodekey:{}", snapshot.workspace_id),
-                    responder_node_pubkey: record.endpoint.tailscale_node_key.clone(),
-                },
-                capabilities: SessionCapabilities::base(),
-                limits: SessionChannelLimits::default(),
-            };
+            if config.binding.team_id != binding.team_id
+                || config.binding.initiator_node_id != binding.initiator_node_id
+                || config.binding.responder_node_id != binding.responder_node_id
+            {
+                continue;
+            }
             let Ok(fetched) = contact_authenticated_body_fetch(cx, address, config, &key).await
             else {
                 continue;
@@ -3819,7 +4042,7 @@ mod tests {
         fetch_pending_team_bodies_from_paths, local_sync_round_request, mesh_event_id_from_hash,
         persist_sync_round_events, project_canonical_mesh_event, run_mesh_sync_once_from_paths,
         run_mesh_sync_supervisor_supervised, run_mesh_sync_supervisor_supervised_with_transport,
-        spawn_team_responder_owner_if_needed,
+        spawn_team_responder_owner_if_needed, try_authenticated_team_sync_round,
     };
     use crate::config::ConfigFile;
     use crate::core::tailscale_probe::TailscaleLocalReport;
@@ -5048,6 +5271,40 @@ max_bytes = 1048576
                     == crate::mesh::anti_entropy_protocol::degraded_codes::TRANSPORT_UNAVAILABLE
             }),
             "an enrolled active peer with no contacted transport must expose the anti-entropy gap"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_team_sync_round_is_absent_without_pair_key() -> TestResult {
+        let snapshot = sample_snapshot(vec![sample_trusted_sync_peer("peer-a")]);
+        let mut lab = LabRuntime::new(LabConfig::new(614));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task_id, mut handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let Some(cx) = Cx::current() else {
+                    return Outcome::Err("LabRuntime task should install Cx".to_owned());
+                };
+                Outcome::Ok(
+                    try_authenticated_team_sync_round(
+                        &cx,
+                        &snapshot,
+                        &MeshSyncSupervisorOptions::default(),
+                    )
+                    .await,
+                )
+            })
+            .map_err(|error| error.to_string())?;
+        lab.scheduler.lock().schedule(task_id, 0);
+        lab.run_until_quiescent();
+        let found = handle
+            .try_join()
+            .map_err(|error| format!("auth sync lab join failed: {error}"))?
+            .ok_or_else(|| "auth sync lab task did not finish".to_owned())??;
+        assert!(
+            found.is_none(),
+            "unsigned lab fixtures have no pair key or LocalAPI route"
         );
         Ok(())
     }

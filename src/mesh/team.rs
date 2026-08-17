@@ -2546,6 +2546,21 @@ pub fn team_join_tailnet_matches(peer_tailnet: &str, local_tailnet: &str) -> boo
     peer_tailnet == local_tailnet || peer_tailnet == TEAM_JOIN_TAILNET_ID
 }
 
+/// Team-join stores `team-join-<ee-node>` until LocalAPI observes the real
+/// Tailscale stable ID. Treat that placeholder as compatible with any
+/// observed ID so `hello-responder run` can bind on a live tailnet.
+#[must_use]
+pub fn team_join_stable_id_matches(stored: &str, observed: &str) -> bool {
+    stored == observed || stored.starts_with("team-join-")
+}
+
+/// Team-join stores `nodekey:<ee-node-id>` until LocalAPI observes the
+/// Tailscale node key. Same placeholder rule as [`team_join_stable_id_matches`].
+#[must_use]
+pub fn team_join_node_pubkey_matches(stored: &str, observed: &str) -> bool {
+    stored == observed || stored.starts_with("nodekey:node_")
+}
+
 /// Team-join handshake is enough for inbound EventFetch. BodyFetch still
 /// requires a durable Body-lane Allow at serve time.
 #[must_use]
@@ -7467,6 +7482,24 @@ mod tests {
         ));
         assert!(team_join_tailnet_matches("tailnet-real", "tailnet-real"));
         assert!(!team_join_tailnet_matches("tailnet-other", "tailnet-real"));
+        assert!(team_join_stable_id_matches(
+            "team-join-node_abc",
+            "nREALSTABLE"
+        ));
+        assert!(team_join_stable_id_matches("nREALSTABLE", "nREALSTABLE"));
+        assert!(!team_join_stable_id_matches("nOTHER", "nREALSTABLE"));
+        assert!(team_join_node_pubkey_matches(
+            "nodekey:node_abc",
+            "nodekey:deadbeef"
+        ));
+        assert!(team_join_node_pubkey_matches(
+            "nodekey:deadbeef",
+            "nodekey:deadbeef"
+        ));
+        assert!(!team_join_node_pubkey_matches(
+            "nodekey:other",
+            "nodekey:deadbeef"
+        ));
         assert!(team_join_allows_ungranted_route(&record));
         let planned = crate::mesh::responder_broker::plan_team_responder_registrations(
             &connection,
