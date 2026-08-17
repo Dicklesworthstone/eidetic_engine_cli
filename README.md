@@ -331,8 +331,31 @@ compatible GNU build when that release does not include musl.
 **Windows (PowerShell):**
 
 ```powershell
-$f = Join-Path $env:TEMP 'install-ee.ps1'; $u = "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.ps1?cache=$([guid]::NewGuid())"; Invoke-WebRequest -UseBasicParsing $u -OutFile $f; & $f -Verify
+$f = Join-Path $env:TEMP 'install-ee.ps1'
+try {
+  Invoke-WebRequest -UseBasicParsing "https://cdn.jsdelivr.net/gh/Dicklesworthstone/eidetic_engine_cli@main/install.ps1" -OutFile $f
+} catch {
+  Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.ps1" -OutFile $f
+}
+if (Test-Path $f) { & $f -Verify } else { Write-Error "Installer download failed - retry in a few minutes" }
 ```
+
+Fetched from the jsDelivr CDN mirror first, falling back to `raw.githubusercontent.com`.
+Both serve identical bytes; jsDelivr is a separate host with its own limits, so a
+GitHub rate-limit or incident does not block the install.
+
+**Do not add a cache-busting query string** (e.g. `?cache=<guid>`). A unique URL
+per request defeats the CDN and forces an origin fetch every time, which is the
+pattern GitHub's anti-scraping limiter penalises: a real client install failed
+with `429: Too Many Requests` on `raw.githubusercontent.com` for exactly this
+reason. The plain URL is CDN-cacheable and re-reads pick up a new `main` within
+the cache TTL anyway. To force an exact revision instead, pin a commit SHA in
+the path (`.../eidetic_engine_cli@<sha>/install.ps1`), which is both immutable
+and cacheable.
+
+The `Test-Path` guard matters: without it a failed download is followed by a
+second, confusing `is not recognized as the name of a cmdlet` error from running
+a file that was never written, which reads like two unrelated faults.
 
 Downloads the current installer to a temporary file before running it. This
 keeps the script inspectable and avoids fragile `Invoke-Expression` and
