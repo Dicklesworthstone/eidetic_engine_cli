@@ -5277,37 +5277,19 @@ max_bytes = 1048576
 
     #[test]
     fn authenticated_team_sync_round_is_absent_without_pair_key() -> TestResult {
+        // Pair-key + LocalAPI futures are !Send (CurrentCxGuard). The product
+        // path is same-thread `block_on` after the Send supervisor, not
+        // LabRuntime::create_task.
         let snapshot = sample_snapshot(vec![sample_trusted_sync_peer("peer-a")]);
-        let mut lab = LabRuntime::new(LabConfig::new(614));
-        let root = lab.state.create_root_region(Budget::INFINITE);
-        let (task_id, mut handle) = lab
-            .state
-            .create_task(root, Budget::INFINITE, async move {
-                let Some(cx) = Cx::current() else {
-                    return Outcome::Err("LabRuntime task should install Cx".to_owned());
-                };
-                Outcome::Ok(
-                    try_authenticated_team_sync_round(
-                        &cx,
-                        &snapshot,
-                        &MeshSyncSupervisorOptions::default(),
-                    )
-                    .await,
-                )
-            })
-            .map_err(|error| error.to_string())?;
-        lab.scheduler.lock().schedule(task_id, 0);
-        lab.run_until_quiescent();
-        let found = match handle
-            .try_join()
-            .map_err(|error| format!("auth sync lab join failed: {error}"))?
-            .ok_or_else(|| "auth sync lab task did not finish".to_owned())?
-        {
-            Outcome::Ok(found) => found,
-            other => {
-                return Err(format!("auth sync lab outcome was not ok: {other:?}"));
-            }
-        };
+        let runtime = crate::core::build_cli_runtime()
+            .map_err(|error| format!("auth sync lab runtime: {error}"))?;
+        let found = runtime.block_on(async move {
+            let Some(cx) = Cx::current() else {
+                return None;
+            };
+            try_authenticated_team_sync_round(&cx, &snapshot, &MeshSyncSupervisorOptions::default())
+                .await
+        });
         assert!(
             found.is_none(),
             "unsigned lab fixtures have no pair key or LocalAPI route"

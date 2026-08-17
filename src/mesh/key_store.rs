@@ -1234,8 +1234,10 @@ fn open_windows_secure_directory(
                     });
                 }
                 // `ee init` may have created `.ee/keys` with an inherited
-                // parent DACL. Harden it in place; do not require the
-                // directory to have been born protected.
+                // parent DACL. Harden it in place to the process TokenUser
+                // plus SYSTEM; do not require the directory to have been
+                // born protected, and do not pin the ACL to the
+                // Administrators group that Windows may record as owner.
                 apply_windows_narrow_dacl(&current)?;
             }
             Err(error)
@@ -1265,8 +1267,12 @@ fn open_windows_secure_directory(
 #[cfg(windows)]
 fn open_windows_directory_handle(path: &Path) -> Result<std::fs::File, KeyStoreError> {
     use std::os::windows::fs::OpenOptionsExt;
+    // FlushFileBuffers on a directory requires GENERIC_WRITE. A
+    // read-only handle fails with Access Denied after the DACL is
+    // narrowed, even when the process user is allowed.
     let file = std::fs::OpenOptions::new()
         .read(true)
+        .write(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
         .map_err(|error| KeyStoreError::Io {
@@ -1355,54 +1361,60 @@ fn windows_file_id(file: &std::fs::File, path: &Path) -> Result<WindowsFileId, K
 #[cfg(windows)]
 fn apply_windows_narrow_dacl(path: &Path) -> Result<(), KeyStoreError> {
     use windows_permissions::constants::{SeObjectType, SecurityInformation};
-    use windows_permissions::wrappers::{
-        ConvertSidToStringSid, GetNamedSecurityInfo, SetNamedSecurityInfo,
-    };
+    use windows_permissions::utilities::current_process_sid;
+    use windows_permissions::wrappers::{ConvertSidToStringSid, SetNamedSecurityInfo};
     use windows_permissions::{LocalBox, SecurityDescriptor};
-    let current = GetNamedSecurityInfo(
-        path.as_os_str(),
-        SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Owner,
-    )
-    .map_err(|error| KeyStoreError::Io {
+    // Pin to the process TokenUser, not the NT owner. On an
+    // Administrators-member workstation the owner is often
+    // BUILTIN\Administrators; a UAC-filtered token then cannot write
+    // or flush the hardened directory.
+    let user = current_process_sid().map_err(|error| KeyStoreError::Io {
         path: path.display().to_string(),
-        message: format!("read owner SID: {error}"),
+        message: format!("read process TokenUser SID: {error}"),
     })?;
-    let owner = current
-        .owner()
-        .ok_or_else(|| KeyStoreError::InsecurePermissions {
-            path: path.display().to_string(),
-            detail: "path has no owner SID".to_owned(),
-        })?;
-    let owner_text = ConvertSidToStringSid(owner).map_err(|error| KeyStoreError::Io {
+    let user_text = ConvertSidToStringSid(user.as_ref()).map_err(|error| KeyStoreError::Io {
         path: path.display().to_string(),
-        message: format!("render owner SID: {error}"),
+        message: format!("render process TokenUser SID: {error}"),
     })?;
-    let sddl = format!("D:P(A;;FA;;;{})(A;;FA;;;SY)", owner_text.to_string_lossy());
+    let sddl = format!("D:P(A;;FA;;;{})(A;;FA;;;SY)", user_text.to_string_lossy());
     let descriptor: LocalBox<SecurityDescriptor> =
         sddl.parse().map_err(|error| KeyStoreError::Io {
             path: path.display().to_string(),
             message: format!("parse owner-only SDDL: {error}"),
         })?;
-    SetNamedSecurityInfo(
+    let with_owner = SetNamedSecurityInfo(
         path.as_os_str(),
         SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
-        None,
+        SecurityInformation::Owner | SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        Some(user.as_ref()),
         None,
         descriptor.dacl(),
         None,
-    )
-    .map_err(|error| KeyStoreError::Io {
-        path: path.display().to_string(),
-        message: format!("set protected DACL: {error}"),
-    })?;
+    );
+    if let Err(error) = with_owner {
+        SetNamedSecurityInfo(
+            path.as_os_str(),
+            SeObjectType::SE_FILE_OBJECT,
+            SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+            None,
+            None,
+            descriptor.dacl(),
+            None,
+        )
+        .map_err(|dacl_error| KeyStoreError::Io {
+            path: path.display().to_string(),
+            message: format!(
+                "set protected DACL: {dacl_error} (take-ownership also failed: {error})"
+            ),
+        })?;
+    }
     verify_windows_narrow_dacl(path)
 }
 
 #[cfg(windows)]
 fn verify_windows_narrow_dacl(path: &Path) -> Result<(), KeyStoreError> {
     use windows_permissions::constants::{AceFlags, AceType, SeObjectType, SecurityInformation};
+    use windows_permissions::utilities::current_process_sid;
     use windows_permissions::wrappers::{ConvertSidToStringSid, EqualSid, GetNamedSecurityInfo};
     use windows_permissions::{LocalBox, Sid};
     let descriptor = GetNamedSecurityInfo(
@@ -1414,12 +1426,10 @@ fn verify_windows_narrow_dacl(path: &Path) -> Result<(), KeyStoreError> {
         path: path.display().to_string(),
         message: format!("read DACL: {error}"),
     })?;
-    let owner = descriptor
-        .owner()
-        .ok_or_else(|| KeyStoreError::InsecurePermissions {
-            path: path.display().to_string(),
-            detail: "path has no owner SID".to_owned(),
-        })?;
+    let user = current_process_sid().map_err(|error| KeyStoreError::Io {
+        path: path.display().to_string(),
+        message: format!("read process TokenUser SID: {error}"),
+    })?;
     let sddl = descriptor.as_sddl().map_err(|error| KeyStoreError::Io {
         path: path.display().to_string(),
         message: format!("render SDDL: {error}"),
@@ -1472,14 +1482,14 @@ fn verify_windows_narrow_dacl(path: &Path) -> Result<(), KeyStoreError> {
                 path: path.display().to_string(),
                 detail: format!("DACL ACE {index} has no SID"),
             })?;
-        let allowed = EqualSid(sid, owner) || EqualSid(sid, system.as_ref());
+        let allowed = EqualSid(sid, user.as_ref()) || EqualSid(sid, system.as_ref());
         if !allowed {
             let rendered = ConvertSidToStringSid(sid)
                 .map(|value| value.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| "unknown".to_owned());
             return Err(KeyStoreError::InsecurePermissions {
                 path: path.display().to_string(),
-                detail: format!("DACL grants access to non-owner SID {rendered}"),
+                detail: format!("DACL grants access to non-process SID {rendered}"),
             });
         }
     }
