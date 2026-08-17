@@ -1301,7 +1301,7 @@ impl Default for MeshSyncSupervisorOptions {
             peer_concurrency: 1,
             body_fetch_budget_bytes: 64 * 1024,
             stale_read_window_ms: 5_000,
-            time_budget_ms: 5_000,
+            time_budget_ms: FOREGROUND_SYNC_TIME_BUDGET_MS,
         }
     }
 }
@@ -1461,6 +1461,13 @@ pub struct TcpMeshForegroundSyncTransport {
     pub timeout: Duration,
 }
 
+/// Per-peer unsigned hello+sync timeout. Live Windows Tailscale soak
+/// needed 4–8s after hello-responder restart; 750ms deferred the round.
+pub const FOREGROUND_TCP_SYNC_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Wall-clock budget for one Tailscale unsigned round plus slack.
+pub const FOREGROUND_SYNC_TIME_BUDGET_MS: u64 = 20_000;
+
 impl TcpMeshForegroundSyncTransport {
     #[must_use]
     pub fn from_snapshot(snapshot: &MeshForegroundSnapshot) -> Self {
@@ -1468,7 +1475,7 @@ impl TcpMeshForegroundSyncTransport {
             committed_port: configured_hello_port(),
             requester_node_key: snapshot.workspace_id.clone(),
             requester_workspace_ids: vec![snapshot.workspace_id.clone()],
-            timeout: Duration::from_millis(750),
+            timeout: FOREGROUND_TCP_SYNC_TIMEOUT,
         }
     }
 }

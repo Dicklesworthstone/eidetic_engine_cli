@@ -864,7 +864,7 @@ pub struct MeshSyncArgs {
     pub stale_read_window_ms: u64,
 
     /// Wall-clock budget for the supervised foreground sync cycle.
-    #[arg(long = "time-budget-ms", default_value_t = 5_000)]
+    #[arg(long = "time-budget-ms", default_value_t = 20_000)]
     pub time_budget_ms: u64,
 }
 
