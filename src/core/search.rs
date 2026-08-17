@@ -2793,10 +2793,12 @@ impl SearchReport {
         output.push_str(&format!("embed_backend: {}\n\n", self.embed_backend));
 
         for (i, hit) in visible_results.iter().enumerate() {
+            let attribution = team_search_attribution_suffix(hit).unwrap_or_default();
             output.push_str(&format!(
-                "  {}. {} (score: {:.4}, source: {})\n",
+                "  {}. {}{} (score: {:.4}, source: {})\n",
                 i + 1,
                 hit.doc_id,
+                attribution,
                 hit.score,
                 hit.source.as_str()
             ));
@@ -11926,6 +11928,32 @@ fn mark_hit_scope(hit: &mut SearchHit, scope: MemoryScope, memory: &crate::db::S
     hit.metadata = Some(metadata);
 }
 
+/// Compact teammate suffix already stored on the hit as `teamProvenance`.
+/// Human search uses the same `· from Priya / project · time` shape pack
+/// markdown and ask citations render; missing/empty fields stay silent.
+fn team_search_attribution_suffix(hit: &SearchHit) -> Option<String> {
+    let provenance = hit.metadata.as_ref()?.get("teamProvenance")?;
+    let member = provenance
+        .get("memberDisplayName")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())?;
+    let produced_at = provenance
+        .get("producedAt")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|when| !when.is_empty())?;
+    let project = provenance
+        .get("projectName")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    Some(match project {
+        Some(project) => format!(" · from {member} / {project} · {produced_at}"),
+        None => format!(" · from {member} · {produced_at}"),
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MemoryValidityVisibility {
     Visible,
@@ -17514,6 +17542,81 @@ mod tests {
         let summary = report.human_summary();
         assert!(summary.contains("lexical: 0.70"));
         assert!(summary.contains("BM25"));
+    }
+
+    #[test]
+    fn human_summary_includes_team_attribution_suffix() {
+        let mut hit = SearchHit {
+            doc_id: "mem_teamhit".to_string(),
+            score: 0.70,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.70),
+            rerank_score: None,
+            metadata: Some(serde_json::json!({
+                "teamProvenance": {
+                    "schema": "ee.team.provenance.v1",
+                    "memberDisplayName": "Priya",
+                    "projectName": "acme-analysis",
+                    "originTrustClass": "human_explicit",
+                    "producedAt": "2026-07-30T14:02:00Z",
+                    "originTimeAssurance": "member_attested"
+                }
+            })),
+            explanation: None,
+        };
+
+        let report = SearchReport {
+            index_freshness: None,
+            status: SearchStatus::Success,
+            embed_backend: EmbedBackend::HashFallback,
+            query: "Acme Corp".to_string(),
+            requested_limit: 1,
+            results: vec![hit.clone()],
+            elapsed_ms: 1.5,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            rerank_configured_mode: crate::config::SearchRerankMode::Auto,
+            rerank_configured_top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            rerank_runtime_available: false,
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            query_assist: None,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Team,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
+        };
+
+        let summary = report.human_summary();
+        assert!(
+            summary.contains(
+                "1. mem_teamhit · from Priya / acme-analysis · 2026-07-30T14:02:00Z (score: 0.7000, source: lexical)"
+            ),
+            "human search must attribute teammate hits: {summary}"
+        );
+
+        if let Some(metadata) = hit.metadata.as_mut() {
+            metadata["teamProvenance"]["projectName"] = serde_json::Value::Null;
+        }
+        let mut unbound = report;
+        unbound.results = vec![hit];
+        let unbound_summary = unbound.human_summary();
+        assert!(
+            unbound_summary.contains(
+                "1. mem_teamhit · from Priya · 2026-07-30T14:02:00Z (score: 0.7000, source: lexical)"
+            ),
+            "missing project must still name the teammate: {unbound_summary}"
+        );
+        assert!(
+            !unbound_summary.contains("acme-analysis"),
+            "null projectName must not invent a project label: {unbound_summary}"
+        );
     }
 
     #[test]
