@@ -1368,7 +1368,6 @@ impl PrivacyConfig {
 pub struct TrustConfig {
     pub default_class: Option<String>,
     pub prompt_injection_guard: Option<bool>,
-    pub team_members: Option<Vec<String>>,
 }
 
 impl TrustConfig {
@@ -1376,7 +1375,6 @@ impl TrustConfig {
         Ok(Self {
             default_class: optional_string(document, "trust", "default_class")?,
             prompt_injection_guard: optional_bool(document, "trust", "prompt_injection_guard")?,
-            team_members: optional_string_array(document, "trust", "team_members")?,
         })
     }
 }
@@ -1696,9 +1694,7 @@ fn config_key_policy(table_path: &str) -> Option<ConfigKeyPolicy> {
         "policy.output_redaction" => ConfigKeyPolicy::Closed(&["enabled"]),
         "privacy" => ConfigKeyPolicy::Closed(&["redact_secrets", "redaction_classes"]),
         "memory" => ConfigKeyPolicy::Closed(&["include_global", "participate"]),
-        "trust" => {
-            ConfigKeyPolicy::Closed(&["default_class", "prompt_injection_guard", "team_members"])
-        }
+        "trust" => ConfigKeyPolicy::Closed(&["default_class", "prompt_injection_guard"]),
         "profile" => ConfigKeyPolicy::Closed(&["selected", "budgets"]),
         "profile.budgets" => ConfigKeyPolicy::Closed(&[
             "search_candidate_limit",
@@ -3780,6 +3776,22 @@ allowed_kind = ["failure"]
                     suggestion: Some(ref suggestion),
                 } if key == "task_lens.overrides[0].allowed_kind"
                     && suggestion == "task_lens.overrides[0].allowed_kinds"
+            ),
+            format!("unexpected error: {error:?}"),
+        )
+    }
+
+    #[test]
+    fn rejects_removed_trust_team_members_nickname_list() -> TestResult {
+        let error = expect_config_error("[trust]\nteam_members = [\"GreenField\"]\n")?;
+
+        ensure(
+            matches!(
+                error,
+                ConfigParseError::UnknownKey {
+                    ref key,
+                    ..
+                } if key == "trust.team_members"
             ),
             format!("unexpected error: {error:?}"),
         )

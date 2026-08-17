@@ -163,7 +163,6 @@ pub const PRIVACY_REDACT_SECRETS_KEY: &str = "privacy.redact_secrets";
 pub const PRIVACY_REDACTION_CLASSES_KEY: &str = "privacy.redaction_classes";
 pub const TRUST_DEFAULT_CLASS_KEY: &str = "trust.default_class";
 pub const TRUST_PROMPT_INJECTION_GUARD_KEY: &str = "trust.prompt_injection_guard";
-pub const TRUST_TEAM_MEMBERS_KEY: &str = "trust.team_members";
 
 const BUILT_IN_DATABASE_PATH: &str = "~/.local/share/ee/ee.db";
 const BUILT_IN_INDEX_DIR: &str = "~/.local/share/ee/indexes";
@@ -1044,13 +1043,6 @@ impl MergedConfig {
                 self.source(TRUST_PROMPT_INJECTION_GUARD_KEY),
             ));
         }
-        if let Some(ref team_members) = self.values.trust.team_members {
-            entries.push(ConfigShowEntry::new(
-                TRUST_TEAM_MEMBERS_KEY,
-                team_members.join(","),
-                self.source(TRUST_TEAM_MEMBERS_KEY),
-            ));
-        }
 
         // Memory section (global-lane posture, bd-1bfwa.3)
         if let Some(include_global) = self.values.memory.include_global {
@@ -1331,7 +1323,6 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
         trust: TrustConfig {
             default_class: Some("agent_assertion".to_string()),
             prompt_injection_guard: Some(true),
-            team_members: None,
         },
         memory: MemoryConfig {
             // Defaults preserve the opt-in-by-presence behavior: the global
@@ -2705,15 +2696,6 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.trust.prompt_injection_guard,
                 &layers.user.trust.prompt_injection_guard,
                 &layers.defaults.trust.prompt_injection_guard,
-            ),
-            team_members: pick_field(
-                &mut sources,
-                TRUST_TEAM_MEMBERS_KEY,
-                &layers.cli.trust.team_members,
-                &layers.environment.trust.team_members,
-                &layers.project.trust.team_members,
-                &layers.user.trust.team_members,
-                &layers.defaults.trust.team_members,
             ),
         },
         memory: MemoryConfig {
