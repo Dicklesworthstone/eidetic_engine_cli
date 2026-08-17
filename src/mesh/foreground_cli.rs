@@ -5298,10 +5298,16 @@ max_bytes = 1048576
             .map_err(|error| error.to_string())?;
         lab.scheduler.lock().schedule(task_id, 0);
         lab.run_until_quiescent();
-        let found = handle
+        let found = match handle
             .try_join()
             .map_err(|error| format!("auth sync lab join failed: {error}"))?
-            .ok_or_else(|| "auth sync lab task did not finish".to_owned())??;
+            .ok_or_else(|| "auth sync lab task did not finish".to_owned())?
+        {
+            Outcome::Ok(found) => found,
+            other => {
+                return Err(format!("auth sync lab outcome was not ok: {other:?}"));
+            }
+        };
         assert!(
             found.is_none(),
             "unsigned lab fixtures have no pair key or LocalAPI route"
