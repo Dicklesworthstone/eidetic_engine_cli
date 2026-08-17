@@ -826,7 +826,26 @@ jobs:
           git commit -m "Update ee to v${VERSION}"
           git push origin "$BRANCH"
 
-          if gh pr list --head "$BRANCH" --base main --state open --json number --jq 'length' | grep -qx '0'; then
+          # `if gh pr list ... | grep -qx '0'` used to decide this: a
+          # transient gh/API failure (rate limit, auth hiccup) produces no
+          # stdout, grep finds no "0" in empty input, and the whole `if` is
+          # false -- silently landing in the "PR already exists" branch when
+          # we genuinely could not check. That would finish this release
+          # step, print a reassuring notice, and never actually open the PR,
+          # with nothing in the log distinguishing it from a true
+          # already-open PR. Check gh's own exit status and the parsed count
+          # separately so an unusable response fails the step loudly instead
+          # of rendering as a confirmed "no PR needed."
+          open_pr_count=""
+          if ! open_pr_count=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq 'length'); then
+            echo "::error title=Could not check for an existing Homebrew tap PR::gh pr list failed; refusing to assume a PR already exists for $BRANCH."
+            exit 1
+          fi
+          if [ -z "$open_pr_count" ]; then
+            echo "::error title=Could not check for an existing Homebrew tap PR::gh pr list returned no usable count for $BRANCH; refusing to assume a PR already exists."
+            exit 1
+          fi
+          if [ "$open_pr_count" = "0" ]; then
             gh pr create \
               --title "Update ee to v${VERSION}" \
               --body "Automated update from ee release workflow." \
