@@ -790,10 +790,11 @@ pub fn verify_frame(
         });
     }
 
-    // Exact-next counter; violations close the session.
-    counters.accept(frame.counter)?;
-
-    // Canonical payload bytes: budget, hash, then MAC.
+    // Authenticate before consuming the exact-next counter. A binding-valid
+    // frame with a forged MAC must not burn the slot (T2.7): the peer's
+    // legitimate next frame would then look like a duplicate and close the
+    // session. Replay still closes after a valid MAC, because ordered TCP
+    // has no replay window.
     let payload_bytes = serde_json::to_vec(&frame.payload).map_err(|error| {
         TransportSessionError::MalformedFrame {
             message: format!("serialize payload: {error}"),
@@ -811,12 +812,13 @@ pub fn verify_frame(
         return Err(TransportSessionError::MacMismatch);
     }
 
-    // Capability gate last: extensions must have been negotiated.
     if let FrameCapability::Extension(name) = &frame.capability
         && !negotiated.allows(name)
     {
         return Err(TransportSessionError::ExtensionNotNegotiated { name: name.clone() });
     }
+
+    counters.accept(frame.counter)?;
 
     Ok(VerifiedFrameV2 {
         frame: frame.clone(),
@@ -3738,6 +3740,28 @@ mod tests {
         let keys = kat_keys();
         let frame = kat_frame(&keys);
         assert_eq!(frame.mac, KAT_FRAME_MAC_HEX);
+    }
+
+    #[test]
+    fn forged_mac_does_not_consume_the_exact_next_counter() {
+        let keys = kat_keys();
+        let mut frame = kat_frame(&keys);
+        let mut mac: Vec<u8> = frame.mac.bytes().collect();
+        mac[0] = if mac[0] == b'a' { b'b' } else { b'a' };
+        frame.mac = String::from_utf8(mac).expect("hex stays utf8");
+        let mut counters = SessionCounters::new();
+        let error = verify_frame(
+            &frame,
+            &kat_binding(),
+            SessionDirection::InitiatorToResponder,
+            &mut counters,
+            &keys,
+            &NegotiatedExtensions::none(),
+        )
+        .expect_err("forged MAC must fail");
+        assert_eq!(error, TransportSessionError::MacMismatch);
+        assert_eq!(counters.expected_next(), 1);
+        assert!(!counters.is_closed());
     }
 
     #[test]

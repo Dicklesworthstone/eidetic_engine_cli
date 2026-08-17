@@ -1,8 +1,8 @@
 # Optional Mesh Operator Onboarding
 
-Status: proposed
-Bead: bd-30ilt
-ADR: docs/adr/0037-optional-mesh-memory.md
+Status: Unix live EE-to-EE shipped; two-human Tailscale soak still open
+Bead: bd-30ilt (SRR6 onboarding) / bd-tc-epic-qzk7o (team-confed)
+ADR: docs/adr/0037-optional-mesh-memory.md / docs/adr/0086-team-memory-confederation.md
 
 ## Purpose
 
@@ -17,6 +17,14 @@ For agent-specific decision rules, pair this guide with
 `docs/agent-ux/auto_enrollment_onboarding.md`. Agents should treat that
 onboarding note as the operational checklist for staying local-only, inspecting
 mesh read-only, dry-running enrollment, and handling revisable packs.
+
+For trusted 2–20 person teams, start at `docs/team/quickstart.md` and
+`docs/agent-ux/team.md`. Production Unix sync is
+`TcpMeshForegroundSyncTransport`, not a no-op. The remaining environment
+gates are two-human Tailscale (`bd-tc-epic-qzk7o.3.8`), Windows-host soak
+(`bd-tc-epic-qzk7o.12`), and production IdP soak
+(`bd-tc-epic-qzk7o.8.8`). The live proof ledger is
+`docs/mesh/verification_matrix.md`.
 
 The default remains local-first:
 

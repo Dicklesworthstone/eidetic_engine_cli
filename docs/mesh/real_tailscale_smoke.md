@@ -2,16 +2,21 @@
 
 `scripts/e2e_overhaul/mesh_tailscale_smoke.sh` is an SRR6 opt-in local-surface
 smoke for hosts that already have an authenticated `tailscaled` and at least
-one visible peer on the same tailnet. It is **not** an EE-to-EE transport proof.
-The current production foreground supervisor uses a no-op transport, so this
-script can complete without contacting another EE process, exchanging a hello,
-fetching a body, or advancing an anti-entropy cursor over the network.
+one visible peer on the same tailnet. It is **not** the two-human EE-to-EE
+live-sync gate.
 
-Treat its result as evidence that local Tailscale observation, enrollment,
-policy filtering, and file export/import interoperate on a real tailnet host.
-Do not cite it as evidence of live mesh synchronization. That graduation
-requires the authenticated two-node socket and live-tailnet gates tracked by
-`bd-tc-epic-qzk7o.3.7` and `bd-tc-epic-qzk7o.3.8`.
+Unix production sync is live: `ee mesh sync --once` and `ee team steward once`
+use `TcpMeshForegroundSyncTransport` (hello, EventFetch, grant-gated
+BodyFetch). Isolated loopback / TeamJoin proofs live in
+[`verification_matrix.md`](verification_matrix.md). This script does not
+replace those proofs. It checks that local Tailscale observation, enrollment,
+policy filtering, and file export/import still interoperate on a real tailnet
+host.
+
+Do not cite a green run of this script as evidence that two distinct humans
+exchanged memory over Tailscale. That graduation is
+`bd-tc-epic-qzk7o.3.8` (T2.6): opted-in two-node socket contact, cursors
+advance, and US-4 search/pack recall teammate text.
 
 Default CI and ordinary agent verification must not run a real tailnet probe:
 
@@ -35,14 +40,15 @@ The script validates:
 - `ee mesh status --json` runs with `EE_MESH_ENABLED=1`.
 - The selected real peer is explicitly enrolled and its returned opaque
   `peerId` is used as the transfer target.
-- `ee mesh sync --once --json` completes one foreground supervisor cycle; the
-  current no-op transport permits zero peer contacts.
+- `ee mesh sync --once --json` completes one foreground supervisor cycle.
+  With no second `ee` process on the selected peer, EventFetch/BodyFetch may
+  still contact zero peers; that is a missing remote `ee`, not a no-op
+  transport. Placeholder values such as `bodyFetchMs=0` and
+  `not_exercised_by_local_sync_surface` are not network transfer evidence.
 - `ee mesh export --peer <enrolled-peer-id>` produces a peer-policy-filtered
   JSON artifact and local file-based `ee mesh import --dry-run` accepts it.
 - The event log includes redaction-safe peer, route, latency, policy, and
-  revision fields for local-surface closeout evidence. Placeholder values such
-  as `bodyFetchMs=0` and `not_exercised_by_local_sync_surface` are not network
-  transfer evidence.
+  revision fields for local-surface closeout evidence.
 
 Artifacts are retained. Do not clean them up during agent sessions unless the
 user explicitly authorizes the exact deletion.

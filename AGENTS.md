@@ -1384,12 +1384,17 @@ opening the next bridge, update the existing `CLOSE_THE_GAP_PLAN.md` from
 Part N to Part N+1 instead of creating another plan file at the repo root.
 
 Historical bridges (most recent first):
+- Part III (2026-08-17) — active at repo-root `CLOSE_THE_GAP_PLAN.md`.
+  Mesh/team-confed honesty closeout after the Unix EE-to-EE campaign.
+  Remainders: two-human Tailscale soak, Windows-host soak, production IdP
+  soak, T2.7 remaining fuzz, T5.7 fence (`bd-d67os.28`).
 - Part I + Part II (2026-05-06 / 2026-05-14) — archived at
   `docs/archive/close_the_gap_2026-05.md`. Closed once the bd-3usjw Part II
   tree was substantially executed.
 
-The last bridge began on 2026-05-14. The next scheduled bridge target is
-2026-08-13, unless the vision-coverage gap exceeds 5% before then.
+Part III opened on 2026-08-17 after the scheduled 2026-08-13 cadence plus a
+mesh-campaign reality check. Do not open a Part IV file at the repo root;
+revise `CLOSE_THE_GAP_PLAN.md` in place when the next bridge starts.
 
 ### Essential Commands
 

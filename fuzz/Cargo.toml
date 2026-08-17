@@ -188,6 +188,20 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "mesh_frame_v2"
+path = "fuzz_targets/mesh_frame_v2.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mesh_bootstrap_envelope"
+path = "fuzz_targets/mesh_bootstrap_envelope.rs"
+test = false
+doc = false
+bench = false
+
 [patch.crates-io]
 asupersync = { path = "/data/projects/asupersync" }
 fsqlite = { path = "/data/projects/frankensqlite/crates/fsqlite" }

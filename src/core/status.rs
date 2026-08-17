@@ -1333,9 +1333,14 @@ pub fn probe_mesh_capability() -> CapabilityStatus {
 
 /// Pure decision half of [`probe_mesh_capability`], split out because env
 /// mutation is untestable under `forbid(unsafe_code)`.
+///
+/// Enabled mesh is `Ready`: Unix EE-to-EE uses `TcpMeshForegroundSyncTransport`.
+/// Disabled/absent stays `Pending` so default local-first binaries do not
+/// advertise a required mesh capability. `Unimplemented` is reserved for the
+/// diagnostic force-gap path, not for a working transport.
 const fn mesh_capability_from_flag(enabled: Option<bool>) -> CapabilityStatus {
     if matches!(enabled, Some(true)) {
-        CapabilityStatus::Unimplemented
+        CapabilityStatus::Ready
     } else {
         CapabilityStatus::Pending
     }
@@ -6131,12 +6136,12 @@ mod tests {
     #[test]
     fn mesh_capability_flag_decision_covers_documented_truthy_forms() -> TestResult {
         // Every documented truthy form parses to Some(true) via the shared
-        // parser; the decision half must then report the honest gap. `=1`
+        // parser; enabled mesh is Ready now that live transport exists. `=1`
         // regressing to Pending is bd-y6o13.
         for raw in ["true", "1", "yes", "on"] {
             ensure(
                 mesh_capability_from_flag(crate::config::parse_env_bool_flag(raw)),
-                CapabilityStatus::Unimplemented,
+                CapabilityStatus::Ready,
                 &format!("truthy `{raw}`"),
             )?;
         }
