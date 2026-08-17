@@ -206,8 +206,7 @@ not unbuilt transport:
 
 | Remainder | Owner | Why it stays open |
 | --- | --- | --- |
-| Two-human Tailscale US-4 soak | `bd-tc-epic-qzk7o.3.8` (T2.6) | Isolated loopback/TeamJoin proven; two distinct humans on a real tailnet are unproven |
-| Frame/session/bootstrap fuzz beyond origin properties | `bd-tc-epic-qzk7o.3.9` (T2.7) | Properties + cargo-fuzz targets landed; MAC no longer consumes the exact-next counter. Isolated proof pending before close |
+| Two-human Tailscale US-4 soak | `bd-tc-epic-qzk7o.3.8` (T2.6) | Isolated loopback/TeamJoin proven; `probe_mesh_capability` is Ready when enabled; smoke can require contact via `EE_E2E_REAL_TAILSCALE_REQUIRE_CONTACT=1`. Two distinct humans on a real tailnet still unproven |
 | T5.7 publication fence | `bd-d67os.28` (NavyLotus); `.6.7` waits | Isolated protocol tests passed 2026-08-17; do not steal or duplicate the fence |
 | Windows-host DACL / inbound crash / key-path soak | `bd-tc-epic-qzk7o.12` plus `.2.4` | `x86_64-pc-windows-gnu --lib` compiles; no Windows-host runtime soak |
 | Production IdP vendor soak | `bd-tc-epic-qzk7o.8.8` | Fake-IdP RS256 + live identity_attest proven; Entra/Okta/Google vendor soak unproven |
