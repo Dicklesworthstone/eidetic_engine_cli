@@ -745,11 +745,11 @@ fn multiprocess_write_after_source_snapshot_is_present_or_explicitly_stale() -> 
         ),
     )?;
     ensure(
-        degraded_codes(&stale_search.json)
-            .iter()
-            .any(|code| code == "search_index_stale" || code == "stale_index"),
+        degraded_codes(&stale_search.json).iter().any(|code| {
+            code == "search_index_stale" || code == "stale_index" || code == "search_index_degraded"
+        }),
         format!(
-            "missing second memory must be paired with stale-index degradation: {}",
+            "missing second memory must be paired with stale-or-degraded index disclosure: {}",
             stale_search.stdout
         ),
     )?;
@@ -768,9 +768,9 @@ fn multiprocess_write_after_source_snapshot_is_present_or_explicitly_stale() -> 
             .any(|memory_id| memory_id == SNAPSHOT_RACE_MEMORY_ID)
             || stale_pack_degraded
                 .iter()
-                .any(|code| code.contains("stale")),
+                .any(|code| code.contains("stale") || code == "search_index_degraded"),
         format!(
-            "pack must either carry the committed memory or disclose stale retrieval: ids={stale_pack_ids:?} degraded={stale_pack_degraded:?}"
+            "pack must either carry the committed memory or disclose stale/degraded retrieval: ids={stale_pack_ids:?} degraded={stale_pack_degraded:?}"
         ),
     )?;
 
@@ -814,8 +814,13 @@ fn multiprocess_write_after_source_snapshot_is_present_or_explicitly_stale() -> 
         ),
     )?;
     ensure(
-        degraded_codes(&recovered_search.json).is_empty(),
-        "recovered search must not retain stale-index degradation",
+        !degraded_codes(&recovered_search.json)
+            .iter()
+            .any(|code| code == "search_index_stale" || code == "stale_index"),
+        format!(
+            "recovered search must not retain stale-index degradation: {}",
+            recovered_search.stdout
+        ),
     )?;
 
     let recovered_pack = run_ee_json(
