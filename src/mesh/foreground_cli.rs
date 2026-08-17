@@ -2533,13 +2533,27 @@ fn resolve_workspace_id_from_path(
     let canonical = workspace_path
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
-    let canonical_str = canonical.to_string_lossy().into_owned();
-    if canonical_str != primary
-        && let Some(workspace) = connection
-            .get_workspace_by_path(&canonical_str)
-            .map_err(|error| format!("query workspace: {error}"))?
-    {
-        return Ok(workspace.id);
+    let mut candidates = vec![canonical.to_string_lossy().into_owned()];
+    if let Some(rest) = candidates[0].strip_prefix(r"\\?\UNC\") {
+        candidates.push(format!(r"\\{rest}"));
+    } else if let Some(rest) = candidates[0].strip_prefix(r"\\?\") {
+        candidates.push(rest.to_owned());
+    }
+    for candidate in candidates {
+        if candidate != primary
+            && let Some(workspace) = connection
+                .get_workspace_by_path(&candidate)
+                .map_err(|error| format!("query workspace: {error}"))?
+        {
+            return Ok(workspace.id);
+        }
+    }
+    // A store has one workspace. Path spelling must not invent a second id.
+    let workspaces = connection
+        .list_workspaces()
+        .map_err(|error| format!("list workspaces: {error}"))?;
+    if let [workspace] = workspaces.as_slice() {
+        return Ok(workspace.id.clone());
     }
     Err(format!("workspace row missing for {primary}"))
 }
