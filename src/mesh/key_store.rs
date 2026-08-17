@@ -1233,7 +1233,10 @@ fn open_windows_secure_directory(
                         expected: "directory",
                     });
                 }
-                verify_windows_narrow_dacl(&current)?;
+                // `ee init` may have created `.ee/keys` with an inherited
+                // parent DACL. Harden it in place; do not require the
+                // directory to have been born protected.
+                apply_windows_narrow_dacl(&current)?;
             }
             Err(error)
                 if error.kind() == std::io::ErrorKind::NotFound
