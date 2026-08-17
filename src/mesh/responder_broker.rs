@@ -2538,6 +2538,20 @@ fn default_responder_control_socket_path_with(
     mut env_var: impl FnMut(&str) -> Option<std::ffi::OsString>,
     uid: u32,
 ) -> PathBuf {
+    if cfg!(windows) {
+        if let Some(local) = env_var("LOCALAPPDATA").filter(|value| !value.is_empty()) {
+            return Path::new(&local)
+                .join("eidetic-engine")
+                .join("mesh-responder.control");
+        }
+        if let Some(profile) = env_var("USERPROFILE").filter(|value| !value.is_empty()) {
+            return Path::new(&profile)
+                .join("AppData")
+                .join("Local")
+                .join("eidetic-engine")
+                .join("mesh-responder.control");
+        }
+    }
     let tmp = env_var("TMPDIR").unwrap_or_else(|| "/tmp".into());
     if let Some(runtime_dir) = env_var("XDG_RUNTIME_DIR") {
         let runtime = Path::new(&runtime_dir);
@@ -4073,6 +4087,23 @@ mod tests {
             ),
             PathBuf::from("/var/tmp/ee-501/mesh-responder.sock")
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn default_control_socket_on_windows_is_not_under_workspace_ee() {
+        let path = default_responder_control_socket_path_with(
+            |key| match key {
+                "LOCALAPPDATA" => Some(r"C:\Users\jeffr\AppData\Local".into()),
+                _ => None,
+            },
+            0,
+        );
+        assert_eq!(
+            path,
+            PathBuf::from(r"C:\Users\jeffr\AppData\Local\eidetic-engine\mesh-responder.control")
+        );
+        assert!(!path.components().any(|part| part.as_os_str() == ".ee"));
     }
 
     #[test]

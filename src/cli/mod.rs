@@ -2589,9 +2589,9 @@ pub enum DaemonCommand {
     /// socket so subsequent `ee` invocations stop short-circuiting to
     /// the (now-dead) daemon.
     Stop(DaemonHotModeStopArgs),
-    /// Install a user-scoped launchd/systemd unit for the team steward.
+    /// Install a user-scoped launchd/systemd/Windows-task unit for the team steward.
     Install(DaemonServiceInstallArgs),
-    /// Quarantine the user-scoped launchd/systemd unit.
+    /// Quarantine the user-scoped launchd/systemd/Windows-task unit.
     Uninstall(DaemonServiceUninstallArgs),
 }
 
@@ -60851,14 +60851,17 @@ where
     W: Write,
     E: Write,
 {
-    let home = match std::env::var_os("HOME").map(PathBuf::from) {
+    let home = match crate::daemon::service_install::resolve_user_home() {
         Some(path) => path,
         None => {
             return write_domain_error(
                 &DomainError::Configuration {
-                    message: "HOME is unset; cannot locate a user-scoped service directory"
-                        .to_owned(),
-                    repair: Some("export HOME and retry ee daemon install --dry-run".to_owned()),
+                    message:
+                        "HOME/USERPROFILE is unset; cannot locate a user-scoped service directory"
+                            .to_owned(),
+                    repair: Some(
+                        "set HOME or USERPROFILE and retry ee daemon install --dry-run".to_owned(),
+                    ),
                 },
                 cli.wants_json(),
                 stdout,
@@ -60873,9 +60876,7 @@ where
     if kind == crate::daemon::service_install::DaemonServiceKind::Unsupported {
         return write_domain_error(
             &DomainError::Configuration {
-                message:
-                    "Windows has no launchd/systemd unit; run the inbound owner in the foreground"
-                        .to_owned(),
+                message: "this platform has no user-scoped daemon supervisor".to_owned(),
                 repair: Some("ee mesh hello-responder run --workspace . --json".to_owned()),
             },
             cli.wants_json(),
@@ -60885,6 +60886,17 @@ where
     }
     if confirm {
         if uninstall {
+            if let Err(error) = crate::daemon::service_install::deactivate_daemon_service(kind) {
+                return write_domain_error(
+                    &DomainError::Storage {
+                        message: format!("Failed to unregister daemon unit: {error}"),
+                        repair: Some("ee daemon uninstall --confirm --json".to_owned()),
+                    },
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                );
+            }
             if let Some(path) = plan.unit_path.as_deref().map(PathBuf::from)
                 && path.is_file()
             {
@@ -60907,7 +60919,7 @@ where
             plan.unit_path.as_deref().map(PathBuf::from),
             plan.unit_body.as_deref(),
         ) {
-            match crate::daemon::service_install::write_unit_file(&path, body) {
+            match crate::daemon::service_install::write_service_unit(kind, &path, body) {
                 Ok(()) => plan.written = true,
                 Err(error) => {
                     return write_domain_error(
