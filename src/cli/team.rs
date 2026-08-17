@@ -7,12 +7,13 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 
 use crate::db::DbConnection;
+use crate::mesh::peer_state::MeshDriftThresholds;
 use crate::mesh::team::{
-    TeamInviteReport, add_local_team_node, adopt_team_project, any_local_team_paused,
-    attest_local_id_token, create_local_team_with_store, execute_team_idp_token_poll,
-    execute_team_steward_once, fetch_local_team_body, inspect_team_health,
-    join_team_with_code_on_store, leave_local_team, list_team_activity, list_team_projects,
-    local_team_status, mint_team_invite_with_store, plan_team_idp_device,
+    TeamInviteReport, TeamMemberRecord, TeamStatusReport, add_local_team_node, adopt_team_project,
+    any_local_team_paused, attest_local_id_token, create_local_team_with_store,
+    execute_team_idp_token_poll, execute_team_steward_once, fetch_local_team_body,
+    inspect_team_health, join_team_with_code_on_store, leave_local_team, list_team_activity,
+    list_team_projects, local_team_status, mint_team_invite_with_store, plan_team_idp_device,
     reconcile_local_team_membership, reconcile_local_team_projects, remove_team_member,
     require_tailnet_attested, resume_pending_invite, revalidate_team_identities,
     revoke_team_invite, revoke_team_invites_before_floor, rotate_local_signing_key,
@@ -750,41 +751,21 @@ where
     };
     match local_team_status(&connection) {
         Ok(report) => {
-            let human = if report.teams.is_empty() {
-                "No local team genesis recorded.\nNext:\n  ee team create --name \"<team>\" --workspace . --json\n"
-                    .to_owned()
-            } else {
-                let mut lines = vec![format!("Teams: {}", report.team_count)];
-                for team in &report.teams {
-                    lines.push(format!(
-                        "  {} ({}) port {} genesis {}",
-                        team.display_name, team.team_id, team.hello_port, team.genesis_event_id
-                    ));
-                }
-                if !report.members.is_empty() {
-                    lines.push(format!("Members: {}", report.members.len()));
-                    for member in &report.members {
-                        lines.push(format!(
-                            "  {} ({}) {} {}",
-                            member.display_name,
-                            member.member_id,
-                            member.bound_via,
-                            if member.is_self { "self" } else { "peer" }
-                        ));
-                    }
-                }
-                if !report.nodes.is_empty() {
-                    lines.push(format!("Nodes: {}", report.nodes.len()));
-                    for node in &report.nodes {
-                        lines.push(format!(
-                            "  {} gen {} {}",
-                            node.node_id, node.signing_key_generation, node.state
-                        ));
-                    }
-                }
-                lines.join("\n") + "\n"
-            };
-            write_team_report(cli, &report, &human, stdout)
+            let as_of = chrono::Utc::now();
+            let freshness = collect_team_member_freshness(&connection, &report.members, as_of);
+            let human = render_team_status_human(&report, &freshness, as_of);
+            match inject_team_member_freshness(&report, &freshness) {
+                Ok(data) => write_team_report(cli, &data, &human, stdout),
+                Err(error) => write_domain_error(
+                    &DomainError::Storage {
+                        message: format!("Failed to serialize team status: {error}"),
+                        repair: Some("ee team status --workspace . --json".to_owned()),
+                    },
+                    cli.wants_json(),
+                    stdout,
+                    stderr,
+                ),
+            }
         }
         Err(error) => write_domain_error(
             &DomainError::Storage {
@@ -2681,6 +2662,211 @@ fn open_team_store(
     Ok((connection, workspace_id))
 }
 
+const MEMBER_REACHABILITY_SELF: &str = "self";
+const MEMBER_REACHABILITY_NEVER_SYNCED: &str = "never_synced";
+const MEMBER_REACHABILITY_SYNCED: &str = "synced";
+const MEMBER_REACHABILITY_SOFT_STALE: &str = "soft_stale";
+const MEMBER_REACHABILITY_HARD_STALE: &str = "hard_stale";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TeamMemberFreshness {
+    last_seen_at: Option<String>,
+    reachability: &'static str,
+}
+
+fn collect_team_member_freshness(
+    connection: &DbConnection,
+    members: &[TeamMemberRecord],
+    as_of: chrono::DateTime<chrono::Utc>,
+) -> Vec<TeamMemberFreshness> {
+    let thresholds = MeshDriftThresholds::default();
+    members
+        .iter()
+        .map(|member| {
+            let last_seen_at = if member.is_self {
+                None
+            } else {
+                latest_peer_last_seen(connection, &member.workspace_id, &member.origin_node_id)
+            };
+            TeamMemberFreshness {
+                reachability: classify_team_member_reachability(
+                    member.is_self,
+                    last_seen_at.as_deref(),
+                    as_of,
+                    thresholds,
+                ),
+                last_seen_at,
+            }
+        })
+        .collect()
+}
+
+fn latest_peer_last_seen(
+    connection: &DbConnection,
+    workspace_id: &str,
+    origin_node_id: &str,
+) -> Option<String> {
+    let peers = connection.list_mesh_peers(workspace_id).ok()?;
+    peers
+        .into_iter()
+        .filter(|peer| {
+            peer.origin_node_id == origin_node_id && !peer.last_seen_at.trim().is_empty()
+        })
+        .max_by(|left, right| last_seen_ord(&left.last_seen_at, &right.last_seen_at))
+        .map(|peer| peer.last_seen_at)
+}
+
+fn last_seen_ord(left: &str, right: &str) -> std::cmp::Ordering {
+    match (parse_rfc3339_utc(left), parse_rfc3339_utc(right)) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (None, None) => left.cmp(right),
+    }
+}
+
+fn classify_team_member_reachability(
+    is_self: bool,
+    last_seen_at: Option<&str>,
+    as_of: chrono::DateTime<chrono::Utc>,
+    thresholds: MeshDriftThresholds,
+) -> &'static str {
+    if is_self {
+        return MEMBER_REACHABILITY_SELF;
+    }
+    let Some(seen) = last_seen_at.and_then(parse_rfc3339_utc) else {
+        return MEMBER_REACHABILITY_NEVER_SYNCED;
+    };
+    let elapsed = as_of.signed_duration_since(seen).num_seconds();
+    if elapsed < 0 {
+        return MEMBER_REACHABILITY_SYNCED;
+    }
+    let elapsed = u64::try_from(elapsed).unwrap_or(u64::MAX);
+    if elapsed >= thresholds.hard_stale_after_seconds {
+        MEMBER_REACHABILITY_HARD_STALE
+    } else if elapsed >= thresholds.soft_stale_after_seconds {
+        MEMBER_REACHABILITY_SOFT_STALE
+    } else {
+        MEMBER_REACHABILITY_SYNCED
+    }
+}
+
+fn parse_rfc3339_utc(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|stamp| stamp.with_timezone(&chrono::Utc))
+}
+
+fn render_team_status_human(
+    report: &TeamStatusReport,
+    freshness: &[TeamMemberFreshness],
+    as_of: chrono::DateTime<chrono::Utc>,
+) -> String {
+    if report.teams.is_empty() {
+        return "No local team genesis recorded.\nNext:\n  ee team create --name \"<team>\" --workspace . --json\n"
+            .to_owned();
+    }
+    let mut lines = vec![format!("Teams: {}", report.team_count)];
+    for team in &report.teams {
+        lines.push(format!(
+            "  {} ({}) port {} genesis {}",
+            team.display_name, team.team_id, team.hello_port, team.genesis_event_id
+        ));
+    }
+    if !report.members.is_empty() {
+        lines.push(format!("Members: {}", report.members.len()));
+        for (member, fresh) in report.members.iter().zip(freshness.iter()) {
+            let role = if member.is_self { "self" } else { "peer" };
+            let mut line = format!(
+                "  {} ({}) {} {}",
+                member.display_name, member.member_id, member.bound_via, role
+            );
+            if let Some(label) = human_member_freshness_label(
+                fresh.reachability,
+                fresh.last_seen_at.as_deref(),
+                as_of,
+            ) {
+                line.push_str(" · ");
+                line.push_str(&label);
+            }
+            lines.push(line);
+        }
+    }
+    if !report.nodes.is_empty() {
+        lines.push(format!("Nodes: {}", report.nodes.len()));
+        for node in &report.nodes {
+            lines.push(format!(
+                "  {} gen {} {}",
+                node.node_id, node.signing_key_generation, node.state
+            ));
+        }
+    }
+    lines.join("\n") + "\n"
+}
+
+fn human_member_freshness_label(
+    reachability: &str,
+    last_seen_at: Option<&str>,
+    as_of: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    match reachability {
+        MEMBER_REACHABILITY_SELF => None,
+        MEMBER_REACHABILITY_NEVER_SYNCED => Some("never synced".to_owned()),
+        MEMBER_REACHABILITY_SYNCED => Some(format!(
+            "synced {} ago",
+            human_age_since(last_seen_at, as_of)
+        )),
+        MEMBER_REACHABILITY_SOFT_STALE => {
+            Some(format!("stale {}", human_age_since(last_seen_at, as_of)))
+        }
+        MEMBER_REACHABILITY_HARD_STALE => Some(format!(
+            "unreachable {}",
+            human_age_since(last_seen_at, as_of)
+        )),
+        _ => None,
+    }
+}
+
+fn human_age_since(last_seen_at: Option<&str>, as_of: chrono::DateTime<chrono::Utc>) -> String {
+    let Some(seen) = last_seen_at.and_then(parse_rfc3339_utc) else {
+        return "unknown".to_owned();
+    };
+    let elapsed = as_of.signed_duration_since(seen).num_seconds().max(0);
+    let elapsed = u64::try_from(elapsed).unwrap_or(0);
+    if elapsed < 60 {
+        format!("{elapsed}s")
+    } else if elapsed < 3_600 {
+        format!("{}m", elapsed / 60)
+    } else if elapsed < 86_400 {
+        format!("{}h", elapsed / 3_600)
+    } else {
+        format!("{}d", elapsed / 86_400)
+    }
+}
+
+fn inject_team_member_freshness(
+    report: &TeamStatusReport,
+    freshness: &[TeamMemberFreshness],
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut data = serde_json::to_value(report)?;
+    let Some(members) = data
+        .get_mut("members")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(data);
+    };
+    for (member, fresh) in members.iter_mut().zip(freshness.iter()) {
+        let Some(object) = member.as_object_mut() else {
+            continue;
+        };
+        if let Some(last_seen_at) = fresh.last_seen_at.as_deref() {
+            object.insert("lastSeenAt".to_owned(), json!(last_seen_at));
+        }
+        object.insert("reachability".to_owned(), json!(fresh.reachability));
+    }
+    Ok(data)
+}
+
 fn write_team_report<W, T>(
     cli: &Cli,
     report: &T,
@@ -2729,5 +2915,222 @@ where
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{
+        CreateWorkspaceInput, DbConnection, InsertTeamMemberInput, UpsertMeshPeerInput,
+    };
+    use crate::mesh::team::create_local_team;
+
+    fn open_db() -> DbConnection {
+        let connection = DbConnection::open_memory().expect("open");
+        connection.migrate().expect("migrate");
+        connection
+    }
+
+    #[test]
+    fn classify_self_and_age_windows() {
+        let as_of = parse_rfc3339_utc("2026-08-13T01:00:00Z").expect("as_of");
+        let thresholds = MeshDriftThresholds::default();
+        assert_eq!(
+            classify_team_member_reachability(
+                true,
+                Some("2026-08-13T00:00:00Z"),
+                as_of,
+                thresholds
+            ),
+            MEMBER_REACHABILITY_SELF
+        );
+        assert_eq!(
+            classify_team_member_reachability(false, None, as_of, thresholds),
+            MEMBER_REACHABILITY_NEVER_SYNCED
+        );
+        assert_eq!(
+            classify_team_member_reachability(
+                false,
+                Some("2026-08-13T00:59:00Z"),
+                as_of,
+                thresholds
+            ),
+            MEMBER_REACHABILITY_SYNCED
+        );
+        assert_eq!(
+            classify_team_member_reachability(
+                false,
+                Some("2026-08-13T00:50:00Z"),
+                as_of,
+                thresholds
+            ),
+            MEMBER_REACHABILITY_SOFT_STALE
+        );
+        assert_eq!(
+            classify_team_member_reachability(
+                false,
+                Some("2026-08-12T23:00:00Z"),
+                as_of,
+                thresholds
+            ),
+            MEMBER_REACHABILITY_HARD_STALE
+        );
+        assert_eq!(
+            human_member_freshness_label(
+                MEMBER_REACHABILITY_HARD_STALE,
+                Some("2026-08-10T01:00:00Z"),
+                as_of
+            )
+            .as_deref(),
+            Some("unreachable 3d")
+        );
+        assert_eq!(
+            human_member_freshness_label(
+                MEMBER_REACHABILITY_SYNCED,
+                Some("2026-08-13T00:56:00Z"),
+                as_of
+            )
+            .as_deref(),
+            Some("synced 4m ago")
+        );
+    }
+
+    #[test]
+    fn team_status_human_names_peer_sync_freshness() {
+        let connection = open_db();
+        connection
+            .insert_workspace(
+                "wsp_statusfresh000000000000001",
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-team-status-fresh".to_owned(),
+                    name: Some("status-fresh".to_owned()),
+                },
+            )
+            .expect("workspace");
+        let created = create_local_team(
+            &connection,
+            "wsp_statusfresh000000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        connection
+            .insert_team_member(&InsertTeamMemberInput {
+                member_id: "mbr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+                team_id: created.team.team_id.clone(),
+                workspace_id: "wsp_statusfresh000000000000001".to_owned(),
+                display_name: "Priya".to_owned(),
+                state: "active".to_owned(),
+                is_self: false,
+                origin_node_id: "node_priya00000000000000000001".to_owned(),
+                bound_via: "invite_ceremony".to_owned(),
+                joined_at: "2026-08-13T00:56:00Z".to_owned(),
+            })
+            .expect("priya");
+        connection
+            .upsert_mesh_peer(&UpsertMeshPeerInput {
+                workspace_id: "wsp_statusfresh000000000000001".to_owned(),
+                peer_id: "peer_priyafresh000000000000001".to_owned(),
+                origin_node_id: "node_priya00000000000000000001".to_owned(),
+                display_name: Some("Priya".to_owned()),
+                policy_summary_json: None,
+                enabled: true,
+                last_seen_at: Some("2026-08-13T00:56:00Z".to_owned()),
+            })
+            .expect("priya peer");
+        connection
+            .insert_team_member(&InsertTeamMemberInput {
+                member_id: "mbr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                team_id: created.team.team_id.clone(),
+                workspace_id: "wsp_statusfresh000000000000001".to_owned(),
+                display_name: "Marcus".to_owned(),
+                state: "active".to_owned(),
+                is_self: false,
+                origin_node_id: "node_marcus0000000000000000001".to_owned(),
+                bound_via: "invite_ceremony".to_owned(),
+                joined_at: "2026-08-13T00:00:00Z".to_owned(),
+            })
+            .expect("marcus");
+        connection
+            .upsert_mesh_peer(&UpsertMeshPeerInput {
+                workspace_id: "wsp_statusfresh000000000000001".to_owned(),
+                peer_id: "peer_stalehana0000000000000001".to_owned(),
+                origin_node_id: "node_hanaold000000000000000001".to_owned(),
+                display_name: Some("Hana-laptop".to_owned()),
+                policy_summary_json: None,
+                enabled: true,
+                last_seen_at: Some("2026-08-10T01:00:00Z".to_owned()),
+            })
+            .expect("unused peer");
+
+        let report = local_team_status(&connection).expect("status");
+        let as_of = parse_rfc3339_utc("2026-08-13T01:00:00Z").expect("as_of");
+        let freshness = collect_team_member_freshness(&connection, &report.members, as_of);
+        let human = render_team_status_human(&report, &freshness, as_of);
+        let data = inject_team_member_freshness(&report, &freshness).expect("json");
+
+        let self_member = report.members.iter().find(|m| m.is_self).expect("self");
+        let priya = report
+            .members
+            .iter()
+            .find(|m| m.display_name == "Priya")
+            .expect("priya");
+        let marcus = report
+            .members
+            .iter()
+            .find(|m| m.display_name == "Marcus")
+            .expect("marcus");
+        let by_id = |id: &str| {
+            freshness
+                .iter()
+                .zip(report.members.iter())
+                .find(|(_, member)| member.member_id == id)
+                .map(|(fresh, _)| fresh)
+                .expect("fresh")
+        };
+
+        assert_eq!(
+            by_id(&self_member.member_id).reachability,
+            MEMBER_REACHABILITY_SELF
+        );
+        assert_eq!(
+            by_id(&priya.member_id).reachability,
+            MEMBER_REACHABILITY_SYNCED
+        );
+        assert_eq!(
+            by_id(&priya.member_id).last_seen_at.as_deref(),
+            Some("2026-08-13T00:56:00Z")
+        );
+        assert_eq!(
+            by_id(&marcus.member_id).reachability,
+            MEMBER_REACHABILITY_NEVER_SYNCED
+        );
+        assert!(
+            human.contains("Priya") && human.contains("synced 4m ago"),
+            "human must name Priya's last sync: {human}"
+        );
+        assert!(
+            human.contains("Marcus") && human.contains("never synced"),
+            "human must say Marcus never synced: {human}"
+        );
+        assert!(
+            !human.contains("unreachable"),
+            "an unused old peer must not label the local operator unreachable: {human}"
+        );
+
+        let members = data["members"].as_array().expect("members");
+        let priya_json = members
+            .iter()
+            .find(|row| row["displayName"] == "Priya")
+            .expect("priya json");
+        assert_eq!(priya_json["reachability"], "synced");
+        assert_eq!(priya_json["lastSeenAt"], "2026-08-13T00:56:00Z");
+        let marcus_json = members
+            .iter()
+            .find(|row| row["displayName"] == "Marcus")
+            .expect("marcus json");
+        assert_eq!(marcus_json["reachability"], "never_synced");
+        assert!(marcus_json.get("lastSeenAt").is_none());
     }
 }

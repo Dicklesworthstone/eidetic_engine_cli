@@ -56,7 +56,12 @@ floor are an error; the repair is `ee team revoke --all-before-floor`.
   defaults the locator to the local Tailscale IPv4 address; pass
   `--endpoint` when Tailscale is absent. `ee team status` lists
   `pendingInvites[]` for `ee team revoke --invite-id` and
-  `pendingRemovalAcks[]` for unsigned removal fanout. Allowed import-ledger memory events rematerialize as local stubs
+  `pendingRemovalAcks[]` for unsigned removal fanout. Each
+  `members[]` row carries `reachability`
+  (`self`/`never_synced`/`synced`/`soft_stale`/`hard_stale`)
+  and optional `lastSeenAt` from the enrolled mesh peer.
+  Human status prints `synced 4m ago` / `unreachable 3d` for
+  peers; JSON keeps the absolute timestamp. Allowed import-ledger memory events rematerialize as local stubs
 via `ee team steward once` if sync crashed after the ledger write.
 Origin project
   shares rematerialize with `ee team projects reconcile`; adopt binds

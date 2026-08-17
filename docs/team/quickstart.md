@@ -21,6 +21,7 @@ ee team join --invite "$INVITE" --workspace . --json
 ee team status --workspace . --json
 ee team members list --workspace . --json
 ee team doctor --workspace . --json
+# status.members[] carry reachability + lastSeenAt (Hana: synced 4m ago)
 # status.pendingInvites[] carries inviteId for ee team revoke --invite-id
 ```
 
