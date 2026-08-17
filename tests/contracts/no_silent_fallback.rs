@@ -579,7 +579,7 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "NSF-CORE-MEMORY-SCOPE-TEAM-MEMBERS",
         "src/core/memory_scope.rs",
         "team_members\n.unwrap_or_default()",
-        "Missing trust.team_members config intentionally produces an empty verified-agent set.",
+        "Team scope loads durable team_members rows only; missing config cannot mint nicknames.",
     ),
     allowed(
         "NSF-CORE-MEMORY-SCOPE-AGENT-URI",
