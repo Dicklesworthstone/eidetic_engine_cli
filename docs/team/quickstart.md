@@ -30,7 +30,8 @@ printf '%s\n' "$PASSPHRASE" | ee team credentials restore --input .ee/keys/mesh-
 ee team port show --workspace . --json
 ee team port migrate --to 41999 --confirm --workspace . --json
 # then restart the responder; it binds the folded team port unless --port or EE_MESH_HELLO_PORT is set
-# ee mesh hello-responder run --workspace .
+ee mesh hello-responder run --workspace .
+# unset EE_MESH_HELLO_PORT if it still pins the previous port
 # status.members[] carry reachability + lastSeenAt (Hana: synced 4m ago)
 # status.pendingInvites[] carries inviteId for ee team revoke --invite-id
 ```

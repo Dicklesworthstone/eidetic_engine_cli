@@ -1874,10 +1874,16 @@ fn persist_sync_round_events(
             imported = imported.saturating_add(1);
         }
     }
-    let _ = crate::mesh::team::apply_imported_team_port_migrations(
+    if let Err(error) = crate::mesh::team::apply_imported_team_port_migrations(
         &connection,
         snapshot.workspace_id.as_str(),
-    );
+    ) {
+        tracing::warn!(
+            workspace_id = snapshot.workspace_id.as_str(),
+            error = %error,
+            "failed to apply imported teamPortMigrated locators after mesh sync"
+        );
+    }
     imported
 }
 

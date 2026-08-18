@@ -2898,7 +2898,7 @@ where
                 cli,
                 &report,
                 &format!(
-                    "Team hello port migrated\n  team_id: {}\n  current: {}\n  previous: {previous}\n  generation: {}\n  genesis_event_hash: {}\n  peer_endpoints_rewritten: {}\n  pair_keys_unchanged: {}\n  grants_unchanged: {}\nNext:\n  EE_MESH_HELLO_PORT={} ee mesh hello-responder run --workspace . --port {}\n",
+                    "Team hello port migrated\n  team_id: {}\n  current: {}\n  previous: {previous}\n  generation: {}\n  genesis_event_hash: {}\n  peer_endpoints_rewritten: {}\n  pair_keys_unchanged: {}\n  grants_unchanged: {}\nNext:\n  ee mesh hello-responder run --workspace .\n  # unset EE_MESH_HELLO_PORT if it still pins the previous port; --port and the env var win over the folded team port\n",
                     report.team_id,
                     report.current_hello_port,
                     report.port_generation,
@@ -2906,8 +2906,6 @@ where
                     report.peer_endpoints_rewritten,
                     report.pair_keys_unchanged,
                     report.grants_unchanged,
-                    report.current_hello_port,
-                    report.current_hello_port,
                 ),
                 stdout,
             )

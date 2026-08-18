@@ -80,6 +80,9 @@ pub const TEAM_PROJECTS_SCHEMA_V1: &str = "ee.team.projects.v1";
 pub const TEAM_PROJECT_SHARED_OPERATION: &str = "teamProjectShared";
 pub const TEAM_PORT_SCHEMA_V1: &str = "ee.team.port.v1";
 pub const TEAM_PORT_MIGRATED_OPERATION: &str = "teamPortMigrated";
+/// Manifest scan for genesis + `teamPortMigrated`. Membership/project/IdP
+/// rows share this table; 256 is too small once a team has been busy.
+const TEAM_PORT_MANIFEST_SCAN_LIMIT: u32 = 4096;
 const TEAM_PROJECT_ID_PREFIX: &str = "prj_tm_";
 const TEAM_PROJECT_ID_LEN: usize = 33;
 
@@ -769,7 +772,7 @@ pub fn create_local_team_with_store(
 /// Load local `teamCreated` genesis events.
 pub fn load_local_teams(connection: &DbConnection) -> Result<Vec<TeamRecord>, OriginStreamError> {
     let rows = connection
-        .list_mesh_manifest_origin_events(256)
+        .list_mesh_manifest_origin_events(TEAM_PORT_MANIFEST_SCAN_LIMIT)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
     let mut teams = Vec::new();
     let mut migrated_ports = std::collections::BTreeMap::<String, u16>::new();
@@ -822,7 +825,15 @@ pub fn inspect_team_port(connection: &DbConnection) -> Result<TeamPortReport, Or
         pair_keys_unchanged: true,
         grants_unchanged: true,
         peer_endpoints_rewritten: 0,
-        mesh_primitives: vec!["ee.team.manifest_event.v1", TEAM_CREATED_OPERATION],
+        mesh_primitives: if port_generation > 1 {
+            vec![
+                "ee.team.manifest_event.v1",
+                TEAM_CREATED_OPERATION,
+                TEAM_PORT_MIGRATED_OPERATION,
+            ]
+        } else {
+            vec!["ee.team.manifest_event.v1", TEAM_CREATED_OPERATION]
+        },
     })
 }
 
@@ -928,7 +939,7 @@ pub fn apply_imported_team_port_migrations(
     workspace_id: &str,
 ) -> Result<usize, OriginStreamError> {
     let rows = connection
-        .list_mesh_manifest_origin_events(256)
+        .list_mesh_manifest_origin_events(TEAM_PORT_MANIFEST_SCAN_LIMIT)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
     let mut rewritten = 0_usize;
     for row in rows {
@@ -970,7 +981,7 @@ fn port_migration_state(
     team_id: &str,
 ) -> Result<(u16, u64, Option<u16>), OriginStreamError> {
     let rows = connection
-        .list_mesh_manifest_origin_events(256)
+        .list_mesh_manifest_origin_events(TEAM_PORT_MANIFEST_SCAN_LIMIT)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
     let mut genesis_port = configured_hello_port();
     let mut generation = 1_u64;
@@ -1057,6 +1068,11 @@ fn rewrite_peer_endpoints_for_port(
 fn replace_endpoint_port(endpoint: &str, previous_port: u16, next_port: u16) -> Option<String> {
     let (host, port) = endpoint.rsplit_once(':')?;
     if port.parse::<u16>().ok()? != previous_port || host.is_empty() {
+        return None;
+    }
+    // Bare IPv6 (`fd7a:115c::1`) contains colons but is not host:port.
+    // Bracket form (`[fd7a:115c::1]:41888`) is the only IPv6 locator we rewrite.
+    if host.contains(':') && !host.starts_with('[') {
         return None;
     }
     Some(format!("{host}:{next_port}"))
@@ -1269,6 +1285,7 @@ fn team_record_from_origin(
         .get("helloPort")
         .and_then(serde_json::Value::as_u64)
         .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port >= 1024)
         .unwrap_or_else(configured_hello_port);
     Ok(Some(TeamRecord {
         team_id: row.team_id.clone(),
@@ -6981,7 +6998,13 @@ fn apply_join_first_sync_events(
             imported = imported.saturating_add(1);
         }
     }
-    let _ = apply_imported_team_port_migrations(connection, workspace_id);
+    if let Err(error) = apply_imported_team_port_migrations(connection, workspace_id) {
+        tracing::warn!(
+            workspace_id,
+            error = %error,
+            "failed to apply imported teamPortMigrated locators after join first-sync"
+        );
+    }
     imported
 }
 
@@ -7524,6 +7547,50 @@ mod tests {
                     .as_deref()
                     .is_some_and(|repair| repair.contains("ee team port migrate --to"))
         }));
+        let second = migrate_local_team_port(
+            &connection,
+            "wsp_persistfixture000000000001",
+            42000,
+            "2026-08-13T03:00:00Z",
+            None,
+        )
+        .expect("second migrate");
+        assert_eq!(second.current_hello_port, 42000);
+        assert_eq!(second.previous_hello_port, Some(41999));
+        assert_eq!(second.port_generation, 3);
+        assert_eq!(second.genesis_event_hash, genesis);
+        assert_eq!(
+            load_local_teams(&connection).expect("reload after second")[0].hello_port,
+            42000
+        );
+        assert_eq!(
+            mint_team_invite(
+                &connection,
+                "127.0.0.1",
+                "2026-08-13T04:00:00Z",
+                "2026-08-20T00:00:00Z",
+            )
+            .expect("invite after second")
+            .hello_port,
+            42000
+        );
+    }
+
+    #[test]
+    fn replace_endpoint_port_rewrites_ipv4_and_bracket_ipv6_only() {
+        assert_eq!(
+            replace_endpoint_port("127.0.0.1:41888", 41888, 41999).as_deref(),
+            Some("127.0.0.1:41999")
+        );
+        assert_eq!(
+            replace_endpoint_port("[fd7a:115c:a1e0::1]:41888", 41888, 41999).as_deref(),
+            Some("[fd7a:115c:a1e0::1]:41999")
+        );
+        assert_eq!(
+            replace_endpoint_port("fd7a:115c:a1e0::41888", 41888, 41999),
+            None
+        );
+        assert_eq!(replace_endpoint_port("127.0.0.1:41888", 41999, 42000), None);
     }
 
     #[test]
