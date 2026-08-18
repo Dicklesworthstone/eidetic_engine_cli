@@ -3736,7 +3736,7 @@ where
     W: Write,
     E: Write,
 {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (args, op);
         return write_responder_broker_error(
@@ -3746,7 +3746,7 @@ where
             stderr,
         );
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         let (snapshot, connection) = match open_mesh_peer_store(cli, args.database.as_deref()) {
             Ok(store) => store,
@@ -3840,23 +3840,6 @@ where
             .control_socket
             .clone()
             .unwrap_or_else(default_responder_control_socket_path);
-        #[cfg(not(any(unix, windows)))]
-        {
-            let _ = (socket, request);
-            return write_domain_error(
-                &DomainError::Configuration {
-                    message: "responder control requires a Unix or Windows host".to_owned(),
-                    repair: Some(
-                        "use a Unix or Windows host for ee mesh responder register/unregister"
-                            .to_owned(),
-                    ),
-                },
-                cli.wants_json(),
-                stdout,
-                stderr,
-            );
-        }
-        #[cfg(any(unix, windows))]
         match submit_responder_control_request(&socket, &request) {
             Ok(response) if response.ok => {
                 let mut status = HelloResponderStatusReport::from_runtime(

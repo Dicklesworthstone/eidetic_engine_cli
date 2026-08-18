@@ -2920,8 +2920,11 @@ fn owner_safe_canonical_path(path: &Path) -> Result<PathBuf, ResponderBrokerErro
     }
     #[cfg(windows)]
     {
+        // Walk the stripped form so `\\?\C:\...` from Path::canonicalize
+        // does not fail metadata on the verbatim prefix.
+        let walk_root = PathBuf::from(normalize_windows_path(path));
         let mut current = PathBuf::new();
-        for component in path.components() {
+        for component in walk_root.components() {
             current.push(component);
             if windows_path_component_is_reparse(&current)? {
                 return Err(ResponderBrokerError::InvalidConfiguration);
@@ -4439,12 +4442,23 @@ mod tests {
             workspace_id: "wsp_wincontrol".to_owned(),
             team_id: "team_wincontrol".to_owned(),
             responder_node_id: "node_0123456789abcdef0123456789abcdef".to_owned(),
-            workspace_path: workspace,
-            database_path: database,
+            workspace_path: workspace.clone(),
+            database_path: database.clone(),
             peer_handles: vec!["peer_0123456789abcdef0123456789abcdef".to_owned()],
             committed_port: 41889,
         };
         assert!(validate_control_request(&request).is_ok());
+
+        let verbatim_workspace = workspace.canonicalize().expect("canon workspace");
+        let verbatim_database = database.canonicalize().expect("canon database");
+        assert!(
+            owner_safe_canonical_path(&verbatim_workspace).is_ok(),
+            "canonical verbatim workspace must be owner-safe"
+        );
+        let mut verbatim_request = request;
+        verbatim_request.workspace_path = verbatim_workspace;
+        verbatim_request.database_path = verbatim_database;
+        assert!(validate_control_request(&verbatim_request).is_ok());
     }
 
     #[test]
