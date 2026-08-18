@@ -6981,6 +6981,7 @@ fn apply_join_first_sync_events(
             imported = imported.saturating_add(1);
         }
     }
+    let _ = apply_imported_team_port_migrations(connection, workspace_id);
     imported
 }
 
@@ -7596,10 +7597,42 @@ mod tests {
             .get_mesh_peer("wsp_persistfixture000000000001", &peer_id)
             .expect("peer")
             .expect("present");
-        let record: crate::mesh::peer::MeshPeerRecord =
+        let mut record: crate::mesh::peer::MeshPeerRecord =
             serde_json::from_str(stored.policy_summary_json.as_deref().expect("json"))
                 .expect("parse peer");
         assert_eq!(record.endpoint.endpoint, "127.0.0.1:41999");
+        record.endpoint.endpoint = format!("127.0.0.1:{genesis_port}");
+        connection
+            .upsert_mesh_peer(&UpsertMeshPeerInput {
+                workspace_id: stored.workspace_id,
+                peer_id: stored.peer_id,
+                origin_node_id: stored.origin_node_id,
+                display_name: stored.display_name,
+                policy_summary_json: Some(serde_json::to_string(&record).expect("replant")),
+                enabled: stored.enabled,
+                last_seen_at: Some(stored.last_seen_at),
+            })
+            .expect("replant old locator");
+        let rewritten =
+            apply_imported_team_port_migrations(&connection, "wsp_persistfixture000000000001")
+                .expect("apply imported");
+        assert_eq!(rewritten, 1);
+        let stored = connection
+            .get_mesh_peer("wsp_persistfixture000000000001", &peer_id)
+            .expect("peer after import")
+            .expect("present after import");
+        let record: crate::mesh::peer::MeshPeerRecord =
+            serde_json::from_str(stored.policy_summary_json.as_deref().expect("json"))
+                .expect("parse peer after import");
+        assert_eq!(record.endpoint.endpoint, "127.0.0.1:41999");
+        assert_eq!(
+            crate::mesh::key_store::MeshKeyStore::open_existing(&workspace)
+                .expect("reopen keys after import")
+                .expect("keys present after import")
+                .list_pair_slots()
+                .expect("list pairs after import"),
+            after
+        );
     }
 
     #[test]
