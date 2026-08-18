@@ -3054,6 +3054,11 @@ justification.
    dependency-contract matrix then); **`rustls` is deferred entirely** (the
    `EE_TEAM_IDP_HTTP_BACKEND` env var stays registered with `curl` as its only
    shipped value, reserving `native` for a future decision).
+   **LOCKED 2026-08-18 (TC-D16):** rustls is **rejected as a mesh
+   backend**, not merely deferred. Mesh security is Tailscale + Frame v2
+   pair-key MAC + Ed25519 origin. `bd-tc-followup-oo7d2.6` closed as
+   rejected. `native` remains reserved only for a future IdP HTTP
+   decision, not for wrapping Frame v2.
 1b. **Ed25519 origin signatures + relay in v1** — **DECIDED 2026-07-30
    (operator ratified explicitly, same day).** The implementation-readiness
    review reversed the earlier direct-from-origin-only v1 decision, making

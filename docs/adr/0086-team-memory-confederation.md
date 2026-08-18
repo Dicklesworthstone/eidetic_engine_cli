@@ -7,8 +7,10 @@ Supersedes: ADR 0037's never-published `ee.mesh.peer_status.v1` reservation; ADR
 Plan: [`docs/mesh/team_confederation_plan.md`](../mesh/team_confederation_plan.md)
 Related: ADR 0037 (optional mesh), 0038 (auto-enrollment), 0041 (anti-entropy),
 0009 (trust classes), 0069 (global knowledge lane), 0083 (user-global store)
-Last amended: 2026-07-30 (operator-ratified implementation-readiness,
-security, consistency, authority, and task-graph review; decisions remain final)
+Last amended: 2026-08-18 (post-v1 follow-up lock: two workspaces not
+two teams in one store; rustls rejected as a mesh backend; loopback
+TCP is the Windows control transport; quorum / selective-sync / vendor
+IdP stay deferred). V1 implementation closed on `bd-tc-epic-qzk7o`.
 
 ## Context
 
@@ -2006,6 +2008,65 @@ not an ordinary member slot with manifest authority.
   the previewed minimal subject/optional-email/configured-group-match
   evidence persists or replicates; ceremony URLs/codes/poll state are gone
   from DB, manifest, audit, logs, and support bundles after their TTL.
+
+## Post-v1 decisions (2026-08-18)
+
+v1 shipped and closed on `bd-tc-epic-qzk7o`. The leftover product
+slices that this environment can implement (Windows service + loopback
+control, encrypted credential backup, versioned `teamPortMigrated`)
+shipped on `bd-tc-followup-oo7d2`. The remaining children are not
+unfinished v1. These decisions lock what happens next so agents stop
+re-asking.
+
+### TC-D15 — Two teams means two workspaces
+
+A person on two teams uses two workspaces. The user-scoped responder
+already multiplexes exact workspace routes on one host-wide port.
+Putting two `teamCreated` geneses in one store would fork membership,
+invite floor, hello-port fold, and `load_local_teams().next()`.
+`ee team create` stays idempotent on the first genesis.
+`bd-tc-followup-oo7d2.5` is rejected, not deferred.
+
+### TC-D16 — Mesh security is Tailscale + Frame v2, not rustls
+
+ee↔ee traffic already rides Tailscale (WireGuard) and
+session-authenticated Frame v2 (pair-key MAC, Ed25519 origin). rustls
+appears transitively via asupersync and is not a mesh TLS backend.
+IdP HTTPS remains constrained curl + pinned CA (plan §13 item 1).
+Adding rustls without a cert/raw-public-key identity model would be a
+second security stack on a trusted tailnet. `bd-tc-followup-oo7d2.6`
+is rejected.
+
+### TC-D17 — Windows same-user control is loopback TCP
+
+Unix control stays UDS. Windows control is loopback TCP plus an
+owner-only `%LOCALAPPDATA%\eidetic-engine\mesh-responder.control`
+endpoint (`ee.mesh.responder.control.endpoint.v1`). Named-pipe listen
+is rejected until a safe-Rust adapter exists; this crate
+`#![forbid(unsafe_code)]`. Live register/status already work.
+
+### TC-D18 — Genesis `hello_port` stays immutable; migrate appends
+
+`teamCreated` still commits one genesis port and that hash never
+rewrites. Post-v1 `ee team port migrate --to N --confirm` appends
+signed `teamPortMigrated`. Load/invite/bind fold the latest port.
+Pair keys and grants stay closed. Joiners apply the overlay on
+`ee mesh sync --once` and join first-sync. This is the shipped
+answer to TC-D1's deferred versioned migration.
+
+### TC-D19 — Quorum, selective-sync, and vendor IdP stay future work
+
+- Roles/quorum (`bd-tc-followup-oo7d2.2`) stay open. v1 authority is
+  origin signatures + remove-wins. Do not start until a team has two
+  real admins and a written conflict rule.
+- Selective-sync (`bd-tc-followup-oo7d2.4`) stays open as the
+  contractor/partial-trust product. Trusted teams sync admitted
+  history. Contractors are not invited (`docs/team/trusted_vs_contractor.md`).
+- Production IdP (`bd-tc-followup-oo7d2.8`) stays open and blocked on
+  a real Entra/Okta/Google secretless public client. Fake-IdP RS256 +
+  live `identity_attest` remains the ceiling.
+
+Do not reopen `bd-tc-epic-qzk7o`. Do not start `bd-1nl13`.
 
 ## Consequences
 

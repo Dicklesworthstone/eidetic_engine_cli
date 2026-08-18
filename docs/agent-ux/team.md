@@ -96,8 +96,8 @@ Origin project
 - Do not claim a production IdP vendor soak; that remains an
   environment remainder. Windows DACL key-path and TeamJoin inbound
   are shipped. Same-user control is loopback TCP plus an owner-only
-  `%LOCALAPPDATA%\eidetic-engine\mesh-responder.control` file; named-pipe
-  listen is later. Tailscale LocalAPI WhoIs stays Unix.
+  `%LOCALAPPDATA%\eidetic-engine\mesh-responder.control` file. Named-pipe
+  listen is rejected until a safe-Rust adapter exists. Tailscale LocalAPI WhoIs stays Unix.
 - Do not close a team-confed bead because a doctor check is green.
 - Do not delete body-cache files. Unshare invalidates; reconcile
   never resurrects from the filesystem.
