@@ -20,7 +20,7 @@ use std::fmt;
 use std::fs;
 use std::future::Future;
 use std::io;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
@@ -1876,7 +1876,7 @@ pub struct ResponderBrokerOwner<A> {
     bound_addresses: Vec<SocketAddr>,
     revalidate_interval: Duration,
     last_revalidated_at: Instant,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     control: Option<ResponderControlListener>,
 }
 
@@ -1904,7 +1904,7 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             bound_addresses: Vec::new(),
             revalidate_interval,
             last_revalidated_at: Instant::now(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             control: None,
         };
         owner.reconcile(cx).await?;
@@ -1957,7 +1957,7 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             bound_addresses: Vec::new(),
             revalidate_interval,
             last_revalidated_at: Instant::now(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             control: None,
         };
         owner.reconcile(cx).await?;
@@ -1992,9 +1992,9 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             })
     }
 
-    /// Publish the same-EUID control socket used by another local workspace
+    /// Publish the same-user control channel used by another local workspace
     /// to register exact routes with this owner.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub fn listen_control(
         &mut self,
         socket_path: impl Into<PathBuf>,
@@ -2003,7 +2003,7 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
         Ok(())
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[must_use]
     pub fn control_socket_path(&self) -> Option<&Path> {
         self.control
@@ -2048,7 +2048,7 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
                     }
                 }
             }
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             self.poll_control(cx).await;
             if self.brokers.is_empty() {
                 asupersync_sleep(cx.now(), self.revalidate_interval).await;
@@ -2226,7 +2226,33 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
         let _ = write_control_response(&mut stream, &response).await;
     }
 
-    #[cfg(unix)]
+    #[cfg(windows)]
+    async fn poll_control(&mut self, cx: &Cx) {
+        let Some(control) = self.control.as_ref() else {
+            return;
+        };
+        let (mut stream, peer) = match control.listener.accept() {
+            Ok(accepted) => accepted,
+            Err(_) => return,
+        };
+        if !peer.ip().is_loopback() {
+            return;
+        }
+        let _ = stream.set_nonblocking(false);
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+        let request = match read_control_frame(&mut stream) {
+            Ok(request) => request,
+            Err(_) => return,
+        };
+        if validate_control_request(&request).is_err() {
+            return;
+        }
+        let response = self.dispatch_control(cx, request).await;
+        let _ = write_control_frame(&mut stream, &response);
+    }
+
+    #[cfg(any(unix, windows))]
     async fn dispatch_control(
         &mut self,
         cx: &Cx,
@@ -2268,7 +2294,7 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     async fn apply_control_register(
         &mut self,
         cx: &Cx,
@@ -2295,7 +2321,7 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
         self.reconcile(cx).await
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     async fn apply_control_unregister(
         &mut self,
         cx: &Cx,
@@ -2631,6 +2657,148 @@ impl Drop for ResponderControlListener {
     }
 }
 
+/// Loopback TCP control listener published through an owner-only endpoint
+/// file. Named-pipe listen is still a later slice; this is the same-user
+/// Windows control transport leftover from `bd-tc-followup-oo7d2.3`.
+#[cfg(windows)]
+struct ResponderControlListener {
+    listener: std::net::TcpListener,
+    socket_path: PathBuf,
+}
+
+#[cfg(windows)]
+impl ResponderControlListener {
+    fn publish(socket_path: PathBuf) -> Result<Self, ResponderBrokerError> {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .map_err(|_| ResponderBrokerError::PortConflict)?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+        let port = listener
+            .local_addr()
+            .map_err(|_| ResponderBrokerError::InvalidConfiguration)?
+            .port();
+        write_windows_control_endpoint(&socket_path, port)?;
+        Ok(Self {
+            listener,
+            socket_path,
+        })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ResponderControlListener {
+    fn drop(&mut self) {
+        quarantine_windows_control_endpoint(&self.socket_path);
+    }
+}
+
+#[cfg(windows)]
+const WINDOWS_CONTROL_ENDPOINT_SCHEMA: &str = "ee.mesh.responder.control.endpoint.v1";
+
+#[cfg(windows)]
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WindowsControlEndpoint {
+    schema: String,
+    transport: String,
+    host: String,
+    port: u16,
+}
+
+#[cfg(windows)]
+fn windows_control_dir_parts(
+    socket_path: &Path,
+) -> Result<(PathBuf, PathBuf, String), ResponderBrokerError> {
+    let file_name = socket_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(ResponderBrokerError::InvalidConfiguration)?
+        .to_owned();
+    let dir = socket_path
+        .parent()
+        .ok_or(ResponderBrokerError::InvalidConfiguration)?;
+    let boundary = dir
+        .parent()
+        .ok_or(ResponderBrokerError::InvalidConfiguration)?;
+    Ok((boundary.to_path_buf(), dir.to_path_buf(), file_name))
+}
+
+#[cfg(windows)]
+fn write_windows_control_endpoint(
+    socket_path: &Path,
+    port: u16,
+) -> Result<(), ResponderBrokerError> {
+    let (boundary, dir, file_name) = windows_control_dir_parts(socket_path)?;
+    let secure = crate::mesh::key_store::SecureLocalDir::open_or_create(boundary, dir)
+        .map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+    let endpoint = WindowsControlEndpoint {
+        schema: WINDOWS_CONTROL_ENDPOINT_SCHEMA.to_owned(),
+        transport: "loopback_tcp".to_owned(),
+        host: Ipv4Addr::LOCALHOST.to_string(),
+        port,
+    };
+    let bytes = serde_json::to_vec_pretty(&endpoint)
+        .map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+    secure
+        .write_replace_capped(&file_name, &bytes, crate::mesh::key_store::MAX_RECORD_BYTES)
+        .map_err(|_| ResponderBrokerError::InvalidConfiguration)
+}
+
+#[cfg(windows)]
+fn read_windows_control_endpoint(
+    socket_path: &Path,
+) -> Result<WindowsControlEndpoint, ResponderBrokerError> {
+    let (boundary, dir, file_name) = windows_control_dir_parts(socket_path)?;
+    let secure = crate::mesh::key_store::SecureLocalDir::open_existing(boundary, dir)
+        .map_err(|_| ResponderBrokerError::TransportUnavailable)?
+        .ok_or(ResponderBrokerError::TransportUnavailable)?;
+    let bytes = secure
+        .read(&file_name)
+        .map_err(|_| ResponderBrokerError::TransportUnavailable)?
+        .ok_or(ResponderBrokerError::TransportUnavailable)?;
+    let endpoint: WindowsControlEndpoint =
+        serde_json::from_slice(&bytes).map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+    if endpoint.schema != WINDOWS_CONTROL_ENDPOINT_SCHEMA
+        || endpoint.transport != "loopback_tcp"
+        || endpoint.host != Ipv4Addr::LOCALHOST.to_string()
+        || endpoint.port < 1024
+    {
+        return Err(ResponderBrokerError::InvalidConfiguration);
+    }
+    Ok(endpoint)
+}
+
+#[cfg(windows)]
+fn quarantine_windows_control_endpoint(socket_path: &Path) {
+    let Ok((boundary, dir, file_name)) = windows_control_dir_parts(socket_path) else {
+        return;
+    };
+    let Ok(Some(secure)) = crate::mesh::key_store::SecureLocalDir::open_existing(boundary, dir)
+    else {
+        return;
+    };
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let retired = format!("{file_name}.quarantined-{stamp}");
+    let _ = secure.rename(&file_name, &retired);
+}
+
+/// Submit one same-user control request to a published owner endpoint.
+#[cfg(windows)]
+pub fn submit_responder_control_request(
+    socket_path: &Path,
+    request: &ResponderControlRequest,
+) -> Result<ResponderControlResponse, ResponderBrokerError> {
+    validate_control_request(request)?;
+    let endpoint = read_windows_control_endpoint(socket_path)?;
+    let mut stream = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, endpoint.port))
+        .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    write_control_frame(&mut stream, request)?;
+    read_control_frame(&mut stream)
+}
+
 #[must_use]
 pub fn responder_control_status_request() -> ResponderControlRequest {
     ResponderControlRequest {
@@ -2835,9 +3003,9 @@ async fn write_control_response(
     write_control_frame_async(stream, response).await
 }
 
-#[cfg(unix)]
-fn write_control_frame<T: Serialize>(
-    stream: &mut std::os::unix::net::UnixStream,
+#[cfg(any(unix, windows))]
+fn write_control_frame<W: Write, T: Serialize>(
+    stream: &mut W,
     value: &T,
 ) -> Result<(), ResponderBrokerError> {
     let bytes =
@@ -2852,9 +3020,9 @@ fn write_control_frame<T: Serialize>(
         .map_err(|_| ResponderBrokerError::TransportUnavailable)
 }
 
-#[cfg(unix)]
-fn read_control_frame<T: for<'de> Deserialize<'de>>(
-    stream: &mut std::os::unix::net::UnixStream,
+#[cfg(any(unix, windows))]
+fn read_control_frame<R: Read, T: for<'de> Deserialize<'de>>(
+    stream: &mut R,
 ) -> Result<T, ResponderBrokerError> {
     let mut len_buf = [0_u8; 4];
     stream

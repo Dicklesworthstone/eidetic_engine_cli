@@ -66,7 +66,7 @@ use crate::mesh::responder_broker::{
     DurableResponderRegistration, InboundLocalApi, PreAuthAdmissionLimits, ResponderBrokerError,
     ResponderBrokerOwner, ResponderControlOp, plan_team_responder_registrations,
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::mesh::responder_broker::{
     RESPONDER_CONTROL_SCHEMA_V1, ResponderControlRequest, default_responder_control_socket_path,
     responder_control_status_request, submit_responder_control_request,
@@ -3538,7 +3538,7 @@ where
             );
         }
     };
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let control_socket = args
         .control_socket
         .clone()
@@ -3647,7 +3647,7 @@ where
             );
         }
     };
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     if let Err(error) = owner.listen_control(control_socket) {
         return write_responder_broker_error(&error, cli, stdout, stderr);
     }
@@ -3840,14 +3840,15 @@ where
             .control_socket
             .clone()
             .unwrap_or_else(default_responder_control_socket_path);
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (socket, request);
             return write_domain_error(
                 &DomainError::Configuration {
-                    message: "responder control requires a Unix host".to_owned(),
+                    message: "responder control requires a Unix or Windows host".to_owned(),
                     repair: Some(
-                        "use a Unix host for ee mesh responder register/unregister".to_owned(),
+                        "use a Unix or Windows host for ee mesh responder register/unregister"
+                            .to_owned(),
                     ),
                 },
                 cli.wants_json(),
@@ -3855,7 +3856,7 @@ where
                 stderr,
             );
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         match submit_responder_control_request(&socket, &request) {
             Ok(response) if response.ok => {
                 let mut status = HelloResponderStatusReport::from_runtime(
@@ -3955,7 +3956,7 @@ where
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
     };
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         let socket = args
             .control_socket
