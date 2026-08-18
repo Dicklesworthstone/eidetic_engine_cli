@@ -4275,6 +4275,55 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn windows_control_endpoint_publishes_and_status_submits() {
+        let root = tempfile::TempDir::new().expect("temp");
+        let path = root
+            .path()
+            .join("eidetic-engine")
+            .join("mesh-responder.control");
+        let listener = ResponderControlListener::publish(path.clone()).expect("publish");
+        let endpoint = read_windows_control_endpoint(&path).expect("read endpoint");
+        assert_eq!(endpoint.transport, "loopback_tcp");
+        assert!(endpoint.port >= 1024);
+
+        let server = listener.listener.try_clone().expect("clone listener");
+        let server_thread = std::thread::spawn(move || {
+            let (mut stream, peer) = loop {
+                match server.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept: {error}"),
+                }
+            };
+            assert!(peer.ip().is_loopback());
+            let request: ResponderControlRequest =
+                read_control_frame(&mut stream).expect("read request");
+            assert_eq!(request.op, ResponderControlOp::Status);
+            let response = ResponderControlResponse {
+                schema: RESPONDER_CONTROL_SCHEMA_V1.to_owned(),
+                ok: true,
+                nonce: request.nonce,
+                code: None,
+                message: None,
+                bound_addresses: vec!["127.0.0.1:41888".to_owned()],
+                registered_routes: 1,
+            };
+            write_control_frame(&mut stream, &response).expect("write response");
+        });
+
+        let response = submit_responder_control_request(&path, &responder_control_status_request())
+            .expect("submit status");
+        assert!(response.ok);
+        assert_eq!(response.registered_routes, 1);
+        assert_eq!(response.bound_addresses, vec!["127.0.0.1:41888".to_owned()]);
+        server_thread.join().expect("server thread");
+        drop(listener);
+    }
+
+    #[test]
     fn status_control_request_skips_path_and_identity_gates() {
         assert!(validate_control_request(&responder_control_status_request()).is_ok());
     }
