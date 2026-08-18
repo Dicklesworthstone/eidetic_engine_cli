@@ -90,9 +90,11 @@ Origin project
 
 - Do not start a second responder port for a second workspace.
 - Do not treat Tailscale WhoIs as team membership.
-- Do not claim a Windows-host DACL soak or production IdP vendor soak;
-  those remain environment remainders. TeamJoin inbound TCP compiles
-  and listens on Windows; Tailscale LocalAPI WhoIs stays Unix.
+- Do not claim a production IdP vendor soak; that remains an
+  environment remainder. Windows DACL key-path and TeamJoin inbound
+  are shipped. Same-user control is loopback TCP plus an owner-only
+  `%LOCALAPPDATA%\eidetic-engine\mesh-responder.control` file; named-pipe
+  listen is later. Tailscale LocalAPI WhoIs stays Unix.
 - Do not close a team-confed bead because a doctor check is green.
 - Do not delete body-cache files. Unshare invalidates; reconcile
   never resurrects from the filesystem.

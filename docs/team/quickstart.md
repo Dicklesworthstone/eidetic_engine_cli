@@ -110,7 +110,11 @@ ee daemon install --confirm --load --json   # also load the supervisor
   start a second `ee` listener by hand.
 - Windows stores team credentials through the reviewed SID/DACL/reparse
   adapter and listens inbound on TeamJoin TCP
-  (`ee mesh hello-responder run`). Tailscale LocalAPI WhoIs stays Unix.
-  launchd/systemd install stays Unix.
+  (`ee mesh hello-responder run`). Same-user control is loopback TCP
+  plus an owner-only
+  `%LOCALAPPDATA%\eidetic-engine\mesh-responder.control` endpoint
+  (`ee mesh hello-responder status|register`). Tailscale LocalAPI
+  WhoIs stays Unix. launchd/systemd install stays Unix; Windows
+  user-task install is `ee daemon install`.
 
 Repair commands always come from `ee team doctor --json`.

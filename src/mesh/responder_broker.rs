@@ -9,14 +9,15 @@
 //! Unsigned bootstrap hello is answered on the same listener before
 //! session_open. After hello or an authenticated session, the broker serves
 //! one `ee.mesh.sync_round.v1` event-header batch from the origin store.
-//! A same-EUID Unix-domain control channel lets another
-//! local workspace register or unregister exact team routes without binding
-//! a second TCP port. Durable lifecycle audit persistence and application
-//! dispatch remain later T2.2 slices.
+//! A same-user control channel lets another local workspace register or
+//! unregister exact team routes without binding a second TCP port: Unix
+//! UDS on Unix, loopback TCP plus an owner-only endpoint file on Windows.
+//! Durable lifecycle audit persistence and application dispatch remain
+//! later T2.2 slices.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::fs;
 use std::future::Future;
 use std::io;
@@ -987,10 +988,8 @@ fn validate_durable_registration(
         || !valid_opaque_peer_handle(&registration.peer_handle)
         || !registration.workspace_path.is_absolute()
         || !registration.database_path.is_absolute()
-        || registration.workspace_path.canonicalize().ok().as_ref()
-            != Some(&registration.workspace_path)
-        || registration.database_path.canonicalize().ok().as_ref()
-            != Some(&registration.database_path)
+        || !path_matches_canonical_form(&registration.workspace_path)
+        || !path_matches_canonical_form(&registration.database_path)
     {
         return Err(ResponderBrokerError::InvalidConfiguration);
     }
@@ -998,7 +997,7 @@ fn validate_durable_registration(
         DatabaseLocation::File(path) => path,
         DatabaseLocation::Memory => return Err(ResponderBrokerError::InvalidConfiguration),
     };
-    if connection_path.canonicalize().ok().as_ref() != Some(&registration.database_path) {
+    if !path_matches_canonical_location(&connection_path, &registration.database_path) {
         return Err(ResponderBrokerError::InvalidConfiguration);
     }
     let workspace = connection
@@ -1007,7 +1006,7 @@ fn validate_durable_registration(
         .ok_or(ResponderBrokerError::InvalidConfiguration)?;
     let stored_workspace_path = PathBuf::from(workspace.path);
     if !stored_workspace_path.is_absolute()
-        || stored_workspace_path.canonicalize().ok().as_ref() != Some(&registration.workspace_path)
+        || !path_matches_canonical_location(&stored_workspace_path, &registration.workspace_path)
     {
         return Err(ResponderBrokerError::InvalidConfiguration);
     }
@@ -2057,9 +2056,19 @@ impl<A: TailscaleLocalApi> ResponderBrokerOwner<A> {
             listener_index %= self.brokers.len();
             let broker = &self.brokers[listener_index];
             let now = wall_now();
+            // When a same-user control listener is published, poll it often
+            // enough that status/register do not race the hello accept budget.
+            #[cfg(any(unix, windows))]
+            let accept_budget = if self.control.is_some() {
+                Duration::from_millis(50)
+            } else {
+                self.revalidate_interval
+            };
+            #[cfg(not(any(unix, windows)))]
+            let accept_budget = self.revalidate_interval;
             let accept_timed_out = match timeout(
                 now,
-                self.revalidate_interval,
+                accept_budget,
                 broker.accept_authenticated_and_serve(cx),
             )
             .await
@@ -2793,8 +2802,8 @@ pub fn submit_responder_control_request(
     let endpoint = read_windows_control_endpoint(socket_path)?;
     let mut stream = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, endpoint.port))
         .map_err(|_| ResponderBrokerError::TransportUnavailable)?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     write_control_frame(&mut stream, request)?;
     read_control_frame(&mut stream)
 }
@@ -2844,20 +2853,55 @@ fn validate_control_request(request: &ResponderControlRequest) -> Result<(), Res
 fn revalidate_control_paths(request: &ResponderControlRequest) -> Result<(), ResponderBrokerError> {
     let workspace = owner_safe_canonical_path(&request.workspace_path)?;
     let database = owner_safe_canonical_path(&request.database_path)?;
-    if database != workspace.join(".ee").join("ee.db") {
+    if !paths_are_same_location(&database, &workspace.join(".ee").join("ee.db")) {
         return Err(ResponderBrokerError::InvalidConfiguration);
     }
     Ok(())
 }
 
+fn path_matches_canonical_form(path: &Path) -> bool {
+    path.canonicalize()
+        .ok()
+        .is_some_and(|canonical| paths_are_same_location(&canonical, path))
+}
+
+fn path_matches_canonical_location(observed: &Path, expected: &Path) -> bool {
+    observed
+        .canonicalize()
+        .ok()
+        .is_some_and(|canonical| paths_are_same_location(&canonical, expected))
+}
+
+fn paths_are_same_location(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        normalize_windows_path(left).eq_ignore_ascii_case(&normalize_windows_path(right))
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+#[cfg(windows)]
+fn normalize_windows_path(path: &Path) -> String {
+    let rendered = path.to_string_lossy();
+    let stripped = if let Some(rest) = rendered.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = rendered.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        rendered.into_owned()
+    };
+    stripped.replace('/', r"\")
+}
+
 fn owner_safe_canonical_path(path: &Path) -> Result<PathBuf, ResponderBrokerError> {
     if !path.is_absolute() {
         return Err(ResponderBrokerError::InvalidConfiguration);
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        return Err(ResponderBrokerError::PlatformUnsupported);
     }
     #[cfg(unix)]
     {
@@ -2872,8 +2916,39 @@ fn owner_safe_canonical_path(path: &Path) -> Result<PathBuf, ResponderBrokerErro
         if canonical != path {
             return Err(ResponderBrokerError::InvalidConfiguration);
         }
-        Ok(canonical)
+        return Ok(canonical);
     }
+    #[cfg(windows)]
+    {
+        let mut current = PathBuf::new();
+        for component in path.components() {
+            current.push(component);
+            if windows_path_component_is_reparse(&current)? {
+                return Err(ResponderBrokerError::InvalidConfiguration);
+            }
+        }
+        let canonical = path
+            .canonicalize()
+            .map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+        if !paths_are_same_location(&canonical, path) {
+            return Err(ResponderBrokerError::InvalidConfiguration);
+        }
+        return Ok(canonical);
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(ResponderBrokerError::PlatformUnsupported)
+    }
+}
+
+#[cfg(windows)]
+fn windows_path_component_is_reparse(path: &Path) -> Result<bool, ResponderBrokerError> {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+    Ok(metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
 }
 
 fn materialize_control_registrations(
@@ -3943,6 +4018,10 @@ mod tests {
         }
     }
 
+    fn fixture_abs_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(label)
+    }
+
     fn route(path: PathBuf, port: u16) -> RegisteredResponderRoute {
         RegisteredResponderRoute {
             workspace_path: path,
@@ -4003,7 +4082,7 @@ mod tests {
     #[test]
     fn production_owner_rejects_loopback_status_before_any_listener_bind() {
         let registry = ResponderRouteRegistry::new([route(
-            PathBuf::from("/tmp/ee-responder-owner-loopback-negative"),
+            fixture_abs_path("ee-responder-owner-loopback-negative"),
             41888,
         )])
         .expect("valid local route registry");
@@ -4080,7 +4159,7 @@ mod tests {
 
     #[test]
     fn registry_multiplexes_same_target_for_distinct_initiator_stable_ids() {
-        let path = PathBuf::from("/tmp/ee-responder-broker-multiplex-unit");
+        let path = fixture_abs_path("ee-responder-broker-multiplex-unit");
         let first = route(path.clone(), 41888);
         let mut second = route(path, 41888);
         second.peer_handle = "peer_fedcba9876543210fedcba9876543210".to_owned();
@@ -4109,7 +4188,7 @@ mod tests {
 
     #[test]
     fn durable_owner_authority_comparison_detects_generation_refreshes() {
-        let path = PathBuf::from("/tmp/ee-responder-broker-refresh-unit");
+        let path = fixture_abs_path("ee-responder-broker-refresh-unit");
         let current = ResponderRouteRegistry::new([route(path.clone(), 41888)])
             .expect("current route registry");
         let mut refreshed_route = route(path, 41888);
@@ -4321,6 +4400,51 @@ mod tests {
         assert_eq!(response.bound_addresses, vec!["127.0.0.1:41888".to_owned()]);
         server_thread.join().expect("server thread");
         drop(listener);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_owner_safe_path_accepts_existing_workspace() {
+        let root = tempfile::TempDir::new().expect("temp");
+        let workspace = root.path().to_path_buf();
+        let ee = workspace.join(".ee");
+        std::fs::create_dir(&ee).expect("ee dir");
+        let database = ee.join("ee.db");
+        std::fs::write(&database, b"").expect("db");
+
+        let accepted_workspace =
+            owner_safe_canonical_path(&workspace).expect("workspace must be owner-safe");
+        let accepted_database =
+            owner_safe_canonical_path(&database).expect("database must be owner-safe");
+        assert!(accepted_workspace.is_absolute());
+        assert!(paths_are_same_location(
+            &accepted_database,
+            &accepted_workspace.join(".ee").join("ee.db")
+        ));
+
+        let sneaky = workspace.join(".").join(".ee").join("ee.db");
+        assert!(matches!(
+            owner_safe_canonical_path(&sneaky),
+            Err(ResponderBrokerError::InvalidConfiguration)
+        ));
+        assert!(matches!(
+            owner_safe_canonical_path(Path::new(r"relative\workspace")),
+            Err(ResponderBrokerError::InvalidConfiguration)
+        ));
+
+        let request = ResponderControlRequest {
+            schema: RESPONDER_CONTROL_SCHEMA_V1.to_owned(),
+            op: ResponderControlOp::Register,
+            nonce: "0123456789abcdef".to_owned(),
+            workspace_id: "wsp_wincontrol".to_owned(),
+            team_id: "team_wincontrol".to_owned(),
+            responder_node_id: "node_0123456789abcdef0123456789abcdef".to_owned(),
+            workspace_path: workspace,
+            database_path: database,
+            peer_handles: vec!["peer_0123456789abcdef0123456789abcdef".to_owned()],
+            committed_port: 41889,
+        };
+        assert!(validate_control_request(&request).is_ok());
     }
 
     #[test]
