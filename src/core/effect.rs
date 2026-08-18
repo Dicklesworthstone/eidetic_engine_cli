@@ -1784,6 +1784,10 @@ impl EffectManifest {
             ),
             CommandEffect::read_only_db("task-frame show", "Show passive task-frame state"),
             CommandEffect::read_only_db(
+                "team port show",
+                "Report the folded team hello port and genesis hash without mutation",
+            ),
+            CommandEffect::read_only_db(
                 "timeline",
                 "Reconstruct read-only memory state for a topic at a historical timestamp",
             ),
@@ -2553,6 +2557,11 @@ impl EffectManifest {
                 "tag",
                 vec!["memory_tags", "search_index_jobs", "audit_log"],
                 "Add or remove memory tags through audited metadata updates",
+            ),
+            CommandEffect::durable_write(
+                "team port migrate",
+                vec!["mesh_origin_events", "mesh_peers"],
+                "Append a versioned teamPortMigrated origin event and rewrite enrolled peer locators without touching pair keys or grants",
             ),
             CommandEffect::durable_write(
                 "verification provenance",

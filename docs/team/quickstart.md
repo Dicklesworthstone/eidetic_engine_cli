@@ -25,6 +25,12 @@ ee team doctor --workspace . --json
 # Encrypted credential recovery (separate from redacted `ee backup`)
 printf '%s\n' "$PASSPHRASE" | ee team credentials backup --passphrase-stdin --workspace . --json
 printf '%s\n' "$PASSPHRASE" | ee team credentials restore --input .ee/keys/mesh-credential-backup/credentials.backup.v1.json --passphrase-stdin --workspace . --json
+
+# Change the live hello port without rewriting genesis or pair keys
+ee team port show --workspace . --json
+ee team port migrate --to 41999 --confirm --workspace . --json
+# then restart the responder on the folded port:
+# EE_MESH_HELLO_PORT=41999 ee mesh hello-responder run --workspace . --port 41999
 # status.members[] carry reachability + lastSeenAt (Hana: synced 4m ago)
 # status.pendingInvites[] carries inviteId for ee team revoke --invite-id
 ```

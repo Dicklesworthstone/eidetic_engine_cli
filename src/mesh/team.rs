@@ -77,6 +77,8 @@ pub const TEAM_STEWARD_SCHEMA_V1: &str = "ee.team.steward.v1";
 pub const TEAM_DOCTOR_SCHEMA_V1: &str = "ee.team.doctor.v1";
 pub const TEAM_PROJECTS_SCHEMA_V1: &str = "ee.team.projects.v1";
 pub const TEAM_PROJECT_SHARED_OPERATION: &str = "teamProjectShared";
+pub const TEAM_PORT_SCHEMA_V1: &str = "ee.team.port.v1";
+pub const TEAM_PORT_MIGRATED_OPERATION: &str = "teamPortMigrated";
 const TEAM_PROJECT_ID_PREFIX: &str = "prj_tm_";
 const TEAM_PROJECT_ID_LEN: usize = 33;
 
@@ -136,6 +138,25 @@ pub struct TeamRecord {
     pub genesis_event_hash: String,
     pub seq: u64,
     pub produced_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamPortReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub team_id: String,
+    pub genesis_event_hash: String,
+    pub genesis_hello_port: u16,
+    pub current_hello_port: u16,
+    pub previous_hello_port: Option<u16>,
+    pub port_generation: u64,
+    pub configured_hello_port: u16,
+    pub migrated: bool,
+    pub pair_keys_unchanged: bool,
+    pub grants_unchanged: bool,
+    pub peer_endpoints_rewritten: usize,
+    pub mesh_primitives: Vec<&'static str>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -747,15 +768,297 @@ pub fn create_local_team_with_store(
 /// Load local `teamCreated` genesis events.
 pub fn load_local_teams(connection: &DbConnection) -> Result<Vec<TeamRecord>, OriginStreamError> {
     let rows = connection
-        .list_mesh_manifest_origin_events(64)
+        .list_mesh_manifest_origin_events(256)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
     let mut teams = Vec::new();
+    let mut migrated_ports = std::collections::BTreeMap::<String, u16>::new();
     for row in rows {
+        if let Ok(OriginEventPayload::Manifest(payload)) = parse_stored_payload(&row)
+            && payload.operation == TEAM_PORT_MIGRATED_OPERATION
+        {
+            if let Some(port) = payload
+                .document_payload
+                .get("helloPort")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|port| u16::try_from(port).ok())
+                .filter(|port| *port >= 1024)
+            {
+                migrated_ports.insert(row.team_id.clone(), port);
+            }
+            continue;
+        }
         if let Some(team) = team_record_from_origin(&row)? {
             teams.push(team);
         }
     }
+    for team in &mut teams {
+        if let Some(port) = migrated_ports.get(&team.team_id) {
+            team.hello_port = *port;
+        }
+    }
     Ok(teams)
+}
+
+/// Report the folded hello port and generation without mutating state.
+pub fn inspect_team_port(connection: &DbConnection) -> Result<TeamPortReport, OriginStreamError> {
+    let team = load_local_teams(connection)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| OriginStreamError::Encode("no local team genesis".to_owned()))?;
+    let (genesis_hello_port, port_generation, previous_hello_port) =
+        port_migration_state(connection, &team.team_id)?;
+    Ok(TeamPortReport {
+        schema: TEAM_PORT_SCHEMA_V1,
+        command: "team port show",
+        team_id: team.team_id,
+        genesis_event_hash: team.genesis_event_hash,
+        genesis_hello_port,
+        current_hello_port: team.hello_port,
+        previous_hello_port,
+        port_generation,
+        configured_hello_port: configured_hello_port(),
+        migrated: false,
+        pair_keys_unchanged: true,
+        grants_unchanged: true,
+        peer_endpoints_rewritten: 0,
+        mesh_primitives: vec!["ee.team.manifest_event.v1", TEAM_CREATED_OPERATION],
+    })
+}
+
+/// Append a versioned `teamPortMigrated` event and rewrite enrolled peer
+/// endpoints that still advertise the previous port. Pair keys and grants
+/// are not opened or rewritten.
+pub fn migrate_local_team_port(
+    connection: &DbConnection,
+    workspace_id: &str,
+    next_port: u16,
+    produced_at: &str,
+    workspace_path: Option<&std::path::Path>,
+) -> Result<TeamPortReport, OriginStreamError> {
+    if next_port < 1024 {
+        return Err(OriginStreamError::Encode(
+            "team hello port must be nonprivileged".to_owned(),
+        ));
+    }
+    let team = load_local_teams(connection)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| OriginStreamError::Encode("no local team genesis".to_owned()))?;
+    if team_is_paused(connection, &team.team_id)? {
+        return Err(OriginStreamError::Encode(
+            "team is paused; resume before migrating the hello port".to_owned(),
+        ));
+    }
+    let (genesis_hello_port, current_generation, _) =
+        port_migration_state(connection, &team.team_id)?;
+    if next_port == team.hello_port {
+        return Err(OriginStreamError::Encode(
+            "team hello port is already the requested port".to_owned(),
+        ));
+    }
+    let next_generation = current_generation.saturating_add(1);
+    let previous_port = team.hello_port;
+    let hex = blake3::hash(
+        format!(
+            "{}:{TEAM_PORT_MIGRATED_OPERATION}:{next_port}:{next_generation}",
+            team.team_id
+        )
+        .as_bytes(),
+    )
+    .to_hex();
+    let payload = OriginEventPayload::Manifest(ManifestEventPayload {
+        operation: TEAM_PORT_MIGRATED_OPERATION.to_owned(),
+        document_id: format!("tdoc_{}", &hex.as_str()[..24]),
+        predecessor_revision_id: None,
+        document_payload: serde_json::json!({
+            "helloPort": next_port,
+            "previousHelloPort": previous_port,
+            "portGeneration": next_generation,
+            "genesisEventHash": team.genesis_event_hash,
+        }),
+    });
+    let ed25519 = workspace_path
+        .map(|path| Ed25519OriginSigner::load_or_create(path, &team.origin_node_id, produced_at))
+        .transpose()?;
+    let mac = LocalOriginSigner::for_workspace(workspace_id);
+    let signer: &dyn OriginSigner = ed25519
+        .as_ref()
+        .map(|signer| signer as &dyn OriginSigner)
+        .unwrap_or(&mac);
+    append_origin_event(
+        connection,
+        signer,
+        &OriginAppendRequest {
+            team_id: &team.team_id,
+            origin_node_id: &team.origin_node_id,
+            payload,
+            required_features: Vec::new(),
+            produced_at,
+            body_nonce: None,
+        },
+    )?;
+    let rewritten =
+        rewrite_peer_endpoints_for_port(connection, workspace_id, previous_port, next_port)?;
+    Ok(TeamPortReport {
+        schema: TEAM_PORT_SCHEMA_V1,
+        command: "team port migrate",
+        team_id: team.team_id,
+        genesis_event_hash: team.genesis_event_hash,
+        genesis_hello_port,
+        current_hello_port: next_port,
+        previous_hello_port: Some(previous_port),
+        port_generation: next_generation,
+        configured_hello_port: configured_hello_port(),
+        migrated: true,
+        pair_keys_unchanged: true,
+        grants_unchanged: true,
+        peer_endpoints_rewritten: rewritten,
+        mesh_primitives: vec![
+            "mesh_origin_events.append",
+            "ee.team.manifest_event.v1",
+            TEAM_PORT_MIGRATED_OPERATION,
+        ],
+    })
+}
+
+/// Apply imported `teamPortMigrated` events onto enrolled peer locators.
+pub fn apply_imported_team_port_migrations(
+    connection: &DbConnection,
+    workspace_id: &str,
+) -> Result<usize, OriginStreamError> {
+    let rows = connection
+        .list_mesh_manifest_origin_events(256)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    let mut rewritten = 0_usize;
+    for row in rows {
+        let Ok(OriginEventPayload::Manifest(payload)) = parse_stored_payload(&row) else {
+            continue;
+        };
+        if payload.operation != TEAM_PORT_MIGRATED_OPERATION {
+            continue;
+        }
+        let Some(next_port) = payload
+            .document_payload
+            .get("helloPort")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|port| u16::try_from(port).ok())
+            .filter(|port| *port >= 1024)
+        else {
+            continue;
+        };
+        let Some(previous_port) = payload
+            .document_payload
+            .get("previousHelloPort")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|port| u16::try_from(port).ok())
+        else {
+            continue;
+        };
+        rewritten = rewritten.saturating_add(rewrite_peer_endpoints_for_port(
+            connection,
+            workspace_id,
+            previous_port,
+            next_port,
+        )?);
+    }
+    Ok(rewritten)
+}
+
+fn port_migration_state(
+    connection: &DbConnection,
+    team_id: &str,
+) -> Result<(u16, u64, Option<u16>), OriginStreamError> {
+    let rows = connection
+        .list_mesh_manifest_origin_events(256)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    let mut genesis_port = configured_hello_port();
+    let mut generation = 1_u64;
+    let mut previous = None;
+    for row in rows {
+        if row.team_id != team_id {
+            continue;
+        }
+        let Ok(OriginEventPayload::Manifest(payload)) = parse_stored_payload(&row) else {
+            continue;
+        };
+        if payload.operation == TEAM_CREATED_OPERATION || payload.operation == TEAM_JOINED_OPERATION
+        {
+            if let Some(port) = payload
+                .document_payload
+                .get("helloPort")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|port| u16::try_from(port).ok())
+                .filter(|port| *port >= 1024)
+            {
+                genesis_port = port;
+            }
+        }
+        if payload.operation == TEAM_PORT_MIGRATED_OPERATION {
+            generation = payload
+                .document_payload
+                .get("portGeneration")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(generation.saturating_add(1));
+            previous = payload
+                .document_payload
+                .get("previousHelloPort")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|port| u16::try_from(port).ok());
+        }
+    }
+    Ok((genesis_port, generation, previous))
+}
+
+fn rewrite_peer_endpoints_for_port(
+    connection: &DbConnection,
+    workspace_id: &str,
+    previous_port: u16,
+    next_port: u16,
+) -> Result<usize, OriginStreamError> {
+    if previous_port == next_port {
+        return Ok(0);
+    }
+    let peers = connection
+        .list_mesh_peers(workspace_id)
+        .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+    let mut rewritten = 0_usize;
+    for stored in peers {
+        let Some(json) = stored.policy_summary_json.as_deref() else {
+            continue;
+        };
+        let Ok(mut record) = serde_json::from_str::<crate::mesh::peer::MeshPeerRecord>(json) else {
+            continue;
+        };
+        let Some(updated) =
+            replace_endpoint_port(&record.endpoint.endpoint, previous_port, next_port)
+        else {
+            continue;
+        };
+        record.endpoint.endpoint = updated;
+        let policy = serde_json::to_string(&record)
+            .map_err(|error| OriginStreamError::Encode(error.to_string()))?;
+        connection
+            .upsert_mesh_peer(&UpsertMeshPeerInput {
+                workspace_id: stored.workspace_id,
+                peer_id: stored.peer_id,
+                origin_node_id: stored.origin_node_id,
+                display_name: stored.display_name,
+                policy_summary_json: Some(policy),
+                enabled: stored.enabled,
+                last_seen_at: Some(stored.last_seen_at),
+            })
+            .map_err(|error| OriginStreamError::Db(error.to_string()))?;
+        rewritten = rewritten.saturating_add(1);
+    }
+    Ok(rewritten)
+}
+
+fn replace_endpoint_port(endpoint: &str, previous_port: u16, next_port: u16) -> Option<String> {
+    let (host, port) = endpoint.rsplit_once(':')?;
+    if port.parse::<u16>().ok()? != previous_port || host.is_empty() {
+        return None;
+    }
+    Some(format!("{host}:{next_port}"))
 }
 
 /// Whether an origin node may contribute events under recorded membership.
@@ -3679,7 +3982,7 @@ pub fn inspect_team_health(
             name: "broker_port".to_owned(),
             status: "ok".to_owned(),
             message: format!(
-                "genesis and configured responder share port {configured_port}; additional workspaces register over the control channel"
+                "current and configured responder share port {configured_port}; additional workspaces register over the control channel"
             ),
             repair: None,
         }
@@ -3688,11 +3991,11 @@ pub fn inspect_team_health(
             name: "broker_port".to_owned(),
             status: "warning".to_owned(),
             message: format!(
-                "genesis hello port {} does not match configured responder port {configured_port}",
+                "team hello port {} does not match configured responder port {configured_port}",
                 team.hello_port
             ),
             repair: Some(format!(
-                "set EE_MESH_HELLO_PORT={} or mint a new invite after aligning the port",
+                "ee team port migrate --to {configured_port} --confirm --workspace . or set EE_MESH_HELLO_PORT={}",
                 team.hello_port
             )),
         }
@@ -5492,6 +5795,7 @@ pub fn reconcile_local_team_membership(
         .into_iter()
         .next()
         .ok_or_else(|| OriginStreamError::Encode("no local team genesis".to_owned()))?;
+    apply_imported_team_port_migrations(connection, workspace_id)?;
     let rows = connection
         .list_mesh_manifest_origin_events(256)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
@@ -7121,6 +7425,158 @@ mod tests {
         assert!(resumed.invite_code.is_empty());
         revoke_team_invite(&connection, &minted.invite_id, "2026-08-13T00:30:00Z").expect("revoke");
         assert!(resume_pending_invite(&connection, &minted.invite_id).is_err());
+    }
+
+    #[test]
+    fn migrate_team_port_folds_without_rewriting_genesis() {
+        let connection = open_db();
+        let created = create_local_team(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+        )
+        .expect("create");
+        let genesis = created.team.genesis_event_hash.clone();
+        let genesis_port = created.team.hello_port;
+        assert!(
+            migrate_local_team_port(
+                &connection,
+                "wsp_persistfixture000000000001",
+                genesis_port,
+                "2026-08-13T01:00:00Z",
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            migrate_local_team_port(
+                &connection,
+                "wsp_persistfixture000000000001",
+                80,
+                "2026-08-13T01:00:00Z",
+                None,
+            )
+            .is_err()
+        );
+        let migrated = migrate_local_team_port(
+            &connection,
+            "wsp_persistfixture000000000001",
+            41999,
+            "2026-08-13T01:00:00Z",
+            None,
+        )
+        .expect("migrate");
+        assert!(migrated.migrated);
+        assert_eq!(migrated.current_hello_port, 41999);
+        assert_eq!(migrated.previous_hello_port, Some(genesis_port));
+        assert_eq!(migrated.genesis_event_hash, genesis);
+        assert_eq!(migrated.port_generation, 2);
+        assert!(migrated.pair_keys_unchanged);
+        assert!(migrated.grants_unchanged);
+        let loaded = load_local_teams(&connection).expect("reload");
+        assert_eq!(loaded[0].hello_port, 41999);
+        assert_eq!(loaded[0].genesis_event_hash, genesis);
+        let shown = inspect_team_port(&connection).expect("show");
+        assert_eq!(shown.current_hello_port, 41999);
+        assert_eq!(shown.genesis_hello_port, genesis_port);
+        assert_eq!(shown.port_generation, 2);
+        let invited = mint_team_invite(
+            &connection,
+            "127.0.0.1",
+            "2026-08-13T02:00:00Z",
+            "2026-08-20T00:00:00Z",
+        )
+        .expect("invite after migrate");
+        assert_eq!(invited.hello_port, 41999);
+        let doctor = inspect_team_health(&connection, "wsp_persistfixture000000000001", None)
+            .expect("doctor after migrate");
+        assert!(doctor.checks.iter().any(|check| {
+            check.name == "broker_port"
+                && check.status == "warning"
+                && check.message.contains("41999")
+                && check
+                    .repair
+                    .as_deref()
+                    .is_some_and(|repair| repair.contains("ee team port migrate --to"))
+        }));
+    }
+
+    #[test]
+    fn migrate_team_port_rewrites_enrolled_peer_locator_and_leaves_pair_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().canonicalize().expect("canon workspace");
+        let database = workspace.join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database).expect("open");
+        connection.migrate().expect("migrate");
+        connection
+            .insert_workspace(
+                "wsp_persistfixture000000000001",
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("port-migrate".to_owned()),
+                },
+            )
+            .expect("workspace");
+        let created = create_local_team_with_store(
+            &connection,
+            "wsp_persistfixture000000000001",
+            "Analysts",
+            "2026-08-13T00:00:00Z",
+            Some(workspace.as_path()),
+        )
+        .expect("create");
+        let genesis_port = created.team.hello_port;
+        let joiner_node = "node_joiner0000000000000000000001";
+        enroll_team_pair_peer(
+            &connection,
+            "wsp_persistfixture000000000001",
+            &created.team.team_id,
+            joiner_node,
+            "Priya",
+            "127.0.0.1",
+            genesis_port,
+            "2026-08-13T04:00:00Z",
+            "wsp_joinworkspace0000000000001",
+        )
+        .expect("enroll");
+        persist_pair_key(
+            &workspace,
+            &created.team.team_id,
+            joiner_node,
+            &[7_u8; 32],
+            "2026-08-13T04:00:00Z",
+        )
+        .expect("pair");
+        let before = crate::mesh::key_store::MeshKeyStore::open_existing(&workspace)
+            .expect("open keys")
+            .expect("keys present")
+            .list_pair_slots()
+            .expect("list pairs");
+        let migrated = migrate_local_team_port(
+            &connection,
+            "wsp_persistfixture000000000001",
+            41999,
+            "2026-08-13T05:00:00Z",
+            Some(workspace.as_path()),
+        )
+        .expect("migrate");
+        assert_eq!(migrated.peer_endpoints_rewritten, 1);
+        let after = crate::mesh::key_store::MeshKeyStore::open_existing(&workspace)
+            .expect("reopen keys")
+            .expect("keys present")
+            .list_pair_slots()
+            .expect("list pairs after");
+        assert_eq!(before, after);
+        let peer_id = team_pair_peer_handle(&created.team.team_id, joiner_node);
+        let stored = connection
+            .get_mesh_peer("wsp_persistfixture000000000001", &peer_id)
+            .expect("peer")
+            .expect("present");
+        let record: crate::mesh::peer::MeshPeerRecord =
+            serde_json::from_str(stored.policy_summary_json.as_deref().expect("json"))
+                .expect("parse peer");
+        assert_eq!(record.endpoint.endpoint, "127.0.0.1:41999");
     }
 
     #[test]

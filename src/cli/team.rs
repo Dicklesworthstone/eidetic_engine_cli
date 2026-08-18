@@ -12,11 +12,12 @@ use crate::mesh::team::{
     TeamInviteReport, TeamMemberRecord, TeamStatusReport, add_local_team_node, adopt_team_project,
     any_local_team_paused, attest_local_id_token, create_local_team_with_store,
     execute_team_idp_token_poll, execute_team_steward_once, fetch_local_team_body,
-    inspect_team_health, join_team_with_code_on_store, leave_local_team, list_team_activity,
-    list_team_projects, local_team_status, mint_team_invite_with_store, plan_team_idp_device,
-    reconcile_local_team_membership, reconcile_local_team_projects, remove_team_member,
-    require_tailnet_attested, resume_pending_invite, revalidate_team_identities,
-    revoke_team_invite, revoke_team_invites_before_floor, rotate_local_signing_key,
+    inspect_team_health, inspect_team_port, join_team_with_code_on_store, leave_local_team,
+    list_team_activity, list_team_projects, local_team_status, migrate_local_team_port,
+    mint_team_invite_with_store, plan_team_idp_device, reconcile_local_team_membership,
+    reconcile_local_team_projects, remove_team_member, require_tailnet_attested,
+    resume_pending_invite, revalidate_team_identities, revoke_team_invite,
+    revoke_team_invites_before_floor, rotate_local_signing_key,
     serve_one_bootstrap_join_with_store, serve_one_invite_first_sync, set_local_team_paused,
     set_team_oidc_provider, share_team_bodies_represented, share_team_history, share_team_project,
     team_idp_status, unshare_team_bodies,
@@ -75,6 +76,18 @@ pub enum TeamCommand {
     /// Encrypted pair-key and signing-seed backup.
     #[command(subcommand)]
     Credentials(TeamCredentialsCommand),
+    /// Inspect or migrate the folded team hello port.
+    #[command(subcommand)]
+    Port(TeamPortCommand),
+}
+
+/// Nested `ee team port` verbs.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum TeamPortCommand {
+    /// Show the folded hello port without rewriting genesis.
+    Show(TeamPortShowArgs),
+    /// Append a versioned `teamPortMigrated` event and rewrite enrolled locators.
+    Migrate(TeamPortMigrateArgs),
 }
 
 /// Nested `ee team credentials` verbs.
@@ -498,6 +511,30 @@ pub struct TeamDoctorArgs {
     pub database: Option<PathBuf>,
 }
 
+/// Arguments for `ee team port show`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamPortShowArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee team port migrate`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamPortMigrateArgs {
+    /// Next non-privileged hello port. Does not rewrite the genesis event.
+    #[arg(long = "to", value_name = "PORT")]
+    pub to: u16,
+
+    /// Confirm appending `teamPortMigrated` and rewriting enrolled peer locators.
+    #[arg(long)]
+    pub confirm: bool,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
 /// Arguments for `ee team credentials backup`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct TeamCredentialsBackupArgs {
@@ -730,6 +767,12 @@ where
         }
         TeamCommand::Credentials(TeamCredentialsCommand::Restore(args)) => {
             handle_team_credentials_restore(cli, args, stdout, stderr)
+        }
+        TeamCommand::Port(TeamPortCommand::Show(args)) => {
+            handle_team_port_show(cli, args, stdout, stderr)
+        }
+        TeamCommand::Port(TeamPortCommand::Migrate(args)) => {
+            handle_team_port_migrate(cli, args, stdout, stderr)
         }
     }
 }
@@ -2756,6 +2799,126 @@ where
             &DomainError::Storage {
                 message: format!("Failed to inspect team health: {error}"),
                 repair: Some("ee team status --workspace . --json".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_port_show<W, E>(
+    cli: &Cli,
+    args: &TeamPortShowArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let (connection, _) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    match inspect_team_port(&connection) {
+        Ok(report) => {
+            let previous = report
+                .previous_hello_port
+                .map_or_else(|| "none".to_owned(), |port| port.to_string());
+            write_team_report(
+                cli,
+                &report,
+                &format!(
+                    "Team hello port\n  team_id: {}\n  current: {}\n  genesis: {}\n  previous: {previous}\n  generation: {}\n  genesis_event_hash: {}\n  configured: {}\n",
+                    report.team_id,
+                    report.current_hello_port,
+                    report.genesis_hello_port,
+                    report.port_generation,
+                    report.genesis_event_hash,
+                    report.configured_hello_port,
+                ),
+                stdout,
+            )
+        }
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to inspect team hello port: {error}"),
+                repair: Some("ee team create --name \"<team>\" --workspace .".to_owned()),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_port_migrate<W, E>(
+    cli: &Cli,
+    args: &TeamPortMigrateArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !args.confirm {
+        return write_domain_error(
+            &DomainError::Usage {
+                message: "Port migrate requires --confirm".to_owned(),
+                repair: Some(format!(
+                    "ee team port migrate --to {} --confirm --workspace .",
+                    args.to
+                )),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
+    let (connection, workspace_id) = match open_team_store(cli, args.database.as_deref()) {
+        Ok(opened) => opened,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let produced_at = chrono::Utc::now().to_rfc3339();
+    let workspace_path = cli.resolve_workspace();
+    match migrate_local_team_port(
+        &connection,
+        &workspace_id,
+        args.to,
+        &produced_at,
+        Some(workspace_path.as_path()),
+    ) {
+        Ok(report) => {
+            let previous = report
+                .previous_hello_port
+                .map_or_else(|| "none".to_owned(), |port| port.to_string());
+            write_team_report(
+                cli,
+                &report,
+                &format!(
+                    "Team hello port migrated\n  team_id: {}\n  current: {}\n  previous: {previous}\n  generation: {}\n  genesis_event_hash: {}\n  peer_endpoints_rewritten: {}\n  pair_keys_unchanged: {}\n  grants_unchanged: {}\nNext:\n  EE_MESH_HELLO_PORT={} ee mesh hello-responder run --workspace . --port {}\n",
+                    report.team_id,
+                    report.current_hello_port,
+                    report.port_generation,
+                    report.genesis_event_hash,
+                    report.peer_endpoints_rewritten,
+                    report.pair_keys_unchanged,
+                    report.grants_unchanged,
+                    report.current_hello_port,
+                    report.current_hello_port,
+                ),
+                stdout,
+            )
+        }
+        Err(error) => write_domain_error(
+            &DomainError::Storage {
+                message: format!("Failed to migrate team hello port: {error}"),
+                repair: Some(format!(
+                    "ee team port show --workspace . --json; ee team port migrate --to {} --confirm --workspace .",
+                    args.to
+                )),
             },
             cli.wants_json(),
             stdout,

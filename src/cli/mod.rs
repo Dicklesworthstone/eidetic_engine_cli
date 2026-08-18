@@ -66593,6 +66593,12 @@ impl NormalizedInvocation {
                     team::TeamCommand::Credentials(team::TeamCredentialsCommand::Restore(_)) => {
                         "team credentials restore".to_string()
                     }
+                    team::TeamCommand::Port(team::TeamPortCommand::Show(_)) => {
+                        "team port show".to_string()
+                    }
+                    team::TeamCommand::Port(team::TeamPortCommand::Migrate(_)) => {
+                        "team port migrate".to_string()
+                    }
                 },
                 Command::Situation(sit) => match sit {
                     SituationCommand::Classify(_) => "situation classify".to_string(),

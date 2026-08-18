@@ -34,8 +34,11 @@ those surfaces are the next command, not a prompt to invent one.
 `coalescedExhaustion` from the last persisted broker snapshot.
 `data.budgets` is the T6.5 join/relay/body/index profile
 (`ee.team.budgets.v1`).
-`ee team doctor` `broker_port` compares genesis hello port to
-`EE_MESH_HELLO_PORT` (default 41888). `whois` documents the accept
+`ee team doctor` `broker_port` compares the folded team hello port
+(`ee team port show`) to `EE_MESH_HELLO_PORT` (default 41888).
+`ee team port migrate --to <port> --confirm` appends `teamPortMigrated`
+and rewrites enrolled peer locators; genesis hash, pair keys, and
+grants stay untouched. `whois` documents the accept
 requirement and does not probe Tailscale.
 `ee team doctor` also reports `admission`, `key_store`, `broker_port`,
 `client_only`, `whois`, `body_cache_lifecycle`, `index_rematerialization`,
