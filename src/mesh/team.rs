@@ -9,6 +9,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::{EnvVar, read_env_var};
 use crate::core::tailscale_probe::{
     TailnetOwnerDisposition, TailscaleLocalReport, TailscaleUserProfile, evaluate_tailnet_owner,
 };
@@ -1059,6 +1060,27 @@ fn replace_endpoint_port(endpoint: &str, previous_port: u16, next_port: u16) -> 
         return None;
     }
     Some(format!("{host}:{next_port}"))
+}
+
+/// Port a local hello responder should bind.
+///
+/// `EE_MESH_HELLO_PORT` wins when set to a non-privileged integer. Otherwise
+/// the folded team hello port (including `teamPortMigrated`) is used.
+/// No team genesis falls back to [`configured_hello_port`].
+#[must_use]
+pub fn local_hello_bind_port(connection: &DbConnection) -> u16 {
+    if read_env_var(EnvVar::MeshHelloPort)
+        .as_deref()
+        .is_some_and(|value| value.trim().parse::<u16>().is_ok_and(|port| port >= 1024))
+    {
+        return configured_hello_port();
+    }
+    load_local_teams(connection)
+        .ok()
+        .and_then(|teams| teams.into_iter().next())
+        .map(|team| team.hello_port)
+        .filter(|port| *port >= 1024)
+        .unwrap_or_else(configured_hello_port)
 }
 
 /// Whether an origin node may contribute events under recorded membership.
@@ -7489,6 +7511,7 @@ mod tests {
         )
         .expect("invite after migrate");
         assert_eq!(invited.hello_port, 41999);
+        assert_eq!(local_hello_bind_port(&connection), 41999);
         let doctor = inspect_team_health(&connection, "wsp_persistfixture000000000001", None)
             .expect("doctor after migrate");
         assert!(doctor.checks.iter().any(|check| {

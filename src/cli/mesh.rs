@@ -313,7 +313,7 @@ pub struct MeshHelloResponderRunArgs {
     #[arg(long = "peer", value_name = "PEER_ID", action = ArgAction::Append)]
     pub peers: Vec<String>,
 
-    /// Committed nonprivileged responder port; defaults to EE_MESH_HELLO_PORT, then 41888.
+    /// Committed nonprivileged responder port; defaults to EE_MESH_HELLO_PORT, then the folded team hello port, then 41888.
     #[arg(long)]
     pub port: Option<u16>,
 
@@ -349,7 +349,7 @@ pub struct MeshHelloResponderRegisterArgs {
     #[arg(long = "peer", value_name = "PEER_ID", action = ArgAction::Append, required = true)]
     pub peers: Vec<String>,
 
-    /// Committed nonprivileged responder port; defaults to EE_MESH_HELLO_PORT, then 41888.
+    /// Committed nonprivileged responder port; defaults to EE_MESH_HELLO_PORT, then the folded team hello port, then 41888.
     #[arg(long)]
     pub port: Option<u16>,
 
@@ -3496,7 +3496,7 @@ where
                 );
             }
         },
-        (None, None) => crate::mesh::hello_responder::DEFAULT_HELLO_RESPONDER_PORT,
+        (None, None) => crate::mesh::team::local_hello_bind_port(&connection),
     };
     if !(100..=60_000).contains(&args.revalidate_ms) || port < 1024 {
         return write_domain_error(
@@ -3811,7 +3811,7 @@ where
                     );
                 }
             },
-            (None, None) => crate::mesh::hello_responder::DEFAULT_HELLO_RESPONDER_PORT,
+            (None, None) => crate::mesh::team::local_hello_bind_port(&connection),
         };
         if port < 1024 {
             return write_domain_error(

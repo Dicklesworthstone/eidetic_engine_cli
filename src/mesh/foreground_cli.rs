@@ -2051,7 +2051,7 @@ async fn live_team_initiator_config(
         &snapshot.workspace_id,
         &workspace,
         &database,
-        configured_hello_port(),
+        crate::mesh::team::local_hello_bind_port(&connection),
     );
     let local_api = InboundLocalApi::prefer(&connection, &registrations, None)?;
     let local_status = local_api.local_status(cx).await.ok()?;
@@ -2704,7 +2704,7 @@ pub fn spawn_team_responder_owner_if_needed(workspace_path: &Path, database_path
         &snapshot.workspace_id,
         &workspace_path,
         &database_path,
-        configured_hello_port(),
+        crate::mesh::team::local_hello_bind_port(&connection),
     );
     if registrations.is_empty() {
         return false;
