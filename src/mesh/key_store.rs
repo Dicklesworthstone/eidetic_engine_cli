@@ -404,6 +404,16 @@ impl PairKeyClass {
             Self::Next => "next",
         }
     }
+
+    /// Parse the on-disk class token. Unknown tokens are `None`.
+    #[must_use]
+    pub fn from_token(token: &str) -> Option<Self> {
+        match token {
+            "current" => Some(Self::Current),
+            "next" => Some(Self::Next),
+            _ => None,
+        }
+    }
 }
 
 /// Which local origin-signing seed a record holds. `Current` signs new origin
@@ -424,6 +434,16 @@ impl SigningKeyClass {
         match self {
             Self::Current => "current",
             Self::Next => "next",
+        }
+    }
+
+    /// Parse the on-disk class token. Unknown tokens are `None`.
+    #[must_use]
+    pub fn from_token(token: &str) -> Option<Self> {
+        match token {
+            "current" => Some(Self::Current),
+            "next" => Some(Self::Next),
+            _ => None,
         }
     }
 }
@@ -847,6 +867,135 @@ impl SecureLocalDir {
         self.sync_dir()
     }
 
+    /// Exclusive publish with an explicit size cap. Unlike
+    /// [`Self::write_exclusive`], this refuses oversized buffers before
+    /// writing so credential-backup envelopes can use a larger cap than a
+    /// single key record without planting an unreadably large file.
+    pub fn write_exclusive_capped(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        max_bytes: u64,
+    ) -> Result<(), KeyStoreError> {
+        reject_oversize(&self.dir.join(name), bytes, max_bytes)?;
+        self.write_exclusive(name, bytes)
+    }
+
+    /// Atomic replace with an explicit size cap. See
+    /// [`Self::write_exclusive_capped`].
+    pub fn write_replace_capped(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        max_bytes: u64,
+    ) -> Result<(), KeyStoreError> {
+        reject_oversize(&self.dir.join(name), bytes, max_bytes)?;
+        self.write_replace(name, bytes)
+    }
+
+    /// Read a file with an explicit size cap. The default [`Self::read`]
+    /// path stays pinned to [`MAX_RECORD_BYTES`].
+    pub fn read_capped(
+        &self,
+        name: &str,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>, KeyStoreError> {
+        use rustix::fs::{Mode, OFlags};
+        validate_file_name(name)?;
+        self.verify_dir()?;
+        let path = self.dir.join(name);
+        let descriptor = match rustix::fs::openat(
+            &self.dir_handle,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0),
+        ) {
+            Ok(descriptor) => descriptor,
+            Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
+            Err(error) if error == rustix::io::Errno::LOOP => {
+                return Err(KeyStoreError::SymlinkComponent {
+                    path: path.display().to_string(),
+                });
+            }
+            Err(error) => {
+                return Err(KeyStoreError::Io {
+                    path: path.display().to_string(),
+                    message: format!("descriptor-relative record open: {error}"),
+                });
+            }
+        };
+        let mut file = std::fs::File::from(descriptor);
+        self.verify_open_file_capped(&file, &path, max_bytes)?;
+        let mut bytes = Vec::new();
+        if let Err(error) = (&mut file)
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+        {
+            bytes.fill(0);
+            compiler_fence(Ordering::SeqCst);
+            return Err(KeyStoreError::Io {
+                path: path.display().to_string(),
+                message: error.to_string(),
+            });
+        }
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+            bytes.fill(0);
+            compiler_fence(Ordering::SeqCst);
+            return Err(KeyStoreError::CapExceeded {
+                path: path.display().to_string(),
+                len: max_bytes.saturating_add(1),
+            });
+        }
+        Ok(Some(bytes))
+    }
+
+    fn verify_open_file_capped(
+        &self,
+        file: &std::fs::File,
+        path: &Path,
+        max_bytes: u64,
+    ) -> Result<(), KeyStoreError> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let metadata = file.metadata().map_err(|error| KeyStoreError::Io {
+            path: path.display().to_string(),
+            message: error.to_string(),
+        })?;
+        if !metadata.is_file() {
+            return Err(KeyStoreError::WrongFileType {
+                path: path.display().to_string(),
+                expected: "regular file",
+            });
+        }
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            return Err(KeyStoreError::InsecurePermissions {
+                path: path.display().to_string(),
+                detail: format!("file mode {mode:04o}, expected exactly 0600"),
+            });
+        }
+        let euid = rustix::process::geteuid().as_raw();
+        if metadata.uid() != euid {
+            return Err(KeyStoreError::ForeignOwner {
+                path: path.display().to_string(),
+                uid: metadata.uid(),
+                euid,
+            });
+        }
+        if metadata.nlink() != 1 {
+            return Err(KeyStoreError::WrongFileType {
+                path: path.display().to_string(),
+                expected: "single-link regular file",
+            });
+        }
+        if metadata.len() > max_bytes {
+            return Err(KeyStoreError::CapExceeded {
+                path: path.display().to_string(),
+                len: metadata.len(),
+            });
+        }
+        Ok(())
+    }
+
     /// Rename a record in place (used for retirement; never deletes).
     pub fn rename(&self, from: &str, to: &str) -> Result<(), KeyStoreError> {
         use rustix::fs::RenameFlags;
@@ -1065,14 +1214,104 @@ impl SecureLocalDir {
         self.publish_temp(name, bytes, true)
     }
 
-    fn publish_temp(&self, name: &str, bytes: &[u8], replace: bool) -> Result<(), KeyStoreError> {
-        use std::os::windows::fs::OpenOptionsExt;
-        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_RECORD_BYTES {
-            return Err(KeyStoreError::CapExceeded {
-                path: self.dir.join(name).display().to_string(),
-                len: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+    /// Exclusive publish with an explicit size cap. See the Unix adapter.
+    pub fn write_exclusive_capped(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        max_bytes: u64,
+    ) -> Result<(), KeyStoreError> {
+        reject_oversize(&self.dir.join(name), bytes, max_bytes)?;
+        self.write_exclusive(name, bytes)
+    }
+
+    /// Atomic replace with an explicit size cap. See the Unix adapter.
+    pub fn write_replace_capped(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        max_bytes: u64,
+    ) -> Result<(), KeyStoreError> {
+        reject_oversize(&self.dir.join(name), bytes, max_bytes)?;
+        self.write_replace(name, bytes)
+    }
+
+    /// Read a file with an explicit size cap.
+    pub fn read_capped(
+        &self,
+        name: &str,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>, KeyStoreError> {
+        validate_file_name(name)?;
+        self.verify_dir()?;
+        let path = self.dir.join(name);
+        let mut file = match open_windows_record_handle(&path, false) {
+            Ok(file) => file,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(2) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(KeyStoreError::Io {
+                    path: path.display().to_string(),
+                    message: error.to_string(),
+                });
+            }
+        };
+        self.verify_open_file_capped(&file, &path, max_bytes)?;
+        let mut bytes = Vec::new();
+        if let Err(error) = (&mut file)
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+        {
+            bytes.fill(0);
+            compiler_fence(Ordering::SeqCst);
+            return Err(KeyStoreError::Io {
+                path: path.display().to_string(),
+                message: error.to_string(),
             });
         }
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+            bytes.fill(0);
+            compiler_fence(Ordering::SeqCst);
+            return Err(KeyStoreError::CapExceeded {
+                path: path.display().to_string(),
+                len: max_bytes.saturating_add(1),
+            });
+        }
+        Ok(Some(bytes))
+    }
+
+    fn verify_open_file_capped(
+        &self,
+        file: &std::fs::File,
+        path: &Path,
+        max_bytes: u64,
+    ) -> Result<(), KeyStoreError> {
+        reject_windows_reparse(file, path)?;
+        let metadata = file.metadata().map_err(|error| KeyStoreError::Io {
+            path: path.display().to_string(),
+            message: error.to_string(),
+        })?;
+        if !metadata.is_file() {
+            return Err(KeyStoreError::WrongFileType {
+                path: path.display().to_string(),
+                expected: "regular file",
+            });
+        }
+        if metadata.len() > max_bytes {
+            return Err(KeyStoreError::CapExceeded {
+                path: path.display().to_string(),
+                len: metadata.len(),
+            });
+        }
+        verify_windows_narrow_dacl(path)
+    }
+
+    fn publish_temp(&self, name: &str, bytes: &[u8], replace: bool) -> Result<(), KeyStoreError> {
+        use std::os::windows::fs::OpenOptionsExt;
         let sequence = SECURE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let tmp_name = format!(".{name}.tmp.{}.{}", std::process::id(), sequence);
         let tmp = self.dir.join(&tmp_name);
@@ -1549,6 +1788,41 @@ impl SecureLocalDir {
     }
 
     /// Fails closed on platforms without a reviewed adapter.
+    pub fn write_exclusive_capped(
+        &self,
+        _name: &str,
+        _bytes: &[u8],
+        _max_bytes: u64,
+    ) -> Result<(), KeyStoreError> {
+        Err(KeyStoreError::PlatformUnsupported {
+            operation: "create capped mesh key record".to_owned(),
+        })
+    }
+
+    /// Fails closed on platforms without a reviewed adapter.
+    pub fn write_replace_capped(
+        &self,
+        _name: &str,
+        _bytes: &[u8],
+        _max_bytes: u64,
+    ) -> Result<(), KeyStoreError> {
+        Err(KeyStoreError::PlatformUnsupported {
+            operation: "replace capped mesh key record".to_owned(),
+        })
+    }
+
+    /// Fails closed on platforms without a reviewed adapter.
+    pub fn read_capped(
+        &self,
+        _name: &str,
+        _max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>, KeyStoreError> {
+        Err(KeyStoreError::PlatformUnsupported {
+            operation: "read capped mesh key record".to_owned(),
+        })
+    }
+
+    /// Fails closed on platforms without a reviewed adapter.
     pub fn rename(&self, _from: &str, _to: &str) -> Result<(), KeyStoreError> {
         Err(KeyStoreError::PlatformUnsupported {
             operation: "rename mesh key record".to_owned(),
@@ -1668,6 +1942,23 @@ impl MeshKeyStore {
         handles.sort();
         handles.dedup();
         Ok(handles)
+    }
+
+    /// Every live pair-key slot on disk, including Current and Next. Retired
+    /// records are omitted. Order is deterministic: handle, then class token.
+    pub fn list_pair_slots(&self) -> Result<Vec<(String, PairKeyClass)>, KeyStoreError> {
+        list_named_slots(self.secure_dir().path(), "pair.", PairKeyClass::from_token)
+    }
+
+    /// Every live local signing-seed slot on disk, including Current and Next.
+    /// Retired records are omitted. Order is deterministic: handle, then class
+    /// token.
+    pub fn list_signing_slots(&self) -> Result<Vec<(String, SigningKeyClass)>, KeyStoreError> {
+        list_named_slots(
+            self.secure_dir().path(),
+            "signing.",
+            SigningKeyClass::from_token,
+        )
     }
 
     /// Load the pair key for `(peer_handle, class)`. `Ok(None)` when absent.
@@ -1828,6 +2119,61 @@ impl MeshKeyStore {
         let retired = format!("retired.{label}.{name}");
         self.dir.rename(&name, &retired)
     }
+}
+
+fn list_named_slots<T: Copy>(
+    dir: &Path,
+    prefix: &str,
+    parse_class: fn(&str) -> Option<T>,
+) -> Result<Vec<(String, T)>, KeyStoreError> {
+    let mut slots = Vec::new();
+    let entries = std::fs::read_dir(dir).map_err(|error| KeyStoreError::Io {
+        path: dir.display().to_string(),
+        message: format!("list key-store slots: {error}"),
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| KeyStoreError::Io {
+            path: dir.display().to_string(),
+            message: format!("read key-store slot entry: {error}"),
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(rest) = name
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        let Some((handle, class_token)) = rest.rsplit_once('.') else {
+            continue;
+        };
+        if handle.is_empty() || handle.starts_with("retired.") {
+            continue;
+        }
+        let Some(class) = parse_class(class_token) else {
+            continue;
+        };
+        slots.push((handle.to_owned(), class_token.to_owned(), class));
+    }
+    slots.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    slots.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
+    Ok(slots
+        .into_iter()
+        .map(|(handle, _, class)| (handle, class))
+        .collect())
+}
+
+fn reject_oversize(path: &Path, bytes: &[u8], max_bytes: u64) -> Result<(), KeyStoreError> {
+    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if len > max_bytes {
+        return Err(KeyStoreError::CapExceeded {
+            path: path.display().to_string(),
+            len,
+        });
+    }
+    Ok(())
 }
 
 fn record_file_name(peer_handle: &str, class: PairKeyClass) -> String {
@@ -2653,7 +2999,10 @@ mod tests {
         std::fs::create_dir_all(keys_dir.parent().expect("parent")).expect("mkdir parents");
         std::os::unix::fs::symlink(&real, &keys_dir).expect("symlink");
         let error = MeshKeyStore::open_or_create(workspace.path()).expect_err("must refuse");
-        assert!(matches!(error, KeyStoreError::SymlinkComponent { .. }));
+        assert!(
+            matches!(error, KeyStoreError::SymlinkComponent { .. }),
+            "expected symlink refusal, got {error:?}"
+        );
         assert_eq!(error.degraded_code(), MESH_KEY_STORE_UNAVAILABLE_CODE);
     }
 
@@ -2706,7 +3055,10 @@ mod tests {
             MeshKeyStore::open_or_create(workspace.path()).expect_err("create must refuse"),
             MeshKeyStore::open_existing(workspace.path()).expect_err("open must refuse"),
         ] {
-            assert!(matches!(error, KeyStoreError::SymlinkComponent { .. }));
+            assert!(
+                matches!(error, KeyStoreError::SymlinkComponent { .. }),
+                "expected symlink refusal, got {error:?}"
+            );
         }
         assert!(
             std::fs::symlink_metadata(elsewhere.join("mesh")).is_err(),

@@ -21,6 +21,10 @@ ee team join --invite "$INVITE" --workspace . --json
 ee team status --workspace . --json
 ee team members list --workspace . --json
 ee team doctor --workspace . --json
+
+# Encrypted credential recovery (separate from redacted `ee backup`)
+printf '%s\n' "$PASSPHRASE" | ee team credentials backup --passphrase-stdin --workspace . --json
+printf '%s\n' "$PASSPHRASE" | ee team credentials restore --input .ee/keys/mesh-credential-backup/credentials.backup.v1.json --passphrase-stdin --workspace . --json
 # status.members[] carry reachability + lastSeenAt (Hana: synced 4m ago)
 # status.pendingInvites[] carries inviteId for ee team revoke --invite-id
 ```

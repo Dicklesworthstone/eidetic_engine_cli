@@ -66587,6 +66587,12 @@ impl NormalizedInvocation {
                         "team steward run-once".to_string()
                     }
                     team::TeamCommand::Doctor(_) => "team doctor".to_string(),
+                    team::TeamCommand::Credentials(team::TeamCredentialsCommand::Backup(_)) => {
+                        "team credentials backup".to_string()
+                    }
+                    team::TeamCommand::Credentials(team::TeamCredentialsCommand::Restore(_)) => {
+                        "team credentials restore".to_string()
+                    }
                 },
                 Command::Situation(sit) => match sit {
                     SituationCommand::Classify(_) => "situation classify".to_string(),

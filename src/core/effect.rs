@@ -2819,6 +2819,16 @@ impl EffectManifest {
                 "Create a redacted support bundle side-path artifact",
             ),
             CommandEffect::workspace_file_write(
+                "team credentials backup",
+                vec![".ee/keys/mesh-credential-backup/"],
+                "Write an encrypted mesh credential-backup envelope through the hardened keys tree",
+            ),
+            CommandEffect::workspace_file_write(
+                "team credentials restore",
+                vec![".ee/keys/mesh/"],
+                "Restore pair keys and signing seeds from an encrypted credential-backup envelope",
+            ),
+            CommandEffect::workspace_file_write(
                 "rehearse run",
                 vec![
                     "rehearsal artifact root",

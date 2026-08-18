@@ -18,6 +18,7 @@ overlaps or contradicts a local memory.
 ee team status --workspace . --json
 ee team doctor --workspace . --json
 ee team members list --workspace . --json
+printf '%s\n' "$PASSPHRASE" | ee team credentials backup --passphrase-stdin --workspace . --json
 ee search "<task>" --memory-scope team --workspace . --json
 ee pack "<task>" --memory-scope team --workspace . --json
 ee team activity --as-of "<rfc3339>" --workspace . --json

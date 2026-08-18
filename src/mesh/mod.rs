@@ -18,6 +18,7 @@ pub mod auto_enrollment;
 pub mod auto_enrollment_safety;
 pub mod bootstrap_envelope;
 pub mod cache;
+pub mod credential_backup;
 pub mod discovery_cache;
 pub mod discovery_policy;
 pub mod emergency_disable;

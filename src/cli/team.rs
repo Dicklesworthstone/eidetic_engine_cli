@@ -72,6 +72,18 @@ pub enum TeamCommand {
     /// Tailnet-attested identity policy.
     #[command(subcommand)]
     Idp(TeamIdpCommand),
+    /// Encrypted pair-key and signing-seed backup.
+    #[command(subcommand)]
+    Credentials(TeamCredentialsCommand),
+}
+
+/// Nested `ee team credentials` verbs.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum TeamCredentialsCommand {
+    /// Write an encrypted credential backup under the workspace keys tree.
+    Backup(TeamCredentialsBackupArgs),
+    /// Restore pair keys and signing seeds from an encrypted backup.
+    Restore(TeamCredentialsRestoreArgs),
 }
 
 /// Nested `ee team fetch` verbs.
@@ -486,6 +498,39 @@ pub struct TeamDoctorArgs {
     pub database: Option<PathBuf>,
 }
 
+/// Arguments for `ee team credentials backup`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamCredentialsBackupArgs {
+    /// Destination file or directory under the workspace. Defaults to
+    /// `<workspace>/.ee/keys/mesh-credential-backup/credentials.backup.v1.json`.
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+
+    /// Read the passphrase from stdin. Never accepted on argv.
+    #[arg(long)]
+    pub passphrase_stdin: bool,
+
+    /// Replace an existing backup envelope at the destination.
+    #[arg(long)]
+    pub overwrite: bool,
+}
+
+/// Arguments for `ee team credentials restore`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TeamCredentialsRestoreArgs {
+    /// Encrypted backup envelope. May live outside the workspace.
+    #[arg(long, value_name = "PATH")]
+    pub input: PathBuf,
+
+    /// Read the passphrase from stdin. Never accepted on argv.
+    #[arg(long)]
+    pub passphrase_stdin: bool,
+
+    /// Replace existing pair-key and signing-seed slots.
+    #[arg(long)]
+    pub overwrite: bool,
+}
+
 /// Arguments for `ee team idp require`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct TeamIdpRequireArgs {
@@ -680,6 +725,12 @@ where
             handle_team_steward_run_once(cli, args, stdout, stderr)
         }
         TeamCommand::Doctor(args) => handle_team_doctor(cli, args, stdout, stderr),
+        TeamCommand::Credentials(TeamCredentialsCommand::Backup(args)) => {
+            handle_team_credentials_backup(cli, args, stdout, stderr)
+        }
+        TeamCommand::Credentials(TeamCredentialsCommand::Restore(args)) => {
+            handle_team_credentials_restore(cli, args, stdout, stderr)
+        }
     }
 }
 
@@ -2441,6 +2492,238 @@ fn probe_local_tailscale_for_team() -> crate::core::tailscale_probe::TailscaleLo
         &mut socket_runner,
         &mut cli_runner,
     )
+}
+
+fn handle_team_credentials_backup<W, E>(
+    cli: &Cli,
+    args: &TeamCredentialsBackupArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !args.passphrase_stdin {
+        return write_domain_error(
+            &DomainError::Usage {
+                message: "Passphrase must be read from stdin via --passphrase-stdin.".to_owned(),
+                repair: Some(
+                    "printf '%s\\n' \"$PASSPHRASE\" | ee team credentials backup --passphrase-stdin --workspace ."
+                        .to_owned(),
+                ),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
+    let passphrase = match read_invite_code_from_stdin() {
+        Ok(value) => value,
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::Usage {
+                    message: format!("Failed to read passphrase from stdin: {error}"),
+                    repair: Some(
+                        "printf '%s\\n' \"$PASSPHRASE\" | ee team credentials backup --passphrase-stdin --workspace ."
+                            .to_owned(),
+                    ),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+    let workspace_path = cli.resolve_workspace();
+    let (output_dir, file_name) =
+        match resolve_credential_backup_output(&workspace_path, args.output.as_deref()) {
+            Ok(resolved) => resolved,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    let created_at = chrono::Utc::now().to_rfc3339();
+    match crate::mesh::credential_backup::backup_workspace_credentials(
+        &workspace_path,
+        &output_dir,
+        &file_name,
+        &passphrase,
+        args.overwrite,
+        &created_at,
+    ) {
+        Ok(report) => {
+            let human = format!(
+                "Credential backup written\n  path: {}\n  pair_slots: {}\n  signing_slots: {}\n  store_present: {}\n",
+                report.path, report.pair_count, report.signing_count, report.store_present
+            );
+            write_team_report(cli, &report, &human, stdout)
+        }
+        Err(error) => write_domain_error(
+            &credential_backup_domain_error(error),
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn handle_team_credentials_restore<W, E>(
+    cli: &Cli,
+    args: &TeamCredentialsRestoreArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if !args.passphrase_stdin {
+        return write_domain_error(
+            &DomainError::Usage {
+                message: "Passphrase must be read from stdin via --passphrase-stdin.".to_owned(),
+                repair: Some(
+                    "printf '%s\\n' \"$PASSPHRASE\" | ee team credentials restore --input <path> --passphrase-stdin --workspace ."
+                        .to_owned(),
+                ),
+            },
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
+    let passphrase = match read_invite_code_from_stdin() {
+        Ok(value) => value,
+        Err(error) => {
+            return write_domain_error(
+                &DomainError::Usage {
+                    message: format!("Failed to read passphrase from stdin: {error}"),
+                    repair: Some(
+                        "printf '%s\\n' \"$PASSPHRASE\" | ee team credentials restore --input <path> --passphrase-stdin --workspace ."
+                            .to_owned(),
+                    ),
+                },
+                cli.wants_json(),
+                stdout,
+                stderr,
+            );
+        }
+    };
+    let workspace_path = cli.resolve_workspace();
+    let created_at = chrono::Utc::now().to_rfc3339();
+    match crate::mesh::credential_backup::restore_workspace_credentials(
+        &workspace_path,
+        &args.input,
+        &passphrase,
+        args.overwrite,
+        &created_at,
+    ) {
+        Ok(report) => {
+            let human = format!(
+                "Credential backup restored\n  path: {}\n  pair_slots: {}\n  signing_slots: {}\n  overwrite: {}\n",
+                report.path, report.pair_count, report.signing_count, report.overwrite
+            );
+            write_team_report(cli, &report, &human, stdout)
+        }
+        Err(error) => write_domain_error(
+            &credential_backup_domain_error(error),
+            cli.wants_json(),
+            stdout,
+            stderr,
+        ),
+    }
+}
+
+fn resolve_credential_backup_output(
+    workspace_path: &std::path::Path,
+    output: Option<&std::path::Path>,
+) -> Result<(PathBuf, String), DomainError> {
+    let default_dir = crate::mesh::credential_backup::mesh_credential_backup_dir(workspace_path);
+    let default_name =
+        crate::mesh::credential_backup::DEFAULT_CREDENTIAL_BACKUP_FILE_NAME.to_owned();
+    let Some(output) = output else {
+        return Ok((default_dir, default_name));
+    };
+    let absolute = if output.is_absolute() {
+        output.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| DomainError::Usage {
+                message: format!("Failed to resolve backup output path: {error}"),
+                repair: Some("Pass an absolute --output path under the workspace.".to_owned()),
+            })?
+            .join(output)
+    };
+    let (dir, name) = if absolute.is_dir()
+        || output
+            .as_os_str()
+            .to_string_lossy()
+            .ends_with(std::path::MAIN_SEPARATOR)
+    {
+        (absolute, default_name)
+    } else {
+        let name = absolute
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| DomainError::Usage {
+                message: "Backup output file name is not valid UTF-8.".to_owned(),
+                repair: Some("Use a file name such as credentials.backup.v1.json.".to_owned()),
+            })?
+            .to_owned();
+        let dir = absolute
+            .parent()
+            .map_or_else(|| workspace_path.to_path_buf(), PathBuf::from);
+        (dir, name)
+    };
+    if dir.strip_prefix(workspace_path).is_err() {
+        return Err(DomainError::Usage {
+            message: format!(
+                "Credential backup output {} is outside the workspace {}",
+                dir.display(),
+                workspace_path.display()
+            ),
+            repair: Some(
+                "Write the encrypted envelope under the workspace (default: .ee/keys/mesh-credential-backup/), then copy the file if you need it elsewhere.".to_owned(),
+            ),
+        });
+    }
+    Ok((dir, name))
+}
+
+fn credential_backup_domain_error(
+    error: crate::mesh::credential_backup::CredentialBackupError,
+) -> DomainError {
+    use crate::mesh::credential_backup::CredentialBackupError;
+    match error {
+        CredentialBackupError::Passphrase { message } => DomainError::Usage {
+            message,
+            repair: Some(
+                "Use a passphrase of at least 12 characters on stdin via --passphrase-stdin."
+                    .to_owned(),
+            ),
+        },
+        CredentialBackupError::Conflict { message } => DomainError::Usage {
+            message,
+            repair: Some(
+                "ee team credentials restore --input <path> --passphrase-stdin --overwrite --workspace ."
+                    .to_owned(),
+            ),
+        },
+        CredentialBackupError::Crypto { message }
+        | CredentialBackupError::Malformed { message } => DomainError::Usage {
+            message,
+            repair: Some(
+                "Confirm the passphrase and that the file is an ee.mesh.credentials.backup.v1 envelope."
+                    .to_owned(),
+            ),
+        },
+        CredentialBackupError::Io { path, message } => DomainError::Storage {
+            message: format!("Credential backup I/O failed at {path}: {message}"),
+            repair: Some("ee team doctor --workspace . --json".to_owned()),
+        },
+        CredentialBackupError::KeyStore(error) => DomainError::Storage {
+            message: error.message(),
+            repair: Some(error.repair()),
+        },
+    }
 }
 
 fn handle_team_doctor<W, E>(
