@@ -3109,6 +3109,16 @@ justification.
    operator-protected system-backup concern and must pass hardened local
    validation before reuse; a first-class encrypted credential-backup format
    would require a separate ADR and threat model.
+   **LOCKED 2026-08-18:** first-class `ee team credentials backup|restore`
+   shipped on `bd-tc-followup-oo7d2.7`. Ordinary `ee backup` still redacts
+   `peerCredentials`.
+7. **Quorum, selective-sync, vendor IdP** — **LOCKED 2026-08-18 (TC-D19):
+   do not build.** Equal-member remove-wins + delegated-member doctor
+   review is the authority product. Origin share/unshare/grants are the
+   publication filter; contractors are not invited. Fake-IdP +
+   tailnet-attest is the identity ceiling. New epics only when there is
+   an IT-owned multi-admin team, a contractor product, or a real IdP
+   tenant.
 
 ---
 
