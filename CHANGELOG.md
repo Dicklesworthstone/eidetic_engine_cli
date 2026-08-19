@@ -14,19 +14,21 @@ checked-in Beads records. The durable research ledger is
 | 2026-05-15 → 2026-06-16 | Published GitHub Releases `v0.1.0` … `v0.12.0` (assets on GitHub; detailed prose below is still incomplete for `0.4.0`–`0.12.0`). |
 | 2026-06-16 → 2026-07-30 | **`0.13.0`** fully researched below (`v0.12.0`..`HEAD`, 673 non-merge commits). |
 | 2026-07-30 → 2026-08-06 | **`0.13.1`** native-reranker completion and release-hardening patch. |
+| 2026-08-06 → 2026-08-18 | **`0.14.0`** team confederation product, Windows mesh control, port migrate. |
 
-Release surface (as of 2026-08-06):
+Release surface (as of 2026-08-18):
 
-- Latest **published** GitHub Release before this cut: [`v0.13.0`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.13.0) (2026-07-30).
-- `Cargo.toml` carries `version = "0.13.1"` for this cut; the historical
-  `v0.13.0` tag and release remain unchanged.
+- Latest **published** GitHub Release before this cut: [`v0.13.1`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.13.1) (2026-08-16).
+- `Cargo.toml` carries `version = "0.14.0"` for this cut; the historical
+  `v0.13.1` tag and release remain unchanged.
 - Install path: `curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash -s -- --easy-mode --verify`
 
 ### Version timeline (tags and GitHub Releases)
 
 | Version | Date | GitHub Release | Notes |
 | --- | --- | --- | --- |
-| [0.13.1](#0131---2026-08-06) | 2026-08-06 | this cut | Pure-Rust native reranking on every release target, model bootstrap, checksum and publication hardening |
+| [0.14.0](#0140---2026-08-18) | 2026-08-18 | this cut | Team confederation (ADR 0086), Windows scheduled-task + loopback control, encrypted credential backup, versioned team port migrate |
+| [0.13.1](#0131---2026-08-06) | 2026-08-06 | yes | Pure-Rust native reranking on every release target, model bootstrap, checksum and publication hardening |
 | [0.13.0](#0130---2026-07-30) | 2026-07-30 | yes | User-global store, Learn→Pack loop, pack-ledger integrity, group-commit / incremental index, installer hardening |
 | [0.12.0](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.12.0) | 2026-06-16 | yes | Contention observability, RCH topology canary, ask/decide/session-budget wave |
 | [0.11.0](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.11.0) | 2026-06-15 | yes | `ee decide`, `ee ask`, memory-debt doctor, scale envelope |
@@ -47,6 +49,19 @@ GitHub Release page for asset lists and the original generated notes until a
 future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
+
+## [0.14.0] - 2026-08-18
+
+Minor release: 109 commits since [`v0.13.1`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.13.1).
+Ships the ADR 0086 team-confederation product loop, Windows inbound/control
+and daemon scheduled-task surfaces, encrypted mesh credential backup, and
+versioned `ee team port` migrate. Quorum, selective-sync, and vendor IdP
+are explicitly not built (TC-D19).
+
+Remote lib-test gate on trj (NVMe source + tmpfs target, `dd4547b6`):
+`9089 passed; 131 failed; 2 ignored`. Failures are pre-existing host/index
+and CLI-subprocess issues, not the team-port or Windows-control work
+(`migrate_team_port_*` and `replace_endpoint_port_*` passed).
 
 ### Team confederation (ADR 0086, live Unix EE-to-EE)
 
