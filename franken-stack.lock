@@ -1,19 +1,20 @@
 # ee.franken-stack.lock.v1
 #
 # Full commit IDs are mandatory. This set pins the sibling revisions that
-# ee's Cargo.lock must close over. Refreshed 2026-08-15 for the v0.13.1
-# cut: ee now consumes asupersync =0.4.4 through the [patch.crates-io]
-# path override (the mesh/team-confederation code uses 0.4.4-only APIs),
-# FrankenSQLite is pinned on the 0.3.2 line, and SQLModel rides the
-# harmonize/vlsf2-fsqlite03 branch (crate version 0.4.0) whose adapter
-# targets fsqlite 0.3 with the stack-safe worker facade. Frankensearch's
-# storage crates continue to use registry fsqlite 0.1.x until that project
-# migrates, so the closure intentionally still carries the registry
-# asupersync 0.3.10 line alongside the path 0.4.4 line.
-asupersync	10afeedb787680e3fa4209b3efc70276fe776825
-franken_agent_detection	f68fc8bb0efe8027a99531b90c555a77bc6fabd7
-franken_networkx	a4c70cdeb680aec9248ade9181ef97e203e3ac2b
-frankensearch	2c4c1270256e570350c7a72a8bbf7d33eb4ebd35
-frankensqlite	829fb59ac4ce7ba79ca1c7fc4e129c14f600d14e
+# ee's Cargo.lock must close over. Refreshed 2026-08-18 for the v0.14.1
+# cut: asupersync origin/main 0.4.8, frankensqlite 0.3.5, frankensearch /
+# franken_networkx / toon / franken_agent_detection at origin/main.
+# SQLModel stays on the 0.4.0 harmonize/vlsf2-fsqlite03 pin (021bd17);
+# origin/main is still the 0.3.2 line and the later harmonize merge
+# reintroduced that downgrade. Isolated dests relax sqlmodel's
+# asupersync =0.4.4 pin to =0.4.8 so the path override can close.
+# Frankensearch storage still uses registry fsqlite 0.1.x until that
+# project migrates, so the closure still carries registry asupersync
+# 0.3.10 alongside the path 0.4.8 line.
+asupersync	ee7bd346e70684ac54ca142f3f5b105f1a003117
+franken_agent_detection	c8816fff484378f362dd517f1f0dd9691c8aeb5a
+franken_networkx	fe425b5d33dc357091d27fb5519af189becd47e8
+frankensearch	46a3aefce1aa658fa98f27f0b3676f073160e15c
+frankensqlite	f4a2e987411df52446c68a155f947f5f362e752d
 sqlmodel_rust	021bd17add2de0024d823ddc0d675550145ebf89
-toon_rust	2fce4e6e402c4d8a1bba00a84144c30c2c1d67c6
+toon_rust	d7185c7800d37810f0a29bd5fca2ee623f25819b

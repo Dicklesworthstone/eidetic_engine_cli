@@ -15,19 +15,21 @@ checked-in Beads records. The durable research ledger is
 | 2026-06-16 → 2026-07-30 | **`0.13.0`** fully researched below (`v0.12.0`..`HEAD`, 673 non-merge commits). |
 | 2026-07-30 → 2026-08-06 | **`0.13.1`** native-reranker completion and release-hardening patch. |
 | 2026-08-06 → 2026-08-18 | **`0.14.0`** team confederation product, Windows mesh control, port migrate. |
+| 2026-08-18 | **`0.14.1`** franken-stack refresh (asupersync 0.4.8, fsqlite 0.3.5) on the 0.14 product. |
 
 Release surface (as of 2026-08-18):
 
 - Latest **published** GitHub Release before this cut: [`v0.13.1`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.13.1) (2026-08-16).
-- `Cargo.toml` carries `version = "0.14.0"` for this cut; the historical
-  `v0.13.1` tag and release remain unchanged.
+- `Cargo.toml` carries `version = "0.14.1"` for this cut; the historical
+  `v0.13.1` tag and the un-asset `v0.14.0` tag remain unchanged.
 - Install path: `curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash -s -- --easy-mode --verify`
 
 ### Version timeline (tags and GitHub Releases)
 
 | Version | Date | GitHub Release | Notes |
 | --- | --- | --- | --- |
-| [0.14.0](#0140---2026-08-18) | 2026-08-18 | this cut | Team confederation (ADR 0086), Windows scheduled-task + loopback control, encrypted credential backup, versioned team port migrate |
+| [0.14.1](#0141---2026-08-18) | 2026-08-18 | this cut | Franken-stack refresh on the 0.14 product: asupersync 0.4.8, FrankenSQLite 0.3.5, crates.io `cargo update` |
+| [0.14.0](#0140---2026-08-18) | 2026-08-18 | tag only | Team confederation (ADR 0086), Windows scheduled-task + loopback control, encrypted credential backup, versioned team port migrate |
 | [0.13.1](#0131---2026-08-06) | 2026-08-06 | yes | Pure-Rust native reranking on every release target, model bootstrap, checksum and publication hardening |
 | [0.13.0](#0130---2026-07-30) | 2026-07-30 | yes | User-global store, Learn→Pack loop, pack-ledger integrity, group-commit / incremental index, installer hardening |
 | [0.12.0](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.12.0) | 2026-06-16 | yes | Contention observability, RCH topology canary, ask/decide/session-budget wave |
@@ -49,6 +51,23 @@ GitHub Release page for asset lists and the original generated notes until a
 future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
+
+## [0.14.1] - 2026-08-18
+
+Patch on 0.14.0: rebuild against current franken-stack `origin/main` pins
+and a crates.io `cargo update` within existing Cargo.toml ranges. Nightly
+toolchain only.
+
+- asupersync `=0.4.4` → `=0.4.8` (`ee7bd346e706`)
+- frankensqlite `0.3.2` → `0.3.5` (`f4a2e987411d`)
+- frankensearch, franken_networkx, toon_rust, franken_agent_detection
+  advanced to `origin/main`
+- SQLModel stays on the 0.4.0 harmonize pin (`021bd17add2d`); `origin/main`
+  is still 0.3.2
+- Isolated dests relax SQLModel's `asupersync =0.4.4` pin to `=0.4.8` so
+  the path override can close
+- crates.io lock refresh (thiserror, uuid, toml_edit, wasm-bindgen, …)
+  with `cargo tree` forbidden-dep check clean
 
 ## [0.14.0] - 2026-08-18
 
