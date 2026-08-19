@@ -131,10 +131,10 @@ fn send_foreground_request(port: u16, token: &str, path: &str) -> Result<JsonVal
 }
 
 #[test]
-fn serve_foreground_cli_accepts_one_real_status_request() -> TestResult {
+fn serve_foreground_cli_keeps_accepting_after_first_request() -> TestResult {
     let _trace = test_tracing::init_test_tracing(
         "bd-3usjw.4",
-        "serve_foreground_cli_accepts_one_real_status_request",
+        "serve_foreground_cli_keeps_accepting_after_first_request",
     );
     let token = "01234567890123456789012345678901";
     let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
@@ -198,45 +198,31 @@ fn serve_foreground_cli_accepts_one_real_status_request() -> TestResult {
         ));
     }
 
-    let mut stream = TcpStream::connect(("127.0.0.1", port))
-        .map_err(|error| format!("connect to serve listener on port {port}: {error}"))?;
-    let request = format!(
-        "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\n\r\n"
+    let first = send_foreground_request(port, token, "/v1/status")?;
+    assert_eq!(first["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
+    assert_eq!(first["request"]["endpoint"].as_str(), Some("status"));
+    let first_payload = &first["response"]["payload"];
+    assert_eq!(first_payload["schema"].as_str(), Some("ee.response.v2"));
+    assert_eq!(first_payload["success"].as_bool(), Some(true));
+    assert_eq!(first_payload["data"]["command"].as_str(), Some("status"));
+
+    // Persistence proof: a one-shot process would close the listener after
+    // the first exchange. A second /v1/status on the same bound port must
+    // still succeed.
+    let second = send_foreground_request(port, token, "/v1/status")?;
+    assert_eq!(second["request"]["endpoint"].as_str(), Some("status"));
+    assert_eq!(
+        second["response"]["payload"]["success"].as_bool(),
+        Some(true),
+        "second status request must succeed on the same foreground listener"
     );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|error| format!("write serve request: {error}"))?;
-    stream
-        .shutdown(Shutdown::Write)
-        .map_err(|error| format!("shutdown serve request writer: {error}"))?;
 
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|error| format!("read serve response: {error}"))?;
-    if !response.starts_with("HTTP/1.1 200 OK\r\n") {
-        return Err(format!("expected 200 response, got {response}"));
-    }
-    let envelope = response_body_json(&response)?;
-    assert_eq!(envelope["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
-    assert_eq!(envelope["request"]["endpoint"].as_str(), Some("status"));
-    let payload = &envelope["response"]["payload"];
-    assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
-    assert_eq!(payload["success"].as_bool(), Some(true));
-    assert_eq!(payload["data"]["command"].as_str(), Some("status"));
-
-    let status = child
+    child
+        .kill()
+        .map_err(|error| format!("stop serve foreground child: {error}"))?;
+    let _ = child
         .wait()
-        .map_err(|error| format!("wait for serve child: {error}"))?;
-    if !status.success() {
-        let mut stderr = String::new();
-        if let Some(mut pipe) = child.stderr.take() {
-            let _ = pipe.read_to_string(&mut stderr);
-        }
-        return Err(format!(
-            "serve child failed: status={status}, stderr={stderr}"
-        ));
-    }
+        .map_err(|error| format!("wait for serve foreground child: {error}"))?;
 
     let mut trailing_stdout = String::new();
     stdout_reader

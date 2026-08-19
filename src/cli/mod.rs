@@ -61762,7 +61762,7 @@ fn serve_bound_startup_response_human(listener_metadata: &serde_json::Value) -> 
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown");
     format!(
-        "ee serve\n========\n\nListening: http://{host}:{port}\nReadiness: {readiness}\nToken: {token}\nMode: foreground one-shot\n\n"
+        "ee serve\n========\n\nListening: http://{host}:{port}\nReadiness: {readiness}\nToken: {token}\nMode: foreground (listens until interrupted)\n\n"
     )
 }
 
@@ -83703,6 +83703,32 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             &Some("ready"),
             "ready state",
+        )
+    }
+
+    #[test]
+    fn serve_bound_startup_response_human_describes_persistent_listener() -> TestResult {
+        let rendered = super::serve_bound_startup_response_human(&serde_json::json!({
+            "listener": {
+                "boundHost": "127.0.0.1",
+                "boundPort": 8766
+            },
+            "startup": {
+                "readiness": {"state": "ready"},
+                "tokenPosture": {"state": "configured"}
+            }
+        }));
+        ensure_contains(&rendered, "Listening: http://127.0.0.1:8766", "listen url")?;
+        ensure_contains(&rendered, "Readiness: ready", "readiness")?;
+        ensure_contains(&rendered, "Token: configured", "token")?;
+        ensure_contains(
+            &rendered,
+            "Mode: foreground (listens until interrupted)",
+            "persistent mode",
+        )?;
+        ensure(
+            !rendered.contains("one-shot"),
+            "human serve startup must not claim one-shot exit after a single request",
         )
     }
 

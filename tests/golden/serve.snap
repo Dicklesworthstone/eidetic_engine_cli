@@ -1,16 +1,17 @@
 ---
 source: src/cli/mod.rs, src/serve.rs, Cargo.toml
-assertion: serve localhost foreground mode is a real one-shot adapter
+assertion: serve localhost foreground mode is a real persistent loopback adapter
 schema:
   command: ee serve --foreground --json
   envelope: ee.response.v2
   payload: ee.serve.startup.v1
-  status: foreground_one_shot
+  status: foreground_persistent
 contracts:
   - ee serve --help is visible in default builds
   - ee serve --foreground --json binds a loopback listener when EE_SERVE_TOKEN is configured
   - startup output uses ee.response.v2 with data.schema ee.serve.startup.v1
-  - one real TcpStream request is accepted and answered before foreground mode exits
+  - the bound listener keeps accepting connections until the process is interrupted
+  - a second real TcpStream request on the same bound port succeeds (not a one-shot exit)
   - ee serve without --foreground returns a usage error instead of implying background mode exists
   - no forbidden HTTP stack is introduced
   - serve adapter remains a wrapper boundary and must not add business logic
@@ -24,7 +25,7 @@ evidence:
   - Cargo.toml: serve = []
   - src/cli/mod.rs: Command::Serve and handle_serve
   - src/serve.rs: serve_foreground_once, bind_serve_listener, render_serve_transport_exchange
-  - tests/e2e_serve_localhost.rs: serve_foreground_cli_accepts_one_real_status_request
+  - tests/e2e_serve_localhost.rs: serve_foreground_cli_keeps_accepting_after_first_request
   - tests/fixtures/failure_modes/serve_unavailable_v1.json is retired
 degraded_contract:
   - missing or weak EE_SERVE_TOKEN returns policy errors before binding
