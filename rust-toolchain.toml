@@ -1,3 +1,6 @@
+# Nightly only. Never stable, beta, or a dated stable pin.
+# Mixing nightly cargo with stable rustc produces E0514 crate mismatches.
+# Release/DSR hosts must set RUSTUP_TOOLCHAIN=nightly (see AGENTS.md).
 [toolchain]
 channel = "nightly"
 components = ["rustfmt", "clippy"]

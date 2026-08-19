@@ -95,6 +95,7 @@ Repeat offenders are killed and replaced.
 We only use **Cargo** in this project, NEVER any other package manager.
 
 - **Edition:** Rust 2024 (nightly required — see `rust-toolchain.toml`)
+- **Toolchain:** Nightly only. Never stable, beta, or a mixed rustup override. `rust-toolchain.toml` pins `channel = "nightly"`. CI uses `dtolnay/rust-toolchain@nightly`. DSR/release hosts must export `RUSTUP_TOOLCHAIN=nightly` so `rustc` and `cargo` cannot drift onto stable mid-build (that mix is E0514).
 - **Dependency versions:** Explicit versions for stability
 - **Configuration:** Cargo.toml only (single binary crate with library surface in the same package; not a workspace in phase 0)
 - **Unsafe code:** Forbidden (`#![forbid(unsafe_code)]`)
