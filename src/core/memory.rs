@@ -39,8 +39,8 @@ use crate::db::{
     CreateMemoryLinkInput, CreateRememberIdempotencyKeyInput, CreateSearchIndexJobInput,
     CreateSessionInput, CreateWorkspaceInput, DbConnection, DbOperation, EvidenceProducerKind,
     MemoryContentSimHash, MemoryLinkRelation, MemoryLinkSource, SearchIndexJobStatus,
-    SearchIndexJobType, StoredMemory, StoredMemoryLink, audit_actions, generate_audit_id,
-    generate_audit_id_seeded,
+    SearchIndexJobType, StoredMemory, StoredMemoryLink, StoredWorkspace, audit_actions,
+    generate_audit_id, generate_audit_id_seeded,
 };
 use crate::models::{
     DomainError, GLOBAL_MEMORY_SCOPE_TAG, KNOWN_MEMORY_KINDS, KNOWN_MEMORY_LEVELS, MAX_TAG_BYTES,
@@ -1424,7 +1424,7 @@ fn remember_memory_inner_with_store(
     typed_field_assignments: &[String],
     attempt_family: Option<&RememberAttemptFamily<'_>>,
 ) -> Result<RememberMemoryReport, DomainError> {
-    let prepared = prepare_remember_memory_with_store(
+    let mut prepared = prepare_remember_memory_with_store(
         options,
         id_source.next_memory_id(),
         store_override,
@@ -1480,11 +1480,12 @@ fn remember_memory_inner_with_store(
     crate::core::ensure_addressed_database_exists(&prepared.database_path)?;
     let connection = open_remember_database_with_retry(&prepared.database_path)?;
     migrate_remember_database_with_retry(&connection)?;
-    ensure_workspace(
+    let workspace_id = ensure_workspace(
         &connection,
         &prepared.workspace_id,
         &prepared.workspace_path,
     )?;
+    prepared.workspace_id = workspace_id;
 
     let memory_id = prepared.memory_id.to_string();
     let audit_id = id_source.next_audit_id();
@@ -4478,25 +4479,25 @@ fn resolve_memory_write_workspace_path(path: &Path, dry_run: bool) -> Result<Pat
     }
 }
 
-/// Ensure the canonical workspace row exists after the already-addressed
-/// database has been opened and migrated.
+/// Ensure a workspace row exists after the already-addressed database has
+/// been opened and migrated, and return the id later writes must use.
+///
+/// A store can already have a path-keyed row whose id differs from the hash
+/// of the current path spelling (GH#23, Windows drive/verbatim hashing,
+/// legacy lexical aliases). Treating "a row exists for this path" as success
+/// and then inserting memories under a freshly hashed id fails SQLite with
+/// `FOREIGN KEY constraint failed` while `ee doctor` still reports healthy:
+/// existing rows stay internally consistent, so PRAGMA/ping checks pass.
 fn ensure_workspace(
     connection: &DbConnection,
-    workspace_id: &str,
+    requested_workspace_id: &str,
     workspace_path: &Path,
-) -> Result<(), DomainError> {
-    let path = workspace_path.to_string_lossy().into_owned();
-    if connection
-        .get_workspace_by_path(&path)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })?
-        .is_some()
-    {
-        return Ok(());
+) -> Result<String, DomainError> {
+    if let Some(existing) = existing_workspace_row(connection, workspace_path)? {
+        return Ok(existing.id);
     }
 
+    let path = workspace_path.to_string_lossy().into_owned();
     let input = CreateWorkspaceInput {
         path: path.clone(),
         name: workspace_path
@@ -4504,18 +4505,11 @@ fn ensure_workspace(
             .map(|name| name.to_string_lossy().into_owned()),
     };
 
-    match connection.insert_workspace(workspace_id, &input) {
-        Ok(()) => Ok(()),
+    match connection.insert_workspace(requested_workspace_id, &input) {
+        Ok(()) => Ok(requested_workspace_id.to_owned()),
         Err(error) if workspace_insert_lost_race(&error) => {
-            if connection
-                .get_workspace_by_path(&path)
-                .map_err(|query_error| DomainError::Storage {
-                    message: format!("Failed to query raced workspace: {query_error}"),
-                    repair: Some("ee doctor".to_owned()),
-                })?
-                .is_some()
-            {
-                Ok(())
+            if let Some(existing) = existing_workspace_row(connection, workspace_path)? {
+                Ok(existing.id)
             } else {
                 Err(DomainError::Storage {
                     message: format!("Failed to register workspace after insert race: {error}"),
@@ -4528,6 +4522,35 @@ fn ensure_workspace(
             repair: Some("ee doctor".to_owned()),
         }),
     }
+}
+
+fn existing_workspace_row(
+    connection: &DbConnection,
+    workspace_path: &Path,
+) -> Result<Option<StoredWorkspace>, DomainError> {
+    let raw = workspace_path.to_string_lossy().into_owned();
+    if let Some(existing) =
+        connection
+            .get_workspace_by_path(&raw)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to query workspace: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            })?
+    {
+        return Ok(Some(existing));
+    }
+    let canonical = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    if canonical != workspace_path {
+        return connection
+            .get_workspace_by_path(&canonical.to_string_lossy())
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to query canonical workspace: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            });
+    }
+    Ok(None)
 }
 
 fn workspace_insert_lost_race(error: &impl ToString) -> bool {
@@ -4638,7 +4661,7 @@ pub(crate) fn prepare_remember_txn_write_for_connection(
 ) -> Result<PreparedRememberTxnWrite, DomainError> {
     validate_remember_level_kind_cross_wire(options.level, options.kind)?;
     let mut id_source = RememberIdSource::Ambient;
-    let prepared =
+    let mut prepared =
         prepare_remember_memory_with_store(options, id_source.next_memory_id(), None, &[], None)?;
     if options.dry_run {
         return Err(DomainError::Usage {
@@ -4649,7 +4672,9 @@ pub(crate) fn prepare_remember_txn_write_for_connection(
     crate::core::ensure_addressed_database_exists(&prepared.database_path)?;
     let write_replay_guard = RememberWriteReplayGuard::arm(&prepared.workspace_path)?;
     migrate_remember_database_with_retry(connection)?;
-    ensure_workspace(connection, &prepared.workspace_id, &prepared.workspace_path)?;
+    let workspace_id =
+        ensure_workspace(connection, &prepared.workspace_id, &prepared.workspace_path)?;
+    prepared.workspace_id = workspace_id;
     // The daemon write-owner is already the per-process serializer for this
     // batch. We keep the direct CLI advisory lock on the direct path, but do
     // not acquire one per memory here; multiple same-workspace remembers in one
@@ -12930,6 +12955,80 @@ mod tests {
             workspace_id_for_database(&connection, &lexical_workspace),
             legacy_workspace_id.to_owned(),
             "legacy lexical workspace fallback",
+        )
+    }
+
+    #[test]
+    fn remember_binds_to_existing_path_keyed_workspace_id() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        let legacy_workspace_id = "wsp_00000000000000000000legacy";
+        let computed_id = stable_workspace_id(temp.path());
+        ensure(
+            computed_id != legacy_workspace_id,
+            true,
+            "fixture id must differ from the current path hash",
+        )?;
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                legacy_workspace_id,
+                &CreateWorkspaceInput {
+                    path: temp.path().to_string_lossy().into_owned(),
+                    name: Some("legacy hashed workspace".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Bind remember writes to the stored workspace row.",
+            workflow_id: None,
+            level: "procedural",
+            kind: "rule",
+            tags: None,
+            confidence: 0.8,
+            source: None,
+            allow_secret_mention: false,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: false,
+            propose_candidates: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(report.persisted, true, "remember persisted")?;
+        ensure(
+            report.workspace_id,
+            legacy_workspace_id.to_owned(),
+            "remember must reuse the stored workspace id",
+        )?;
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let memory = connection
+            .get_memory(&report.memory_id.to_string())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "memory should be persisted".to_string())?;
+        ensure(
+            memory.workspace_id,
+            legacy_workspace_id.to_owned(),
+            "memory row workspace id",
+        )?;
+        ensure(
+            connection
+                .get_workspace(&computed_id)
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            true,
+            "remember must not invent a second workspace row for the same path",
         )
     }
 
