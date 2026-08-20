@@ -1419,11 +1419,14 @@ pub(crate) fn store_memory_row_count(workspace_path: &Path, database: &Path) -> 
     let workspace_root = workspace_path
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
-    let workspace = connection
-        .list_workspaces()
-        .ok()?
-        .into_iter()
-        .find(|workspace| nearby_store_workspace_path_matches(workspace, &workspace_root))?;
+    let requested = crate::core::workspace::stable_workspace_id(&workspace_root);
+    let workspace = crate::core::workspace::select_existing_workspace_row(
+        &connection,
+        &requested,
+        &[workspace_path, workspace_root.as_path()],
+    )
+    .ok()
+    .flatten()?;
     connection
         .count_live_memories_for_workspace(&workspace.id)
         .ok()
@@ -1463,11 +1466,13 @@ fn nearby_store_workspace_identity(
         return Some(workspace);
     }
 
-    connection
-        .list_workspaces()
-        .ok()?
-        .into_iter()
-        .find(|workspace| nearby_store_workspace_path_matches(workspace, &candidate.workspace_root))
+    crate::core::workspace::select_existing_workspace_row(
+        connection,
+        &crate::core::workspace::stable_workspace_id(&candidate.workspace_root),
+        &[candidate.workspace_root.as_path()],
+    )
+    .ok()
+    .flatten()
 }
 
 fn nearby_store_workspace_path_matches(workspace: &StoredWorkspace, candidate_root: &Path) -> bool {

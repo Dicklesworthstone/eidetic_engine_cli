@@ -3632,7 +3632,13 @@ fn audit_context_pack_assembly_with_connection(
     let canonical_workspace = workspace_path
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
-    let workspace_id = crate::core::curate::stable_workspace_id(&canonical_workspace);
+    let requested = crate::core::curate::stable_workspace_id(&canonical_workspace);
+    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        conn,
+        &requested,
+        &[workspace_path, canonical_workspace.as_path()],
+    )
+    .unwrap_or(requested);
     if conn.get_workspace(&workspace_id).ok().flatten().is_none() {
         return;
     }
@@ -12115,7 +12121,13 @@ fn provenance_for_memory_cached(
         push_evidence_freshness_degradation(memory, &freshness, degraded);
     }
     let active_workspace_id = stable_context_workspace_id(workspace_path);
-    let note = if memory.workspace_id == active_workspace_id {
+    let local_workspace = context_workspace_path_keys(workspace_path)
+        .into_iter()
+        .any(|path| {
+            memory.workspace_id == stable_context_workspace_id(&path)
+                || memory.workspace_id == crate::core::workspace::stable_workspace_id(&path)
+        });
+    let note = if local_workspace {
         format!(
             "Memory {} selected for context pack; evidenceFreshness={}",
             memory.id,

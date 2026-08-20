@@ -3563,12 +3563,15 @@ async fn answer_bootstrap_join(
         &prove.inviter_nonce,
     );
     granted.pair_confirmation = crate::mesh::team::pair_confirmation(&pair);
-    if let Ok(workspaces) = connection.list_workspaces()
-        && let Some(workspace) = workspaces.first()
-    {
+    let requested = crate::core::workspace::stable_workspace_id(&route.workspace_path);
+    if let Ok(workspace_id) = crate::core::workspace::bound_workspace_id_or_hash(
+        &connection,
+        &requested,
+        &[route.workspace_path.as_path()],
+    ) {
         let _ = crate::mesh::team::record_inviter_side_join_member(
             &connection,
-            &workspace.id,
+            &workspace_id,
             &granted,
             &prove.joiner_node_id,
             &prove.joiner_display_name,
@@ -3577,7 +3580,7 @@ async fn answer_bootstrap_join(
         );
         let _ = crate::mesh::team::enroll_joiner_from_accept(
             &connection,
-            &workspace.id,
+            &workspace_id,
             &granted.team_id,
             &prove.joiner_node_id,
             &prove.joiner_display_name,
