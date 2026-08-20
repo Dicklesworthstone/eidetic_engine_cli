@@ -2790,22 +2790,56 @@ fn check_database(workspace_path: Option<&Path>) -> CheckResult {
         );
     }
 
-    match DbConnection::open_file(&database_path).and_then(|connection| {
-        connection.ping()?;
-        connection.needs_migration()
-    }) {
-        Ok(false) => CheckResult::ok(
-            "database",
-            format!(
-                "Database opened and schema is current at {}.",
-                database_path.display()
-            ),
-        ),
-        Ok(true) => CheckResult::warning(
-            "database",
-            "Database opened but schema migrations are pending.",
-            error_codes::MIGRATION_REQUIRED,
-        ),
+    match DbConnection::open_file(&database_path) {
+        Ok(connection) => {
+            if let Err(error) = connection.ping() {
+                return CheckResult::error(
+                    "database",
+                    format!("Database readiness check failed: {error}"),
+                    error_codes::DATABASE_CORRUPTED,
+                );
+            }
+            match connection.needs_migration() {
+                Ok(true) => CheckResult::warning(
+                    "database",
+                    "Database opened but schema migrations are pending.",
+                    error_codes::MIGRATION_REQUIRED,
+                ),
+                Ok(false) => match crate::core::workspace::select_existing_workspace_row(
+                    &connection,
+                    &stable_workspace_id(workspace_path),
+                    &[workspace_path],
+                ) {
+                    Ok(Some(_)) => CheckResult::ok(
+                        "database",
+                        format!(
+                            "Database opened and schema is current at {}.",
+                            database_path.display()
+                        ),
+                    ),
+                    Ok(None) => CheckResult::warning(
+                        "database",
+                        format!(
+                            "Database opened and schema is current at {}, but no workspace row matched this path. Writes may fail with FOREIGN KEY constraint failed.",
+                            database_path.display()
+                        ),
+                        error_codes::WORKSPACE_ROW_MISSING,
+                    ),
+                    Err(_) => CheckResult::ok(
+                        "database",
+                        format!(
+                            "Database opened and schema is current at {}.",
+                            database_path.display()
+                        ),
+                    ),
+                },
+                Err(error) => CheckResult::error(
+                    "database",
+                    format!("Database readiness check failed: {error}"),
+                    error_codes::DATABASE_CORRUPTED,
+                ),
+            }
+        }
         Err(error) => CheckResult::error(
             "database",
             format!("Database readiness check failed: {error}"),
@@ -5113,6 +5147,16 @@ mod tests {
         let connection = crate::db::DbConnection::open_file(&database_path)
             .map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::workspace::stable_workspace_id(&target);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: target.to_string_lossy().into_owned(),
+                    name: Some("doctor canonical workspace".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())?;
 
         let report = DoctorReport::gather_for_workspace(&alias);

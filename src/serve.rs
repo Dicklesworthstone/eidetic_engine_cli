@@ -1812,7 +1812,8 @@ fn serve_search_payload_json(
     advisory_state: &ServeSearchAdvisoryState,
 ) -> Result<ServeDispatchPayload, DomainError> {
     let workspace_path = serve_current_workspace_path()?;
-    let advisory_workspace_key = crate::core::workspace::stable_workspace_id(&workspace_path);
+    let advisory_workspace_key =
+        crate::core::workspace::bound_workspace_id_from_path(&workspace_path);
     let query = require_single_query_value(request, "q", "/v1/search")?;
     let report = run_search(&SearchOptions {
         workspace_path,
@@ -1895,7 +1896,8 @@ fn serve_context_payload_json(
         &crate::output::render_context_response_json(&run.response),
         "pack",
     )?;
-    let workspace_key = crate::core::workspace::stable_workspace_id(&options.workspace_path);
+    let workspace_key =
+        crate::core::workspace::bound_workspace_id_from_path(&options.workspace_path);
     let (payload, advisory_delivery) = if let Some(search_report) = run.search_report.as_ref() {
         advisory_state.render_context_for_delivery(payload, search_report, &workspace_key)?
     } else {

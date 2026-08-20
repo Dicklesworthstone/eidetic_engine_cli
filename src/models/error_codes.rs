@@ -157,6 +157,13 @@ pub const WRITE_FAILED: ErrorCode = ErrorCode {
     default_repair: None,
 };
 
+pub const WORKSPACE_ROW_MISSING: ErrorCode = ErrorCode {
+    id: "EE-E204",
+    category: ErrorCategory::Storage,
+    description: "Database is present but no workspace row matched this path",
+    default_repair: Some("ee init --workspace ."),
+};
+
 // Search index errors (EE-E300 - EE-E399)
 pub const INDEX_NOT_FOUND: ErrorCode = ErrorCode {
     id: "EE-E300",
@@ -327,6 +334,7 @@ pub const ALL_ERROR_CODES: &[ErrorCode] = &[
     DATABASE_LOCKED,
     DATABASE_CORRUPTED,
     WRITE_FAILED,
+    WORKSPACE_ROW_MISSING,
     // Search index
     INDEX_NOT_FOUND,
     INDEX_STALE,

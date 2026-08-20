@@ -38832,7 +38832,7 @@ fn context_stream_options_for_request(
     pack_options: &ContextPackOptions,
     workspace_path: &Path,
 ) -> output::streaming::ContextStreamFrameOptions {
-    let workspace_id = crate::core::workspace::stable_workspace_id(workspace_path);
+    let workspace_id = crate::core::workspace::bound_workspace_id_from_path(workspace_path);
     let pack_id = context_stream_pack_id(request, pack_options, &workspace_id);
     let request_id = format!("ctx_stream_{pack_id}");
     output::streaming::ContextStreamFrameOptions::new(
@@ -40199,7 +40199,8 @@ where
     };
 
     let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
-    let advisory_workspace_id = crate::core::workspace::stable_workspace_id(&workspace_path);
+    let advisory_workspace_id =
+        crate::core::workspace::bound_workspace_id_from_path(&workspace_path);
     let database_path_for_pack_dna = args
         .database
         .clone()
@@ -43848,7 +43849,7 @@ where
             attach_revisable_pack_metadata(&mut response, args.mesh_mode, "pack");
             let advisory_workspace_path = resolve_cli_workspace_path(&options.workspace_path);
             let advisory_workspace_id =
-                crate::core::workspace::stable_workspace_id(&advisory_workspace_path);
+                crate::core::workspace::bound_workspace_id_from_path(&advisory_workspace_path);
             write_context_response(
                 renderer,
                 cli.format,
@@ -46992,7 +46993,8 @@ where
     let mut command_timings = Vec::new();
     let workspace_start = Instant::now();
     let workspace_path = resolve_cli_workspace_path(&cli.resolve_workspace());
-    let advisory_workspace_id = crate::core::workspace::stable_workspace_id(&workspace_path);
+    let advisory_workspace_id =
+        crate::core::workspace::bound_workspace_id_from_path(&workspace_path);
     command_timings.push(cli_performance_timing_json(
         "command::workspaceResolve",
         workspace_start.elapsed(),

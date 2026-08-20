@@ -2742,6 +2742,26 @@ pub(crate) fn ensure_bound_workspace(
 /// win. Do not derive the fallback from `workspace_paths[0]`: callers often
 /// pass the raw CLI spelling first, and hashing that disagrees with
 /// remember's canonical id.
+pub(crate) fn bound_workspace_id_from_path(workspace_path: &Path) -> String {
+    let canonical = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let requested = stable_workspace_id(&canonical);
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return requested;
+    }
+    let Ok(connection) = DbConnection::open_file_read_only(&database_path) else {
+        return requested;
+    };
+    bound_workspace_id_or_hash(
+        &connection,
+        &requested,
+        &[workspace_path, canonical.as_path()],
+    )
+    .unwrap_or(requested)
+}
+
 pub(crate) fn bound_workspace_id_or_hash(
     connection: &DbConnection,
     requested_workspace_id: &str,

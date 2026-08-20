@@ -3901,7 +3901,7 @@ fn dispatch_search(
             }
         };
     let advisory_workspace_id =
-        crate::core::workspace::stable_workspace_id(&options.workspace_path);
+        crate::core::workspace::bound_workspace_id_from_path(&options.workspace_path);
     let performance = explain_performance.then(|| {
         search_run.report.performance_explain_json_with_trace(
             options.speed,
@@ -4627,7 +4627,19 @@ fn execute_daemon_txn_batch(
                         });
                     }
                     PreparedDaemonTxnBatchEntry::Outcome(entry) => {
-                        let (event_id, input, audit_id) = entry.clone().into_parts();
+                        let workspace_id = crate::core::workspace::ensure_bound_workspace(
+                            &connection,
+                            &entry.workspace_id,
+                            &[entry.workspace_path.as_path()],
+                        )
+                        .map_err(|error| {
+                            crate::db::DbError::MalformedRow {
+                                operation: crate::db::DbOperation::Execute,
+                                message: error.message().to_string(),
+                            }
+                        })?;
+                        let (event_id, mut input, audit_id) = entry.clone().into_parts();
+                        input.event.workspace_id = workspace_id;
                         crate::core::outcome::record_outcome_feedback_event_in_txn(
                             &connection,
                             &event_id,
@@ -4950,7 +4962,7 @@ fn dispatch_context(
         }
     };
     let advisory_workspace_id =
-        crate::core::workspace::stable_workspace_id(&options.workspace_path);
+        crate::core::workspace::bound_workspace_id_from_path(&options.workspace_path);
     let deadline = params.timeout_ms.map(Duration::from_millis);
     let context_run = match run_context_pack_with_performance_controlled(
         &options,
