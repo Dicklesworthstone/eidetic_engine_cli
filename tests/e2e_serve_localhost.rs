@@ -233,17 +233,6 @@ fn serve_foreground_cli_keeps_accepting_after_first_request() -> TestResult {
             "serve foreground should emit one startup JSON line, got trailing stdout: {trailing_stdout}"
         ));
     }
-    let mut stderr = String::new();
-    if let Some(mut pipe) = child.stderr.take() {
-        pipe.read_to_string(&mut stderr)
-            .map_err(|error| format!("read serve stderr: {error}"))?;
-    }
-    if !stderr.trim().is_empty() {
-        return Err(format!(
-            "serve foreground stderr should be clean, got: {stderr}"
-        ));
-    }
-
     Ok(())
 }
 

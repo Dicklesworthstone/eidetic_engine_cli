@@ -1483,7 +1483,7 @@ fn remember_memory_inner_with_store(
     let workspace_id = ensure_workspace(
         &connection,
         &prepared.workspace_id,
-        &prepared.workspace_path,
+        &[&prepared.workspace_path, options.workspace_path],
     )?;
     prepared.workspace_id = workspace_id;
 
@@ -4491,24 +4491,35 @@ fn resolve_memory_write_workspace_path(path: &Path, dry_run: bool) -> Result<Pat
 fn ensure_workspace(
     connection: &DbConnection,
     requested_workspace_id: &str,
-    workspace_path: &Path,
+    workspace_paths: &[&Path],
 ) -> Result<String, DomainError> {
-    if let Some(existing) = existing_workspace_row(connection, workspace_path)? {
+    if let Some(existing) =
+        existing_workspace_row(connection, requested_workspace_id, workspace_paths)?
+    {
         return Ok(existing.id);
     }
 
-    let path = workspace_path.to_string_lossy().into_owned();
+    let path = workspace_paths
+        .first()
+        .copied()
+        .unwrap_or_else(|| Path::new("."))
+        .to_string_lossy()
+        .into_owned();
     let input = CreateWorkspaceInput {
         path: path.clone(),
-        name: workspace_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned()),
+        name: workspace_paths.first().copied().and_then(|workspace_path| {
+            workspace_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        }),
     };
 
     match connection.insert_workspace(requested_workspace_id, &input) {
         Ok(()) => Ok(requested_workspace_id.to_owned()),
         Err(error) if workspace_insert_lost_race(&error) => {
-            if let Some(existing) = existing_workspace_row(connection, workspace_path)? {
+            if let Some(existing) =
+                existing_workspace_row(connection, requested_workspace_id, workspace_paths)?
+            {
                 Ok(existing.id)
             } else {
                 Err(DomainError::Storage {
@@ -4526,29 +4537,43 @@ fn ensure_workspace(
 
 fn existing_workspace_row(
     connection: &DbConnection,
-    workspace_path: &Path,
+    requested_workspace_id: &str,
+    workspace_paths: &[&Path],
 ) -> Result<Option<StoredWorkspace>, DomainError> {
-    let raw = workspace_path.to_string_lossy().into_owned();
-    if let Some(existing) =
-        connection
-            .get_workspace_by_path(&raw)
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to query workspace: {error}"),
-                repair: Some("ee doctor".to_owned()),
-            })?
+    if let Some(existing) = connection
+        .get_workspace(requested_workspace_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query workspace by id: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?
     {
         return Ok(Some(existing));
     }
-    let canonical = workspace_path
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_path.to_path_buf());
-    if canonical != workspace_path {
-        return connection
-            .get_workspace_by_path(&canonical.to_string_lossy())
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to query canonical workspace: {error}"),
-                repair: Some("ee doctor".to_owned()),
-            });
+
+    let mut seen = BTreeSet::new();
+    for workspace_path in workspace_paths {
+        let mut candidates = vec![workspace_path.to_path_buf()];
+        if let Ok(canonical) = workspace_path.canonicalize()
+            && canonical != **workspace_path
+        {
+            candidates.push(canonical);
+        }
+        for candidate in candidates {
+            let key = candidate.to_string_lossy().into_owned();
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            if let Some(existing) =
+                connection
+                    .get_workspace_by_path(&key)
+                    .map_err(|error| DomainError::Storage {
+                        message: format!("Failed to query workspace: {error}"),
+                        repair: Some("ee doctor".to_owned()),
+                    })?
+            {
+                return Ok(Some(existing));
+            }
+        }
     }
     Ok(None)
 }
@@ -4672,8 +4697,11 @@ pub(crate) fn prepare_remember_txn_write_for_connection(
     crate::core::ensure_addressed_database_exists(&prepared.database_path)?;
     let write_replay_guard = RememberWriteReplayGuard::arm(&prepared.workspace_path)?;
     migrate_remember_database_with_retry(connection)?;
-    let workspace_id =
-        ensure_workspace(connection, &prepared.workspace_id, &prepared.workspace_path)?;
+    let workspace_id = ensure_workspace(
+        connection,
+        &prepared.workspace_id,
+        &[&prepared.workspace_path, options.workspace_path],
+    )?;
     prepared.workspace_id = workspace_id;
     // The daemon write-owner is already the per-process serializer for this
     // batch. We keep the direct CLI advisory lock on the direct path, but do
@@ -12958,13 +12986,15 @@ mod tests {
         )
     }
 
-    #[test]
-    fn remember_binds_to_existing_path_keyed_workspace_id() -> TestResult {
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
-        let database_path = temp.path().join(".ee").join("ee.db");
+    fn remember_into_legacy_workspace(
+        workspace_path: &Path,
+        stored_path: &Path,
+        content: &str,
+    ) -> TestResult {
+        std::fs::create_dir(workspace_path.join(".ee")).map_err(|error| error.to_string())?;
+        let database_path = workspace_path.join(".ee").join("ee.db");
         let legacy_workspace_id = "wsp_00000000000000000000legacy";
-        let computed_id = stable_workspace_id(temp.path());
+        let computed_id = stable_workspace_id(workspace_path);
         ensure(
             computed_id != legacy_workspace_id,
             true,
@@ -12978,7 +13008,7 @@ mod tests {
             .insert_workspace(
                 legacy_workspace_id,
                 &CreateWorkspaceInput {
-                    path: temp.path().to_string_lossy().into_owned(),
+                    path: stored_path.to_string_lossy().into_owned(),
                     name: Some("legacy hashed workspace".to_owned()),
                 },
             )
@@ -12986,9 +13016,9 @@ mod tests {
         connection.close().map_err(|error| error.to_string())?;
 
         let report = remember_memory(&RememberMemoryOptions {
-            workspace_path: temp.path(),
+            workspace_path,
             database_path: None,
-            content: "Bind remember writes to the stored workspace row.",
+            content,
             workflow_id: None,
             level: "procedural",
             kind: "rule",
@@ -13022,13 +13052,42 @@ mod tests {
             legacy_workspace_id.to_owned(),
             "memory row workspace id",
         )?;
+        let workspaces = connection
+            .list_workspaces()
+            .map_err(|error| error.to_string())?;
         ensure(
-            connection
-                .get_workspace(&computed_id)
-                .map_err(|error| error.to_string())?
-                .is_none(),
-            true,
-            "remember must not invent a second workspace row for the same path",
+            workspaces.len(),
+            1,
+            "remember must not invent a second workspace row",
+        )?;
+        ensure(
+            workspaces[0].id,
+            legacy_workspace_id.to_owned(),
+            "sole workspace row id",
+        )
+    }
+
+    #[test]
+    fn remember_binds_to_existing_path_keyed_workspace_id() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let canonical = temp
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        remember_into_legacy_workspace(
+            temp.path(),
+            &canonical,
+            "Bind remember writes to the stored workspace row.",
+        )
+    }
+
+    #[test]
+    fn remember_binds_to_lexical_path_row_after_canonical_resolve() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        remember_into_legacy_workspace(
+            temp.path(),
+            temp.path(),
+            "Bind remember writes to a lexical workspace path spelling.",
         )
     }
 
