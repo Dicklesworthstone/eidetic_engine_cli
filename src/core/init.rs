@@ -16,9 +16,9 @@ use super::{
         IndexRebuildOptions, IndexRebuildStatus, index_corpus_compatibility_is_current,
         rebuild_index,
     },
-    workspace::stable_workspace_id,
+    workspace::{ensure_bound_workspace, stable_workspace_id},
 };
-use crate::db::{CreateWorkspaceInput, DbConnection};
+use crate::db::DbConnection;
 use crate::policy::store_auth::{StoreAuthRoot, workspace_keys_dir};
 
 /// Status of the init operation.
@@ -915,26 +915,15 @@ fn initialize_database(
     harden_init_database_mode(database_path, allow_symlink)
         .map_err(|error| format!("failed to harden database permissions: {error}"))?;
 
-    // Create workspace row if it doesn't exist (idempotent).
-    let workspace_key = workspace_path.to_string_lossy().to_string();
-    let existing = connection
-        .get_workspace_by_path(&workspace_key)
-        .map_err(|error| format!("failed to check workspace: {error}"))?;
-    let workspace_id = if let Some(existing) = existing {
-        existing.id
-    } else {
-        let workspace_id = stable_workspace_id(workspace_path);
-        connection
-            .insert_workspace(
-                &workspace_id,
-                &CreateWorkspaceInput {
-                    path: workspace_key,
-                    name: None,
-                },
-            )
-            .map_err(|error| format!("failed to create workspace row: {error}"))?;
-        workspace_id
-    };
+    // Create workspace row if it doesn't exist (idempotent). Bind to a
+    // path-keyed row when one already exists so later writes do not FK-fail
+    // against a freshly hashed id.
+    let workspace_id = ensure_bound_workspace(
+        &connection,
+        &stable_workspace_id(workspace_path),
+        &[workspace_path],
+    )
+    .map_err(|error| format!("failed to create workspace row: {}", error.message()))?;
 
     super::model::ensure_bundled_embedding_model_registered(&connection, &workspace_id)
         .map_err(|error| format!("failed to register bundled embedding model: {error}"))?;

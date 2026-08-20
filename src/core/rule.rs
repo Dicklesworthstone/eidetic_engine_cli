@@ -1514,7 +1514,7 @@ pub fn add_rule(options: &RuleAddOptions<'_>) -> Result<RuleAddReport, DomainErr
 
 /// List procedural rules for the selected workspace.
 pub fn list_rules(options: &RuleListOptions<'_>) -> Result<RuleListReport, DomainError> {
-    let prepared = prepare_rule_read(
+    let mut prepared = prepare_rule_read(
         options.workspace_path,
         options.database_path,
         Some("ee rule list --help"),
@@ -1525,6 +1525,7 @@ pub fn list_rules(options: &RuleListOptions<'_>) -> Result<RuleListReport, Domai
     validate_list_window(options.limit)?;
 
     let connection = open_existing_database(&prepared.database_path)?;
+    bind_prepared_rule_read(&connection, &mut prepared, options.workspace_path)?;
     let stored = connection
         .list_procedural_rules(
             &prepared.workspace_id,
@@ -1595,7 +1596,7 @@ pub fn list_rules(options: &RuleListOptions<'_>) -> Result<RuleListReport, Domai
 
 /// Show one procedural rule in the selected workspace.
 pub fn show_rule(options: &RuleShowOptions<'_>) -> Result<RuleShowReport, DomainError> {
-    let prepared = prepare_rule_read(
+    let mut prepared = prepare_rule_read(
         options.workspace_path,
         options.database_path,
         Some("ee rule show --help"),
@@ -1606,6 +1607,7 @@ pub fn show_rule(options: &RuleShowOptions<'_>) -> Result<RuleShowReport, Domain
         })?
         .to_string();
     let connection = open_existing_database(&prepared.database_path)?;
+    bind_prepared_rule_read(&connection, &mut prepared, options.workspace_path)?;
     let Some(rule) =
         connection
             .get_procedural_rule(&rule_id)
@@ -1639,7 +1641,7 @@ pub fn show_rule(options: &RuleShowOptions<'_>) -> Result<RuleShowReport, Domain
 
 /// Protect or unprotect one procedural rule.
 pub fn protect_rule(options: &RuleProtectOptions<'_>) -> Result<RuleProtectReport, DomainError> {
-    let prepared = prepare_rule_read(
+    let mut prepared = prepare_rule_read(
         options.workspace_path,
         options.database_path,
         Some("ee rule protect --help"),
@@ -1653,6 +1655,7 @@ pub fn protect_rule(options: &RuleProtectOptions<'_>) -> Result<RuleProtectRepor
         })?
         .to_string();
     let connection = open_existing_database(&prepared.database_path)?;
+    bind_prepared_rule_read(&connection, &mut prepared, options.workspace_path)?;
     let Some(rule) =
         connection
             .get_procedural_rule(&rule_id)
@@ -1762,7 +1765,7 @@ pub fn protect_rule(options: &RuleProtectOptions<'_>) -> Result<RuleProtectRepor
 
 /// Record lifecycle evidence for one procedural rule.
 pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, DomainError> {
-    let prepared = prepare_rule_read(
+    let mut prepared = prepare_rule_read(
         options.workspace_path,
         options.database_path,
         Some("ee rule mark --help"),
@@ -1771,6 +1774,7 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
     let trigger = RuleLifecycleTrigger::from_str(options.trigger)
         .map_err(|error| rule_read_usage_error(error.to_string(), "ee rule mark --help"))?;
     let connection = open_existing_database(&prepared.database_path)?;
+    bind_prepared_rule_read(&connection, &mut prepared, options.workspace_path)?;
     let stored = load_active_rule(&connection, &prepared.workspace_id, &rule_id)?;
     let previous_detail = load_rule_details(&connection, stored.clone())?;
     let maturity =
@@ -1956,7 +1960,7 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
 
 /// Update mutable metadata for one procedural rule.
 pub fn update_rule(options: &RuleUpdateOptions<'_>) -> Result<RuleUpdateReport, DomainError> {
-    let prepared = prepare_rule_read(
+    let mut prepared = prepare_rule_read(
         options.workspace_path,
         options.database_path,
         Some("ee rule update --help"),
@@ -1964,6 +1968,7 @@ pub fn update_rule(options: &RuleUpdateOptions<'_>) -> Result<RuleUpdateReport, 
     validate_rule_update_request(options)?;
     let rule_id = parse_rule_id_for_command(options.rule_id, "ee rule update --help")?;
     let connection = open_existing_database(&prepared.database_path)?;
+    bind_prepared_rule_read(&connection, &mut prepared, options.workspace_path)?;
     let stored = load_active_rule(&connection, &prepared.workspace_id, &rule_id)?;
     let previous_detail = load_rule_details(&connection, stored)?;
     let prepared_update = prepare_rule_update(&connection, &prepared, &previous_detail, options)?;
@@ -2272,13 +2277,14 @@ pub fn list_playbook_rules(
     options: &PlaybookListOptions<'_>,
 ) -> Result<PlaybookListReport, DomainError> {
     validate_list_window(options.limit)?;
-    let prepared = prepare_rule_read(
+    let mut prepared = prepare_rule_read(
         options.workspace_path,
         options.database_path,
         Some("ee playbook list --help"),
     )?;
     let snapshot = load_playbook_snapshot(
-        &prepared,
+        &mut prepared,
+        options.workspace_path,
         options.include_tombstoned,
         options.limit,
         options.offset,
@@ -2306,12 +2312,18 @@ pub fn export_playbook(
     options: &PlaybookExportOptions<'_>,
 ) -> Result<PlaybookExportReport, DomainError> {
     validate_list_window(options.limit)?;
-    let prepared = prepare_rule_read(
+    let mut prepared = prepare_rule_read(
         options.workspace_path,
         options.database_path,
         Some("ee playbook export --help"),
     )?;
-    let snapshot = load_playbook_snapshot(&prepared, options.include_tombstoned, options.limit, 0)?;
+    let snapshot = load_playbook_snapshot(
+        &mut prepared,
+        options.workspace_path,
+        options.include_tombstoned,
+        options.limit,
+        0,
+    )?;
     let exported_at = Utc::now().to_rfc3339();
 
     // TC-D14: MAC the rules' records root under the playbook subkey so
@@ -2466,7 +2478,7 @@ fn playbook_auth_state(
 pub fn import_playbook(
     options: &PlaybookImportOptions<'_>,
 ) -> Result<PlaybookImportReport, DomainError> {
-    let prepared = prepare_rule_read(
+    let mut prepared = prepare_rule_read(
         options.workspace_path,
         options.database_path,
         Some("ee playbook import --help"),
@@ -2482,10 +2494,15 @@ pub fn import_playbook(
             ),
         })?;
     validate_playbook_document(&document)?;
+    let existing = load_playbook_snapshot(
+        &mut prepared,
+        options.workspace_path,
+        true,
+        MAX_RULE_LIST_LIMIT,
+        0,
+    )?;
     let auth_state =
         playbook_auth_state(&document, &prepared.workspace_path, &prepared.workspace_id)?;
-
-    let existing = load_playbook_snapshot(&prepared, true, MAX_RULE_LIST_LIMIT, 0)?;
     let mut existing_contents = existing
         .rules
         .iter()
@@ -2683,13 +2700,15 @@ struct PlaybookSnapshot {
 }
 
 fn load_playbook_snapshot(
-    prepared: &PreparedRuleRead,
+    prepared: &mut PreparedRuleRead,
+    caller_path: &Path,
     include_tombstoned: bool,
     limit: u32,
     offset: u32,
 ) -> Result<PlaybookSnapshot, DomainError> {
     validate_list_window(limit)?;
     let connection = open_existing_database(&prepared.database_path)?;
+    bind_prepared_rule_read(&connection, prepared, caller_path)?;
     let stored = connection
         .list_procedural_rules(&prepared.workspace_id, None, None, include_tombstoned)
         .map_err(|error| DomainError::Storage {
@@ -3329,6 +3348,18 @@ fn playbook_candidate_audit_details(
         "confidence": confidence,
     })
     .to_string()
+}
+
+fn bind_prepared_rule_read(
+    connection: &DbConnection,
+    prepared: &mut PreparedRuleRead,
+    caller_path: &Path,
+) -> Result<(), DomainError> {
+    prepared.workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        connection,
+        &[prepared.workspace_path.as_path(), caller_path],
+    )?;
+    Ok(())
 }
 
 fn prepare_rule_read(

@@ -20,7 +20,9 @@ use chrono::Utc;
 use serde::Serialize;
 
 use crate::core::curate::{ClusterCoherenceInput, silhouette_agglomerative_clusters};
-use crate::core::workspace::{ensure_bound_workspace, stable_workspace_id};
+use crate::core::workspace::{
+    bound_workspace_id_or_hash, ensure_bound_workspace, stable_workspace_id,
+};
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
     CreateAuditInput, CreateCurationCandidateInput, CreateEvidenceSpanInput,
@@ -726,19 +728,13 @@ pub fn journal_report_for_daemon_write(
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
     let database_path = effective_database_path(&workspace_path, options.database_path);
     let connection = open_journal_database(&database_path)?;
-    let requested_workspace_id = prepared.payload.workspace_id.as_str();
-    let workspace_id = crate::core::workspace::select_existing_workspace_row(
+    let workspace_id = bound_workspace_id_or_hash(
         &connection,
-        requested_workspace_id,
         &[
             prepared.payload.workspace_path.as_path(),
             options.workspace_path,
         ],
-    )?
-    .map_or_else(
-        || requested_workspace_id.to_owned(),
-        |workspace| workspace.id,
-    );
+    )?;
     let stored = connection
         .get_journal_entry(&workspace_id, &prepared.payload.entry_id)
         .map_err(|error| DomainError::Storage {
@@ -964,12 +960,11 @@ pub fn list_journal_entries(
     options: &JournalListOptions<'_>,
 ) -> Result<JournalListReport, DomainError> {
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
-    let workspace_id = stable_workspace_id(&workspace_path);
     if !journal_capture_enabled(&workspace_path) {
         return Ok(JournalListReport {
             version: env!("CARGO_PKG_VERSION"),
             status: JOURNAL_DISABLED_CODE,
-            workspace_id,
+            workspace_id: stable_workspace_id(&workspace_path),
             entries: Vec::new(),
             degraded: vec![journal_disabled_degradation()],
         });
@@ -983,6 +978,10 @@ pub fn list_journal_entries(
 
     let database_path = effective_database_path(&workspace_path, options.database_path);
     let connection = open_journal_database(&database_path)?;
+    let workspace_id = bound_workspace_id_or_hash(
+        &connection,
+        &[workspace_path.as_path(), options.workspace_path],
+    )?;
     let filter = JournalEntryListFilter {
         session_key: options.session_key.clone(),
         agent_name: options.agent_name.clone(),
@@ -1035,7 +1034,10 @@ pub fn show_journal_entry(
 
     let database_path = effective_database_path(&workspace_path, options.database_path);
     let connection = open_journal_database(&database_path)?;
-    let workspace_id = stable_workspace_id(&workspace_path);
+    let workspace_id = bound_workspace_id_or_hash(
+        &connection,
+        &[workspace_path.as_path(), options.workspace_path],
+    )?;
     let stored = connection
         .get_journal_entry(&workspace_id, entry_id)
         .map_err(|error| DomainError::Storage {
@@ -1635,12 +1637,11 @@ pub fn distill_journal_entries(
     options: &JournalDistillOptions<'_>,
 ) -> Result<JournalDistillReport, DomainError> {
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
-    let workspace_id = stable_workspace_id(&workspace_path);
     if !journal_capture_enabled(&workspace_path) {
         return Ok(JournalDistillReport {
             version: env!("CARGO_PKG_VERSION"),
             status: JOURNAL_DISABLED_CODE,
-            workspace_id,
+            workspace_id: stable_workspace_id(&workspace_path),
             scope_session: options.session_key.clone(),
             scope_agent: options.agent_name.clone(),
             scope_since: options.since.clone(),
@@ -1656,6 +1657,10 @@ pub fn distill_journal_entries(
 
     let database_path = effective_database_path(&workspace_path, options.database_path);
     let connection = open_journal_database(&database_path)?;
+    let workspace_id = bound_workspace_id_or_hash(
+        &connection,
+        &[workspace_path.as_path(), options.workspace_path],
+    )?;
 
     // Scope selection. `undistilled_only` stays false so already-distilled
     // entries in scope surface as explicit `already_distilled` abstentions

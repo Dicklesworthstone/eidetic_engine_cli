@@ -5,6 +5,7 @@
 //! live transcript, and inbound origin events verify against `team_member_nodes`.
 //! This module still does not advertise `mesh.team.memory.v1`.
 
+use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -938,11 +939,18 @@ pub fn apply_imported_team_port_migrations(
     connection: &DbConnection,
     workspace_id: &str,
 ) -> Result<usize, OriginStreamError> {
+    let local_team_ids = load_local_teams(connection)?
+        .into_iter()
+        .map(|team| team.team_id)
+        .collect::<BTreeSet<_>>();
     let rows = connection
         .list_mesh_manifest_origin_events(TEAM_PORT_MANIFEST_SCAN_LIMIT)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
     let mut rewritten = 0_usize;
     for row in rows {
+        if !local_team_ids.is_empty() && !local_team_ids.contains(&row.team_id) {
+            continue;
+        }
         let Ok(OriginEventPayload::Manifest(payload)) = parse_stored_payload(&row) else {
             continue;
         };

@@ -515,13 +515,7 @@ fn selected_workspace_id(
     connection: &DbConnection,
     workspace_path: &Path,
 ) -> Result<String, DomainError> {
-    let requested = stable_workspace_id(workspace_path);
-    Ok(crate::core::workspace::select_existing_workspace_row(
-        connection,
-        &requested,
-        &[workspace_path],
-    )?
-    .map_or(requested, |workspace| workspace.id))
+    crate::core::workspace::bound_workspace_id_or_hash(connection, &[workspace_path])
 }
 
 impl PreparedArtifact {

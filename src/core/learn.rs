@@ -22,7 +22,7 @@ use crate::db::{
 };
 use crate::models::{
     DomainError, ExperimentOutcome, ExperimentOutcomeStatus, ExperimentSafetyBoundary,
-    LearningObservation, LearningObservationSignal, LearningTargetKind, WorkspaceId,
+    LearningObservation, LearningObservationSignal, LearningTargetKind,
 };
 use crate::search::{HashEmbedder, simhash::cosine_similarity};
 
@@ -2366,35 +2366,11 @@ fn ensure_learning_workspace(
         })?;
     let normalized_workspace = normalize_workspace_path(workspace_path);
     let workspace_path_text = normalized_workspace.to_string_lossy().into_owned();
-    if let Some(workspace) = connection
-        .get_workspace_by_path(&workspace_path_text)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?
-    {
-        connection.close().map_err(|error| DomainError::Storage {
-            message: format!("Failed to close database: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
-        return Ok(workspace.id);
-    }
-
-    let workspace_id = stable_workspace_id(&workspace_path_text);
-    connection
-        .insert_workspace(
-            &workspace_id,
-            &CreateWorkspaceInput {
-                path: workspace_path_text,
-                name: normalized_workspace
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned()),
-            },
-        )
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to register workspace: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
+    let workspace_id = crate::core::workspace::ensure_bound_workspace(
+        &connection,
+        &stable_workspace_id(&workspace_path_text),
+        &[normalized_workspace.as_path(), workspace_path],
+    )?;
     connection.close().map_err(|error| DomainError::Storage {
         message: format!("Failed to close database: {error}"),
         repair: Some("ee doctor".to_string()),
@@ -2418,89 +2394,26 @@ fn normalize_workspace_path(path: &Path) -> PathBuf {
     }
 }
 
-/// Resolve a workspace path to its DB row, trying both the path as
-/// given and its canonical (symlink-resolved) form.
+/// Resolve a workspace path to its stored row id.
 ///
-/// Bead bd-17c65.7.1 (G1). The 2026-05-10 walkthrough surfaced the
-/// symlink-mismatch bug: `--workspace /tmp/foo` failed to find a
-/// workspace registered (by `ee remember`) as `/private/tmp/foo`. The
-/// lookup fell back to `stable_workspace_id` and produced a synthetic
-/// id that didn't match any memory rows. Trying both forms picks up
-/// the canonical case while preserving exact-match for the common
-/// case of paths stored without canonicalization.
-/// Resolve a workspace path to its DB row, matching `ee remember`'s
-/// canonicalization order so workspace_ids agree across surfaces.
-///
-/// Bead bd-17c65.7.1 (G1). `ee remember`'s `resolve_workspace_path`
-/// canonicalizes the path before computing `stable_workspace_id`. To
-/// produce the SAME workspace_id (and find memories that ee remember
-/// inserted), `ee learn summary` must canonicalize too. Lookup
-/// strategy:
-///
-/// 1. Try the canonical (symlink-resolved) path.
-/// 2. Fall back to the raw path (for fresh workspaces / test fixtures
-///    that store under non-canonical paths).
-/// 3. Final fallback: `stable_workspace_id` from the canonical path —
-///    matches what `ee remember` would have produced for a fresh DB.
+/// Bead bd-17c65.7.1 (G1): `--workspace /tmp/foo` must find a row
+/// registered as `/private/tmp/foo`. Path-keyed ids win over a fresh
+/// hash so learn/summary see the same memories as `ee remember`.
 fn resolve_workspace_id_with_fallback(
     connection: &DbConnection,
     workspace_path: &Path,
 ) -> Result<String, DomainError> {
-    let primary = workspace_path.to_string_lossy().into_owned();
-    // Compute canonical form once; falls back to absolute if the path
-    // doesn't exist yet (rare — every caller has at least .ee/ee.db).
     let canonical = workspace_path
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
-    let canonical_str = canonical.to_string_lossy().into_owned();
-    tracing::debug!(
-        target: "ee::learn",
-        "resolve_workspace_id primary={primary} canonical={canonical_str}"
-    );
-
-    // 1. Try canonical first — matches the path `ee remember` stored
-    // workspaces under.
-    if canonical_str != primary {
-        let canonical_lookup =
-            connection
-                .get_workspace_by_path(&canonical_str)
-                .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to query workspace: {error}"),
-                    repair: Some("ee doctor".to_string()),
-                })?;
-        if let Some(ws) = canonical_lookup {
-            tracing::debug!(target: "ee::learn", "resolve_workspace_id matched canonical id={}", ws.id);
-            return Ok(ws.id);
-        }
-    }
-
-    // 2. Fall back to the raw path (test fixtures may register under
-    // non-canonical paths).
-    let primary_lookup = connection
-        .get_workspace_by_path(&primary)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
-    if let Some(ws) = primary_lookup {
-        tracing::debug!(target: "ee::learn", "resolve_workspace_id matched raw id={}", ws.id);
-        return Ok(ws.id);
-    }
-
-    // 3. Final fallback: synthesize a stable id from the canonical
-    // path. This matches `ee remember`'s `stable_workspace_id(canonical)`
-    // computation, so a fresh workspace's memories (stored under the
-    // canonical id) are findable even when no workspaces row exists.
-    let synthetic = stable_workspace_id(&canonical_str);
-    tracing::debug!(target: "ee::learn", "resolve_workspace_id synthetic id={synthetic}");
-    Ok(synthetic)
+    crate::core::workspace::bound_workspace_id_or_hash(
+        connection,
+        &[workspace_path, canonical.as_path()],
+    )
 }
 
 fn stable_workspace_id(path: &str) -> String {
-    let hash = blake3::hash(format!("workspace:{path}").as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[..16]);
-    WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+    crate::core::workspace::stable_workspace_id(Path::new(path))
 }
 
 fn generate_learning_record_id(prefix: &str) -> String {

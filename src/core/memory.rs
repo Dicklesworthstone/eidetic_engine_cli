@@ -1878,7 +1878,6 @@ pub fn close_workflow(
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
     let workflow_id = parse_workflow_id(Some(options.workflow_id))?
         .ok_or_else(|| remember_usage_error("workflow id cannot be empty".to_owned()))?;
-    let workspace_id = stable_workspace_id(&workspace_path);
     let closed_at = Utc::now().to_rfc3339();
 
     let connection =
@@ -1890,6 +1889,10 @@ pub fn close_workflow(
         message: format!("Failed to migrate database: {error}"),
         repair: Some("ee doctor".to_string()),
     })?;
+    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        &connection,
+        &[&workspace_path, options.workspace_path],
+    )?;
 
     let promotions = connection
         .promote_workflow_working_memories_audited(
@@ -9328,15 +9331,8 @@ pub(crate) fn workspace_id_for_database(conn: &DbConnection, workspace_path: &Pa
     let canonical = workspace_path
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
-    let requested = stable_workspace_id(&canonical);
-    match crate::core::workspace::select_existing_workspace_row(
-        conn,
-        &requested,
-        &[workspace_path, canonical.as_path()],
-    ) {
-        Ok(Some(row)) => row.id,
-        _ => requested,
-    }
+    crate::core::workspace::bound_workspace_id_or_hash(conn, &[workspace_path, canonical.as_path()])
+        .unwrap_or_else(|_| stable_workspace_id(&canonical))
 }
 
 fn get_memory_for_workspace(

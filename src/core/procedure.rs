@@ -19,7 +19,7 @@ use crate::db::{
 };
 use crate::models::{
     DomainError, ProcedureExportFormat, ProcedureMaturity, ProcedureStatus,
-    ProcedureVerificationStatus, SKILL_CAPSULE_SCHEMA_V1, SkillCapsuleInstallMode, WorkspaceId,
+    ProcedureVerificationStatus, SKILL_CAPSULE_SCHEMA_V1, SkillCapsuleInstallMode,
 };
 use crate::output::markdown;
 
@@ -3680,16 +3680,18 @@ fn open_procedure_store_with_workspace_mode(
         message: format!("failed to migrate procedure database: {error}"),
         repair: Some("ee init --workspace . --json".to_owned()),
     })?;
-    let workspace_key = workspace_path.display().to_string();
-    let workspace = connection
-        .get_workspace_by_path(&workspace_key)
-        .map_err(storage_error("failed to load workspace row"))?;
-    let workspace_id = if let Some(workspace) = workspace {
-        workspace.id
-    } else if create_workspace_row {
+    let requested = crate::core::workspace::stable_workspace_id(&workspace_path);
+    let workspace_id = if create_workspace_row {
         ensure_procedure_workspace(&connection, &workspace_path)?
     } else {
-        return Ok(None);
+        match crate::core::workspace::select_existing_workspace_row(
+            &connection,
+            &requested,
+            &[&workspace_path],
+        )? {
+            Some(workspace) => workspace.id,
+            None => return Ok(None),
+        }
     };
     Ok(Some(ProcedureStore {
         connection,
@@ -3701,30 +3703,15 @@ fn ensure_procedure_workspace(
     connection: &DbConnection,
     workspace_path: &Path,
 ) -> Result<String, DomainError> {
-    let workspace_key = workspace_path.display().to_string();
-    let workspace_id = stable_workspace_id(workspace_path);
-    connection
-        .insert_workspace(
-            &workspace_id,
-            &CreateWorkspaceInput {
-                path: workspace_key,
-                name: workspace_path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned()),
-            },
-        )
-        .map_err(|error| DomainError::Storage {
-            message: format!("failed to register procedure workspace: {error}"),
-            repair: Some("ee doctor --json".to_owned()),
-        })?;
-    Ok(workspace_id)
+    crate::core::workspace::ensure_bound_workspace(
+        connection,
+        &stable_workspace_id(workspace_path),
+        &[workspace_path],
+    )
 }
 
 fn stable_workspace_id(path: &Path) -> String {
-    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[..16]);
-    WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+    crate::core::workspace::stable_workspace_id(path)
 }
 
 fn resolve_workspace_path(workspace: &Path) -> Result<PathBuf, DomainError> {
