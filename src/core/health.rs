@@ -438,6 +438,12 @@ impl HealthScorecardReport {
                 repair: Some("ee doctor --workspace . --json".to_owned()),
             }
         })?;
+        let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+            &connection,
+            &workspace_id,
+            &[workspace_path],
+        )
+        .unwrap_or(workspace_id);
 
         let memories = connection
             .list_memories(&workspace_id, None, false)

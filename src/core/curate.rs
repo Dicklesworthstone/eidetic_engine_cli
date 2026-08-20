@@ -2277,7 +2277,7 @@ struct PreparedCurateRead {
 pub fn list_reflection_request_ledger_diagnostics(
     options: &ReflectionRequestLedgerDiagnosticsOptions<'_>,
 ) -> Result<ReflectionRequestLedgerDiagnosticsReport, DomainError> {
-    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     let now = parse_reflection_diagnostics_time(options.now_rfc3339)?;
     let now_rfc3339 = now.to_rfc3339_opts(SecondsFormat::Secs, true);
     let status_filter = options
@@ -2286,7 +2286,7 @@ pub fn list_reflection_request_ledger_diagnostics(
         .filter(|status| !status.is_empty())
         .map(str::to_owned);
 
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
     let rows = connection
         .list_reflection_request_ledger_for_diagnostics(
             &prepared.workspace_id,
@@ -2592,7 +2592,7 @@ fn reflection_retention_cutoff(
 pub fn list_curation_candidates(
     options: &CurateCandidatesOptions<'_>,
 ) -> Result<CurateCandidatesReport, DomainError> {
-    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     let candidate_type = parse_optional_candidate_type(options.candidate_type)?;
     let status = parse_optional_status(options.status)?;
     let target_memory_id = parse_optional_memory_id(options.target_memory_id)?;
@@ -2600,7 +2600,7 @@ pub fn list_curation_candidates(
     let synthesize_dedup =
         should_synthesize_mi_dedup_candidates(candidate_type.as_deref(), status.as_deref());
 
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
     let query_target_memory_id = if synthesize_dedup {
         None
     } else {
@@ -2706,10 +2706,10 @@ pub fn list_curation_candidates(
 pub fn review_session_proposals(
     options: &ReviewSessionOptions<'_>,
 ) -> Result<ReviewSessionReport, DomainError> {
-    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     validate_review_session_options(options)?;
 
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
     let session = resolve_review_session(
         &connection,
         &prepared.workspace_id,
@@ -2788,10 +2788,10 @@ pub fn review_session_proposals(
 pub fn capture_suggestions(
     options: &CaptureSuggestOptions<'_>,
 ) -> Result<CaptureSuggestionsReport, DomainError> {
-    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     validate_capture_suggest_options(options)?;
 
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
     let requested_session_id = options
         .session_id
         .map(str::trim)
@@ -5247,7 +5247,7 @@ fn review_state_rank(review_state: &str) -> u8 {
 pub fn validate_curation_candidate(
     options: &CurateValidateOptions<'_>,
 ) -> Result<CurateValidateReport, DomainError> {
-    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     let candidate_id = validate_curate_candidate_id(options.candidate_id)?;
     let reviewed_by = options
         .actor
@@ -5256,7 +5256,7 @@ pub fn validate_curation_candidate(
         .unwrap_or("ee")
         .to_owned();
 
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
     let stored = connection
         .get_curation_candidate(&prepared.workspace_id, &candidate_id)
         .map_err(|error| DomainError::Storage {
@@ -5392,10 +5392,10 @@ pub fn validate_curation_candidate(
 pub fn show_curation_candidate(
     options: &CurateShowOptions<'_>,
 ) -> Result<CurateShowReport, DomainError> {
-    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     let candidate_id = validate_curate_candidate_id(options.candidate_id)?;
 
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
     let stored = connection
         .get_curation_candidate(&prepared.workspace_id, &candidate_id)
         .map_err(|error| DomainError::Storage {
@@ -5548,7 +5548,7 @@ fn planned_application_from_decision(
 pub fn apply_curation_candidate(
     options: &CurateApplyOptions<'_>,
 ) -> Result<CurateApplyReport, DomainError> {
-    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     let candidate_id = validate_curate_candidate_id(options.candidate_id)?;
     let applied_by = options
         .actor
@@ -5557,7 +5557,7 @@ pub fn apply_curation_candidate(
         .unwrap_or("ee")
         .to_owned();
 
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
     let stored = connection
         .get_curation_candidate(&prepared.workspace_id, &candidate_id)
         .map_err(|error| DomainError::Storage {
@@ -5817,7 +5817,7 @@ fn curate_apply_index_publish_failed(
 pub fn review_curation_candidate(
     options: &CurateReviewOptions<'_>,
 ) -> Result<CurateReviewReport, DomainError> {
-    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     let candidate_id = validate_curate_candidate_id(options.candidate_id)?;
     let reviewed_by = options
         .actor
@@ -5829,7 +5829,7 @@ pub fn review_curation_candidate(
     let merge_into_candidate_id = parse_merge_target_candidate_id(options)?;
     let snoozed_until = parse_snoozed_until(options)?;
 
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
     let stored = connection
         .get_curation_candidate(&prepared.workspace_id, &candidate_id)
         .map_err(|error| DomainError::Storage {
@@ -5947,7 +5947,7 @@ pub fn review_curation_candidate(
 pub fn run_curation_disposition(
     options: &CurateDispositionOptions<'_>,
 ) -> Result<CurateDispositionReport, DomainError> {
-    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     let actor = options
         .actor
         .map(str::trim)
@@ -5956,7 +5956,7 @@ pub fn run_curation_disposition(
         .to_owned();
     let now = parse_or_current_time(options.now_rfc3339)?;
 
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
     let candidates = connection
         .list_curation_candidates(&prepared.workspace_id, None, None, None)
         .map_err(|error| DomainError::Storage {
@@ -6299,7 +6299,7 @@ fn push_structural_decay_feature_disabled_degradation(
 pub fn run_curate_retire(
     options: &CurateRetireOptions<'_>,
 ) -> Result<CurateRetireReport, DomainError> {
-    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     let actor = options
         .actor
         .map(str::trim)
@@ -6314,7 +6314,7 @@ pub fn run_curate_retire(
 
     let next_action = "ee curate candidates --status=retired --json".to_owned();
 
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
     let candidate = connection
         .get_curation_candidate(&prepared.workspace_id, options.candidate_id)
         .map_err(|error| DomainError::Storage {
@@ -6418,7 +6418,7 @@ pub fn run_curate_retire(
 pub fn run_curate_tombstone(
     options: &CurateTombstoneOptions<'_>,
 ) -> Result<CurateTombstoneReport, DomainError> {
-    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     let actor = options
         .actor
         .map(str::trim)
@@ -6433,7 +6433,7 @@ pub fn run_curate_tombstone(
 
     let next_action = "ee memory list --json".to_owned();
 
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
     let memory =
         get_curate_memory_for_workspace(&connection, &prepared.workspace_id, options.memory_id)?;
 
@@ -6592,7 +6592,7 @@ fn load_bearing_tombstone_issue(
 pub fn run_curate_untombstone(
     options: &CurateUntombstoneOptions<'_>,
 ) -> Result<CurateUntombstoneReport, DomainError> {
-    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     let actor = options
         .actor
         .map(str::trim)
@@ -6607,7 +6607,7 @@ pub fn run_curate_untombstone(
 
     let next_action = format!("ee memory show {} --json", options.memory_id);
 
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
     let memory =
         get_curate_memory_for_workspace(&connection, &prepared.workspace_id, options.memory_id)?;
 
@@ -6751,7 +6751,7 @@ fn threshold_promotion_target(source_level: &str) -> Option<&'static str> {
 pub fn run_curate_auto_promote(
     options: &CurateAutoPromoteOptions<'_>,
 ) -> Result<CurateAutoPromoteReport, DomainError> {
-    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     let actor = options
         .actor
         .map(str::trim)
@@ -6767,7 +6767,7 @@ pub fn run_curate_auto_promote(
         max_per_run: options.max_per_run,
     };
 
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
 
     // Build the set of memory IDs that have any pending feedback
     // quarantine. We load once and group rather than issuing N+1
@@ -7096,7 +7096,7 @@ fn apply_threshold_promotion(
 pub fn run_review_workspace(
     options: &ReviewWorkspaceOptions<'_>,
 ) -> Result<ReviewWorkspaceReport, DomainError> {
-    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     let scope_path = review_workspace_scope_path(&prepared.workspace_path, options.scope);
     let scope_filter = options.scope.map(|_| scope_path.as_path());
 
@@ -7106,7 +7106,7 @@ pub fn run_review_workspace(
         "ee review workspace --propose --json".to_owned()
     };
 
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
 
     let mut memories = connection
         .list_memories(&prepared.workspace_id, None, false)
@@ -7323,7 +7323,7 @@ impl ProposeDerivedReport {
 pub fn propose_derived_candidate(
     options: &ProposeDerivedOptions<'_>,
 ) -> Result<ProposeDerivedReport, DomainError> {
-    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
 
     let level = options.level.trim();
     if level.is_empty() {
@@ -7379,7 +7379,7 @@ pub fn propose_derived_candidate(
         ));
     }
 
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
 
     // Resolve source ids -> canonical (kind, id, contentHash) tuples.
     // Deduplicate via BTreeSet so the array is sorted and idempotent
@@ -7715,7 +7715,7 @@ pub struct ReflectionIngestReport {
 pub fn propose_reflection_request(
     options: &ReflectionProposeOptions<'_>,
 ) -> Result<ReflectionProposeReport, DomainError> {
-    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
 
     let reflection_kind = options.reflection_kind.trim();
     if reflection_kind.is_empty() {
@@ -7748,7 +7748,7 @@ pub fn propose_reflection_request(
     }
     validate_reflection_propose_limits(options.limits)?;
 
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
     let mut source_inputs = Vec::new();
     for raw_id in options.source_ids {
         source_inputs.push(resolve_reflection_source(
@@ -8092,7 +8092,7 @@ fn reflection_propose_next_commands(workspace_path: &Path) -> Vec<String> {
 pub fn ingest_reflection_result(
     options: &ReflectionIngestOptions<'_>,
 ) -> Result<ReflectionIngestReport, DomainError> {
-    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
     let result = parse_reflection_result_artifact_json(options.result_json)
         .map_err(reflection_result_validation_error)?;
     let request_id = result.request_id.trim();
@@ -8136,7 +8136,7 @@ pub fn ingest_reflection_result(
 
     let result_hash =
         reflection_result_artifact_hash(&result).map_err(reflection_result_validation_error)?;
-    let connection = open_existing_database(&prepared.database_path)?;
+    let connection = open_bound_curate_read(&mut prepared)?;
     let stored = connection
         .get_reflection_request_ledger(&prepared.workspace_id, request_id)
         .map_err(|error| DomainError::Storage {
@@ -15659,6 +15659,16 @@ fn proposed_tags_for_candidate(
         }
     }
     tags.into_iter().collect()
+}
+
+fn open_bound_curate_read(prepared: &mut PreparedCurateRead) -> Result<DbConnection, DomainError> {
+    let connection = open_existing_database(&prepared.database_path)?;
+    prepared.workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        &connection,
+        &prepared.workspace_id,
+        &[prepared.workspace_path.as_path()],
+    )?;
+    Ok(connection)
 }
 
 fn prepare_curate_read(

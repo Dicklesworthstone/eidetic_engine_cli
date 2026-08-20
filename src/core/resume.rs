@@ -191,9 +191,16 @@ struct ResumeAdmissionBoundary {
 
 impl ResumeAdmissionBoundary {
     fn for_workspace(workspace_path: &Path) -> Self {
+        Self::for_bound_workspace(
+            workspace_path,
+            crate::core::workspace::stable_workspace_id(workspace_path),
+        )
+    }
+
+    fn for_bound_workspace(workspace_path: &Path, workspace_id: String) -> Self {
         Self {
             scope: MemoryScopeContext::for_workspace(workspace_path, MemoryScope::Workspace, false),
-            workspace_id: crate::core::workspace::stable_workspace_id(workspace_path),
+            workspace_id,
         }
     }
 
@@ -789,7 +796,8 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
     // secret-bearing bodies fail closed; tags and provenance remain eligible
     // for field-level public redaction during projection. This deliberately
     // performs no per-memory storage lookup.
-    let admission = ResumeAdmissionBoundary::for_workspace(&canonical_workspace);
+    let admission =
+        ResumeAdmissionBoundary::for_bound_workspace(&canonical_workspace, workspace_id.clone());
     let all_live: Vec<StoredMemory> = current_memories
         .into_iter()
         .filter_map(|memory| {

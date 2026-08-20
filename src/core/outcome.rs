@@ -2161,9 +2161,10 @@ fn sprt_quarantine_recovery_actions() -> Vec<serde_json::Value> {
 pub fn list_feedback_quarantine(
     options: &OutcomeQuarantineListOptions<'_>,
 ) -> Result<OutcomeQuarantineListReport, DomainError> {
-    let prepared = prepare_quarantine_workspace(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_quarantine_workspace(options.workspace_path, options.database_path)?;
     let status = normalize_quarantine_status(options.status)?;
     let connection = open_existing_database(&prepared.database_path)?;
+    bind_prepared_quarantine_workspace(&connection, &mut prepared);
     let rows = connection
         .list_feedback_quarantine(&prepared.workspace_id, status.as_deref())
         .map_err(|error| DomainError::Storage {
@@ -2191,9 +2192,10 @@ pub fn list_feedback_quarantine(
 pub fn review_feedback_quarantine(
     options: &OutcomeQuarantineReviewOptions<'_>,
 ) -> Result<OutcomeQuarantineReviewReport, DomainError> {
-    let prepared = prepare_quarantine_workspace(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_quarantine_workspace(options.workspace_path, options.database_path)?;
     let quarantine_id = validate_feedback_quarantine_id(options.quarantine_id)?;
     let connection = open_existing_database(&prepared.database_path)?;
+    bind_prepared_quarantine_workspace(&connection, &mut prepared);
     let Some(row) = connection
         .get_feedback_quarantine(&quarantine_id)
         .map_err(|error| DomainError::Storage {
@@ -2314,6 +2316,19 @@ struct PreparedQuarantineWorkspace {
     workspace_id: String,
     workspace_path: std::path::PathBuf,
     database_path: std::path::PathBuf,
+}
+
+fn bind_prepared_quarantine_workspace(
+    connection: &DbConnection,
+    prepared: &mut PreparedQuarantineWorkspace,
+) {
+    let bound = crate::core::workspace::bound_workspace_id_or_hash(
+        connection,
+        &prepared.workspace_id,
+        &[prepared.workspace_path.as_path()],
+    )
+    .unwrap_or_else(|_| prepared.workspace_id.clone());
+    prepared.workspace_id = bound;
 }
 
 fn prepare_quarantine_workspace(

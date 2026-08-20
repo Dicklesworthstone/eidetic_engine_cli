@@ -466,11 +466,12 @@ struct MemoryDebtSignals {
 pub fn run_memory_debt_doctor(
     options: &MemoryDebtDoctorOptions<'_>,
 ) -> Result<MemoryDebtReport, DomainError> {
-    let prepared = prepare_memory_debt(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_memory_debt(options.workspace_path, options.database_path)?;
     let class_filter = parse_class_filter(options.class_filter)?;
     let limit = options.limit.min(MAX_LIMIT);
     let now = parse_now(options.now_rfc3339)?;
     let connection = open_existing_database(&prepared.database_path)?;
+    bind_prepared_memory_debt(&connection, &mut prepared);
     build_memory_debt_report(
         &connection,
         &prepared,
@@ -486,9 +487,10 @@ pub fn run_memory_debt_doctor(
 pub fn run_memory_debt_snapshot(
     options: &MemoryDebtSnapshotOptions<'_>,
 ) -> Result<MemoryDebtSnapshotReport, DomainError> {
-    let prepared = prepare_memory_debt(options.workspace_path, options.database_path)?;
+    let mut prepared = prepare_memory_debt(options.workspace_path, options.database_path)?;
     let now = parse_now(options.now_rfc3339)?;
     let connection = open_existing_database(&prepared.database_path)?;
+    bind_prepared_memory_debt(&connection, &mut prepared);
     let report = build_memory_debt_report(
         &connection,
         &prepared,
@@ -1304,6 +1306,16 @@ fn newer_time(current: Option<DateTime<Utc>>, candidate: DateTime<Utc>) -> Optio
         Some(current) => current.max(candidate),
         None => candidate,
     })
+}
+
+fn bind_prepared_memory_debt(connection: &DbConnection, prepared: &mut PreparedMemoryDebt) {
+    let bound = workspace::bound_workspace_id_or_hash(
+        connection,
+        &prepared.workspace_id,
+        &[prepared.workspace_path.as_path()],
+    )
+    .unwrap_or_else(|_| prepared.workspace_id.clone());
+    prepared.workspace_id = bound;
 }
 
 fn prepare_memory_debt(

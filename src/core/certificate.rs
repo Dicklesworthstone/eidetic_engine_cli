@@ -1070,8 +1070,9 @@ fn list_database_certificates(options: &CertificateListOptions) -> CertificateLi
             database_path.display()
         ));
     };
+    let workspace_id = bound_certificate_workspace_id(&connection, database_path, workspace_id);
     let Ok(records) =
-        connection.list_certificates_for_workspace(workspace_id, None, None, u32::MAX)
+        connection.list_certificates_for_workspace(&workspace_id, None, None, u32::MAX)
     else {
         return CertificateListReport::new().with_store_unavailable(format!(
             "certificate database query failed for workspace {workspace_id}"
@@ -1212,8 +1213,26 @@ fn load_database_certificate(
     }
 
     let connection = DbConnection::open_file(database_path).ok()?;
+    let workspace_id = bound_certificate_workspace_id(&connection, database_path, workspace_id);
     let record = connection.get_certificate(&options.certificate_id).ok()??;
     (record.workspace_id == workspace_id).then_some(record)
+}
+
+fn bound_certificate_workspace_id(
+    connection: &DbConnection,
+    database_path: &Path,
+    requested_workspace_id: &str,
+) -> String {
+    let workspace_path = database_path
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(database_path);
+    crate::core::workspace::bound_workspace_id_or_hash(
+        connection,
+        requested_workspace_id,
+        &[workspace_path],
+    )
+    .unwrap_or_else(|_| requested_workspace_id.to_owned())
 }
 
 /// Return `Some(reason)` if the backing certificate database cannot be
