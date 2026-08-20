@@ -8622,9 +8622,21 @@ where
             .database_path
             .map(absolute_path_from_cwd)
             .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
-        let workspace_id = stable_workspace_id(&workspace_path);
         let index_dir = workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR);
         let connection = open_remember_database_with_retry(&database_path)?;
+        let canonical = workspace_path
+            .canonicalize()
+            .unwrap_or_else(|_| workspace_path.clone());
+        let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+            &connection,
+            &stable_workspace_id(&canonical),
+            &[
+                options.workspace_path,
+                workspace_path.as_path(),
+                canonical.as_path(),
+            ],
+        )
+        .unwrap_or_else(|_| stable_workspace_id(&canonical));
         before_reconcile(&connection, &workspace_id)?;
         let provisional_index_status = match reconcile_pending_remember_index_jobs(
             &connection,
@@ -13074,6 +13086,45 @@ mod tests {
             }
             other => Err(format!("expected already_recorded, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn remember_batch_drain_binds_to_path_keyed_workspace() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = temp.path();
+        let canonical = workspace_path
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        remember_into_legacy_workspace(
+            workspace_path,
+            &canonical,
+            "Seed a path-keyed workspace before the coalesced batch drain.",
+        )?;
+
+        let report = remember_memory_batch_stdin(
+            &upgrade_batch_options(workspace_path, false),
+            concat!(
+                "{\"content\":\"Path-keyed batch row one about index drain.\"}\n",
+                "{\"content\":\"Path-keyed batch row two about index drain.\"}\n",
+            ),
+        )
+        .map_err(|error| error.message())?;
+        ensure(report.stored_count, 2, "path-keyed batch stored count")?;
+        ensure(
+            report.index_status.clone(),
+            "indexed".to_owned(),
+            "path-keyed batch drain reports indexed",
+        )?;
+
+        let connection = open_upgrade_test_db(workspace_path)?;
+        let pending = connection
+            .list_pending_search_index_jobs("wsp_00000000000000000000legacy", None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            pending.len(),
+            0,
+            "path-keyed pending index jobs after the batch drain",
+        )
     }
 
     fn peer_conflict_memory<'a>(
