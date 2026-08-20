@@ -19,15 +19,13 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use serde::Serialize;
 
-use crate::core::curate::{
-    ClusterCoherenceInput, silhouette_agglomerative_clusters, stable_workspace_id,
-};
+use crate::core::curate::{ClusterCoherenceInput, silhouette_agglomerative_clusters};
+use crate::core::workspace::{ensure_bound_workspace, stable_workspace_id};
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
     CreateAuditInput, CreateCurationCandidateInput, CreateEvidenceSpanInput,
-    CreateJournalEntryInput, CreateSessionInput, CreateWorkspaceInput, DbConnection,
-    EvidenceProducerKind, JournalEntryListFilter, StoredJournalEntry, StoredMemory, audit_actions,
-    generate_audit_id,
+    CreateJournalEntryInput, CreateSessionInput, DbConnection, EvidenceProducerKind,
+    JournalEntryListFilter, StoredJournalEntry, StoredMemory, audit_actions, generate_audit_id,
 };
 use crate::models::{CandidateId, DomainError};
 use crate::policy::{InstructionRisk, detect_instruction_like_content, redact_secret_like_content};
@@ -667,8 +665,12 @@ pub fn append_journal_entry_with_id(
 
     let database_path = effective_database_path(&workspace_path, options.database_path);
     let connection = open_journal_database(&database_path)?;
-    let workspace_id = stable_workspace_id(&workspace_path);
-    ensure_workspace(&connection, &workspace_id, &workspace_path)?;
+    let requested_workspace_id = stable_workspace_id(&workspace_path);
+    let workspace_id = ensure_bound_workspace(
+        &connection,
+        &requested_workspace_id,
+        &[workspace_path.as_path(), options.workspace_path],
+    )?;
 
     let stored = persist_prepared_entry_with_id(
         &connection,
@@ -724,8 +726,21 @@ pub fn journal_report_for_daemon_write(
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
     let database_path = effective_database_path(&workspace_path, options.database_path);
     let connection = open_journal_database(&database_path)?;
+    let requested_workspace_id = prepared.payload.workspace_id.as_str();
+    let workspace_id = crate::core::workspace::select_existing_workspace_row(
+        &connection,
+        requested_workspace_id,
+        &[
+            prepared.payload.workspace_path.as_path(),
+            options.workspace_path,
+        ],
+    )?
+    .map_or_else(
+        || requested_workspace_id.to_owned(),
+        |workspace| workspace.id,
+    );
     let stored = connection
-        .get_journal_entry(&prepared.payload.workspace_id, &prepared.payload.entry_id)
+        .get_journal_entry(&workspace_id, &prepared.payload.entry_id)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to read daemon-routed journal entry: {error}"),
             repair: Some("ee doctor".to_owned()),
@@ -844,8 +859,12 @@ pub fn append_journal_entries_stdin(
 
     let database_path = effective_database_path(&workspace_path, options.database_path);
     let connection = open_journal_database(&database_path)?;
-    let workspace_id = stable_workspace_id(&workspace_path);
-    ensure_workspace(&connection, &workspace_id, &workspace_path)?;
+    let requested_workspace_id = stable_workspace_id(&workspace_path);
+    let workspace_id = ensure_bound_workspace(
+        &connection,
+        &requested_workspace_id,
+        &[workspace_path.as_path(), options.workspace_path],
+    )?;
 
     let mut results = Vec::with_capacity(lines.len());
     let mut stored_count = 0_usize;
@@ -2660,47 +2679,8 @@ pub(crate) fn ensure_workspace(
     connection: &DbConnection,
     workspace_id: &str,
     workspace_path: &Path,
-) -> Result<(), DomainError> {
-    let path = workspace_path.to_string_lossy().into_owned();
-    if connection
-        .get_workspace_by_path(&path)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })?
-        .is_some()
-    {
-        return Ok(());
-    }
-
-    let input = CreateWorkspaceInput {
-        path: path.clone(),
-        name: workspace_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned()),
-    };
-    match connection.insert_workspace(workspace_id, &input) {
-        Ok(()) => Ok(()),
-        // Another writer can race the workspace insert; losing the race is
-        // success as long as the row exists afterwards.
-        Err(error) => {
-            if connection
-                .get_workspace_by_path(&path)
-                .map_err(|query_error| DomainError::Storage {
-                    message: format!("Failed to query raced workspace: {query_error}"),
-                    repair: Some("ee doctor".to_owned()),
-                })?
-                .is_some()
-            {
-                Ok(())
-            } else {
-                Err(DomainError::Storage {
-                    message: format!("Failed to register workspace: {error}"),
-                    repair: Some("ee doctor".to_owned()),
-                })
-            }
-        }
-    }
+) -> Result<String, DomainError> {
+    ensure_bound_workspace(connection, workspace_id, &[workspace_path])
 }
 
 #[cfg(test)]

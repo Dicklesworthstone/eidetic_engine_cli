@@ -24,8 +24,8 @@ use super::{
 };
 use crate::db::{
     CompleteImportLedgerInput, CreateAuditInput, CreateEvidenceSpanInput, CreateImportLedgerInput,
-    CreateSearchIndexJobInput, CreateSessionInput, CreateWorkspaceInput, DatabaseConfig,
-    DbConnection, DbError, DbOperation, EvidenceProducerKind, SearchIndexJobType,
+    CreateSearchIndexJobInput, CreateSessionInput, DatabaseConfig, DbConnection, DbError,
+    DbOperation, EvidenceProducerKind, SearchIndexJobType,
 };
 use crate::models::{
     AuditId, CASS_EVIDENCE_SPAN_SCHEMA_V1, CASS_SESSION_SCHEMA_V1, EvidenceId,
@@ -1788,21 +1788,15 @@ fn existing_session_index_job_for_reconciliation(
 }
 
 fn ensure_workspace(connection: &DbConnection, workspace_path: &Path) -> Result<String, DbError> {
-    let path = workspace_path.to_string_lossy().into_owned();
-    if let Some(existing) = connection.get_workspace_by_path(&path)? {
-        return Ok(existing.id);
-    }
-    let id = stable_workspace_id(&path);
-    connection.insert_workspace(
-        &id,
-        &CreateWorkspaceInput {
-            path,
-            name: workspace_path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned()),
-        },
-    )?;
-    Ok(id)
+    crate::core::workspace::ensure_bound_workspace(
+        connection,
+        &crate::core::workspace::stable_workspace_id(workspace_path),
+        &[workspace_path],
+    )
+    .map_err(|error| DbError::MalformedRow {
+        operation: DbOperation::Execute,
+        message: error.message(),
+    })
 }
 
 fn ensure_running_ledger(

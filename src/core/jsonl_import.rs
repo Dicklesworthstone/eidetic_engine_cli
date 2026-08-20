@@ -15,8 +15,8 @@ use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
 use crate::db::{
-    CreateAuditInput, CreateMemoryInput, CreateSearchIndexJobInput, CreateWorkspaceInput,
-    DatabaseConfig, DbConnection, DbError, SearchIndexJobType, StoredMemory,
+    CreateAuditInput, CreateMemoryInput, CreateSearchIndexJobInput, DatabaseConfig, DbConnection,
+    DbError, DbOperation, SearchIndexJobType, StoredMemory,
 };
 use crate::models::{
     EXPORT_AGENT_SCHEMA_V1, EXPORT_ARTIFACT_SCHEMA_V1, EXPORT_AUDIT_SCHEMA_V1,
@@ -1894,21 +1894,15 @@ fn trust_subclass_for_header(header: Option<&ExportHeader>) -> String {
 }
 
 fn ensure_workspace(connection: &DbConnection, workspace_path: &Path) -> Result<String, DbError> {
-    let path = workspace_path.to_string_lossy().into_owned();
-    if let Some(existing) = connection.get_workspace_by_path(&path)? {
-        return Ok(existing.id);
-    }
-    let id = stable_workspace_id(&path);
-    connection.insert_workspace(
-        &id,
-        &CreateWorkspaceInput {
-            path,
-            name: workspace_path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned()),
-        },
-    )?;
-    Ok(id)
+    crate::core::workspace::ensure_bound_workspace(
+        connection,
+        &crate::core::workspace::stable_workspace_id(workspace_path),
+        &[workspace_path],
+    )
+    .map_err(|error| DbError::MalformedRow {
+        operation: DbOperation::Execute,
+        message: error.message(),
+    })
 }
 
 fn database_path(options: &JsonlImportOptions) -> PathBuf {

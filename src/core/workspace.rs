@@ -2675,6 +2675,187 @@ pub fn stable_workspace_id(path: &Path) -> String {
     WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
 }
 
+/// Ensure a workspace row exists and return the id later writes must use.
+///
+/// Path-keyed rows win over a freshly hashed id. Several spellings of the same
+/// root (canonical vs lexical, Windows verbatim vs drive path) can already be
+/// stored under a different id than `requested_workspace_id`. Inserting child
+/// rows under the hashed id then fails SQLite with FOREIGN KEY constraint
+/// failed while `ee doctor` still reports healthy. If more than one matching
+/// row exists, prefer the one that already holds live memories.
+pub(crate) fn ensure_bound_workspace(
+    connection: &DbConnection,
+    requested_workspace_id: &str,
+    workspace_paths: &[&Path],
+) -> Result<String, DomainError> {
+    if let Some(existing) =
+        select_existing_workspace_row(connection, requested_workspace_id, workspace_paths)?
+    {
+        return Ok(existing.id);
+    }
+
+    let path = workspace_paths
+        .first()
+        .copied()
+        .unwrap_or_else(|| Path::new("."))
+        .to_string_lossy()
+        .into_owned();
+    let input = CreateWorkspaceInput {
+        path,
+        name: workspace_paths.first().copied().and_then(|workspace_path| {
+            workspace_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        }),
+    };
+
+    connection
+        .upsert_workspace_with_scope(
+            requested_workspace_id,
+            &input,
+            &WorkspaceScopeFields::standalone(),
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to register workspace: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+
+    Ok(select_existing_workspace_row(
+        connection,
+        requested_workspace_id,
+        workspace_paths,
+    )?
+    .ok_or_else(|| DomainError::Storage {
+        message: format!(
+            "Failed to register workspace {requested_workspace_id}: row missing after upsert"
+        ),
+        repair: Some("ee doctor".to_owned()),
+    })?
+    .id)
+}
+
+pub(crate) fn select_existing_workspace_row(
+    connection: &DbConnection,
+    requested_workspace_id: &str,
+    workspace_paths: &[&Path],
+) -> Result<Option<StoredWorkspace>, DomainError> {
+    let mut matches = BTreeMap::new();
+    let mut input_keys = BTreeSet::new();
+    for workspace_path in workspace_paths {
+        for key in workspace_path_lookup_keys(workspace_path) {
+            input_keys.insert(key.clone());
+            if let Some(existing) =
+                connection
+                    .get_workspace_by_path(&key)
+                    .map_err(|error| DomainError::Storage {
+                        message: format!("Failed to query workspace: {error}"),
+                        repair: Some("ee doctor".to_owned()),
+                    })?
+            {
+                matches.entry(existing.id.clone()).or_insert(existing);
+            }
+        }
+    }
+    if matches.is_empty() && !input_keys.is_empty() {
+        for row in connection
+            .list_workspaces()
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to list workspaces: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            })?
+        {
+            if workspace_path_lookup_keys(Path::new(&row.path))
+                .iter()
+                .any(|key| input_keys.contains(key))
+            {
+                matches.entry(row.id.clone()).or_insert(row);
+            }
+        }
+    }
+    if !matches.is_empty() {
+        return Ok(Some(pick_workspace_row(
+            connection,
+            matches.into_values().collect(),
+        )?));
+    }
+    connection
+        .get_workspace(requested_workspace_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query workspace by id: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })
+}
+
+fn pick_workspace_row(
+    connection: &DbConnection,
+    rows: Vec<StoredWorkspace>,
+) -> Result<StoredWorkspace, DomainError> {
+    let mut best: Option<(u64, String, StoredWorkspace)> = None;
+    for row in rows {
+        let live = connection
+            .count_live_memories_for_workspace(&row.id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to count live memories for workspace: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            })?;
+        let better = match &best {
+            None => true,
+            Some((best_live, best_id, _)) => {
+                live > *best_live || (live == *best_live && row.id < *best_id)
+            }
+        };
+        if better {
+            best = Some((live, row.id.clone(), row));
+        }
+    }
+    best.ok_or_else(|| DomainError::Storage {
+        message: "workspace row picker received an empty match set".to_owned(),
+        repair: Some("ee doctor".to_owned()),
+    })
+    .map(|(_, _, row)| row)
+}
+
+fn workspace_path_lookup_keys(path: &Path) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut keys = Vec::new();
+    let mut push = |value: String| {
+        let trimmed = trim_trailing_path_separators(&value);
+        if seen.insert(value.clone()) {
+            keys.push(value);
+        }
+        if seen.insert(trimmed.clone()) {
+            keys.push(trimmed);
+        }
+    };
+    let raw = path.to_string_lossy().into_owned();
+    push(raw.clone());
+    push(strip_windows_verbatim_prefix(&raw));
+    push(normalize_lexical(path).to_string_lossy().into_owned());
+    if let Ok(canonical) = path.canonicalize() {
+        let rendered = canonical.to_string_lossy().into_owned();
+        push(rendered.clone());
+        push(strip_windows_verbatim_prefix(&rendered));
+    }
+    keys
+}
+
+fn trim_trailing_path_separators(value: &str) -> String {
+    let mut trimmed = value.to_owned();
+    while trimmed.len() > 1 {
+        let Some(last) = trimmed.as_bytes().last().copied() else {
+            break;
+        };
+        if last != b'/' && last != b'\\' {
+            break;
+        }
+        if trimmed.len() == 3 && trimmed.as_bytes()[1] == b':' {
+            break;
+        }
+        trimmed.pop();
+    }
+    trimmed
+}
+
 #[allow(dead_code, reason = "N4.3 staged token-threaded workspace ID helper")]
 pub(crate) fn stable_workspace_id_seeded(
     path: &Path,
@@ -3103,6 +3284,141 @@ mod tests {
         let verbatim = Path::new(r"\\?\C:\Users\jeffr\ee-tc-win-soak6");
         assert_eq!(stable_workspace_id(drive), stable_workspace_id(verbatim));
         assert!(stable_workspace_id(drive).starts_with("wsp_"));
+    }
+
+    #[test]
+    fn workspace_path_lookup_keys_include_lexical_and_trailing_slash_forms() {
+        let lexical = Path::new("/tmp/ee-lookup/./campaign");
+        let keys = workspace_path_lookup_keys(lexical);
+        assert!(
+            keys.iter()
+                .any(|key| key.ends_with("/campaign") && !key.contains("/./")),
+            "lookup keys should include the lexically normalized path, got {keys:?}"
+        );
+        let slashed = workspace_path_lookup_keys(Path::new("/tmp/ee-lookup/campaign/"));
+        assert!(
+            slashed.iter().any(|key| key == "/tmp/ee-lookup/campaign"),
+            "lookup keys should include the trailing-slash-trimmed path, got {slashed:?}"
+        );
+    }
+
+    #[test]
+    fn ensure_bound_workspace_reuses_lexical_row_when_caller_is_canonical() -> TestResult {
+        let root = unique_dir("ee-bound-workspace")?;
+        fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let canonical = root.canonicalize().map_err(|error| error.to_string())?;
+        let Some(name) = canonical.file_name() else {
+            return Err("canonical workspace path missing file name".to_owned());
+        };
+        let lexical = canonical.join("..").join(name);
+        assert_ne!(
+            lexical, canonical,
+            "lexical alias must differ from the canonical path"
+        );
+
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let occupied_id = "wsp_00000000000000000000legacy";
+        connection
+            .insert_workspace(
+                occupied_id,
+                &CreateWorkspaceInput {
+                    path: lexical.to_string_lossy().into_owned(),
+                    name: Some("legacy lexical workspace".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let requested = stable_workspace_id(&canonical);
+        assert_ne!(
+            requested, occupied_id,
+            "hashed id must differ from the stored path-keyed id"
+        );
+        let bound = ensure_bound_workspace(&connection, &requested, &[&canonical])
+            .map_err(|error| error.message())?;
+        assert_eq!(bound, occupied_id, "bind to stored path row");
+
+        let workspaces = connection
+            .list_workspaces()
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            workspaces.len(),
+            1,
+            "must not invent a second workspace row"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pick_workspace_row_prefers_the_occupied_id() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let empty = StoredWorkspace {
+            id: "wsp_bbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            path: "/tmp/ee-empty".to_owned(),
+            name: Some("empty".to_owned()),
+            scope_kind: "standalone".to_owned(),
+            repository_root: None,
+            repository_fingerprint: None,
+            subproject_path: None,
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            updated_at: "2026-01-01T00:00:00Z".to_owned(),
+        };
+        let occupied = StoredWorkspace {
+            id: "wsp_aaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            path: "/tmp/ee-occupied".to_owned(),
+            name: Some("occupied".to_owned()),
+            scope_kind: "standalone".to_owned(),
+            repository_root: None,
+            repository_fingerprint: None,
+            subproject_path: None,
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            updated_at: "2026-01-01T00:00:00Z".to_owned(),
+        };
+        connection
+            .insert_workspace(
+                &occupied.id,
+                &CreateWorkspaceInput {
+                    path: occupied.path.clone(),
+                    name: occupied.name.clone(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &empty.id,
+                &CreateWorkspaceInput {
+                    path: empty.path.clone(),
+                    name: empty.name.clone(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000001",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: occupied.id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "occupied workspace memory".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: crate::models::TrustClass::HumanExplicit.as_str().to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let picked = pick_workspace_row(&connection, vec![empty, occupied.clone()])
+            .map_err(|error| error.message())?;
+        assert_eq!(picked.id, occupied.id, "occupied workspace wins");
+        Ok(())
     }
 
     #[test]

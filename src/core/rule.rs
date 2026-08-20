@@ -27,7 +27,7 @@ use crate::db::{
 use crate::models::{
     CandidateId, DomainError, MemoryContent, MemoryId, RuleId, RuleLifecycleEvidence,
     RuleLifecycleTransition, RuleLifecycleTrigger, RuleMaturity, RuleScope, Tag, TrustClass,
-    UnitScore, WorkspaceId,
+    UnitScore,
 };
 use crate::policy::import_auth::{
     ArtifactContext, AuthenticatedHeader, ImportAuthOutcome, PLAYBOOK_ARTIFACT_FAMILY,
@@ -1413,7 +1413,7 @@ fn rule_shell_quote_command_arg(value: &str) -> String {
 
 /// Add a procedural rule or preview the write.
 pub fn add_rule(options: &RuleAddOptions<'_>) -> Result<RuleAddReport, DomainError> {
-    let prepared = prepare_rule_add(options)?;
+    let mut prepared = prepare_rule_add(options)?;
     if options.dry_run {
         return Ok(rule_add_report(
             &prepared, "dry_run", false, None, None, false,
@@ -1430,11 +1430,12 @@ pub fn add_rule(options: &RuleAddOptions<'_>) -> Result<RuleAddReport, DomainErr
         message: format!("Failed to migrate database: {error}"),
         repair: Some("ee doctor".to_string()),
     })?;
-    ensure_workspace(
+    let workspace_id = crate::core::workspace::ensure_bound_workspace(
         &connection,
         &prepared.workspace_id,
-        &prepared.workspace_path,
+        &[&prepared.workspace_path, options.workspace_path],
     )?;
+    prepared.workspace_id = workspace_id;
     verify_source_memories(
         &connection,
         &prepared.workspace_id,
@@ -2073,7 +2074,7 @@ pub fn extract_playbook_candidates(
 ) -> Result<PlaybookExtractReport, DomainError> {
     validate_playbook_limit(options.limit)?;
     let since = parse_playbook_since(options.since)?;
-    let prepared = prepare_rule_read(
+    let mut prepared = prepare_rule_read(
         options.workspace_path,
         options.database_path,
         Some("ee playbook extract --workspace . --json"),
@@ -2084,11 +2085,12 @@ pub fn extract_playbook_candidates(
         message: format!("Failed to migrate database: {error}"),
         repair: Some("ee doctor".to_owned()),
     })?;
-    ensure_workspace(
+    let workspace_id = crate::core::workspace::ensure_bound_workspace(
         &connection,
         &prepared.workspace_id,
-        &prepared.workspace_path,
+        &[&prepared.workspace_path, options.workspace_path],
     )?;
+    prepared.workspace_id = workspace_id;
 
     let mut memories = connection
         .list_memories(&prepared.workspace_id, Some("semantic"), false)
@@ -4370,46 +4372,8 @@ fn ensure_database_parent_exists(database_path: &Path) -> Result<(), DomainError
     })
 }
 
-fn ensure_workspace(
-    connection: &DbConnection,
-    workspace_id: &str,
-    workspace_path: &Path,
-) -> Result<(), DomainError> {
-    let path = workspace_path.to_string_lossy().into_owned();
-    if connection
-        .get_workspace_by_path(&path)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })?
-        .is_some()
-    {
-        return Ok(());
-    }
-
-    connection
-        .insert_workspace(
-            workspace_id,
-            &CreateWorkspaceInput {
-                path,
-                name: workspace_path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned()),
-            },
-        )
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to register workspace: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })
-}
-
 fn stable_workspace_id(path: &Path) -> String {
-    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
-    let mut bytes = [0_u8; 16];
-    for (target, source) in bytes.iter_mut().zip(hash.as_bytes()) {
-        *target = *source;
-    }
-    WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+    crate::core::workspace::stable_workspace_id(path)
 }
 
 fn generate_search_index_job_id() -> String {

@@ -16,8 +16,9 @@ use crate::core::why::{DedupLinkEvidence, find_embed_dedup_link};
 #[cfg(test)]
 use crate::db::generate_audit_id_seeded;
 use crate::db::{
-    CreateAuditInput, DatabaseConfig, DbConnection, DbError, FeedbackEventsFingerprint,
-    StoredFeedbackEvent, StoredMemory, StoredModelRegistryEntry, audit_actions, generate_audit_id,
+    CreateAuditInput, DatabaseConfig, DbConnection, DbError, DbOperation,
+    FeedbackEventsFingerprint, StoredFeedbackEvent, StoredMemory, StoredModelRegistryEntry,
+    audit_actions, generate_audit_id,
     read_pool::{PoolConfig, ReadConnectionPool, registered_process_read_pool},
 };
 use crate::models::degradation::{
@@ -7334,10 +7335,17 @@ async fn run_similar_with_cx_and_posture(
     // Workspaces are keyed by the raw `workspace_path` everywhere they are
     // written (init/remember) and where search builds its scope context, so the
     // lookup uses the same raw path rather than a canonical root.
-    let workspace_id = connection
-        .get_workspace_by_path(&options.workspace_path.to_string_lossy())?
-        .map(|workspace| workspace.id)
-        .unwrap_or_else(|| crate::core::curate::stable_workspace_id(&options.workspace_path));
+    let requested_workspace_id = crate::core::curate::stable_workspace_id(&options.workspace_path);
+    let workspace_id = crate::core::workspace::select_existing_workspace_row(
+        &connection,
+        &requested_workspace_id,
+        &[&options.workspace_path],
+    )
+    .map_err(|error| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: error.message(),
+    })?
+    .map_or(requested_workspace_id, |workspace| workspace.id);
     let scope_context = MemoryScopeContext::for_workspace(
         &options.workspace_path,
         options.memory_scope,
@@ -11200,13 +11208,15 @@ fn live_admitted_evidence_doc_ids_with_connection(
     connection: &DbConnection,
 ) -> BTreeSet<String> {
     let canonical_workspace = default_workspace_root(&options.workspace_path);
-    let canonical_workspace_path = canonical_workspace.to_string_lossy();
-    let Some(workspace_id) = connection
-        .get_workspace_by_path(canonical_workspace_path.as_ref())
-        .ok()
-        .flatten()
-        .map(|workspace| workspace.id)
-    else {
+    let requested = crate::core::curate::stable_workspace_id(&canonical_workspace);
+    let Some(workspace_id) = crate::core::workspace::select_existing_workspace_row(
+        connection,
+        &requested,
+        &[&options.workspace_path, canonical_workspace.as_path()],
+    )
+    .ok()
+    .flatten()
+    .map(|workspace| workspace.id) else {
         return BTreeSet::new();
     };
     evidence_ids
@@ -20989,7 +20999,7 @@ pub fn run_family_retrieval(
     }
     let family_alias = crate::models::public_attempt_family_alias(family_id);
     let workspace_root = default_workspace_root(options.workspace_path);
-    let workspace_id = crate::core::curate::stable_workspace_id(&workspace_root);
+    let requested_workspace_id = crate::core::curate::stable_workspace_id(&workspace_root);
     let default_database_path = default_workspace_database_path(options.workspace_path);
     let database_path = options.database_path.unwrap_or(&default_database_path);
     let storage_error = |message: String| DomainError::Storage {
@@ -21017,6 +21027,13 @@ pub fn run_family_retrieval(
             "Attempt-family read snapshot became unavailable: {error}"
         ))
     })?;
+    let workspace_id = crate::core::workspace::select_existing_workspace_row(
+        connection,
+        &requested_workspace_id,
+        &[options.workspace_path, workspace_root.as_path()],
+    )
+    .map_err(|error| storage_error(error.message()))?
+    .map_or(requested_workspace_id, |workspace| workspace.id);
 
     let logical_ids = connection
         .list_attempt_family_membership_logical_ids(&workspace_id, family_id)

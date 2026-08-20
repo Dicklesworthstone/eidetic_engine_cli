@@ -5690,8 +5690,12 @@ fn resolve_context_profile_workspace_id(
     workspace_path: &Path,
     candidates: &[PackCandidate],
 ) -> Option<String> {
-    let workspace_path = workspace_path.display().to_string();
-    if let Ok(Some(workspace)) = connection.get_workspace_by_path(&workspace_path) {
+    let requested = crate::core::curate::stable_workspace_id(workspace_path);
+    if let Ok(Some(workspace)) = crate::core::workspace::select_existing_workspace_row(
+        connection,
+        &requested,
+        &[workspace_path],
+    ) {
         return Some(workspace.id);
     }
 
@@ -5988,29 +5992,14 @@ fn persist_pack_record_with_pack_id(
     // (symlink-resolved) form. Matches the pattern in G1's
     // resolve_workspace_id_with_fallback.
     let workspace_lookup_start = Instant::now();
-    let raw = workspace_path.display().to_string();
-    let workspace = match connection
-        .get_workspace_by_path(&raw)
-        .map_err(|e| format!("workspace lookup failed: {e}"))?
-    {
-        Some(ws) => ws,
-        None => {
-            let canonical = workspace_path
-                .canonicalize()
-                .unwrap_or_else(|_| workspace_path.to_path_buf());
-            let canonical_str = canonical.display().to_string();
-            if canonical_str == raw {
-                return Err("workspace not found".to_string());
-            }
-            match connection
-                .get_workspace_by_path(&canonical_str)
-                .map_err(|e| format!("workspace lookup failed: {e}"))?
-            {
-                Some(ws) => ws,
-                None => return Err("workspace not found".to_string()),
-            }
-        }
-    };
+    let requested = crate::core::curate::stable_workspace_id(workspace_path);
+    let workspace = crate::core::workspace::select_existing_workspace_row(
+        connection,
+        &requested,
+        &[workspace_path],
+    )
+    .map_err(|error| format!("workspace lookup failed: {}", error.message()))?
+    .ok_or_else(|| "workspace not found".to_string())?;
     subspans.workspace_lookup = workspace_lookup_start.elapsed();
 
     let pack_hash_start = Instant::now();

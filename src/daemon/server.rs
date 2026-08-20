@@ -4607,7 +4607,7 @@ fn execute_daemon_txn_batch(
             for entry in &prepared_entries {
                 match entry {
                     PreparedDaemonTxnBatchEntry::Journal(entry) => {
-                        crate::core::journal::ensure_workspace(
+                        let workspace_id = crate::core::journal::ensure_workspace(
                             &connection,
                             &entry.workspace_id,
                             &entry.workspace_path,
@@ -4618,7 +4618,8 @@ fn execute_daemon_txn_batch(
                                 message: error.message().to_string(),
                             }
                         })?;
-                        let input = entry.clone().into_create_input();
+                        let mut input = entry.clone().into_create_input();
+                        input.workspace_id = workspace_id;
                         let entry_id = input.entry_id.clone();
                         connection.insert_journal_entry(&input)?;
                         out.push(WriteResult::Success {

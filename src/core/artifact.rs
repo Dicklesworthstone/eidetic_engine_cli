@@ -12,10 +12,10 @@ use chrono::{SecondsFormat, Utc};
 
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::db::{
-    CreateArtifactInput, CreateArtifactLinkInput, CreateAuditInput, CreateWorkspaceInput,
-    DbConnection, StoredArtifact, StoredArtifactLink, audit_actions, generate_audit_id,
+    CreateArtifactInput, CreateArtifactLinkInput, CreateAuditInput, DbConnection, StoredArtifact,
+    StoredArtifactLink, audit_actions, generate_audit_id,
 };
-use crate::models::{DomainError, ProvenanceUri, WorkspaceId};
+use crate::models::{DomainError, ProvenanceUri};
 
 pub const ARTIFACT_REGISTER_SCHEMA_V1: &str = "ee.artifact.register.v1";
 pub const ARTIFACT_INSPECT_SCHEMA_V1: &str = "ee.artifact.inspect.v1";
@@ -336,7 +336,7 @@ struct PreparedArtifact {
 pub fn register_artifact(
     options: &ArtifactRegisterOptions<'_>,
 ) -> Result<ArtifactRegisterReport, DomainError> {
-    let prepared = prepare_artifact(options)?;
+    let mut prepared = prepare_artifact(options)?;
     if options.dry_run {
         let view = ArtifactView {
             artifact: prepared.to_stored_preview(),
@@ -364,11 +364,13 @@ pub fn register_artifact(
         message: format!("Failed to migrate database: {error}"),
         repair: Some("ee doctor".to_string()),
     })?;
-    ensure_workspace(
+    let workspace_id = crate::core::workspace::ensure_bound_workspace(
         &connection,
         &prepared.workspace_id,
-        &prepared.workspace_path,
+        &[&prepared.workspace_path, options.workspace_path],
     )?;
+    prepared.workspace_id = workspace_id.clone();
+    prepared.input.workspace_id = workspace_id;
 
     let audit_id = generate_audit_id();
     let audit_details = artifact_audit_details(&prepared.artifact_id, &prepared.input);
@@ -513,14 +515,13 @@ fn selected_workspace_id(
     connection: &DbConnection,
     workspace_path: &Path,
 ) -> Result<String, DomainError> {
-    let workspace_id = stable_workspace_id(workspace_path);
-    let stored_workspace = connection
-        .get_workspace_by_path(&workspace_path.to_string_lossy())
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
-    Ok(stored_workspace.map_or(workspace_id, |workspace| workspace.id))
+    let requested = stable_workspace_id(workspace_path);
+    Ok(crate::core::workspace::select_existing_workspace_row(
+        connection,
+        &requested,
+        &[workspace_path],
+    )?
+    .map_or(requested, |workspace| workspace.id))
 }
 
 impl PreparedArtifact {
@@ -1078,39 +1079,6 @@ fn ensure_database_parent_exists(database_path: &Path) -> Result<(), DomainError
     })
 }
 
-fn ensure_workspace(
-    connection: &DbConnection,
-    workspace_id: &str,
-    workspace_path: &Path,
-) -> Result<(), DomainError> {
-    let path = workspace_path.to_string_lossy().into_owned();
-    if connection
-        .get_workspace_by_path(&path)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?
-        .is_some()
-    {
-        return Ok(());
-    }
-
-    connection
-        .insert_workspace(
-            workspace_id,
-            &CreateWorkspaceInput {
-                path,
-                name: workspace_path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned()),
-            },
-        )
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to register workspace: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })
-}
-
 fn resolve_workspace_path(path: &Path, dry_run: bool) -> Result<PathBuf, DomainError> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -1134,12 +1102,7 @@ fn resolve_workspace_path(path: &Path, dry_run: bool) -> Result<PathBuf, DomainE
 }
 
 fn stable_workspace_id(path: &Path) -> String {
-    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
-    let mut bytes = [0_u8; 16];
-    for (target, source) in bytes.iter_mut().zip(hash.as_bytes().iter().copied()) {
-        *target = source;
-    }
-    WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+    crate::core::workspace::stable_workspace_id(path)
 }
 
 fn stable_artifact_id(

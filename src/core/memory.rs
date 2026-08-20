@@ -39,8 +39,8 @@ use crate::db::{
     CreateMemoryLinkInput, CreateRememberIdempotencyKeyInput, CreateSearchIndexJobInput,
     CreateSessionInput, CreateWorkspaceInput, DbConnection, DbOperation, EvidenceProducerKind,
     MemoryContentSimHash, MemoryLinkRelation, MemoryLinkSource, SearchIndexJobStatus,
-    SearchIndexJobType, StoredMemory, StoredMemoryLink, StoredWorkspace, audit_actions,
-    generate_audit_id, generate_audit_id_seeded,
+    SearchIndexJobType, StoredMemory, StoredMemoryLink, audit_actions, generate_audit_id,
+    generate_audit_id_seeded,
 };
 use crate::models::{
     DomainError, GLOBAL_MEMORY_SCOPE_TAG, KNOWN_MEMORY_KINDS, KNOWN_MEMORY_LEVELS, MAX_TAG_BYTES,
@@ -1480,7 +1480,7 @@ fn remember_memory_inner_with_store(
     crate::core::ensure_addressed_database_exists(&prepared.database_path)?;
     let connection = open_remember_database_with_retry(&prepared.database_path)?;
     migrate_remember_database_with_retry(&connection)?;
-    let workspace_id = ensure_workspace(
+    let workspace_id = crate::core::workspace::ensure_bound_workspace(
         &connection,
         &prepared.workspace_id,
         &[&prepared.workspace_path, options.workspace_path],
@@ -4479,111 +4479,6 @@ fn resolve_memory_write_workspace_path(path: &Path, dry_run: bool) -> Result<Pat
     }
 }
 
-/// Ensure a workspace row exists after the already-addressed database has
-/// been opened and migrated, and return the id later writes must use.
-///
-/// A store can already have a path-keyed row whose id differs from the hash
-/// of the current path spelling (GH#23, Windows drive/verbatim hashing,
-/// legacy lexical aliases). Treating "a row exists for this path" as success
-/// and then inserting memories under a freshly hashed id fails SQLite with
-/// `FOREIGN KEY constraint failed` while `ee doctor` still reports healthy:
-/// existing rows stay internally consistent, so PRAGMA/ping checks pass.
-fn ensure_workspace(
-    connection: &DbConnection,
-    requested_workspace_id: &str,
-    workspace_paths: &[&Path],
-) -> Result<String, DomainError> {
-    if let Some(existing) =
-        existing_workspace_row(connection, requested_workspace_id, workspace_paths)?
-    {
-        return Ok(existing.id);
-    }
-
-    let path = workspace_paths
-        .first()
-        .copied()
-        .unwrap_or_else(|| Path::new("."))
-        .to_string_lossy()
-        .into_owned();
-    let input = CreateWorkspaceInput {
-        path: path.clone(),
-        name: workspace_paths.first().copied().and_then(|workspace_path| {
-            workspace_path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        }),
-    };
-
-    match connection.insert_workspace(requested_workspace_id, &input) {
-        Ok(()) => Ok(requested_workspace_id.to_owned()),
-        Err(error) if workspace_insert_lost_race(&error) => {
-            if let Some(existing) =
-                existing_workspace_row(connection, requested_workspace_id, workspace_paths)?
-            {
-                Ok(existing.id)
-            } else {
-                Err(DomainError::Storage {
-                    message: format!("Failed to register workspace after insert race: {error}"),
-                    repair: Some("ee doctor".to_owned()),
-                })
-            }
-        }
-        Err(error) => Err(DomainError::Storage {
-            message: format!("Failed to register workspace: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        }),
-    }
-}
-
-fn existing_workspace_row(
-    connection: &DbConnection,
-    requested_workspace_id: &str,
-    workspace_paths: &[&Path],
-) -> Result<Option<StoredWorkspace>, DomainError> {
-    if let Some(existing) = connection
-        .get_workspace(requested_workspace_id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace by id: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })?
-    {
-        return Ok(Some(existing));
-    }
-
-    let mut seen = BTreeSet::new();
-    for workspace_path in workspace_paths {
-        let mut candidates = vec![workspace_path.to_path_buf()];
-        if let Ok(canonical) = workspace_path.canonicalize()
-            && canonical != **workspace_path
-        {
-            candidates.push(canonical);
-        }
-        for candidate in candidates {
-            let key = candidate.to_string_lossy().into_owned();
-            if !seen.insert(key.clone()) {
-                continue;
-            }
-            if let Some(existing) =
-                connection
-                    .get_workspace_by_path(&key)
-                    .map_err(|error| DomainError::Storage {
-                        message: format!("Failed to query workspace: {error}"),
-                        repair: Some("ee doctor".to_owned()),
-                    })?
-            {
-                return Ok(Some(existing));
-            }
-        }
-    }
-    Ok(None)
-}
-
-fn workspace_insert_lost_race(error: &impl ToString) -> bool {
-    let message = error.to_string().to_ascii_lowercase();
-    message.contains("unique constraint failed: workspaces.path")
-        || message.contains("unique constraint failed: workspaces.id")
-}
-
 fn build_prepared_remember_txn_write(
     connection: &DbConnection,
     prepared: PreparedRememberMemory,
@@ -4697,7 +4592,7 @@ pub(crate) fn prepare_remember_txn_write_for_connection(
     crate::core::ensure_addressed_database_exists(&prepared.database_path)?;
     let write_replay_guard = RememberWriteReplayGuard::arm(&prepared.workspace_path)?;
     migrate_remember_database_with_retry(connection)?;
-    let workspace_id = ensure_workspace(
+    let workspace_id = crate::core::workspace::ensure_bound_workspace(
         connection,
         &prepared.workspace_id,
         &[&prepared.workspace_path, options.workspace_path],
@@ -5442,10 +5337,7 @@ fn remember_retry_sleep(delay: Duration, phase: &'static str) -> Result<(), Doma
 }
 
 fn stable_workspace_id(path: &Path) -> String {
-    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[..16]);
-    WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+    crate::core::workspace::stable_workspace_id(path)
 }
 
 fn generate_search_index_job_id() -> String {
@@ -9436,15 +9328,15 @@ pub(crate) fn workspace_id_for_database(conn: &DbConnection, workspace_path: &Pa
     let canonical = workspace_path
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
-    if let Ok(Some(row)) = conn.get_workspace_by_path(&canonical.to_string_lossy()) {
-        return row.id;
+    let requested = stable_workspace_id(&canonical);
+    match crate::core::workspace::select_existing_workspace_row(
+        conn,
+        &requested,
+        &[workspace_path, canonical.as_path()],
+    ) {
+        Ok(Some(row)) => row.id,
+        _ => requested,
     }
-    if canonical != workspace_path
-        && let Ok(Some(row)) = conn.get_workspace_by_path(&workspace_path.to_string_lossy())
-    {
-        return row.id;
-    }
-    stable_workspace_id(&canonical)
 }
 
 fn get_memory_for_workspace(
@@ -12983,6 +12875,19 @@ mod tests {
             workspace_id_for_database(&connection, &lexical_workspace),
             legacy_workspace_id.to_owned(),
             "legacy lexical workspace fallback",
+        )?;
+        let canonical_workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        ensure(
+            canonical_workspace != lexical_workspace,
+            true,
+            "canonical caller spelling differs from the stored lexical path",
+        )?;
+        ensure(
+            workspace_id_for_database(&connection, &canonical_workspace),
+            legacy_workspace_id.to_owned(),
+            "canonical caller still binds to the lexical stored row",
         )
     }
 

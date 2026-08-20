@@ -58,7 +58,7 @@ use crate::graph::decay::{
 use crate::models::degradation::GRAPH_CURATE_DISCONNECTED_GRAPH_CODE;
 use crate::models::{
     CandidateId, DomainError, EvidenceId, MemoryId, MemoryKind, MemoryLevel, ProducerMetadata,
-    ProvenanceUri, REVIEW_SESSION_SCHEMA_V2, RuleId, Tag, TrustClass, UnitScore, WorkspaceId,
+    ProvenanceUri, REVIEW_SESSION_SCHEMA_V2, RuleId, Tag, TrustClass, UnitScore,
 };
 use crate::search::HashEmbedder;
 
@@ -15892,12 +15892,7 @@ fn resolve_workspace_path(path: &Path) -> Result<PathBuf, DomainError> {
 }
 
 pub(crate) fn stable_workspace_id(path: &Path) -> String {
-    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
-    let mut bytes = [0_u8; 16];
-    for (target, source) in bytes.iter_mut().zip(hash.as_bytes()) {
-        *target = *source;
-    }
-    WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+    crate::core::workspace::stable_workspace_id(path)
 }
 
 fn curate_usage_error(message: String, repair: &str) -> DomainError {

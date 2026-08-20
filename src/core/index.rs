@@ -7389,19 +7389,17 @@ fn workspace_id_for_index_status(
     workspace_path: &Path,
 ) -> Result<Option<String>, DbError> {
     let canonical_root = default_workspace_root(workspace_path);
-    let canonical_key = canonical_root.to_string_lossy();
-    if let Some(workspace) = db.get_workspace_by_path(canonical_key.as_ref())? {
-        return Ok(Some(workspace.id));
-    }
-
-    let lexical_key = workspace_path.to_string_lossy();
-    if lexical_key != canonical_key {
-        if let Some(workspace) = db.get_workspace_by_path(lexical_key.as_ref())? {
-            return Ok(Some(workspace.id));
-        }
-    }
-
-    Ok(None)
+    let requested = crate::core::workspace::stable_workspace_id(&canonical_root);
+    crate::core::workspace::select_existing_workspace_row(
+        db,
+        &requested,
+        &[workspace_path, canonical_root.as_path()],
+    )
+    .map(|row| row.map(|workspace| workspace.id))
+    .map_err(|error| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: error.message(),
+    })
 }
 
 fn log_db_generation_observed(report: &IndexStatusReport) {
