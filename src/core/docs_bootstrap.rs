@@ -18,9 +18,8 @@ use crate::core::curate::{
 };
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
-    CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateSessionInput,
-    CreateWorkspaceInput, DbConnection, EvidenceProducerKind, StoredCurationCandidate,
-    WorkspaceScopeFields,
+    CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateSessionInput, DbConnection,
+    EvidenceProducerKind, StoredCurationCandidate,
 };
 use crate::models::{CandidateId, DomainError, EvidenceId, SessionId};
 
@@ -545,7 +544,6 @@ pub fn apply_docs_bootstrap(
         .database_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
-    let workspace_id = stable_workspace_id(&workspace_path);
     let mut degraded = run.degraded.clone();
     let mut candidates = Vec::new();
     let mut approved_candidate_ids = Vec::new();
@@ -553,7 +551,7 @@ pub fn apply_docs_bootstrap(
     let mut skipped_count = 0_usize;
 
     let connection = open_bootstrap_database(&database_path)?;
-    prepare_bootstrap_workspace(&connection, &workspace_id, &workspace_path)?;
+    let workspace_id = prepare_bootstrap_workspace(&connection, workspace_path)?;
     let session_id = ensure_bootstrap_session(&connection, &workspace_id, &workspace_path, &run)?;
 
     for candidate in &run.candidates {
@@ -738,26 +736,13 @@ fn open_bootstrap_database(database_path: &Path) -> Result<DbConnection, DomainE
 
 fn prepare_bootstrap_workspace(
     connection: &DbConnection,
-    workspace_id: &str,
     workspace_path: &Path,
-) -> Result<(), DomainError> {
-    let name = workspace_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .map(str::to_owned);
-    connection
-        .upsert_workspace_with_scope(
-            workspace_id,
-            &CreateWorkspaceInput {
-                path: workspace_path.display().to_string(),
-                name,
-            },
-            &WorkspaceScopeFields::standalone(),
-        )
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to prepare docs bootstrap workspace row: {error}"),
-            repair: Some("Run `ee init --workspace .` and retry docs bootstrap apply.".to_owned()),
-        })
+) -> Result<String, DomainError> {
+    crate::core::workspace::ensure_bound_workspace(
+        connection,
+        &stable_workspace_id(workspace_path),
+        &[workspace_path],
+    )
 }
 
 fn ensure_bootstrap_session(

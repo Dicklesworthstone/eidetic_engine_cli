@@ -407,6 +407,11 @@ pub fn poll_memory_deltas(
         message: format!("Failed to migrate database: {error}"),
         repair: Some("Run `ee migrate run --workspace . --json`.".to_owned()),
     })?;
+    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        &connection,
+        &workspace_id,
+        &[workspace_path.as_path(), options.workspace_path],
+    )?;
 
     let high_watermark = audit_high_watermark(&connection)?;
     if options.cursor > high_watermark {

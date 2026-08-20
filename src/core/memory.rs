@@ -1980,6 +1980,11 @@ pub fn create_workflow(
         message: format!("Failed to migrate database: {error}"),
         repair: Some("ee doctor".to_string()),
     })?;
+    let workspace_id = crate::core::workspace::ensure_bound_workspace(
+        &connection,
+        &workspace_id,
+        &[&workspace_path, options.workspace_path],
+    )?;
 
     let audit_id = generate_audit_id();
     let details = serde_json::json!({
@@ -10679,11 +10684,7 @@ pub fn build_memory_timeline(
             )),
         }
     })?;
-    let workspace_path = options
-        .workspace_path
-        .canonicalize()
-        .unwrap_or_else(|_| options.workspace_path.to_path_buf());
-    let workspace_id = stable_workspace_id(&workspace_path);
+    let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
     let stored = conn
         .list_memories_for_retrieval(&workspace_id, None, true)
         .map_err(|error| DomainError::Storage {
@@ -12335,11 +12336,7 @@ pub fn check_for_duplicates(options: &DedupeCheckOptions<'_>) -> DedupeCheckRepo
         Err(message) => return DedupeCheckReport::error(message),
     };
 
-    let workspace_path = options
-        .workspace_path
-        .canonicalize()
-        .unwrap_or_else(|_| options.workspace_path.to_path_buf());
-    let workspace_id = stable_workspace_id(&workspace_path);
+    let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
 
     // List memories with optional level filter
     let memories = match conn.list_memories(&workspace_id, options.level, false) {
