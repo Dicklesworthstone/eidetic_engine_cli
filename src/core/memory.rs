@@ -7698,12 +7698,24 @@ pub fn remember_memory_with_controls_typed_fields_and_family(
             .database_path
             .map(absolute_path_from_cwd)
             .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
-        let workspace_id = stable_workspace_id(&workspace_path);
         let content_hash = remember_content_hash(&canonical_content);
 
         if database_path.exists() {
             let connection = open_remember_database_with_retry(&database_path)?;
             migrate_remember_database_with_retry(&connection)?;
+            let canonical = workspace_path
+                .canonicalize()
+                .unwrap_or_else(|_| workspace_path.clone());
+            let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+                &connection,
+                &stable_workspace_id(&canonical),
+                &[
+                    options.workspace_path,
+                    workspace_path.as_path(),
+                    canonical.as_path(),
+                ],
+            )
+            .unwrap_or_else(|_| stable_workspace_id(&canonical));
 
             if let Some(key) = idempotency_key.as_deref() {
                 let existing = connection
@@ -12993,6 +13005,75 @@ mod tests {
             temp.path(),
             "Bind remember writes to a lexical workspace path spelling.",
         )
+    }
+
+    #[test]
+    fn remember_idempotency_replay_binds_to_path_keyed_workspace() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = temp.path();
+        let canonical = workspace_path
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        remember_into_legacy_workspace(
+            workspace_path,
+            &canonical,
+            "Seed a path-keyed workspace before the idempotent replay.",
+        )?;
+
+        let content = "Idempotent path-keyed lesson: bind before looking up the key.";
+        let options = RememberMemoryOptions {
+            workspace_path,
+            database_path: None,
+            content,
+            workflow_id: None,
+            level: "procedural",
+            kind: "rule",
+            tags: None,
+            confidence: 0.8,
+            source: None,
+            allow_secret_mention: false,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: false,
+            propose_candidates: false,
+        };
+        let controls = RememberWriteControls {
+            reinforce: false,
+            idempotency_key: Some("path-keyed-lesson-001"),
+            defer_index_processing: false,
+        };
+        let created = match remember_memory_with_controls(&options, &controls)
+            .map_err(|error| error.message())?
+        {
+            RememberOutcome::Created(report) => report,
+            other => {
+                return Err(format!(
+                    "expected created memory for the first idempotent write, got {other:?}"
+                ));
+            }
+        };
+        ensure(
+            created.workspace_id.clone(),
+            "wsp_00000000000000000000legacy".to_owned(),
+            "first write uses the stored workspace id",
+        )?;
+
+        match remember_memory_with_controls(&options, &controls).map_err(|error| error.message())? {
+            RememberOutcome::AlreadyRecorded(report) => {
+                ensure(
+                    report.workspace_id,
+                    "wsp_00000000000000000000legacy".to_owned(),
+                    "replay lookup uses the stored workspace id",
+                )?;
+                ensure(
+                    report.memory_id,
+                    created.memory_id.to_string(),
+                    "replay returns the original memory id",
+                )
+            }
+            other => Err(format!("expected already_recorded, got {other:?}")),
+        }
     }
 
     fn peer_conflict_memory<'a>(

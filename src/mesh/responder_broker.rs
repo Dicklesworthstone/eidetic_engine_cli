@@ -1181,10 +1181,15 @@ impl ResponderRouteRegistry {
         ids
     }
 
-    fn first_workspace_path(&self) -> Option<&Path> {
+    fn first_store_route(&self) -> Option<&RegisteredResponderRoute> {
         self.routes
             .values()
-            .next()
+            .find(|route| route.database_path.is_some())
+            .or_else(|| self.routes.values().next())
+    }
+
+    fn first_workspace_path(&self) -> Option<&Path> {
+        self.first_store_route()
             .map(|route| route.workspace_path.as_path())
     }
 }
@@ -3793,16 +3798,14 @@ fn persist_authenticated_admission_snapshot(
     routes: &ResponderRouteRegistry,
     admission: &Arc<Mutex<AdmissionState>>,
 ) {
-    let Some(database_path) = routes
-        .routes
-        .values()
-        .find_map(|route| route.database_path.clone())
-    else {
+    let Some(route) = routes.first_store_route() else {
         return;
     };
-    let Some(workspace_id) = routes.workspace_ids().into_iter().next() else {
+    let Some(database_path) = route.database_path.clone() else {
         return;
     };
+    let requested = route.expectations.responder_workspace_id.clone();
+    let workspace_path = route.workspace_path.clone();
     let Ok(state) = admission.lock() else {
         return;
     };
@@ -3811,6 +3814,12 @@ fn persist_authenticated_admission_snapshot(
     let Ok(connection) = DbConnection::open_file(database_path) else {
         return;
     };
+    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        &connection,
+        &requested,
+        &[workspace_path.as_path()],
+    )
+    .unwrap_or(requested);
     let _ = crate::mesh::team::persist_team_admission_states(
         &connection,
         &workspace_id,
@@ -3824,15 +3833,11 @@ fn load_sync_round_response(
     range_start_seq: u64,
     max_events: u32,
 ) -> SyncRoundResponse {
-    let workspace_id = routes
-        .workspace_ids()
-        .into_iter()
-        .next()
+    let route = routes.first_store_route();
+    let workspace_id = route
+        .map(|route| route.expectations.responder_workspace_id.clone())
         .unwrap_or_default();
-    let (team_id, origin_node_id) = routes
-        .routes
-        .values()
-        .next()
+    let (team_id, origin_node_id) = route
         .map(|route| {
             (
                 route.expectations.team_id.clone(),
@@ -3841,10 +3846,7 @@ fn load_sync_round_response(
         })
         .unwrap_or_default();
     let mut events = Vec::new();
-    if let Some(database_path) = routes
-        .routes
-        .values()
-        .find_map(|route| route.database_path.clone())
+    if let Some(database_path) = route.and_then(|route| route.database_path.clone())
         && let Ok(connection) = DbConnection::open_file_read_only(database_path)
     {
         let limit = max_events.max(1).min(512);
@@ -3899,9 +3901,8 @@ fn load_identity_attest_response(
         checked_at: String::new(),
     };
     let Some(database_path) = routes
-        .routes
-        .values()
-        .find_map(|route| route.database_path.clone())
+        .first_store_route()
+        .and_then(|route| route.database_path.clone())
     else {
         return rejected;
     };
@@ -3934,17 +3935,20 @@ fn load_body_fetch_response(
             nonce_hex: None,
         };
     }
-    let workspace_id = routes
-        .workspace_ids()
-        .into_iter()
-        .next()
-        .unwrap_or_default();
-    let workspace_path = routes.first_workspace_path().map(Path::to_path_buf);
-    let database_path = routes
-        .routes
-        .values()
-        .find_map(|route| route.database_path.clone());
-    let Some((workspace_path, database_path)) = workspace_path.zip(database_path) else {
+    let Some(route) = routes.first_store_route() else {
+        return BodyFetchResponse {
+            schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
+            body_cache_key: key.to_owned(),
+            cache_status: "metadata_only".to_owned(),
+            size_bytes: 0,
+            body_hex: None,
+            nonce_hex: None,
+        };
+    };
+    let requested_workspace_id = route.expectations.responder_workspace_id.clone();
+    let workspace_path = route.workspace_path.clone();
+    let peer_id = route.peer_handle.clone();
+    let Some(database_path) = route.database_path.clone() else {
         return BodyFetchResponse {
             schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
             body_cache_key: key.to_owned(),
@@ -3964,13 +3968,13 @@ fn load_body_fetch_response(
             nonce_hex: None,
         };
     };
-    if let Some(peer_id) = routes
-        .routes
-        .values()
-        .next()
-        .map(|route| route.peer_handle.clone())
-        && !crate::mesh::team::body_lane_allows_fetch(&connection, &workspace_id, &peer_id)
-    {
+    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        &connection,
+        &requested_workspace_id,
+        &[workspace_path.as_path()],
+    )
+    .unwrap_or(requested_workspace_id);
+    if !crate::mesh::team::body_lane_allows_fetch(&connection, &workspace_id, &peer_id) {
         return BodyFetchResponse {
             schema: BODY_FETCH_RESPONSE_SCHEMA_V1.to_owned(),
             body_cache_key: key.to_owned(),
