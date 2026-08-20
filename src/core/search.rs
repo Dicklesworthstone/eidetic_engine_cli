@@ -8932,7 +8932,7 @@ fn pin_lexical_ram_tier_for_search(
     let config = lexical_ram_tier_config_for_search(workspace_path);
     let result = pin_lexical_index_files(&index_dir.join("lexical"), &config);
     trace_lexical_ram_tier(
-        &crate::core::curate::stable_workspace_id(workspace_path),
+        &crate::core::workspace::bound_workspace_id_from_path(workspace_path),
         &result,
         started.elapsed().as_secs_f64() * 1000.0,
     );

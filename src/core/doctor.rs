@@ -3098,10 +3098,7 @@ fn check_shard_fanout(workspace_path: Option<&Path>) -> CheckResult {
     let enabled =
         shard_fanout_enabled_from_env_value(read_env_var(EnvVar::ShardFanoutEnabled).as_deref());
     let workspace_root = workspace_path.map(Path::to_path_buf);
-    let workspace_id = workspace_path.map(|path| {
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        stable_workspace_id(&canonical)
-    });
+    let workspace_id = workspace_path.map(crate::core::workspace::bound_workspace_id_from_path);
     let report = resolve_shard_fanout_status(ShardFanoutResolverInput {
         enabled,
         workspace_id,

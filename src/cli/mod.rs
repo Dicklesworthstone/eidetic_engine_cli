@@ -75794,7 +75794,15 @@ mod tests {
         let database_path = workspace.join(".ee").join("ee.db");
         let connection = crate::db::DbConnection::open_file(&database_path)
             .map_err(|error| format!("open audit test db: {error}"))?;
-        let workspace_id = crate::core::workspace::stable_workspace_id(workspace);
+        let canonical = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.to_path_buf());
+        let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+            &connection,
+            &crate::core::workspace::stable_workspace_id(&canonical),
+            &[workspace, canonical.as_path()],
+        )
+        .unwrap_or_else(|_| crate::core::workspace::stable_workspace_id(&canonical));
         let entries = connection
             .list_audit_entries(Some(&workspace_id), None)
             .map_err(|error| format!("list preflight audit entries: {error}"))?;

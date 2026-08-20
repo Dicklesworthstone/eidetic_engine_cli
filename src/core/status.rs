@@ -833,7 +833,7 @@ fn pack_l2_source_dependencies(workspace_path: &Path) -> Vec<FreshnessDependency
     vec![FreshnessDependency::new(
         "source",
         "workspace_id",
-        stable_workspace_id(workspace_path),
+        crate::core::workspace::bound_workspace_id_from_path(workspace_path),
     )]
 }
 
@@ -3066,7 +3066,7 @@ fn gather_lexical_ram_tier_status(workspace_path: Option<&Path>) -> LexicalRamTi
     let config = lexical_ram_tier_config_for_status(workspace_path);
     let result = pin_lexical_index_files(&index_path, &config);
     let workspace_id = workspace_path
-        .map(stable_workspace_id)
+        .map(crate::core::workspace::bound_workspace_id_from_path)
         .unwrap_or_else(|| "workspace_unknown".to_owned());
     trace_lexical_ram_tier(&workspace_id, &result, 0.0);
     result
@@ -3187,10 +3187,7 @@ fn gather_shard_fanout_status(workspace_path: Option<&Path>) -> ShardFanoutStatu
         shard_fanout_enabled_from_env_value(read_env_var(EnvVar::ShardFanoutEnabled).as_deref());
     let shards_dir_override = read_env_var_os(EnvVar::ShardsDir).map(PathBuf::from);
     let workspace_root = workspace_path.map(Path::to_path_buf);
-    let workspace_id = workspace_path.map(|path| {
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        stable_workspace_id(&canonical)
-    });
+    let workspace_id = workspace_path.map(crate::core::workspace::bound_workspace_id_from_path);
 
     resolve_shard_fanout_status(ShardFanoutResolverInput {
         enabled,
