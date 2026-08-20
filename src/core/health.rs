@@ -1271,26 +1271,16 @@ fn resolve_health_workspace_ids(
     workspace_path: &Path,
 ) -> BTreeSet<String> {
     let mut candidates = BTreeSet::new();
-    let workspace_key = workspace_path.to_string_lossy().to_string();
-    if let Some(workspace) = connection
-        .get_workspace_by_path(&workspace_key)
-        .ok()
-        .flatten()
-    {
-        candidates.insert(workspace.id);
-    }
     candidates.insert(stable_workspace_id(workspace_path));
-
     if let Ok(canonical) = workspace_path.canonicalize() {
-        let canonical_key = canonical.to_string_lossy().to_string();
-        if let Some(workspace) = connection
-            .get_workspace_by_path(&canonical_key)
-            .ok()
-            .flatten()
-        {
-            candidates.insert(workspace.id);
-        }
         candidates.insert(stable_workspace_id(&canonical));
+    }
+    if let Ok(Some(workspace)) = crate::core::workspace::select_existing_workspace_row(
+        connection,
+        &stable_workspace_id(workspace_path),
+        &[workspace_path],
+    ) {
+        candidates.insert(workspace.id);
     }
     candidates
 }

@@ -23,8 +23,8 @@ use crate::core::feedback::{
 use crate::db::{
     CreateCurationCandidateInput, CreateTripwireCheckEventInput, DbConnection, StoredTripwire,
 };
+use crate::models::DomainError;
 use crate::models::preflight::{Tripwire, TripwireAction, TripwireState, TripwireType};
-use crate::models::{DomainError, WorkspaceId};
 
 /// Schema for tripwire list report.
 pub const TRIPWIRE_LIST_SCHEMA_V1: &str = "ee.tripwire.list.v1";
@@ -730,21 +730,8 @@ fn resolve_workspace_id(
     connection: &DbConnection,
     workspace_path: &Path,
 ) -> Result<String, DomainError> {
-    let path = workspace_path.to_string_lossy().into_owned();
-    let stored = connection
-        .get_workspace_by_path(&path)
-        .map_err(storage_error("Failed to query tripwire workspace"))?;
-    Ok(stored.map_or_else(
-        || stable_workspace_id(workspace_path),
-        |workspace| workspace.id,
-    ))
-}
-
-fn stable_workspace_id(path: &Path) -> String {
-    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[..16]);
-    WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+    let requested = crate::core::workspace::stable_workspace_id(workspace_path);
+    crate::core::workspace::bound_workspace_id_or_hash(connection, &requested, &[workspace_path])
 }
 
 fn tripwire_from_stored(stored: &StoredTripwire) -> Result<Tripwire, DomainError> {

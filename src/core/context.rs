@@ -4582,20 +4582,29 @@ fn context_workspace_ids(
 
     for path in context_workspace_path_keys(workspace_path) {
         ids.insert(stable_context_workspace_id(&path));
-        let path_string = path.to_string_lossy().into_owned();
-        match connection.get_workspace_by_path(&path_string) {
-            Ok(Some(workspace)) => {
-                ids.insert(workspace.id);
-            }
-            Ok(None) => {}
-            Err(error) => push_degradation(
-                degraded,
-                "context_lexical_fallback_workspace_lookup_failed",
-                ContextResponseSeverity::Low,
-                format!("Workspace lookup for {} failed: {error}", path.display()),
-                Some("ee doctor --json".to_owned()),
-            ),
+    }
+
+    let requested = crate::core::workspace::stable_workspace_id(workspace_path);
+    match crate::core::workspace::select_existing_workspace_row(
+        connection,
+        &requested,
+        &[workspace_path],
+    ) {
+        Ok(Some(workspace)) => {
+            ids.insert(workspace.id);
         }
+        Ok(None) => {}
+        Err(error) => push_degradation(
+            degraded,
+            "context_lexical_fallback_workspace_lookup_failed",
+            ContextResponseSeverity::Low,
+            format!(
+                "Workspace lookup for {} failed: {}",
+                workspace_path.display(),
+                error.message()
+            ),
+            Some("ee doctor --json".to_owned()),
+        ),
     }
 
     ids.into_iter().collect()
@@ -6676,12 +6685,9 @@ fn context_pack_l2_default_root() -> PathBuf {
 }
 
 fn context_pack_l2_workspace_id(connection: &DbConnection, workspace_path: &Path) -> String {
-    for path in context_workspace_path_keys(workspace_path) {
-        if let Ok(Some(workspace)) = connection.get_workspace_by_path(&path.to_string_lossy()) {
-            return workspace.id;
-        }
-    }
-    stable_context_workspace_id(workspace_path)
+    let requested = crate::core::workspace::stable_workspace_id(workspace_path);
+    crate::core::workspace::bound_workspace_id_or_hash(connection, &requested, &[workspace_path])
+        .unwrap_or(requested)
 }
 
 fn pack_l2_workspace_component(workspace_id: &str) -> String {
@@ -10010,23 +10016,29 @@ fn graph_context_workspace_ids(
     let mut workspace_ids = BTreeSet::new();
     for path in context_workspace_path_keys(workspace_path) {
         workspace_ids.insert(stable_context_workspace_id(&path));
-        let path_string = path.to_string_lossy().into_owned();
-        match connection.get_workspace_by_path(&path_string) {
-            Ok(Some(workspace)) => {
-                workspace_ids.insert(workspace.id);
-            }
-            Ok(None) => {}
-            Err(error) => push_degradation(
-                degraded,
-                "context_graph_workspace_lookup_unavailable",
-                ContextResponseSeverity::Low,
-                format!(
-                    "Graph snapshot posture could not resolve workspace path {}: {error}",
-                    path.display()
-                ),
-                Some("ee status --json".to_string()),
-            ),
+    }
+
+    let requested = crate::core::workspace::stable_workspace_id(workspace_path);
+    match crate::core::workspace::select_existing_workspace_row(
+        connection,
+        &requested,
+        &[workspace_path],
+    ) {
+        Ok(Some(workspace)) => {
+            workspace_ids.insert(workspace.id);
         }
+        Ok(None) => {}
+        Err(error) => push_degradation(
+            degraded,
+            "context_graph_workspace_lookup_unavailable",
+            ContextResponseSeverity::Low,
+            format!(
+                "Graph snapshot posture could not resolve workspace path {}: {}",
+                workspace_path.display(),
+                error.message()
+            ),
+            Some("ee status --json".to_string()),
+        ),
     }
 
     workspace_ids

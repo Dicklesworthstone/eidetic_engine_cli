@@ -3826,8 +3826,12 @@ impl ManualRunner {
             );
         }
         let workspace_path = self.normalized_workspace_path();
-        let workspace_id = match connection.get_workspace_by_path(&workspace_path.to_string_lossy())
-        {
+        let requested = crate::core::workspace::stable_workspace_id(&workspace_path);
+        let workspace_id = match crate::core::workspace::select_existing_workspace_row(
+            &connection,
+            &requested,
+            &[workspace_path.as_path()],
+        ) {
             Ok(Some(workspace)) => workspace.id,
             Ok(None) => {
                 return (
@@ -3841,7 +3845,10 @@ impl ManualRunner {
                 return (
                     RunOutcome::Failed,
                     None,
-                    Some(format!("Affinity workspace lookup failed: {error}")),
+                    Some(format!(
+                        "Affinity workspace lookup failed: {}",
+                        error.message()
+                    )),
                     None,
                 );
             }
@@ -3961,8 +3968,12 @@ impl ManualRunner {
             );
         }
         let workspace_path = self.normalized_workspace_path();
-        let workspace_id = match connection.get_workspace_by_path(&workspace_path.to_string_lossy())
-        {
+        let requested = crate::core::workspace::stable_workspace_id(&workspace_path);
+        let workspace_id = match crate::core::workspace::select_existing_workspace_row(
+            &connection,
+            &requested,
+            &[workspace_path.as_path()],
+        ) {
             Ok(Some(workspace)) => workspace.id,
             Ok(None) => {
                 return (
@@ -3976,7 +3987,10 @@ impl ManualRunner {
                 return (
                     RunOutcome::Failed,
                     None,
-                    Some(format!("Primer refresh workspace lookup failed: {error}")),
+                    Some(format!(
+                        "Primer refresh workspace lookup failed: {}",
+                        error.message()
+                    )),
                     None,
                 );
             }
@@ -6429,19 +6443,19 @@ impl ManualRunner {
 
         if let Some(workspace_path) = self.options.workspace_path.as_ref() {
             let workspace_path = normalize_runner_workspace_path(workspace_path);
-            for path in runner_workspace_path_keys(&workspace_path) {
-                let path_string = path.to_string_lossy().into_owned();
-                let workspace =
-                    connection
-                        .get_workspace_by_path(&path_string)
-                        .map_err(|error| {
-                            format!("Failed to query workspace path {path_string}: {error}")
-                        })?;
-                if let Some(workspace) = workspace {
-                    return Ok(workspace.id);
-                }
-            }
-            return Ok(stable_runner_workspace_id(&workspace_path));
+            let requested = crate::core::workspace::stable_workspace_id(&workspace_path);
+            return crate::core::workspace::bound_workspace_id_or_hash(
+                connection,
+                &requested,
+                &[workspace_path.as_path()],
+            )
+            .map_err(|error| {
+                format!(
+                    "Failed to query workspace path {}: {}",
+                    workspace_path.display(),
+                    error.message()
+                )
+            });
         }
 
         let workspaces = connection
@@ -6461,17 +6475,18 @@ impl ManualRunner {
 
         if let Some(database_path) = self.resolve_database_path().filter(|path| path.exists()) {
             if let Ok(connection) = DbConnection::open_file(&database_path) {
-                for path in runner_workspace_path_keys(workspace_path) {
-                    if let Ok(Some(workspace)) =
-                        connection.get_workspace_by_path(&path.to_string_lossy())
-                    {
-                        return workspace.id;
-                    }
+                let requested = crate::core::workspace::stable_workspace_id(workspace_path);
+                if let Ok(workspace_id) = crate::core::workspace::bound_workspace_id_or_hash(
+                    &connection,
+                    &requested,
+                    &[workspace_path],
+                ) {
+                    return workspace_id;
                 }
             }
         }
 
-        stable_runner_workspace_id(workspace_path)
+        crate::core::workspace::stable_workspace_id(workspace_path)
     }
 
     fn graph_link_limit(&self) -> Result<Option<u32>, String> {
@@ -6667,43 +6682,12 @@ fn normalize_runner_workspace_path(path: &Path) -> PathBuf {
     absolute.canonicalize().unwrap_or(absolute)
 }
 
-fn runner_workspace_path_keys(workspace_path: &Path) -> BTreeSet<PathBuf> {
-    let mut path_keys = BTreeSet::new();
-    let absolute = if workspace_path.is_absolute() {
-        workspace_path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(workspace_path)
-    };
-    path_keys.insert(workspace_path.to_path_buf());
-    path_keys.insert(absolute.clone());
-    if let Ok(canonical) = absolute.canonicalize() {
-        path_keys.insert(canonical);
-    }
-    path_keys
-}
-
-fn stable_runner_workspace_id(path: &Path) -> String {
-    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
-    crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_bytes(blake3_uuid_bytes(&hash)))
-        .to_string()
-}
-
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn usize_to_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
-}
-
-fn blake3_uuid_bytes(hash: &blake3::Hash) -> [u8; 16] {
-    let mut bytes = [0_u8; 16];
-    if let Some(prefix) = hash.as_bytes().get(..16) {
-        bytes.copy_from_slice(prefix);
-    }
-    bytes
 }
 
 fn millis_to_u64(elapsed: std::time::Duration) -> u64 {

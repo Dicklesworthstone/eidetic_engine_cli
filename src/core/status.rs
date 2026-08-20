@@ -3211,11 +3211,8 @@ fn gather_pack_budget_buckets_with_connection(
     if !database_path.exists() {
         return PackBudgetBucketReport::default();
     }
-    let canonical_workspace = workspace_path
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_path.to_path_buf());
-    let workspace_id = stable_workspace_id(&canonical_workspace);
     if let Some(connection) = connection {
+        let workspace_id = bound_status_workspace_id(connection, workspace_path);
         let Ok(entries) = connection.list_audit_entries(Some(&workspace_id), None) else {
             return PackBudgetBucketReport::default();
         };
@@ -3224,6 +3221,7 @@ fn gather_pack_budget_buckets_with_connection(
     let Ok(connection) = DbConnection::open_file_read_only(&database_path) else {
         return PackBudgetBucketReport::default();
     };
+    let workspace_id = bound_status_workspace_id(&connection, workspace_path);
     let Ok(entries) = connection.list_audit_entries(Some(&workspace_id), None) else {
         return PackBudgetBucketReport::default();
     };
@@ -3344,10 +3342,7 @@ pub fn gather_rch_verify_ledger_status_with_connection(
             }
         }
     };
-    let canonical_workspace = workspace_path
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_path.to_path_buf());
-    let workspace_id = stable_workspace_id(&canonical_workspace);
+    let workspace_id = bound_status_workspace_id(connection, workspace_path);
     summarize_rch_verify_ledger_status(connection, &workspace_id, &Utc::now().to_rfc3339())
         .unwrap_or_else(|_| {
             RchVerifyLedgerStatusReport::unavailable(
@@ -5060,29 +5055,27 @@ fn status_visible_memory_links(links: Vec<StoredMemoryLink>) -> Vec<StoredMemory
 
 fn resolve_status_workspace_ids(connection: &DbConnection, workspace_path: &Path) -> Vec<String> {
     let mut candidates = Vec::new();
-    let workspace_key = workspace_path.to_string_lossy().to_string();
-    if let Some(workspace) = connection
-        .get_workspace_by_path(&workspace_key)
-        .ok()
-        .flatten()
-    {
-        push_unique_workspace_id(&mut candidates, workspace.id);
-    }
     push_unique_workspace_id(&mut candidates, stable_workspace_id(workspace_path));
-
     if let Ok(canonical) = workspace_path.canonicalize() {
-        let canonical_key = canonical.to_string_lossy().to_string();
-        if let Some(workspace) = connection
-            .get_workspace_by_path(&canonical_key)
-            .ok()
-            .flatten()
-        {
-            push_unique_workspace_id(&mut candidates, workspace.id);
-        }
         push_unique_workspace_id(&mut candidates, stable_workspace_id(&canonical));
     }
-
+    push_unique_workspace_id(
+        &mut candidates,
+        bound_status_workspace_id(connection, workspace_path),
+    );
     candidates
+}
+
+fn bound_status_workspace_id(connection: &DbConnection, workspace_path: &Path) -> String {
+    let canonical = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    crate::core::workspace::bound_workspace_id_or_hash(
+        connection,
+        &stable_workspace_id(&canonical),
+        &[workspace_path, canonical.as_path()],
+    )
+    .unwrap_or_else(|_| stable_workspace_id(&canonical))
 }
 
 fn push_unique_workspace_id(candidates: &mut Vec<String>, workspace_id: String) {
@@ -5181,10 +5174,6 @@ fn gather_memory_health_with_connection(
         );
     }
 
-    let canonical_workspace = workspace_path
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_path.to_path_buf());
-    let workspace_id = stable_workspace_id(&canonical_workspace);
     let owned_connection;
     let connection = if let Some(connection) = connection {
         connection
@@ -5207,6 +5196,7 @@ fn gather_memory_health_with_connection(
             }
         }
     };
+    let workspace_id = bound_status_workspace_id(connection, workspace_path);
     let memories = match connection.list_memories(&workspace_id, None, true) {
         Ok(memories) => memories,
         Err(_) => {
@@ -5416,10 +5406,6 @@ fn gather_curation_health_with_connection(
         );
     }
 
-    let canonical_workspace = workspace_path
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_path.to_path_buf());
-    let workspace_id = stable_workspace_id(&canonical_workspace);
     let owned_connection;
     let connection = if let Some(connection) = connection {
         connection
@@ -5442,6 +5428,7 @@ fn gather_curation_health_with_connection(
             }
         }
     };
+    let workspace_id = bound_status_workspace_id(connection, workspace_path);
     let candidates = match connection.list_curation_candidates(&workspace_id, None, None, None) {
         Ok(candidates) => candidates,
         Err(_) => {
@@ -5496,10 +5483,6 @@ fn gather_feedback_health_with_connection(
         );
     }
 
-    let canonical_workspace = workspace_path
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_path.to_path_buf());
-    let workspace_id = stable_workspace_id(&canonical_workspace);
     let owned_connection;
     let connection = if let Some(connection) = connection {
         connection
@@ -5522,6 +5505,7 @@ fn gather_feedback_health_with_connection(
             }
         }
     };
+    let workspace_id = bound_status_workspace_id(connection, workspace_path);
     let since = Utc::now()
         .checked_sub_signed(ChronoDuration::seconds(i64::from(
             DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,

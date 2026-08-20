@@ -2590,16 +2590,15 @@ fn load_workspace(
     connection: &DbConnection,
     workspace_path: &Path,
 ) -> Result<crate::db::StoredWorkspace, DomainError> {
-    let path = workspace_path.to_string_lossy();
-    connection
-        .get_workspace_by_path(&path)
+    let requested = crate::core::workspace::stable_workspace_id(workspace_path);
+    crate::core::workspace::select_existing_workspace_row(connection, &requested, &[workspace_path])
         .map_err(|error| DomainError::Storage {
-            message: error.to_string(),
+            message: error.message(),
             repair: Some(INIT_AND_MIGRATE_REPAIR_COMMAND.to_owned()),
         })?
         .ok_or_else(|| DomainError::NotFound {
             resource: "workspace".to_owned(),
-            id: path.into_owned(),
+            id: workspace_path.to_string_lossy().into_owned(),
             repair: Some("ee init --workspace .".to_owned()),
         })
 }

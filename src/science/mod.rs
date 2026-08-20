@@ -1626,7 +1626,12 @@ pub fn analyze_clustering(options: &ClusteringAnalysisOptions) -> ClusteringAnal
     let Ok(connection) = crate::db::DbConnection::open_file(&database_path) else {
         return ClusteringAnalysisReport::no_candidates();
     };
-    let workspace_id = stable_workspace_id(&workspace_path);
+    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        &connection,
+        &stable_workspace_id(&workspace_path),
+        &[workspace_path.as_path()],
+    )
+    .unwrap_or_else(|_| stable_workspace_id(&workspace_path));
     let candidate_type = non_empty_filter(options.candidate_type.as_deref());
     let status = non_empty_filter(options.status.as_deref());
     let Ok(mut candidates) =

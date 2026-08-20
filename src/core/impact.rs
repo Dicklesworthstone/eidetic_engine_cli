@@ -553,11 +553,18 @@ fn resolve_workspace_id(
     connection: &DbConnection,
     workspace_path: &Path,
 ) -> Result<String, DbError> {
-    let path = workspace_path.to_string_lossy();
+    let requested = crate::core::curate::stable_workspace_id(workspace_path);
+    if let Ok(Some(workspace)) = crate::core::workspace::select_existing_workspace_row(
+        connection,
+        &requested,
+        &[workspace_path],
+    ) {
+        return Ok(workspace.id);
+    }
     Ok(connection
-        .get_workspace_by_path(&path)?
+        .get_workspace_by_path(&workspace_path.to_string_lossy())?
         .map(|workspace| workspace.id)
-        .unwrap_or_else(|| crate::core::curate::stable_workspace_id(workspace_path)))
+        .unwrap_or(requested))
 }
 
 fn impact_content_preview(content: &str) -> String {

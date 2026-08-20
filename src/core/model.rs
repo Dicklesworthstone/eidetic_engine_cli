@@ -2242,21 +2242,17 @@ fn resolve_workspace_id(
     workspace_path: &Path,
 ) -> Result<String, DomainError> {
     let path_str = workspace_path.to_string_lossy().into_owned();
-    let workspace = connection
-        .get_workspace_by_path(&path_str)
-        .map_err(|error| {
-            db_error_to_domain(
-                error,
-                "Failed to resolve workspace",
-                Some("ee init --workspace .".to_string()),
-            )
-        })?;
-    workspace
-        .map(|workspace| workspace.id)
-        .ok_or_else(|| DomainError::Configuration {
-            message: format!("Workspace not registered for path {path_str}"),
-            repair: Some("ee init --workspace .".to_string()),
-        })
+    let requested = crate::core::workspace::stable_workspace_id(workspace_path);
+    crate::core::workspace::select_existing_workspace_row(
+        connection,
+        &requested,
+        &[workspace_path],
+    )?
+    .map(|workspace| workspace.id)
+    .ok_or_else(|| DomainError::Configuration {
+        message: format!("Workspace not registered for path {path_str}"),
+        repair: Some("ee init --workspace .".to_string()),
+    })
 }
 
 fn ensure_bundled_embedding_model_registered_for_status(

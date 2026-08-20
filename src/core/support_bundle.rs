@@ -2260,8 +2260,7 @@ fn collect_agent_profile_evidence(workspace: &Path) -> Value {
         .flatten()
         .map_or(Value::Null, Value::from);
 
-    let workspace_path = workspace.display().to_string();
-    let Ok(Some(workspace_row)) = connection.get_workspace_by_path(&workspace_path) else {
+    let Some(workspace_row) = support_bundle_workspace_row(&connection, workspace) else {
         return agent_profile_evidence_value("workspace_missing", database, Vec::new());
     };
     database["workspaceRowPresent"] = json!(true);
@@ -2582,8 +2581,7 @@ fn collect_cache_hotset_snapshot(
     snapshot.database_readable = true;
     snapshot.schema_version = connection.schema_version().ok().flatten();
 
-    let workspace_path = workspace.display().to_string();
-    let Ok(Some(workspace_row)) = connection.get_workspace_by_path(&workspace_path) else {
+    let Some(workspace_row) = support_bundle_workspace_row(&connection, workspace) else {
         snapshot.generation = cache_source_generation(&snapshot, cache_state);
         return snapshot;
     };
@@ -4976,8 +4974,11 @@ pub(crate) fn collect_pack_replay_summary(workspace: &Path) -> Value {
         Err(_) => return pack_replay_summary_value("query_failed", database, Vec::new()),
     };
 
-    let workspace_path = workspace.display().to_string();
-    let workspace_row = match connection.get_workspace_by_path(&workspace_path) {
+    let workspace_row = match crate::core::workspace::select_existing_workspace_row(
+        &connection,
+        &crate::core::workspace::stable_workspace_id(workspace),
+        &[workspace],
+    ) {
         Ok(Some(workspace_row)) => workspace_row,
         Ok(None) => return pack_replay_summary_value("workspace_missing", database, Vec::new()),
         Err(_) => return pack_replay_summary_value("query_failed", database, Vec::new()),
@@ -6239,6 +6240,19 @@ fn support_cache_key(payload: &str) -> String {
     format!("blake3:{}", compute_hash(payload))
 }
 
+fn support_bundle_workspace_row(
+    connection: &DbConnection,
+    workspace: &Path,
+) -> Option<crate::db::StoredWorkspace> {
+    crate::core::workspace::select_existing_workspace_row(
+        connection,
+        &crate::core::workspace::stable_workspace_id(workspace),
+        &[workspace],
+    )
+    .ok()
+    .flatten()
+}
+
 fn collect_audit_entries(workspace: &Path, limit: u32) -> String {
     let database_path = workspace.join(".ee").join("ee.db");
     if !support_bundle_database_path_is_regular(&database_path) {
@@ -6249,8 +6263,7 @@ fn collect_audit_entries(workspace: &Path, limit: u32) -> String {
         return "[]".to_string();
     };
 
-    let workspace_key = workspace.to_string_lossy();
-    let Ok(Some(workspace_row)) = connection.get_workspace_by_path(&workspace_key) else {
+    let Some(workspace_row) = support_bundle_workspace_row(&connection, workspace) else {
         return "[]".to_string();
     };
 
@@ -6347,8 +6360,7 @@ fn collect_verification_evidence_summary(workspace: &Path, limit: u32) -> Value 
     };
     database["readable"] = json!(true);
 
-    let workspace_key = workspace.to_string_lossy();
-    let Ok(Some(workspace_row)) = connection.get_workspace_by_path(&workspace_key) else {
+    let Some(workspace_row) = support_bundle_workspace_row(&connection, workspace) else {
         return verification_evidence_summary_value("workspace_missing", database, Vec::new());
     };
     database["workspaceMatched"] = json!(true);

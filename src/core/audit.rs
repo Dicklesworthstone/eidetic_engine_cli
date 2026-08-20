@@ -1021,32 +1021,19 @@ fn timeline_db_generation(workspace: &Path, database_path: Option<&Path>) -> u64
     let Ok(connection) = DbConnection::open_file(&database_path) else {
         return 0;
     };
-    for workspace_path in timeline_workspace_path_candidates(workspace) {
-        match connection.get_workspace_by_path(&workspace_path) {
-            Ok(Some(workspace_row)) => {
-                return connection
-                    .get_workspace_generation(&workspace_row.id)
-                    .ok()
-                    .flatten()
-                    .unwrap_or(0);
-            }
-            Ok(None) => {}
-            Err(_) => return 0,
-        }
+    let requested = crate::core::workspace::stable_workspace_id(workspace);
+    match crate::core::workspace::select_existing_workspace_row(
+        &connection,
+        &requested,
+        &[workspace],
+    ) {
+        Ok(Some(workspace_row)) => connection
+            .get_workspace_generation(&workspace_row.id)
+            .ok()
+            .flatten()
+            .unwrap_or(0),
+        Ok(None) | Err(_) => 0,
     }
-    0
-}
-
-fn timeline_workspace_path_candidates(workspace: &Path) -> Vec<String> {
-    let raw = workspace.to_string_lossy().into_owned();
-    let mut candidates = vec![raw.clone()];
-    if let Ok(canonical) = workspace.canonicalize() {
-        let canonical = canonical.to_string_lossy().into_owned();
-        if canonical != raw {
-            candidates.push(canonical);
-        }
-    }
-    candidates
 }
 
 fn parse_optional_instant(

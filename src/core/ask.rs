@@ -238,7 +238,7 @@ pub fn segment_spans(content: &str) -> Vec<(usize, usize)> {
         }
 
         if in_code_fence {
-            i += 1;
+            i += char_len_at(bytes, i);
             continue;
         }
 

@@ -633,8 +633,9 @@ pub const GLOBAL_WORKSPACE_NAME: &str = "ee-global";
 /// The store-root path string used as the workspace key for the global store.
 ///
 /// `remember`/search derive the workspace id from this same path
-/// ([`crate::db::DbConnection::get_workspace_by_path`]), so writes and reads
-/// agree on a single stable global workspace.
+/// through the occupancy-aware workspace bind, so writes and reads
+/// agree on a single stable global workspace even when the store root
+/// is spelled lexically versus canonically.
 #[must_use]
 pub fn global_workspace_key(paths: &GlobalStorePaths) -> String {
     paths.root.to_string_lossy().into_owned()
@@ -689,23 +690,26 @@ fn ensure_global_workspace_row(
     paths: &GlobalStorePaths,
 ) -> Result<String, String> {
     let workspace_key = global_workspace_key(paths);
-    if let Some(existing) = connection
-        .get_workspace_by_path(&workspace_key)
-        .map_err(|error| format!("failed to check global workspace row: {error}"))?
+    let requested = global_workspace_id(paths);
+    if let Some(existing) = crate::core::workspace::select_existing_workspace_row(
+        connection,
+        &requested,
+        &[paths.root.as_path()],
+    )
+    .map_err(|error| format!("failed to check global workspace row: {}", error.message()))?
     {
         return Ok(existing.id);
     }
-    let workspace_id = global_workspace_id(paths);
     connection
         .insert_workspace(
-            &workspace_id,
+            &requested,
             &CreateWorkspaceInput {
                 path: workspace_key,
                 name: Some(GLOBAL_WORKSPACE_NAME.to_owned()),
             },
         )
         .map_err(|error| format!("failed to create global workspace row: {error}"))?;
-    Ok(workspace_id)
+    Ok(requested)
 }
 
 /// Read memories persisted in the user-global store (read-only).
@@ -735,10 +739,18 @@ pub fn read_global_store_memories(
             "global store database needs migration; skipping read-only global tier".to_owned(),
         );
     }
-    let workspace_key = global_workspace_key(paths);
-    let Some(workspace) = connection
-        .get_workspace_by_path(&workspace_key)
-        .map_err(|error| format!("failed to resolve global workspace row: {error}"))?
+    let requested = global_workspace_id(paths);
+    let Some(workspace) = crate::core::workspace::select_existing_workspace_row(
+        &connection,
+        &requested,
+        &[paths.root.as_path()],
+    )
+    .map_err(|error| {
+        format!(
+            "failed to resolve global workspace row: {}",
+            error.message()
+        )
+    })?
     else {
         return Ok(Vec::new());
     };

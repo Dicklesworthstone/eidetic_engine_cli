@@ -36,7 +36,7 @@ use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
     CreateAuditInput, CreateCurationCandidateInput, CreateWorkspaceInput, DbConnection,
     PROVENANCE_STATUS_MISMATCH, PROVENANCE_STATUS_MISSING, PROVENANCE_STATUS_SKIPPED,
-    PROVENANCE_STATUS_VERIFIED, WorkspaceScopeFields, audit_actions, generate_audit_id,
+    PROVENANCE_STATUS_VERIFIED, audit_actions, generate_audit_id,
 };
 use crate::models::{
     CandidateId, DomainError, LineSpan, ProducerMetadata, ProvenanceUri, RCH_VERIFY_SCHEMA_V1,
@@ -2270,60 +2270,14 @@ fn ensure_verification_workspace(
     connection: &DbConnection,
     workspace_path: &Path,
 ) -> Result<String, DomainError> {
-    let workspace_path = workspace_path
+    let canonical = workspace_path
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
-    let workspace_key = workspace_path.to_string_lossy().into_owned();
-    if let Some(existing) = connection
-        .get_workspace_by_path(&workspace_key)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query verification workspace: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })?
-    {
-        return Ok(existing.id);
-    }
-
-    let workspace_id = super::workspace::stable_workspace_id(&workspace_path);
-    let input = CreateWorkspaceInput {
-        path: workspace_key,
-        name: workspace_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_owned),
-    };
-    connection
-        .upsert_workspace_with_scope(&workspace_id, &input, &WorkspaceScopeFields::standalone())
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to ensure workspace for verification ledger: {error}"),
-            repair: Some("ee init --workspace .".to_owned()),
-        })?;
-    if let Some(existing) =
-        connection
-            .get_workspace(&workspace_id)
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to query ensured verification workspace: {error}"),
-                repair: Some("ee doctor".to_owned()),
-            })?
-    {
-        return Ok(existing.id);
-    }
-    if let Some(existing) = connection
-        .get_workspace_by_path(&workspace_path.to_string_lossy())
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query ensured verification workspace path: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })?
-    {
-        return Ok(existing.id);
-    }
-
-    Err(DomainError::Storage {
-        message:
-            "Failed to ensure workspace for verification ledger: workspace row was not inserted"
-                .to_owned(),
-        repair: Some("ee init --workspace .".to_owned()),
-    })
+    crate::core::workspace::ensure_bound_workspace(
+        connection,
+        &super::workspace::stable_workspace_id(&canonical),
+        &[canonical.as_path(), workspace_path],
+    )
 }
 
 fn validate_verification_record(record: &VerificationEvidenceRecord) -> Result<(), DomainError> {

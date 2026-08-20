@@ -915,7 +915,6 @@ fn load_memory_economy_metrics(
     let workspace_path = workspace_path
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
-    let workspace_id = stable_workspace_id(&workspace_path);
     let connection = DbConnection::open_file(database_path).map_err(|error| {
         DomainError::UnsatisfiedDegradedMode {
             message: format!(
@@ -924,6 +923,12 @@ fn load_memory_economy_metrics(
             repair: Some(crate::core::storeless_workspace_repair(database_path)),
         }
     })?;
+    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        &connection,
+        &stable_workspace_id(&workspace_path),
+        &[workspace_path.as_path()],
+    )
+    .unwrap_or_else(|_| stable_workspace_id(&workspace_path));
     let active_memories = connection
         .list_memories(&workspace_id, None, false)
         .map_err(|error| economy_metrics_unavailable(database_path, error))?;

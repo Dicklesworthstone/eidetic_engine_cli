@@ -2390,12 +2390,13 @@ fn find_workspace_alias_read_only(
         return Ok(None);
     }
     let canonical = canonical_or_lexical(workspace_path);
-    let path = canonical.display().to_string();
     let conn = open_registry_read_only(registry_path)?;
-    Ok(conn
-        .get_workspace_by_path(&path)
-        .map_err(|error| storage_error("failed to resolve workspace alias", error))?
-        .and_then(|row| row.name))
+    Ok(select_existing_workspace_row(
+        &conn,
+        &stable_workspace_id(&canonical),
+        &[workspace_path, canonical.as_path()],
+    )?
+    .and_then(|row| row.name))
 }
 
 fn find_alias_read_only(

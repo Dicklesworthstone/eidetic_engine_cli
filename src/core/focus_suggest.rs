@@ -327,18 +327,11 @@ fn resolve_workspace_id(
     let canonical = workspace_path
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
-    let canonical_str = canonical.to_string_lossy().into_owned();
-    let raw_str = workspace_path.to_string_lossy().into_owned();
-
-    for candidate in [canonical_str.as_str(), raw_str.as_str()] {
-        if let Ok(Some(workspace)) = connection.get_workspace_by_path(candidate) {
-            return Ok(workspace.id);
-        }
-    }
-
-    Ok(crate::core::curate::stable_workspace_id(
-        canonical.as_path(),
-    ))
+    crate::core::workspace::bound_workspace_id_or_hash(
+        connection,
+        &crate::core::curate::stable_workspace_id(canonical.as_path()),
+        &[workspace_path, canonical.as_path()],
+    )
 }
 
 fn memory_created_at(memory: &StoredMemory) -> Option<DateTime<Utc>> {

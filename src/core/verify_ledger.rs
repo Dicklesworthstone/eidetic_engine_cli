@@ -1422,13 +1422,9 @@ fn active_rch_verify_blockers_after_success_supersession(
 }
 
 fn rch_verify_workspace_id(connection: &DbConnection, workspace_path: &Path) -> String {
-    let workspace_path_string = workspace_path.to_string_lossy().into_owned();
-    connection
-        .get_workspace_by_path(&workspace_path_string)
-        .ok()
-        .flatten()
-        .map(|workspace| workspace.id)
-        .unwrap_or_else(|| super::curate::stable_workspace_id(workspace_path))
+    let requested = super::curate::stable_workspace_id(workspace_path);
+    crate::core::workspace::bound_workspace_id_or_hash(connection, &requested, &[workspace_path])
+        .unwrap_or(requested)
 }
 
 fn rch_verify_run_local_fallback_refused(run: &RchVerifyRunView) -> bool {
