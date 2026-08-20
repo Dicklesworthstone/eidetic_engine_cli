@@ -1381,37 +1381,15 @@ fn insights_workspace_id(
     connection: &DbConnection,
     workspace: &Path,
 ) -> Result<Option<String>, DomainError> {
-    for candidate in workspace_path_candidates(workspace) {
-        let key = candidate.to_string_lossy();
-        let row = connection
-            .get_workspace_by_path(key.as_ref())
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to query workspace row: {error}"),
-                repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
-            })?;
-        if let Some(workspace) = row {
-            return Ok(Some(workspace.id));
-        }
-    }
-
-    connection
-        .list_workspaces()
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to list workspace rows: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
-        })
-        .map(|workspaces| workspaces.into_iter().next().map(|workspace| workspace.id))
-}
-
-fn workspace_path_candidates(workspace: &Path) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(canonical) = workspace.canonicalize() {
-        candidates.push(canonical);
-    }
-    if !candidates.iter().any(|candidate| candidate == workspace) {
-        candidates.push(workspace.to_path_buf());
-    }
-    candidates
+    let canonical = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    crate::core::workspace::select_existing_workspace_row(
+        connection,
+        &crate::core::workspace::stable_workspace_id(&canonical),
+        &[workspace, canonical.as_path()],
+    )
+    .map(|row| row.map(|workspace| workspace.id))
 }
 
 fn proximity_hotspot_reports_from_links(

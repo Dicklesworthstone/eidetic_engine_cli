@@ -2569,38 +2569,15 @@ fn resolve_workspace_row_id(
     connection: &DbConnection,
     workspace_path: &Path,
 ) -> Result<String, String> {
-    let primary = workspace_path.to_string_lossy().into_owned();
-    if let Some(workspace) = connection
-        .get_workspace_by_path(&primary)
-        .map_err(|error| format!("query workspace: {error}"))?
-    {
-        return Ok(workspace.id);
-    }
     let canonical = workspace_path
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
-    let mut candidates = vec![canonical.to_string_lossy().into_owned()];
-    if let Some(rest) = candidates[0].strip_prefix(r"\\?\UNC\") {
-        candidates.push(format!(r"\\{rest}"));
-    } else if let Some(rest) = candidates[0].strip_prefix(r"\\?\") {
-        candidates.push(rest.to_owned());
-    }
-    for candidate in candidates {
-        if candidate != primary
-            && let Some(workspace) = connection
-                .get_workspace_by_path(&candidate)
-                .map_err(|error| format!("query workspace: {error}"))?
-        {
-            return Ok(workspace.id);
-        }
-    }
-    let workspaces = connection
-        .list_workspaces()
-        .map_err(|error| format!("list workspaces: {error}"))?;
-    if let [workspace] = workspaces.as_slice() {
-        return Ok(workspace.id.clone());
-    }
-    Err(format!("workspace row missing for {primary}"))
+    crate::core::workspace::bound_workspace_id_or_hash(
+        connection,
+        &crate::core::workspace::stable_workspace_id(&canonical),
+        &[workspace_path, canonical.as_path()],
+    )
+    .map_err(|error| error.message())
 }
 
 /// One bounded sync tick for the team steward / daemon. Same supervisor as

@@ -267,17 +267,16 @@ fn baseline_memories(workspace: &Path) -> Result<Vec<(String, String)>, DomainEr
             message: format!("Failed to open workspace database: {error}"),
             repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
         })?;
-    let workspace_row = connection
-        .get_workspace_by_path(workspace.to_string_lossy().as_ref())
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace row: {error}"),
-            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
-        })?;
-    let Some(workspace_row) = workspace_row else {
-        return Ok(Vec::new());
-    };
+    let canonical = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        &connection,
+        &crate::core::workspace::stable_workspace_id(&canonical),
+        &[workspace, canonical.as_path()],
+    )?;
     let memories = connection
-        .list_memories(&workspace_row.id, None, false)
+        .list_memories(&workspace_id, None, false)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to list workspace memories: {error}"),
             repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),

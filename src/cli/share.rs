@@ -444,34 +444,14 @@ fn resolve_share_workspace_id(
     connection: &DbConnection,
     workspace_path: &std::path::Path,
 ) -> Result<String, DomainError> {
-    let primary = workspace_path.to_string_lossy().into_owned();
-    if let Some(workspace) = connection
-        .get_workspace_by_path(&primary)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?
-    {
-        return Ok(workspace.id);
-    }
-
     let canonical = workspace_path
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
-    let canonical_str = canonical.to_string_lossy().into_owned();
-    if canonical_str != primary
-        && let Some(workspace) =
-            connection
-                .get_workspace_by_path(&canonical_str)
-                .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to query workspace: {error}"),
-                    repair: Some("ee doctor".to_string()),
-                })?
-    {
-        return Ok(workspace.id);
-    }
-
-    Ok(super::stable_cli_workspace_id(&canonical))
+    crate::core::workspace::bound_workspace_id_or_hash(
+        connection,
+        &crate::core::workspace::stable_workspace_id(&canonical),
+        &[workspace_path, canonical.as_path()],
+    )
 }
 
 fn storage_error(context: &str, error: crate::db::DbError) -> DomainError {

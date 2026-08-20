@@ -21051,12 +21051,11 @@ fn governed_db_generation(workspace_root: &Path) -> u64 {
     let Ok(connection) = crate::db::DbConnection::open_file(&database_path) else {
         return 0;
     };
-    let workspace_path = workspace_root.to_string_lossy().into_owned();
-    let Ok(Some(workspace)) = connection.get_workspace_by_path(&workspace_path) else {
+    let Ok(workspace_id) = bound_cli_workspace_id(&connection, workspace_root) else {
         return 0;
     };
     connection
-        .get_workspace_generation(&workspace.id)
+        .get_workspace_generation(&workspace_id)
         .ok()
         .flatten()
         .unwrap_or(0)
@@ -24781,19 +24780,18 @@ fn open_workspace_database_for_write(
     open_workspace_database_for_write_at(workspace, database)
 }
 
-fn canonical_workspace_row(
+fn bound_cli_workspace_id(
     connection: &crate::db::DbConnection,
-    workspace: &Path,
-) -> crate::db::Result<(PathBuf, Option<crate::db::StoredWorkspace>)> {
-    let canonical_workspace = workspace
+    workspace_path: &Path,
+) -> Result<String, DomainError> {
+    let canonical = workspace_path
         .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf());
-    let mut existing_workspace =
-        connection.get_workspace_by_path(&canonical_workspace.to_string_lossy())?;
-    if existing_workspace.is_none() && canonical_workspace != workspace {
-        existing_workspace = connection.get_workspace_by_path(&workspace.to_string_lossy())?;
-    }
-    Ok((canonical_workspace, existing_workspace))
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    crate::core::workspace::bound_workspace_id_or_hash(
+        connection,
+        &workspace_core::stable_workspace_id(&canonical),
+        &[workspace_path, canonical.as_path()],
+    )
 }
 
 fn open_workspace_database_for_write_at(
@@ -24822,33 +24820,14 @@ fn open_workspace_database_for_write_at(
     // legacy raw-path row. Otherwise preflight can create an empty duplicate
     // workspace whose path is `./...`, and later raw-first readers can report
     // an empty store even though the canonical row owns all memories.
-    let (canonical_workspace, existing_workspace) =
-        canonical_workspace_row(&connection, &workspace).map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace row: {error}"),
-            repair: Some("ee doctor --json".to_owned()),
-        })?;
-    let canonical_workspace_path = canonical_workspace.to_string_lossy().into_owned();
-    let workspace_id = match existing_workspace {
-        Some(workspace) => workspace.id,
-        None => {
-            let workspace_id = crate::core::workspace::stable_workspace_id(&canonical_workspace);
-            connection
-                .insert_workspace(
-                    &workspace_id,
-                    &crate::db::CreateWorkspaceInput {
-                        path: canonical_workspace_path,
-                        name: canonical_workspace
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned()),
-                    },
-                )
-                .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to create workspace row: {error}"),
-                    repair: Some("ee doctor --json".to_owned()),
-                })?;
-            workspace_id
-        }
-    };
+    let canonical_workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.clone());
+    let workspace_id = crate::core::workspace::ensure_bound_workspace(
+        &connection,
+        &crate::core::workspace::stable_workspace_id(&canonical_workspace),
+        &[canonical_workspace.as_path(), workspace.as_path()],
+    )?;
 
     // Preserve the caller's original path spelling for operations whose
     // workspace-path semantics are observable. Canonicalization above is only
@@ -24914,15 +24893,7 @@ fn open_preflight_memory_database_for_read(
                 repair: Some("ee status --json".to_owned()),
             }
         })?;
-    let (canonical_workspace, existing_workspace) = canonical_workspace_row(&connection, workspace)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace row read-only: {error}"),
-            repair: Some("ee migrate status --workspace . --json".to_owned()),
-        })?;
-    let workspace_id = existing_workspace.map_or_else(
-        || crate::core::workspace::stable_workspace_id(&canonical_workspace),
-        |stored| stored.id,
-    );
+    let workspace_id = bound_cli_workspace_id(&connection, workspace)?;
     Ok((connection, workspace_id))
 }
 
@@ -34172,11 +34143,7 @@ where
         // (honestly omitted when cold).
         let workspace_path =
             resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
-        let workspace_id = conn
-            .get_workspace_by_path(&workspace_path.to_string_lossy())
-            .ok()
-            .flatten()
-            .map(|workspace| workspace.id);
+        let workspace_id = bound_cli_workspace_id(conn, &workspace_path).ok();
         let affinity: Option<BTreeMap<(String, String), f64>> =
             workspace_id.as_deref().and_then(|workspace_id| {
                 conn.get_latest_graph_snapshot(
@@ -36258,31 +36225,11 @@ fn resolve_graph_workspace_id(
     if let Some(workspace_id) = explicit_workspace_id {
         return Ok(workspace_id.to_owned());
     }
-    let workspace_path = workspace.to_string_lossy().into_owned();
-    let stored = conn
-        .get_workspace_by_path(&workspace_path)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?;
-
-    Ok(stored.map_or_else(
-        || stable_cli_workspace_id(workspace),
-        |workspace| workspace.id,
-    ))
+    bound_cli_workspace_id(conn, workspace)
 }
 
 fn stable_cli_workspace_id(path: &Path) -> String {
-    let rendered = path.to_string_lossy();
-    let rendered = rendered
-        .strip_prefix(r"\\?\UNC\")
-        .map(|rest| format!(r"\\{rest}"))
-        .or_else(|| rendered.strip_prefix(r"\\?\").map(str::to_owned))
-        .unwrap_or_else(|| rendered.into_owned());
-    let hash = blake3::hash(format!("workspace:{rendered}").as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[..16]);
-    crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+    workspace_core::stable_workspace_id(path)
 }
 
 fn write_graph_export_report<W>(
@@ -39664,15 +39611,8 @@ fn orient_primer_value(
             );
         }
     };
-    let workspace_key = workspace_path.to_string_lossy().into_owned();
-    let workspace_id = match connection.get_workspace_by_path(&workspace_key) {
-        Ok(Some(workspace)) => workspace.id,
-        Ok(None) => {
-            return unavailable(
-                "Primer skipped: workspace is not registered.".to_owned(),
-                degraded,
-            );
-        }
+    let workspace_id = match bound_cli_workspace_id(&connection, workspace_path) {
+        Ok(workspace_id) => workspace_id,
         Err(error) => {
             return unavailable(
                 format!("Primer skipped: workspace lookup failed: {error}"),
@@ -42657,23 +42597,7 @@ fn migration_audit_workspace_id(
     conn: &crate::db::DbConnection,
     workspace_path: &Path,
 ) -> Option<String> {
-    let mut candidates = Vec::new();
-    if let Ok(canonical) = workspace_path.canonicalize() {
-        candidates.push(canonical);
-    }
-    candidates.push(workspace_path.to_path_buf());
-
-    for candidate in candidates {
-        let path = candidate.to_string_lossy();
-        if let Ok(Some(workspace)) = conn.get_workspace_by_path(path.as_ref()) {
-            return Some(workspace.id);
-        }
-    }
-
-    conn.list_workspaces()
-        .ok()
-        .and_then(|workspaces| workspaces.into_iter().next())
-        .map(|workspace| workspace.id)
+    bound_cli_workspace_id(conn, workspace_path).ok()
 }
 
 fn migration_index_rebuild_audit_details(
@@ -43938,22 +43862,7 @@ fn error_recall_query_seed(
     let code = rustc_code_from_message(&error_log);
     let canonical = crate::core::error_recall::from_rustc(code.as_deref(), &redacted_message);
     let connection = open_attest_database_for_workspace(workspace, database)?;
-    let workspace_path = workspace.to_string_lossy().into_owned();
-    let workspace_id = match connection.get_workspace_by_path(&workspace_path) {
-        Ok(Some(workspace)) => workspace.id,
-        Ok(None) => {
-            return Err(DomainError::Storage {
-                message: format!("No workspace registered at {workspace_path}"),
-                repair: Some("ee init --workspace . --json".to_owned()),
-            });
-        }
-        Err(error) => {
-            return Err(DomainError::Storage {
-                message: format!("Failed to query workspace row: {error}"),
-                repair: Some("ee doctor --json".to_owned()),
-            });
-        }
-    };
+    let workspace_id = bound_cli_workspace_id(&connection, workspace)?;
     let report =
         crate::core::error_diagnosis::error_recall_report(&connection, &workspace_id, &canonical)
             .map_err(|error| DomainError::Storage {
@@ -44050,27 +43959,7 @@ fn resolve_database_workspace_id(
     connection: &crate::db::DbConnection,
     workspace_path: &Path,
 ) -> Result<String, DomainError> {
-    let mut candidates = vec![workspace_path.to_path_buf()];
-    if let Ok(canonical) = workspace_path.canonicalize()
-        && canonical != workspace_path
-    {
-        candidates.push(canonical);
-    }
-
-    for candidate in candidates {
-        let candidate = candidate.to_string_lossy();
-        if let Some(workspace) = connection
-            .get_workspace_by_path(candidate.as_ref())
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to resolve pack workspace: {error}"),
-                repair: Some("Run `ee doctor --json` to inspect database health.".to_owned()),
-            })?
-        {
-            return Ok(workspace.id);
-        }
-    }
-
-    Ok(workspace_core::stable_workspace_id(workspace_path))
+    bound_cli_workspace_id(connection, workspace_path)
 }
 
 fn load_pack_record(
@@ -47983,22 +47872,7 @@ fn open_agentsmd_workspace(
         message: format!("Failed to migrate database: {error}"),
         repair: Some("ee migrate run --workspace . --json".to_owned()),
     })?;
-    let workspace_key = workspace_path.to_string_lossy().into_owned();
-    let workspace_id = match connection.get_workspace_by_path(&workspace_key) {
-        Ok(Some(workspace)) => workspace.id,
-        Ok(None) => {
-            return Err(DomainError::Storage {
-                message: format!("Workspace is not registered: {}", workspace_path.display()),
-                repair: Some("ee init --workspace . --json".to_owned()),
-            });
-        }
-        Err(error) => {
-            return Err(DomainError::Storage {
-                message: format!("Failed to query workspace row: {error}"),
-                repair: Some("ee doctor --json".to_owned()),
-            });
-        }
-    };
+    let workspace_id = bound_cli_workspace_id(&connection, &workspace_path)?;
     Ok((connection, workspace_id, workspace_path))
 }
 
@@ -48187,23 +48061,9 @@ where
         };
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
-    let workspace_key = workspace_path.to_string_lossy().into_owned();
-    let workspace_id = match connection.get_workspace_by_path(&workspace_key) {
-        Ok(Some(workspace)) => workspace.id,
-        Ok(None) => {
-            let error = DomainError::Storage {
-                message: format!("Workspace is not registered: {}", workspace_path.display()),
-                repair: Some("ee init --workspace . --json".to_owned()),
-            };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-        }
-        Err(error) => {
-            let error = DomainError::Storage {
-                message: format!("Failed to query workspace row: {error}"),
-                repair: Some("ee doctor --json".to_owned()),
-            };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-        }
+    let workspace_id = match bound_cli_workspace_id(&connection, &workspace_path) {
+        Ok(workspace_id) => workspace_id,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
 
     let settings =
@@ -48344,23 +48204,9 @@ where
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
 
-    let workspace_key = workspace_path.to_string_lossy().into_owned();
-    let workspace_id = match connection.get_workspace_by_path(&workspace_key) {
-        Ok(Some(ws)) => ws.id,
-        Ok(None) => {
-            let error = DomainError::Storage {
-                message: format!("Workspace not registered: {}", workspace_path.display()),
-                repair: Some("ee init --workspace . --json".to_owned()),
-            };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-        }
-        Err(e) => {
-            let error = DomainError::Storage {
-                message: format!("Failed to query workspace: {e}"),
-                repair: Some("ee doctor --json".to_owned()),
-            };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-        }
+    let workspace_id = match bound_cli_workspace_id(&connection, &workspace_path) {
+        Ok(workspace_id) => workspace_id,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
 
     // Fetch non-tombstoned memories for this workspace
@@ -48520,23 +48366,9 @@ where
         };
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
-    let workspace_key = workspace_path.to_string_lossy().into_owned();
-    let workspace_id = match connection.get_workspace_by_path(&workspace_key) {
-        Ok(Some(workspace)) => workspace.id,
-        Ok(None) => {
-            let error = DomainError::Storage {
-                message: format!("Workspace is not registered: {}", workspace_path.display()),
-                repair: Some("ee init --workspace . --json".to_owned()),
-            };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-        }
-        Err(error) => {
-            let error = DomainError::Storage {
-                message: format!("Failed to query workspace row: {error}"),
-                repair: Some("ee doctor --json".to_owned()),
-            };
-            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-        }
+    let workspace_id = match bound_cli_workspace_id(&connection, &workspace_path) {
+        Ok(workspace_id) => workspace_id,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
 
     let mut extra_degraded: Vec<RecallDegradedEntry> = Vec::new();
@@ -49841,14 +49673,7 @@ fn open_verify_rch_ledger_database_for_read(
             message: format!("Failed to open RCH verifier ledger database: {error}"),
             repair: Some("ee status --json".to_owned()),
         })?;
-    let (canonical_workspace, existing_workspace) =
-        canonical_workspace_row(&connection, &workspace).map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace row: {error}"),
-            repair: Some("ee doctor --json".to_owned()),
-        })?;
-    let workspace_id = existing_workspace
-        .map(|row| row.id)
-        .unwrap_or_else(|| workspace_core::stable_workspace_id(&canonical_workspace));
+    let workspace_id = bound_cli_workspace_id(&connection, &workspace)?;
     Ok(Some((connection, workspace_id)))
 }
 
@@ -49986,15 +49811,7 @@ fn open_verify_provenance_database(
             message: format!("Failed to open provenance verification database: {error}"),
             repair: Some("ee status --json".to_owned()),
         })?;
-    let workspace_path = workspace.to_string_lossy().into_owned();
-    let workspace_id = connection
-        .get_workspace_by_path(&workspace_path)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace row: {error}"),
-            repair: Some("ee doctor --json".to_owned()),
-        })?
-        .map(|row| row.id)
-        .unwrap_or_else(|| workspace_core::stable_workspace_id(&workspace));
+    let workspace_id = bound_cli_workspace_id(&connection, &workspace)?;
     Ok((connection, workspace_id, workspace))
 }
 
@@ -51205,31 +51022,10 @@ where
         Ok(connection) => connection,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    let workspace_path = cli.resolve_workspace().to_string_lossy().into_owned();
-    let workspace_id = match connection.get_workspace_by_path(&workspace_path) {
-        Ok(Some(workspace)) => workspace.id,
-        Ok(None) => {
-            return write_domain_error(
-                &DomainError::Storage {
-                    message: format!("No workspace registered at {workspace_path}"),
-                    repair: Some("ee init --workspace . --json".to_owned()),
-                },
-                cli.wants_json(),
-                stdout,
-                stderr,
-            );
-        }
-        Err(error) => {
-            return write_domain_error(
-                &DomainError::Storage {
-                    message: format!("Failed to query workspace row: {error}"),
-                    repair: Some("ee doctor --json".to_owned()),
-                },
-                cli.wants_json(),
-                stdout,
-                stderr,
-            );
-        }
+    let workspace_path = cli.resolve_workspace();
+    let workspace_id = match bound_cli_workspace_id(&connection, &workspace_path) {
+        Ok(workspace_id) => workspace_id,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
 
     let link_recording = error_repair_link_recording_from_args(args);
@@ -59381,30 +59177,7 @@ fn ensure_demo_workspace_row(
     workspace_id: &str,
     workspace: &Path,
 ) -> Result<(), DomainError> {
-    let path = workspace.to_string_lossy().into_owned();
-    if conn
-        .get_workspace_by_path(&path)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query demo workspace row: {error}"),
-            repair: Some("ee doctor --json".to_owned()),
-        })?
-        .is_some()
-    {
-        return Ok(());
-    }
-    conn.insert_workspace(
-        workspace_id,
-        &crate::db::CreateWorkspaceInput {
-            path,
-            name: workspace
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned()),
-        },
-    )
-    .map_err(|error| DomainError::Storage {
-        message: format!("Failed to create demo workspace row: {error}"),
-        repair: Some("ee doctor --json".to_owned()),
-    })
+    crate::core::workspace::ensure_bound_workspace(conn, workspace_id, &[workspace]).map(|_| ())
 }
 
 fn demo_evidence_root() -> Result<PathBuf, DomainError> {
