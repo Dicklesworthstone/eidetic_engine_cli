@@ -1432,9 +1432,13 @@ pub(crate) fn admit_recent_context_memories(
             .get(&memory.id)
             .cloned()
             .unwrap_or_else(Vec::new);
-        let Some(provenance) =
-            provenance_for_memory(&memory, memory_id, &options.workspace_path, &mut degraded)
-        else {
+        let Some(provenance) = provenance_for_memory(
+            &memory,
+            memory_id,
+            &options.workspace_path,
+            Some(memory.workspace_id.as_str()),
+            &mut degraded,
+        ) else {
             continue;
         };
         let relevance = unit_score(1.0 - (recency_rank.min(500) as f32 * 0.001))
@@ -2473,9 +2477,19 @@ fn reconstruct_not_retrieved_candidate(
         })?;
     let tags = connection.get_memory_tags(&memory.id).unwrap_or_default();
     let mut provenance = Vec::new();
-    if let Some(memory_provenance) =
-        provenance_for_memory(&memory, memory_id, workspace_path, degraded)
-    {
+    let bound_workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        connection,
+        &crate::core::workspace::stable_workspace_id(workspace_path),
+        &[workspace_path],
+    )
+    .ok();
+    if let Some(memory_provenance) = provenance_for_memory(
+        &memory,
+        memory_id,
+        workspace_path,
+        bound_workspace_id.as_deref(),
+        degraded,
+    ) {
         provenance.push(memory_provenance);
     }
     let relevance = unit_score(0.0)
@@ -7897,6 +7911,13 @@ fn candidates_from_search_with_metrics(
     degraded: &mut Vec<ContextResponseDegradation>,
     preloaded_memories: Option<&BTreeMap<String, StoredMemory>>,
 ) -> (Vec<PackCandidate>, CandidateResolutionMetrics) {
+    let requested = crate::core::workspace::stable_workspace_id(workspace_path);
+    let bound_workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        connection,
+        &requested,
+        &[workspace_path],
+    )
+    .ok();
     let mut metrics = CandidateResolutionMetrics {
         search_hits: search_report.results.len(),
         ..CandidateResolutionMetrics::default()
@@ -8136,6 +8157,7 @@ fn candidates_from_search_with_metrics(
                     memories: &memories,
                     tags_map: &tags_map,
                     workspace_path,
+                    bound_workspace_id: bound_workspace_id.as_deref(),
                     query: &search_report.query,
                     validity_reference_time: filters
                         .temporal
@@ -9940,6 +9962,7 @@ fn apply_graph_hints(
             &tags,
             evidence,
             workspace_path,
+            Some(memory.workspace_id.as_str()),
             degraded,
         ) {
             metrics.expanded_candidates = metrics.expanded_candidates.saturating_add(1);
@@ -10687,12 +10710,17 @@ fn graph_candidate_from_memory(
     tags: &[String],
     evidence: &GraphHintEvidence,
     workspace_path: &Path,
+    bound_workspace_id: Option<&str>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<PackCandidate> {
     let mut provenance = Vec::new();
-    if let Some(memory_provenance) =
-        provenance_for_memory(memory, memory_id, workspace_path, degraded)
-    {
+    if let Some(memory_provenance) = provenance_for_memory(
+        memory,
+        memory_id,
+        workspace_path,
+        bound_workspace_id,
+        degraded,
+    ) {
         provenance.push(memory_provenance);
     }
     if let Ok(seed_id) = MemoryId::from_str(&evidence.seed_memory_id)
@@ -11047,6 +11075,7 @@ struct PreloadedCandidateSource<'a> {
     memories: &'a CandidateMemoryBatch<'a>,
     tags_map: &'a BTreeMap<String, Vec<String>>,
     workspace_path: &'a Path,
+    bound_workspace_id: Option<&'a str>,
     query: &'a str,
     validity_reference_time: Option<DateTime<Utc>>,
     include_tombstoned: bool,
@@ -11086,6 +11115,7 @@ fn candidate_from_hit_preloaded(
         memory,
         memory_id,
         source.workspace_path,
+        source.bound_workspace_id,
         degraded,
         source.freshness_file_cache,
     );
@@ -11315,9 +11345,16 @@ fn focus_candidate_from_item(
         .get_memory_tags(&memory.id)
         .unwrap_or_else(|_| Vec::new());
     let mut provenance = Vec::new();
-    if let Some(memory_provenance) =
-        provenance_for_memory(&memory, item.memory_id, source.workspace_path, degraded)
-    {
+    if let Some(memory_provenance) = provenance_for_memory(
+        &memory,
+        item.memory_id,
+        source.workspace_path,
+        source
+            .workspace_ids
+            .contains(&memory.workspace_id)
+            .then_some(memory.workspace_id.as_str()),
+        degraded,
+    ) {
         provenance.push(memory_provenance);
     }
     if let Ok(focus_provenance) = PackProvenance::new(
@@ -12077,6 +12114,7 @@ fn provenance_for_memory(
     memory: &StoredMemory,
     memory_id: MemoryId,
     workspace_path: &Path,
+    bound_workspace_id: Option<&str>,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<PackProvenance> {
     let mut freshness_file_cache = crate::core::memory::EvidenceFreshnessFileCache::default();
@@ -12084,6 +12122,7 @@ fn provenance_for_memory(
         memory,
         memory_id,
         workspace_path,
+        bound_workspace_id,
         degraded,
         &mut freshness_file_cache,
     )
@@ -12093,6 +12132,7 @@ fn provenance_for_memory_cached(
     memory: &StoredMemory,
     memory_id: MemoryId,
     workspace_path: &Path,
+    bound_workspace_id: Option<&str>,
     degraded: &mut Vec<ContextResponseDegradation>,
     freshness_file_cache: &mut crate::core::memory::EvidenceFreshnessFileCache,
 ) -> Option<PackProvenance> {
@@ -12121,12 +12161,14 @@ fn provenance_for_memory_cached(
         push_evidence_freshness_degradation(memory, &freshness, degraded);
     }
     let active_workspace_id = stable_context_workspace_id(workspace_path);
-    let local_workspace = context_workspace_path_keys(workspace_path)
-        .into_iter()
-        .any(|path| {
-            memory.workspace_id == stable_context_workspace_id(&path)
-                || memory.workspace_id == crate::core::workspace::stable_workspace_id(&path)
-        });
+    let local_workspace = bound_workspace_id == Some(memory.workspace_id.as_str())
+        || memory.workspace_id == active_workspace_id
+        || context_workspace_path_keys(workspace_path)
+            .into_iter()
+            .any(|path| {
+                memory.workspace_id == stable_context_workspace_id(&path)
+                    || memory.workspace_id == crate::core::workspace::stable_workspace_id(&path)
+            });
     let note = if local_workspace {
         format!(
             "Memory {} selected for context pack; evidenceFreshness={}",
@@ -13446,6 +13488,7 @@ mod tests {
             memories: &memory_batch,
             tags_map: &tags_map,
             workspace_path: Path::new("/tmp/ee-hybrid-pack-relevance-test"),
+            bound_workspace_id: None,
             query: "hybrid recall",
             validity_reference_time: None,
             include_tombstoned: false,
@@ -15326,7 +15369,7 @@ pub fn unrelated_context() -> u64 {{
         let mut degraded = Vec::new();
 
         let provenance =
-            super::provenance_for_memory(&memory, memory_id, temp.path(), &mut degraded)
+            super::provenance_for_memory(&memory, memory_id, temp.path(), None, &mut degraded)
                 .ok_or_else(|| "cross-shard provenance should render".to_owned())?;
 
         assert!(provenance.note.contains("cross_shard_read"));

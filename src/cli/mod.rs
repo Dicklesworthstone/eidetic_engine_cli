@@ -28467,7 +28467,14 @@ where
         }
     };
 
-    let workspace_id = crate::core::curate::stable_workspace_id(&workspace_path);
+    let workspace_id = match crate::core::workspace::ensure_bound_workspace(
+        &conn,
+        &workspace_core::stable_workspace_id(&workspace_path),
+        &[workspace_path.as_path()],
+    ) {
+        Ok(workspace_id) => workspace_id,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
 
     let audit_details = serde_json::json!({
         "targetType": &args.target_type,
@@ -28615,7 +28622,10 @@ where
         }
     };
 
-    let workspace_id = crate::core::curate::stable_workspace_id(&workspace_path);
+    let workspace_id = match bound_cli_workspace_id(&conn, &workspace_path) {
+        Ok(workspace_id) => workspace_id,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
 
     match conn.list_rationale_traces_for_target(&workspace_id, &args.target_type, &args.target_id) {
         Ok(traces) => {
@@ -33275,7 +33285,6 @@ where
             stderr,
         );
     }
-    let workspace_id = crate::core::curate::stable_workspace_id(&canonical_path);
     let connection = match crate::db::DbConnection::open_file(&database_path) {
         Ok(connection) => connection,
         Err(error) => {
@@ -33289,6 +33298,10 @@ where
                 stderr,
             );
         }
+    };
+    let workspace_id = match bound_cli_workspace_id(&connection, &canonical_path) {
+        Ok(workspace_id) => workspace_id,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
 
     let entry = match connection.get_trust_quarantine(&workspace_id, &args.source_uri) {
@@ -37935,7 +37948,17 @@ where
     let canonical_workspace = workspace
         .canonicalize()
         .unwrap_or_else(|_| workspace.clone());
-    let workspace_id = crate::core::curate::stable_workspace_id(&canonical_workspace);
+    let workspace_id = match crate::db::DbConnection::open_file(&database_path) {
+        Ok(connection) => bound_cli_workspace_id(&connection, &canonical_workspace)
+            .unwrap_or_else(|_| crate::core::curate::stable_workspace_id(&canonical_workspace)),
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("open database: {error}"),
+                repair: Some(crate::core::storeless_workspace_repair(&database_path)),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
 
     let extraction = LabelExtractionConfig {
         label_window_minutes: args
@@ -38072,7 +38095,6 @@ where
     let canonical_workspace = workspace
         .canonicalize()
         .unwrap_or_else(|_| workspace.clone());
-    let workspace_id = crate::core::curate::stable_workspace_id(&canonical_workspace);
     let connection = match crate::db::DbConnection::open_file(&database_path) {
         Ok(connection) => connection,
         Err(error) => {
@@ -38082,6 +38104,10 @@ where
             };
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
+    };
+    let workspace_id = match bound_cli_workspace_id(&connection, &canonical_workspace) {
+        Ok(workspace_id) => workspace_id,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let command_name = if promote {
         "shadow promote"
@@ -56771,12 +56797,12 @@ fn load_rule_provenance_ego(cli: &Cli, args: &RuleProvenanceArgs) -> Result<Stri
         return Err(crate::core::storeless_workspace_error(&database_path));
     }
 
-    let workspace_id = workspace_core::stable_workspace_id(&workspace_path);
     let connection =
         DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
             message: format!("Failed to open database: {error}"),
             repair: Some("ee doctor".to_owned()),
         })?;
+    let workspace_id = bound_cli_workspace_id(&connection, &workspace_path)?;
     let graph = build_rule_provenance_bipartite_from_tables(&connection, &workspace_id).map_err(
         |error| DomainError::Storage {
             message: format!("Failed to build rule provenance graph: {error}"),
@@ -61573,9 +61599,11 @@ where
     if let Some(object) = data.as_object_mut() {
         let database_path = workspace_path.join(".ee").join("ee.db");
         let team = if let Ok(connection) = crate::db::DbConnection::open_file(&database_path) {
+            let workspace_id = bound_cli_workspace_id(&connection, &workspace_path)
+                .unwrap_or_else(|_| crate::core::causal::stable_workspace_id(&workspace_path));
             crate::mesh::team::inspect_team_health(
                 &connection,
-                &crate::core::causal::stable_workspace_id(&workspace_path),
+                &workspace_id,
                 Some(&workspace_path),
             )
             .ok()
