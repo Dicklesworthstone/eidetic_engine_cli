@@ -34156,7 +34156,7 @@ where
         // (honestly omitted when cold).
         let workspace_path =
             resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
-        let workspace_id = bound_cli_workspace_id(conn, &workspace_path).ok();
+        let workspace_id = bound_cli_workspace_id(&conn, &workspace_path).ok();
         let affinity: Option<BTreeMap<(String, String), f64>> =
             workspace_id.as_deref().and_then(|workspace_id| {
                 conn.get_latest_graph_snapshot(

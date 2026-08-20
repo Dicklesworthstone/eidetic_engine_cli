@@ -12989,7 +12989,7 @@ mod tests {
             "remember must not invent a second workspace row",
         )?;
         ensure(
-            workspaces[0].id,
+            workspaces[0].id.clone(),
             legacy_workspace_id.to_owned(),
             "sole workspace row id",
         )

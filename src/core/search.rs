@@ -3871,7 +3871,7 @@ fn search_score_calibration_for_workspace_cached(
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
     {
-        let count = full_loads.entry(workspace_root.clone()).or_default();
+        let count = full_loads.entry(workspace_path.to_path_buf()).or_default();
         *count = count.saturating_add(1);
     }
 

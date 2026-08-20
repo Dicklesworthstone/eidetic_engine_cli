@@ -551,7 +551,7 @@ pub fn apply_docs_bootstrap(
     let mut skipped_count = 0_usize;
 
     let connection = open_bootstrap_database(&database_path)?;
-    let workspace_id = prepare_bootstrap_workspace(&connection, workspace_path)?;
+    let workspace_id = prepare_bootstrap_workspace(&connection, &workspace_path)?;
     let session_id = ensure_bootstrap_session(&connection, &workspace_id, &workspace_path, &run)?;
 
     for candidate in &run.candidates {
