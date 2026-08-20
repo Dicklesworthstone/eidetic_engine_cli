@@ -1209,10 +1209,8 @@ fn normalize_workspace_path(path: &Path) -> PathBuf {
 }
 
 fn stable_workspace_id(workspace_path: &Path) -> WorkspaceId {
-    let hash = blake3::hash(format!("workspace:{}", workspace_path.to_string_lossy()).as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[..16]);
-    WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes))
+    WorkspaceId::from_str(&crate::core::workspace::stable_workspace_id(workspace_path))
+        .expect("workspace hasher always emits a valid WorkspaceId")
 }
 
 fn parse_memory_ids(raw_ids: &[String]) -> Result<Vec<MemoryId>, DomainError> {

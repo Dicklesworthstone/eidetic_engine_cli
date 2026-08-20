@@ -29,7 +29,7 @@ use crate::db::{
 };
 use crate::models::{
     AuditId, CASS_EVIDENCE_SPAN_SCHEMA_V1, CASS_SESSION_SCHEMA_V1, EvidenceId,
-    IMPORT_CASS_SCHEMA_V1, IMPORT_LEDGER_CASS_SCHEMA_V1, SessionId, WorkspaceId,
+    IMPORT_CASS_SCHEMA_V1, IMPORT_LEDGER_CASS_SCHEMA_V1, SessionId,
 };
 
 const DEFAULT_DB_FILE: &str = "ee.db";
@@ -2258,7 +2258,7 @@ fn invalid_since(value: &str, message: &str) -> CassImportError {
 }
 
 fn stable_workspace_id(path: &str) -> String {
-    WorkspaceId::from_uuid(stable_uuid(&format!("workspace:{path}"))).to_string()
+    crate::core::workspace::stable_workspace_id(Path::new(path))
 }
 
 fn stable_session_id(workspace_id: &str, source_path: &str) -> String {

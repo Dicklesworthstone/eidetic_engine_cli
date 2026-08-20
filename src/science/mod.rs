@@ -1707,12 +1707,7 @@ fn resolve_clustering_workspace_path(path: &Path) -> Option<PathBuf> {
 }
 
 fn stable_workspace_id(path: &Path) -> String {
-    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
-    let mut bytes = [0_u8; 16];
-    for (target, source) in bytes.iter_mut().zip(hash.as_bytes()) {
-        *target = *source;
-    }
-    crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+    crate::core::workspace::stable_workspace_id(path)
 }
 
 fn non_empty_filter(raw: Option<&str>) -> Option<&str> {

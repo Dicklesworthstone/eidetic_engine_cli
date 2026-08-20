@@ -1842,7 +1842,13 @@ fn collect_work_packet_ledger_verifier_evidence(
     let canonical_workspace = workspace
         .canonicalize()
         .unwrap_or_else(|_| workspace.to_path_buf());
-    let workspace_id = crate::core::curate::stable_workspace_id(&canonical_workspace);
+    let requested = crate::core::curate::stable_workspace_id(&canonical_workspace);
+    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        &connection,
+        &requested,
+        &[workspace, canonical_workspace.as_path()],
+    )
+    .unwrap_or(requested);
     let Ok(report) =
         list_rch_verify_blockers(&connection, &workspace_id, None, &Utc::now().to_rfc3339())
     else {

@@ -1954,24 +1954,8 @@ fn restore_graph_cache_assets(
             "inspect restored records.jsonl and retry with a fresh --side-path".to_owned(),
         ),
     })?;
-    let restored_workspace_id = match connection
-        .list_workspaces()
-        .map_err(|error| DomainError::Import {
-            message: format!("failed reading restored workspace for graph cache restore: {error}"),
-            repair: Some(
-                "inspect restored records.jsonl and retry with a fresh --side-path".to_owned(),
-            ),
-        })?
-        .into_iter()
-        .next()
-    {
-        Some(workspace) => workspace.id,
-        None => restore_graph_cache_workspace_from_assets(
-            &connection,
-            restored_database_path,
-            restored_derived,
-        )?,
-    };
+    let restored_workspace_id =
+        restore_graph_cache_workspace_id(&connection, restored_database_path, restored_derived)?;
 
     let mut restored_rows = 0u32;
     for asset in restored_derived
@@ -1999,6 +1983,59 @@ fn restore_graph_cache_assets(
         restored_rows = restored_rows.saturating_add(1);
     }
     Ok(restored_rows)
+}
+
+fn restore_graph_cache_workspace_id(
+    connection: &DbConnection,
+    restored_database_path: &Path,
+    restored_derived: &[BackupRestoredDerivedAssetReport],
+) -> Result<String, DomainError> {
+    let workspaces = connection
+        .list_workspaces()
+        .map_err(|error| DomainError::Import {
+            message: format!("failed reading restored workspace for graph cache restore: {error}"),
+            repair: Some(
+                "inspect restored records.jsonl and retry with a fresh --side-path".to_owned(),
+            ),
+        })?;
+    match workspaces.as_slice() {
+        [] => restore_graph_cache_workspace_from_assets(
+            connection,
+            restored_database_path,
+            restored_derived,
+        ),
+        [workspace] => Ok(workspace.id.clone()),
+        _ => {
+            let asset_workspace_id = restored_derived
+                .iter()
+                .filter(|asset| asset.kind.starts_with("graph_"))
+                .find_map(|asset| {
+                    read_restored_derived_json(asset)
+                        .ok()
+                        .and_then(|value| json_string(&value, "workspaceId"))
+                });
+            if let Some(asset_workspace_id) = asset_workspace_id {
+                if workspaces
+                    .iter()
+                    .any(|workspace| workspace.id == asset_workspace_id)
+                {
+                    return Ok(asset_workspace_id);
+                }
+            }
+            crate::core::workspace::pick_workspace_row(connection, workspaces)
+                .map(|workspace| workspace.id)
+                .map_err(|error| DomainError::Import {
+                    message: format!(
+                        "failed choosing restored workspace for graph cache restore: {}",
+                        error.message()
+                    ),
+                    repair: Some(
+                        "inspect restored records.jsonl and retry with a fresh --side-path"
+                            .to_owned(),
+                    ),
+                })
+        }
+    }
 }
 
 fn restore_graph_cache_workspace_from_assets(

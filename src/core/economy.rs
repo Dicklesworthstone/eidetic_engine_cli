@@ -14,7 +14,6 @@ use crate::db::{
     DbConnection, StoredFeedbackEvent, StoredMemory, StoredProcedure, StoredProcedureEvent,
 };
 use crate::models::DomainError;
-use crate::models::WorkspaceId;
 use crate::models::economy::{
     AttentionBudgetAllocation, AttentionBudgetRequest, ContextAttentionProfile,
     ECONOMY_REPORT_SCHEMA_V1, ECONOMY_SIMULATION_SCHEMA_V1, SituationAttentionProfile,
@@ -1479,10 +1478,7 @@ fn saturating_sum_u32(values: impl IntoIterator<Item = u32>) -> u32 {
 }
 
 fn stable_workspace_id(path: &Path) -> String {
-    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[..16]);
-    WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+    crate::core::workspace::stable_workspace_id(path)
 }
 
 #[cfg(test)]

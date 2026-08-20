@@ -2825,7 +2825,7 @@ pub(crate) fn select_existing_workspace_row(
         })
 }
 
-fn pick_workspace_row(
+pub(crate) fn pick_workspace_row(
     connection: &DbConnection,
     rows: Vec<StoredWorkspace>,
 ) -> Result<StoredWorkspace, DomainError> {

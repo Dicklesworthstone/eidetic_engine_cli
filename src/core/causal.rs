@@ -16,7 +16,7 @@ use crate::models::causal::{
     CAUSAL_TRACE_SCHEMA_V1, CausalDecisionTrace, CausalEvidenceMethod, CausalEvidenceStrength,
     CausalExposureChannel, PromotionAction, PromotionPlan, PromotionPlanStatus,
 };
-use crate::models::{CandidateId, DomainError, TraceId, WorkspaceId};
+use crate::models::{CandidateId, DomainError, TraceId};
 
 /// Schema for causal trace list response.
 pub const CAUSAL_TRACE_LIST_SCHEMA_V1: &str = "ee.causal.trace_list.v1";
@@ -1052,10 +1052,7 @@ fn causal_evidence_strength(path: &[CausalLedgerEdge]) -> CausalEvidenceStrength
 }
 
 pub(crate) fn stable_workspace_id(path: &Path) -> String {
-    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[..16]);
-    WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+    crate::core::workspace::stable_workspace_id(path)
 }
 
 // ============================================================================

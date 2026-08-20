@@ -696,6 +696,37 @@ fn default_workspace_database_path(workspace_path: &Path) -> PathBuf {
         .join("ee.db")
 }
 
+fn bound_search_workspace_id(
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+    connection: Option<&DbConnection>,
+) -> String {
+    let workspace_root = default_workspace_root(workspace_path);
+    let requested = crate::core::curate::stable_workspace_id(&workspace_root);
+    if let Some(connection) = connection {
+        return crate::core::workspace::bound_workspace_id_or_hash(
+            connection,
+            &requested,
+            &[workspace_path, workspace_root.as_path()],
+        )
+        .unwrap_or(requested);
+    }
+    let default_database_path = default_workspace_database_path(workspace_path);
+    let database_path = database_path.unwrap_or(&default_database_path);
+    if !database_path.exists() {
+        return requested;
+    }
+    match DbConnection::open_file_read_only(database_path) {
+        Ok(connection) => crate::core::workspace::bound_workspace_id_or_hash(
+            &connection,
+            &requested,
+            &[workspace_path, workspace_root.as_path()],
+        )
+        .unwrap_or(requested),
+        Err(_) => requested,
+    }
+}
+
 fn default_workspace_index_dir(workspace_path: &Path) -> PathBuf {
     default_workspace_root(workspace_path)
         .join(".ee")
@@ -3798,8 +3829,7 @@ fn search_score_calibration_for_workspace_cached(
     database_path: Option<&Path>,
     read_connection: Option<&DbConnection>,
 ) -> SearchScoreCalibration {
-    let workspace_root = default_workspace_root(workspace_path);
-    let workspace_id = crate::core::curate::stable_workspace_id(&workspace_root);
+    let workspace_id = bound_search_workspace_id(workspace_path, database_path, read_connection);
     let default_database_path = default_workspace_database_path(workspace_path);
     let resolved_database_path = database_path.unwrap_or(&default_database_path);
     let feedback_fingerprint = search_score_calibration_feedback_fingerprint(
@@ -4521,8 +4551,7 @@ fn search_score_calibration_feedback_events(
     database_path: Option<&Path>,
     read_connection: Option<&DbConnection>,
 ) -> SearchScoreCalibrationFeedbackEvents {
-    let workspace_root = default_workspace_root(workspace_path);
-    let workspace_id = crate::core::curate::stable_workspace_id(&workspace_root);
+    let workspace_id = bound_search_workspace_id(workspace_path, database_path, read_connection);
     search_score_calibration_feedback_events_with_workspace_id(
         workspace_path,
         database_path,
@@ -7645,9 +7674,17 @@ fn resolve_search_rerank_runtime(
 
     let database_path = options.resolve_database_path();
     let workspace_root = default_workspace_root(&options.workspace_path);
-    let workspace_id = crate::core::curate::stable_workspace_id(&workspace_root);
+    let requested = crate::core::curate::stable_workspace_id(&workspace_root);
     let resolution_result = match connection {
-        Some(connection) => resolve_registered_reranker(connection, &workspace_id),
+        Some(connection) => {
+            let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+                connection,
+                &requested,
+                &[&options.workspace_path, workspace_root.as_path()],
+            )
+            .unwrap_or(requested);
+            resolve_registered_reranker(connection, &workspace_id)
+        }
         None => {
             if !database_path.exists() {
                 Err(format!(
@@ -7657,7 +7694,15 @@ fn resolve_search_rerank_runtime(
             } else {
                 DbConnection::open_file_read_only(&database_path)
                     .map_err(|error| error.to_string())
-                    .and_then(|connection| resolve_registered_reranker(&connection, &workspace_id))
+                    .and_then(|connection| {
+                        let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+                            &connection,
+                            &requested,
+                            &[&options.workspace_path, workspace_root.as_path()],
+                        )
+                        .unwrap_or(requested);
+                        resolve_registered_reranker(&connection, &workspace_id)
+                    })
             }
         }
     };
@@ -8331,12 +8376,17 @@ async fn run_search_inner_with_performance(
             // it must never trigger an implicit read-write reopen.
             if let Some(audit_connection) = audit_connection {
                 let audit_workspace_start = Instant::now();
-                // Match memory_command_workspace_id's canonicalize-then-hash
-                // so the audit row joins to the same workspace the enclosing
-                // write was recorded under (especially on macOS where
-                // /tmp -> /private/tmp).
+                // Bind to the stored workspace row so path-keyed ids join
+                // the same audit workspace as remember/init writes.
+                // Canonicalize first so /tmp -> /private/tmp on macOS.
                 let canonical_workspace = default_workspace_root(&options.workspace_path);
-                let workspace_id = crate::core::curate::stable_workspace_id(&canonical_workspace);
+                let requested = crate::core::curate::stable_workspace_id(&canonical_workspace);
+                let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+                    audit_connection,
+                    &requested,
+                    &[&options.workspace_path, canonical_workspace.as_path()],
+                )
+                .unwrap_or(requested);
                 let audit_workspace_persisted =
                     search_audit_workspace_persisted(Some(audit_connection), &workspace_id);
                 trace.record_elapsed("search::auditWorkspaceCheck", audit_workspace_start);

@@ -24,7 +24,6 @@ use crate::models::{
     EXPORT_MEMORY_SCHEMA_V1, EXPORT_TAG_SCHEMA_V1, EXPORT_WORKSPACE_SCHEMA_V1, ExportFooter,
     ExportHeader, ExportMemoryRecord, ExportTagRecord, IMPORT_JSONL_SCHEMA_V1, ImportSource,
     MemoryContent, MemoryId, MemoryKind, MemoryLevel, Tag, TrustClass, TrustLevel, UnitScore,
-    WorkspaceId,
 };
 use crate::policy::import_auth::{
     ArtifactContext, EXPORT_ARTIFACT_FAMILY, EXPORT_RECORD_ENCODING_V1, ImportAuthOutcome,
@@ -2057,10 +2056,6 @@ fn normalize_path(path: &Path) -> PathBuf {
 
 fn source_id(source_path: &Path) -> String {
     format!("jsonl://{}", source_path.to_string_lossy())
-}
-
-fn stable_workspace_id(path: &str) -> String {
-    WorkspaceId::from_uuid(stable_uuid(&format!("workspace:{path}"))).to_string()
 }
 
 fn stable_uuid(input: &str) -> Uuid {
