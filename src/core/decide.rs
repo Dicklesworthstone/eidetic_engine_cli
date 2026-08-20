@@ -16,7 +16,7 @@ use super::memory::{
     ExpireMemoryOptions, MemoryLinkMode, MemoryLinkOptions, RememberMemoryOptions, expire_memory,
     remember_memory, update_memory_link,
 };
-use super::workspace::stable_workspace_id;
+use super::workspace::{bound_workspace_id_or_hash, stable_workspace_id};
 use crate::db::{DbConnection, MemoryLinkRelation, MemoryLinkSource, StoredMemory};
 use crate::models::memory::{
     extract_typed_memory_fields_json_with_redactor, typed_memory_fields_from_json,
@@ -249,7 +249,7 @@ pub fn parse_revisit_by(raw: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, 
 }
 
 pub fn decide_record(options: &DecideRecordOptions<'_>) -> Result<DecideRecordReport, DomainError> {
-    let scope = decide_scope(
+    let mut scope = decide_scope(
         options.workspace_path,
         options.database_path,
         options.dry_run,
@@ -265,13 +265,17 @@ pub fn decide_record(options: &DecideRecordOptions<'_>) -> Result<DecideRecordRe
         now,
     )?;
 
-    let existing_heads = load_decisions(&scope, false, now)?;
+    let existing_heads = load_decisions(&mut scope, false, now)?;
     if let Some(supersedes) = options.supersedes {
         let Some(predecessor) = existing_heads
             .iter()
             .find(|item| item.memory_id == supersedes)
             .cloned()
-            .or_else(|| load_decision_by_id(&scope, supersedes, now).ok().flatten())
+            .or_else(|| {
+                load_decision_by_id(&mut scope, supersedes, now)
+                    .ok()
+                    .flatten()
+            })
         else {
             return Err(DomainError::NotFound {
                 resource: "decision memory".to_owned(),
@@ -454,9 +458,9 @@ pub fn decide_record(options: &DecideRecordOptions<'_>) -> Result<DecideRecordRe
 }
 
 pub fn decide_list(options: &DecideListOptions<'_>) -> Result<DecideListReport, DomainError> {
-    let scope = decide_scope(options.workspace_path, options.database_path, false)?;
+    let mut scope = decide_scope(options.workspace_path, options.database_path, false)?;
     let now = options.now.unwrap_or_else(Utc::now);
-    let mut decisions = load_decisions(&scope, options.include_superseded, now)?;
+    let mut decisions = load_decisions(&mut scope, options.include_superseded, now)?;
     if let Some(about) = options.about.and_then(non_empty_trimmed) {
         let needle = about.to_ascii_lowercase();
         decisions.retain(|item| decision_item_matches_about(item, &needle));
@@ -483,14 +487,14 @@ pub fn decide_list(options: &DecideListOptions<'_>) -> Result<DecideListReport, 
 pub fn decide_revisit(
     options: &DecideRevisitOptions<'_>,
 ) -> Result<DecideRevisitReport, DomainError> {
-    let scope = decide_scope(options.workspace_path, options.database_path, false)?;
+    let mut scope = decide_scope(options.workspace_path, options.database_path, false)?;
     let now = options.now.unwrap_or_else(Utc::now);
     let warning_days = options
         .warning_days
         .unwrap_or_else(|| configured_revisit_warning_days(&scope.workspace_path));
     let warning_days_i64 = i64::try_from(warning_days.min(36_500)).unwrap_or(36_500);
     let window_end = now + TimeDelta::days(warning_days_i64);
-    let mut decisions = load_decisions(&scope, false, now)?;
+    let mut decisions = load_decisions(&mut scope, false, now)?;
     decisions.retain(|item| {
         item.revisit_by
             .as_deref()
@@ -701,7 +705,7 @@ fn store_exact_decision_fields(
 }
 
 fn load_decision_by_id(
-    scope: &DecideScope,
+    scope: &mut DecideScope,
     memory_id: &str,
     now: DateTime<Utc>,
 ) -> Result<Option<DecideItem>, DomainError> {
@@ -709,6 +713,11 @@ fn load_decision_by_id(
         return Ok(None);
     }
     let conn = open_decide_database_read_only(&scope.database_path)?;
+    scope.workspace_id = bound_workspace_id_or_hash(
+        &conn,
+        &scope.workspace_id,
+        &[scope.workspace_path.as_path()],
+    )?;
     let Some(memory) = conn
         .get_memory(memory_id)
         .map_err(|error| decide_storage_error(format!("Failed to query decision: {error}")))?
@@ -722,7 +731,7 @@ fn load_decision_by_id(
 }
 
 fn load_decisions(
-    scope: &DecideScope,
+    scope: &mut DecideScope,
     include_superseded: bool,
     now: DateTime<Utc>,
 ) -> Result<Vec<DecideItem>, DomainError> {
@@ -730,6 +739,11 @@ fn load_decisions(
         return Ok(Vec::new());
     }
     let conn = open_decide_database_read_only(&scope.database_path)?;
+    scope.workspace_id = bound_workspace_id_or_hash(
+        &conn,
+        &scope.workspace_id,
+        &[scope.workspace_path.as_path()],
+    )?;
     let memories = if include_superseded {
         conn.list_memories_for_retrieval(&scope.workspace_id, None, false)
     } else {

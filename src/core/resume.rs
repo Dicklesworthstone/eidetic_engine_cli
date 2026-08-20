@@ -752,7 +752,11 @@ pub fn build_resume_report(options: &ResumeOptions<'_>) -> Result<ResumeReport, 
         .workspace_path
         .canonicalize()
         .unwrap_or_else(|_| options.workspace_path.to_path_buf());
-    let workspace_id = crate::core::workspace::stable_workspace_id(&canonical_workspace);
+    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        &connection,
+        &crate::core::workspace::stable_workspace_id(&canonical_workspace),
+        &[options.workspace_path, canonical_workspace.as_path()],
+    )?;
     let now = Utc::now();
     let current_memories = connection
         .list_recent_current_memories_for_retrieval(&workspace_id, &now.to_rfc3339(), u32::MAX)

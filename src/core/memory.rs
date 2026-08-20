@@ -1891,6 +1891,7 @@ pub fn close_workflow(
     })?;
     let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
         &connection,
+        &stable_workspace_id(&workspace_path),
         &[&workspace_path, options.workspace_path],
     )?;
 
@@ -9331,8 +9332,13 @@ pub(crate) fn workspace_id_for_database(conn: &DbConnection, workspace_path: &Pa
     let canonical = workspace_path
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
-    crate::core::workspace::bound_workspace_id_or_hash(conn, &[workspace_path, canonical.as_path()])
-        .unwrap_or_else(|_| stable_workspace_id(&canonical))
+    let requested = stable_workspace_id(&canonical);
+    crate::core::workspace::bound_workspace_id_or_hash(
+        conn,
+        &requested,
+        &[workspace_path, canonical.as_path()],
+    )
+    .unwrap_or(requested)
 }
 
 fn get_memory_for_workspace(

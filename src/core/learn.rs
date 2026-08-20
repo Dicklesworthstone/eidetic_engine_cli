@@ -2408,6 +2408,7 @@ fn resolve_workspace_id_with_fallback(
         .unwrap_or_else(|_| workspace_path.to_path_buf());
     crate::core::workspace::bound_workspace_id_or_hash(
         connection,
+        &crate::core::workspace::stable_workspace_id(&canonical),
         &[workspace_path, canonical.as_path()],
     )
 }

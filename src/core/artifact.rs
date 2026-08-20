@@ -515,7 +515,11 @@ fn selected_workspace_id(
     connection: &DbConnection,
     workspace_path: &Path,
 ) -> Result<String, DomainError> {
-    crate::core::workspace::bound_workspace_id_or_hash(connection, &[workspace_path])
+    crate::core::workspace::bound_workspace_id_or_hash(
+        connection,
+        &stable_workspace_id(workspace_path),
+        &[workspace_path],
+    )
 }
 
 impl PreparedArtifact {

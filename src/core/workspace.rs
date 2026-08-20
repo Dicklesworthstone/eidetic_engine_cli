@@ -2736,20 +2736,19 @@ pub(crate) fn ensure_bound_workspace(
 
 /// Resolve the stored workspace id for reads without inserting a row.
 ///
-/// Falls back to hashing the first supplied path when the store has no
-/// matching row, matching the historical empty-store behavior.
+/// `requested_workspace_id` is the hash the caller would have used on an
+/// empty store (canonical path after remember/init). Path-keyed rows still
+/// win. Do not derive the fallback from `workspace_paths[0]`: callers often
+/// pass the raw CLI spelling first, and hashing that disagrees with
+/// remember's canonical id.
 pub(crate) fn bound_workspace_id_or_hash(
     connection: &DbConnection,
+    requested_workspace_id: &str,
     workspace_paths: &[&Path],
 ) -> Result<String, DomainError> {
-    let requested = workspace_paths
-        .first()
-        .copied()
-        .map(stable_workspace_id)
-        .unwrap_or_else(|| stable_workspace_id(Path::new(".")));
     Ok(
-        select_existing_workspace_row(connection, &requested, workspace_paths)?
-            .map_or(requested, |row| row.id),
+        select_existing_workspace_row(connection, requested_workspace_id, workspace_paths)?
+            .map_or_else(|| requested_workspace_id.to_owned(), |row| row.id),
     )
 }
 

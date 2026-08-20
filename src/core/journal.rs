@@ -730,6 +730,7 @@ pub fn journal_report_for_daemon_write(
     let connection = open_journal_database(&database_path)?;
     let workspace_id = bound_workspace_id_or_hash(
         &connection,
+        &prepared.payload.workspace_id,
         &[
             prepared.payload.workspace_path.as_path(),
             options.workspace_path,
@@ -980,6 +981,7 @@ pub fn list_journal_entries(
     let connection = open_journal_database(&database_path)?;
     let workspace_id = bound_workspace_id_or_hash(
         &connection,
+        &stable_workspace_id(&workspace_path),
         &[workspace_path.as_path(), options.workspace_path],
     )?;
     let filter = JournalEntryListFilter {
@@ -1036,6 +1038,7 @@ pub fn show_journal_entry(
     let connection = open_journal_database(&database_path)?;
     let workspace_id = bound_workspace_id_or_hash(
         &connection,
+        &stable_workspace_id(&workspace_path),
         &[workspace_path.as_path(), options.workspace_path],
     )?;
     let stored = connection
@@ -1659,6 +1662,7 @@ pub fn distill_journal_entries(
     let connection = open_journal_database(&database_path)?;
     let workspace_id = bound_workspace_id_or_hash(
         &connection,
+        &stable_workspace_id(&workspace_path),
         &[workspace_path.as_path(), options.workspace_path],
     )?;
 

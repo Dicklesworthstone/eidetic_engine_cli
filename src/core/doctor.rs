@@ -3028,7 +3028,12 @@ fn check_reranker_posture(workspace_path: Option<&Path>) -> CheckResult {
             );
         }
     };
-    let workspace_id = stable_workspace_id(workspace_path);
+    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        &connection,
+        &stable_workspace_id(workspace_path),
+        &[workspace_path],
+    )
+    .unwrap_or_else(|_| stable_workspace_id(workspace_path));
     match resolve_registered_reranker(&connection, &workspace_id) {
         Ok(RegisteredRerankerResolution::Absent) => {
             reranker_posture_check_result(Some(false), None)

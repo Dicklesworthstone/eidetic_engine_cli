@@ -217,7 +217,6 @@ impl QuarantineReport {
             }
         }
 
-        let workspace_id = super::curate::stable_workspace_id(&workspace_path);
         let connection = match DbConnection::open_file(&database_path) {
             Ok(connection) => connection,
             Err(error) => {
@@ -230,6 +229,27 @@ impl QuarantineReport {
                         code: "quarantine_database_unreadable",
                         severity: "medium",
                         message: format!("Failed to open quarantine database: {error}."),
+                        repair: "ee doctor --json",
+                    }],
+                );
+            }
+        };
+        let workspace_id = match crate::core::workspace::bound_workspace_id_or_hash(
+            &connection,
+            &super::curate::stable_workspace_id(&workspace_path),
+            &[&workspace_path],
+        ) {
+            Ok(workspace_id) => workspace_id,
+            Err(error) => {
+                return Self::gather_with_storage(
+                    Vec::new(),
+                    QuarantineStorageStatus::Unavailable,
+                    Some(workspace_path.display().to_string()),
+                    Some(database_path.display().to_string()),
+                    vec![QuarantineDegradation {
+                        code: "quarantine_database_unreadable",
+                        severity: "medium",
+                        message: format!("Failed to resolve workspace for quarantine: {error}."),
                         repair: "ee doctor --json",
                     }],
                 );

@@ -971,6 +971,7 @@ pub fn apply_imported_team_port_migrations(
             .get("previousHelloPort")
             .and_then(serde_json::Value::as_u64)
             .and_then(|port| u16::try_from(port).ok())
+            .filter(|port| *port >= 1024)
         else {
             continue;
         };

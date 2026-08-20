@@ -3357,6 +3357,7 @@ fn bind_prepared_rule_read(
 ) -> Result<(), DomainError> {
     prepared.workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
         connection,
+        &prepared.workspace_id,
         &[prepared.workspace_path.as_path(), caller_path],
     )?;
     Ok(())
