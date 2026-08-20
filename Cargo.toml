@@ -21,7 +21,7 @@ exclude = [
 
 [package]
 name = "eidetic-engine"
-version = "0.14.1"
+version = "0.14.2"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -98,7 +98,7 @@ serve = []
 science-analytics = []
 
 [dependencies]
-asupersync = { version = "=0.4.8", default-features = false, features = ["tracing-integration"] }
+asupersync = { version = "=0.4.9", default-features = false, features = ["tracing-integration"] }
 arc-swap = { version = "=1.9.2" }
 base64 = { version = "0.22.1" }
 blake3 = { version = "1.5" }
@@ -111,7 +111,7 @@ clap_complete = { version = "4.6.1" }
 fnx-algorithms = { version = "0.2.0", path = "../franken_networkx/crates/fnx-algorithms" }
 fnx-classes = { version = "0.2.0", path = "../franken_networkx/crates/fnx-classes" }
 fnx-runtime = { version = "0.2.0", path = "../franken_networkx/crates/fnx-runtime", default-features = false, features = ["asupersync-integration"] }
-frankensearch = { version = "0.3.0", path = "../frankensearch/frankensearch", default-features = false, features = ["hash", "storage", "model2vec", "download", "rerank", "native"] }
+frankensearch = { version = "0.3.2", path = "../frankensearch/frankensearch", default-features = false, features = ["hash", "storage", "model2vec", "download", "rerank", "native"] }
 # MSRV-compatible, safe advisory file locking for doctor fix/undo coordination.
 # Keep async features disabled: Tokio/async-std/smol are forbidden here.
 fs4 = { version = "0.13.1", default-features = false, features = ["sync"] }
@@ -168,7 +168,7 @@ windows-permissions = { version = "0.2.4" }
 # rely on those constructors, so we opt in here: as a dev-dependency the feature
 # is unified into test/bench/`--all-targets` builds only and stays OUT of the
 # release binary (which uses the detached, capability-less production Cx path).
-asupersync = { version = "=0.4.8", default-features = false, features = ["tracing-integration", "test-internals"] }
+asupersync = { version = "=0.4.9", default-features = false, features = ["tracing-integration", "test-internals"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 insta = { version = "1.48.0", features = ["json"] }
 proptest = { version = "1.9.0", default-features = false, features = ["std"] }

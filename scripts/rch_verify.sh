@@ -3881,6 +3881,19 @@ materialize_pinned_franken_stack() {
             >> "$metadata_path"
     done < <(franken_stack_rows)
 
+    # SQLModel 0.4.0 exact-pins asupersync =0.4.4. Rewrite that one pin to
+    # the locked asupersync crate version so the path override can close.
+    # Same isolated-dest procedure as v0.14.1 / v0.14.2.
+    local asu_toml="$bundle_root/asupersync/Cargo.toml"
+    local sql_toml="$bundle_root/sqlmodel_rust/Cargo.toml"
+    if [ -f "$asu_toml" ] && [ -f "$sql_toml" ]; then
+        local asu_ver
+        asu_ver=$(sed -n 's/^version = "\([0-9][0-9.]*\)"/\1/p' "$asu_toml" | head -n 1)
+        if [ -n "$asu_ver" ] && grep -Eq '^asupersync = \{ version = "=[0-9]' "$sql_toml"; then
+            perl -i -pe 's/^(asupersync = \{ version = ")=[^"]+/${1}='"$asu_ver"'/' "$sql_toml"
+        fi
+    fi
+
     FRANKEN_STACK_JSON="$(finalize_franken_stack_json "$metadata_path")"
     if [ "$(json_text_field "$FRANKEN_STACK_JSON" status)" != "pinned" ]; then
         return 1

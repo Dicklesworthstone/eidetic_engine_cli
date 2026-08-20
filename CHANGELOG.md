@@ -16,19 +16,21 @@ checked-in Beads records. The durable research ledger is
 | 2026-07-30 → 2026-08-06 | **`0.13.1`** native-reranker completion and release-hardening patch. |
 | 2026-08-06 → 2026-08-18 | **`0.14.0`** team confederation product, Windows mesh control, port migrate. |
 | 2026-08-18 | **`0.14.1`** franken-stack refresh (asupersync 0.4.8, fsqlite 0.3.5) on the 0.14 product. |
+| 2026-08-18 → 2026-08-20 | **`0.14.2`** workspace-id bind campaign plus franken-stack refresh (asupersync 0.4.9, fsqlite 0.3.7). |
 
-Release surface (as of 2026-08-18):
+Release surface (as of 2026-08-20):
 
-- Latest **published** GitHub Release before this cut: [`v0.13.1`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.13.1) (2026-08-16).
-- `Cargo.toml` carries `version = "0.14.1"` for this cut; the historical
-  `v0.13.1` tag and the un-asset `v0.14.0` tag remain unchanged.
+- Latest **published** GitHub Release before this cut: [`v0.14.1`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.14.1) (2026-08-19).
+- `Cargo.toml` carries `version = "0.14.2"` for this cut; the historical
+  `v0.13.1`, un-asset `v0.14.0`, and `v0.14.1` tags remain unchanged.
 - Install path: `curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash -s -- --easy-mode --verify`
 
 ### Version timeline (tags and GitHub Releases)
 
 | Version | Date | GitHub Release | Notes |
 | --- | --- | --- | --- |
-| [0.14.1](#0141---2026-08-18) | 2026-08-18 | this cut | Franken-stack refresh on the 0.14 product: asupersync 0.4.8, FrankenSQLite 0.3.5, crates.io `cargo update` |
+| [0.14.2](#0142---2026-08-20) | 2026-08-20 | this cut | Workspace-id bind campaign plus franken-stack refresh: asupersync 0.4.9, FrankenSQLite 0.3.7, frankensearch 0.3.2 |
+| [0.14.1](#0141---2026-08-18) | 2026-08-18 | yes | Franken-stack refresh on the 0.14 product: asupersync 0.4.8, FrankenSQLite 0.3.5, crates.io `cargo update` |
 | [0.14.0](#0140---2026-08-18) | 2026-08-18 | tag only | Team confederation (ADR 0086), Windows scheduled-task + loopback control, encrypted credential backup, versioned team port migrate |
 | [0.13.1](#0131---2026-08-06) | 2026-08-06 | yes | Pure-Rust native reranking on every release target, model bootstrap, checksum and publication hardening |
 | [0.13.0](#0130---2026-07-30) | 2026-07-30 | yes | User-global store, Learn→Pack loop, pack-ledger integrity, group-commit / incremental index, installer hardening |
@@ -51,6 +53,36 @@ GitHub Release page for asset lists and the original generated notes until a
 future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
+
+## [0.14.2] - 2026-08-20
+
+Patch on 0.14.1: bind writes and reads to the stored workspace row id
+(the FOREIGN KEY / split-brain hasher campaign) and rebuild against
+current franken-stack `origin/main` pins plus a crates.io `cargo update`
+within existing Cargo.toml ranges. Nightly toolchain only.
+
+Franken-stack:
+
+- asupersync `=0.4.8` → `=0.4.9` (`9eb0600e6ef4`)
+- frankensqlite `0.3.5` → `0.3.7` (`61313e42292a`, origin/main)
+- frankensearch `0.3.0` → `0.3.2` (`8382ec3ed6b3`); storage now requests
+  fsqlite 0.3.7 so the patched engine satisfies both ee's DB layer and
+  frankensearch storage
+- franken_networkx and franken_agent_detection advanced to `origin/main`
+  (crate versions still 0.2.0 / 0.1.10)
+- toon_rust unchanged at `d7185c7800d3` (0.2.3)
+- SQLModel stays on the 0.4.0 harmonize pin (`021bd17add2d`); `origin/main`
+  is still 0.3.2
+- Isolated dests and the checkout helpers relax SQLModel's
+  `asupersync =0.4.4` pin to `=0.4.9` so the path override can close
+- crates.io lock refresh (blake3, either, frostem, …)
+
+Workspace bind (since `v0.14.1`): `ensure_bound_workspace` /
+`bound_workspace_id_or_hash` now cover remember, pack, search, graph,
+steward, mesh, doctor, situation adopt, and related CLI lookups so a
+path-keyed stored `workspaces.id` is reused instead of hashing a
+split-brain row. `ee serve` tells the truth about the persistent
+foreground listener. Doctor surfaces missing workspace rows (EE-E204).
 
 ## [0.14.1] - 2026-08-18
 

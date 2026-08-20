@@ -1,20 +1,19 @@
 # ee.franken-stack.lock.v1
 #
 # Full commit IDs are mandatory. This set pins the sibling revisions that
-# ee's Cargo.lock must close over. Refreshed 2026-08-18 for the v0.14.1
-# cut: asupersync origin/main 0.4.8, frankensqlite 0.3.5, frankensearch /
-# franken_networkx / toon / franken_agent_detection at origin/main.
-# SQLModel stays on the 0.4.0 harmonize/vlsf2-fsqlite03 pin (021bd17);
-# origin/main is still the 0.3.2 line and the later harmonize merge
-# reintroduced that downgrade. Isolated dests relax sqlmodel's
-# asupersync =0.4.4 pin to =0.4.8 so the path override can close.
-# Frankensearch storage still uses registry fsqlite 0.1.x until that
-# project migrates, so the closure still carries registry asupersync
-# 0.3.10 alongside the path 0.4.8 line.
-asupersync	ee7bd346e70684ac54ca142f3f5b105f1a003117
-franken_agent_detection	c8816fff484378f362dd517f1f0dd9691c8aeb5a
-franken_networkx	fe425b5d33dc357091d27fb5519af189becd47e8
-frankensearch	46a3aefce1aa658fa98f27f0b3676f073160e15c
-frankensqlite	f4a2e987411df52446c68a155f947f5f362e752d
+# ee's Cargo.lock must close over. Refreshed 2026-08-20 for the v0.14.2
+# cut: asupersync origin/main 0.4.9, frankensqlite origin/main 0.3.7,
+# frankensearch / franken_networkx / toon / franken_agent_detection at
+# origin/main. SQLModel stays on the 0.4.0 harmonize/vlsf2-fsqlite03 pin
+# (021bd17); origin/main is still the 0.3.2 line. Isolated dests and the
+# checkout helpers relax sqlmodel's asupersync =0.4.4 pin to =0.4.9 so
+# the path override can close. Frankensearch storage now requests
+# fsqlite 0.3.7, so the patched 0.3.7 engine satisfies both ee's DB
+# layer and frankensearch storage.
+asupersync	9eb0600e6ef4d17633dff3dc43ad99c64e72adbe
+franken_agent_detection	17f28ad8fbea9181134d63e109a310ea7bf31997
+franken_networkx	972814b1b4649c20b6f2acdd7456e3580cefdbeb
+frankensearch	8382ec3ed6b3395afd28dd049efedaedc3259d59
+frankensqlite	61313e42292a27f7545f906b774166f49161a4db
 sqlmodel_rust	021bd17add2de0024d823ddc0d675550145ebf89
 toon_rust	d7185c7800d37810f0a29bd5fca2ee623f25819b

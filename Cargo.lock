@@ -178,12 +178,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arrayref"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
-
-[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -230,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync"
-version = "0.4.8"
+version = "0.4.9"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -290,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.4.8"
+version = "0.4.9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -425,11 +419,10 @@ dependencies = [
 
 [[package]]
 name = "blake3"
-version = "1.8.6"
+version = "1.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76ae7bad254120e9e4c63bafc385310756f90c484eac0e36b8317cf09cb92a77"
+checksum = "6d9e454fc11f76977dc803893aff6304ed33d6a26efae8696573bea74baa27ae"
 dependencies = [
- "arrayref",
  "arrayvec",
  "cc",
  "cfg-if",
@@ -1336,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "eidetic-engine"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "arc-swap",
  "asupersync",
@@ -1388,9 +1381,9 @@ dependencies = [
 
 [[package]]
 name = "either"
-version = "1.17.0"
+version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
+checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
 name = "encode_unicode"
@@ -1569,7 +1562,7 @@ dependencies = [
 
 [[package]]
 name = "franken-decision"
-version = "0.4.8"
+version = "0.4.9"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -1578,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.4.8"
+version = "0.4.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -1586,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.4.8"
+version = "0.4.9"
 dependencies = [
  "serde",
 ]
@@ -1724,9 +1717,9 @@ dependencies = [
 
 [[package]]
 name = "frostem"
-version = "1.20260804.4"
+version = "1.20260804.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "deaa779108eb1892b360df2c4d539cf18e4a1c0099ffebca672b96f1cc2ae3fa"
+checksum = "99acf14234145edd16787e51250d50d30893edc6a7f888d0a5e935005ebe599a"
 
 [[package]]
 name = "fs4"
@@ -1740,7 +1733,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "asupersync",
  "fsqlite-core",
@@ -1759,7 +1752,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ast"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "fsqlite-types",
  "smallvec",
@@ -1767,7 +1760,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-btree"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "foldhash",
  "fsqlite-error",
@@ -1783,7 +1776,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-core"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "asupersync",
  "blake3",
@@ -1820,14 +1813,14 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-error"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "fsqlite-ext-fts5"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -1838,7 +1831,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-icu"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -1848,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-json"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -1859,7 +1852,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-misc"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -1871,7 +1864,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-ext-rtree"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "fsqlite-error",
  "fsqlite-func",
@@ -1880,7 +1873,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-func"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "chrono",
  "fsqlite-error",
@@ -1890,7 +1883,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-mvcc"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "asupersync",
  "blake3",
@@ -1914,7 +1907,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-observability"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "fsqlite-types",
  "parking_lot",
@@ -1924,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-pager"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "argon2",
  "asupersync",
@@ -1948,7 +1941,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-parser"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "fsqlite-ast",
  "fsqlite-error",
@@ -1960,7 +1953,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-planner"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "blake3",
  "fsqlite-ast",
@@ -1976,7 +1969,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-types"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "asupersync",
  "bitflags 2.13.1",
@@ -1994,7 +1987,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-vdbe"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "asupersync",
  "crossbeam-deque",
@@ -2015,7 +2008,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-vfs"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "advisory-lock",
  "asupersync",
@@ -2032,7 +2025,7 @@ dependencies = [
 
 [[package]]
 name = "fsqlite-wal"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "asupersync",
  "blake3",
@@ -6022,8 +6015,8 @@ version = "0.2.0"
 
 [[patch.unused]]
 name = "fsqlite-ext-fts3"
-version = "0.3.5"
+version = "0.3.7"
 
 [[patch.unused]]
 name = "fsqlite-ext-session"
-version = "0.3.5"
+version = "0.3.7"

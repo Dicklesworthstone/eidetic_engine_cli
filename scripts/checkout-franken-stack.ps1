@@ -211,3 +211,30 @@ foreach ($required in $knownRepositories) {
         throw "required repository missing from lock: $required"
     }
 }
+
+# SQLModel 0.4.0 still exact-pins asupersync =0.4.4. Rewrite that one
+# exact pin to the locked asupersync crate version so the path override
+# can close (same isolated-dest procedure as v0.14.1 / v0.14.2).
+$asuToml = Join-Path $resolvedRoot "asupersync/Cargo.toml"
+$sqlToml = Join-Path $resolvedRoot "sqlmodel_rust/Cargo.toml"
+if ((Test-Path $asuToml) -and (Test-Path $sqlToml)) {
+    $asuVer = $null
+    foreach ($line in [IO.File]::ReadAllLines($asuToml)) {
+        if ($line -match '^version = "([0-9][0-9.]*)"') {
+            $asuVer = $Matches[1]
+            break
+        }
+    }
+    if ($asuVer) {
+        $sqlText = [IO.File]::ReadAllText($sqlToml)
+        $updated = [regex]::Replace(
+            $sqlText,
+            '(?m)^(asupersync = \{ version = ")=[^"]+',
+            "`${1}=$asuVer"
+        )
+        if ($updated -ne $sqlText) {
+            [IO.File]::WriteAllText($sqlToml, $updated)
+            Write-Host "franken-stack: relaxed sqlmodel asupersync exact pin to =$asuVer"
+        }
+    }
+}
