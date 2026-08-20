@@ -2493,12 +2493,7 @@ fn adopt_resolve_workspace_path(
 }
 
 fn adopt_stable_workspace_id(path: &std::path::Path) -> String {
-    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
-    let mut bytes = [0_u8; 16];
-    for (target, source) in bytes.iter_mut().zip(hash.as_bytes()) {
-        *target = *source;
-    }
-    crate::models::WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+    crate::core::workspace::stable_workspace_id(path)
 }
 
 /// Run the full `ee situation adopt` command flow: resolve the
@@ -2526,9 +2521,15 @@ pub fn adopt_situation_command(
             repair: Some("ee migrate run --workspace .".to_owned()),
         })?;
 
+    let requested = adopt_stable_workspace_id(&workspace_path);
+    let workspace_scope = crate::core::workspace::bound_workspace_id_or_hash(
+        &connection,
+        &requested,
+        &[options.workspace_path, workspace_path.as_path()],
+    )?;
     let request = AdoptSituationRequest {
         task_text: options.task_text.to_owned(),
-        workspace_scope: adopt_stable_workspace_id(&workspace_path),
+        workspace_scope,
         adopted_by: options.adopted_by.map(str::to_owned),
         adoption_reason: options.adoption_reason.map(str::to_owned),
         evidence_ids: options.evidence_ids.to_vec(),
@@ -2621,6 +2622,51 @@ mod tests {
         } else {
             Err(message.to_owned())
         }
+    }
+
+    #[test]
+    fn adopt_situation_command_binds_to_path_keyed_workspace() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path();
+        std::fs::create_dir(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let database = workspace.join(".ee").join("ee.db");
+        let connection =
+            crate::db::DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let canonical = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let legacy_id = "wsp_00000000000000000000legacy";
+        let hashed = adopt_stable_workspace_id(&canonical);
+        check(
+            hashed != legacy_id,
+            "fixture id must differ from the current path hash",
+        )?;
+        connection
+            .insert_workspace(
+                legacy_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: canonical.to_string_lossy().into_owned(),
+                    name: Some("situation bind".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = adopt_situation_command(&AdoptSituationCommandOptions {
+            workspace_path: workspace,
+            database_path: None,
+            task_text: "fix the failing release workflow",
+            adopted_by: Some("test-agent"),
+            adoption_reason: Some("bind test"),
+            evidence_ids: &[],
+            as_of: None,
+        })
+        .map_err(|error| error.message())?;
+        check(
+            report.workspace_scope == legacy_id,
+            "situation adopt must bind workspace_scope to the stored workspace id",
+        )
     }
 
     #[test]

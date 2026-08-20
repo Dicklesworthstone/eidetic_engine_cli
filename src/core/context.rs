@@ -92,8 +92,7 @@ use crate::models::{
     AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_OUTCOMES,
     AgentContextProfileCounts, EmbedBackend, EvidenceId, GLOBAL_MEMORY_SCOPE_TAG, MemoryId,
     MemoryScope, MemoryScopeStats, MemorySentinelResultStatus, PACK_SCHEMA_V2, PackId,
-    ProvenanceUri, RedactionLevel, RuleId, TrustClass, UnitScore, WorkspaceId,
-    posture_for_trust_class,
+    ProvenanceUri, RedactionLevel, RuleId, TrustClass, UnitScore, posture_for_trust_class,
 };
 use crate::pack::{
     ConflictKind, ConflictRecommendedAction, ConsensusConflictReport, ContextPackProfile,
@@ -4648,10 +4647,7 @@ fn context_workspace_path_keys(workspace_path: &Path) -> BTreeSet<PathBuf> {
 }
 
 fn stable_context_workspace_id(path: &Path) -> String {
-    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&hash.as_bytes()[..16]);
-    WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+    crate::core::workspace::stable_workspace_id(path)
 }
 
 fn lexical_terms(text: &str) -> BTreeSet<String> {
