@@ -697,7 +697,7 @@ pub fn prepare_journal_daemon_write(
         message: format!("{} ({})", error.message, error.code),
         repair: Some("ee journal append --help".to_owned()),
     })?;
-    let workspace_id = stable_workspace_id(&workspace_path);
+    let workspace_id = crate::core::workspace::bound_workspace_id_from_path(&workspace_path);
     Ok(PreparedJournalDaemonWrite {
         payload: JournalDaemonWritePayload {
             workspace_path,

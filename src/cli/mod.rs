@@ -57941,7 +57941,7 @@ fn resolve_certificate_store_source(
     } else {
         CertificateStoreSource::Database {
             database_path: workspace_path.join(".ee").join("ee.db"),
-            workspace_id: crate::core::curate::stable_workspace_id(&workspace_path),
+            workspace_id: crate::core::workspace::bound_workspace_id_from_path(&workspace_path),
         }
     }
 }

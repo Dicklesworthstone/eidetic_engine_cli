@@ -782,7 +782,13 @@ pub fn plan_team_responder_registrations(
     let Ok(teams) = crate::mesh::team::load_local_teams(connection) else {
         return Vec::new();
     };
-    let Ok(peers) = connection.list_mesh_peers(workspace_id) else {
+    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        connection,
+        workspace_id,
+        &[workspace_path],
+    )
+    .unwrap_or_else(|_| workspace_id.to_owned());
+    let Ok(peers) = connection.list_mesh_peers(&workspace_id) else {
         return Vec::new();
     };
     let mut registrations = Vec::new();
@@ -866,7 +872,8 @@ pub async fn resolve_durable_registration<A: TailscaleLocalApi>(
     connection: &DbConnection,
     registration: &DurableResponderRegistration,
 ) -> Result<ResolvedResponderRegistration, ResponderBrokerError> {
-    validate_durable_registration(connection, registration)?;
+    let registration = bind_durable_registration_workspace(connection, registration)?;
+    validate_durable_registration(connection, &registration)?;
     let local_status = local_api.local_status(cx).await.map_err(|error| {
         if matches!(
             error,
@@ -975,6 +982,21 @@ pub async fn resolve_durable_registration<A: TailscaleLocalApi>(
         local_status,
         route,
     })
+}
+
+fn bind_durable_registration_workspace(
+    connection: &DbConnection,
+    registration: &DurableResponderRegistration,
+) -> Result<DurableResponderRegistration, ResponderBrokerError> {
+    let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
+        connection,
+        &registration.workspace_id,
+        &[registration.workspace_path.as_path()],
+    )
+    .map_err(|_| ResponderBrokerError::InvalidConfiguration)?;
+    let mut bound = registration.clone();
+    bound.workspace_id = workspace_id;
+    Ok(bound)
 }
 
 fn validate_durable_registration(

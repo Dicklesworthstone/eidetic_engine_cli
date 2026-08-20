@@ -2549,10 +2549,7 @@ pub fn resolve_store_workspace_id(
     // member id cannot host enrollments. Prefer the member id only when
     // the matching store row exists.
     if let Ok(members) = connection.list_all_team_members()
-        && let Some(member) = members
-            .iter()
-            .find(|member| member.is_self)
-            .or_else(|| members.first())
+        && let Some(member) = members.iter().find(|member| member.is_self)
         && !member.workspace_id.is_empty()
         && connection
             .get_workspace(&member.workspace_id)
