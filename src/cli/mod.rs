@@ -68055,7 +68055,7 @@ mod tests {
             "/fixture/best campaign/.ee-campaign",
             "17 documents",
             "last write 2026-08-10T14:15:16Z",
-            "Nearby-store discovery outcome: truncated after the 250 ms budget; the candidate list may be incomplete.",
+            "Nearby-store discovery outcome: truncated after the 750 ms budget; the candidate list may be incomplete.",
             "ee resume --workspace '/fixture/best campaign' --database '/fixture/best campaign/.ee-campaign/ee.db' --json",
         ] {
             ensure_contains(&human, expected, "resume nearby-store human posture")?;
@@ -79042,16 +79042,33 @@ mod tests {
     }
 
     #[test]
-    fn fields_minimal_storeless_miss_emits_error_envelope() -> TestResult {
-        // Pin the workspace to an isolated temp dir: `invoke` runs in-process
-        // against the ambient cwd/env, and a live ambient workspace with
-        // degradations would otherwise leak state into the minimal
-        // projection under full-suite runs. An uninitialized store now takes
-        // the exit-10 storeless-miss path BEFORE any success projection, so
-        // this pins the error-envelope contract for `--fields minimal`.
-        crate::core::profile::reset_path_probe_calls_for_test();
+    fn fields_minimal_trims_heavy_sections_and_skips_probes() -> TestResult {
+        // Pin the workspace to an isolated, INITIALIZED temp dir: `invoke`
+        // runs in-process against the ambient cwd/env, and a live ambient
+        // workspace with degradations would otherwise leak state into the
+        // minimal projection under full-suite runs. `ee status` is a
+        // read-only posture surface — it never storeless-misses; it gathers
+        // normally even without `.ee/`. The v2 envelope ALWAYS serializes
+        // `degraded[]`, so "minimal" means trimming heavy sections (runtime
+        // object, host path probes), not deleting the envelope contract.
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let workspace = dir.path().to_string_lossy().into_owned();
+        let workspace_path = dir.path();
+        let init_report = init_workspace(&InitOptions {
+            workspace_path: workspace_path.to_path_buf(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        if matches!(init_report.status, crate::core::init::InitStatus::Failed) {
+            return Err(format!(
+                "initialize minimal fields fixture: {:?}",
+                init_report.action_errors
+            ));
+        }
+        crate::core::profile::reset_path_probe_calls_for_test();
+        let workspace = workspace_path.to_string_lossy().into_owned();
         let (exit, stdout, _) = invoke(&[
             "ee",
             "--workspace",
@@ -79061,22 +79078,17 @@ mod tests {
             "--fields",
             "minimal",
         ]);
-        ensure_equal(
-            &exit,
-            &ProcessExitCode::WorkspaceStoreMissing,
-            "minimal status store-missing exit",
-        )?;
+        ensure_equal(&exit, &ProcessExitCode::Success, "minimal status exit")?;
         let value: serde_json::Value = serde_json::from_str(&stdout)
             .map_err(|error| format!("minimal status stdout must be JSON: {error}"))?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.error.v2"),
-            "minimal status error schema",
+            &serde_json::json!("ee.response.v2"),
+            "minimal status response schema",
         )?;
-        ensure_equal(
-            &value["error"]["code"],
-            &serde_json::json!("workspace_store_missing"),
-            "minimal status store-missing code",
+        ensure(
+            value["degraded"].as_array().is_some(),
+            "v2 envelope always serializes degraded[]",
         )?;
         ensure(
             !stdout.contains("\"runtime\":{"),

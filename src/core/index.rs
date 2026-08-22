@@ -2627,7 +2627,12 @@ where
         job_finalizer.mark_cancelled();
         return Err(error);
     }
-    update_running_index_job_total(db, &job.id, documents_total)?;
+    if let Err(error) = update_running_index_job_total(db, &job.id, documents_total) {
+        let mut message = error.to_string();
+        append_failed_index_job_transition(db, &job.id, &mut message);
+        job_finalizer.mark_cancelled();
+        return Err(error);
+    }
 
     // bd-2qmvp: the single-document incremental path upserts only its own
     // document yet stamps the current MAX workspace generation (see
