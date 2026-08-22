@@ -48,8 +48,12 @@ pub const SESSION_ITEM_CAP: usize = 20;
 pub const RESUME_SESSION_CAP: usize = 64;
 /// Open-loop tag vocabulary.
 pub const OPEN_LOOP_TAGS: [&str; 6] = ["next", "queue", "blocking", "pending", "todo", "revisit"];
-/// Wall-clock budget for the nearby-store scan.
-pub const RESUME_NEARBY_SCAN_BUDGET_MS: u64 = 250;
+/// Wall-clock budget for the nearby-store scan. Discovery runs only on the
+/// cold path (no surfaced episodic memories), so populated resumes never pay
+/// it. The budget must absorb scheduler starvation on loaded machines before
+/// child probes run; truncation with zero candidates is the one outcome this
+/// recovery surface exists to prevent.
+pub const RESUME_NEARBY_SCAN_BUDGET_MS: u64 = 750;
 /// Cap on open-loop tagged items and staleness flags.
 const OPEN_LOOP_CAP: usize = 32;
 /// Base commands plus one discovery diagnostic and one ranked retarget.
