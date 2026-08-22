@@ -589,6 +589,7 @@ fn precreate_workspace_store(workspace: &Path) -> TestResult {
             },
         )
         .map_err(|error| error.to_string())?;
+    connection.close().map_err(|error| error.to_string())?;
     Ok(())
 }
 
