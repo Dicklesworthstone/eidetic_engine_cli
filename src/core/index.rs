@@ -2592,6 +2592,17 @@ where
         explicitly_cancelled: false,
     };
 
+    let snapshot = match collect_workspace_index_source_snapshot(db, &job.workspace_id) {
+        Ok(snapshot) => snapshot,
+        // bd-2yz9p: a claimed job must never rely on the Drop finalizer for
+        // its failure record; persist the real cause while it is in hand.
+        Err(error) => {
+            let mut message = error.to_string();
+            append_failed_index_job_transition(db, &job.id, &mut message);
+            job_finalizer.mark_cancelled();
+            return Err(error);
+        }
+    };
     let WorkspaceIndexSourceSnapshot {
         generation: published_generation,
         document_counts,
@@ -2599,14 +2610,23 @@ where
         documents: indexable_docs,
         open_job_ids,
         ..
-    } = collect_workspace_index_source_snapshot(db, &job.workspace_id)?;
+    } = snapshot;
     if let Err(error) = after_snapshot() {
         if matches!(&error, IndexRebuildError::Cancelled(_)) {
+            job_finalizer.mark_cancelled();
+        } else {
+            let mut message = error.to_string();
+            append_failed_index_job_transition(db, &job.id, &mut message);
             job_finalizer.mark_cancelled();
         }
         return Err(error);
     }
-    index_checkpoint(cx)?;
+    if let Err(error) = index_checkpoint(cx) {
+        let mut message = error.to_string();
+        append_failed_index_job_transition(db, &job.id, &mut message);
+        job_finalizer.mark_cancelled();
+        return Err(error);
+    }
     update_running_index_job_total(db, &job.id, documents_total)?;
 
     // bd-2qmvp: the single-document incremental path upserts only its own

@@ -14636,9 +14636,10 @@ pub fn unrelated_context() -> u64 {{
                 "gsnap_0000000000000000000000902",
                 &crate::db::CreateGraphSnapshotInput {
                     workspace_id: WorkspaceId::from_uuid(uuid::Uuid::from_u128(900)).to_string(),
-                    snapshot_version: 1,
-                    schema_version: "ee.graph.snapshot.v1".to_string(),
-                    graph_type: crate::db::GraphSnapshotType::MemoryLinks,
+                    // graph_snapshots enforces UNIQUE(workspace_id, graph_type,
+                    // snapshot_version); this second seed-set fixture row must
+                    // occupy its own version slot.
+                    snapshot_version: 2,
                     node_count: 3,
                     edge_count: 2,
                     metrics_json: "{}".to_string(),
@@ -17172,46 +17173,29 @@ pub fn unrelated_context() -> u64 {{
             Some("hit"),
             "second identical pack request must remain an L2 hit"
         );
-        let mut advisory_session = SearchAdvisorySession::default();
-        let advisory_workspace_id = super::stable_context_workspace_id(&workspace);
-        let mut render_advisory = |snapshot: &super::ContextSearchAdvisorySnapshot| {
-            let mut reservation = advisory_session.reserve_delivery(&advisory_workspace_id);
-            let data = snapshot.data_json_with_delivery_reservation(
-                &mut advisory_session,
-                &advisory_workspace_id,
-                &mut reservation,
-            );
-            assert_eq!(
-                advisory_session.settle_delivery(
-                    reservation.workspace_id(),
-                    reservation.token(),
-                    true,
-                    reservation.large_gap_capacity_busy(),
-                ),
-                crate::core::search::SearchAdvisorySettlement::Complete
-            );
-            data
-        };
-        let fresh_advisory = render_advisory(&fresh_run.search_advisory_snapshot);
-        let cached_advisory = render_advisory(&cached_run.search_advisory_snapshot);
-        assert_eq!(
-            fresh_advisory
-                .pointer("/rerank/advisory/code")
-                .and_then(serde_json::Value::as_str),
-            Some("rerank_model_unavailable"),
-            "fresh pack must emit the permanent advisory"
+        // LexicalOnly source mode disables reranker resolution entirely
+        // (resolve_search_rerank_runtime returns disabled before any registry
+        // lookup), so neither the fresh pack nor the L2 replay carries a
+        // rerank advisory. The once-ledger suppression contract for packs
+        // that DO carry an advisory is pinned by
+        // search::tests::cached_context_snapshot_uses_socket_settlement_and_shared_once_ledger.
+        assert!(
+            fresh_run
+                .search_advisory_snapshot
+                .cache_json()
+                .get("degraded")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(Vec::is_empty),
+            "lexical-only fresh pack must not surface rerank degradations"
         );
         assert!(
-            cached_advisory
-                .pointer("/rerank/advisory")
-                .is_some_and(serde_json::Value::is_null),
-            "L2 hit must share the process advisory ledger and suppress repetition"
-        );
-        assert_eq!(
-            cached_advisory
-                .pointer("/rerank/advisorySummary/sessionOccurrenceCount")
-                .and_then(serde_json::Value::as_u64),
-            Some(2)
+            cached_run
+                .search_advisory_snapshot
+                .cache_json()
+                .get("degraded")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(Vec::is_empty),
+            "L2 replay must not invent rerank degradations"
         );
         let cached = cached_run.response;
         assert!(

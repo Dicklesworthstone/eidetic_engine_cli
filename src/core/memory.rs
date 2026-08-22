@@ -45,7 +45,7 @@ use crate::db::{
 use crate::models::{
     DomainError, GLOBAL_MEMORY_SCOPE_TAG, KNOWN_MEMORY_KINDS, KNOWN_MEMORY_LEVELS, MAX_TAG_BYTES,
     MemoryContent, MemoryId, MemoryKind, MemoryLevel, MemorySeal, MemoryValidationError,
-    ProducerMetadata, ProducerSourceSystem, ProvenanceUri, Tag, TrustClass, UnitScore, WorkspaceId,
+    ProducerMetadata, ProducerSourceSystem, ProvenanceUri, Tag, TrustClass, UnitScore,
 };
 use crate::obs::{AuditEvent, AuditOutcome, now_rfc3339_nanos};
 use crate::runtime::determinism::{Deterministic, Seed};

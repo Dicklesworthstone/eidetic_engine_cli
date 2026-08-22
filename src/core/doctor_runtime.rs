@@ -1188,6 +1188,27 @@ pub fn replay_undo(run_dir: &Path) -> Result<UndoSummary, DoctorRuntimeError> {
         .append(true)
         .open(&undo_log_path)?;
 
+    // bd-doctor-undo-state: the undo outcome is part of the run's durable
+    // lifecycle. Persist the terminal status into state.json while the
+    // workspace lock is still held so `ee doctor --list-runs`, `--diff`, and
+    // the gc planner observe the truthful post-undo state instead of the
+    // pre-undo terminal status.
+    let persist_undo_status = |status: &RunStatus| -> Result<(), DoctorRuntimeError> {
+        let mut persisted_state = read_state(run_dir)?;
+        persisted_state.status = status.clone();
+        let bytes =
+            serde_json::to_vec_pretty(&persisted_state).map_err(|error| DoctorRuntimeError::Io {
+                context: "serialize RunState".into(),
+                source: io::Error::new(io::ErrorKind::InvalidData, error),
+            })?;
+        write_file_atomic(&run_dir.join("state.json"), &bytes).map_err(|source| {
+            DoctorRuntimeError::Io {
+                context: format!("write state.json {}", run_dir.join("state.json").display()),
+                source,
+            }
+        })
+    };
+
     for action in lines.iter().rev() {
         if already_undone_sequences.contains(&action.sequence) {
             skipped += 1;
@@ -1215,6 +1236,7 @@ pub fn replay_undo(run_dir: &Path) -> Result<UndoSummary, DoctorRuntimeError> {
                     "error": e.to_string(),
                 });
                 writeln!(undo_log, "{}", entry)?;
+                persist_undo_status(&RunStatus::UndonePartial)?;
                 return Ok(UndoSummary {
                     actions_undone: undone,
                     actions_skipped: skipped,
@@ -1224,6 +1246,8 @@ pub fn replay_undo(run_dir: &Path) -> Result<UndoSummary, DoctorRuntimeError> {
             }
         }
     }
+
+    persist_undo_status(&RunStatus::Undone)?;
 
     Ok(UndoSummary {
         actions_undone: undone,

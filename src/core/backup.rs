@@ -5881,14 +5881,23 @@ mod tests {
         });
 
         match result {
-            Err(DomainError::Storage { message, repair }) => {
+            Err(DomainError::WorkspaceStoreMissing { message, repair, .. }) => {
+                // Exit-10 storeless-miss contract: an addressed-but-absent
+                // store is an addressing miss, not a storage failure.
                 ensure(
-                    message.contains("does not exist"),
+                    message.contains("Database not found"),
                     "missing database should be explicit",
                 )?;
-                ensure_equal(repair.as_deref(), Some("ee init --workspace ."), "repair")
+                ensure(
+                    repair
+                        .as_deref()
+                        .is_some_and(|repair| repair.contains("ee init --workspace")),
+                    "repair keeps conditional init last",
+                )
             }
-            other => Err(format!("expected storage error, got {other:?}")),
+            other => Err(format!(
+                "expected workspace-store-missing error, got {other:?}"
+            )),
         }
     }
 

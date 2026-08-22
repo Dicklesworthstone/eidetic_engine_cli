@@ -16,7 +16,7 @@ use crate::core::curate::{
 use crate::core::outcome::{OutcomeRecordOptions, OutcomeRecordReport, record_outcome};
 use crate::core::query_miss_cluster::KNOWLEDGE_GAP_MIN_CLUSTER_MISSES;
 use crate::db::{
-    CreateCurationCandidateInput, CreateLearningObservationInput, CreateWorkspaceInput,
+    CreateCurationCandidateInput, CreateLearningObservationInput,
     DbConnection, StoredAuditEntry, StoredCurationCandidate, StoredFeedbackEvent,
     StoredLearningObservation, StoredMemory, audit_actions,
 };

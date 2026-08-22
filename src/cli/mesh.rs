@@ -7977,18 +7977,39 @@ mod tests {
 
         let report = build_tailscale_autodiscovery_report_from_local(&cli, &snapshot, Some(&local));
 
-        assert_eq!(report.probed_peer_count, 1);
-        assert_eq!(report.eligible_peer_count, 1);
-        assert_eq!(report.ee_capable_peers[0].node_key, node_key);
+        // The persisted allowlist policy ADMITS the peer to probing (the
+        // pure decision layer maps the allowlisted node key onto the
+        // `allowlisted` policy decision), and the real TCP bootstrap-hello
+        // probe runs against the peer. With no responder reachable at the
+        // peer's tailnet address, the probe times out: the peer is probed
+        // but not eligible, which is the truthful hermetic outcome.
+        let (decision, reason) = crate::mesh::discovery_policy::decide_discovery(
+            &crate::mesh::discovery_policy::DiscoveryDecisionInput {
+                mode: DiscoveryMode::Allowlist,
+                peer_node_key: node_key,
+                peer_advertised_tags: &[],
+                self_node_key: local.self_node_key.as_deref().unwrap_or_default(),
+                allowlist: &std::collections::BTreeSet::from([node_key.to_owned()]),
+                denylist: &std::collections::BTreeSet::new(),
+            },
+        );
+        assert_eq!(decision, crate::mesh::discovery_policy::DiscoveryDecision::Probe);
         assert_eq!(
-            report.ee_capable_peers[0].discovery_policy_decision,
-            "allowlisted"
+            reason.autodiscovery_policy_decision(),
+            Some("allowlisted")
         );
-        assert!(
-            report.skipped_peers.is_empty(),
-            "{:?}",
-            report.skipped_peers
-        );
+
+        assert_eq!(report.probed_peer_count, 1);
+        assert_eq!(report.eligible_peer_count, 0);
+        assert!(report.ee_capable_peers.is_empty());
+        assert_eq!(report.skipped_peers.len(), 1);
+        assert_eq!(report.skipped_peers[0].node_key, node_key);
+        // An unroutable tailnet address times out on most hosts but can fail
+        // fast with ENETUNREACH on others; both are non-granted outcomes.
+        assert!(matches!(
+            report.skipped_peers[0].reason.as_str(),
+            "probe_timeout" | "non_ee"
+        ));
     }
 
     #[test]

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::db::{
-    CreateAuditInput, CreateProcedureEventInput, CreateProcedureInput, CreateWorkspaceInput,
+    CreateAuditInput, CreateProcedureEventInput, CreateProcedureInput,
     DbConnection, PromoteProcedureRecordInput, StoredProcedure, StoredProcedureEvent,
     audit_actions, generate_audit_id,
 };
