@@ -154,88 +154,94 @@ fn serve_foreground_cli_keeps_accepting_after_first_request() -> TestResult {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("spawn ee serve foreground: {error}"))?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "serve child stdout was not piped".to_owned())?;
-    let mut stdout_reader = BufReader::new(stdout);
-    let mut startup_line = String::new();
-    let startup_bytes = stdout_reader
-        .read_line(&mut startup_line)
-        .map_err(|error| format!("read serve startup line: {error}"))?;
-    if startup_bytes == 0 {
-        let _ = child.kill();
-        let status = child
-            .wait()
-            .map_err(|error| format!("wait for failed serve child: {error}"))?;
-        let mut stderr = String::new();
-        if let Some(mut pipe) = child.stderr.take() {
-            let _ = pipe.read_to_string(&mut stderr);
+    let outcome = (|| -> TestResult {
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "serve child stdout was not piped".to_owned())?;
+        let mut stdout_reader = BufReader::new(stdout);
+        let mut startup_line = String::new();
+        let startup_bytes = stdout_reader
+            .read_line(&mut startup_line)
+            .map_err(|error| format!("read serve startup line: {error}"))?;
+        if startup_bytes == 0 {
+            let _ = child.kill();
+            let status = child
+                .wait()
+                .map_err(|error| format!("wait for failed serve child: {error}"))?;
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            return Err(format!(
+                "serve child exited before startup JSON: status={status}, stderr={stderr}"
+            ));
         }
-        return Err(format!(
-            "serve child exited before startup JSON: status={status}, stderr={stderr}"
-        ));
-    }
 
-    let startup: JsonValue = serde_json::from_str(startup_line.trim())
-        .map_err(|error| format!("parse serve startup JSON: {error}; line={startup_line}"))?;
-    assert_eq!(startup["schema"].as_str(), Some("ee.response.v2"));
-    assert_eq!(startup["success"].as_bool(), Some(true));
-    assert_eq!(
-        startup["data"]["schema"].as_str(),
-        Some(ee::serve::SERVE_STARTUP_SCHEMA_V1)
-    );
-    assert_eq!(
-        startup["data"]["startup"]["readiness"]["state"].as_str(),
-        Some("ready")
-    );
-    let port = startup["data"]["listener"]["boundPort"]
-        .as_u64()
-        .and_then(|port| u16::try_from(port).ok())
-        .ok_or_else(|| format!("startup missing listener boundPort: {startup}"))?;
-    if port == 0 {
-        return Err(format!(
-            "serve listener must expose an OS-assigned port: {startup}"
-        ));
-    }
+        let startup: JsonValue = serde_json::from_str(startup_line.trim())
+            .map_err(|error| format!("parse serve startup JSON: {error}; line={startup_line}"))?;
+        assert_eq!(startup["schema"].as_str(), Some("ee.response.v2"));
+        assert_eq!(startup["success"].as_bool(), Some(true));
+        assert_eq!(
+            startup["data"]["schema"].as_str(),
+            Some(ee::serve::SERVE_STARTUP_SCHEMA_V1)
+        );
+        assert_eq!(
+            startup["data"]["startup"]["readiness"]["state"].as_str(),
+            Some("ready")
+        );
+        let port = startup["data"]["listener"]["boundPort"]
+            .as_u64()
+            .and_then(|port| u16::try_from(port).ok())
+            .ok_or_else(|| format!("startup missing listener boundPort: {startup}"))?;
+        if port == 0 {
+            return Err(format!(
+                "serve listener must expose an OS-assigned port: {startup}"
+            ));
+        }
 
-    let first = send_foreground_request(port, token, "/v1/status")?;
-    assert_eq!(first["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
-    assert_eq!(first["request"]["endpoint"].as_str(), Some("status"));
-    let first_payload = &first["response"]["payload"];
-    assert_eq!(first_payload["schema"].as_str(), Some("ee.response.v2"));
-    assert_eq!(first_payload["success"].as_bool(), Some(true));
-    assert_eq!(first_payload["data"]["command"].as_str(), Some("status"));
+        let first = send_foreground_request(port, token, "/v1/status")?;
+        assert_eq!(first["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
+        assert_eq!(first["request"]["endpoint"].as_str(), Some("status"));
+        let first_payload = &first["response"]["payload"];
+        assert_eq!(first_payload["schema"].as_str(), Some("ee.response.v2"));
+        assert_eq!(first_payload["success"].as_bool(), Some(true));
+        assert_eq!(first_payload["data"]["command"].as_str(), Some("status"));
 
-    // Persistence proof: a one-shot process would close the listener after
-    // the first exchange. A second /v1/status on the same bound port must
-    // still succeed.
-    let second = send_foreground_request(port, token, "/v1/status")?;
-    assert_eq!(second["request"]["endpoint"].as_str(), Some("status"));
-    assert_eq!(
-        second["response"]["payload"]["success"].as_bool(),
-        Some(true),
-        "second status request must succeed on the same foreground listener"
-    );
+        // Persistence proof: a one-shot process would close the listener after
+        // the first exchange. A second /v1/status on the same bound port must
+        // still succeed.
+        let second = send_foreground_request(port, token, "/v1/status")?;
+        assert_eq!(second["request"]["endpoint"].as_str(), Some("status"));
+        assert_eq!(
+            second["response"]["payload"]["success"].as_bool(),
+            Some(true),
+            "second status request must succeed on the same foreground listener"
+        );
 
-    child
-        .kill()
-        .map_err(|error| format!("stop serve foreground child: {error}"))?;
-    let _ = child
-        .wait()
-        .map_err(|error| format!("wait for serve foreground child: {error}"))?;
+        child
+            .kill()
+            .map_err(|error| format!("stop serve foreground child: {error}"))?;
+        let _ = child
+            .wait()
+            .map_err(|error| format!("wait for serve foreground child: {error}"))?;
 
-    let mut trailing_stdout = String::new();
-    stdout_reader
-        .read_to_string(&mut trailing_stdout)
-        .map_err(|error| format!("read trailing serve stdout: {error}"))?;
-    if !trailing_stdout.trim().is_empty() {
-        return Err(format!(
-            "serve foreground should emit one startup JSON line, got trailing stdout: {trailing_stdout}"
-        ));
-    }
-    Ok(())
+        let mut trailing_stdout = String::new();
+        stdout_reader
+            .read_to_string(&mut trailing_stdout)
+            .map_err(|error| format!("read trailing serve stdout: {error}"))?;
+        if !trailing_stdout.trim().is_empty() {
+            return Err(format!(
+                "serve foreground should emit one startup JSON line, got trailing stdout: {trailing_stdout}"
+            ));
+        }
+        Ok(())
+    })();
+    // Failure paths above must not leak the foreground listener; re-kill is
+    // a no-op when the flow already stopped and reaped the child.
+    let _ = child.kill();
+    let _ = child.wait();
+    outcome
 }
 
 #[test]
@@ -285,87 +291,92 @@ fn serve_foreground_real_context_first_consumes_process_advisory() -> TestResult
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("spawn context-first serve foreground: {error}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "context-first serve stdout was not piped".to_owned())?;
-    let mut stdout_reader = BufReader::new(stdout);
-    let mut startup_line = String::new();
-    stdout_reader
-        .read_line(&mut startup_line)
-        .map_err(|error| format!("read context-first serve startup: {error}"))?;
-    let startup: JsonValue = serde_json::from_str(startup_line.trim())
-        .map_err(|error| format!("parse context-first serve startup: {error}"))?;
-    let port = startup["data"]["listener"]["boundPort"]
-        .as_u64()
-        .and_then(|port| u16::try_from(port).ok())
-        .ok_or_else(|| format!("context-first startup missing port: {startup}"))?;
+    let outcome = (|| -> TestResult {
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "context-first serve stdout was not piped".to_owned())?;
+        let mut stdout_reader = BufReader::new(stdout);
+        let mut startup_line = String::new();
+        stdout_reader
+            .read_line(&mut startup_line)
+            .map_err(|error| format!("read context-first serve startup: {error}"))?;
+        let startup: JsonValue = serde_json::from_str(startup_line.trim())
+            .map_err(|error| format!("parse context-first serve startup: {error}"))?;
+        let port = startup["data"]["listener"]["boundPort"]
+            .as_u64()
+            .and_then(|port| u16::try_from(port).ok())
+            .ok_or_else(|| format!("context-first startup missing port: {startup}"))?;
 
-    let context = send_foreground_request(
-        port,
-        token,
-        "/v1/context?task=serve%20context-first%20advisory",
-    )?;
-    let context_payload = &context["response"]["payload"];
-    if context_payload
-        .pointer("/data/embed_backend")
-        .and_then(JsonValue::as_str)
-        == Some("hash_fallback")
-    {
-        // Hosts without the local semantic/rerank stack never build rerank
-        // posture, so the process-advisory contract is unobservable here. The
-        // deterministic pins for that contract live in cli::tests; here assert
-        // the lexical pack still succeeded and skip only the advisory reads.
+        let context = send_foreground_request(
+            port,
+            token,
+            "/v1/context?task=serve%20context-first%20advisory",
+        )?;
+        let context_payload = &context["response"]["payload"];
+        if context_payload
+            .pointer("/data/embed_backend")
+            .and_then(JsonValue::as_str)
+            == Some("hash_fallback")
+        {
+            // Hosts without the local semantic/rerank stack never build rerank
+            // posture, so the process-advisory contract is unobservable here. The
+            // deterministic pins for that contract live in cli::tests; assert the
+            // lexical pack still succeeded and skip only the advisory reads. The
+            // early return exits this flow closure, not the test: the caller still
+            // stops and reaps the serve child on every path below.
+            assert_eq!(
+                context_payload["success"].as_bool(),
+                Some(true),
+                "lexical context pack must still succeed on model-less hosts: {context_payload}"
+            );
+            return Ok(());
+        }
         assert_eq!(
-            context_payload["success"].as_bool(),
-            Some(true),
-            "lexical context pack must still succeed on model-less hosts: {context_payload}"
+            context_payload
+                .pointer("/data/rerank/advisory/code")
+                .and_then(JsonValue::as_str),
+            Some("rerank_model_unavailable"),
+            "real serve context must carry canonical rerank advisory: {context_payload}"
         );
-        return Ok(());
-    }
-    assert_eq!(
-        context_payload
-            .pointer("/data/rerank/advisory/code")
-            .and_then(JsonValue::as_str),
-        Some("rerank_model_unavailable"),
-        "real serve context must carry canonical rerank advisory: {context_payload}"
-    );
-    assert_eq!(
-        context_payload
-            .pointer("/data/rerank/advisorySummary/scope")
-            .and_then(JsonValue::as_str),
-        Some("process")
-    );
+        assert_eq!(
+            context_payload
+                .pointer("/data/rerank/advisorySummary/scope")
+                .and_then(JsonValue::as_str),
+            Some("process")
+        );
 
-    let search =
-        send_foreground_request(port, token, "/v1/search?q=serve%20context-first%20advisory")?;
-    let search_payload = &search["response"]["payload"];
-    assert!(
-        search_payload
-            .pointer("/data/rerank/advisory")
-            .is_some_and(JsonValue::is_null),
-        "real serve search after context must suppress the advisory: {search_payload}"
-    );
-    assert_eq!(
-        search_payload
-            .pointer("/data/rerank/advisorySummary/sessionOccurrenceCount")
-            .and_then(JsonValue::as_u64),
-        Some(2)
-    );
-    assert_eq!(
-        search_payload
-            .pointer("/data/rerank/advisorySummary/sessionSuppressedCount")
-            .and_then(JsonValue::as_u64),
-        Some(1)
-    );
+        let search =
+            send_foreground_request(port, token, "/v1/search?q=serve%20context-first%20advisory")?;
+        let search_payload = &search["response"]["payload"];
+        assert!(
+            search_payload
+                .pointer("/data/rerank/advisory")
+                .is_some_and(JsonValue::is_null),
+            "real serve search after context must suppress the advisory: {search_payload}"
+        );
+        assert_eq!(
+            search_payload
+                .pointer("/data/rerank/advisorySummary/sessionOccurrenceCount")
+                .and_then(JsonValue::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            search_payload
+                .pointer("/data/rerank/advisorySummary/sessionSuppressedCount")
+                .and_then(JsonValue::as_u64),
+            Some(1)
+        );
 
+        Ok(())
+    })();
     child
         .kill()
         .map_err(|error| format!("stop context-first serve child: {error}"))?;
     let _ = child
         .wait()
         .map_err(|error| format!("wait for context-first serve child: {error}"))?;
-    Ok(())
+    outcome
 }
 
 #[test]
