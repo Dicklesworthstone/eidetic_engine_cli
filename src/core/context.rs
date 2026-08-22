@@ -12408,7 +12408,7 @@ mod tests {
     use crate::core::profile::{OperatingProfile, RuntimeProfileReport};
     use crate::core::search::{
         PERFORMANCE_EXPLAIN_SCHEMA_V1, RERANK_MODEL_UNAVAILABLE_ADVISORY, ScoreSource,
-        SearchAdvisorySession, SearchDegradation, SearchHit, SearchOptions, SearchReport,
+        SearchDegradation, SearchHit, SearchOptions, SearchReport,
         SearchStatus,
     };
     use crate::db::read_pool::{
