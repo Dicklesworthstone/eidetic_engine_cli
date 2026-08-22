@@ -194,6 +194,7 @@ struct ResumeAdmissionBoundary {
 }
 
 impl ResumeAdmissionBoundary {
+    #[cfg(test)]
     fn for_workspace(workspace_path: &Path) -> Self {
         Self::for_bound_workspace(
             workspace_path,
