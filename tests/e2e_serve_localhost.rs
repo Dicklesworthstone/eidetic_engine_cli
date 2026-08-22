@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::path::{Path, PathBuf};
@@ -5,7 +6,8 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
-use ee::db::DbConnection;
+use ee::core::workspace::stable_workspace_id;
+use ee::db::{CreateWorkspaceInput, DbConnection};
 use ee::models::{MEMORY_SEAL_PLACEHOLDER_CONTENT, memory_seal_commitment};
 use ee::serve::{SERVE_ENDPOINT_SCHEMA_V1, ServeLimits, render_serve_transport_exchange};
 use serde_json::{Value as JsonValue, json};
@@ -553,10 +555,37 @@ fn serve_why_endpoint_attempts_real_memory_explanation() -> TestResult {
     Ok(())
 }
 
+/// Create the conventional `.ee/ee.db` store (schema + workspace row) for a
+/// temp workspace. Remember/why flows address stores explicitly since the
+/// workspace-miss contract stopped auto-creating them on lookup.
+fn precreate_workspace_store(workspace: &Path) -> TestResult {
+    let database = workspace.join(".ee").join("ee.db");
+    let parent = database
+        .parent()
+        .ok_or_else(|| "database path has no parent".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+    connection.migrate().map_err(|error| error.to_string())?;
+    let workspace_path = workspace.to_string_lossy().into_owned();
+    connection
+        .insert_workspace(
+            &stable_workspace_id(Path::new(&workspace_path)),
+            &CreateWorkspaceInput {
+                path: workspace_path,
+                name: workspace
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 #[test]
 fn serve_why_endpoint_returns_canonical_why_payload_shape() -> TestResult {
     let token = "01234567890123456789012345678901";
     let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    precreate_workspace_store(workspace.path())?;
     let sealed_protocol =
         b"PRE-REGISTERED SERVER PROTOCOL: preserve the exact canonical why seal state.";
     let sealed_at = "2026-08-12T14:30:00Z";
@@ -1378,6 +1407,7 @@ fn serve_unknown_endpoint_returns_404_with_endpoint_discovery_error() -> TestRes
 fn serve_durable_write_endpoint_remembers_memory_with_audited_handler() -> TestResult {
     let token = "01234567890123456789012345678901";
     let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+    precreate_workspace_store(workspace.path())?;
     let body = json!({
         "operation": "remember",
         "workspace": workspace.path().display().to_string(),
