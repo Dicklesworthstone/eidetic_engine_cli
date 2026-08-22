@@ -1804,7 +1804,10 @@ fn parse_rendered_response_json(
 fn serve_doctor_payload_json() -> Result<JsonValue, DomainError> {
     let workspace_path = serve_current_workspace_path()?;
     let report = DoctorReport::gather_for_workspace(&workspace_path);
-    parse_rendered_response_json(&crate::output::render_doctor_json(&report), "doctor")
+    parse_rendered_response_json(
+        &crate::output::render_doctor_concise_json(&report),
+        "doctor",
+    )
 }
 
 fn serve_search_payload_json(

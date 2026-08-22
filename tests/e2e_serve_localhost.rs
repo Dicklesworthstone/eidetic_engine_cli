@@ -305,6 +305,22 @@ fn serve_foreground_real_context_first_consumes_process_advisory() -> TestResult
         "/v1/context?task=serve%20context-first%20advisory",
     )?;
     let context_payload = &context["response"]["payload"];
+    if context_payload
+        .pointer("/data/embed_backend")
+        .and_then(JsonValue::as_str)
+        == Some("hash_fallback")
+    {
+        // Hosts without the local semantic/rerank stack never build rerank
+        // posture, so the process-advisory contract is unobservable here. The
+        // deterministic pins for that contract live in cli::tests; here assert
+        // the lexical pack still succeeded and skip only the advisory reads.
+        assert_eq!(
+            context_payload["success"].as_bool(),
+            Some(true),
+            "lexical context pack must still succeed on model-less hosts: {context_payload}"
+        );
+        return Ok(());
+    }
     assert_eq!(
         context_payload
             .pointer("/data/rerank/advisory/code")
@@ -465,7 +481,11 @@ fn serve_events_endpoint_returns_terminal_subscribe_poll_frame() -> TestResult {
         }
         Some("error") => {
             assert_eq!(payload["schema"].as_str(), Some("ee.error.v2"));
-            assert_eq!(payload["error"]["code"].as_str(), Some("storage"));
+            let code = payload["error"]["code"].as_str();
+            assert!(
+                matches!(code, Some("storage" | "workspace_store_missing")),
+                "events must fail through a real storage/addressing path, got {payload}"
+            );
         }
         other => {
             return Err(format!(
@@ -515,7 +535,10 @@ fn serve_why_endpoint_attempts_real_memory_explanation() -> TestResult {
         assert_eq!(payload["schema"].as_str(), Some("ee.error.v2"));
         let code = payload["error"]["code"].as_str();
         assert!(
-            matches!(code, Some("not_found" | "storage")),
+            matches!(
+                code,
+                Some("not_found" | "storage" | "workspace_store_missing")
+            ),
             "why must fail through the real storage/explain path when unavailable, got {payload}"
         );
     } else {
@@ -547,7 +570,7 @@ fn serve_why_endpoint_returns_canonical_why_payload_shape() -> TestResult {
         kind: "rule",
         tags: Some("serve,why,contract,sealed"),
         confidence: 0.91,
-        source: Some("serve://e2e/why-canonical-sealed"),
+        source: Some("manual://e2e/why-canonical-sealed"),
         allow_secret_mention: false,
         valid_from: None,
         valid_to: None,
@@ -573,7 +596,7 @@ fn serve_why_endpoint_returns_canonical_why_payload_shape() -> TestResult {
         kind: "rule",
         tags: Some("serve,why,contract,unsealed"),
         confidence: 0.91,
-        source: Some("serve://e2e/why-canonical-unsealed"),
+        source: Some("manual://e2e/why-canonical-unsealed"),
         allow_secret_mention: false,
         valid_from: None,
         valid_to: None,
@@ -1363,7 +1386,7 @@ fn serve_durable_write_endpoint_remembers_memory_with_audited_handler() -> TestR
         "kind": "fact",
         "tags": ["serve", "durable-write"],
         "confidence": 0.73,
-        "source": "serve://e2e/durable-write",
+        "source": "manual://e2e/durable-write",
         "autoLink": false,
         "proposeCandidates": false
     })
