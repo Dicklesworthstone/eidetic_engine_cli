@@ -89309,6 +89309,7 @@ demos:
             .insert_memory(
                 &hostile_memory_id,
                 &crate::db::CreateMemoryInput {
+                    workspace_id: foreign_workspace_id.to_owned(),
                     level: "procedural".to_owned(),
                     kind: "rule".to_owned(),
                     content: format!("private credential {SECRET}"),

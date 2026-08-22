@@ -2351,6 +2351,10 @@ fn saturating_len(len: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    // Test callers bind the canonical id helper through a local alias so the
+    // production module keeps zero wrapper surface (de27bdab removed the
+    // unused prod wrapper; these four call sites remained).
+    use crate::core::workspace::stable_workspace_id;
     #[cfg(unix)]
     use std::fs;
     #[cfg(unix)]
