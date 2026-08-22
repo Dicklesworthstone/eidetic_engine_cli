@@ -1506,7 +1506,7 @@ fn serve_durable_write_endpoint_remembers_memory_with_audited_handler() -> TestR
     assert_eq!(result["kind"].as_str(), Some("fact"));
     assert_eq!(result["persisted"].as_bool(), Some(true));
     assert_eq!(result["dryRun"].as_bool(), Some(false));
-    assert_eq!(result["redactionStatus"].as_str(), Some("accepted"));
+    assert_eq!(result["redactionStatus"].as_str(), Some("checked"));
     if result["memoryId"].as_str().is_none() {
         return Err(format!(
             "durable remember must return a memoryId: {payload}"
