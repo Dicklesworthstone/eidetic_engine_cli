@@ -635,6 +635,7 @@ fn decode_unpadded_base64url(input: &str) -> Result<Vec<u8>, ()> {
     Ok(output)
 }
 
+#[cfg(test)]
 #[must_use]
 pub(crate) fn encode_unpadded_base64url(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";

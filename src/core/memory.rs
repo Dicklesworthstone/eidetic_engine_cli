@@ -33,14 +33,15 @@ use super::search::{SearchOptions, SearchStatus, run_search};
 use crate::config::{ConfigFile, GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY};
 use crate::curate::cluster_coherence::{ClusterCoherenceConfig, EmbeddingPoint, agglomerate};
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
+#[cfg(test)]
+use crate::db::CreateWorkspaceInput;
 use crate::db::{
     AdvisoryLockId, ApplyMemoryLevelTransitionInput, CreateAuditInput,
     CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateMemoryInput,
     CreateMemoryLinkInput, CreateRememberIdempotencyKeyInput, CreateSearchIndexJobInput,
-    CreateSessionInput, CreateWorkspaceInput, DbConnection, DbOperation, EvidenceProducerKind,
-    MemoryContentSimHash, MemoryLinkRelation, MemoryLinkSource, SearchIndexJobStatus,
-    SearchIndexJobType, StoredMemory, StoredMemoryLink, audit_actions, generate_audit_id,
-    generate_audit_id_seeded,
+    CreateSessionInput, DbConnection, DbOperation, EvidenceProducerKind, MemoryContentSimHash,
+    MemoryLinkRelation, MemoryLinkSource, SearchIndexJobStatus, SearchIndexJobType, StoredMemory,
+    StoredMemoryLink, audit_actions, generate_audit_id, generate_audit_id_seeded,
 };
 use crate::models::{
     DomainError, GLOBAL_MEMORY_SCOPE_TAG, KNOWN_MEMORY_KINDS, KNOWN_MEMORY_LEVELS, MAX_TAG_BYTES,

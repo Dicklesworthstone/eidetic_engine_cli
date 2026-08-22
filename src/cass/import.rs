@@ -2257,10 +2257,6 @@ fn invalid_since(value: &str, message: &str) -> CassImportError {
     }
 }
 
-fn stable_workspace_id(path: &str) -> String {
-    crate::core::workspace::stable_workspace_id(Path::new(path))
-}
-
 fn stable_session_id(workspace_id: &str, source_path: &str) -> String {
     SessionId::from_uuid(stable_uuid(&format!(
         "session:{workspace_id}:{source_path}"

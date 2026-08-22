@@ -78353,6 +78353,9 @@ mod tests {
             "Control output fields by preset or comma-separated canonical names",
             "help documents --fields placement",
         )?;
+        let orient_pos = stdout
+            .find("  orient ")
+            .ok_or_else(|| "help orient position missing".to_string())?;
         let init_pos = stdout
             .find("  init ")
             .ok_or_else(|| "help init position missing".to_string())?;

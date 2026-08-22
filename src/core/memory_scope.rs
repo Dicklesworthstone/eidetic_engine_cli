@@ -5,9 +5,10 @@ use std::str::FromStr;
 
 use serde_json::{Value as JsonValue, json};
 
+#[cfg(test)]
+use crate::config::ConfigFile;
 use crate::config::{
-    ConfigFile, EnvVar, MeshLane, MeshLaneDecision, MeshLaneGrants, MeshPeerGroupBinding,
-    read_env_var,
+    EnvVar, MeshLane, MeshLaneDecision, MeshLaneGrants, MeshPeerGroupBinding, read_env_var,
 };
 use crate::db::StoredMemory;
 use crate::models::{MemoryScope, MemoryScopeStats, TrustClass, memory_tags_include_global_scope};

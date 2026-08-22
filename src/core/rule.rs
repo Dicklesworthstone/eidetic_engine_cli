@@ -18,11 +18,13 @@ use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
 };
 use crate::curate::{CandidateSource, CandidateType, specificity_score};
+#[cfg(test)]
+use crate::db::CreateWorkspaceInput;
 use crate::db::{
     CreateAuditInput, CreateCurationCandidateInput, CreateProceduralRuleInput,
-    CreateSearchIndexJobInput, CreateWorkspaceInput, DbConnection, SearchIndexJobType,
-    StoredMemory, StoredProceduralRule, UpdateProceduralRuleInput,
-    UpdateProceduralRuleLifecycleInput, audit_actions, generate_audit_id,
+    CreateSearchIndexJobInput, DbConnection, SearchIndexJobType, StoredMemory,
+    StoredProceduralRule, UpdateProceduralRuleInput, UpdateProceduralRuleLifecycleInput,
+    audit_actions, generate_audit_id,
 };
 use crate::models::{
     CandidateId, DomainError, MemoryContent, MemoryId, RuleId, RuleLifecycleEvidence,

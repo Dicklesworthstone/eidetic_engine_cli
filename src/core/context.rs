@@ -14639,6 +14639,8 @@ pub fn unrelated_context() -> u64 {{
                     // graph_snapshots enforces UNIQUE(workspace_id, graph_type,
                     // snapshot_version); this second seed-set fixture row must
                     // occupy its own version slot.
+                    schema_version: "ee.graph.snapshot.v1".to_string(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
                     snapshot_version: 2,
                     node_count: 3,
                     edge_count: 2,

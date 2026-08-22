@@ -3846,7 +3846,7 @@ fn peer_conflict_items_from_memories(
             "count": unassessed,
         }));
     }
-    items.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+    items.sort_by_key(|item| item.to_string());
     items
 }
 
