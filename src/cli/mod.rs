@@ -72187,8 +72187,7 @@ mod tests {
         let db_path = std::path::Path::new(&workspace).join(".ee").join("ee.db");
         let connection = crate::db::DbConnection::open_file(&db_path)
             .map_err(|error| format!("advisory fixture db open failed: {error}"))?;
-        let requested =
-            crate::core::curate::stable_workspace_id(std::path::Path::new(&workspace));
+        let requested = crate::core::curate::stable_workspace_id(std::path::Path::new(&workspace));
         let workspace_id = crate::core::workspace::bound_workspace_id_or_hash(
             &connection,
             &requested,
@@ -72197,7 +72196,7 @@ mod tests {
         .map_err(|error| format!("advisory fixture workspace bind failed: {error}"))?;
         connection
             .insert_model_registry_entry(
-                "mdl_advisory_lifecycle_broken",
+                "mdl_advisory_lifecycle_broken2",
                 &crate::db::CreateModelRegistryInput {
                     workspace_id,
                     provider: crate::models::ModelProvider::FastEmbed,
