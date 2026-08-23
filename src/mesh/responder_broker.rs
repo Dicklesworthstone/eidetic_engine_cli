@@ -3849,7 +3849,7 @@ fn load_sync_round_response(
     if let Some(database_path) = route.and_then(|route| route.database_path.clone())
         && let Ok(connection) = DbConnection::open_file_read_only(database_path)
     {
-        let limit = max_events.max(1).min(512);
+        let limit = max_events.clamp(1, 512);
         if let Ok(rows) =
             connection.list_mesh_origin_events(&team_id, &origin_node_id, range_start_seq, limit)
         {

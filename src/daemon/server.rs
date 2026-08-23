@@ -236,13 +236,16 @@ impl<'a> PendingSearchAdvisoryDelivery<'a> {
             reservation: Some(reservation),
         }
     }
-
+    // The reservation is Some from construction until `finish`/`Drop` takes it;
+    // no other path can empty it (same invariant class as lock_linearization_gate).
+    #[allow(clippy::expect_used)]
     fn reservation_mut(&mut self) -> &mut SearchAdvisoryDeliveryReservation {
         self.reservation
             .as_mut()
             .expect("pending advisory delivery must retain its reservation")
     }
 
+    #[allow(clippy::expect_used)]
     fn finish(
         mut self,
         response: DaemonResponse,

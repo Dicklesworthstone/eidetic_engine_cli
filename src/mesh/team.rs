@@ -1813,7 +1813,7 @@ fn load_invite_first_sync_events(
     range_start_seq: u64,
     max_events: u32,
 ) -> Result<Vec<SyncRoundEvent>, OriginStreamError> {
-    let limit = max_events.max(1).min(512);
+    let limit = max_events.clamp(1, 512);
     let rows = connection
         .list_mesh_origin_events(team_id, origin_node_id, range_start_seq, limit)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
@@ -2195,7 +2195,7 @@ pub fn share_team_history(
         .into_iter()
         .next()
         .ok_or_else(|| OriginStreamError::Encode("no local team genesis".to_owned()))?;
-    let cap = limit.max(1).min(256);
+    let cap = limit.clamp(1, 256);
     let memories = connection
         .list_memories(workspace_id, None, false)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
@@ -3061,7 +3061,7 @@ pub fn share_team_bodies_represented(
         .into_iter()
         .next()
         .ok_or_else(|| OriginStreamError::Encode("no local team genesis".to_owned()))?;
-    let cap = limit.max(1).min(256);
+    let cap = limit.clamp(1, 256);
     let memories = connection
         .list_memories(workspace_id, None, false)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
@@ -6006,7 +6006,7 @@ pub fn list_team_activity(
         .into_iter()
         .next()
         .ok_or_else(|| OriginStreamError::Encode("no local team genesis".to_owned()))?;
-    let cap = limit.max(1).min(1000);
+    let cap = limit.clamp(1, 1000);
     let members = connection
         .list_all_team_members()
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
@@ -7049,14 +7049,10 @@ pub fn persist_granted_join_with_store(
     workspace_path: Option<&std::path::Path>,
     inviter_verifying_key: Option<&str>,
 ) -> Result<TeamJoinReport, OriginStreamError> {
-    if load_local_teams(connection)?
-        .iter()
-        .any(|team| team.team_id == granted.team_id)
+    if let Some(team) = load_local_teams(connection)?
+        .into_iter()
+        .find(|team| team.team_id == granted.team_id)
     {
-        let team = load_local_teams(connection)?
-            .into_iter()
-            .find(|team| team.team_id == granted.team_id)
-            .expect("just checked");
         return Ok(TeamJoinReport {
             schema: TEAM_JOIN_SCHEMA_V1,
             command: "team join",

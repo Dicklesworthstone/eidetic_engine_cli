@@ -371,7 +371,7 @@ impl SyncRoundRequest {
             schema: SYNC_ROUND_SCHEMA_V1.to_owned(),
             tips,
             range_start_seq,
-            max_events: max_events.max(1).min(512),
+            max_events: max_events.clamp(1, 512),
         }
     }
 }

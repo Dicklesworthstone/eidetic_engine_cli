@@ -428,7 +428,7 @@ pub fn set_focus(options: &FocusSetOptions) -> Result<FocusReport, DomainError> 
     ensure_capacity(options.capacity)?;
     let loaded = load_focus(options.workspace_path.as_path())?;
     let before_hash = state_hash(&loaded.state);
-    let workspace_id = stable_workspace_id(&loaded.workspace_path);
+    let workspace_id = stable_workspace_id(&loaded.workspace_path)?;
     let now = Utc::now().to_rfc3339();
     let parsed_memory_ids = parse_memory_ids(&options.memory_ids)?;
     let focal_memory_id = parse_optional_memory_id(options.focal_memory_id.as_deref())?;
@@ -631,7 +631,7 @@ pub fn clear_focus(options: &FocusClearOptions) -> Result<FocusReport, DomainErr
     let capacity = options.capacity.unwrap_or(loaded.state.capacity);
     ensure_capacity(capacity)?;
     let mut state = FocusState::new(
-        stable_workspace_id(&loaded.workspace_path),
+        stable_workspace_id(&loaded.workspace_path)?,
         capacity,
         Utc::now().to_rfc3339(),
     )
@@ -1197,7 +1197,7 @@ fn stored_focus_state_to_domain(stored: StoredFocusState) -> Result<FocusState, 
 
 fn empty_focus_state(workspace_path: &Path, capacity: usize) -> Result<FocusState, DomainError> {
     FocusState::new(
-        stable_workspace_id(workspace_path),
+        stable_workspace_id(workspace_path)?,
         capacity,
         UNSET_FOCUS_TIMESTAMP,
     )
@@ -1208,9 +1208,13 @@ fn normalize_workspace_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn stable_workspace_id(workspace_path: &Path) -> WorkspaceId {
-    WorkspaceId::from_str(&crate::core::workspace::stable_workspace_id(workspace_path))
-        .expect("workspace hasher always emits a valid WorkspaceId")
+fn stable_workspace_id(workspace_path: &Path) -> Result<WorkspaceId, DomainError> {
+    WorkspaceId::from_str(&crate::core::workspace::stable_workspace_id(workspace_path)).map_err(
+        |error| DomainError::Storage {
+            message: format!("Derived workspace id rejected: {error}"),
+            repair: Some("Report this as a bug: the workspace hasher must emit a valid WorkspaceId.".to_owned()),
+        },
+    )
 }
 
 fn parse_memory_ids(raw_ids: &[String]) -> Result<Vec<MemoryId>, DomainError> {
