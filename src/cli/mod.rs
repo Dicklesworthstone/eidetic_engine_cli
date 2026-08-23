@@ -68615,6 +68615,35 @@ mod tests {
             ));
         }
 
+        // A fresh store no longer manufactures degradations: the bundled
+        // embedder is auto-registered (so DEG_NO_REGISTRY_ENTRIES cannot
+        // fire) and an absent reranker stays silent until one is actually
+        // registered (bd-degraded-advisory-noise lifecycle). Exercise a
+        // real degradation instead: a registered-but-unavailable reranker
+        // must surface rerank_model_missing in both reports.
+        let fixture_database = workspace.join(".ee").join("ee.db");
+        let fixture_connection = crate::db::DbConnection::open_file(&fixture_database)
+            .map_err(|error| format!("open model renderer fixture database: {error}"))?;
+        let fixture_workspace_id = crate::core::workspace::stable_workspace_id(workspace);
+        fixture_connection
+            .insert_model_registry_entry(
+                "mreg_model_parity_unavailable_reranker_fixture",
+                &crate::db::CreateModelRegistryInput {
+                    workspace_id: fixture_workspace_id,
+                    provider: crate::models::model_registry::ModelProvider::Hash,
+                    model_name: "model-parity-fixture-reranker".to_owned(),
+                    purpose: crate::models::model_registry::ModelPurpose::Reranker,
+                    dimension: None,
+                    distance_metric: None,
+                    status: crate::models::model_registry::ModelRegistryStatus::Unavailable,
+                    version: None,
+                    source_uri: None,
+                    content_hash: None,
+                    metadata_json: None,
+                    last_checked_at: None,
+                },
+            )
+            .map_err(|error| format!("insert unavailable reranker fixture: {error}"))?;
         let status = crate::core::model::build_model_status_report(
             &crate::core::model::ModelStatusOptions {
                 workspace_path: workspace,
