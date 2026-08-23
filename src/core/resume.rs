@@ -53,7 +53,18 @@ pub const OPEN_LOOP_TAGS: [&str; 6] = ["next", "queue", "blocking", "pending", "
 /// it. The budget must absorb scheduler starvation on loaded machines before
 /// child probes run; truncation with zero candidates is the one outcome this
 /// recovery surface exists to prevent.
-pub const RESUME_NEARBY_SCAN_BUDGET_MS: u64 = 750;
+///
+/// Calibrated against measurement, not intuition: on RCH workers a seeded
+/// one-store fixture deterministically spends ~700ms inside
+/// `inspect_nearby_store_candidate` alone (store open + probe under the
+/// fsqlite cooperative-checkpoint path), so the previous 750ms budget
+/// expired at or before the single candidate was published — the recovery
+/// scenario always degraded to `truncated` with an empty store list. The
+/// in-repo unit twin of this scan runs its assertions under a 10s budget for
+/// the same slow-disk reason. 2000ms keeps the full find+inspect+registry
+/// sequence inside the window with headroom while leaving the populated
+/// resume path (which skips discovery entirely) untouched.
+pub const RESUME_NEARBY_SCAN_BUDGET_MS: u64 = 2000;
 /// Cap on open-loop tagged items and staleness flags.
 const OPEN_LOOP_CAP: usize = 32;
 /// Base commands plus one discovery diagnostic and one ranked retarget.
