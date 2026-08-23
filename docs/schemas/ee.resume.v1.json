@@ -127,13 +127,28 @@
           "maxItems": 5,
           "items": {
             "type": "object",
-            "required": ["workspaceRoot", "storeDir", "documents", "lastWrite"],
+            "required": [
+              "workspaceRoot",
+              "storeDir",
+              "documents",
+              "lastWrite",
+              "provenance"
+            ],
             "additionalProperties": false,
             "properties": {
               "workspaceRoot": { "type": "string", "minLength": 1, "maxLength": 4096 },
               "storeDir": { "type": "string", "minLength": 1, "maxLength": 4096 },
               "documents": { "type": "integer", "minimum": 0 },
-              "lastWrite": { "type": ["string", "null"], "format": "date-time" }
+              "lastWrite": { "type": ["string", "null"], "format": "date-time" },
+              "provenance": {
+                "type": "string",
+                "enum": [
+                  "workspace_root",
+                  "child_scan",
+                  "parent_scan",
+                  "workspace_registry"
+                ]
+              }
             }
           }
         },

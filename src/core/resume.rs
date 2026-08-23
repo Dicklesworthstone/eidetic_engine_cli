@@ -170,8 +170,49 @@ pub struct ResumeReport {
     /// Unique stale memory IDs across every rendered projection.
     pub stale_count: usize,
     /// Populated when the store has nothing episodic to resume from.
+    #[serde(serialize_with = "serialize_nearby_stores_with_provenance")]
     pub nearby_stores: Option<NearbyStoreScanAssessment>,
     pub next_commands: Vec<String>,
+}
+
+/// Resume-surface wire shape for nearby-store discovery: the shared
+/// assessment rendering plus a per-store `provenance` discriminator
+/// (`child_scan` | `parent_scan` | `workspace_root` | `workspace_registry`).
+/// A resuming agent must be able to tell a locally proved candidate from a
+/// registry assertion, so this recovery surface pins provenance in its
+/// contract; the shared [`NearbyStoreScanAssessment`] type itself keeps
+/// provenance out of orient/status wires by design (see
+/// `NearbyStore::provenance`).
+fn serialize_nearby_stores_with_provenance<S>(
+    assessment: &Option<NearbyStoreScanAssessment>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeStruct;
+    let Some(scan) = assessment else {
+        return serializer.serialize_none();
+    };
+    let stores: Vec<serde_json::Value> = scan
+        .stores
+        .iter()
+        .map(|store| {
+            let mut value = serde_json::to_value(store)
+                .map_err(|error| serde::ser::Error::custom(error.to_string()))?;
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "provenance".to_owned(),
+                    serde_json::Value::String(store.provenance.as_str().to_owned()),
+                );
+            }
+            value
+        })
+        .collect();
+    let mut state = serializer.serialize_struct("NearbyStoreScanAssessment", 2)?;
+    state.serialize_field("stores", &stores)?;
+    state.serialize_field("outcome", &scan.outcome)?;
+    state.end()
 }
 
 fn parse_ts(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
