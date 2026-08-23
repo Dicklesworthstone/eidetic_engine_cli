@@ -94,8 +94,10 @@ fn assert_cli_preflight_run_stdout_clean(args: &[&str], display: &str, code: &st
     let started = Instant::now();
     trace_trauma_guard_preflight_contract("dispatch", 0, &[]);
 
-    let output = crate::common_spawn::serialized_real_ee_with(|command| command.args(args))
-        .map_err(|error| format!("failed to run ee {display}: {error}"))?;
+    let output = crate::common_spawn::serialized_real_ee_with(|command| {
+        command.args(args);
+    })
+    .map_err(|error| format!("failed to run ee {display}: {error}"))?;
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("stdout was not UTF-8 for ee {display}: {error}"))?;
     let stderr = String::from_utf8(output.stderr)
@@ -135,8 +137,10 @@ fn assert_cli_preflight_run_stdout_clean(args: &[&str], display: &str, code: &st
 }
 
 fn assert_cli_tripwire_not_found_stdout_clean(args: &[&str], display: &str) -> TestResult {
-    let output = crate::common_spawn::serialized_real_ee_with(|command| command.args(args))
-        .map_err(|error| format!("failed to run ee {display}: {error}"))?;
+    let output = crate::common_spawn::serialized_real_ee_with(|command| {
+        command.args(args);
+    })
+    .map_err(|error| format!("failed to run ee {display}: {error}"))?;
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("stdout was not UTF-8 for ee {display}: {error}"))?;
     let stderr = String::from_utf8(output.stderr)
