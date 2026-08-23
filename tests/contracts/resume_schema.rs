@@ -550,7 +550,7 @@ fn real_binary_resume_retains_locally_proved_candidate_when_registry_is_unavaila
         cold_text.clone(),
         "--json".to_owned(),
     ];
-    let report = run_until_proved(REAL_BINARY_RESUME_ATTEMPTS, || {
+    run_until_proved(REAL_BINARY_RESUME_ATTEMPTS, || {
         let json_output = run_real_ee_with_registry(&json_args, &invalid_registry)?;
         ensure_real_ee_success(&json_output, "real JSON ee resume with partial registry")?;
         let response = real_ee_stdout_json(&json_output, "partial-registry resume")?;
@@ -598,7 +598,7 @@ fn real_binary_resume_retains_locally_proved_candidate_when_registry_is_unavaila
         Ok(report.clone())
     })?;
 
-    let human = run_until_proved(REAL_BINARY_RESUME_ATTEMPTS, || {
+    run_until_proved(REAL_BINARY_RESUME_ATTEMPTS, || {
         let human_args = vec![
             "resume".to_owned(),
             "--workspace".to_owned(),

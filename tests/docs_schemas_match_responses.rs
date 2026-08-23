@@ -2358,7 +2358,7 @@ fn stale_search_response_with_structured_freshness_matches_public_schema() -> Te
 #[test]
 fn search_schema_closes_rerank_advisory_and_rejects_fake_automatic_repairs() -> TestResult {
     let schema = schema_doc("ee.search.v1")?;
-    let mut response = read_json(&fixture_path(
+    let response = read_json(&fixture_path(
         "golden/agent/search_deterministic_ranking.json.golden",
     ))?;
     if response
