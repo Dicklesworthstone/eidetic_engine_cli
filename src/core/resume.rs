@@ -206,9 +206,9 @@ where
                     serde_json::Value::String(store.provenance.as_str().to_owned()),
                 );
             }
-            value
+            Ok(value)
         })
-        .collect();
+        .collect::<Result<Vec<_>, S::Error>>()?;
     let mut state = serializer.serialize_struct("NearbyStoreScanAssessment", 2)?;
     state.serialize_field("stores", &stores)?;
     state.serialize_field("outcome", &scan.outcome)?;
