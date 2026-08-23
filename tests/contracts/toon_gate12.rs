@@ -86,6 +86,7 @@ fn run_ee_with_env(
             command.env(key, value);
         }
     })
+    .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
 fn parse_response_schema(stdout: &[u8], context: &str) -> Result<String, String> {
