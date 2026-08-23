@@ -7713,6 +7713,7 @@ fn resolve_search_rerank_runtime(
         }
     };
     let resolved = match resolution_result {
+        Ok(RegisteredRerankerResolution::Loaded(resolved)) => resolved,
         Ok(RegisteredRerankerResolution::Absent | RegisteredRerankerResolution::HashRejected) => {
             // Absent: nothing registered. HashRejected: a reranker row is
             // present but its stored hash cannot match this build's bundled
@@ -7818,25 +7819,45 @@ pub(crate) fn resolve_registered_reranker(
     if entries.is_empty() {
         return Ok(RegisteredRerankerResolution::Absent);
     }
+    // `Err(hash_rejected)` classifies an all-failed pass: a rejected stored
+    // hash is deterministic and not retryable, while a plain load failure is
+    // the retryable unavailable posture.
+    match first_loadable_registered_reranker(&entries, |entry| {
+        verify_reranker_registry_hash(entry).ok()?;
+        load_verified_search_reranker(entry).ok()
+    }) {
+        Ok((entry, reranker)) => Ok(RegisteredRerankerResolution::Loaded(
+            ResolvedRegisteredReranker { entry, reranker },
+        )),
+        Err(hash_rejected) => Ok(if hash_rejected {
+            RegisteredRerankerResolution::HashRejected
+        } else {
+            RegisteredRerankerResolution::Unloadable
+        }),
+    }
+}
+
+/// Deterministic skip-broken-first pass over sorted available reranker rows.
+/// The loader receives every surviving row in order; the first `Some` wins.
+/// `Err(true)` means at least one row failed its bundled-manifest hash gate
+/// before the pass exhausted, which callers surface as HashRejected.
+fn first_loadable_registered_reranker<T>(
+    entries: &[StoredModelRegistryEntry],
+    mut load: impl FnMut(&StoredModelRegistryEntry) -> Option<T>,
+) -> Result<(StoredModelRegistryEntry, T), bool> {
     let mut hash_rejected = false;
     for entry in entries {
-        if verify_reranker_registry_hash(&entry).is_err() {
+        if verify_reranker_registry_hash(entry).is_err() {
             // Keep scanning: a later row may still load, but a rejected hash
             // is remembered so an all-failed pass classifies deterministically.
             hash_rejected = true;
             continue;
         }
-        if let Ok(reranker) = load_verified_search_reranker(&entry) {
-            return Ok(RegisteredRerankerResolution::Loaded(
-                ResolvedRegisteredReranker { entry, reranker },
-            ));
+        if let Some(loaded) = load(entry) {
+            return Ok((entry.clone(), loaded));
         }
     }
-    if hash_rejected {
-        Ok(RegisteredRerankerResolution::HashRejected)
-    } else {
-        Ok(RegisteredRerankerResolution::Unloadable)
-    }
+    Err(hash_rejected)
 }
 
 fn sorted_available_reranker_entries(
@@ -18759,19 +18780,28 @@ mod tests {
 
     #[test]
     fn doctor_and_search_resolution_skip_broken_first_for_valid_second() {
+        let bundled = crate::core::model::bundled_rerank_model_manifest()
+            .expect("bundled rerank manifest must be readable");
+        let valid_hash = format!("blake3:{}", bundled.hash_blake3);
+
+        let mut broken_first = registered_reranker_entry(
+            "mdl_broken_first",
+            "a-broken",
+            ModelPurpose::Reranker,
+            ModelRegistryStatus::Available,
+        );
+        broken_first.content_hash = Some("blake3:00000000000000000000000000000000".to_owned());
+        let mut valid_second = registered_reranker_entry(
+            "mdl_valid_second",
+            "b-valid",
+            ModelPurpose::Reranker,
+            ModelRegistryStatus::Available,
+        );
+        valid_second.content_hash = Some(valid_hash);
+
         let entries = vec![
-            registered_reranker_entry(
-                "mdl_valid_second",
-                "b-valid",
-                ModelPurpose::Reranker,
-                ModelRegistryStatus::Available,
-            ),
-            registered_reranker_entry(
-                "mdl_broken_first",
-                "a-broken",
-                ModelPurpose::Reranker,
-                ModelRegistryStatus::Available,
-            ),
+            valid_second,
+            broken_first,
             registered_reranker_entry(
                 "mdl_unavailable",
                 "0-unavailable",
@@ -18786,18 +18816,30 @@ mod tests {
             ),
         ];
         let entries = sorted_available_reranker_entries(entries);
+        assert_eq!(
+            entries.iter().map(|entry| entry.model_name.as_str()).collect::<Vec<_>>(),
+            vec!["a-broken", "b-valid"],
+            "only available reranker rows survive, sorted deterministically"
+        );
+        assert!(verify_reranker_registry_hash(&entries[0]).is_err());
+        assert!(verify_reranker_registry_hash(&entries[1]).is_ok());
+
         let mut attempts = Vec::new();
-        let (selected, loaded) = first_loadable_registered_reranker(entries, |entry| {
+        let (selected, loaded) = first_loadable_registered_reranker(&entries, |entry| {
             attempts.push(entry.model_name.clone());
             if entry.model_name == "b-valid" {
-                Ok("loaded-valid-second")
+                Some("loaded-valid-second")
             } else {
-                Err("broken-first")
+                None
             }
         })
-        .expect("the deterministic resolver must continue after the broken first entry");
+        .expect("the deterministic resolver must continue after the hash-rejected first entry");
 
-        assert_eq!(attempts, vec!["a-broken", "b-valid"]);
+        assert_eq!(
+            attempts,
+            vec!["b-valid"],
+            "hash-rejected first row is skipped before the loader runs"
+        );
         assert_eq!(selected.model_name, "b-valid");
         assert_eq!(loaded, "loaded-valid-second");
     }
