@@ -21,7 +21,6 @@ use serde_json::Value as JsonValue;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 type TestResult = Result<(), String>;
 
@@ -356,10 +355,7 @@ fn close_inconclusive_fixture() -> Result<String, String> {
 }
 
 fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee(args)
 }
 
 fn unique_workspace_dir(prefix: &str) -> Result<PathBuf, String> {

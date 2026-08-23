@@ -30,7 +30,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::PathBuf;
-use std::process::Command;
 
 use ee::db::DbConnection;
 use ee::models::memory::Tag;
@@ -38,10 +37,6 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 type TestResult = Result<(), String>;
-
-fn ee_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_ee")
-}
 
 struct InitializedWorkspace {
     _dir: TempDir,
@@ -65,12 +60,13 @@ fn init_workspace() -> Result<InitializedWorkspace, String> {
 }
 
 fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
-    Command::new(ee_binary())
-        .args(args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
-        .output()
-        .map_err(|error| format!("spawn ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee_with(|command| {
+        command
+            .args(args)
+            .env_remove("EE_WORKSPACE")
+            .env_remove("EE_WORKSPACE_REGISTRY");
+    })
+    .map_err(|error| format!("spawn ee {}: {error}", args.join(" ")))
 }
 
 fn parse_error_envelope(out: &std::process::Output) -> Result<Value, String> {

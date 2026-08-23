@@ -3,7 +3,6 @@
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 use ee::core::certificate::{
     CERTIFICATE_MANIFEST_SCHEMA_V1, CERTIFICATE_PAYLOAD_SCHEMA_V1,
@@ -84,10 +83,7 @@ fn pretty(value: &Value) -> Result<String, String> {
 }
 
 fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee(args)
 }
 
 fn parse_stdout_json(output: &std::process::Output) -> Result<Value, String> {

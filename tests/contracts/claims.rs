@@ -5,7 +5,6 @@
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 use ee::core::claims::{
     CLAIM_VERIFY_SCHEMA_V1, ClaimListOptions, ClaimShowOptions, ClaimVerifyOptions,
@@ -69,10 +68,7 @@ fn unique_claim_workspace(label: &str) -> Result<PathBuf, String> {
 }
 
 fn run_ee(args: &[String]) -> Result<std::process::Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee(args)
 }
 
 fn parse_stdout_json(output: &std::process::Output) -> Result<Value, String> {

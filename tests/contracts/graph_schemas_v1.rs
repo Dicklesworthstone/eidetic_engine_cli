@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use ee::db::{
     CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
@@ -87,12 +87,13 @@ fn repo_root() -> PathBuf {
 }
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee_with(|command| {
+        command
+            .args(args)
+            .env_remove("EE_WORKSPACE")
+            .env_remove("EE_WORKSPACE_REGISTRY");
+    })
+    .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
 fn stdout_json(output: &Output, context: &str) -> Result<Value, String> {
@@ -1986,17 +1987,15 @@ impl KnowledgeGapsFixture {
         hmac_key_path: &Path,
     ) -> Result<Value, String> {
         let args = recommendation_command_args(command)?;
-        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
-            .args(args)
-            .current_dir(&self.workspace)
-            .env_remove("EE_WORKSPACE")
-            .env_remove("EE_WORKSPACE_REGISTRY")
-            .env("EE_REFLECTION_HMAC_KEY_ID", "bd-3bsvv-contract-key")
-            .env("EE_REFLECTION_HMAC_KEY_PATH", hmac_key_path)
-            .output()
-            .map_err(|error| {
-                format!("failed to run recommendation command `{command}`: {error}")
-            })?;
+        let output = crate::common_spawn::serialized_real_ee_with(|bin| {
+            bin.args(args)
+                .current_dir(&self.workspace)
+                .env_remove("EE_WORKSPACE")
+                .env_remove("EE_WORKSPACE_REGISTRY")
+                .env("EE_REFLECTION_HMAC_KEY_ID", "bd-3bsvv-contract-key")
+                .env("EE_REFLECTION_HMAC_KEY_PATH", hmac_key_path);
+        })
+        .map_err(|error| format!("failed to run recommendation command `{command}`: {error}"))?;
         stdout_json(&output, "knowledgeGaps reflect propose recommendation")
     }
 

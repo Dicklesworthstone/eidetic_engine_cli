@@ -18,24 +18,21 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use ee::db::{DbConnection, MIGRATIONS, MigrationRecord, audit_actions};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
-fn ee_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_ee")
-}
-
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(ee_binary())
-        .args(args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee_with(|command| {
+        command
+            .args(args)
+            .env_remove("EE_WORKSPACE")
+            .env_remove("EE_WORKSPACE_REGISTRY");
+    })
+    .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
 fn parse_stdout(output: &Output, context: &str) -> Result<Value, String> {

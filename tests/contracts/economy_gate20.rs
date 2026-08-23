@@ -11,7 +11,7 @@ use ee::db::{CreateFeedbackEventInput, CreateMemoryInput, CreateWorkspaceInput, 
 use ee::models::WorkspaceId;
 use serde_json::Value as JsonValue;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 type TestResult = Result<(), String>;
 const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 6;
@@ -34,10 +34,7 @@ fn ensure_json_equal(actual: Option<&JsonValue>, expected: JsonValue, context: &
 }
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee(args)
 }
 
 struct EconomyDbFixture {

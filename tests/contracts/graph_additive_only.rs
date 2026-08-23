@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
 use ee::db::{
@@ -339,10 +339,7 @@ fn graph_payload_for_baseline_rejects_bare_health_payload() {
 }
 
 fn run_ee(args: &[String]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee(args)
 }
 
 fn assert_additive_shape(

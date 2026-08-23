@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use chrono::{Duration, Utc};
 use ee::db::{
@@ -14,12 +14,13 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee_with(|command| {
+        command
+            .args(args)
+            .env_remove("EE_WORKSPACE")
+            .env_remove("EE_WORKSPACE_REGISTRY");
+    })
+    .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
 fn stdout_json(output: &Output, context: &str) -> Result<Value, String> {

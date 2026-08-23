@@ -10,8 +10,6 @@
 //! - Response is wrapped in `ee.response.v2`
 //! - No Tokio, rusqlite, SQLx, Diesel, SeaORM, or petgraph
 
-use std::process::Command;
-
 type TestResult = Result<(), String>;
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
@@ -30,10 +28,7 @@ fn ensure_contains(haystack: &str, needle: &str, context: &str) -> TestResult {
 }
 
 fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee(args)
 }
 
 #[test]

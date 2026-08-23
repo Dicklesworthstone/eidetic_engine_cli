@@ -18,7 +18,7 @@ use ee::models::{
 use serde_json::Value as JsonValue;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 type TestResult = Result<(), String>;
 
@@ -35,10 +35,7 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
 }
 
 fn run_ee_owned(args: &[String]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee(args)
 }
 
 fn assert_clean_machine_stdout(stdout: &str, context: &str) -> TestResult {

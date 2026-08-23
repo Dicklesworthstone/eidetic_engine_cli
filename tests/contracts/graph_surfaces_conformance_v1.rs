@@ -43,16 +43,12 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value as JsonValue;
 
 type TestResult = Result<(), String>;
-
-fn ee_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_ee")
-}
 
 fn target_root() -> PathBuf {
     env::var_os("CARGO_TARGET_TMPDIR")
@@ -75,14 +71,15 @@ fn unique_workspace(prefix: &str) -> Result<PathBuf, String> {
 }
 
 fn run_ee_with_workspace(workspace: &Path, args: &[&str]) -> Result<Output, String> {
-    Command::new(ee_binary())
-        .arg("--workspace")
-        .arg(workspace)
-        .args(args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee_with(|command| {
+        command
+            .arg("--workspace")
+            .arg(workspace)
+            .args(args)
+            .env_remove("EE_WORKSPACE")
+            .env_remove("EE_WORKSPACE_REGISTRY");
+    })
+    .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
 fn ee_stdout_string(output: Output, context: &str) -> Result<String, String> {

@@ -16,7 +16,7 @@ use serde_json::Value as JsonValue;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 type TestResult = Result<(), String>;
 
@@ -68,10 +68,7 @@ fn golden_path(name: &str) -> PathBuf {
 }
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee(args)
 }
 
 fn parse_json(raw: &str, context: &str) -> Result<JsonValue, String> {

@@ -17,7 +17,6 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value as JsonValue;
@@ -51,12 +50,10 @@ fn isolated_workspace(label: &str) -> Result<PathBuf, String> {
 }
 
 fn run_ee_in(workspace: &Path, args: &[&str]) -> Result<JsonValue, String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
-        .arg("--workspace")
-        .arg(workspace)
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))?;
+    let output = crate::common_spawn::serialized_real_ee_with(|command| {
+        command.arg("--workspace").arg(workspace).args(args);
+    })
+    .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     ensure(
         output.status.success(),
@@ -273,12 +270,10 @@ fn schema_list_unsatisfiable_shell_matches_golden() -> TestResult {
 }
 
 fn seed_memories(workspace: &Path, count: usize) -> TestResult {
-    let init = Command::new(env!("CARGO_BIN_EXE_ee"))
-        .arg("--workspace")
-        .arg(workspace)
-        .arg("init")
-        .output()
-        .map_err(|error| format!("failed to run ee init: {error}"))?;
+    let init = crate::common_spawn::serialized_real_ee_with(|command| {
+        command.arg("--workspace").arg(workspace).arg("init");
+    })
+    .map_err(|error| format!("failed to run ee init: {error}"))?;
     ensure(
         init.status.success(),
         format!(
@@ -291,19 +286,20 @@ fn seed_memories(workspace: &Path, count: usize) -> TestResult {
             "Governor contract seed memory {index:02}: deterministic retrieval corpus row \
              about the release workflow and clippy gating conventions."
         );
-        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
-            .arg("--workspace")
-            .arg(workspace)
-            .arg("remember")
-            .arg(&body)
-            .arg("--level")
-            .arg("semantic")
-            .arg("--kind")
-            .arg("fact")
-            .arg("--tags")
-            .arg("governor,contract")
-            .output()
-            .map_err(|error| format!("failed to run ee remember: {error}"))?;
+        let output = crate::common_spawn::serialized_real_ee_with(|command| {
+            command
+                .arg("--workspace")
+                .arg(workspace)
+                .arg("remember")
+                .arg(&body)
+                .arg("--level")
+                .arg("semantic")
+                .arg("--kind")
+                .arg("fact")
+                .arg("--tags")
+                .arg("governor,contract");
+        })
+        .map_err(|error| format!("failed to run ee remember: {error}"))?;
         ensure(
             output.status.success(),
             format!(
@@ -316,12 +312,10 @@ fn seed_memories(workspace: &Path, count: usize) -> TestResult {
 }
 
 fn seed_ready_revival_sentinels(workspace: &Path, count: usize) -> TestResult {
-    let init = Command::new(env!("CARGO_BIN_EXE_ee"))
-        .arg("--workspace")
-        .arg(workspace)
-        .arg("init")
-        .output()
-        .map_err(|error| format!("failed to run ee init: {error}"))?;
+    let init = crate::common_spawn::serialized_real_ee_with(|command| {
+        command.arg("--workspace").arg(workspace).arg("init");
+    })
+    .map_err(|error| format!("failed to run ee init: {error}"))?;
     ensure(
         init.status.success(),
         format!(
@@ -335,19 +329,20 @@ fn seed_ready_revival_sentinels(workspace: &Path, count: usize) -> TestResult {
         let body = format!(
             "Governor revival contract seed {index:02}: retry this distinct route after the marker appears."
         );
-        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
-            .arg("--workspace")
-            .arg(workspace)
-            .arg("remember")
-            .arg(&body)
-            .arg("--level")
-            .arg("episodic")
-            .arg("--kind")
-            .arg("failure")
-            .arg("--revive-when")
-            .arg("path_exists:ready.marker")
-            .output()
-            .map_err(|error| format!("failed to run ee remember: {error}"))?;
+        let output = crate::common_spawn::serialized_real_ee_with(|command| {
+            command
+                .arg("--workspace")
+                .arg(workspace)
+                .arg("remember")
+                .arg(&body)
+                .arg("--level")
+                .arg("episodic")
+                .arg("--kind")
+                .arg("failure")
+                .arg("--revive-when")
+                .arg("path_exists:ready.marker");
+        })
+        .map_err(|error| format!("failed to run ee remember: {error}"))?;
         ensure(
             output.status.success(),
             format!(
@@ -360,12 +355,10 @@ fn seed_ready_revival_sentinels(workspace: &Path, count: usize) -> TestResult {
 }
 
 fn seed_journal_entries(workspace: &Path, count: usize) -> TestResult {
-    let init = Command::new(env!("CARGO_BIN_EXE_ee"))
-        .arg("--workspace")
-        .arg(workspace)
-        .arg("init")
-        .output()
-        .map_err(|error| format!("failed to run ee init: {error}"))?;
+    let init = crate::common_spawn::serialized_real_ee_with(|command| {
+        command.arg("--workspace").arg(workspace).arg("init");
+    })
+    .map_err(|error| format!("failed to run ee init: {error}"))?;
     ensure(
         init.status.success(),
         format!(
@@ -378,17 +371,18 @@ fn seed_journal_entries(workspace: &Path, count: usize) -> TestResult {
             "Governor journal contract seed entry {index:02}: {}",
             "release workflow output governor continuation cursor ".repeat(12)
         );
-        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
-            .arg("--workspace")
-            .arg(workspace)
-            .arg("journal")
-            .arg("append")
-            .arg(&body)
-            .arg("--session")
-            .arg("governor-contract")
-            .arg("--json")
-            .output()
-            .map_err(|error| format!("failed to run ee journal append: {error}"))?;
+        let output = crate::common_spawn::serialized_real_ee_with(|command| {
+            command
+                .arg("--workspace")
+                .arg(workspace)
+                .arg("journal")
+                .arg("append")
+                .arg(&body)
+                .arg("--session")
+                .arg("governor-contract")
+                .arg("--json");
+        })
+        .map_err(|error| format!("failed to run ee journal append: {error}"))?;
         ensure(
             output.status.success(),
             format!(

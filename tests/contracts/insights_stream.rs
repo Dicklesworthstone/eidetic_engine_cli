@@ -8,13 +8,14 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 fn run_ee(args: &[&str]) -> Result<String, String> {
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
-        .env_remove("EE_LOG_JSON")
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))?;
+    let output = crate::common_spawn::serialized_real_ee_with(|command| {
+        command
+            .args(args)
+            .env_remove("EE_WORKSPACE")
+            .env_remove("EE_WORKSPACE_REGISTRY")
+            .env_remove("EE_LOG_JSON");
+    })
+    .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))?;
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("ee stdout should be UTF-8: {error}"))?;
     let stderr = String::from_utf8_lossy(&output.stderr);

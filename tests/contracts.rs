@@ -1,5 +1,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)] // test code may unwrap/expect (matches lib.rs cfg_attr policy)
 
+#[path = "contracts/common_spawn.rs"]
+mod common_spawn;
+
 #[path = "contracts/dependency_contract_matrix.rs"]
 mod dependency_contract_matrix;
 

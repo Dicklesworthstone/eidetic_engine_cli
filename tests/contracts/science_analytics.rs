@@ -88,10 +88,7 @@ fn assert_fixture_json(name: &str, actual: &JsonValue) -> TestResult {
 }
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee(args)
 }
 
 fn parse_json_stdout(output: Output, context: &str) -> Result<JsonValue, String> {

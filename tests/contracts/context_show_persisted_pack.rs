@@ -22,7 +22,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use ee::core::context::{ContextPackOptions, run_context_pack};
 use ee::core::index::{IndexRebuildOptions, rebuild_index};
@@ -34,10 +33,6 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 type TestResult = Result<(), String>;
-
-fn ee_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_ee")
-}
 
 struct PackFixture {
     _dir: TempDir,
@@ -153,12 +148,13 @@ fn build_persisted_pack() -> Result<PackFixture, String> {
 }
 
 fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
-    Command::new(ee_binary())
-        .args(args)
-        .env_remove("EE_WORKSPACE")
-        .env_remove("EE_WORKSPACE_REGISTRY")
-        .output()
-        .map_err(|error| format!("spawn ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee_with(|command| {
+        command
+            .args(args)
+            .env_remove("EE_WORKSPACE")
+            .env_remove("EE_WORKSPACE_REGISTRY");
+    })
+    .map_err(|error| format!("spawn ee {}: {error}", args.join(" ")))
 }
 
 fn parse_stdout(out: &std::process::Output, context: &str) -> Result<Value, String> {

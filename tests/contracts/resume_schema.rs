@@ -55,22 +55,20 @@ fn run_real_ee_with_registry(args: &[String], registry: &Path) -> Result<Output,
     // Each invocation spawns a full `ee` binary whose bounded nearby-store
     // scan runs on a wall-clock budget. libtest's default parallelism lets
     // the real-binary bridges compete for the same loaded-machine CPU, so
-    // the spawns are serialized here as contention hygiene. Measured
-    // outcome (2026-08-23): serialization alone does NOT fix the retention
-    // bridge — it still truncated 4/4 attempts on an RCH worker with the
-    // mutex active, so the truncation is systematic, not a scheduling
-    // lottery. Root-cause analysis and the proposed discovery-budget fix
-    // are tracked on bd-resume-verb-v0f57. Assertions are untouched.
-    static REAL_EE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _serial_guard = REAL_EE_SERIAL
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    Command::new(env!("CARGO_BIN_EXE_ee"))
-        .env("EE_EMBED_DOWNLOAD", "off")
-        .env("EE_WORKSPACE_REGISTRY", registry)
-        .args(args)
-        .output()
-        .map_err(|error| format!("launch real ee {}: {error}", args.join(" ")))
+    // all real-binary spawns are serialized through the crate-wide gate in
+    // common_spawn (bd-7vtqm). Measured outcome (2026-08-23): serialization
+    // alone does NOT fix the retention bridge — it still truncated 4/4
+    // attempts on an RCH worker with the mutex active, so the truncation is
+    // systematic, not a scheduling lottery. Root-cause analysis and the
+    // proposed discovery-budget fix are tracked on bd-resume-verb-v0f57.
+    // Assertions are untouched.
+    crate::common_spawn::serialized_real_ee_with(|command| {
+        command
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .env("EE_WORKSPACE_REGISTRY", registry)
+            .args(args);
+    })
+    .map_err(|error| format!("launch real ee {}: {error}", args.join(" ")))
 }
 
 fn real_ee_stdout_json(output: &Output, label: &str) -> Result<Value, String> {
@@ -719,7 +717,7 @@ fn resume_e2e_script_real_binary_acceptance_bridge() -> TestResult {
     )?;
     let temp = resume_test_tempdir("ee-resume-e2e-bridge.")?;
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/e2e_resume.sh");
-    let ee_bin = env!("CARGO_BIN_EXE_ee");
+    let ee_bin = crate::common_spawn::ee_binary();
     ensure(
         Path::new(ee_bin)
             .components()
@@ -953,23 +951,25 @@ fn resume_real_binary_completes_under_two_seconds_on_10k_store() -> TestResult {
     let baseline = fingerprint("baseline")?;
 
     let json_started = Instant::now();
-    let json_output = Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args([
+    let json_workspace = canonical_workspace
+        .to_str()
+        .ok_or("acceptance workspace path is not UTF-8")?;
+    let json_database = database
+        .to_str()
+        .ok_or("acceptance database path is not UTF-8")?;
+    let json_output = crate::common_spawn::serialized_real_ee_with(|command| {
+        command.args([
             "resume",
             "--workspace",
-            canonical_workspace
-                .to_str()
-                .ok_or("acceptance workspace path is not UTF-8")?,
+            json_workspace,
             "--database",
-            database
-                .to_str()
-                .ok_or("acceptance database path is not UTF-8")?,
+            json_database,
             "--sessions",
             "3",
             "--json",
-        ])
-        .output()
-        .map_err(|error| format!("launch real JSON ee resume: {error}"))?;
+        ]);
+    })
+    .map_err(|error| format!("launch real JSON ee resume: {error}"))?;
     let json_elapsed = json_started.elapsed();
 
     ensure(
@@ -1016,22 +1016,24 @@ fn resume_real_binary_completes_under_two_seconds_on_10k_store() -> TestResult {
     )?;
 
     let human_started = Instant::now();
-    let human_output = Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args([
+    let human_workspace = canonical_workspace
+        .to_str()
+        .ok_or("acceptance workspace path is not UTF-8")?;
+    let human_database = database
+        .to_str()
+        .ok_or("acceptance database path is not UTF-8")?;
+    let human_output = crate::common_spawn::serialized_real_ee_with(|command| {
+        command.args([
             "resume",
             "--workspace",
-            canonical_workspace
-                .to_str()
-                .ok_or("acceptance workspace path is not UTF-8")?,
+            human_workspace,
             "--database",
-            database
-                .to_str()
-                .ok_or("acceptance database path is not UTF-8")?,
+            human_database,
             "--sessions",
             "3",
-        ])
-        .output()
-        .map_err(|error| format!("launch real human ee resume: {error}"))?;
+        ]);
+    })
+    .map_err(|error| format!("launch real human ee resume: {error}"))?;
     let human_elapsed = human_started.elapsed();
     ensure(
         human_output.status.success(),

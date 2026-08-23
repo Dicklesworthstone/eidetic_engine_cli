@@ -13,7 +13,6 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value as JsonValue;
@@ -43,10 +42,7 @@ fn ensure_not_contains(haystack: &str, needle: &str, context: &str) -> TestResul
 }
 
 fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee(args)
 }
 
 fn isolated_workspace(label: &str) -> Result<PathBuf, String> {
@@ -68,32 +64,28 @@ fn isolated_workspace(label: &str) -> Result<PathBuf, String> {
 }
 
 fn run_ee_in_workspace(workspace: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
-        .arg("--workspace")
-        .arg(workspace)
-        .args(args)
-        .output()
-        .map_err(|error| {
-            format!(
-                "failed to run ee --workspace {} {}: {error}",
-                workspace.display(),
-                args.join(" ")
-            )
-        })
+    crate::common_spawn::serialized_real_ee_with(|command| {
+        command.arg("--workspace").arg(workspace).args(args);
+    })
+    .map_err(|error| {
+        format!(
+            "failed to run ee --workspace {} {}: {error}",
+            workspace.display(),
+            args.join(" ")
+        )
+    })
 }
 
 fn run_ee_with_env(
     args: &[&str],
     env_overrides: &[(&str, &str)],
 ) -> Result<std::process::Output, String> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
-    command.args(args);
-    for (key, value) in env_overrides {
-        command.env(key, value);
-    }
-    command
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee_with(|command| {
+        command.args(args);
+        for (key, value) in env_overrides {
+            command.env(key, value);
+        }
+    })
 }
 
 fn parse_response_schema(stdout: &[u8], context: &str) -> Result<String, String> {

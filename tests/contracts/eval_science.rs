@@ -5,7 +5,7 @@
 
 use ee::models::ProcessExitCode;
 use serde_json::{Value as JsonValue, json};
-use std::process::{Command, Output};
+use std::process::Output;
 
 type TestResult = Result<(), String>;
 
@@ -26,10 +26,7 @@ fn ensure_json_equal(actual: Option<&JsonValue>, expected: JsonValue, context: &
 }
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_ee"))
-        .args(args)
-        .output()
-        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    crate::common_spawn::serialized_real_ee(args)
 }
 
 #[test]
