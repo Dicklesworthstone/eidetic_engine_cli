@@ -787,10 +787,9 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     let workspace_path = normalize_path(&options.workspace_path);
     let database_path = database_path(options, &workspace_path);
     if !database_path.is_file() {
-        return Err(DomainError::Storage {
-            message: format!("database file '{}' does not exist", database_path.display()),
-            repair: Some(crate::core::storeless_workspace_repair(&database_path)),
-        });
+        // Exit-10 storeless-miss contract: an addressed-but-absent store is an
+        // addressing miss, not a storage failure.
+        return Err(crate::core::storeless_workspace_error(&database_path));
     }
 
     let connection =

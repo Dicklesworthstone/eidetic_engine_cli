@@ -17175,29 +17175,30 @@ pub fn unrelated_context() -> u64 {{
             Some("hit"),
             "second identical pack request must remain an L2 hit"
         );
-        // LexicalOnly source mode disables reranker resolution entirely
-        // (resolve_search_rerank_runtime returns disabled before any registry
-        // lookup), so neither the fresh pack nor the L2 replay carries a
-        // rerank advisory. The once-ledger suppression contract for packs
-        // that DO carry an advisory is pinned by
+        // The empty-index lexical-only fixture legitimately carries
+        // non-rerank degradations (index_missing from the missing-index
+        // search report). The pinned contracts are that no rerank advisory
+        // surfaces (LexicalOnly disables reranker resolution before any
+        // registry lookup) and that the L2 replay preserves the stored
+        // advisory snapshot verbatim. The once-ledger suppression contract
+        // for packs that DO carry an advisory is pinned by
         // search::tests::cached_context_snapshot_uses_socket_settlement_and_shared_once_ledger.
+        let fresh_advisory = fresh_run.search_advisory_snapshot.cache_json();
+        let fresh_degraded = fresh_advisory
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "fresh advisory snapshot must carry a degraded array".to_owned())?;
         assert!(
-            fresh_run
-                .search_advisory_snapshot
-                .cache_json()
-                .get("degraded")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(Vec::is_empty),
+            fresh_degraded
+                .iter()
+                .all(|entry| entry.get("code").and_then(serde_json::Value::as_str)
+                    != Some("rerank_model_unavailable")),
             "lexical-only fresh pack must not surface rerank degradations"
         );
-        assert!(
-            cached_run
-                .search_advisory_snapshot
-                .cache_json()
-                .get("degraded")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(Vec::is_empty),
-            "L2 replay must not invent rerank degradations"
+        assert_eq!(
+            cached_run.search_advisory_snapshot.cache_json(),
+            fresh_advisory,
+            "L2 replay must preserve the stored advisory snapshot"
         );
         let cached = cached_run.response;
         assert!(
