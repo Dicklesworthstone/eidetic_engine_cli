@@ -52,6 +52,17 @@ fn resume_test_tempdir(prefix: &str) -> Result<tempfile::TempDir, String> {
 }
 
 fn run_real_ee_with_registry(args: &[String], registry: &Path) -> Result<Output, String> {
+    // Each invocation spawns a full `ee` binary whose bounded nearby-store
+    // scan runs on a wall-clock budget. Concurrent real-binary bridges
+    // (libtest default parallelism) compete for the same loaded-machine CPU
+    // and turned the retention bridge into a scheduler lottery on RCH
+    // workers (4/4 attempts truncated). Serializing the spawns costs a few
+    // seconds and makes the proved-retention capability, not machine load,
+    // decide the outcome. Assertions are untouched.
+    static REAL_EE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serial_guard = REAL_EE_SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .env("EE_EMBED_DOWNLOAD", "off")
         .env("EE_WORKSPACE_REGISTRY", registry)
