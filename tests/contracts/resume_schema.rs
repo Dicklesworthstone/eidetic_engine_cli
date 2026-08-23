@@ -53,12 +53,14 @@ fn resume_test_tempdir(prefix: &str) -> Result<tempfile::TempDir, String> {
 
 fn run_real_ee_with_registry(args: &[String], registry: &Path) -> Result<Output, String> {
     // Each invocation spawns a full `ee` binary whose bounded nearby-store
-    // scan runs on a wall-clock budget. Concurrent real-binary bridges
-    // (libtest default parallelism) compete for the same loaded-machine CPU
-    // and turned the retention bridge into a scheduler lottery on RCH
-    // workers (4/4 attempts truncated). Serializing the spawns costs a few
-    // seconds and makes the proved-retention capability, not machine load,
-    // decide the outcome. Assertions are untouched.
+    // scan runs on a wall-clock budget. libtest's default parallelism lets
+    // the real-binary bridges compete for the same loaded-machine CPU, so
+    // the spawns are serialized here as contention hygiene. Measured
+    // outcome (2026-08-23): serialization alone does NOT fix the retention
+    // bridge — it still truncated 4/4 attempts on an RCH worker with the
+    // mutex active, so the truncation is systematic, not a scheduling
+    // lottery. Root-cause analysis and the proposed discovery-budget fix
+    // are tracked on bd-resume-verb-v0f57. Assertions are untouched.
     static REAL_EE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _serial_guard = REAL_EE_SERIAL
         .lock()
