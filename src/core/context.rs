@@ -6486,7 +6486,11 @@ fn context_pack_l2_try_hit(
                         ContextSearchAdvisorySnapshot::from_current_rerank_posture(
                             resolve_search_rerank_runtime_posture(
                                 search_options,
-                                source_mode_metadata.applied,
+                                // The cached pack already proved non-fallback
+                                // above; only an explicitly requested lexical
+                                // mode suppresses registry consultation.
+                                source_mode_metadata.requested
+                                    == crate::core::search::SearchSourceMode::LexicalOnly,
                                 Some(connection),
                             ),
                         );

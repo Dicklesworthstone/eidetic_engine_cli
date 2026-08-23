@@ -2773,7 +2773,7 @@ fn model_manifest_sha256_fingerprint(manifest: &ModelManifest) -> String {
 
 /// Fetch and register the default rerank model.
 /// Unpack a verified rerank model `.tar.zst` into its sibling directory
-/// (`<stored_dir>/<stem>/`) so `load_search_reranker` / `unpacked_rerank_model_dir`
+/// (`<stored_dir>/<stem>/`) so `load_verified_search_reranker` / `unpacked_rerank_model_dir`
 /// can read the safetensors weights + tokenizer. Without this the reranker stays
 /// `rerank_model_unavailable` on every search. Idempotent: skips when already
 /// unpacked.
@@ -2901,7 +2901,7 @@ pub fn fetch_rerank_model(
     };
 
     // Unpack the verified archive into its sibling model dir so the reranker is
-    // actually loadable; load_search_reranker requires the unpacked directory.
+    // actually loadable; load_verified_search_reranker requires the unpacked directory.
     unpack_rerank_model_artifact(&stored_path, &stored_dir)?;
 
     let connection = DbConnection::open_file(&database_path).map_err(|error| {

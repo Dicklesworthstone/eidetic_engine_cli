@@ -7655,13 +7655,19 @@ impl SearchRerankTextProvider {
 
 fn resolve_search_rerank_runtime(
     options: &SearchOptions,
-    source_mode: SearchSourceMode,
+    explicit_lexical_only: bool,
     connection: Option<&DbConnection>,
     configured_mode: crate::config::SearchRerankMode,
     configured_top_k: usize,
     degraded: &mut Vec<SearchDegradation>,
 ) -> SearchRerankRuntime {
-    if source_mode == SearchSourceMode::LexicalOnly {
+    // Only an explicitly requested lexical-only mode skips the registry.
+    // A hybrid request that FELL BACK to lexical (semantic embedder
+    // unavailable) must still consult it so a present-but-unusable
+    // reranker surfaces its permanent capability advisory instead of
+    // silently vanishing whenever retrieval degraded (bd-degraded-
+    // advisory-noise).
+    if explicit_lexical_only {
         return SearchRerankRuntime::disabled();
     }
 
@@ -7706,10 +7712,12 @@ fn resolve_search_rerank_runtime(
             }
         }
     };
-
     let resolved = match resolution_result {
-        Ok(RegisteredRerankerResolution::Loaded(resolved)) => resolved,
-        Ok(RegisteredRerankerResolution::Absent) => {
+        Ok(RegisteredRerankerResolution::Absent | RegisteredRerankerResolution::HashRejected) => {
+            // Absent: nothing registered. HashRejected: a reranker row is
+            // present but its stored hash cannot match this build's bundled
+            // manifest — deterministic, not retryable, so it shares the
+            // permanent canonical advisory lifecycle.
             degraded.push(SearchDegradation::rerank_model_absent());
             return SearchRerankRuntime::disabled();
         }
@@ -7763,14 +7771,14 @@ pub(crate) struct SearchRerankRuntimePosture {
 /// current.
 pub(crate) fn resolve_search_rerank_runtime_posture(
     options: &SearchOptions,
-    source_mode: SearchSourceMode,
+    explicit_lexical_only: bool,
     connection: Option<&DbConnection>,
 ) -> SearchRerankRuntimePosture {
     let (configured_mode, configured_top_k) = resolve_search_rerank_config(&options.workspace_path);
     let mut degraded = Vec::new();
     let runtime = resolve_search_rerank_runtime(
         options,
-        source_mode,
+        explicit_lexical_only,
         connection,
         configured_mode,
         configured_top_k,
@@ -7788,6 +7796,10 @@ pub(crate) enum RegisteredRerankerResolution {
     Absent,
     Loaded(ResolvedRegisteredReranker),
     Unloadable,
+    /// A reranker row is registered as available, but its stored hash cannot
+    /// match this build's bundled manifest. Deterministic and not retryable,
+    /// so it drives the permanent advisory lifecycle.
+    HashRejected,
 }
 
 pub(crate) struct ResolvedRegisteredReranker {
@@ -7806,14 +7818,25 @@ pub(crate) fn resolve_registered_reranker(
     if entries.is_empty() {
         return Ok(RegisteredRerankerResolution::Absent);
     }
-    if let Some((entry, reranker)) =
-        first_loadable_registered_reranker(entries, load_search_reranker)
-    {
-        return Ok(RegisteredRerankerResolution::Loaded(
-            ResolvedRegisteredReranker { entry, reranker },
-        ));
+    let mut hash_rejected = false;
+    for entry in entries {
+        if verify_reranker_registry_hash(&entry).is_err() {
+            // Keep scanning: a later row may still load, but a rejected hash
+            // is remembered so an all-failed pass classifies deterministically.
+            hash_rejected = true;
+            continue;
+        }
+        if let Ok(reranker) = load_verified_search_reranker(&entry) {
+            return Ok(RegisteredRerankerResolution::Loaded(
+                ResolvedRegisteredReranker { entry, reranker },
+            ));
+        }
     }
-    Ok(RegisteredRerankerResolution::Unloadable)
+    if hash_rejected {
+        Ok(RegisteredRerankerResolution::HashRejected)
+    } else {
+        Ok(RegisteredRerankerResolution::Unloadable)
+    }
 }
 
 fn sorted_available_reranker_entries(
@@ -7830,20 +7853,9 @@ fn sorted_available_reranker_entries(
     entries
 }
 
-fn first_loadable_registered_reranker<T, E>(
-    entries: Vec<StoredModelRegistryEntry>,
-    mut load: impl FnMut(&StoredModelRegistryEntry) -> Result<T, E>,
-) -> Option<(StoredModelRegistryEntry, T)> {
-    for entry in entries {
-        if let Ok(loaded) = load(&entry) {
-            return Some((entry, loaded));
-        }
-    }
-    None
-}
-
-fn load_search_reranker(entry: &StoredModelRegistryEntry) -> Result<Arc<dyn Reranker>, String> {
-    verify_reranker_registry_hash(entry)?;
+fn load_verified_search_reranker(
+    entry: &StoredModelRegistryEntry,
+) -> Result<Arc<dyn Reranker>, String> {
     let source_path = reranker_entry_source_path(entry)?;
     let model_dir = unpacked_rerank_model_dir(&source_path)?;
     let reranker = NativeReranker::load(&model_dir).map_err(|error| {
@@ -8106,7 +8118,9 @@ async fn run_search_inner_with_performance(
         resolve_search_rerank_config(&options.workspace_path);
     let rerank_runtime = resolve_search_rerank_runtime(
         options,
-        source_mode.applied,
+        // Applied lexical-only WITHOUT a fallback means the operator asked
+        // for lexical; a fallback means hybrid was requested and degraded.
+        source_mode.applied == SearchSourceMode::LexicalOnly && !source_mode.fallback_applied,
         read_connection,
         rerank_configured_mode,
         rerank_configured_top_k,

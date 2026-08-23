@@ -3075,6 +3075,13 @@ fn check_reranker_posture(workspace_path: Option<&Path>) -> CheckResult {
         Ok(RegisteredRerankerResolution::Loaded(_)) => {
             reranker_posture_check_result(Some(true), None)
         }
+        Ok(RegisteredRerankerResolution::HashRejected) => {
+            tracing::warn!(
+                target: "ee::doctor::reranker",
+                event = "registered_reranker_hash_rejected",
+            );
+            reranker_posture_check_result(Some(false), None)
+        }
         Ok(RegisteredRerankerResolution::Unloadable) => {
             tracing::warn!(
                 target: "ee::doctor::reranker",
