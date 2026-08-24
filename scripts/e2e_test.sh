@@ -57,6 +57,7 @@ START_TIME=""
 
 # Available scenarios
 SCENARIOS=(
+    "walking_skeleton"
     "status"
     "health"
     "capabilities"
@@ -271,6 +272,129 @@ assert_stdout_clean() {
     return 0
 }
 
+assert_stderr_empty() {
+    local context="${1:-}"
+
+    if [[ -s "${LAST_STDERR_FILE}" ]]; then
+        log_fail "${context}: stderr must be empty on success"
+        return 1
+    fi
+    return 0
+}
+
+validate_response_command() {
+    local response_file="$1"
+    local expected_command="$2"
+    python3 - "${response_file}" "${expected_command}" <<'PY'
+import json
+import sys
+
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["schema"] == "ee.response.v2"
+assert value["success"] is True
+assert isinstance(value["data"], dict)
+assert value["data"]["command"] == sys.argv[2]
+PY
+}
+
+response_memory_id() {
+    local response_file="$1"
+    python3 - "${response_file}" <<'PY'
+import json
+import sys
+
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+memory_id = value["data"].get("memory_id") or value["data"].get("memoryId")
+assert isinstance(memory_id, str) and memory_id.startswith("mem_")
+print(memory_id)
+PY
+}
+
+validate_remember_persisted() {
+    local response_file="$1"
+    local workspace="$2"
+    validate_response_command "${response_file}" remember
+    response_memory_id "${response_file}" >/dev/null
+    [[ -s "${workspace}/.ee/ee.db" ]]
+}
+
+validate_search_hit() {
+    local response_file="$1"
+    local memory_id="$2"
+    local expected_content="$3"
+    python3 - "${response_file}" "${memory_id}" "${expected_content}" <<'PY'
+import json
+import sys
+
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["schema"] == "ee.response.v2"
+assert value["success"] is True
+hits = value["data"]["results"]
+matching = [
+    hit for hit in hits
+    if (hit.get("memoryId") or hit.get("memory_id") or hit.get("docId")) == sys.argv[2]
+]
+assert len(matching) == 1
+assert matching[0]["content"] == sys.argv[3]
+assert matching[0]["source"] == "lexical"
+PY
+}
+
+validate_pack_item() {
+    local response_file="$1"
+    local memory_id="$2"
+    local expected_content="$3"
+    python3 - "${response_file}" "${memory_id}" "${expected_content}" <<'PY'
+import json
+import sys
+
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["schema"] == "ee.response.v2"
+assert value["success"] is True
+pack = value["data"]["pack"]
+assert pack["schema"] == "ee.pack.v2"
+assert isinstance(pack["hash"], str) and pack["hash"].startswith("blake3:")
+matching = [item for item in pack["items"] if item.get("memoryId") == sys.argv[2]]
+assert len(matching) == 1
+assert matching[0]["content"] == sys.argv[3]
+assert isinstance(matching[0]["provenance"], list) and matching[0]["provenance"]
+PY
+}
+
+validate_why_explanation() {
+    local response_file="$1"
+    local memory_id="$2"
+    python3 - "${response_file}" "${memory_id}" <<'PY'
+import json
+import sys
+
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["schema"] == "ee.response.v2"
+assert value["success"] is True
+data = value["data"]
+assert all(isinstance(data[field], dict) for field in ("storage", "retrieval", "selection"))
+assert data["selection"].get("latestPackSelection") is not None
+memory = data.get("memory") or {}
+explained_id = memory.get("id") or memory.get("memoryId") or data.get("memoryId")
+assert explained_id in (None, sys.argv[2])
+PY
+}
+
+validate_status_capabilities() {
+    local response_file="$1"
+    python3 - "${response_file}" <<'PY'
+import json
+import sys
+
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["schema"] == "ee.response.v2"
+assert value["success"] is True
+assert value["data"]["command"] == "status"
+capabilities = value["data"]["capabilities"]
+assert all(field in capabilities for field in ("runtime", "storage", "search"))
+PY
+}
+
 emit_test_event() {
     local scenario="$1"
     local phase="$2"
@@ -359,6 +483,39 @@ with Path(os.environ["EVENT_LOG_FILE"]).open("a", encoding="utf-8") as handle:
 PY
 }
 
+run_walking_step() {
+    local step="$1"
+    local command_label="$2"
+    local validator="$3"
+    shift 3
+    local validator_args=()
+    while [[ $# -gt 0 && "$1" != "--" ]]; do
+        validator_args+=("$1")
+        shift
+    done
+    if [[ $# -eq 0 ]]; then
+        log_fail "walking skeleton ${step}: missing command separator"
+        return 1
+    fi
+    shift
+
+    run_ee walking_skeleton "${step}" "$@"
+    if assert_exit 0 "walking skeleton ${step} exit" && \
+       assert_stdout_json "walking skeleton ${step} JSON" && \
+       "${validator}" "${LAST_STDOUT_FILE}" "${validator_args[@]}" && \
+       assert_stdout_clean "walking skeleton ${step} stdout" && \
+       assert_stderr_empty "walking skeleton ${step} stderr"; then
+        emit_test_event walking_skeleton "${step}" command_end \
+            "${command_label}" passed passed ""
+        log_pass "walking skeleton ${step}"
+        return 0
+    fi
+
+    emit_test_event walking_skeleton "${step}" command_end \
+        "${command_label}" failed not_checked "${step}_contract_failed"
+    return 1
+}
+
 validate_swarm_workload_trace() {
     local trace_file="$1"
     python3 - "${trace_file}" <<'PY'
@@ -418,6 +575,89 @@ PY
 # Test Scenarios
 # ============================================================================
 
+scenario_walking_skeleton() {
+    log_step "Running scenario: walking_skeleton"
+    local passed=0
+    local failed=0
+    local memory_id=""
+    local content="Run cargo fmt --check before release."
+    local workspace="${TEST_WORKSPACE}/ws"
+
+    if run_walking_step init \
+        "ee init --workspace <workspace> --skip-boilerplate --json" \
+        validate_response_command init -- \
+        init --workspace "${workspace}" --skip-boilerplate --json; then
+        ((passed++))
+    else
+        ((failed++))
+    fi
+
+    if run_walking_step remember \
+        "ee remember <content> --workspace <workspace> --level procedural --kind rule --json" \
+        validate_remember_persisted "${workspace}" -- \
+        remember "${content}" --workspace "${workspace}" \
+        --level procedural --kind rule --tags release,format --confidence 0.95 \
+        --no-auto-link --no-propose-candidates --json; then
+        memory_id="$(response_memory_id "${LAST_STDOUT_FILE}")"
+        ((passed++))
+    else
+        ((failed++))
+    fi
+
+    if run_walking_step index_rebuild \
+        "ee index rebuild --workspace <workspace> --json" \
+        validate_response_command index_rebuild -- \
+        index rebuild --workspace "${workspace}" --json; then
+        ((passed++))
+    else
+        ((failed++))
+    fi
+
+    if run_walking_step search \
+        "ee search <query> --workspace <workspace> --source-mode lexical_only --json" \
+        validate_search_hit "${memory_id:-mem_missing}" "${content}" -- \
+        search "format before release" --workspace "${workspace}" \
+        --source-mode lexical_only --relevance-floor 0.0 --json; then
+        ((passed++))
+    else
+        ((failed++))
+    fi
+
+    if run_walking_step pack \
+        "ee pack <task> --workspace <workspace> --source-mode lexical_only --json" \
+        validate_pack_item "${memory_id:-mem_missing}" "${content}" -- \
+        pack "prepare release" --workspace "${workspace}" \
+        --source-mode lexical_only --max-tokens 2000 --json; then
+        ((passed++))
+    else
+        ((failed++))
+    fi
+
+    if run_walking_step why \
+        "ee why <memory-id> --workspace <workspace> --json" \
+        validate_why_explanation "${memory_id:-mem_missing}" -- \
+        why "${memory_id:-mem_missing}" --workspace "${workspace}" --json; then
+        ((passed++))
+    else
+        ((failed++))
+    fi
+
+    if run_walking_step status \
+        "ee status --workspace <workspace> --json" \
+        validate_status_capabilities -- \
+        status --workspace "${workspace}" --json; then
+        ((passed++))
+    else
+        ((failed++))
+    fi
+
+    TESTS_RUN=$((TESTS_RUN + passed + failed))
+    TESTS_PASSED=$((TESTS_PASSED + passed))
+    TESTS_FAILED=$((TESTS_FAILED + failed))
+
+    [[ ${failed} -eq 0 ]]
+}
+
 scenario_status() {
     log_step "Running scenario: status"
     local passed=0
@@ -427,7 +667,7 @@ scenario_status() {
     run_ee status json_output status --json
     if assert_exit 0 "status --json exit" && \
        assert_stdout_json "status --json format" && \
-       assert_json_schema "ee.response.v1" "status schema" && \
+       assert_json_schema "ee.response.v2" "status schema" && \
        assert_stdout_clean "status stdout clean"; then
         ((passed++))
         log_pass "status --json"
@@ -714,6 +954,7 @@ run_scenario() {
     local name="$1"
 
     case "${name}" in
+        walking_skeleton) scenario_walking_skeleton ;;
         status)      scenario_status ;;
         health)      scenario_health ;;
         capabilities) scenario_capabilities ;;
