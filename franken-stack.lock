@@ -1,8 +1,10 @@
 # ee.franken-stack.lock.v1
 #
 # Full commit IDs are mandatory. This set pins the sibling revisions that
-# ee's Cargo.lock must close over. Refreshed 2026-08-20 for the v0.14.2
-# cut: asupersync origin/main 0.4.9, frankensqlite origin/main 0.3.7,
+# ee's Cargo.lock must close over. Refreshed 2026-08-24 for the v0.14.3
+# cut: frankensqlite advances to the v0.3.9 tag commit (83a07fcf), which carries
+# the WAL-certificate suffix-version fix (1e69e5c4f / GH ee#27) and the
+# Windows sidecar-less lock-path fixes. asupersync stays 0.4.9,
 # frankensearch / franken_networkx / toon / franken_agent_detection at
 # origin/main. SQLModel stays on the 0.4.0 harmonize/vlsf2-fsqlite03 pin
 # (021bd17); origin/main is still the 0.3.2 line. Isolated dests and the
@@ -14,6 +16,6 @@ asupersync	9eb0600e6ef4d17633dff3dc43ad99c64e72adbe
 franken_agent_detection	17f28ad8fbea9181134d63e109a310ea7bf31997
 franken_networkx	972814b1b4649c20b6f2acdd7456e3580cefdbeb
 frankensearch	8382ec3ed6b3395afd28dd049efedaedc3259d59
-frankensqlite	61313e42292a27f7545f906b774166f49161a4db
+frankensqlite	83a07fcf64afa21f643d66a0a0edbc6e47013d62
 sqlmodel_rust	021bd17add2de0024d823ddc0d675550145ebf89
 toon_rust	d7185c7800d37810f0a29bd5fca2ee623f25819b

@@ -1212,7 +1212,10 @@ fn stable_workspace_id(workspace_path: &Path) -> Result<WorkspaceId, DomainError
     WorkspaceId::from_str(&crate::core::workspace::stable_workspace_id(workspace_path)).map_err(
         |error| DomainError::Storage {
             message: format!("Derived workspace id rejected: {error}"),
-            repair: Some("Report this as a bug: the workspace hasher must emit a valid WorkspaceId.".to_owned()),
+            repair: Some(
+                "Report this as a bug: the workspace hasher must emit a valid WorkspaceId."
+                    .to_owned(),
+            ),
         },
     )
 }

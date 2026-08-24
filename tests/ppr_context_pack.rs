@@ -159,7 +159,9 @@ fn ppr_breakdown_count(response: &ContextResponse) -> usize {
         .count()
 }
 
-fn pack_selection_signature(response: &ContextResponse) -> Vec<(String, u32, String, Option<(u32, u32, u32)>)> {
+fn pack_selection_signature(
+    response: &ContextResponse,
+) -> Vec<(String, u32, String, Option<(u32, u32, u32)>)> {
     response
         .data
         .pack
@@ -372,7 +374,11 @@ fn requested_pack_ppr_degrades_without_changing_textual_ranking() -> TestResult 
         .pack_dna
         .as_ref()
         .ok_or_else(|| "requested Pack DNA block is absent".to_owned())?;
-    if pack_dna["pprNeighbors"].as_array().map_or(usize::MAX, Vec::len) != 0 {
+    if pack_dna["pprNeighbors"]
+        .as_array()
+        .map_or(usize::MAX, Vec::len)
+        != 0
+    {
         return Err(format!(
             "production Pack DNA must not expose local PPR neighbors: {pack_dna}"
         ));
@@ -410,11 +416,9 @@ fn requested_pack_ppr_degrades_without_changing_textual_ranking() -> TestResult 
     }
     assert_no_context_ppr_artifacts(workspace_path, &db_path)?;
 
-    let summary = serde_json::to_string_pretty(&ppr_unavailable_snapshot_summary(
-        &requested,
-        &zero_weight,
-    ))
-    .map_err(|error| format!("serialize unavailable-PPR snapshot summary: {error}"))?;
+    let summary =
+        serde_json::to_string_pretty(&ppr_unavailable_snapshot_summary(&requested, &zero_weight))
+            .map_err(|error| format!("serialize unavailable-PPR snapshot summary: {error}"))?;
     let expected = include_str!("snapshots/pack_with_ppr.snap").trim_end();
     if summary != expected {
         return Err(format!(

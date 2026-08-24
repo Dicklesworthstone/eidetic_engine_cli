@@ -54,6 +54,22 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-08-24
+
+Franken-stack refresh release. No ee-side code changes are required for the
+headline fix; the value is in the pinned engine underneath.
+
+### Fixed
+
+- **Read-write opens no longer fail on databases whose WAL carries a
+  legacy certificate suffix (version 2/3)** (GitHub #27). Upstream
+  frankensqlite fix (`1e69e5c4f`, shipped in fsqlite 0.3.9): legacy
+  v2/v3 WAL certificates now classify as absent rather than corrupt, so
+  affected databases open read-write with no manual surgery. The
+  franken-stack pin advances from frankensqlite `61313e42` (0.3.7 line)
+  to the `v0.3.9` tag commit (`83a07fcf`), which also carries the Windows
+  sidecar-less lock-path fixes and the async-api feature-graph repair.
+
 ## [0.14.2] - 2026-08-20
 
 Patch on 0.14.1: bind writes and reads to the stored workspace row id

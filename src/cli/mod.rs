@@ -68690,21 +68690,19 @@ mod tests {
         // the top-level `degraded[]` while the report payload keeps them.
         // Parity is therefore subset-by-(code,message), not strict equality.
         ensure(
-            status_value["degraded"]
-                .as_array()
-                .is_some_and(|top| {
-                    !top.is_empty()
-                        && top.iter().all(|entry| {
-                            status_value["data"]["degradations"]
-                                .as_array()
-                                .is_some_and(|report| {
-                                    report.iter().any(|candidate| {
-                                        candidate.get("code") == entry.get("code")
-                                            && candidate.get("message") == entry.get("message")
-                                    })
+            status_value["degraded"].as_array().is_some_and(|top| {
+                !top.is_empty()
+                    && top.iter().all(|entry| {
+                        status_value["data"]["degradations"]
+                            .as_array()
+                            .is_some_and(|report| {
+                                report.iter().any(|candidate| {
+                                    candidate.get("code") == entry.get("code")
+                                        && candidate.get("message") == entry.get("message")
                                 })
-                        })
-                }),
+                            })
+                    })
+            }),
             "model status top-level degraded mirrors normalized report entries",
         )?;
 
@@ -68733,21 +68731,19 @@ mod tests {
         )?;
         // Same normalized-mirror subset contract as model status above.
         ensure(
-            list_value["degraded"]
-                .as_array()
-                .is_some_and(|top| {
-                    !top.is_empty()
-                        && top.iter().all(|entry| {
-                            list_value["data"]["degradations"]
-                                .as_array()
-                                .is_some_and(|report| {
-                                    report.iter().any(|candidate| {
-                                        candidate.get("code") == entry.get("code")
-                                            && candidate.get("message") == entry.get("message")
-                                    })
+            list_value["degraded"].as_array().is_some_and(|top| {
+                !top.is_empty()
+                    && top.iter().all(|entry| {
+                        list_value["data"]["degradations"]
+                            .as_array()
+                            .is_some_and(|report| {
+                                report.iter().any(|candidate| {
+                                    candidate.get("code") == entry.get("code")
+                                        && candidate.get("message") == entry.get("message")
                                 })
-                        })
-                }),
+                            })
+                    })
+            }),
             "model list top-level degraded mirrors normalized report entries",
         )
     }
@@ -76553,8 +76549,9 @@ mod tests {
         let repair = value["error"]["repair"].as_str().unwrap_or_default();
         ensure(
             repair.contains("looked for")
-                && repair
-                    .contains("Only if you intended to create a NEW store here: ee init --workspace "),
+                && repair.contains(
+                    "Only if you intended to create a NEW store here: ee init --workspace ",
+                ),
             &format!(
                 "repair must re-check addressing first and keep init last and conditional: {repair:?}"
             ),
@@ -77891,9 +77888,7 @@ mod tests {
             // Explicit argv fingerprint so the CLI lookup can address this
             // row without re-deriving the input's hashed form.
             command_argv_hash: "blake3:failed-command-argv".to_owned(),
-            cargo_target_dir_hash_or_class: Some(
-                "class:external_cargo_target".to_owned(),
-            ),
+            cargo_target_dir_hash_or_class: Some("class:external_cargo_target".to_owned()),
             execution_substrate: "rch".to_owned(),
             worker_host: Some("css".to_owned()),
             started_at: Some("2026-05-15T05:02:00Z".to_owned()),

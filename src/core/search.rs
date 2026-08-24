@@ -18817,7 +18817,10 @@ mod tests {
         ];
         let entries = sorted_available_reranker_entries(entries);
         assert_eq!(
-            entries.iter().map(|entry| entry.model_name.as_str()).collect::<Vec<_>>(),
+            entries
+                .iter()
+                .map(|entry| entry.model_name.as_str())
+                .collect::<Vec<_>>(),
             vec!["a-broken", "b-valid"],
             "only available reranker rows survive, sorted deterministically"
         );

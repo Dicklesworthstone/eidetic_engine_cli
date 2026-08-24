@@ -7993,11 +7993,11 @@ mod tests {
                 denylist: &std::collections::BTreeSet::new(),
             },
         );
-        assert_eq!(decision, crate::mesh::discovery_policy::DiscoveryDecision::Probe);
         assert_eq!(
-            reason.autodiscovery_policy_decision(),
-            Some("allowlisted")
+            decision,
+            crate::mesh::discovery_policy::DiscoveryDecision::Probe
         );
+        assert_eq!(reason.autodiscovery_policy_decision(), Some("allowlisted"));
 
         assert_eq!(report.probed_peer_count, 1);
         assert_eq!(report.eligible_peer_count, 0);

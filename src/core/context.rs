@@ -1981,6 +1981,35 @@ fn context_severity_from_pack_dna(severity: &str) -> ContextResponseSeverity {
     ContextResponseSeverity::parse_lossy(severity)
 }
 
+/// Pack-DNA-side degradation entry for a requested-but-unavailable pack PPR.
+fn graph_ppr_upstream_unavailable_pack_dna_degradation()
+-> crate::graph::pack_dna::PackDnaDegradation {
+    crate::graph::pack_dna::PackDnaDegradation {
+        code: GRAPH_PPR_UPSTREAM_UNAVAILABLE_CODE.to_owned(),
+        severity: "medium".to_owned(),
+        message: GRAPH_PPR_UPSTREAM_UNAVAILABLE_MESSAGE.to_owned(),
+        repair: GRAPH_PPR_UPSTREAM_UNAVAILABLE_REPAIR.to_owned(),
+    }
+}
+
+/// Response-side twin of the pack-DNA entry. Idempotent: converging emit
+/// paths (pack pipeline, pack-DNA attach) cannot duplicate the code.
+fn push_graph_ppr_upstream_unavailable_degradation(degraded: &mut Vec<ContextResponseDegradation>) {
+    if degraded
+        .iter()
+        .any(|entry| entry.code == GRAPH_PPR_UPSTREAM_UNAVAILABLE_CODE)
+    {
+        return;
+    }
+    push_degradation(
+        degraded,
+        GRAPH_PPR_UPSTREAM_UNAVAILABLE_CODE,
+        ContextResponseSeverity::Medium,
+        GRAPH_PPR_UPSTREAM_UNAVAILABLE_MESSAGE,
+        Some(GRAPH_PPR_UPSTREAM_UNAVAILABLE_REPAIR.to_owned()),
+    );
+}
+
 pub fn run_context_pack_with_performance(
     options: &ContextPackOptions,
     command: &'static str,
@@ -7244,7 +7273,7 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        PACK_L2_CACHE_KEY_SCHEMA_V4.as_bytes(),
+        PACK_L2_CACHE_KEY_SCHEMA_V5.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "workspace_id", input.workspace_id.as_bytes());
     hash_labeled_u64(
@@ -11156,6 +11185,11 @@ fn candidate_from_hit_preloaded(
     );
     subspans.freshness_provenance += provenance_start.elapsed();
     let provenance = provenance?;
+    let construction_start = Instant::now();
+    let Some(relevance) = pack_candidate_relevance_from_search_hit(hit) else {
+        subspans.candidate_construction += construction_start.elapsed();
+        return None;
+    };
     // bd-3h6bz: a rule-artifact hit hydrates the promoted RULE body into the
     // pack candidate — not merely its source memory. The source memory stays
     // the identity anchor and provenance base; tombstoned rules never
@@ -11200,8 +11234,8 @@ fn candidate_from_hit_preloaded(
         section: promoted_rule
             .map(|_| PackSection::ProceduralRules)
             .unwrap_or_else(|| section_for_memory(memory)),
-        content,
         estimated_tokens: estimate_tokens_default(&content),
+        content,
         relevance,
         utility,
         provenance: candidate_provenances,

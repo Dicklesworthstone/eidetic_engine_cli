@@ -34,9 +34,9 @@ use super::{build_info, duration_millis_saturating};
 use crate::core::memory::{EvidenceFreshnessStatus, assess_memory_evidence_freshness};
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
-    CreateAuditInput, CreateCurationCandidateInput, DbConnection,
-    PROVENANCE_STATUS_MISMATCH, PROVENANCE_STATUS_MISSING, PROVENANCE_STATUS_SKIPPED,
-    PROVENANCE_STATUS_VERIFIED, audit_actions, generate_audit_id,
+    CreateAuditInput, CreateCurationCandidateInput, DbConnection, PROVENANCE_STATUS_MISMATCH,
+    PROVENANCE_STATUS_MISSING, PROVENANCE_STATUS_SKIPPED, PROVENANCE_STATUS_VERIFIED,
+    audit_actions, generate_audit_id,
 };
 use crate::models::{
     CandidateId, DomainError, LineSpan, ProducerMetadata, ProvenanceUri, RCH_VERIFY_SCHEMA_V1,
