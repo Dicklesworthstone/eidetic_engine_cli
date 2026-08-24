@@ -265,9 +265,9 @@ fn insights_empty_workspace_cli_shape_matches_contract() -> TestResult {
         data.pointer("/degradedSignals")
             .and_then(Value::as_array)
             .is_some_and(|signals| {
-                signals
-                    .iter()
-                    .any(|signal| signal.get("code").and_then(Value::as_str) == Some("graph.workspace_empty"))
+                signals.iter().any(|signal| {
+                    signal.get("code").and_then(Value::as_str) == Some("graph.workspace_empty")
+                })
             }),
         "empty-workspace insights must still carry the info-level graph.workspace_empty signal",
     )?;
