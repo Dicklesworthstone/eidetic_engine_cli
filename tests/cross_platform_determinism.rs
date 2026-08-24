@@ -577,7 +577,7 @@ fn add_weighted_edge(
     attrs.insert("weight".to_owned(), CgseValue::Float(weight));
     attrs.insert("confidence".to_owned(), CgseValue::Float(confidence));
     graph
-        .add_edge_with_attrs(source.to_owned(), target.to_owned(), attrs)
+        .add_edge_with_attrs(source, target, attrs)
         .map_err(|error| format!("add edge {source}->{target}: {error:?}"))
 }
 
