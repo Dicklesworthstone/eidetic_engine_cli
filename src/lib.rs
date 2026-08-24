@@ -1,4 +1,12 @@
 #![forbid(unsafe_code)]
+// `core::index` / `core::search` build deeply nested async graphs (spawn_in ->
+// process_index_jobs_coalesced_with_cx_bounded -> process_one_index_job_with_cx
+// -> ...). Auto-trait (`Send`) resolution across those coroutine witnesses
+// exceeds rustc's default depth of 128, which trips the future-compat
+// `recursion_depth_exceeding_limit` lint and therefore fails
+// `clippy -D warnings`. This raises a compiler resource bound; it does not
+// silence the lint, and rustc itself recommends exactly this remedy.
+#![recursion_limit = "256"]
 #![cfg_attr(target_vendor = "apple", feature(peer_credentials_unix_socket))]
 #![cfg_attr(windows, feature(windows_by_handle))]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
