@@ -1981,6 +1981,7 @@ dependencies = [
  "blake3",
  "crc32c",
  "fsqlite-error",
+ "fsqlite-observability",
  "fsqlite-types",
  "fsqlite-vfs",
  "parking_lot",
@@ -5211,7 +5212,7 @@ dependencies = [
 
 [[package]]
 name = "tru"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "chrono",
