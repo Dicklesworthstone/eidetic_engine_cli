@@ -2482,7 +2482,7 @@ mod tests {
 
         let parsed: ExportAuditRecord = serde_json::from_value(json)
             .map_err(|error| format!("targetless audit must deserialize: {error}"))?;
-        ensure(parsed, audit, "targetless audit JSON round trip")?;
+        ensure(&parsed, &audit, "targetless audit JSON round trip")?;
 
         let export_record = ExportRecord::Audit(audit.clone());
         let jsonl = serde_json::to_string(&export_record)
