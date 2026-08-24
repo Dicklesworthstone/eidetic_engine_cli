@@ -84,6 +84,7 @@ use crate::db::{
     CreatePackBaselineInput, CreatePackEvidenceItemInput, CreatePackItemInput,
     CreatePackOmissionInput, CreatePackRecordInput, CreatePackTaskLensInput, DatabaseConfig,
     DbConnection, PackRecordInsertTimings, StoredAgentContextProfileForPack, StoredMemory,
+    StoredProceduralRule,
 };
 use crate::models::degradation::{
     GRAPH_PACK_DNA_TIMEOUT_CODE, GRAPH_PPR_EMPTY_SEED_SET_CODE, GRAPH_PPR_SNAPSHOT_STALE_CODE,
@@ -8012,6 +8013,21 @@ fn candidates_from_search_with_metrics(
     metrics.memory_batch_reads =
         usize::from(!memory_ids_refs.is_empty() && !used_preloaded_memories);
     metrics.tag_batch_reads = usize::from(!memory_ids_refs.is_empty());
+    // Phase 2.5: batch load promoted procedural rules referenced by
+    // rule-artifact hits so their bodies can hydrate into pack candidates
+    // (bd-3h6bz).
+    let mut rules_map: BTreeMap<String, StoredProceduralRule> = BTreeMap::new();
+    for (_, resolution, _) in &hit_resolutions {
+        let Some((_, Some(artifact_id))) = resolution else {
+            continue;
+        };
+        if artifact_id.starts_with("rule_")
+            && !rules_map.contains_key(artifact_id.as_str())
+            && let Ok(Some(rule)) = connection.get_procedural_rule(artifact_id)
+        {
+            rules_map.insert(artifact_id.clone(), rule);
+        }
+    }
 
     // Phase 3: Build candidates from preloaded data.
     let mut candidates = Vec::new();
@@ -8167,6 +8183,7 @@ fn candidates_from_search_with_metrics(
                         .or(filters.temporal.as_of),
                     include_tombstoned,
                     freshness_file_cache: &mut freshness_file_cache,
+                    rules: &rules_map,
                 };
                 match candidate_from_hit_preloaded(
                     preloaded,
@@ -11080,6 +11097,10 @@ struct PreloadedCandidateSource<'a> {
     validity_reference_time: Option<DateTime<Utc>>,
     include_tombstoned: bool,
     freshness_file_cache: &'a mut crate::core::memory::EvidenceFreshnessFileCache,
+    /// Promoted procedural rules referenced by rule-artifact hits, batched
+    /// alongside memories so a rule hit hydrates its own body into the pack
+    /// candidate instead of collapsing into its source memory (bd-3h6bz).
+    rules: &'a BTreeMap<String, StoredProceduralRule>,
 }
 
 struct FocusCandidateSource<'a> {
@@ -11121,16 +11142,29 @@ fn candidate_from_hit_preloaded(
     );
     subspans.freshness_provenance += provenance_start.elapsed();
     let provenance = provenance?;
-    let construction_start = Instant::now();
-    let Some(relevance) = pack_candidate_relevance_from_search_hit(hit) else {
-        subspans.candidate_construction += construction_start.elapsed();
-        return None;
+    // bd-3h6bz: a rule-artifact hit hydrates the promoted RULE body into the
+    // pack candidate — not merely its source memory. The source memory stays
+    // the identity anchor and provenance base; tombstoned rules never
+    // hydrate.
+    let promoted_rule = artifact_id
+        .as_deref()
+        .filter(|artifact| artifact.starts_with("rule_"))
+        .and_then(|artifact| source.rules.get(artifact))
+        .filter(|rule| rule.tombstoned_at.is_none());
+    let utility = match promoted_rule.and_then(|rule| unit_score(rule.utility)) {
+        Some(rule_utility) => rule_utility,
+        None => {
+            let Some(memory_utility) = unit_score(memory.utility) else {
+                subspans.candidate_construction += construction_start.elapsed();
+                return None;
+            };
+            memory_utility
+        }
     };
-    let Some(utility) = unit_score(memory.utility) else {
-        subspans.candidate_construction += construction_start.elapsed();
-        return None;
+    let content = match promoted_rule {
+        Some(rule) => rule.content.clone(),
+        None => memory.content.clone(),
     };
-    let content = memory.content.clone();
     let why = candidate_selection_why(
         source.query,
         hit.source.as_str(),
@@ -11138,14 +11172,25 @@ fn candidate_from_hit_preloaded(
         memory.utility,
         artifact_id.as_deref(),
     );
+    let mut candidate_provenances = vec![provenance];
+    if let Some(rule) = promoted_rule {
+        if let Ok(entry) = PackProvenance::new(
+            candidate_provenances[0].uri.clone(),
+            format!("Promoted procedural rule {}", rule.id),
+        ) {
+            candidate_provenances.push(entry);
+        }
+    }
     let candidate = match PackCandidate::new(PackCandidateInput {
         memory_id,
-        section: section_for_memory(memory),
+        section: promoted_rule
+            .map(|_| PackSection::ProceduralRules)
+            .unwrap_or_else(|| section_for_memory(memory)),
         content,
-        estimated_tokens: estimate_tokens_default(&memory.content),
+        estimated_tokens: estimate_tokens_default(&content),
         relevance,
         utility,
-        provenance: vec![provenance],
+        provenance: candidate_provenances,
         why,
     }) {
         Ok(candidate) => candidate,
@@ -11155,13 +11200,19 @@ fn candidate_from_hit_preloaded(
         }
     };
 
-    let candidate = candidate
+    let mut candidate = candidate
         .with_diversity_key(diversity_key_for_memory(memory, &tags))
         .with_trust_signal(trust_signal_for_memory(memory, memory_id, degraded))
         .with_lifecycle(pack_lifecycle_for_memory(
             memory,
             source.validity_reference_time,
         ));
+    if let Some(rule) = promoted_rule {
+        candidate.trust = PackTrustSignal::new(
+            TrustClass::from_str(&rule.trust_class).unwrap_or(TrustClass::AgentValidated),
+            Some("procedural_rule".to_owned()),
+        );
+    }
     let candidate = match memory.tombstoned_at.as_ref() {
         Some(tombstoned_at) => candidate.with_tombstoned_at(tombstoned_at.clone()),
         None => candidate,
@@ -12412,8 +12463,7 @@ mod tests {
     use crate::core::profile::{OperatingProfile, RuntimeProfileReport};
     use crate::core::search::{
         PERFORMANCE_EXPLAIN_SCHEMA_V1, RERANK_MODEL_UNAVAILABLE_ADVISORY, ScoreSource,
-        SearchDegradation, SearchHit, SearchOptions, SearchReport,
-        SearchStatus,
+        SearchDegradation, SearchHit, SearchOptions, SearchReport, SearchStatus,
     };
     use crate::db::read_pool::{
         AcquireWaitStats, PoolConfig, PoolStats, READ_POOL_UNDERSIZED_P99_THRESHOLD,
@@ -13493,6 +13543,7 @@ mod tests {
             validity_reference_time: None,
             include_tombstoned: false,
             freshness_file_cache: &mut freshness_file_cache,
+            rules: &BTreeMap::new(),
         };
         let hit = SearchHit {
             doc_id: memory_key.clone(),
@@ -17193,10 +17244,10 @@ pub fn unrelated_context() -> u64 {{
             .and_then(serde_json::Value::as_array)
             .ok_or_else(|| "fresh advisory snapshot must carry a degraded array".to_owned())?;
         assert!(
-            fresh_degraded
-                .iter()
-                .all(|entry| entry.get("code").and_then(serde_json::Value::as_str)
-                    != Some("rerank_model_unavailable")),
+            fresh_degraded.iter().all(|entry| entry
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                != Some("rerank_model_unavailable")),
             "lexical-only fresh pack must not surface rerank degradations"
         );
         assert_eq!(

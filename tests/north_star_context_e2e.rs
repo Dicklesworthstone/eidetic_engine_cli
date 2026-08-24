@@ -647,12 +647,9 @@ fn north_star_3_promoted_ci_rule_is_retrievable() -> TestResult {
     Ok(())
 }
 
-/// Regression tripwire for the remaining §4.3 gap: the NEXT context call must
-/// surface the promoted rule itself, not only its source memory. Fails today
-/// because `rule_linked_memory_id` hydration collapses rules into their source
-/// memory items; un-ignore when bd-3h6bz lands direct-rule pack admission.
+/// §4.3 pack-surfacing contract: the NEXT context call must carry the promoted
+/// rule body itself, not only its source memory (bd-3h6bz direct hydration).
 #[test]
-#[ignore = "bd-3h6bz: pack omits linked rule documents; enable when direct-rule pack items land"]
 fn north_star_3b_pack_surfaces_promoted_rule() -> TestResult {
     let dir = scenario_dir("ci_failure_procedural_pack")?;
     init_workspace(&dir)?;
