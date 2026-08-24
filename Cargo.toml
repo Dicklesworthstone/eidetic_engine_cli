@@ -130,14 +130,14 @@ serde_json = { version = "1.0.149", features = ["arbitrary_precision", "preserve
 serde_yaml = { version = "0.9.34" }
 sha2 = { version = "0.11.0" }
 signal-hook = { version = "0.4" }
-sqlmodel-core = { version = "0.4.0", path = "../sqlmodel_rust/crates/sqlmodel-core" }
-sqlmodel-frankensqlite = { version = "0.4.0", path = "../sqlmodel_rust/crates/sqlmodel-frankensqlite" }
+sqlmodel-core = { version = "0.4.1", path = "../sqlmodel_rust/crates/sqlmodel-core" }
+sqlmodel-frankensqlite = { version = "0.4.1", path = "../sqlmodel_rust/crates/sqlmodel-frankensqlite" }
 tempfile = { version = "3.27.0" }
 # Real BPE tokenization for context pack budget enforcement
 # (eidetic_engine_cli-aitk). Default features only; the `async-openai`
 # feature would pull tokio/reqwest/hyper which are forbidden here.
 tiktoken-rs = { version = "0.12.0", default-features = false }
-toon = { package = "tru", version = "0.2.3", path = "../toon_rust", default-features = false }
+toon = { package = "tru", version = "0.2.4", path = "../toon_rust", default-features = false }
 toml_edit = { version = "0.25.12", default-features = false, features = ["parse", "display"] }
 tracing = { version = "0.1.44" }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
