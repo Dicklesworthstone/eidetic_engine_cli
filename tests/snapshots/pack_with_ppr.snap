@@ -1,30 +1,12 @@
 {
-  "schema": "ee.pack.ppr.golden.v1",
-  "pprItemCount": 2,
-  "items": [
-    {
-      "combinedEqualsPpr": true,
-      "content": "PPR golden fixture structural reranking release neighbor memory.",
-      "pprScorePositive": true,
-      "scoreBreakdownKeys": [
-        "combinedScore",
-        "pprScore",
-        "textScore"
-      ],
-      "textScorePositive": true,
-      "whyMentionsPpr": true
-    },
-    {
-      "combinedEqualsPpr": true,
-      "content": "PPR golden fixture structural reranking release seed memory.",
-      "pprScorePositive": true,
-      "scoreBreakdownKeys": [
-        "combinedScore",
-        "pprScore",
-        "textScore"
-      ],
-      "textScorePositive": true,
-      "whyMentionsPpr": true
-    }
-  ]
+  "schema": "ee.pack.ppr.unavailable.golden.v1",
+  "requestedDegradationCount": 1,
+  "selectionMatchesZeroWeight": true,
+  "scoreBreakdownCount": 0,
+  "whyMentionsPpr": false,
+  "packDna": {
+    "hasCommunityOfMass": true,
+    "pprNeighborCount": 0,
+    "unavailableDegradationCount": 1
+  }
 }
