@@ -261,15 +261,19 @@ fn insights_empty_workspace_cli_shape_matches_contract() -> TestResult {
         "ee insights degraded signal",
         "severity",
     )?;
-    ensure(
-        data.pointer("/degradedSignals")
-            .and_then(Value::as_array)
-            .is_some_and(|signals| {
-                signals.iter().any(|signal| {
-                    signal.get("code").and_then(Value::as_str) == Some("graph.workspace_empty")
-                })
-            }),
-        "empty-workspace insights must still carry the info-level graph.workspace_empty signal",
+    let workspace_empty_present = data
+        .pointer("/degradedSignals")
+        .and_then(Value::as_array)
+        .is_some_and(|signals| {
+            signals.iter().any(|signal| {
+                signal.get("code").and_then(Value::as_str) == Some("graph.workspace_empty")
+            })
+        });
+    ensure_eq(
+        Some(workspace_empty_present),
+        Some(true),
+        "ee insights degraded signal",
+        "graph.workspace_empty presence",
     )?;
 
     let sections = data
