@@ -100,7 +100,11 @@ pub struct WitnessClassification {
 
 /// Action the maintenance command should take for a single row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum WitnessAction {
     /// Row is older than the effective TTL and is not tied to an
     /// active snapshot. Safe to delete.
@@ -111,7 +115,11 @@ pub enum WitnessAction {
 
 /// Why a witness row is being kept rather than pruned.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "code", rename_all = "snake_case")]
+#[serde(
+    tag = "code",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum WitnessKeepReason {
     /// The witness is tied to a snapshot that is still active. We
     /// preserve historical evidence as long as the snapshot is
@@ -359,6 +367,42 @@ mod tests {
                 ttl_days: 30
             }
         ));
+    }
+
+    #[test]
+    fn action_fields_serialize_with_machine_contract_casing() {
+        let prune = serde_json::to_value(WitnessAction::Prune {
+            age_days: 31,
+            ttl_days: 30,
+        })
+        .expect("prune action serializes");
+        assert_eq!(
+            prune,
+            serde_json::json!({
+                "kind": "prune",
+                "ageDays": 31,
+                "ttlDays": 30,
+            })
+        );
+
+        let keep = serde_json::to_value(WitnessAction::Keep {
+            reason: WitnessKeepReason::WithinTtl {
+                age_days: 5,
+                ttl_days: 30,
+            },
+        })
+        .expect("keep action serializes");
+        assert_eq!(
+            keep,
+            serde_json::json!({
+                "kind": "keep",
+                "reason": {
+                    "code": "within_ttl",
+                    "ageDays": 5,
+                    "ttlDays": 30,
+                },
+            })
+        );
     }
 
     /// Witness within the default TTL on an inactive snapshot is

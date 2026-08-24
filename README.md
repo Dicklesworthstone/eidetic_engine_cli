@@ -1346,6 +1346,10 @@ ee outcome <candidate-id> --target-type candidate --signal negative --reason "To
 | `ee graph diff [--graph <family>] [--from ID] [--to ID] [--since RFC3339]` | Temporal structural diff between two persisted snapshots: content-hash-keyed add/remove sets, fingerprint-matched community deltas, persisted-centrality movers (`ee.graph.diff.v1`) |
 | `ee insights [--section <name>] [--explain <id>] --json` | Inspect graph-derived findings and memory-centric topology |
 | `ee proximity <memory-a> <memory-b> --json` | Explain Gomory-Hu min-cut proximity between two memory nodes |
+| `ee economy report [--artifact-type TYPE] [--min-utility SCORE] [--include-debt] [--include-reserves] --json` | Report memory utility, cost, maintenance debt, tail-risk reserves, and attention-budget posture without mutating ranking state |
+| `ee economy score <artifact-id> [--artifact-type TYPE] [--breakdown] --json` | Explain the economic-value score for one memory, procedure, tripwire, or situation |
+| `ee economy simulate --budget TOKENS [--budget TOKENS ...] [--baseline-budget TOKENS] --json` | Compare alternate attention budgets and pack profiles without changing durable state |
+| `ee economy prune-plan --dry-run [--max-recommendations N] --json` | Produce a bounded report-only plan to retire, compact, merge, demote, or revalidate low-value artifacts; omission of `--dry-run` is refused |
 
 ### Conflicts
 

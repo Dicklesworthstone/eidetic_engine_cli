@@ -154,8 +154,8 @@ fn seed_witness_fixture(workspace: &Path) -> Result<(PathBuf, String), String> {
     .map_err(|error| format!("insert workspace: {error}"))?;
 
     let active_snapshot = "gsnap_activewitnessretention001";
-    let archived_old_snapshot = "gsnap_archivedoldwitnessret001";
-    let archived_recent_snapshot = "gsnap_archivednewwitnessret001";
+    let archived_old_snapshot = "gsnap_archivedoldwitnessret0001";
+    let archived_recent_snapshot = "gsnap_archivednewwitnessret0001";
     insert_snapshot(
         &conn,
         &workspace_id,
@@ -401,7 +401,7 @@ fn graph_witnesses_prune_degrades_but_keeps_unparseable_recorded_at() -> TestRes
     set_witness_recorded_at(
         &conn,
         &workspace_id,
-        "gsnap_archivednewwitnessret001",
+        "gsnap_archivednewwitnessret0001",
         "same_day_hits",
         "not a timestamp",
     )?;

@@ -608,9 +608,9 @@ fn top_level_command_list_matches_src() {
     //     | grep -E '^\s+[A-Z][a-zA-Z]+\(' | wc -l
     let expected = TOP_LEVEL_COMMAND_VARIANTS.len();
     // Count is intentionally hard-coded as a tripwire. The number
-    // matches the wc -l at 2026-05-13. When you add a command,
+    // matches the wc -l at 2026-08-24. When you add a command,
     // update both the list and this constant in the same commit.
-    let pinned_at_drift_check = 70;
+    let pinned_at_drift_check = 71;
     assert_eq!(
         expected, pinned_at_drift_check,
         "TOP_LEVEL_COMMAND_VARIANTS length changed from {pinned_at_drift_check} \
