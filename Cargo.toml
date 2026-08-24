@@ -104,7 +104,7 @@ base64 = { version = "0.22.1" }
 blake3 = { version = "1.5" }
 crossbeam-queue = { version = "0.3" }
 determinism = { version = "0.1.0", path = "crates/determinism" }
-franken-agent-detection = { version = "0.1.10", path = "../franken_agent_detection", default-features = false }
+franken-agent-detection = { version = "0.2.2", path = "../franken_agent_detection", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = { version = "4.6.1" }
