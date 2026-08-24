@@ -35,32 +35,45 @@
 > **2026-08-24 independent rerun addendum.** The reality check was repeated from
 > the complete `AGENTS.md`, `README.md`, controlling plans/ADRs, implementation,
 > tracker, installed release, hosted release/CI, and source-attested verification
-> surfaces. Current `main` is `5962397d48b1e01aa4cc3886c91423d7830a9c18`
-> (`v0.14.2-96-g5962397d`). Recent commits improve rule-body hydration, make
-> unavailable upstream PPR degrade truthfully, and advance backup/export paths,
-> but they do not implement ADR 0085 typed pack identity, calibrate lexical
-> relevance, prove deterministic generations, complete recovery, or close any
-> child of `bd-reality-core-convergence-1azkt`.
+> surfaces. Current `main` is `c355087fe23f809719a3b1d510fc3f735389a606`
+> (`v0.14.2-98-gc355087f`), with source package version `0.14.3`; the installed
+> probe binary remains release `0.14.2`. Source now has a real, first-class
+> `PackEvidenceItem` path for positively admitted CASS spans, persists those
+> rows in `pack_evidence_items`, accepts targetless audit records during backup,
+> and opens existing store-auth state without creating it during dry-run. Those
+> are material improvements and invalidate the earlier `REGRESSED` labels for
+> the whole CASS and backup goals. They do not yet provide the generic ADR 0085
+> entity model, native rule identity, a complete durable backup inventory,
+> evolved-store recovery proof, calibrated lexical relevance, or deterministic
+> immutable index generations. README still describes unlinked CASS evidence as
+> un-packable, so source and public contract have also drifted in the opposite
+> direction.
 >
 > A fresh installed-`0.14.2` walking-skeleton probe did persist, search, pack,
 > and explain one manual procedural memory with provenance, confirming that the
-> ordinary component path is real. The same isolated workspace reported
-> inconsistent index/model readiness across status/search observations, so it
-> does not upgrade the source-attested verdict. A pinned, clean-tree RCH
-> `cargo check --locked --all-targets` reached Cargo on worker `vmi1152480` but
-> ended `rch_environment_failure` after remote worker disk exhaustion; retry and
-> local proof-ledger persistence also failed because the Mac had only 116 MiB
-> free and the external build volume was absent. This is neither a green proof
-> nor a source failure. Hosted CI for this exact SHA remains pending with zero
-> jobs.
+> ordinary component path is real. Its status is nevertheless
+> `degraded_recoverable` because the selected workspace index is missing/stale,
+> and its version output cannot attest a source commit or target. The pinned
+> current-source RCH command did not reach compilation: `rch_verify.sh`
+> correctly refused the source state because `franken-stack.lock` materializes
+> FrankenSQLite/fsqlite `0.3.9` while `Cargo.lock` still resolves `0.3.7`.
+> `contract-drift-radar --strict` separately found that the dependency contract
+> documents still expect Asupersync `0.3.9` while `Cargo.toml` requests `0.4.9`.
+> Closure lint, verification drift guard, and the 134/134 surface-oriented
+> vision inventory pass; none compiles or proves product behavior. Hosted CI run
+> `32759250334` for this exact SHA was cancelled with zero jobs, as were the
+> immediately preceding main runs. This is a source-state/proof failure, not
+> evidence that compilation or the product suite passed.
 >
-> The bridge was then re-run through three ambition rounds and five plan-space
-> refinement passes: product closure, recovery/operability, adversarial proof,
-> dependency order, observability/testing, privacy/failure handling, and agent
-> journey/release maturity. No additional unowned controlling goal emerged.
-> The existing epic plus reused blockers covers all 24 checklist rows; its 23
-> records remain 20 open and 3 in progress, and `.22` still graph-blocks on every
-> mandatory child and reused blocker. No duplicate plan or Bead was created.
+> The bridge was then re-run independently through three ambition rounds
+> (agent outcome, durable recovery/operation, and proof/release ambition) and
+> five plan-space refinement passes (dependency order, observability/oracles,
+> privacy/failure handling, shared-checkout/execution risk, and final
+> clarity/scope). No additional unowned controlling goal emerged. The passes
+> sharpened `.1`, `.10`, `.13`, and `.18`; the existing epic plus reused blockers
+> still covers all 24 checklist rows. Its 23 records remain 20 open and 3 in
+> progress, and `.22` still graph-blocks on every mandatory child and reused
+> blocker. No duplicate plan or Bead was created.
 
 ---
 
@@ -200,9 +213,10 @@ current `Cargo.lock`.
 
 The decisive failures are at integration and proof boundaries:
 
-1. CASS transcript spans are persisted and partial projection work exists, but
-   job coverage, admissible indexing, typed hydration, and public closed-loop
-   proof do not reliably make them searchable and packable.
+1. CASS transcript spans are persisted, projected, and can enter a pack through
+   a first-class positively admitted `PackEvidenceItem` path. The public
+   import-to-index-to-pack proof, full job/revision coverage, README contract,
+   and generic ADR 0085 entity model have not converged.
 2. Applied procedural rules are persisted and partially projected, but corpus/
    reembed accounting and native rule-item hydration remain incomplete.
 3. Incremental evidence/linkage jobs can stamp a derived index whose actual
@@ -213,8 +227,9 @@ The decisive failures are at integration and proof boundaries:
    readily than the exact public behavior they claim.
 6. Current RCH and hosted CI evidence is red, cancelled, killed, or pending;
    no immutable current SHA has the required green readiness proof.
-7. Release automation is disabled and the latest release lacks the signed/
-   provenance asset set produced by the checked-in workflow.
+7. Release automation is tag-only, but its dependency/tool inputs are not yet
+   hermetic and the latest release lacks the signed/provenance asset set the
+   checked-in workflow claims to produce.
 8. README performance numbers are historical and not reproducibly tied to the
    current baseline file, raw samples, host fingerprint, or a release-blocking
    gate.
@@ -227,14 +242,17 @@ The decisive failures are at integration and proof boundaries:
     scores above one all become public `relevanceScore: 1.0`; downstream floor,
     pack-quality, and ask-confidence semantics can therefore call weak results
     maximally relevant or "good".
-11. Backup creation fails on a legitimate targetless audit row. Dry-run can
-    create authentication-key state, export omits much of the durable five-job
-    model, and restore ignores even exported links/audits. The documented
-    recovery surface is materially lossy.
-12. CASS pack admission has an accepted design, ADR 0085: a positively admitted
-    safe evidence span is a first-class typed pack entity, while unsafe or
-    unclassified spans fail closed. Implementation and README wording have not
-    converged on that contract.
+11. Backup now accepts legitimate targetless audit rows, uses one read snapshot,
+    and avoids creating authentication-key state during dry-run. Export still
+    covers only workspace/memories/tags/links/audits, selected graph fields, and
+    attempt-family data; rules, CASS sessions/evidence, outcomes, packs,
+    curation lineage, and durable jobs are not round-tripped. The documented
+    recovery surface therefore remains materially incomplete.
+12. CASS pack admission now implements the evidence-specific core of ADR 0085:
+    a positively admitted safe evidence span is first-class and unsafe or
+    unclassified spans fail closed. The general typed-entity contract, native
+    rule entities, replay/outcome migration, schema version decision, public
+    E2E, and README wording have not converged.
 13. Effective build inputs are not hermetic: sibling trees and semantic
     checkout-time patches are incompletely represented in provenance, release
     tooling has mutable inputs, and release Cargo builds omit `--locked`.
@@ -249,8 +267,8 @@ product.**
 ## 7. Evidence snapshot and authority boundary
 
 Source base under the latest audit: `main` at
-`5962397d48b1e01aa4cc3886c91423d7830a9c18`
-(`v0.14.2-96-g5962397d`). The tracked worktree was clean; pre-existing untracked
+`c355087fe23f809719a3b1d510fc3f735389a606`
+(`v0.14.2-98-gc355087f`). The tracked worktree was clean; pre-existing untracked
 tracker journals, `.ci/`, and a Cargo manifest backup were left untouched.
 Static claims below are source/contract findings, not a green-candidate proof.
 
@@ -260,7 +278,7 @@ SHA-256
 Its `ee version --json` reports `gitCommit: null`, `gitTag: null`, and
 `targetTriple: unknown`. Therefore the live runtime results are
 **released-binary evidence against the current workspace**, not proof that
-commit `5962397d` behaves identically. Source inspection contains a plausible
+commit `c355087f` behaves identically. Source inspection contains a plausible
 matching race. Bead `.10` must reproduce or refute it with a source-attested
 candidate before `.2` changes the implementation.
 
@@ -279,6 +297,13 @@ candidate before `.2` changes the implementation.
   `tower`, or `reqwest`.
 - Core command dispatch and durable use-case implementations are real rather
   than TODO/unimplemented macros.
+- Current source implements live-admitted direct CASS pack entities with stable
+  `EvidenceId`, revision hash, session/span provenance, trust class, and durable
+  `pack_evidence_items` persistence. This is real partial ADR 0085 delivery,
+  not yet a proof that the complete CASS loop works.
+- Current backup source uses a consistent DB read snapshot, accepts nullable
+  audit targets, and does not create store-auth state during dry-run; focused
+  inline tests cover both repaired cases.
 - The active Beads dependency graph has no active cycle.
 - `closure-lint --audit --json` reports no formal violation, while this plan
   explicitly records what that linter does not prove.
@@ -297,10 +322,10 @@ candidate before `.2` changes the implementation.
 - A live installed-binary lexical query returned distinct BM25 scores roughly
   `1.59..3.12`, all rendered as `relevanceScore: 1.0`. Current source and tests
   explicitly implement that saturation.
-- `ee backup create --dry-run --json` failed with high-severity storage error
-  `missing required non-empty field 'target_type'`. Current source shows the
-  nullable audit/export mismatch, incomplete export inventory, lossy restore,
-  and key-opening-before-dry-run behavior.
+- The installed `0.14.2` backup dry-run failed on a nullable audit target, but
+  current source fixes that failure and the dry-run key mutation. The remaining
+  source defect is broader: the export inventory omits durable five-job state
+  and restore cannot yet prove lossless behavior across it.
 - The installed release reports source rows that do not become documents: 147
   evidence spans but zero indexed evidence documents and zero rule documents.
 - A live Asupersync migration query returned either no result or unrelated RCH,
@@ -321,17 +346,15 @@ candidate before `.2` changes the implementation.
   `src/search/bm25_simd.rs` residue contradicts the no-custom-BM25 boundary.
   Additional source audit found score-changing local fusion, global-store
   token-overlap retrieval, and locally recomputed diagnostic RRF.
-- Recent RCH contract runs exited 101 or were stuck-detector cancelled; two
-  North Star attempts exited 137. Current full check, clippy, full tests, and
-  exact North Star behavior have no green current-SHA proof.
-- Hosted CI has no successful substantive current-main verdict. The latest
-  release workflow is disabled, and v0.14.2 has archives/checksums/installers
-  but no Sigstore bundles or SLSA provenance assets.
-- At the latest audit checkpoint, hosted push run `32731128435` for
-  `5962397d` was `pending` with zero jobs. The one pinned clean-tree RCH check
-  ended in an attributed environment failure (remote worker disk full, retry
-  attempted, local proof-ledger write blocked by host disk exhaustion); no
-  local Cargo fallback or duplicate verification run was started.
+- The pinned current-SHA RCH check was refused before dispatch because the
+  materialized FrankenSQLite/fsqlite `0.3.9` contract disagrees with locked
+  `0.3.7`; current check, clippy, full tests, and exact North Stars therefore
+  have no source-attested verdict. `contract-drift-radar --strict` also fails
+  on stale Asupersync version documentation (`0.3.9` versus manifest `0.4.9`).
+- Hosted CI has no successful substantive current-main verdict. Exact-SHA run
+  `32759250334` was cancelled with zero jobs, and preceding main runs were also
+  concurrency-cancelled. Release v0.14.2 has native archives/checksums/installers
+  but no Sigstore bundle or SLSA provenance assets.
 
 ---
 
@@ -342,14 +365,14 @@ candidate before `.2` changes the implementation.
 | 1 | Local-first single CLI; core commands need no daemon | **WORKING** | Real direct CLI paths and source-backed storage exist. |
 | 2 | Franken-stack foundations; no forbidden substitute dependencies or core algorithms | **PARTIAL / WRONG-APPROACH** | Static dependency scan is clean, but local PPR/fusion/global token overlap/diagnostic RRF cross hard boundaries; custom BM25 is public; version identity drifts. `.4`, `.15`, `.18`. |
 | 3 | Manual memory → DB → search → pack → why | **PARTIAL** | The ordinary path and provenance exist. Released-binary probes are unreliable; source-attested attribution is `.10`, then `.2`/`.3`. |
-| 4 | CASS import makes permitted prior incident content searchable and safely packable | **REGRESSED** | `bd-3k1mg`, `bd-16imy`, ADR 0085. Search projection is incomplete and typed live admission/provenance is not proven. |
-| 5 | Hybrid BM25 + neural-local retrieval by default | **REGRESSED / ATTRIBUTION PENDING** | Released binary flips backend; current source has plausible causes; fresh-workspace fallback is `bd-fresh-workspace-hash-fallback-kvltg`. |
-| 6 | Same declared snapshot gives byte-stable canonical JSON and pack hash | **REGRESSED / NO-BEAD at audit start** | Released-binary semantics diverged; source contract and attribution are `.1`, `.10`, `.2`, `.3`. |
-| 7 | Retrieval scores and pack quality mean what their names claim | **REGRESSED / NO-BEAD at audit start** | Current code clamps unbounded lexical BM25 to `1.0` and uses incompatible domains for admission/quality. `.11`, `.12`. |
+| 4 | CASS import makes permitted prior incident content searchable and safely packable | **PARTIAL / UNPROVEN** | Source has direct live-admitted `PackEvidenceItem` hydration and persistence. Import/job/index/replay/outcome public proof, generic typed identity, and README wording remain with `bd-3k1mg`, `bd-16imy`, ADR 0085, `.9`, `.17`. |
+| 5 | Hybrid BM25 + neural-local retrieval by default | **PARTIAL / UNPROVEN** | Released binary flips backend; current source has plausible causes but no source-attested oracle. Fresh-workspace fallback is `bd-fresh-workspace-hash-fallback-kvltg`; `.10`, `.2`, `.3` own attribution and convergence. |
+| 6 | Same declared snapshot gives byte-stable canonical JSON and pack hash | **UNPROVEN** | Released-binary semantics diverged. ADR 0087 is a `proposed` contract, not implementation; `.1`, `.10`, `.2`, `.3` own closure. |
+| 7 | Retrieval scores and pack quality mean what their names claim | **WRONG-APPROACH** | Current code passes raw lexical BM25 through a unit clamp, saturating scores above `1.0` before pack admission/quality. `.11`, `.12`. |
 | 8 | Explainable packs with typed identity, provenance, freshness, trust, and score reasons | **PARTIAL** | Rendering is strong for admitted memories; rule/evidence v3 identity, calibration, and deterministic admission remain open. |
-| 9 | Learn loop turns repeated evidence into a rule used by later search/pack | **REGRESSED** | `bd-3h6bz`; rule search work is substantial, but native rule item/content/identity and exact E2E remain open. |
+| 9 | Learn loop turns repeated evidence into a rule used by later search/pack | **PARTIAL / UNPROVEN** | Rules are stored, indexed, and can hydrate content through a linked source `MemoryId`; native rule identity and the exact later-pack E2E remain open under `bd-3h6bz`, ADR 0085, and `.17`. |
 | 10 | Maintain loop links, decays, consolidates, validates, repairs, and converges | **PARTIAL / UNPROVEN** | Decay/machinery exist; public consolidate → apply → index → retrieve is `bd-1oep7`. |
-| 11 | Complete durable backup, verify, migration, restore, and rebuild | **REGRESSED / NO-BEAD at audit start** | Create fails on a valid audit; dry-run can mutate; export/restore omit core durable state. `.13`, `.14`. |
+| 11 | Complete durable backup, verify, migration, restore, and rebuild | **PARTIAL / UNPROVEN** | Targetless audits, read-snapshot export, and non-mutating auth-key dry-run are fixed in source. Export/restore still omit core durable state and evolved-store proof. `.13`, `.14`. |
 | 12 | Graceful offline degradation remains useful and truthful | **PARTIAL** | Honest fallback/abstention exists; released binary may instead return no result/error, and uncalibrated quality is misleading. |
 | 13 | Stable machine envelopes and truthful repair exits | **PARTIAL** | `bd-34l8k`, `bd-3ak9b`, `bd-vv2dw`, `bd-aav4p`, `bd-5k6k7`; typed pack v3 is an intentional future break. |
 | 14 | Exact eight North Star public-CLI scenarios | **UNPROVEN** | `bd-2mpct`, `bd-2mpct.1`, and bridge `.17`; current runs are red/killed and prior oracles are permissive. |
@@ -357,10 +380,10 @@ candidate before `.2` changes the implementation.
 | 16 | Graph insight and optional adapters are real or explicitly degraded | **PARTIAL** | Core graph/team surfaces are substantial; placeholder insights remain under `bd-2pos6`; stable claims must close or demote in `.9`. |
 | 17 | Multi-agent local writes preserve integrity and truthful freshness | **PARTIAL / UNPROVEN** | Strong tests exist; current full-suite proof is red and evidence/linkage/index generation gaps remain. |
 | 18 | Unix team-confederation and documented environment posture | **PARTIAL** | Unix/two-host/Windows/fake-IdP evidence exists; Part III two-human wording and README disagree. `.8`. |
-| 19 | Canonical readiness verification and green CI | **REGRESSED / NO-BEAD at audit start** | `.5` builds the runner, `.17` hardens oracles, `.19` owns the factual green-candidate claim. |
-| 20 | Reproducible performance and usable first-agent latency | **UNPROVEN / NO-BEAD at audit start** | README baseline/footer drift, no raw provenance, advisory budgets, and remote/local driver mismatch. `.6`. |
-| 21 | Hermetic multi-platform release/install chain | **PARTIAL / NO-BEAD at audit start** | Current release has archives/checksums/installers but no candidate checks/provenance set; workflow is disabled. `.7`, `.18`, `.20`, `.21`. |
-| 22 | Canonical walking skeleton proves init → remember → search → pack → why | **REGRESSED** | Basic E2E omits the claimed flow and asserts v1. `.5`, `bd-2mpct`. |
+| 19 | Canonical readiness verification and green CI | **UNPROVEN** | Pinned verification refuses the current locked dependency mismatch before compilation; exact-SHA CI was cancelled with zero jobs after multiple cancelled runs. `.5`, `.17`, `.18`, `.19`. |
+| 20 | Reproducible performance and usable first-agent latency | **UNPROVEN** | README baseline/footer drift, no raw provenance, advisory budgets, and remote/local driver mismatch. `.6`. |
+| 21 | Hermetic multi-platform release/install chain | **PARTIAL / UNPROVEN** | Current release has archives/checksums/installers but no candidate checks/provenance set; tag-only workflow inputs remain non-hermetic. `.7`, `.18`, `.20`, `.21`. |
+| 22 | Canonical walking skeleton proves init → remember → search → pack → why | **PARTIAL / UNPROVEN** | Installed release completes the ordinary path, but the claimed basic E2E omits it and still asserts v1; no current-source proof exists. `.5`, `bd-2mpct`. |
 | 23 | Recommended agent journey is coherent and fast without a daemon | **PARTIAL** | Five-command core exists, while README promotes broader overlapping flows and latency remains unproven. `.6`, `.9`. |
 | 24 | No-silent-mutation lifecycle, helpful/harmful feedback, decay/inversion | **PARTIAL / UNPROVEN** | Machinery exists; exact later-pack behavior, audit semantics, and docs wording need behavioral proof or maturity demotion. `.9`, `.17`, `bd-2mpct`. |
 
