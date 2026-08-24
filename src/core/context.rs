@@ -88,6 +88,7 @@ use crate::db::{
 };
 use crate::models::degradation::{
     GRAPH_PACK_DNA_TIMEOUT_CODE, GRAPH_PPR_EMPTY_SEED_SET_CODE, GRAPH_PPR_SNAPSHOT_STALE_CODE,
+    GRAPH_PPR_UPSTREAM_UNAVAILABLE_CODE,
 };
 use crate::models::{
     AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_OUTCOMES,
@@ -120,10 +121,12 @@ static CONTEXT_PROXIMITY_TREE_CACHE: OnceLock<RwLock<Option<CachedContextProximi
     OnceLock::new();
 const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
 #[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
-pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V4: &str = "ee.pack.l2_cache_key.v4";
+pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V5: &str = "ee.pack.l2_cache_key.v5";
 const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V3: &str = "ee.pack.l2_context_response.v3";
 const CONTEXT_SEARCH_ADVISORY_SNAPSHOT_SCHEMA_V1: &str = "ee.context.search_advisory_snapshot.v1";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
+const GRAPH_PPR_UPSTREAM_UNAVAILABLE_MESSAGE: &str = "Personalized PageRank pack influence is unavailable because the pinned FrankenNetworkX dependency does not expose deterministic personalized PageRank; textual ranking and non-PPR graph explanations remain active.";
+const GRAPH_PPR_UPSTREAM_UNAVAILABLE_REPAIR: &str = "Use --ppr-weight 0 and rely on textual ranking until a pinned FrankenNetworkX personalized PageRank API is available.";
 const CONTEXT_CHANGED_SYMBOL_BOOST: f32 = 0.05;
 const CONTEXT_MEMORY_TIER_HOT_BOOST: f32 = 0.025;
 const CONTEXT_MEMORY_TIER_WARM_BOOST: f32 = 0.010;
@@ -1742,12 +1745,16 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
         .map(|item| item.memory_id)
         .collect::<Vec<_>>();
 
+    let pack_dna_ppr_requested = !query_seed_weights.is_empty();
     let input = crate::graph::pack_dna::PackDnaInput {
         pack_memory_ids,
         query_seed_weights,
         trust_anchor_memory_ids,
         ego_radius: crate::graph::pack_dna::DEFAULT_PACK_DNA_EGO_RADIUS,
-        ppr_neighbor_limit: crate::graph::pack_dna::DEFAULT_PACK_DNA_PPR_NEIGHBOR_LIMIT,
+        // Pack DNA remains useful without its PPR sub-signal. Keep the local
+        // ACL implementation off the production pack path until the pinned
+        // FrankenNetworkX dependency owns deterministic personalized PageRank.
+        ppr_neighbor_limit: 0,
     };
     let projection_seed_ids = pack_dna_projection_seed_ids(&input, pack_dna_config.max_items);
     let projection = match crate::graph::build_memory_graph_for_frontier(
@@ -1778,7 +1785,7 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
             return;
         }
     };
-    let pack_dna = match compute_context_pack_dna(&projection, &input) {
+    let mut pack_dna = match compute_context_pack_dna(&projection, &input) {
         Ok(pack_dna) => pack_dna,
         Err(crate::graph::GraphError::AlgorithmTimeout { timeout_ms, .. }) => {
             let pack_dna = crate::graph::pack_dna::PackDna {
@@ -1831,6 +1838,13 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
             return;
         }
     };
+
+    if pack_dna_ppr_requested {
+        pack_dna
+            .degraded
+            .push(graph_ppr_upstream_unavailable_pack_dna_degradation());
+        push_graph_ppr_upstream_unavailable_degradation(&mut response.data.degraded);
+    }
 
     for degradation in &pack_dna.degraded {
         push_degradation(
