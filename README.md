@@ -178,8 +178,8 @@ $ ee index rebuild --workspace .
 # 5. Search the indexed CASS excerpts directly
 $ ee search "release workflow failure" --workspace . --limit 20 --explain --json
 
-# 6. Pack durable memories for the task; the manual rule from step 2 is eligible
-$ ee pack "enforce clippy warnings as errors in CI" --workspace . --profile thorough
+# 6. Pack durable memories and live-admitted CASS excerpts for the task
+$ ee pack "enforce clippy warnings as errors in CI" --workspace . --profile thorough --json
 
 # 7. Inspect that manually remembered rule
 $ ee why mem_01HQ3K5Z --workspace . --json
@@ -190,12 +190,13 @@ $ ee outcome mem_01HQ3K5Z --signal helpful --reason "Caught a clippy regression"
 ```
 
 The manual rule and imported CASS evidence are separate records in this
-example. Step 6 can select the rule because step 2 created a durable memory;
-the import does not retroactively give that rule CASS provenance. Fresh
-imported excerpts are searchable after step 4, but an excerpt requires a
-linked, distilled memory before it can hydrate into a memory-centric pack. A
-matching unlinked excerpt is reported as
-`context_evidence_hit_unhydrated` instead of being represented as a pack item.
+example. Step 6 can select either one: durable memories appear as
+`entityKind: "memory"`, while a live-admitted unlinked excerpt appears as
+`entityKind: "evidence_span"` with `evidenceSpanId`, session and line-range
+provenance, and no fabricated `memoryId`. The import does not retroactively
+give the manual rule CASS provenance. `context_evidence_hit_unhydrated` is
+reported only when a matching evidence hit fails current live admission (for
+example, because its source row is stale or no longer pack-eligible).
 
 The flow runs locally with no daemon and no cloud. On a typical project, the
 interactive steps are fast enough to use before ordinary agent work.
@@ -1865,6 +1866,9 @@ ee index rebuild --workspace .
 # Imported excerpts are now directly retrievable as evidence
 ee search "<phrase from a prior session>" --workspace . --limit 20 --explain --json
 
+# The same live-admitted excerpt can enter a pack without a synthetic memory
+ee pack "<phrase from a prior session>" --workspace . --json
+
 # Preview curation candidates without writing
 ee review session <cass-session-id> --workspace . --propose --dry-run --json
 
@@ -1876,10 +1880,12 @@ ee curate apply <candidate-id> --workspace . --json
 ee index rebuild --workspace .
 ```
 
-Fresh imported spans have no memory link. They remain searchable, but a
-memory-centric pack skips them with `context_evidence_hit_unhydrated` until a
-reviewed curation candidate creates the linked memory. Rebuilding the derived
-index after curation makes the new linkage visible to retrieval.
+Fresh imported spans have no memory link, but remain searchable and directly
+packable when their live source row passes current admission. In JSON packs
+they are typed as `entityKind: "evidence_span"`, retain their exact session and
+line-range provenance, and never receive a synthetic `memoryId`. Curation is
+still how an excerpt becomes a durable memory or procedural rule; rebuilding
+the derived index after curation makes that new linkage visible to retrieval.
 
 Required `cass` commands consumed (all with stable contracts):
 

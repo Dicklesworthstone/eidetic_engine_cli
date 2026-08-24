@@ -40,6 +40,12 @@ const README_CASS_IMPORT_FIELDS: &[&str] = &[
     "indexJobsQueued",
     "indexRequiredAction",
 ];
+const README_DIRECT_CASS_PACK_MARKERS: &[&str] = &[
+    "live-admitted unlinked excerpt",
+    "`entityKind: \"evidence_span\"`",
+    "no fabricated `memoryId`",
+    "ee pack \"<phrase from a prior session>\" --workspace . --json",
+];
 
 /// Top-level commands that intentionally do not appear in the
 /// README Command Reference. Each entry needs a one-line justification
@@ -377,6 +383,26 @@ fn extract_readme_commands(readme: &str) -> BTreeSet<String> {
         }
     }
     commands
+}
+
+#[test]
+fn readme_documents_direct_cass_evidence_packing_without_synthetic_memory_ids() -> TestResult {
+    for marker in README_DIRECT_CASS_PACK_MARKERS {
+        if !README.contains(marker) {
+            return Err(format!(
+                "README must preserve the direct CASS pack contract marker {marker:?}"
+            ));
+        }
+    }
+    if README.contains("an excerpt requires a\nlinked, distilled memory before it can hydrate")
+        || README.contains("memory-centric pack skips them with `context_evidence_hit_unhydrated`")
+    {
+        return Err(
+            "README still claims that unlinked live-admitted CASS evidence cannot enter packs"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 #[test]
