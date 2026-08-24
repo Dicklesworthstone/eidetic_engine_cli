@@ -9,9 +9,9 @@
 # origin/main. SQLModel stays on the 0.4.0 harmonize/vlsf2-fsqlite03 pin
 # (021bd17); origin/main is still the 0.3.2 line. Isolated dests and the
 # checkout helpers relax sqlmodel's asupersync =0.4.4 pin to =0.4.9 so
-# the path override can close. Frankensearch storage now requests
-# fsqlite 0.3.7, so the patched 0.3.7 engine satisfies both ee's DB
-# layer and frankensearch storage.
+# the path override can close. Frankensearch storage accepts fsqlite 0.3.7,
+# so the pinned 0.3.9 engine satisfies both ee's DB layer and frankensearch
+# storage.
 asupersync	9eb0600e6ef4d17633dff3dc43ad99c64e72adbe
 franken_agent_detection	17f28ad8fbea9181134d63e109a310ea7bf31997
 franken_networkx	972814b1b4649c20b6f2acdd7456e3580cefdbeb

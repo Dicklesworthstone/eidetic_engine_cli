@@ -407,7 +407,8 @@ DEPENDENCY_RESEARCH_DOC="${ROOT}/docs/dependency-research-notes.md"
 DEPENDENCY_MATRIX_DOC="${ROOT}/docs/dependency-contract-matrix.md"
 COMPREHENSIVE_PLAN_DOC="${ROOT}/COMPREHENSIVE_PLAN.md"
 CARGO_TOML="${ROOT}/Cargo.toml"
-accepted_asupersync_profile='asupersync = { version = "=0.3.9", default-features = false, features = ["tracing-integration"] }'
+accepted_asupersync_profile=""
+accepted_asupersync_version=""
 dependency_violations="[]"
 dependency_violation_count=0
 dependency_docs_checked=0
@@ -440,20 +441,24 @@ append_dependency_violation() {
 
 if [ -f "$CARGO_TOML" ]; then
   append_dependency_checked_file "Cargo.toml"
-  if ! grep -Fq "$accepted_asupersync_profile" "$CARGO_TOML"; then
+  accepted_asupersync_profile=$(grep -E '^asupersync[[:space:]]*=.*default-features = false.*features = \["tracing-integration"\]' "$CARGO_TOML" 2>/dev/null | head -1 || true)
+  accepted_asupersync_version=$(printf '%s' "$accepted_asupersync_profile" \
+    | sed -n 's/.*version = "=\([^"]*\)".*/\1/p')
+  if [ -z "$accepted_asupersync_profile" ] || [ -z "$accepted_asupersync_version" ]; then
     hit=$(grep -nE '^asupersync[[:space:]]*=' "$CARGO_TOML" 2>/dev/null | head -1 || true)
     append_dependency_violation \
       "Cargo.toml" \
       "$(printf '%s' "$hit" | awk -F: '{print $1}')" \
       "dependency_profile_drift" \
       "$(printf '%s' "$hit" | cut -d: -f2-)" \
-      "$accepted_asupersync_profile"
+      'an exact asupersync registry pin with default-features=false and tracing-integration'
   fi
 fi
 
 if [ -f "$DEPENDENCY_RESEARCH_DOC" ]; then
   append_dependency_checked_file "docs/dependency-research-notes.md"
-  if ! grep -Fq "$accepted_asupersync_profile" "$DEPENDENCY_RESEARCH_DOC"; then
+  if [ -n "$accepted_asupersync_profile" ] \
+    && ! grep -Fq "$accepted_asupersync_profile" "$DEPENDENCY_RESEARCH_DOC"; then
     hit=$(grep -nF 'asupersync = {' "$DEPENDENCY_RESEARCH_DOC" 2>/dev/null | head -1 || true)
     append_dependency_violation \
       "docs/dependency-research-notes.md" \
@@ -469,14 +474,16 @@ if [ -f "$DEPENDENCY_RESEARCH_DOC" ]; then
       "$(printf '%s' "$hit" | awk -F: '{print $1}')" \
       "stale_dependency_profile_reference" \
       "$(printf '%s' "$hit" | cut -d: -f2-)" \
-      "asupersync =0.3.9 with default-features=false and tracing-integration"
-  done < <(grep -nE 'asupersync[^[:cntrl:]]*(0\.3\.[1-8])|0\.3\.[1-8][^[:cntrl:]]*asupersync|leave .{0,80}asupersync.{0,80}default features|\["test-internals", "proc-macros"\]' "$DEPENDENCY_RESEARCH_DOC" 2>/dev/null || true)
+      "asupersync =${accepted_asupersync_version} with default-features=false and tracing-integration"
+  done < <(grep -nE 'asupersync[^[:cntrl:]]*[0-9]+\.[0-9]+\.[0-9]+|[0-9]+\.[0-9]+\.[0-9]+[^[:cntrl:]]*asupersync' "$DEPENDENCY_RESEARCH_DOC" 2>/dev/null \
+    | grep -Fv "$accepted_asupersync_version" || true)
 fi
 
 if [ -f "$DEPENDENCY_MATRIX_DOC" ]; then
   append_dependency_checked_file "docs/dependency-contract-matrix.md"
   matrix_line=$(grep -nE "^\| \`asupersync\` \|" "$DEPENDENCY_MATRIX_DOC" 2>/dev/null | head -1 || true)
-  if ! printf '%s' "$matrix_line" | grep -Fq "registry \`=0.3.9\`" \
+  if [ -z "$accepted_asupersync_version" ] \
+    || ! printf '%s' "$matrix_line" | grep -Fq "registry \`=${accepted_asupersync_version}\`" \
     || ! printf '%s' "$matrix_line" | grep -Fq 'default-features = false' \
     || ! printf '%s' "$matrix_line" | grep -Fq 'tracing-integration'; then
     append_dependency_violation \
@@ -484,14 +491,15 @@ if [ -f "$DEPENDENCY_MATRIX_DOC" ]; then
       "$(printf '%s' "$matrix_line" | awk -F: '{print $1}')" \
       "dependency_profile_drift" \
       "$(printf '%s' "$matrix_line" | cut -d: -f2-)" \
-      "asupersync matrix row includes registry \`=0.3.9\`, \`default-features = false\`, and \`tracing-integration\`"
+      "asupersync matrix row includes registry \`=${accepted_asupersync_version}\`, \`default-features = false\`, and \`tracing-integration\`"
   fi
 fi
 
 if [ -f "$COMPREHENSIVE_PLAN_DOC" ]; then
   append_dependency_checked_file "COMPREHENSIVE_PLAN.md"
   plan_line=$(grep -nE '^asupersync[[:space:]]*=' "$COMPREHENSIVE_PLAN_DOC" 2>/dev/null | head -1 || true)
-  if ! printf '%s' "$plan_line" | grep -Fq 'version = "=0.3.9"' \
+  if [ -z "$accepted_asupersync_version" ] \
+    || ! printf '%s' "$plan_line" | grep -Fq "version = \"=${accepted_asupersync_version}\"" \
     || ! printf '%s' "$plan_line" | grep -Fq 'default-features = false' \
     || ! printf '%s' "$plan_line" | grep -Fq 'tracing-integration'; then
     append_dependency_violation \
@@ -508,8 +516,9 @@ if [ -f "$COMPREHENSIVE_PLAN_DOC" ]; then
       "$(printf '%s' "$hit" | awk -F: '{print $1}')" \
       "stale_dependency_profile_reference" \
       "$(printf '%s' "$hit" | cut -d: -f2-)" \
-      "asupersync =0.3.9 with default-features=false and tracing-integration"
-  done < <(grep -nE 'asupersync[^[:cntrl:]]*(0\.3\.[1-8]|version = "0\.3")|features = \["proc-macros"\]' "$COMPREHENSIVE_PLAN_DOC" 2>/dev/null || true)
+      "asupersync =${accepted_asupersync_version} with default-features=false and tracing-integration"
+  done < <(grep -nE 'asupersync[^[:cntrl:]]*[0-9]+\.[0-9]+\.[0-9]+|[0-9]+\.[0-9]+\.[0-9]+[^[:cntrl:]]*asupersync' "$COMPREHENSIVE_PLAN_DOC" 2>/dev/null \
+    | grep -Fv "$accepted_asupersync_version" || true)
 fi
 
 dependency_status="ok"
