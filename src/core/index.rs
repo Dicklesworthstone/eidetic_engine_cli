@@ -5364,6 +5364,7 @@ fn registered_model2vec_source_path(
 
 enum RegisteredModel2VecResolution {
     NotRegistered,
+    BundledDefaultDeclared,
     Ready(EmbedderStack),
     Rejected(EmbedModelResolution),
 }
@@ -5377,7 +5378,8 @@ fn workspace_registry_selection_from_resolution(
     resolution: RegisteredModel2VecResolution,
 ) -> Option<WorkspaceRegistryEmbedderSelection> {
     match resolution {
-        RegisteredModel2VecResolution::NotRegistered => None,
+        RegisteredModel2VecResolution::NotRegistered
+        | RegisteredModel2VecResolution::BundledDefaultDeclared => None,
         RegisteredModel2VecResolution::Ready(stack) => Some(WorkspaceRegistryEmbedderSelection {
             stack,
             model_resolution: EmbedModelResolution::ready(EmbedModelSource::Registered),
@@ -5457,6 +5459,14 @@ fn registered_model2vec_resolution(
             entry,
             EmbedRegistryRejectionReason::ModelNameMismatch,
         ));
+    }
+    if crate::core::model::is_bundled_embedding_declaration(entry) {
+        tracing::debug!(
+            target: "ee::index::embedder",
+            registry_id = entry.id,
+            "bundled model declaration defers to configured or verified machine model resolution"
+        );
+        return Ok(RegisteredModel2VecResolution::BundledDefaultDeclared);
     }
     if entry.status != ModelRegistryStatus::Available {
         return Ok(rejected_registered_model2vec(
@@ -5633,12 +5643,21 @@ fn workspace_embedder_stack(
     db: &DbConnection,
     workspace_id: &str,
 ) -> Result<EmbedderStack, DbError> {
-    if configured_embedder_model_root().is_none()
-        && let Some(selection) = workspace_registry_embedder_selection(db, workspace_id)?
-    {
+    if configured_embedder_model_root().is_some() {
+        return Ok(default_embedder_stack());
+    }
+    workspace_embedder_stack_with_default(db, workspace_id, default_embedder_stack)
+}
+
+fn workspace_embedder_stack_with_default(
+    db: &DbConnection,
+    workspace_id: &str,
+    default: impl FnOnce() -> EmbedderStack,
+) -> Result<EmbedderStack, DbError> {
+    if let Some(selection) = workspace_registry_embedder_selection(db, workspace_id)? {
         return Ok(selection.stack);
     }
-    Ok(default_embedder_stack())
+    Ok(default())
 }
 
 fn verified_potion_model_dir(model_dir: &Path) -> bool {
@@ -7944,7 +7963,11 @@ fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::model::{BUNDLED_EMBEDDING_DIMENSION, BUNDLED_EMBEDDING_MODEL_REVISION};
+    use crate::core::model::{
+        BUNDLED_EMBEDDING_DECLARATION_SOURCE_URI, BUNDLED_EMBEDDING_DIMENSION,
+        BUNDLED_EMBEDDING_MODEL_REVISION, bundled_embedding_declaration_input,
+        ensure_bundled_embedding_model_registered,
+    };
     use crate::core::profile::OperatingProfile;
     use crate::search::Embedder;
     use proptest::prelude::*;
@@ -8628,6 +8651,153 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_machine_model_cache_is_rejected_with_truthful_hash_fallback() -> TestResult {
+        let model_cache_root = unique_test_dir("embed-model-registry-incomplete");
+        let incomplete_model_dir = model_cache_root
+            .join(EE_MODEL2VEC_REGISTRY_SUBDIR)
+            .join(POTION_MODEL_NAME);
+        write_marker(&incomplete_model_dir, "tokenizer.json", "{}")?;
+
+        let resolved_root = resolve_default_embedder_model_root(&model_cache_root);
+        ensure(
+            resolved_root == model_cache_root,
+            "an incomplete canonical cache entry must not be selected as verified",
+        )?;
+
+        let selection = default_search_embedder_for_settings(&EeEmbedderSettings {
+            model_root: resolved_root,
+            download_mode: EeEmbedDownloadMode::Off,
+            local_source: EmbedModelSource::Cache,
+        });
+        ensure(
+            !selection.stack.fast().is_semantic(),
+            "an incomplete cache must not claim a neural backend",
+        )?;
+        ensure(
+            selection.model_resolution == EmbedModelResolution::deterministic_hash(),
+            "an incomplete offline cache must report the deterministic hash fallback",
+        )?;
+        ensure(
+            selection.lazy_model2vec.is_none(),
+            "offline fallback must not retain a download-capable lazy model",
+        )
+    }
+
+    #[test]
+    fn fresh_workspace_declaration_invokes_machine_default_resolver() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::testing::wsp("freshcache");
+        let workspace_path = unique_test_dir("fresh-cache-workspace");
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().into_owned(),
+                    name: Some("fresh cache resolution".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            ensure_bundled_embedding_model_registered(&connection, &workspace_id)
+                .map_err(|error| error.to_string())?,
+            "fresh workspace should receive its bundled model declaration",
+        )?;
+        ensure(
+            matches!(
+                registered_model2vec_resolution(&connection, &workspace_id)
+                    .map_err(|error| error.to_string())?,
+                RegisteredModel2VecResolution::BundledDefaultDeclared
+            ),
+            "the exact auto-declared row must be distinguished from a rejected registration",
+        )?;
+
+        let default_selected = std::cell::Cell::new(false);
+        let stack = workspace_embedder_stack_with_default(&connection, &workspace_id, || {
+            default_selected.set(true);
+            // This injected semantic stack proves resolver precedence only.
+            // Cache acceptance and rejection are covered independently by
+            // the default-root and incomplete-cache tests above.
+            EmbedderStack::from_parts(
+                Arc::new(TestSemanticEmbedder::new(
+                    POTION_MODEL_NAME,
+                    usize::try_from(BUNDLED_EMBEDDING_DIMENSION)
+                        .expect("bundled dimension fits usize"),
+                )) as Arc<dyn crate::search::Embedder>,
+                None,
+            )
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure(
+            default_selected.get(),
+            "a declaration must invoke the machine-default resolver",
+        )?;
+        ensure(
+            stack.fast().is_semantic() && stack.fast().id() == POTION_MODEL_NAME,
+            "the machine-default resolver's selected stack must remain intact",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn malformed_bundled_declaration_still_fails_closed_before_machine_default() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::testing::wsp("baddeclaration");
+        let workspace_path = unique_test_dir("bad-declaration-workspace");
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().into_owned(),
+                    name: Some("bad declaration resolution".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let mut input = bundled_embedding_declaration_input(&workspace_id);
+        input.metadata.tokenizer = None;
+        connection
+            .insert_embedding_metadata_record(&crate::testing::mdl("baddeclaration"), &input)
+            .map_err(|error| error.to_string())?;
+
+        let selection = workspace_registry_embedder_selection(&connection, &workspace_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "malformed declaration must produce a rejection selection".to_owned())?;
+        ensure(
+            selection.model_resolution.source == EmbedModelSource::RegistryRejected
+                && selection
+                    .model_resolution
+                    .registry_rejection
+                    .as_ref()
+                    .is_some_and(|rejection| {
+                        rejection.reason == EmbedRegistryRejectionReason::StatusNotAvailable
+                    }),
+            "malformed declared rows must preserve an explicit registry rejection reason",
+        )?;
+
+        let default_selected = std::cell::Cell::new(false);
+        let stack = workspace_embedder_stack_with_default(&connection, &workspace_id, || {
+            default_selected.set(true);
+            EmbedderStack::from_parts(
+                Arc::new(TestSemanticEmbedder::new(POTION_MODEL_NAME, 256))
+                    as Arc<dyn crate::search::Embedder>,
+                None,
+            )
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(
+            !default_selected.get(),
+            "a malformed declaration must not be bypassed by a machine default",
+        )?;
+        ensure(
+            !stack.fast().is_semantic(),
+            "a malformed declaration must execute the hash fallback",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
     fn embed_download_off_keeps_hash_fallback_stack() -> TestResult {
         let settings = EeEmbedderSettings {
             model_root: unique_test_dir("embed-download-off"),
@@ -8952,11 +9122,7 @@ mod tests {
                     distance_metric: ModelDistanceMetric::Cosine,
                     status: ModelRegistryStatus::Unavailable,
                     version: Some(BUNDLED_EMBEDDING_MODEL_REVISION.to_owned()),
-                    source_uri: Some(format!(
-                        "frankensearch://{}/{}",
-                        ModelProvider::Model2Vec.as_str(),
-                        POTION_MODEL_NAME
-                    )),
+                    source_uri: Some(BUNDLED_EMBEDDING_DECLARATION_SOURCE_URI.to_owned()),
                     content_hash: None,
                     metadata,
                     last_checked_at: None,

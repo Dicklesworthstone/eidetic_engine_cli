@@ -3387,6 +3387,15 @@ pub const BUNDLED_EMBEDDING_DIMENSION: u32 = 256;
 /// test guards against drift. (Follow-up: unify into one exported constant.)
 pub const BUNDLED_EMBEDDING_MODEL_REVISION: &str = "a28f4eebecd4dc585034f605e52d414878a0417c";
 
+/// Durable marker for the auto-declared bundled model row.
+///
+/// This URI is intentionally not a loadable artifact location. The index
+/// resolver recognizes it only as part of the byte-exact fresh-workspace
+/// declaration sentinel; an available model replaces it with the verified
+/// local artifact path.
+pub const BUNDLED_EMBEDDING_DECLARATION_SOURCE_URI: &str =
+    "ee-bundled-declaration://model2vec/potion-multilingual-128M";
+
 /// Canonical, redaction-safe embedding-metadata record for the bundled model.
 ///
 /// Deterministic by construction: the same ADR-pinned identity always yields a
@@ -3405,18 +3414,13 @@ pub fn bundled_embedding_metadata_record() -> EmbeddingMetadataRecord {
     metadata
 }
 
-/// Build the registry-insert input for the bundled embedding model at `status`.
+/// Build the declared-but-not-downloaded registry input for the bundled model.
 ///
-/// `status` carries the honest availability: [`ModelRegistryStatus::Available`]
-/// only when the artifact is actually loadable, otherwise
-/// [`ModelRegistryStatus::Unavailable`] (declared-but-not-downloaded). The
-/// `dimension == metadata.dimension` registry invariant is upheld by
-/// construction.
+/// The `dimension == metadata.dimension` registry invariant is upheld by
+/// construction. The index-build path uses its separate verified-artifact
+/// constructor when it promotes the row to [`ModelRegistryStatus::Available`].
 #[must_use]
-pub fn bundled_embedding_registry_input(
-    workspace_id: &str,
-    status: ModelRegistryStatus,
-) -> CreateEmbeddingMetadataInput {
+pub fn bundled_embedding_declaration_input(workspace_id: &str) -> CreateEmbeddingMetadataInput {
     let metadata = bundled_embedding_metadata_record();
     CreateEmbeddingMetadataInput {
         workspace_id: workspace_id.to_owned(),
@@ -3424,17 +3428,42 @@ pub fn bundled_embedding_registry_input(
         model_name: BUNDLED_EMBEDDING_MODEL_ID.to_owned(),
         dimension: BUNDLED_EMBEDDING_DIMENSION,
         distance_metric: ModelDistanceMetric::Cosine,
-        status,
+        status: ModelRegistryStatus::Unavailable,
         version: Some(BUNDLED_EMBEDDING_MODEL_REVISION.to_owned()),
-        source_uri: Some(format!(
-            "frankensearch://{provider}/{model}",
-            provider = ModelProvider::Model2Vec.as_str(),
-            model = BUNDLED_EMBEDDING_MODEL_ID
-        )),
+        source_uri: Some(BUNDLED_EMBEDDING_DECLARATION_SOURCE_URI.to_owned()),
         content_hash: None,
         metadata,
         last_checked_at: None,
     }
+}
+
+/// Return whether `entry` is exactly the declared-but-not-downloaded bundled
+/// model row created for a fresh workspace.
+///
+/// This declaration advertises the default model; it is not an operator
+/// selection and must not shadow a verified machine-level model cache. Keep
+/// the comparison byte-exact, including the declaration-only source marker,
+/// so a stale, extended, or partially populated registry row still fails
+/// closed in the workspace resolver.
+pub(crate) fn is_bundled_embedding_declaration(entry: &StoredModelRegistryEntry) -> bool {
+    let expected = bundled_embedding_declaration_input(&entry.workspace_id);
+    let metadata_matches = expected
+        .metadata
+        .to_canonical_json()
+        .ok()
+        .is_some_and(|metadata| entry.metadata_json.as_deref() == Some(metadata.as_str()));
+
+    entry.provider == expected.provider
+        && entry.model_name == expected.model_name
+        && entry.purpose == ModelPurpose::Embedding
+        && entry.dimension == Some(expected.dimension)
+        && entry.distance_metric == Some(expected.distance_metric)
+        && entry.status == expected.status
+        && entry.version == expected.version
+        && entry.source_uri == expected.source_uri
+        && entry.content_hash == expected.content_hash
+        && entry.last_checked_at == expected.last_checked_at
+        && metadata_matches
 }
 
 /// Idempotently register the bundled default embedding model in the registry so
@@ -3468,7 +3497,7 @@ pub fn ensure_bundled_embedding_model_registered(
         }
     }
 
-    let input = bundled_embedding_registry_input(workspace_id, ModelRegistryStatus::Unavailable);
+    let input = bundled_embedding_declaration_input(workspace_id);
     match db.upsert_embedding_metadata_record(&generate_model_registry_id(), &input)? {
         ModelRegistryUpsertOutcome::Inserted => Ok(true),
         ModelRegistryUpsertOutcome::Updated | ModelRegistryUpsertOutcome::Unchanged => Ok(false),
@@ -3736,8 +3765,8 @@ mod tests {
     }
 
     #[test]
-    fn bundled_registry_input_upholds_invariants() -> TestResult {
-        let input = bundled_embedding_registry_input("wsp_x", ModelRegistryStatus::Unavailable);
+    fn bundled_declaration_input_upholds_invariants() -> TestResult {
+        let input = bundled_embedding_declaration_input("wsp_x");
         ensure(
             input.dimension == input.metadata.dimension,
             "registry dimension must equal metadata dimension (db invariant)",
@@ -3752,20 +3781,71 @@ mod tests {
         )?;
         ensure(
             input.status == ModelRegistryStatus::Unavailable,
-            "status passes through verbatim",
+            "declaration is honestly unavailable",
         )?;
         ensure(
-            input
-                .source_uri
+            input.source_uri.as_deref() == Some(BUNDLED_EMBEDDING_DECLARATION_SOURCE_URI),
+            "source uri carries the durable bundled-declaration marker",
+        )
+    }
+
+    #[test]
+    fn bundled_declaration_requires_exact_marker_and_canonical_metadata() -> TestResult {
+        let input = bundled_embedding_declaration_input("wsp_x");
+        let mut entry = StoredModelRegistryEntry {
+            id: "mdl_01HQ3K5Z000000000000000099".to_owned(),
+            workspace_id: input.workspace_id.clone(),
+            provider: input.provider,
+            model_name: input.model_name.clone(),
+            purpose: ModelPurpose::Embedding,
+            dimension: Some(input.dimension),
+            distance_metric: Some(input.distance_metric),
+            status: input.status,
+            version: input.version.clone(),
+            source_uri: input.source_uri.clone(),
+            content_hash: input.content_hash.clone(),
+            metadata_json: Some(
+                input
+                    .metadata
+                    .to_canonical_json()
+                    .map_err(|error| error.to_string())?,
+            ),
+            created_at: "2026-08-23T00:00:00Z".to_owned(),
+            updated_at: "2026-08-23T00:00:00Z".to_owned(),
+            last_checked_at: input.last_checked_at.clone(),
+        };
+        ensure(
+            is_bundled_embedding_declaration(&entry),
+            "the canonical auto-declaration must match",
+        )?;
+
+        entry.source_uri = Some(format!(
+            "frankensearch://{}/{}",
+            ModelProvider::Model2Vec.as_str(),
+            BUNDLED_EMBEDDING_MODEL_ID
+        ));
+        ensure(
+            !is_bundled_embedding_declaration(&entry),
+            "a generic model source must not impersonate the declaration marker",
+        )?;
+
+        entry.source_uri = input.source_uri;
+        let mut metadata = serde_json::from_str::<serde_json::Value>(
+            entry
+                .metadata_json
                 .as_deref()
-                .is_some_and(|uri| uri.contains(BUNDLED_EMBEDDING_MODEL_ID)),
-            "source uri names the bundled model",
-        )?;
-        // A passed Available status is honored (download path uses it).
-        let available = bundled_embedding_registry_input("wsp_x", ModelRegistryStatus::Available);
+                .ok_or("canonical declaration metadata must exist")?,
+        )
+        .map_err(|error| error.to_string())?;
+        metadata
+            .as_object_mut()
+            .ok_or("canonical declaration metadata must be an object")?
+            .insert("operatorOverride".to_owned(), serde_json::json!(true));
+        entry.metadata_json =
+            Some(serde_json::to_string(&metadata).map_err(|error| error.to_string())?);
         ensure(
-            available.status == ModelRegistryStatus::Available,
-            "available status passes through too",
+            !is_bundled_embedding_declaration(&entry),
+            "unknown metadata must not receive the declaration exemption",
         )
     }
 
@@ -4427,11 +4507,7 @@ mod tests {
             report.degradations[0].code == "model_registry_no_available_entry",
             "degradation code",
         )?;
-        let bundled_source = short_hashed_path(&format!(
-            "frankensearch://{provider}/{model}",
-            provider = ModelProvider::Model2Vec.as_str(),
-            model = BUNDLED_EMBEDDING_MODEL_ID,
-        ));
+        let bundled_source = short_hashed_path(BUNDLED_EMBEDDING_DECLARATION_SOURCE_URI);
         ensure(
             report.model_lifecycle.models.iter().any(|entry| {
                 entry.provider == ModelProvider::Model2Vec.as_str()

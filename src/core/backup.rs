@@ -38,7 +38,7 @@ use crate::policy::import_auth::{
     ArtifactContext, EXPORT_ARTIFACT_FAMILY, EXPORT_RECORD_ENCODING_V1, STORE_KEY_NAMESPACE_V1,
     authenticate_artifact,
 };
-use crate::policy::store_auth::{MacDomain, StoreAuthRoot, workspace_keys_dir};
+use crate::policy::store_auth::{MacDomain, StoreAuthError, StoreAuthRoot, workspace_keys_dir};
 
 const DEFAULT_DB_FILE: &str = "ee.db";
 const DEFAULT_BACKUP_DIR: &str = "backups";
@@ -792,13 +792,15 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         return Err(crate::core::storeless_workspace_error(&database_path));
     }
 
-    let connection =
-        DbConnection::open(DatabaseConfig::file(database_path.clone())).map_err(|error| {
-            DomainError::Storage {
-                message: error.to_string(),
-                repair: Some(INIT_AND_MIGRATE_REPAIR_COMMAND.to_owned()),
-            }
-        })?;
+    let database_config = if options.dry_run {
+        DatabaseConfig::read_only_file(database_path.clone())
+    } else {
+        DatabaseConfig::file(database_path.clone())
+    };
+    let connection = DbConnection::open(database_config).map_err(|error| DomainError::Storage {
+        message: error.to_string(),
+        repair: Some(INIT_AND_MIGRATE_REPAIR_COMMAND.to_owned()),
+    })?;
     let workspace = load_workspace(&connection, &workspace_path)?;
     let export_data = load_export_data(&connection, workspace)?;
     let backup_id = BackupId::now().to_string();
@@ -847,18 +849,9 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     // TC-D14: a store-auth fault must not block the backup — the artifact
     // ships unauthenticated with a high degraded entry, and import then
     // refuses native `human_explicit` trust instead of trusting the header.
-    let store_auth = match StoreAuthRoot::open_or_create(workspace_keys_dir(&workspace_path)) {
-        Ok(root) => Some(root),
-        Err(error) => {
-            degraded.push(BackupDegradation::with_severity(
-                error.degraded_code(),
-                "high",
-                error.message(),
-                error.repair(),
-            ));
-            None
-        }
-    };
+    // A dry-run must not initialize the key store merely to preview an
+    // artifact, so it only opens an already-existing root.
+    let store_auth = load_store_auth_for_backup(&workspace_path, options.dry_run, &mut degraded);
 
     let (records_bytes, stats) = render_records(
         &backup_id,
@@ -985,6 +978,33 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
     ];
 
     Ok(report)
+}
+
+fn load_store_auth_for_backup(
+    workspace_path: &Path,
+    dry_run: bool,
+    degraded: &mut Vec<BackupDegradation>,
+) -> Option<StoreAuthRoot> {
+    let keys_dir = workspace_keys_dir(workspace_path);
+    let result = if dry_run {
+        StoreAuthRoot::open(&keys_dir)
+    } else {
+        StoreAuthRoot::open_or_create(&keys_dir)
+    };
+
+    match result {
+        Ok(root) => Some(root),
+        Err(StoreAuthError::NotInitialized { .. }) if dry_run => None,
+        Err(error) => {
+            degraded.push(BackupDegradation::with_severity(
+                error.degraded_code(),
+                "high",
+                error.message(),
+                error.repair(),
+            ));
+            None
+        }
+    }
 }
 
 /// List backup manifests under a backup root.
@@ -4775,6 +4795,33 @@ mod tests {
         }
     }
 
+    fn directory_entry_names(path: &Path) -> Result<Vec<String>, String> {
+        let mut names = fs::read_dir(path)
+            .map_err(|error| error.to_string())?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        names.sort();
+        Ok(names)
+    }
+
+    fn optional_file_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
+        match fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn database_sidecar_path(database: &Path, suffix: &str) -> PathBuf {
+        let mut path = database.as_os_str().to_os_string();
+        path.push(suffix);
+        PathBuf::from(path)
+    }
+
     fn stored_memory_fixture(id: &str) -> StoredMemory {
         StoredMemory {
             id: id.to_owned(),
@@ -5067,9 +5114,23 @@ mod tests {
     fn dry_run_does_not_create_backup_directory() -> TestResult {
         let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
         let out = workspace.join("planned-backups");
+        let keys_dir = workspace_keys_dir(&workspace);
+        let database_dir = database
+            .parent()
+            .ok_or_else(|| "fixture database must have a parent directory".to_owned())?;
+        let database_bytes_before = fs::read(&database).map_err(|error| error.to_string())?;
+        let wal_path = database_sidecar_path(&database, "-wal");
+        let shm_path = database_sidecar_path(&database, "-shm");
+        let wal_bytes_before = optional_file_bytes(&wal_path)?;
+        let shm_bytes_before = optional_file_bytes(&shm_path)?;
+        let database_entries_before = directory_entry_names(database_dir)?;
+        ensure(
+            !keys_dir.exists(),
+            "fixture must begin without a store-authentication key directory",
+        )?;
         let report = create_backup(&BackupCreateOptions {
             workspace_path: workspace.clone(),
-            database_path: Some(database),
+            database_path: Some(database.clone()),
             output_dir: Some(out.clone()),
             label: Some("pre-test".to_owned()),
             redaction_level: RedactionLevel::Standard,
@@ -5085,7 +5146,214 @@ mod tests {
             "not_checked",
             "dry run verification",
         )?;
-        ensure(!out.exists(), "dry run must not create output directory")
+        ensure(!out.exists(), "dry run must not create output directory")?;
+        ensure(
+            !keys_dir.exists(),
+            "dry run must not initialize the store-authentication key directory",
+        )?;
+        ensure(
+            report.degraded.iter().all(|entry| {
+                entry.code != crate::policy::store_auth::MESH_STORE_AUTHENTICATION_UNAVAILABLE_CODE
+            }),
+            "an absent key store is an expected dry-run state, not a degradation",
+        )?;
+        ensure_equal(
+            fs::read(&database).map_err(|error| error.to_string())?,
+            database_bytes_before,
+            "dry run must not change database bytes",
+        )?;
+        ensure_equal(
+            optional_file_bytes(&wal_path)?,
+            wal_bytes_before,
+            "dry run must not create or change the WAL sidecar",
+        )?;
+        ensure_equal(
+            optional_file_bytes(&shm_path)?,
+            shm_bytes_before,
+            "dry run must not create or change the shared-memory sidecar",
+        )?;
+        ensure_equal(
+            directory_entry_names(database_dir)?,
+            database_entries_before,
+            "dry run must not add database lock or journal artifacts",
+        )
+    }
+
+    #[test]
+    fn dry_run_loads_existing_store_auth_without_changing_it() -> TestResult {
+        let (_tempdir, workspace, _database) = fixture().map_err(|error| error.message())?;
+        let keys_dir = workspace_keys_dir(&workspace);
+        let created = StoreAuthRoot::create(&keys_dir).map_err(|error| error.message())?;
+        let key_path = keys_dir.join("store_auth_root.json");
+        let bytes_before = fs::read(&key_path).map_err(|error| error.to_string())?;
+        let entries_before = directory_entry_names(&keys_dir)?;
+        let key_id_before = created.current_key_id();
+        let mut degraded = Vec::new();
+
+        let loaded =
+            load_store_auth_for_backup(&workspace, true, &mut degraded).ok_or_else(|| {
+                "dry run must load an initialized store-authentication root".to_owned()
+            })?;
+
+        ensure_equal(
+            loaded.current_key_id(),
+            key_id_before,
+            "dry-run store-authentication key id",
+        )?;
+        ensure(
+            degraded.is_empty(),
+            format!("healthy existing key store must not degrade dry run: {degraded:?}"),
+        )?;
+        ensure_equal(
+            fs::read(&key_path).map_err(|error| error.to_string())?,
+            bytes_before,
+            "dry run must not change store-authentication bytes",
+        )?;
+        ensure_equal(
+            directory_entry_names(&keys_dir)?,
+            entries_before,
+            "dry run must not change store-authentication directory entries",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dry_run_degrades_for_symlinked_store_auth_without_creating_backup() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let keys_target = workspace.join("dry-run-keys-elsewhere");
+        fs::create_dir_all(&keys_target).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&keys_target, workspace_keys_dir(&workspace))
+            .map_err(|error| error.to_string())?;
+        let out = workspace.join("dry-run-degraded-backups");
+
+        let report = create_backup(&BackupCreateOptions {
+            workspace_path: workspace,
+            database_path: Some(database),
+            output_dir: Some(out.clone()),
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: true,
+        })
+        .map_err(|error| error.message())?;
+
+        let entry = report
+            .degraded
+            .iter()
+            .find(|entry| {
+                entry.code == crate::policy::store_auth::MESH_STORE_AUTHENTICATION_UNAVAILABLE_CODE
+            })
+            .ok_or_else(|| "symlinked key store must degrade a dry-run backup".to_owned())?;
+        ensure_equal(entry.severity.as_str(), "high", "degraded severity")?;
+        ensure(
+            !out.exists(),
+            "degraded dry run must not create backup output",
+        )
+    }
+
+    #[test]
+    fn dry_run_accepts_targetless_and_type_only_audits() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection
+            .insert_audit(
+                "audit_00000000000000000000000002",
+                &CreateAuditInput {
+                    workspace_id: Some(WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string()),
+                    actor: Some("test".to_owned()),
+                    action: "db.check_integrity".to_owned(),
+                    target_type: None,
+                    target_id: None,
+                    details: Some(r#"{"status":"ok"}"#.to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_audit(
+                "audit_00000000000000000000000003",
+                &CreateAuditInput {
+                    workspace_id: Some(WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string()),
+                    actor: Some("test".to_owned()),
+                    action: "search_completed".to_owned(),
+                    target_type: Some("search".to_owned()),
+                    target_id: None,
+                    details: Some(r#"{"resultCount":1}"#.to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let report = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(workspace.join("planned-backups")),
+            label: Some("integrity-audit".to_owned()),
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: true,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure_equal(report.status.as_str(), "dry_run", "dry run status")?;
+        ensure_equal(
+            report.audit_count,
+            3,
+            "backup must accept targeted, targetless, and type-only audits",
+        )
+    }
+
+    #[test]
+    fn audit_record_preserves_independently_optional_targets() -> TestResult {
+        for (target_type, target_id, expected_type, expected_id, context) in [
+            (None, None, None, None, "targetless audit"),
+            (
+                Some("search".to_owned()),
+                None,
+                Some("search"),
+                None,
+                "type-only audit",
+            ),
+            (
+                None,
+                Some("source-001".to_owned()),
+                None,
+                Some("source-001"),
+                "id-only audit",
+            ),
+        ] {
+            let stored = StoredAuditEntry {
+                id: format!("audit-{context}"),
+                workspace_id: Some(WorkspaceId::from_uuid(Uuid::from_u128(1)).to_string()),
+                timestamp: "2026-08-23T12:00:00Z".to_owned(),
+                actor: Some("test".to_owned()),
+                action: "backup.audit-shape".to_owned(),
+                target_type,
+                target_id,
+                details: None,
+                surface: "backup".to_owned(),
+                mutation_kind: "backup.audit-shape".to_owned(),
+                before_hash: None,
+                after_hash: None,
+                prev_row_hash: None,
+                this_row_hash: None,
+            };
+            let exported =
+                audit_record(&stored).map_err(|error| format!("{context} must export: {error}"))?;
+            ensure_equal(
+                exported.target_type.as_deref(),
+                expected_type,
+                &format!("{context} target_type"),
+            )?;
+            ensure_equal(
+                exported.target_id.as_deref(),
+                expected_id,
+                &format!("{context} target_id"),
+            )?;
+        }
+
+        Ok(())
     }
 
     #[test]
@@ -5880,7 +6148,9 @@ mod tests {
         });
 
         match result {
-            Err(DomainError::WorkspaceStoreMissing { message, repair, .. }) => {
+            Err(DomainError::WorkspaceStoreMissing {
+                message, repair, ..
+            }) => {
                 // Exit-10 storeless-miss contract: an addressed-but-absent
                 // store is an addressing miss, not a storage failure.
                 ensure(

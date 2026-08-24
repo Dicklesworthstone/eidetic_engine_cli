@@ -479,15 +479,19 @@ impl StoreAuthRoot {
     /// Open the store if it exists, otherwise create it. The common wiring path.
     pub fn open_or_create(keys_dir: impl AsRef<Path>) -> Result<Self, StoreAuthError> {
         let keys_dir = keys_dir.as_ref();
-        if keys_dir.join(KEY_FILE_NAME).exists() {
-            Self::open(keys_dir)
-        } else {
-            match Self::create(keys_dir) {
+        let path = keys_dir.join(KEY_FILE_NAME);
+        match path.try_exists() {
+            Ok(true) => Self::open(keys_dir),
+            Ok(false) => match Self::create(keys_dir) {
                 // A concurrent creator won the race between our existence check
                 // and the exclusive create; adopt their root instead of ours.
                 Err(StoreAuthError::AlreadyInitialized { .. }) => Self::open(keys_dir),
                 other => other,
-            }
+            },
+            Err(error) => Err(StoreAuthError::Io {
+                path: path.display().to_string(),
+                message: error.to_string(),
+            }),
         }
     }
 
@@ -522,10 +526,19 @@ impl StoreAuthRoot {
         let keys_dir = keys_dir.as_ref();
         let path = keys_dir.join(KEY_FILE_NAME);
         reject_symlink_components(keys_dir, &path)?;
-        if !path.exists() {
-            return Err(StoreAuthError::NotInitialized {
-                path: path.display().to_string(),
-            });
+        match path.try_exists() {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(StoreAuthError::NotInitialized {
+                    path: path.display().to_string(),
+                });
+            }
+            Err(error) => {
+                return Err(StoreAuthError::Io {
+                    path: path.display().to_string(),
+                    message: error.to_string(),
+                });
+            }
         }
         enforce_owner_only_dir(keys_dir)?;
         enforce_owner_only_file(&path)?;
@@ -1052,6 +1065,25 @@ mod tests {
         let dir = keys_dir();
         let error = StoreAuthRoot::open(dir.path()).expect_err("open must fail");
         assert!(matches!(error, StoreAuthError::NotInitialized { .. }));
+    }
+
+    #[test]
+    fn inaccessible_key_path_is_io_not_not_initialized() {
+        let dir = keys_dir();
+        let regular_file = dir.path().join("not-a-directory");
+        std::fs::write(&regular_file, b"occupied").expect("write regular-file path component");
+        let impossible_keys_dir = regular_file.join("keys");
+
+        for error in [
+            StoreAuthRoot::open(&impossible_keys_dir).expect_err("open must reject invalid path"),
+            StoreAuthRoot::open_or_create(&impossible_keys_dir)
+                .expect_err("open-or-create must reject invalid path"),
+        ] {
+            assert!(
+                matches!(error, StoreAuthError::Io { .. }),
+                "an inaccessible key path is an I/O fault, not an absent store: {error:?}"
+            );
+        }
     }
 
     #[test]

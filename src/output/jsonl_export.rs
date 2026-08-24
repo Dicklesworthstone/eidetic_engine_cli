@@ -628,7 +628,10 @@ pub fn redact_audit_record(
 
     if level.redacts_identifiers() {
         record.audit_id = redact_identifier(&record.audit_id, level);
-        record.target_id = redact_identifier(&record.target_id, level);
+        record.target_id = record
+            .target_id
+            .take()
+            .map(|target_id| redact_identifier(&target_id, level));
         if let Some(by) = record.performed_by.as_ref() {
             record.performed_by = Some(redact_identifier(by, level));
         }
@@ -1272,6 +1275,34 @@ mod tests {
         let content = secret_assignment("redaction-fixture");
         let result = redact_content(&content, RedactionLevel::None);
         ensure(result, content, "none level preserves content")
+    }
+
+    #[test]
+    fn redact_targetless_audit_preserves_absent_target_pair() -> TestResult {
+        let audit = ExportAuditRecord::builder()
+            .audit_id("aud-db-check-redaction")
+            .operation("db.check_integrity")
+            .performed_at("2026-04-30T12:00:00Z")
+            .performed_by("ee db check-integrity")
+            .details(serde_json::json!({ "passed": true }))
+            .build()
+            .map_err(|error| format!("targetless audit fixture must build: {error}"))?;
+
+        for level in [RedactionLevel::Minimal, RedactionLevel::Full] {
+            let redacted = redact_audit_record(audit.clone(), level);
+            ensure(
+                redacted.target_type.as_deref(),
+                None,
+                &format!("{level} keeps target_type absent"),
+            )?;
+            ensure(
+                redacted.target_id.as_deref(),
+                None,
+                &format!("{level} keeps target_id absent"),
+            )?;
+        }
+
+        Ok(())
     }
 
     #[test]

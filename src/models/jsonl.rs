@@ -1677,15 +1677,60 @@ impl ExportTagRecordBuilder {
 
 /// Export audit record.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "UncheckedExportAuditRecord")]
 pub struct ExportAuditRecord {
     pub schema: String,
     pub audit_id: String,
     pub operation: String,
-    pub target_type: String,
-    pub target_id: String,
+    pub target_type: Option<String>,
+    pub target_id: Option<String>,
     pub performed_at: String,
     pub performed_by: Option<String>,
     pub details: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct UncheckedExportAuditRecord {
+    schema: String,
+    audit_id: String,
+    operation: String,
+    target_type: Option<String>,
+    target_id: Option<String>,
+    performed_at: String,
+    performed_by: Option<String>,
+    details: Option<serde_json::Value>,
+}
+
+impl TryFrom<UncheckedExportAuditRecord> for ExportAuditRecord {
+    type Error = ExportRecordBuildError;
+
+    fn try_from(record: UncheckedExportAuditRecord) -> Result<Self, Self::Error> {
+        let (target_type, target_id) =
+            validated_audit_target_fields(record.target_type, record.target_id)?;
+        Ok(Self {
+            schema: record.schema,
+            audit_id: record.audit_id,
+            operation: record.operation,
+            target_type,
+            target_id,
+            performed_at: record.performed_at,
+            performed_by: record.performed_by,
+            details: record.details,
+        })
+    }
+}
+
+fn validated_audit_target_fields(
+    target_type: Option<String>,
+    target_id: Option<String>,
+) -> Result<(Option<String>, Option<String>), ExportRecordBuildError> {
+    let target_type = target_type
+        .map(|value| required_string(ExportRecordType::Audit, "target_type", Some(value)))
+        .transpose()?;
+    let target_id = target_id
+        .map(|value| required_string(ExportRecordType::Audit, "target_id", Some(value)))
+        .transpose()?;
+    Ok((target_type, target_id))
 }
 
 impl ExportAuditRecord {
@@ -1753,14 +1798,17 @@ impl ExportAuditRecordBuilder {
     ///
     /// # Errors
     ///
-    /// Returns an error when a required machine-facing field is missing or blank.
+    /// Returns an error when a required machine-facing field, or an optional target field that
+    /// is present, is blank.
     pub fn build(self) -> Result<ExportAuditRecord, ExportRecordBuildError> {
+        let (target_type, target_id) =
+            validated_audit_target_fields(self.target_type, self.target_id)?;
         Ok(ExportAuditRecord {
             schema: EXPORT_AUDIT_SCHEMA_V1.to_owned(),
             audit_id: required_string(ExportRecordType::Audit, "audit_id", self.audit_id)?,
             operation: required_string(ExportRecordType::Audit, "operation", self.operation)?,
-            target_type: required_string(ExportRecordType::Audit, "target_type", self.target_type)?,
-            target_id: required_string(ExportRecordType::Audit, "target_id", self.target_id)?,
+            target_type,
+            target_id,
             performed_at: required_string(
                 ExportRecordType::Audit,
                 "performed_at",
@@ -2392,7 +2440,176 @@ mod tests {
         assert_eq!(audit.schema, EXPORT_AUDIT_SCHEMA_V1);
         assert_eq!(audit.audit_id, "aud-001");
         assert_eq!(audit.operation, "create");
+        assert_eq!(audit.target_type.as_deref(), Some("memory"));
+        assert_eq!(audit.target_id.as_deref(), Some("mem-001"));
         assert_eq!(audit.performed_by, Some("claude-code".to_owned()));
+    }
+
+    #[test]
+    fn export_targetless_audit_round_trips_with_null_target_pair() -> TestResult {
+        let audit = ExportAuditRecord::builder()
+            .audit_id("aud-db-check-001")
+            .operation("db.check_integrity")
+            .performed_at("2026-04-30T12:00:00Z")
+            .performed_by("ee db check-integrity")
+            .details(serde_json::json!({ "passed": true }))
+            .build()
+            .map_err(|error| format!("targetless audit must build: {error}"))?;
+
+        ensure(
+            audit.target_type.as_deref(),
+            None,
+            "targetless audit target type",
+        )?;
+        ensure(
+            audit.target_id.as_deref(),
+            None,
+            "targetless audit target id",
+        )?;
+
+        let json = serde_json::to_value(&audit)
+            .map_err(|error| format!("targetless audit must serialize: {error}"))?;
+        ensure(
+            json.get("target_type"),
+            Some(&serde_json::Value::Null),
+            "targetless audit serializes target_type as null",
+        )?;
+        ensure(
+            json.get("target_id"),
+            Some(&serde_json::Value::Null),
+            "targetless audit serializes target_id as null",
+        )?;
+
+        let parsed: ExportAuditRecord = serde_json::from_value(json)
+            .map_err(|error| format!("targetless audit must deserialize: {error}"))?;
+        ensure(parsed, audit, "targetless audit JSON round trip")?;
+
+        let export_record = ExportRecord::Audit(audit.clone());
+        let jsonl = serde_json::to_string(&export_record)
+            .map_err(|error| format!("targetless audit record must render as JSONL: {error}"))?;
+        let parsed_record: ExportRecord = serde_json::from_str(&jsonl)
+            .map_err(|error| format!("targetless audit JSONL must parse: {error}"))?;
+        ensure_export_record_match(
+            &parsed_record,
+            &export_record,
+            "targetless audit ExportRecord round trip",
+        )?;
+
+        let parsed_without_target_fields: ExportAuditRecord =
+            serde_json::from_value(serde_json::json!({
+                "schema": EXPORT_AUDIT_SCHEMA_V1,
+                "audit_id": "aud-db-check-002",
+                "operation": "db.check_integrity",
+                "performed_at": "2026-04-30T12:01:00Z",
+                "performed_by": "ee db check-integrity",
+                "details": { "passed": true }
+            }))
+            .map_err(|error| format!("omitted target pair must deserialize: {error}"))?;
+        ensure(
+            parsed_without_target_fields.target_type,
+            None,
+            "omitted target_type parses as absent",
+        )?;
+        ensure(
+            parsed_without_target_fields.target_id,
+            None,
+            "omitted target_id parses as absent",
+        )
+    }
+
+    #[test]
+    fn export_audit_round_trips_independently_optional_target_fields() -> TestResult {
+        for (audit, expected_type, expected_id, ctx) in [
+            (
+                ExportAuditRecord::builder()
+                    .audit_id("aud-search-completed")
+                    .operation("search_completed")
+                    .target_type("search")
+                    .performed_at("2026-04-30T12:00:00Z")
+                    .build()
+                    .map_err(|error| format!("type-only audit must build: {error}"))?,
+                Some("search"),
+                None,
+                "type-only search audit",
+            ),
+            (
+                ExportAuditRecord::builder()
+                    .audit_id("aud-source-observed")
+                    .operation("source_observed")
+                    .target_id("source-001")
+                    .performed_at("2026-04-30T12:01:00Z")
+                    .build()
+                    .map_err(|error| format!("id-only audit must build: {error}"))?,
+                None,
+                Some("source-001"),
+                "id-only source audit",
+            ),
+        ] {
+            ensure(
+                audit.target_type.as_deref(),
+                expected_type,
+                &format!("{ctx} target_type"),
+            )?;
+            ensure(
+                audit.target_id.as_deref(),
+                expected_id,
+                &format!("{ctx} target_id"),
+            )?;
+            ensure_json_round_trip(&audit, ctx)?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn export_audit_rejects_blank_present_target_fields() -> TestResult {
+        for (builder, field, ctx) in [
+            (
+                ExportAuditRecord::builder()
+                    .audit_id("aud-blank-type")
+                    .operation("memory.inspect")
+                    .target_type("   ")
+                    .target_id("mem-001")
+                    .performed_at("2026-04-30T12:00:00Z"),
+                "target_type",
+                "audit with blank target_type",
+            ),
+            (
+                ExportAuditRecord::builder()
+                    .audit_id("aud-blank-id")
+                    .operation("memory.inspect")
+                    .target_type("memory")
+                    .target_id("\n\t")
+                    .performed_at("2026-04-30T12:00:00Z"),
+                "target_id",
+                "audit with blank target_id",
+            ),
+        ] {
+            ensure_build_error(builder.build(), ExportRecordType::Audit, field, ctx)?;
+        }
+
+        for (target_fragment, expected_field) in [
+            (r#""target_type":" ","target_id":"mem-001""#, "target_type"),
+            (r#""target_type":"memory","target_id":"""#, "target_id"),
+        ] {
+            let json = format!(
+                r#"{{"schema":"{EXPORT_AUDIT_SCHEMA_V1}","audit_id":"aud-invalid","operation":"memory.inspect",{target_fragment},"performed_at":"2026-04-30T12:00:00Z","performed_by":null,"details":null}}"#
+            );
+            let error = serde_json::from_str::<ExportAuditRecord>(&json)
+                .expect_err("malformed audit target pair must not deserialize");
+            ensure(
+                error.to_string().contains(expected_field),
+                true,
+                &format!("malformed audit error identifies {expected_field}"),
+            )?;
+            ensure(
+                serde_json::from_str::<ExportRecord>(&json).is_err(),
+                true,
+                "malformed audit must not pass through the untagged ExportRecord union",
+            )?;
+        }
+
+        Ok(())
     }
 
     #[test]
@@ -2520,11 +2737,10 @@ mod tests {
                 .audit_id("aud-001")
                 .operation("create")
                 .target_id("mem-001")
-                .performed_at("2026-04-30T12:00:00Z")
                 .build(),
             ExportRecordType::Audit,
-            "target_type",
-            "audit missing target_type",
+            "performed_at",
+            "audit missing performed_at",
         )?;
         ensure_build_error(
             ExportWorkspaceRecord::builder()
