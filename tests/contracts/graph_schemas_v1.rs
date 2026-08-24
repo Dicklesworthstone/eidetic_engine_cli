@@ -241,19 +241,35 @@ fn insights_empty_workspace_cli_shape_matches_contract() -> TestResult {
         "ee insights data",
         "runDurationMs",
     )?;
+    // bd-g3yh5: since d4a5809f (bd-2u60p) every graph-gated section consults
+    // the runtime `graph.feature.*` flags, whose documented defaults are
+    // false (docs/configuration/graph.md). A fresh workspace therefore
+    // emits one medium `graph_feature_disabled` signal per gated section,
+    // aggregated ahead of the info-level `graph.workspace_empty` signal
+    // (degraded aggregation sorts by descending severity, then code).
     ensure_eq(
         data.pointer("/degradedSignals/0/code")
             .and_then(Value::as_str),
-        Some("graph.workspace_empty"),
+        Some("graph_feature_disabled"),
         "ee insights degraded signal",
         "code",
     )?;
     ensure_eq(
         data.pointer("/degradedSignals/0/severity")
             .and_then(Value::as_str),
-        Some("info"),
+        Some("medium"),
         "ee insights degraded signal",
         "severity",
+    )?;
+    ensure(
+        data.pointer("/degradedSignals")
+            .and_then(Value::as_array)
+            .is_some_and(|signals| {
+                signals
+                    .iter()
+                    .any(|signal| signal.get("code").and_then(Value::as_str) == Some("graph.workspace_empty"))
+            }),
+        "empty-workspace insights must still carry the info-level graph.workspace_empty signal",
     )?;
 
     let sections = data

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 type TestResult = Result<(), String>;
-const UNSATISFIED_DEGRADED_MODE_EXIT: i32 = 6;
+const WORKSPACE_STORE_MISSING_EXIT: i32 = 10;
 const SUCCESS_EXIT: i32 = 0;
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
@@ -651,7 +651,7 @@ fn gate20_cli_empty_db_abstains_without_seed_artifacts() -> TestResult {
 }
 
 #[test]
-fn gate20_cli_missing_database_returns_stable_degraded_error() -> TestResult {
+fn gate20_cli_missing_database_returns_workspace_store_missing() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
@@ -660,6 +660,10 @@ fn gate20_cli_missing_database_returns_stable_degraded_error() -> TestResult {
         .map_err(|error| error.to_string())?;
     let workspace_arg = workspace.display().to_string();
 
+    // bd-g3yh5: e37fa2d4 pinned the exit-10 WorkspaceStoreMissing contract for
+    // addressed-but-absent stores, and 4b6400dc routed remaining surfaces
+    // through core::storeless_workspace_error. `economy report` on a missing
+    // store is an addressing miss (exit 10), not a degraded-mode refusal.
     let actual = run_json_with_exit(
         &[
             "--json",
@@ -668,7 +672,7 @@ fn gate20_cli_missing_database_returns_stable_degraded_error() -> TestResult {
             "economy",
             "report",
         ],
-        UNSATISFIED_DEGRADED_MODE_EXIT,
+        WORKSPACE_STORE_MISSING_EXIT,
     )?;
 
     ensure_json_equal(
@@ -678,14 +682,14 @@ fn gate20_cli_missing_database_returns_stable_degraded_error() -> TestResult {
     )?;
     ensure_json_equal(
         actual.pointer("/error/code"),
-        JsonValue::String("unsatisfied_degraded_mode".to_owned()),
+        JsonValue::String("workspace_store_missing".to_owned()),
         "missing database error code",
     )?;
     ensure(
         actual
             .pointer("/error/message")
             .and_then(JsonValue::as_str)
-            .is_some_and(|message| message.contains("no database exists")),
-        "missing database error message must explain the degraded condition",
+            .is_some_and(|message| message.contains("Database not found at")),
+        "missing database error message must name the looked-for store path",
     )
 }

@@ -43,10 +43,12 @@ fn eval_run_science_json_reports_fixture_without_science_metrics() -> TestResult
     let stderr = String::from_utf8(output.stderr)
         .map_err(|error| format!("eval run --science stderr was not UTF-8: {error}"))?;
 
+    // bd-g3yh5: on exit-code mismatch, surface the JSON envelope so the
+    // remote artifact shows which error path fired instead of a bare code.
     ensure(
         output.status.code() == Some(ProcessExitCode::EvalFailure as i32),
         format!(
-            "eval run --science must fail the process for a failed fixture; got {:?}; stderr: {stderr}",
+            "eval run --science must fail the process for a failed fixture; got {:?}; stderr: {stderr}; stdout: {stdout}",
             output.status.code()
         ),
     )?;
@@ -97,10 +99,12 @@ fn eval_run_without_science_reports_fixture_metrics_contract() -> TestResult {
         .map_err(|error| format!("eval run stdout was not UTF-8: {error}"))?;
     let stderr = String::from_utf8(output.stderr)
         .map_err(|error| format!("eval run stderr was not UTF-8: {error}"))?;
+    // bd-g3yh5: include the JSON envelope when the exit code mismatches so
+    // remote artifacts show the firing error path, not just a bare code.
     ensure(
         output.status.code() == Some(ProcessExitCode::EvalFailure as i32),
         format!(
-            "eval run must fail the process for a failed fixture; got {:?}; stderr: {stderr}",
+            "eval run must fail the process for a failed fixture; got {:?}; stderr: {stderr}; stdout: {stdout}",
             output.status.code()
         ),
     )?;

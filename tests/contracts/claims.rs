@@ -313,7 +313,13 @@ fn public_claim_schema_examples_parse_through_runtime() -> TestResult {
         frequency: Some("weekly".to_string()),
         ..Default::default()
     })
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| {
+        // bd-g3yh5: embed the exact bytes the runtime rejected so remote
+        // artifacts show the schema-example drift directly.
+        let written = std::fs::read_to_string(fixture.join("claims.yaml"))
+            .unwrap_or_else(|read_error| format!("<unreadable: {read_error}>"));
+        format!("{error}; claims.yaml under test:\n{written}")
+    })?;
     ensure(list.total_count == 1, "public claims example should parse")?;
     ensure(
         list.filtered_count == 1,

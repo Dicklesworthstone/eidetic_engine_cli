@@ -1,7 +1,6 @@
 {
   "schema": "ee.response.v2",
   "success": true,
-  "degraded": [],
   "data": {
     "command": "agent detect",
     "formatVersion": 1,
@@ -50,5 +49,7 @@
         ]
       }
     ]
-  }
+  },
+  "degraded": []
 }
+
