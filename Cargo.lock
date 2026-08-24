@@ -1552,7 +1552,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "franken-agent-detection"
-version = "0.1.10"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "dirs",
@@ -1739,10 +1739,6 @@ dependencies = [
  "fsqlite-core",
  "fsqlite-error",
  "fsqlite-ext-fts5",
- "fsqlite-ext-icu",
- "fsqlite-ext-json",
- "fsqlite-ext-misc",
- "fsqlite-ext-rtree",
  "fsqlite-parser",
  "fsqlite-types",
  "fsqlite-vfs",
@@ -1785,10 +1781,6 @@ dependencies = [
  "fsqlite-btree",
  "fsqlite-error",
  "fsqlite-ext-fts5",
- "fsqlite-ext-icu",
- "fsqlite-ext-json",
- "fsqlite-ext-misc",
- "fsqlite-ext-rtree",
  "fsqlite-func",
  "fsqlite-mvcc",
  "fsqlite-observability",
@@ -1827,48 +1819,6 @@ dependencies = [
  "fsqlite-types",
  "smallvec",
  "tracing",
-]
-
-[[package]]
-name = "fsqlite-ext-icu"
-version = "0.3.9"
-dependencies = [
- "fsqlite-error",
- "fsqlite-func",
- "fsqlite-types",
- "tracing",
-]
-
-[[package]]
-name = "fsqlite-ext-json"
-version = "0.3.9"
-dependencies = [
- "fsqlite-error",
- "fsqlite-func",
- "fsqlite-types",
- "json5",
- "serde_json",
-]
-
-[[package]]
-name = "fsqlite-ext-misc"
-version = "0.3.9"
-dependencies = [
- "fsqlite-error",
- "fsqlite-func",
- "fsqlite-types",
- "getrandom 0.4.3",
- "rand 0.10.2",
- "tracing",
-]
-
-[[package]]
-name = "fsqlite-ext-rtree"
-version = "0.3.9"
-dependencies = [
- "fsqlite-error",
- "fsqlite-func",
- "fsqlite-types",
 ]
 
 [[package]]
@@ -3387,16 +3337,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "json5"
-version = "1.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "733a844dbd6fef128e98cb4487b887cb55454d92cd9994b1bafe004fabbe670c"
-dependencies = [
- "serde",
- "ucd-trie",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4750,7 +4690,7 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "asupersync",
  "regex",
@@ -4761,7 +4701,7 @@ dependencies = [
 
 [[package]]
 name = "sqlmodel-frankensqlite"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "asupersync",
  "fsqlite",
@@ -5320,12 +5260,6 @@ dependencies = [
  "quote",
  "syn 3.0.3",
 ]
-
-[[package]]
-name = "ucd-trie"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
 
 [[package]]
 name = "unarray"
@@ -6015,6 +5949,22 @@ version = "0.2.0"
 
 [[patch.unused]]
 name = "fsqlite-ext-fts3"
+version = "0.3.9"
+
+[[patch.unused]]
+name = "fsqlite-ext-icu"
+version = "0.3.9"
+
+[[patch.unused]]
+name = "fsqlite-ext-json"
+version = "0.3.9"
+
+[[patch.unused]]
+name = "fsqlite-ext-misc"
+version = "0.3.9"
+
+[[patch.unused]]
+name = "fsqlite-ext-rtree"
 version = "0.3.9"
 
 [[patch.unused]]
