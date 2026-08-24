@@ -296,10 +296,15 @@ fn public_claim_schema_examples_parse_through_runtime() -> TestResult {
     let claims_example = claims_schema
         .pointer("/examples/0")
         .ok_or_else(|| "claims-file schema missing examples[0]".to_string())?;
+    // Serialize through serde_json TEXT, not serde_yaml: serde_yaml
+    // cannot render serde_json::Number directly and emits a
+    // `$serde_json::private::Number` map for scalar values, which the
+    // runtime parser then rejects at `version`. JSON is a strict YAML
+    // subset, so the text form parses as YAML unchanged.
     fs::write(
         fixture.join("claims.yaml"),
-        serde_yaml::to_string(claims_example)
-            .map_err(|error| format!("failed to encode claims example as YAML: {error}"))?,
+        serde_json::to_string(claims_example)
+            .map_err(|error| format!("failed to encode claims example as JSON-as-YAML: {error}"))?,
     )
     .map_err(|error| format!("failed to write claims example: {error}"))?;
 
