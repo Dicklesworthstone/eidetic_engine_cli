@@ -29,6 +29,12 @@
 !src/cache/
 !src/cache/**
 
+# The tracked Beads JSONL is a compile-time input for plan_doc_completeness.
+# RCH's default hidden-directory exclusions are broader than this project, so
+# re-include the directory and its tracked source-of-truth file explicitly.
+!.beads/
+!.beads/issues.jsonl
+
 # Diagnostic output files created by verification scripts
 .clippy_out.txt
 .closure-lint-report.json

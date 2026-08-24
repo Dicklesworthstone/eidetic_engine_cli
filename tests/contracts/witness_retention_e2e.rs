@@ -11,10 +11,13 @@ use ee::db::{
 };
 use serde_json::Value;
 
+#[path = "common_spawn.rs"]
+mod common_spawn;
+
 type TestResult = Result<(), String>;
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
-    crate::common_spawn::serialized_real_ee_with(|command| {
+    common_spawn::serialized_real_ee_with(|command| {
         command
             .args(args)
             .env_remove("EE_WORKSPACE")
