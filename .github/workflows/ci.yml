@@ -35,7 +35,12 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Main pushes must always run to completion: with unconditional
+  # cancel-in-progress, swarm cadence (frequent pushes) cancelled every
+  # in-flight main run and left main permanently unverified (~200
+  # consecutive cancelled runs as of 2026-08-23). Only supersede stale
+  # PR runs, where cancelling an outdated commit is the point.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   daemon-search-observation:
