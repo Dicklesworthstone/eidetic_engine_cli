@@ -1157,11 +1157,16 @@ plus grant-gated BodyFetch. Authorized bodies hydrate into local memories so
 `ee search` / `ee pack --memory-scope team` recall teammate text with
 `teamProvenance`. Policy-governed file export/import remains available.
 
-What is **not** yet proven: two distinct humans on a real Tailscale tailnet,
-a Windows-host DACL/crash soak, and a production IdP vendor soak. The opt-in
+What the v1 remainder set covers (all closed 2026-08-17, see
+[`docs/mesh/verification_matrix.md`](docs/mesh/verification_matrix.md)): a live
+two-host Tailscale tailnet soak (`bd-tc-epic-qzk7o.3.8` — two hosts, not yet two
+distinct human operators), a Windows-host inbound crash/restart soak
+(`bd-tc-epic-qzk7o.12`), and an explicit fail-closed decision that fake-IdP
+RS256 + live `identity_attest` is the v1 identity ceiling (`bd-tc-epic-qzk7o.8.8`;
+vendor tenant is a post-v1 epic). The opt-in
 `scripts/e2e_overhaul/mesh_tailscale_smoke.sh` still proves local Tailscale
-observation, enrollment, policy, and file export/import. It is not the
-two-human live-sync gate (`bd-tc-epic-qzk7o.3.8`).
+observation, enrollment, policy, and file export/import; it is not the
+two-human live-sync gate, which remains a recorded follow-up.
 
 | Command | Purpose |
 |---|---|
@@ -2423,7 +2428,7 @@ Boundaries to know:
 |---|---|
 | Concurrent writes | FrankenSQLite uses single-process MVCC WAL. Many agents can read at once; heavy write swarms should route through job locks or the optional daemon write owner. |
 | Agent loop | `ee` stores and retrieves memory. Claude Code, Codex, or another harness still owns tools, approvals, and the prompt loop. |
-| User interface | The primary interface is the CLI. Graph exports are CLI artifacts, not an interactive web app. |
+| Mesh | Unix live EE-to-EE is shipped (`TcpMeshForegroundSyncTransport`). The v1 remainder set closed 2026-08-17: two-host tailnet soak, Windows-host crash/restart soak, and the fake-IdP-as-v1-ceiling decision (see `docs/mesh/verification_matrix.md`); a two-distinct-human soak is the recorded post-v1 follow-up. FrankenSQLite remains the local source of truth. |
 | Retention model | Forgetting and decay are product features. Export JSONL into git when you need sealed long-term records. |
 | Model choice | Embeddings are delegated to Frankensearch. Default installs use the pinned local `potion-multilingual-128M` fast tier; semantic quality follows that model and the derived index unless the operator explicitly changes Frankensearch posture. |
 | MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
@@ -2459,9 +2464,10 @@ Yes. `cass` is an evidence source, not a hard dependency. Without it, `ee rememb
 Yes on Unix. `ee team create` → send the invite → `ee team join`, then run
 `ee mesh hello-responder run` or `ee daemon --foreground` on the origin and
 `ee mesh sync --once` / `ee team steward once` on the joiner. Search and pack
-with `--memory-scope team`. Two distinct humans on a real Tailscale tailnet,
-Windows-host soak, and production IdP vendor soak are still environment
-remainders.
+with `--memory-scope team`. The v1 remainder set (two-host tailnet soak,
+Windows-host crash/restart soak, fake-IdP-as-v1-ceiling decision) closed
+2026-08-17 per `docs/mesh/verification_matrix.md`; a two-distinct-human soak
+remains a recorded post-v1 follow-up.
 
 **How big does the database get?**
 On a typical multi-project developer machine, expect 50-500 MB after a year.

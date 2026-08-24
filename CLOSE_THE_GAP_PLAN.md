@@ -10,6 +10,19 @@
 > Companion: `docs/adr/0086-team-memory-confederation.md`,
 > `docs/mesh/team_confederation_plan.md`,
 > `docs/mesh/verification_matrix.md`, `README.md`.
+>
+> **2026-08-23 audit addendum (OxAlpha reality check).** All five remainder
+> closures were re-verified against their evidence; two defects still block
+> §5 archiving: (1) `.3.8` closed on a live TWO-HOST tailnet soak — its own
+> close note says "not two distinct humans" — while §5 requires a two-human
+> artifact; (2) `.3.9` is closed with an EMPTY close reason, violating §3.1.
+> Both rows now carry audit comments requesting evidence backfill or an
+> explicit amended decision. README Limitations/FAQ/Mesh sections were synced
+> to the matrix's closed-remainder-set state in the same pass. Separately,
+> CI was found permanently self-cancelling on `main`
+> (`cancel-in-progress` unconditional; ~200 consecutive cancelled runs since
+> 2026-08-16, last completed verdicts all failure) — fixed in
+> `.github/workflows/ci.yml` so main runs always complete.
 
 ---
 
