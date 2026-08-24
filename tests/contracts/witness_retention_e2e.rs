@@ -11,6 +11,7 @@ use ee::db::{
 };
 use serde_json::Value;
 
+#[allow(dead_code)] // standalone target uses only the configurable launcher
 #[path = "common_spawn.rs"]
 mod common_spawn;
 
