@@ -181,6 +181,7 @@ run_ee() {
     env \
         HOME="${TEST_HOME}" \
         EE_WORKSPACE="${TEST_WORKSPACE}/ws" \
+        EE_EMBED_DOWNLOAD="${EE_EMBED_DOWNLOAD:-off}" \
         NO_COLOR=1 \
         "${EE_BINARY}" "${cmd_args[@]}" \
         >"${stdout_file}" 2>"${stderr_file}" || exit_code=$?
