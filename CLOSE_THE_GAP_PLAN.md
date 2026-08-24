@@ -1,4 +1,4 @@
-# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revision 2026-08-23)**
+# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **PART III, TWO-TRACK CONVERGENCE (2026-08-17; reality-check revision 2026-08-24)**
 
 > Track A: mesh / team-confederation acceptance reconciliation after the Unix
 > EE-to-EE campaign. Track B: core-product, durability, verification, and
@@ -31,6 +31,36 @@
 > requests are not deterministic, current verification is red or inconclusive,
 > and release/performance evidence is weaker than the README claims. This file
 > remains Part III instead of opening a competing Part IV while §5 is unresolved.
+>
+> **2026-08-24 independent rerun addendum.** The reality check was repeated from
+> the complete `AGENTS.md`, `README.md`, controlling plans/ADRs, implementation,
+> tracker, installed release, hosted release/CI, and source-attested verification
+> surfaces. Current `main` is `5962397d48b1e01aa4cc3886c91423d7830a9c18`
+> (`v0.14.2-96-g5962397d`). Recent commits improve rule-body hydration, make
+> unavailable upstream PPR degrade truthfully, and advance backup/export paths,
+> but they do not implement ADR 0085 typed pack identity, calibrate lexical
+> relevance, prove deterministic generations, complete recovery, or close any
+> child of `bd-reality-core-convergence-1azkt`.
+>
+> A fresh installed-`0.14.2` walking-skeleton probe did persist, search, pack,
+> and explain one manual procedural memory with provenance, confirming that the
+> ordinary component path is real. The same isolated workspace reported
+> inconsistent index/model readiness across status/search observations, so it
+> does not upgrade the source-attested verdict. A pinned, clean-tree RCH
+> `cargo check --locked --all-targets` reached Cargo on worker `vmi1152480` but
+> ended `rch_environment_failure` after remote worker disk exhaustion; retry and
+> local proof-ledger persistence also failed because the Mac had only 116 MiB
+> free and the external build volume was absent. This is neither a green proof
+> nor a source failure. Hosted CI for this exact SHA remains pending with zero
+> jobs.
+>
+> The bridge was then re-run through three ambition rounds and five plan-space
+> refinement passes: product closure, recovery/operability, adversarial proof,
+> dependency order, observability/testing, privacy/failure handling, and agent
+> journey/release maturity. No additional unowned controlling goal emerged.
+> The existing epic plus reused blockers covers all 24 checklist rows; its 23
+> records remain 20 open and 3 in progress, and `.22` still graph-blocks on every
+> mandatory child and reused blocker. No duplicate plan or Bead was created.
 
 ---
 
@@ -218,18 +248,19 @@ product.**
 
 ## 7. Evidence snapshot and authority boundary
 
-Source base under audit: `main` at
-`802099a908d86d7cb425398f7b6441fb7402dd6e`
-(`v0.14.2-78-g802099a9`) with a concurrently dirty shared checkout. Static
-claims below are source/contract findings, not a clean-candidate proof.
+Source base under the latest audit: `main` at
+`5962397d48b1e01aa4cc3886c91423d7830a9c18`
+(`v0.14.2-96-g5962397d`). The tracked worktree was clean; pre-existing untracked
+tracker journals, `.ci/`, and a Cargo manifest backup were left untouched.
+Static claims below are source/contract findings, not a green-candidate proof.
 
 Operational probes used `/Users/jemanuel/.local/bin/ee` version `0.14.2`,
 SHA-256
 `d7e50bc8831c29437fdc23bf6ff6e57e1b2131665a01c8af937dea02323857f5`.
 Its `ee version --json` reports `gitCommit: null`, `gitTag: null`, and
-`targetTriple: unknown`. Therefore the live nondeterminism results are
+`targetTriple: unknown`. Therefore the live runtime results are
 **released-binary evidence against the current workspace**, not proof that
-commit `802099a9` behaves identically. Source inspection contains a plausible
+commit `5962397d` behaves identically. Source inspection contains a plausible
 matching race. Bead `.10` must reproduce or refute it with a source-attested
 candidate before `.2` changes the implementation.
 
@@ -296,10 +327,11 @@ candidate before `.2` changes the implementation.
 - Hosted CI has no successful substantive current-main verdict. The latest
   release workflow is disabled, and v0.14.2 has archives/checksums/installers
   but no Sigstore bundles or SLSA provenance assets.
-- At the audit checkpoint, the current hosted push run for `802099a9` was
-  `pending` with zero jobs. RCH had active unrelated/project jobs, while recent
-  project contract/North-Star runs ended 101, 130, or 137; no duplicate Cargo
-  run was started by this audit.
+- At the latest audit checkpoint, hosted push run `32731128435` for
+  `5962397d` was `pending` with zero jobs. The one pinned clean-tree RCH check
+  ended in an attributed environment failure (remote worker disk full, retry
+  attempted, local proof-ledger write blocked by host disk exhaustion); no
+  local Cargo fallback or duplicate verification run was started.
 
 ---
 
