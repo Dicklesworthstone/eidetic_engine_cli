@@ -1202,10 +1202,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "determinism"
-version = "0.1.0"
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1328,6 +1324,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ee-determinism"
+version = "0.1.0"
+
+[[package]]
 name = "eidetic-engine"
 version = "0.14.3"
 dependencies = [
@@ -1340,8 +1340,8 @@ dependencies = [
  "clap_complete",
  "criterion",
  "crossbeam-queue",
- "determinism",
  "ed25519-dalek 3.0.0",
+ "ee-determinism",
  "fnx-algorithms",
  "fnx-classes",
  "fnx-runtime",
@@ -2025,7 +2025,6 @@ dependencies = [
  "fsqlite-error",
  "fsqlite-func",
  "fsqlite-mvcc",
- "fsqlite-observability",
  "fsqlite-pager",
  "fsqlite-parser",
  "fsqlite-types",
@@ -2061,7 +2060,6 @@ dependencies = [
  "blake3",
  "crc32c",
  "fsqlite-error",
- "fsqlite-observability",
  "fsqlite-types",
  "fsqlite-vfs",
  "parking_lot",

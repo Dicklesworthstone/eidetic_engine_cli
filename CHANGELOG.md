@@ -54,10 +54,38 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
-## [0.14.3] - 2026-08-24
+## [0.14.3] - 2026-08-25
 
-Franken-stack refresh release. No ee-side code changes are required for the
-headline fix; the value is in the pinned engine underneath.
+Retrieval-correctness, release-readiness, and Franken-stack refresh release.
+This cut combines the WAL compatibility fix in the pinned storage engine with
+ee-side search calibration, cross-shard orientation fixes, deterministic
+contract hardening, and the first crates.io-ready package layout.
+
+### Added
+
+- **Global-store evidence is now first-class in fast orientation.** Lexical
+  hits from the user-global memory store retain their authoritative scope tags,
+  provenance, and explanation instead of looking like unexplained local hits.
+- **Promoted procedural rules carry their bodies into context packs.** Pack
+  candidates no longer lose the actionable text while preserving the rule's
+  evidence chain.
+- **Graph PPR unavailability has a typed degradation contract.** Callers can
+  distinguish an unavailable upstream PPR signal from an unusable context pack.
+- **The Rust packages are ready for leaf-first crates.io publication.** The
+  internal attribute macro ships as `ee-determinism`; the public package remains
+  `eidetic-engine` with the `ee` binary and a bounded source package.
+
+### Changed
+
+- **Frankensearch advances to 0.4.0.** ee now projects normalized relevance
+  scores consistently, calibrates deterministic ranking against the adapter,
+  and keeps ranking ties stable across repeated runs.
+- **Context, robot output, and mesh command surfaces are more precise.** JSONL
+  audit records are validated, store-auth failures are typed, and context-pack
+  selection explanations better match the evidence actually used.
+- **Verification is serialized where tests share process-global state.** The
+  canonical verifier no longer creates false reds by racing integration tests
+  that intentionally exercise global registries or real CLI subprocesses.
 
 ### Fixed
 
@@ -69,6 +97,14 @@ headline fix; the value is in the pinned engine underneath.
   franken-stack pin advances from frankensqlite `61313e42` (0.3.7 line)
   to the `v0.3.9` tag commit (`83a07fcf`), which also carries the Windows
   sidecar-less lock-path fixes and the async-api feature-graph repair.
+- **Registered reranker fallback skips broken candidates and reports the real
+  advisory.** Lexical fallback remains usable without hiding a permanent model
+  or registry failure.
+- **Nearby-store resume preserves provenance and survives worker-load discovery
+  starvation.** Serialization errors now flow through the typed result path.
+- **The walking skeleton and release verification stay offline and reproducible.**
+  Remote test inputs, golden contracts, clippy cleanliness, and deterministic
+  search snapshots are aligned with the shipped behavior.
 
 ## [0.14.2] - 2026-08-20
 
