@@ -1,7 +1,22 @@
-# Nightly only. Never stable, beta, or a dated stable pin.
+# Nightly only. Never stable, beta, or a dated *stable* pin.
 # Mixing nightly cargo with stable rustc produces E0514 crate mismatches.
 # Release/DSR hosts must set RUSTUP_TOOLCHAIN=nightly (see AGENTS.md).
+#
+# Pinned to a DATED nightly on purpose -- this satisfies the nightly-only rule
+# above while removing the floating-channel hazard. Do not change this back to a
+# bare `channel = "nightly"`.
+#
+# A floating nightly means the compiler moves under the repo between builds: the
+# same commit can build clean on one host and ICE on another simply because the
+# two resolved `nightly` on different days. That failure presents as a code bug
+# and gets debugged as one. It also breaks release reproducibility, since the
+# host that gates a release and the host that builds the artifact can disagree
+# about what `nightly` means.
+#
+# nightly-2026-08-20 is the date standardised across this workspace during the
+# 2026-08 release run. Bump it deliberately, as its own commit, after a green
+# gate -- never by letting it float.
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-08-20"
 components = ["rustfmt", "clippy"]
 profile = "default"
