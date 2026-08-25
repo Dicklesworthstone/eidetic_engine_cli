@@ -319,3 +319,12 @@ windsurf.mcp.json
 
 # Beads compliance audit dir (managed by /beads-compliance-and-completion-verification skill)
 /beads_compliance_audit/
+
+# br per-process write locks under .beads/. These are hashed, per-machine,
+# always zero-byte, and are created/removed around every br database and JSONL
+# write. The upstream br .beads/.gitignore template does not cover these names,
+# so three of them were accidentally committed (a8d478388) by a pathspec that
+# was meant to capture .beads/issues.jsonl. Untracked and ignored here so a
+# routine `git add .beads/` can never republish them.
+.beads/.br-db-write-*.lock
+.beads/.br-jsonl-write-*.lock
