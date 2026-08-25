@@ -1,5 +1,7 @@
 # Context Pack: format before release
 
+**embed_backend:** `hash_fallback`
+
 **Profile:** compact | **Budget:** 8/4000 tokens
 
 ## Advisory Memory Banner
@@ -16,7 +18,7 @@ Context includes 3 degraded signals; semantic embedding is unavailable, so treat
 Run cargo fmt --check before release.
 ```
 
-**Why:** matched 'format before release' via lexical (relevance 0.5754, utility 0.8000)
+**Why:** matched 'format before release' via lexical (relevance 0.5000, utility 0.8000)
 
 **Trust:** `human_explicit` / `authoritative`
 

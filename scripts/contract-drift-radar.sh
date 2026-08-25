@@ -198,14 +198,14 @@ fi
 
 SCHEMAS_DIR="${ROOT}/docs/schemas"
 schema_ids="[]"
+schema_id_lines=""
 schema_count=0
 if [ -d "$SCHEMAS_DIR" ]; then
-  schema_ids=$(find "$SCHEMAS_DIR" -maxdepth 1 -type f -name 'ee.*.json' -print 2>/dev/null \
+  schema_id_lines=$(find "$SCHEMAS_DIR" -maxdepth 1 -type f -name 'ee.*.json' -print 2>/dev/null \
     | awk -F'/' '{print $NF}' \
     | sed 's/\.json$//' \
-    | sort -u \
-    | jq -R . \
-    | jq -s 'unique')
+    | sort -u)
+  schema_ids=$(printf '%s\n' "$schema_id_lines" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique')
   schema_count=$(printf '%s' "$schema_ids" | jq 'length')
 fi
 
@@ -282,67 +282,71 @@ example_violations="[]"
 example_count=0
 example_violation_count=0
 example_skipped_legacy=0
-for doc in "${CURRENT_DOCS[@]}"; do
-  rel="${doc#"${ROOT}"/}"
-  # Pull fenced blocks via awk
-  in_block=0
-  block=""
-  block_lang=""
-  start_line=0
-  line_no=0
-  prev_line=""
-  block_is_legacy=0
-  while IFS= read -r line; do
-    line_no=$((line_no + 1))
-    if [ "$in_block" -eq 0 ]; then
-      if printf '%s' "$line" | grep -qE '^```(json|jsonc)\s*$'; then
-        in_block=1
-        block=""
-        block_lang=$(printf '%s' "$line" | sed -E 's/^```//; s/\s*$//')
-        start_line=$line_no
-        # Allow-list markers immediately preceding the fence:
-        # <!-- legacy-example --> or <!-- contract-drift-allow:... -->
-        block_is_legacy=0
-        if printf '%s' "$prev_line" | grep -qE '<!--\s*(legacy-example|contract-drift-allow:)' ; then
-          block_is_legacy=1
-        fi
-      fi
-      prev_line="$line"
-      continue
-    fi
-    if printf '%s' "$line" | grep -qE '^```\s*$'; then
-      # End of fence — check the block
-      in_block=0
-      # Only inspect blocks that mention "schema":"ee.*"
-      if printf '%s' "$block" | grep -qE '"schema"\s*:\s*"ee\.'; then
-        schema_id=$(printf '%s' "$block" | grep -oE '"schema"\s*:\s*"ee\.[^"]+"' | head -1 | sed -E 's/.*"(ee\.[^"]+)".*/\1/')
-        example_count=$((example_count + 1))
-        if [ "$block_is_legacy" -eq 1 ]; then
-          example_skipped_legacy=$((example_skipped_legacy + 1))
-        elif [ -n "$schema_id" ]; then
-          # Check inventory
-          known=$(printf '%s' "$schema_ids" | jq -r --arg id "$schema_id" 'any(. == $id)')
-          if [ "$known" != "true" ]; then
-            obj=$(jq -cn \
-              --arg file "$rel" \
-              --arg line "$start_line" \
-              --arg schema_id "$schema_id" \
-              --arg lang "$block_lang" \
-              --arg code "json_example_schema_id_unknown" \
-              '{file: $file, line: ($line | tonumber? // 0), code: $code, schemaId: $schema_id, fenceLanguage: $lang}')
-            example_violations=$(printf '%s' "$example_violations" | jq --argjson obj "$obj" '. + [$obj]')
-            example_violation_count=$((example_violation_count + 1))
-          fi
-        fi
-      fi
-      block=""
-      prev_line="$line"
-      continue
-    fi
-    block="$(printf '%s\n%s' "$block" "$line")"
-    prev_line="$line"
-  done < "$doc"
-done
+example_rows=$(
+  awk -v root="${ROOT}/" '
+    FNR == 1 {
+      relative = FILENAME
+      sub("^" root, "", relative)
+      in_block = 0
+      previous = ""
+    }
+    in_block == 0 {
+      if ($0 ~ /^```(json|jsonc)[[:space:]]*$/) {
+        in_block = 1
+        language = $0
+        sub(/^```/, "", language)
+        sub(/[[:space:]]*$/, "", language)
+        start_line = FNR
+        legacy = (previous ~ /<!--[[:space:]]*(legacy-example|contract-drift-allow:)/)
+        schema_id = ""
+      }
+      previous = $0
+      next
+    }
+    $0 ~ /^```[[:space:]]*$/ {
+      if (schema_id != "") {
+        printf "%s\t%d\t%s\t%d\t%s\n", relative, start_line, language, legacy, schema_id
+      }
+      in_block = 0
+      previous = $0
+      next
+    }
+    schema_id == "" && $0 ~ /"schema"[[:space:]]*:[[:space:]]*"ee\./ {
+      schema_id = $0
+      sub(/^.*"schema"[[:space:]]*:[[:space:]]*"/, "", schema_id)
+      sub(/".*$/, "", schema_id)
+    }
+    { previous = $0 }
+  ' "${CURRENT_DOCS[@]}"
+)
+
+while IFS=$'\t' read -r rel start_line block_lang block_is_legacy schema_id; do
+  [ -n "$schema_id" ] || continue
+  example_count=$((example_count + 1))
+  if [ "$block_is_legacy" -eq 1 ]; then
+    example_skipped_legacy=$((example_skipped_legacy + 1))
+    continue
+  fi
+
+  case "
+$schema_id_lines
+" in
+    *"
+$schema_id
+"*) ;;
+    *)
+      obj=$(jq -cn \
+        --arg file "$rel" \
+        --arg line "$start_line" \
+        --arg schema_id "$schema_id" \
+        --arg lang "$block_lang" \
+        --arg code "json_example_schema_id_unknown" \
+        '{file: $file, line: ($line | tonumber? // 0), code: $code, schemaId: $schema_id, fenceLanguage: $lang}')
+      example_violations=$(printf '%s' "$example_violations" | jq --argjson obj "$obj" '. + [$obj]')
+      example_violation_count=$((example_violation_count + 1))
+      ;;
+  esac
+done <<< "$example_rows"
 
 examples_status="ok"
 [ "$example_violation_count" -gt 0 ] && examples_status="violations"
@@ -362,31 +366,33 @@ documented_codes=0
 fixture_codes=0
 if [ -f "$DEGRADED_DOC" ] && [ -d "$FIXTURE_DIR" ]; then
   # Codes from the catalog are H2 headings: '## `<code>`'
-  doc_codes_tmp=$(mktemp)
-  grep -oE "^## \`[a-z0-9_]+\`" "$DEGRADED_DOC" \
+  doc_code_lines=$(grep -oE "^## \`[a-z0-9_]+\`" "$DEGRADED_DOC" \
     | sed -E "s/^## \`//; s/\`$//" \
-    | sort -u >"$doc_codes_tmp"
-  documented_codes=$(wc -l <"$doc_codes_tmp" | tr -d '[:space:]')
+    | sort -u)
+  documented_codes=$(printf '%s\n' "$doc_code_lines" | awk 'NF { count++ } END { print count + 0 }')
 
-  fixture_codes_tmp=$(mktemp)
-  find "$FIXTURE_DIR" -maxdepth 1 -type f -name '*.json' \
+  fixture_code_lines=$(find "$FIXTURE_DIR" -maxdepth 1 -type f -name '*.json' \
     | awk -F'/' '{print $NF}' \
     | sed 's/\.json$//' \
-    | sort -u >"$fixture_codes_tmp"
-  fixture_codes=$(wc -l <"$fixture_codes_tmp" | tr -d '[:space:]')
+    | sort -u)
+  fixture_codes=$(printf '%s\n' "$fixture_code_lines" | awk 'NF { count++ } END { print count + 0 }')
 
   # Codes documented but missing a fixture
-  while IFS= read -r code; do
-    [ -z "$code" ] && continue
-    if ! grep -Fxq "$code" "$fixture_codes_tmp"; then
+  for code in $doc_code_lines; do
+    case "
+$fixture_code_lines
+" in
+      *"
+$code
+"*) ;;
+      *)
       obj=$(jq -cn --arg c "$code" --arg code "documented_code_missing_fixture" \
         '{code: $code, degradedCode: $c}')
       taxonomy_orphans=$(printf '%s' "$taxonomy_orphans" | jq --argjson obj "$obj" '. + [$obj]')
       taxonomy_orphan_count=$((taxonomy_orphan_count + 1))
-    fi
-  done <"$doc_codes_tmp"
-
-  rm -f "$doc_codes_tmp" "$fixture_codes_tmp"
+      ;;
+    esac
+  done
 fi
 
 taxonomy_status="ok"

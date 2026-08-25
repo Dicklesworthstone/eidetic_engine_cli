@@ -1,6 +1,7 @@
 ---
 source: tests/json_contract_snapshots.rs
-expression: search
+assertion_line: 126
+expression: canonical_json_text(value)
 ---
 {
   "data": {
@@ -62,15 +63,15 @@ expression: search
         ]
       }
     ],
-    "embed_backend": "hash_fallback",
     "elapsedMs": 0,
+    "embed_backend": "hash_fallback",
     "errors": [],
     "metrics": {
       "candidatesAboveFloor": 1,
       "candidatesBelowFloor": 0,
       "elapsedMs": 0,
       "errorCount": 0,
-      "fallbackApplied": false,
+      "fallbackApplied": true,
       "fieldCoverage": {
         "explanationCount": 0,
         "fastScoreCount": 0,
@@ -79,17 +80,17 @@ expression: search
         "qualityScoreCount": 0,
         "rerankScoreCount": 0
       },
-      "honestQualityScore": 0.7299950122833252,
+      "honestQualityScore": 0.729977,
       "memoryScope": "swarm",
       "qualityAssessment": "good",
-      "relevanceFloor": 0.05000000074505806,
+      "relevanceFloor": 0.05,
       "requestedLimit": 10,
       "returnedCount": 1,
       "scoreDistribution": {
-        "max": 0.5753639936447144,
-        "mean": 0.5753639936447144,
-        "min": 0.5753639936447144,
-        "top": 0.5753639936447144
+        "max": 0.5,
+        "mean": 0.5,
+        "min": 0.5,
+        "top": 0.5
       },
       "sourceCounts": {
         "hybrid": 0,
@@ -98,7 +99,7 @@ expression: search
         "semanticFast": 0,
         "semanticQuality": 0
       },
-      "sourceModeApplied": "hybrid",
+      "sourceModeApplied": "lexical_only",
       "sourceModeRequested": "hybrid",
       "strictScope": false,
       "strictSourceMode": false
@@ -165,7 +166,7 @@ expression: search
         "distinctCount": 1,
         "emittedCount": 1,
         "permanent": true,
-        "scope": "invocation",
+        "scope": "process",
         "sessionOccurrenceCount": 1,
         "sessionSuppressedCount": 0,
         "suppressedCount": 0
@@ -186,7 +187,7 @@ expression: search
         "content": "Run cargo fmt --check before release.",
         "coverageGuarantee": null,
         "docId": "mem_00000000000000000000000001",
-        "lexicalScore": 0.5753642320632935,
+        "lexicalScore": 0.57536423,
         "memoryId": "mem_00000000000000000000000001",
         "metadata": {
           "calibrated": false,
@@ -203,7 +204,7 @@ expression: search
           "scoreCalibration": {
             "corruptLineNumbers": [],
             "corruptRowCount": 0,
-            "coverage": 0.949999988079071,
+            "coverage": 0.95,
             "method": "scaled_split_conformal",
             "minimumSamples": 20,
             "provenance": {
@@ -238,12 +239,16 @@ expression: search
         },
         "provenance": [
           {
+            "kind": "provenance_uri",
+            "uri": "file://AGENTS.md#L164-173"
+          },
+          {
             "docId": "mem_00000000000000000000000001",
             "kind": "search_document"
           }
         ],
-        "relevanceScore": 0.5753639936447144,
-        "score": 0.5753642320632935,
+        "relevanceScore": 0.5,
+        "score": 0.5,
         "scoreInterval": [
           0.0,
           1.0
@@ -253,7 +258,7 @@ expression: search
         "validFrom": "[TIMESTAMP]",
         "validityStatus": "current",
         "validityWindowKind": "starts_at",
-        "why": "Selected by lexical retrieval with score 0.5754."
+        "why": "Selected by lexical retrieval with relevance 0.5000 from score 0.5000 (unit_normalized)."
       }
     ],
     "scopeStats": {

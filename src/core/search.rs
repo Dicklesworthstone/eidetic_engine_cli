@@ -19,7 +19,7 @@ use crate::db::{
     CreateAuditInput, DatabaseConfig, DbConnection, DbError, DbOperation,
     FeedbackEventsFingerprint, StoredFeedbackEvent, StoredMemory, StoredModelRegistryEntry,
     audit_actions, generate_audit_id,
-    read_pool::{PoolConfig, ReadConnectionPool, registered_process_read_pool},
+    read_pool::{PoolConfig, registered_process_read_pool},
 };
 use crate::models::degradation::{
     CONFORMAL_CALIBRATION_INSUFFICIENT_CODE, SEARCH_SCORE_CALIBRATION_FILE_TOO_LARGE_CODE,
@@ -44,8 +44,9 @@ use super::degraded_aggregation::{DegradationAggregationInput, aggregate_degrade
 use super::index::{
     EmbeddingPosture, IndexHealth, IndexProcessingOptions, IndexProcessingStatus, IndexStatusError,
     IndexStatusOptions, IndexStatusReport, current_embedding_posture,
-    embedder_reports_pending_model2vec_download, get_index_status_with_connection,
-    prepare_search_embedder_for_workspace, process_index_jobs_coalesced_with_cx_bounded,
+    embedder_reports_pending_model2vec_download, get_index_status_in_current_snapshot,
+    get_index_status_with_connection, prepare_search_embedder_for_workspace,
+    process_index_jobs_coalesced_with_cx_bounded,
 };
 use super::memory_drift::{
     MemoryDriftSelectionHint, memory_drift_selection_hint_from_provenance_status,
@@ -100,7 +101,87 @@ pub const SEARCH_INDEX_LARGE_GAP_THRESHOLD: u64 = 50;
 /// be expensive. Larger stores remain truthfully stale and use the explicit
 /// rebuild repair instead of blocking an interactive read.
 const SEARCH_INDEX_AUTO_RECONCILE_MAX_DOCUMENTS: u64 = 64;
-const SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT: Duration = Duration::from_millis(500);
+/// Wall-clock budget for repairing a small stale corpus before retrieval.
+///
+/// Reconciliation publishes complete vector and lexical tiers even for a
+/// one-generation gap. A 500 ms budget was shorter than a cold open plus
+/// publish on ordinary development hardware, so the advertised automatic
+/// repair path routinely timed out before doing useful work. Five seconds
+/// remains a minority of the 60-second search budget while giving the bounded
+/// (at most 64-document) path enough time to converge.
+const SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Search snapshots must outlive the request that owns them so cancellation
+/// and transaction cleanup, rather than the pool watchdog, decide the result.
+/// Debug builds need substantially more headroom because Frankensearch's
+/// unoptimized CPU work can exceed the release budget even for tiny fixtures.
+/// Release binaries retain the interactive 60-second deadline.
+#[cfg(not(debug_assertions))]
+const SEARCH_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(debug_assertions)]
+const SEARCH_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+/// Cleanup headroom only; this does not extend the request deadline or permit
+/// additional search work.
+const SEARCH_SNAPSHOT_RELEASE_GRACE: Duration = Duration::from_secs(5);
+#[cfg(test)]
+std::thread_local! {
+    static TEST_SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT: RefCell<Option<Duration>> =
+        const { RefCell::new(None) };
+    static TEST_SEARCH_REQUEST_TIMEOUT: RefCell<Option<Duration>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct TestSearchIndexAutoReconcileTimeoutGuard {
+    previous_reconcile: Option<Duration>,
+    previous_request: Option<Duration>,
+}
+
+#[cfg(test)]
+impl Drop for TestSearchIndexAutoReconcileTimeoutGuard {
+    fn drop(&mut self) {
+        TEST_SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT.with(|slot| {
+            *slot.borrow_mut() = self.previous_reconcile.take();
+        });
+        TEST_SEARCH_REQUEST_TIMEOUT.with(|slot| {
+            *slot.borrow_mut() = self.previous_request.take();
+        });
+    }
+}
+
+#[cfg(test)]
+fn with_test_search_timeouts<T>(timeout: Duration, run: impl FnOnce() -> T) -> T {
+    let previous_reconcile =
+        TEST_SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT.with(|slot| slot.borrow_mut().replace(timeout));
+    let previous_request =
+        TEST_SEARCH_REQUEST_TIMEOUT.with(|slot| slot.borrow_mut().replace(timeout));
+    let _guard = TestSearchIndexAutoReconcileTimeoutGuard {
+        previous_reconcile,
+        previous_request,
+    };
+    run()
+}
+
+fn search_index_auto_reconcile_timeout() -> Duration {
+    #[cfg(test)]
+    if let Some(timeout) =
+        TEST_SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT.with(|slot| slot.borrow().as_ref().copied())
+    {
+        return timeout;
+    }
+    SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT
+}
+
+fn search_request_timeout() -> Duration {
+    #[cfg(test)]
+    if let Some(timeout) = TEST_SEARCH_REQUEST_TIMEOUT.with(|slot| slot.borrow().as_ref().copied())
+    {
+        return timeout;
+    }
+    SEARCH_REQUEST_TIMEOUT
+}
+
+fn search_snapshot_max_pin_duration(request_timeout: Duration) -> Duration {
+    request_timeout.saturating_add(SEARCH_SNAPSHOT_RELEASE_GRACE)
+}
 const SEARCH_QUERY_MISS_AUDIT_SCHEMA_V1: &str = "ee.search.query_miss.v1";
 const INDEX_STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
 const SEARCH_SCORE_COVERAGE_GUARANTEE: f32 = 0.95;
@@ -6839,12 +6920,16 @@ pub fn run_search_with_performance_and_filters(
     kind_filter: Option<&str>,
     typed_field_filters: &[TypedMemoryFieldFilter],
 ) -> Result<SearchPerformanceRun, SearchError> {
-    crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
-        run_search_with_performance_and_filters_with_cx(
+    let request_timeout = search_request_timeout();
+    let reconcile_timeout = search_index_auto_reconcile_timeout();
+    crate::core::run_cli_with_cx(request_timeout, |cx| async move {
+        run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
             &cx,
             options,
             kind_filter,
             typed_field_filters,
+            reconcile_timeout,
+            request_timeout,
         )
         .await
     })
@@ -6862,6 +6947,26 @@ pub async fn run_search_with_performance_and_filters_with_cx(
     kind_filter: Option<&str>,
     typed_field_filters: &[TypedMemoryFieldFilter],
 ) -> Result<SearchPerformanceRun, SearchError> {
+    let request_timeout = search_request_timeout();
+    run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
+        cx,
+        options,
+        kind_filter,
+        typed_field_filters,
+        search_index_auto_reconcile_timeout(),
+        request_timeout,
+    )
+    .await
+}
+
+async fn run_search_with_performance_and_filters_with_cx_and_reconcile_timeout(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    kind_filter: Option<&str>,
+    typed_field_filters: &[TypedMemoryFieldFilter],
+    reconcile_timeout: Duration,
+    request_timeout: Duration,
+) -> Result<SearchPerformanceRun, SearchError> {
     let total_start = Instant::now();
     search_checkpoint(cx)?;
     let determinism = Deterministic::from_seed(0);
@@ -6869,7 +6974,7 @@ pub async fn run_search_with_performance_and_filters_with_cx(
 
     let index_dir = options.resolve_index_dir();
     let database_path = options.resolve_database_path();
-    reconcile_search_index_before_read_with_cx(cx, options).await;
+    reconcile_search_index_before_read_with_cx_and_timeout(cx, options, reconcile_timeout).await;
     let embedder_preparation = if options.source_mode.uses_embeddings()
         && index_dir.exists()
         && crate::core::index::index_corpus_compatibility_is_current(&index_dir)
@@ -6891,7 +6996,8 @@ pub async fn run_search_with_performance_and_filters_with_cx(
     if database_path.exists() {
         let read_pool = registered_process_read_pool(
             DatabaseConfig::file(database_path.clone()),
-            PoolConfig::default_single(),
+            PoolConfig::default_single()
+                .with_max_pin_duration(search_snapshot_max_pin_duration(request_timeout)),
         );
         let read_snapshot = read_pool.pin_snapshot().map_err(|error| {
             SearchError::Index(format!(
@@ -9361,9 +9467,10 @@ fn lexical_search_available(_index_dir: &Path) -> bool {
 /// generation/stat reads instead of opening a fresh file database connection.
 /// On this host a fresh `DbConnection::open_file` is a fixed ~250-300ms cost,
 /// and the search hot path already holds an open read connection, so reusing
-/// it removes a redundant open from the `search::degradationSetup` span. The
-/// cached report and every returned field are identical regardless of
-/// `connection` — only the connection used for the DB-stats read differs.
+/// it removes a redundant open from the `search::degradationSetup` span. If
+/// that caller-owned snapshot cannot serve the status query, the probe retries
+/// through a fresh read-only connection before declaring degraded status. The
+/// report fields are identical regardless of connection source.
 fn cached_index_status_for_search(
     options: &SearchOptions,
     index_dir: &Path,
@@ -9380,7 +9487,16 @@ fn cached_index_status_for_search(
     // cache entry was populated, and never let this request repopulate the
     // cache with an observation older than a concurrent writer's invalidation.
     if let Some(connection) = connection {
-        return get_index_status_with_connection(&status_options, Some(connection));
+        match get_index_status_in_current_snapshot(&status_options, connection) {
+            Ok(status) => return Ok(status),
+            Err(error) => {
+                tracing::warn!(
+                    target: "ee::search::index_freshness",
+                    error = %error,
+                    "caller-owned index-status snapshot failed; retrying with a fresh read-only connection"
+                );
+            }
+        }
     }
 
     let cache_key = IndexStatusCacheKey::from_search_options(options, index_dir);
@@ -9428,8 +9544,20 @@ pub(crate) async fn reconcile_search_index_before_read_with_cx(
     cx: &asupersync::Cx,
     options: &SearchOptions,
 ) {
-    let child_scope =
-        cx.scope_with_budget(cx.budget_for_timeout(SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT));
+    reconcile_search_index_before_read_with_cx_and_timeout(
+        cx,
+        options,
+        SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT,
+    )
+    .await;
+}
+
+async fn reconcile_search_index_before_read_with_cx_and_timeout(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    reconcile_timeout: Duration,
+) {
+    let child_scope = cx.scope_with_budget(cx.budget_for_timeout(reconcile_timeout));
     let owned_options = options.clone();
     let mut task = match cx.spawn_in(&child_scope, move |child_cx| async move {
         reconcile_search_index_within_budget(&child_cx, &owned_options).await;
@@ -9464,24 +9592,20 @@ async fn reconcile_search_index_within_budget(cx: &asupersync::Cx, options: &Sea
         database_path: options.database_path.clone(),
         index_dir: Some(index_dir.clone()),
     };
-    let database_path = options.resolve_database_path();
-    // This preflight must not inherit the process pool's five-second acquire
-    // wait. A dedicated one-slot pool opens immediately, and the pinned read
-    // transaction makes corpus counts and generation one atomic observation.
-    let read_pool = ReadConnectionPool::new(
-        DatabaseConfig::file(database_path),
-        PoolConfig::default_single()
-            .with_acquire_timeout(Duration::ZERO)
-            .with_max_pin_duration(SEARCH_INDEX_AUTO_RECONCILE_TIMEOUT),
-    );
-    let Ok(read_snapshot) = read_pool.acquire_snapshot(true) else {
-        return;
-    };
-    let Ok(connection) = read_snapshot.checked_connection() else {
-        return;
-    };
-    let Ok(status) = get_index_status_with_connection(&status_options, Some(connection)) else {
-        return;
+    // This is only a bounded eligibility hint. The coalesced processor takes
+    // the publication lease and collects a fresh authoritative source snapshot
+    // before it enforces the same corpus ceiling, so pinning a read transaction
+    // here adds failure/latency without protecting the publish decision.
+    let status = match get_index_status_with_connection(&status_options, None) {
+        Ok(status) => status,
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::search::index_freshness",
+                error = %error,
+                "could not inspect search-index freshness for bounded pre-retrieval repair"
+            );
+            return;
+        }
     };
     let Some((db_generation, index_generation)) = status.db_generation.zip(status.index_generation)
     else {
@@ -9508,9 +9632,6 @@ async fn reconcile_search_index_within_budget(cx: &asupersync::Cx, options: &Sea
         );
         return;
     }
-    drop(read_snapshot);
-    drop(read_pool);
-
     if cx.checkpoint().is_err() {
         return;
     }
@@ -12367,6 +12488,18 @@ mod tests {
         } else {
             Err(message.into())
         }
+    }
+
+    #[test]
+    fn search_snapshot_lifetime_outlives_owning_request() {
+        assert_eq!(
+            search_snapshot_max_pin_duration(Duration::from_secs(60)),
+            Duration::from_secs(65)
+        );
+        assert_eq!(
+            search_snapshot_max_pin_duration(Duration::from_secs(300)),
+            Duration::from_secs(305)
+        );
     }
 
     fn unique_test_dir(label: &str) -> PathBuf {
@@ -15863,6 +15996,12 @@ mod tests {
 
     #[test]
     fn live_large_gap_search_emits_repair_once_without_hiding_stale_truth() -> TestResult {
+        with_test_search_timeouts(Duration::from_secs(300), || {
+            live_large_gap_search_emits_repair_once_without_hiding_stale_truth_fixture()
+        })
+    }
+
+    fn live_large_gap_search_emits_repair_once_without_hiding_stale_truth_fixture() -> TestResult {
         let workspace = unique_test_dir("live-large-index-gap");
         std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
         let database_path = workspace.join("ee.db");
@@ -15870,6 +16009,8 @@ mod tests {
         let workspace_id = "wsp_live_large_gap_00000000000";
         let seed_id = "mem_live_large_gap_seed_000000";
         let seed_content = "Live large-gap seed remains in the old lexical index.";
+        let _embedder_guard =
+            crate::core::index::install_test_hash_workspace_embedder(workspace_id);
 
         let connection =
             DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
@@ -16531,6 +16672,14 @@ mod tests {
     #[cfg(feature = "lexical-bm25")]
     #[test]
     fn live_evidence_admission_filters_stale_index_from_search_assist_and_diag() -> TestResult {
+        with_test_search_timeouts(Duration::from_secs(300), || {
+            live_evidence_admission_filters_stale_index_from_search_assist_and_diag_fixture()
+        })
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    fn live_evidence_admission_filters_stale_index_from_search_assist_and_diag_fixture()
+    -> TestResult {
         let workspace = unique_test_dir("evidence-live-admission");
         std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
         let database_path = workspace.join("ee.db");
@@ -16542,6 +16691,8 @@ mod tests {
         let memory_id = "mem_40000000000000000000000001";
         let denied_phrase = "forbidden old evidence phrase visibility canary";
         let safe_phrase = "safe memory visibility canary remains available";
+        let _embedder_guard =
+            crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
 
         let connection =
             DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
@@ -16668,7 +16819,7 @@ mod tests {
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
         })
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("initial admitted-evidence search failed: {error}"))?;
         assert!(
             initially_admitted
                 .results
@@ -16713,7 +16864,8 @@ mod tests {
             strict_scope: false,
         };
 
-        let search = run_search(&base_options).map_err(|error| error.to_string())?;
+        let search = run_search(&base_options)
+            .map_err(|error| format!("post-denial search failed: {error}"))?;
         assert!(
             search.results.iter().all(|hit| hit.doc_id != evidence_id),
             "live-denied evidence must not survive normal search"
@@ -16733,12 +16885,13 @@ mod tests {
             relevance_floor: Some(f32::MAX),
             ..base_options.clone()
         })
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("post-denial query-assist search failed: {error}"))?;
         let assist_json = assist.data_json().to_string();
         assert!(!assist_json.contains(&evidence_id));
         assert!(!assist_json.contains(denied_phrase));
 
-        let diag = run_diag_search(&base_options).map_err(|error| error.to_string())?;
+        let diag = run_diag_search(&base_options)
+            .map_err(|error| format!("post-denial diagnostic search failed: {error}"))?;
         let diag_json = diag.data_json().to_string();
         assert!(!diag_json.contains(&evidence_id));
         assert!(!diag_json.contains(denied_phrase));
@@ -19504,6 +19657,12 @@ mod tests {
 
     #[test]
     fn successful_auto_reconcile_ready_rearms_later_large_gap_episode() -> TestResult {
+        with_test_search_timeouts(Duration::from_secs(300), || {
+            successful_auto_reconcile_ready_rearms_later_large_gap_episode_fixture()
+        })
+    }
+
+    fn successful_auto_reconcile_ready_rearms_later_large_gap_episode_fixture() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = temp.path();
         let init = crate::core::init::init_workspace(&crate::core::init::InitOptions {
@@ -19557,47 +19716,19 @@ mod tests {
             }
         };
         let database_path = init.database_path.clone();
-        let connection =
-            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
-        let workspace_record = connection
-            .get_workspace_by_path(&init.workspace.to_string_lossy())
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "initialized workspace must be bound in the database".to_owned())?;
-        let registry_entries = connection
-            .list_model_registry_entries(&workspace_record.id)
-            .map_err(|error| error.to_string())?;
-        ensure(
-            registry_entries.len() == 1,
-            format!(
-                "auto-reconcile fixture must start with one bundled model declaration: {registry_entries:?}"
-            ),
-        )?;
-        let registry_entry = &registry_entries[0];
-        let registry_updated = connection
-            .update_model_registry_entry(
-                &registry_entry.id,
-                &crate::db::CreateModelRegistryInput {
-                    workspace_id: registry_entry.workspace_id.clone(),
-                    provider: registry_entry.provider,
-                    model_name: "test-unavailable-model".to_owned(),
-                    purpose: registry_entry.purpose,
-                    dimension: registry_entry.dimension,
-                    distance_metric: registry_entry.distance_metric,
-                    status: crate::models::ModelRegistryStatus::Unavailable,
-                    version: registry_entry.version.clone(),
-                    source_uri: Some("test://unavailable-model".to_owned()),
-                    content_hash: None,
-                    metadata_json: registry_entry.metadata_json.clone(),
-                    last_checked_at: registry_entry.last_checked_at.clone(),
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        ensure(
-            registry_updated,
-            "auto-reconcile fixture must force deterministic hash fallback",
-        )?;
-        connection.close().map_err(|error| error.to_string())?;
-
+        let workspace_id = {
+            let connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            let workspace_id = connection
+                .get_workspace_by_path(&init.workspace.to_string_lossy())
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "initialized workspace must be bound in the database".to_owned())?
+                .id;
+            connection.close().map_err(|error| error.to_string())?;
+            workspace_id
+        };
+        let _embedder_guard =
+            crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
         remember("Initial indexed auto-reconcile rearm rule.", false)?;
         let rebuild = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
             workspace_path: workspace.to_path_buf(),
@@ -19626,10 +19757,25 @@ mod tests {
             stale.health == crate::core::index::IndexHealth::Stale,
             format!("queued update must make the pre-search index stale: {stale:?}"),
         )?;
+        let pending_before_search = {
+            let connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            let pending = connection
+                .list_pending_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+            pending
+        };
+        ensure(
+            pending_before_search.len() == 1,
+            format!(
+                "fixture must leave exactly one pending index job for read repair: {pending_before_search:?}"
+            ),
+        )?;
 
         let ready_report = run_search(&SearchOptions {
             workspace_path: workspace.to_path_buf(),
-            database_path: Some(database_path),
+            database_path: Some(database_path.clone()),
             index_dir: None,
             query: "auto-reconcile update".to_owned(),
             limit: 10,
@@ -19650,9 +19796,20 @@ mod tests {
         .map_err(|error| error.to_string())?;
         let ready = crate::core::index::get_index_status(&status_options)
             .map_err(|error| error.to_string())?;
+        let jobs_after_search = {
+            let connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            let jobs = connection
+                .list_search_index_jobs(&workspace_id, None)
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+            jobs
+        };
         ensure(
             ready.health == crate::core::index::IndexHealth::Ready,
-            format!("bounded pre-read reconciliation must converge to ready: {ready:?}"),
+            format!(
+                "bounded pre-read reconciliation must converge to ready: status={ready:?}, search={ready_report:?}, jobs={jobs_after_search:?}"
+            ),
         )?;
         ensure(
             ready_report.index_freshness.is_none(),

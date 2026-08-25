@@ -94,6 +94,19 @@ snapshot_dir() {
     fi
 }
 
+snapshot_git_index() {
+    local out="$1"
+    if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git -C "$REPO_ROOT" diff --cached --name-only >"$out"
+    else
+        # Rsync verification mirrors intentionally carry no .git metadata.
+        # Preserve a stable sentinel before and after the exercise so the
+        # sandbox, tracker, mail, Cargo, and RCH no-mutation assertions still
+        # run instead of discarding the entire contract.
+        printf '%s\n' '<git-index-unavailable>' >"$out"
+    fi
+}
+
 json_field() {
     local path="$1"
     local pointer="$2"
@@ -884,7 +897,7 @@ chmod +x "$shim_bin/rch"
 
 snapshot_dir "$sandbox/.beads" "$beads_before"
 snapshot_dir "$mail_root" "$mail_before"
-git -C "$REPO_ROOT" diff --cached --name-only >"$git_index_before"
+snapshot_git_index "$git_index_before"
 : >"$call_log"
 : >"$cargo_log"
 : >"$rch_log"
@@ -1009,7 +1022,7 @@ fi
 
 snapshot_dir "$sandbox/.beads" "$beads_after"
 snapshot_dir "$mail_root" "$mail_after"
-git -C "$REPO_ROOT" diff --cached --name-only >"$git_index_after"
+snapshot_git_index "$git_index_after"
 
 if ! diff -u "$beads_before" "$beads_after" >"$artifact_root/beads.diff"; then
     fail=1

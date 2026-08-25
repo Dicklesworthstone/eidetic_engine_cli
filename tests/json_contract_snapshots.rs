@@ -7,7 +7,7 @@ use ee::db::{
     DbConnection,
 };
 use ee::models::{PackId, WorkspaceId};
-use insta::assert_json_snapshot;
+use insta::assert_snapshot;
 use serde_json::{Map, Value, json};
 
 type TestResult = Result<(), String>;
@@ -118,8 +118,19 @@ fn assert_graph_surface_snapshot(name: &str, value: Value) {
     settings.set_snapshot_path("snapshots");
     settings.set_prepend_module_to_snapshot(false);
     settings.bind(|| {
-        assert_json_snapshot!(name, canonical_json(value));
+        assert_snapshot!(name, canonical_json_text(value));
     });
+}
+
+fn assert_contract_snapshot(name: &str, value: Value) {
+    assert_snapshot!(name, canonical_json_text(value));
+}
+
+fn canonical_json_text(value: Value) -> String {
+    match serde_json::to_string_pretty(&canonical_json(value)) {
+        Ok(serialized) => serialized,
+        Err(error) => panic!("serde_json::Value failed canonical serialization: {error}"),
+    }
 }
 
 fn canonical_json(value: Value) -> Value {
@@ -127,12 +138,30 @@ fn canonical_json(value: Value) -> Value {
         Value::Array(items) => Value::Array(items.into_iter().map(canonical_json).collect()),
         Value::Object(object) => {
             let mut entries: Vec<_> = object.into_iter().collect();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            let preserve_profile_pair_order = entries.len() == 2
+                && entries.iter().any(|(key, _)| key == "missingConfigDryRun")
+                && entries.iter().any(|(key, _)| key == "existingConfigDryRun");
+            if !preserve_profile_pair_order {
+                entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            }
             let mut canonical = Map::new();
             for (key, value) in entries {
                 canonical.insert(key, canonical_json(value));
             }
             Value::Object(canonical)
+        }
+        Value::Number(number) => {
+            if let Some(integer) = number.as_i64() {
+                Value::from(integer)
+            } else if let Some(integer) = number.as_u64() {
+                Value::from(integer)
+            } else if let Some(float) = number.as_f64() {
+                serde_json::Number::from_f64(float)
+                    .map(Value::Number)
+                    .unwrap_or(Value::Number(number))
+            } else {
+                Value::Number(number)
+            }
         }
         scalar => scalar,
     }
@@ -615,7 +644,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "status".to_string(),
         ],
     )?;
-    assert_json_snapshot!("status_json_contract", status);
+    assert_contract_snapshot("status_json_contract", status);
 
     let doctor = run_json_command(
         &fixture,
@@ -629,7 +658,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "--full".to_string(),
         ],
     )?;
-    assert_json_snapshot!("doctor_json_contract", doctor);
+    assert_contract_snapshot("doctor_json_contract", doctor);
 
     let search = run_json_command(
         &fixture,
@@ -645,7 +674,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             index_dir.clone(),
         ],
     )?;
-    assert_json_snapshot!("search_json_contract", search);
+    assert_contract_snapshot("search_json_contract", search);
 
     let why = run_json_command(
         &fixture,
@@ -659,7 +688,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             database.clone(),
         ],
     )?;
-    assert_json_snapshot!("why_json_contract", why);
+    assert_contract_snapshot("why_json_contract", why);
 
     let context = run_json_command(
         &fixture,
@@ -681,7 +710,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "10".to_string(),
         ],
     )?;
-    assert_json_snapshot!("context_json_contract", context);
+    assert_contract_snapshot("context_json_contract", context);
 
     // Profile config plan contract - dry-run mode produces stable JSON showing
     // selected profile, budgets, planned TOML edits, and host probe summary.
@@ -700,7 +729,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             fixture.profile_config_arg(),
         ],
     )?;
-    assert_json_snapshot!("profile_config_plan_json_contract", profile_config_plan);
+    assert_contract_snapshot("profile_config_plan_json_contract", profile_config_plan);
 
     let missing_config_apply = run_profile_json_command(
         &fixture,
@@ -759,7 +788,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
         "missingConfigDryRun": missing_config_apply,
         "existingConfigDryRun": existing_config_apply,
     });
-    assert_json_snapshot!("profile_config_apply_json_contract", profile_config_apply);
+    assert_contract_snapshot("profile_config_apply_json_contract", profile_config_apply);
 
     Ok(())
 }

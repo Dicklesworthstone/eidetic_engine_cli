@@ -278,7 +278,7 @@ expression: why
           "mode": "uncompressed_in_row",
           "payloadIncluded": false,
           "schema": "ee.pack_replay_ledger.v1",
-          "uncompressedBytes": 1584
+          "uncompressedBytes": 1652
         },
         "packHash": "[HASH]",
         "packId": "[PACK_ID]",
@@ -307,7 +307,7 @@ expression: why
       "workflowId": null
     },
     "verificationEvidence": [],
-    "version": "0.13.1"
+    "version": "0.14.3"
   },
   "degraded": [
     {

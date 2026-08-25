@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 #![allow(clippy::expect_used, clippy::unwrap_used)] // test code may unwrap/expect (matches lib.rs cfg_attr policy)
 
 #[path = "contracts/common_spawn.rs"]
@@ -554,6 +555,9 @@ mod context_delta_schema_v1;
 
 #[path = "contracts/search_document_schema_v1.rs"]
 mod search_document_schema_v1;
+
+#[path = "contracts/query_assist_schema.rs"]
+mod query_assist_schema;
 
 #[path = "contracts/context_delta_prior_unknown_repair_pinned.rs"]
 mod context_delta_prior_unknown_repair_pinned;

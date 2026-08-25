@@ -836,6 +836,29 @@ closure_lint_or_tracked_drift() {
 }
 
 # shellcheck disable=SC2329
+untracked_work_audit_advisory() {
+    # untracked-work-audit invokes `br list`, which owns its own Beads lock.
+    # Holding verify's shared file locks around it makes br wait on the parent
+    # process that is synchronously waiting for br: a 30-second self-deadlock.
+    # The audit also has no meaningful input in rsync verification mirrors,
+    # where the tracked tree is present without Git metadata.
+    if ! git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "ok: not in a git worktree; untracked work audit skipped"
+        return 0
+    fi
+    ./scripts/untracked-work-audit.sh
+}
+
+# shellcheck disable=SC2329
+ruby_gate_or_skip() {
+    if ! command -v ruby >/dev/null 2>&1; then
+        echo "[!] SKIP: ruby is unavailable; run this no-Cargo proof-lane gate on a Ruby-capable host"
+        return 0
+    fi
+    "$@"
+}
+
+# shellcheck disable=SC2329
 e2e_event_contract_radar_advisory() {
     local report="${EE_E2E_EVENT_CONTRACT_RADAR_REPORT:-${REPO_ROOT}/.e2e-event-contract-radar-report.json}"
     local allowlist="${EE_E2E_EVENT_CONTRACT_RADAR_ALLOWLIST:-}"
@@ -915,7 +938,7 @@ run_stage "Untracked Work Audit Contract" "./scripts/untracked-work-audit.sh --s
 
 # Gate 3.5: Advisory dirty-work ownership coverage. This remains advisory while
 # multi-agent sessions routinely carry unrelated in-flight changes.
-run_stage "Untracked Work Audit (advisory)" "with_beads_read_locks ./scripts/untracked-work-audit.sh"
+run_stage "Untracked Work Audit (advisory)" "untracked_work_audit_advisory"
 
 # Gate 3.59: Bridge staleness contract. This no-Cargo fixture harness proves
 # signal classifications before the live advisory scan reads Beads state.
@@ -991,19 +1014,19 @@ run_stage "Swarm SLO Replay Contract" "./scripts/e2e_overhaul/swarm_slo_replay.s
 # harness transforms offline proof-lane fixtures and verifies duplicate-run,
 # missing/stale artifact, checksum, surface-probe, unavailable-gh, and invalid
 # SHA behavior before agents rely on CI artifact source-authority evidence.
-run_stage "CI Proof-Lane Snapshot Contract" "./scripts/ci_proof_lane_snapshot_fixture_test.sh"
+run_stage "CI Proof-Lane Snapshot Contract" "ruby_gate_or_skip ./scripts/ci_proof_lane_snapshot_fixture_test.sh"
 
 # Gate 3.89: CI proof-lane hygiene contract. This no-Cargo synthetic harness
 # exercises workflow-dispatch, duplicate-dispatch, cancellable CI artifacts,
 # release artifacts, and unclassified artifact-lane policy without reading
 # live workflows or invoking Cargo.
-run_stage "CI Proof-Lane Hygiene Contract" "./scripts/ci_proof_lane_hygiene.sh --self-test"
+run_stage "CI Proof-Lane Hygiene Contract" "ruby_gate_or_skip ./scripts/ci_proof_lane_hygiene.sh --self-test"
 
 # Gate 3.895: CI proof-lane hygiene advisory (bd-1n3x1.8). This no-Cargo,
 # network-free workflow scanner emits ee.ci_proof_lane_hygiene.v1 so agents see
 # duplicate-dispatch, cancel-in-progress, artifact-retention, release-artifact,
 # and unclassified artifact-lane posture before spending CI/RCH proof slots.
-run_stage "CI Proof-Lane Hygiene Advisory" "./scripts/ci_proof_lane_hygiene.sh --json"
+run_stage "CI Proof-Lane Hygiene Advisory" "ruby_gate_or_skip ./scripts/ci_proof_lane_hygiene.sh --json"
 
 # Gate 3.896: Release provenance static contract. This no-Cargo gate verifies
 # the release workflow, installer, README, publish checklist, and audit script

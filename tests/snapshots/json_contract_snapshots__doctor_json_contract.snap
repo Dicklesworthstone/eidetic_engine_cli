@@ -12,7 +12,7 @@ expression: doctor
         "tier": "core"
       },
       {
-        "message": "Advisory-only ee install posture needs attention: binary_not_on_path: no 'ee' binary was found in PATH; binary_not_on_path: running ee binary is not available through PATH. running version 0.13.1; local source version 0.13.1 via cargo_toml at [REPO]/Cargo.toml; installed/current version 0.13.1 via running_process at [EE_BINARY]; freshness path_binary_missing; PATH status missing; No ee binary was found on PATH. This check uses only local PATH/source evidence and performs no network lookup.",
+        "message": "Advisory-only ee install posture needs attention: binary_not_on_path: no 'ee' binary was found in PATH; binary_not_on_path: running ee binary is not available through PATH. running version 0.14.3; local source version 0.14.3 via cargo_toml at [REPO]/Cargo.toml; installed/current version 0.14.3 via running_process at [EE_BINARY]; freshness path_binary_missing; PATH status missing; No ee binary was found on PATH. This check uses only local PATH/source evidence and performs no network lookup.",
         "name": "ee_install_path",
         "severity": "warning",
         "tier": "advisory"
@@ -112,7 +112,7 @@ expression: doctor
       "verificationActiveCount": 0,
       "workspaceHash": "[HASH]"
     },
-    "version": "0.13.1"
+    "version": "0.14.3"
   },
   "degraded": [],
   "fields": "standard",

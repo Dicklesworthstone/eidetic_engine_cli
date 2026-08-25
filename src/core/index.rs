@@ -1,5 +1,7 @@
 #[cfg(test)]
 use std::cell::RefCell;
+#[cfg(test)]
+use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
@@ -116,6 +118,46 @@ std::thread_local! {
         const { RefCell::new(None) };
     static INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS_OVERRIDE: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+static TEST_WORKSPACE_EMBEDDER_STACK_OVERRIDES: OnceLock<Mutex<HashMap<String, EmbedderStack>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct TestWorkspaceEmbedderStackGuard {
+    workspace_id: String,
+    previous: Option<EmbedderStack>,
+}
+
+#[cfg(test)]
+impl Drop for TestWorkspaceEmbedderStackGuard {
+    fn drop(&mut self) {
+        let overrides =
+            TEST_WORKSPACE_EMBEDDER_STACK_OVERRIDES.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Ok(mut overrides) = overrides.lock() {
+            if let Some(previous) = self.previous.take() {
+                overrides.insert(self.workspace_id.clone(), previous);
+            } else {
+                overrides.remove(&self.workspace_id);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_test_hash_workspace_embedder(
+    workspace_id: &str,
+) -> TestWorkspaceEmbedderStackGuard {
+    let overrides =
+        TEST_WORKSPACE_EMBEDDER_STACK_OVERRIDES.get_or_init(|| Mutex::new(HashMap::new()));
+    let previous = overrides.lock().ok().and_then(|mut overrides| {
+        overrides.insert(workspace_id.to_owned(), hash_fallback_embedder_stack())
+    });
+    TestWorkspaceEmbedderStackGuard {
+        workspace_id: workspace_id.to_owned(),
+        previous,
+    }
 }
 
 #[cfg(test)]
@@ -3330,7 +3372,19 @@ async fn delete_incremental_document(
     Ok(())
 }
 
+#[cfg(test)]
 fn open_fast_vector_index(index_dir: &Path) -> Result<VectorIndex, IncrementalFallback> {
+    open_fast_vector_index_with(index_dir, VectorIndex::open)
+}
+
+fn open_fast_vector_index_read_only(index_dir: &Path) -> Result<VectorIndex, IncrementalFallback> {
+    open_fast_vector_index_with(index_dir, VectorIndex::open_read_only)
+}
+
+fn open_fast_vector_index_with(
+    index_dir: &Path,
+    open: impl FnOnce(&Path) -> Result<VectorIndex, SearchError>,
+) -> Result<VectorIndex, IncrementalFallback> {
     let fast_path = index_dir.join(VECTOR_INDEX_FAST_FILE);
     let fallback_path = index_dir.join(VECTOR_INDEX_FALLBACK_FILE);
     let path = if path_is_regular_file_no_follow(&fast_path) {
@@ -3347,7 +3401,7 @@ fn open_fast_vector_index(index_dir: &Path) -> Result<VectorIndex, IncrementalFa
             ),
         ));
     };
-    VectorIndex::open(&path).map_err(|error| {
+    open(&path).map_err(|error| {
         incremental_fallback(
             IncrementalFallbackReason::TierUnavailable,
             format!(
@@ -3358,7 +3412,21 @@ fn open_fast_vector_index(index_dir: &Path) -> Result<VectorIndex, IncrementalFa
     })
 }
 
+#[cfg(test)]
 fn open_quality_vector_index(index_dir: &Path) -> Result<Option<VectorIndex>, IncrementalFallback> {
+    open_quality_vector_index_with(index_dir, VectorIndex::open)
+}
+
+fn open_quality_vector_index_read_only(
+    index_dir: &Path,
+) -> Result<Option<VectorIndex>, IncrementalFallback> {
+    open_quality_vector_index_with(index_dir, VectorIndex::open_read_only)
+}
+
+fn open_quality_vector_index_with(
+    index_dir: &Path,
+    open: impl FnOnce(&Path) -> Result<VectorIndex, SearchError>,
+) -> Result<Option<VectorIndex>, IncrementalFallback> {
     let path = index_dir.join(VECTOR_INDEX_QUALITY_FILE);
     if !path_exists_no_follow(&path) {
         return Ok(None);
@@ -3372,7 +3440,7 @@ fn open_quality_vector_index(index_dir: &Path) -> Result<Option<VectorIndex>, In
             ),
         ));
     }
-    VectorIndex::open(&path).map(Some).map_err(|error| {
+    open(&path).map(Some).map_err(|error| {
         incremental_fallback(
             IncrementalFallbackReason::TierUnavailable,
             format!(
@@ -5005,7 +5073,7 @@ fn verify_published_tier_counts(
     expect_quality_tier: bool,
 ) -> Result<(), String> {
     let expected = usize::try_from(documents_total).unwrap_or(usize::MAX);
-    let fast = open_fast_vector_index(index_dir).map_err(|fallback| fallback.detail)?;
+    let fast = open_fast_vector_index_read_only(index_dir).map_err(|fallback| fallback.detail)?;
     if fast.record_count() != expected {
         return Err(format!(
             "fast-tier persisted document count mismatch: expected {expected}, found {}",
@@ -5013,7 +5081,8 @@ fn verify_published_tier_counts(
         ));
     }
 
-    let quality = open_quality_vector_index(index_dir).map_err(|fallback| fallback.detail)?;
+    let quality =
+        open_quality_vector_index_read_only(index_dir).map_err(|fallback| fallback.detail)?;
     match (expect_quality_tier, quality) {
         (true, Some(index)) if index.record_count() == expected => {}
         (true, Some(index)) => {
@@ -5676,6 +5745,15 @@ fn workspace_embedder_stack(
     db: &DbConnection,
     workspace_id: &str,
 ) -> Result<EmbedderStack, DbError> {
+    #[cfg(test)]
+    if let Some(stack) = TEST_WORKSPACE_EMBEDDER_STACK_OVERRIDES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|overrides| overrides.get(workspace_id).cloned())
+    {
+        return Ok(stack);
+    }
     if configured_embedder_model_root().is_some() {
         return Ok(default_embedder_stack());
     }
@@ -6556,13 +6634,34 @@ pub(crate) fn current_embedding_posture(
     embedding_posture_for_document_count(db, workspace_id, index_dir, documents_total)
 }
 
+/// Resolve any workspace-specific embedding backend before a status caller
+/// pins its long-lived database snapshot.
+///
+/// Loading a verified local Model2Vec artifact can take longer than the read
+/// pool's snapshot watchdog. The resolved default and registered embedders are
+/// process-cached, so doing this once on a short-lived read-only connection
+/// keeps the subsequent coherent status gather free of model I/O.
+pub(crate) fn prepare_index_status_embedder_for_workspace(
+    workspace_path: &Path,
+    database_path: &Path,
+) -> Result<(), IndexStatusError> {
+    if !database_path.exists() {
+        return Ok(());
+    }
+    let db = DbConnection::open_file_read_only(database_path)?;
+    if let Some(workspace_id) = workspace_id_for_index_status(&db, workspace_path)? {
+        let _ = workspace_embedder_stack(&db, &workspace_id)?;
+    }
+    Ok(())
+}
+
 fn embedding_posture_for_document_count(
     db: &DbConnection,
     workspace_id: &str,
     index_dir: &Path,
     documents_total: u32,
 ) -> Result<EmbeddingPosture, DbError> {
-    let stack = default_search_embedder_stack();
+    let stack = workspace_embedder_stack(db, workspace_id)?;
     let vector_coverage =
         embedding_vector_coverage(index_dir, documents_total, read_fast_vector_record_count);
     embedding_posture_from_stack(db, workspace_id, &stack, vector_coverage)
@@ -6656,7 +6755,7 @@ fn embedding_vector_coverage(
 }
 
 fn read_fast_vector_record_count(index_dir: &Path) -> Option<usize> {
-    open_fast_vector_index(index_dir)
+    open_fast_vector_index_read_only(index_dir)
         .ok()
         .map(|index| index.record_count())
 }
@@ -6670,7 +6769,7 @@ fn read_fast_vector_record_count(index_dir: &Path) -> Option<usize> {
 /// carried the true dimension and embedder id all along, so readers can
 /// backfill the missing evidence without forcing a rebuild.
 pub(crate) fn read_fast_vector_index_fingerprint(index_dir: &Path) -> Option<(u32, String)> {
-    let index = open_fast_vector_index(index_dir).ok()?;
+    let index = open_fast_vector_index_read_only(index_dir).ok()?;
     let dimension = u32::try_from(index.dimension()).ok()?;
     Some((dimension, index.embedder_id().to_owned()))
 }
@@ -6682,6 +6781,21 @@ fn current_indexable_document_count(db: &DbConnection, workspace_id: &str) -> Re
 fn current_index_corpus_counts(
     db: &DbConnection,
     workspace_id: &str,
+) -> Result<(IndexDocumentCounts, EvidenceAdmissionReport), DbError> {
+    current_index_corpus_counts_with_snapshot(db, workspace_id, false)
+}
+
+fn current_index_corpus_counts_in_current_snapshot(
+    db: &DbConnection,
+    workspace_id: &str,
+) -> Result<(IndexDocumentCounts, EvidenceAdmissionReport), DbError> {
+    current_index_corpus_counts_with_snapshot(db, workspace_id, true)
+}
+
+fn current_index_corpus_counts_with_snapshot(
+    db: &DbConnection,
+    workspace_id: &str,
+    caller_holds_snapshot: bool,
 ) -> Result<(IndexDocumentCounts, EvidenceAdmissionReport), DbError> {
     let memories = db.list_memories_for_retrieval_with_global(workspace_id, None, false)?;
     let mut indexable_memory_count = 0_usize;
@@ -6702,11 +6816,17 @@ fn current_index_corpus_counts(
         })
         .count();
     let mut evidence = 0_usize;
-    let evidence_scan =
+    let evidence_scan = if caller_holds_snapshot {
+        db.visit_search_admitted_evidence_spans_in_current_snapshot(workspace_id, |_| {
+            evidence = evidence.saturating_add(1);
+            Ok(())
+        })?
+    } else {
         db.visit_search_admitted_evidence_spans_for_workspace(workspace_id, |_| {
             evidence = evidence.saturating_add(1);
             Ok(())
-        })?;
+        })?
+    };
     let to_u32 = |label: &str, count: usize| {
         u32::try_from(count).map_err(|_| DbError::MalformedRow {
             operation: DbOperation::Query,
@@ -7352,12 +7472,34 @@ impl From<std::io::Error> for IndexStatusError {
 pub fn get_index_status(
     options: &IndexStatusOptions,
 ) -> Result<IndexStatusReport, IndexStatusError> {
-    get_index_status_with_connection(options, None)
+    get_index_status_with_connection_mode(options, None, false)
 }
 
 pub(crate) fn get_index_status_with_connection(
     options: &IndexStatusOptions,
     connection: Option<&DbConnection>,
+) -> Result<IndexStatusReport, IndexStatusError> {
+    get_index_status_with_connection_mode(options, connection, false)
+}
+
+/// Inspect index status while reusing a database connection whose caller
+/// already owns the active read snapshot.
+///
+/// Evidence admission normally opens its own bounded read transaction. That
+/// is correct for a standalone status probe, but invalid inside the pinned
+/// snapshots used by search and aggregate status. This entry point preserves
+/// the caller's coherent snapshot instead of attempting a nested transaction.
+pub(crate) fn get_index_status_in_current_snapshot(
+    options: &IndexStatusOptions,
+    connection: &DbConnection,
+) -> Result<IndexStatusReport, IndexStatusError> {
+    get_index_status_with_connection_mode(options, Some(connection), true)
+}
+
+fn get_index_status_with_connection_mode(
+    options: &IndexStatusOptions,
+    connection: Option<&DbConnection>,
+    caller_holds_snapshot: bool,
 ) -> Result<IndexStatusReport, IndexStatusError> {
     let start = Instant::now();
     let database_path = options.resolve_database_path();
@@ -7377,7 +7519,8 @@ pub(crate) fn get_index_status_with_connection(
             &owned_connection
         };
         if let Some(workspace_id) = workspace_id_for_index_status(db, &options.workspace_path)? {
-            let (counts, admission, generation) = get_db_stats(db, &workspace_id)?;
+            let (counts, admission, generation) =
+                get_db_stats(db, &workspace_id, caller_holds_snapshot)?;
             let embedding = Some(embedding_posture_for_document_count(
                 db,
                 &workspace_id,
@@ -7810,8 +7953,13 @@ fn inspect_index_dir(index_dir: &Path) -> Result<(bool, u32, u64), std::io::Erro
 fn get_db_stats(
     db: &DbConnection,
     workspace_id: &str,
+    caller_holds_snapshot: bool,
 ) -> Result<(IndexDocumentCounts, EvidenceAdmissionReport, Option<u64>), DbError> {
-    let (counts, evidence_admission) = current_index_corpus_counts(db, workspace_id)?;
+    let (counts, evidence_admission) = if caller_holds_snapshot {
+        current_index_corpus_counts_in_current_snapshot(db, workspace_id)?
+    } else {
+        current_index_corpus_counts(db, workspace_id)?
+    };
     let generation = db
         .get_workspace_generation(workspace_id)?
         .or(Some(u64::from(counts.total())));
@@ -11714,7 +11862,7 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
 
-        let (_, _, generation) = get_db_stats(&connection, "wsp_01234567890123456789012345")
+        let (_, _, generation) = get_db_stats(&connection, "wsp_01234567890123456789012345", false)
             .map_err(|error| error.to_string())?;
         ensure(
             generation == Some(1),
@@ -11759,8 +11907,9 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
 
-        let (_, _, generation_before) = get_db_stats(&connection, "wsp_22222222222222222222222222")
-            .map_err(|error| error.to_string())?;
+        let (_, _, generation_before) =
+            get_db_stats(&connection, "wsp_22222222222222222222222222", false)
+                .map_err(|error| error.to_string())?;
         ensure(
             generation_before == Some(1),
             "baseline generation should track the single source document",
@@ -11782,8 +11931,9 @@ mod tests {
                 .map_err(|error| error.to_string())?;
         }
 
-        let (_, _, generation_after) = get_db_stats(&connection, "wsp_22222222222222222222222222")
-            .map_err(|error| error.to_string())?;
+        let (_, _, generation_after) =
+            get_db_stats(&connection, "wsp_22222222222222222222222222", false)
+                .map_err(|error| error.to_string())?;
         ensure(
             generation_after == generation_before,
             format!(

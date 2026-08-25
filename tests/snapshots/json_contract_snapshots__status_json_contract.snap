@@ -291,7 +291,7 @@ expression: status
       "unknownAgeCount": 0,
       "windowHours": 24
     },
-    "version": "0.13.1",
+    "version": "0.14.3",
     "workspace": {
       "canonicalRoot": "[WORKSPACE]",
       "configDir": "[WORKSPACE]/.ee",

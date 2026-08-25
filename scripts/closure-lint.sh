@@ -160,6 +160,19 @@ CURRENT_BEAD_NOTES=""
 CURRENT_BEAD_CLOSE_REASON=""
 CURRENT_BEAD_CLOSED_DATE=""
 CURRENT_BEAD_PARENT=""
+CURRENT_BEAD_EXPLICIT_SURFACES=""
+CURRENT_BEAD_FILE_SURFACES=""
+CURRENT_BEAD_RUST_FILE_SURFACES=""
+CURRENT_BEAD_SRC_FILE_SURFACES=""
+CURRENT_BEAD_REFERENCED_TEST_PATHS=""
+CURRENT_BEAD_IMPLEMENTATION_SURFACES=""
+CURRENT_BEAD_AUDIT_EMISSION_DECLARED="false"
+CURRENT_BEAD_AUDIT_EVENT_TYPE="false"
+CURRENT_BEAD_AUDIT_CHAIN_CONTINUITY="false"
+CURRENT_BEAD_REJECTION_CRITERIA="false"
+CURRENT_BEAD_DEGRADATION_CODES=""
+FIELD_SEPARATOR=$(printf '\037')
+RECORD_NEWLINE=$(printf '\036')
 
 add_violation() {
     local bead_id="$1"
@@ -224,44 +237,169 @@ add_failure_mode_fixture_violation() {
     fi
 }
 
-load_current_bead() {
-    local bead_id="$1"
-
-    CURRENT_BEAD_ID="$bead_id"
-    CURRENT_BEAD_JSON=$(
-        jq -c --arg bead_id "$bead_id" '
-            select(.id == $bead_id)
-        ' "$BEADS_FILE" 2>/dev/null | head -n 1
-    )
+load_current_bead_json() {
+    CURRENT_BEAD_JSON="$1"
 
     if [ -z "$CURRENT_BEAD_JSON" ]; then
+        CURRENT_BEAD_ID=""
         CURRENT_BEAD_LABELS=""
         CURRENT_BEAD_DESCRIPTION=""
         CURRENT_BEAD_NOTES=""
         CURRENT_BEAD_CLOSE_REASON=""
         CURRENT_BEAD_CLOSED_DATE=""
         CURRENT_BEAD_PARENT=""
+        CURRENT_BEAD_EXPLICIT_SURFACES=""
+        CURRENT_BEAD_FILE_SURFACES=""
+        CURRENT_BEAD_RUST_FILE_SURFACES=""
+        CURRENT_BEAD_SRC_FILE_SURFACES=""
+        CURRENT_BEAD_REFERENCED_TEST_PATHS=""
+        CURRENT_BEAD_IMPLEMENTATION_SURFACES=""
+        CURRENT_BEAD_AUDIT_EMISSION_DECLARED="false"
+        CURRENT_BEAD_AUDIT_EVENT_TYPE="false"
+        CURRENT_BEAD_AUDIT_CHAIN_CONTINUITY="false"
+        CURRENT_BEAD_REJECTION_CRITERIA="false"
+        CURRENT_BEAD_DEGRADATION_CODES=""
         return 1
     fi
 
-    CURRENT_BEAD_LABELS=$(printf "%s" "$CURRENT_BEAD_JSON" | jq -r '(.labels // []) | join(",")')
-    CURRENT_BEAD_DESCRIPTION=$(printf "%s" "$CURRENT_BEAD_JSON" | jq -r '.description // ""')
-    CURRENT_BEAD_NOTES=$(printf "%s" "$CURRENT_BEAD_JSON" | jq -r '.notes // ""')
-    CURRENT_BEAD_CLOSE_REASON=$(printf "%s" "$CURRENT_BEAD_JSON" | jq -r '.close_reason // ""')
-    CURRENT_BEAD_CLOSED_DATE=$(
+    local parsed_fields
+    local saved_ifs
+    parsed_fields=$(
         printf "%s" "$CURRENT_BEAD_JSON" |
-            jq -r '(.closed_at // .updated_at // .created_at // "") | sub("T.*$"; "")'
-    )
-    CURRENT_BEAD_PARENT=$(
-        printf "%s" "$CURRENT_BEAD_JSON" |
-            jq -r '
-                if ((.parent // "") != "") then
-                    .parent
-                else
-                    ([.dependencies[]? | select((.issue_id // "") == (.id // "") and (.type // "") == "parent-child") | .depends_on_id][0] // "")
-                end
+            jq -j '
+                def explicit_surfaces:
+                    [
+                        ((.labels // [])[]? | select(startswith("implements-surface:")) | sub("^implements-surface:"; "")),
+                        (try (.title | capture("\\[implements-surface:(?<surface>[^]]+)\\]").surface) catch empty)
+                    ]
+                    | unique;
+                def file_surfaces:
+                    [
+                        (.description // "")
+                        | split("\n")[]
+                        | select(startswith("FILE SURFACE:"))
+                        | sub("^FILE SURFACE:[ \\t]*"; "")
+                        | split(",")[]
+                        | sub("^[ \\t]*"; "")
+                        | sub("[ \\t].*$"; "")
+                        | sub("^`"; "")
+                        | sub("`$"; "")
+                        | select(test("^[A-Za-z0-9_./*?+-]+$"))
+                    ];
+                def referenced_test_paths:
+                    [
+                        [(.description // ""), (.notes // "")]
+                        | join("\n")
+                        | scan("tests/[A-Za-z0-9_./*?+-]+")
+                        | sub("[).,:;]+$"; "")
+                        | sub("/$"; "")
+                    ]
+                    | unique
+                    | sort;
+                def inferred_surfaces($paths):
+                    [
+                        $paths[]
+                        | if . == "src/core/cass_prefetch.rs" then
+                            "cass_prefetch"
+                          elif (. == "src/daemon.rs" or startswith("src/daemon/")) then
+                            "daemon_hot_mode"
+                          elif . == "src/graph/numa_pin.rs" then
+                            "graph_numa_pin"
+                          elif . == "src/search/lexical_ram_tier.rs" then
+                            "lexical_ram_tier"
+                          else
+                            empty
+                          end
+                    ]
+                    | unique;
+                def degradation_codes:
+                    ([.description // "", .notes // "", .close_reason // ""] | join("\n") | split("\n")) as $lines
+                    | reduce $lines[] as $line (
+                        {inside: false, selected: []};
+                        if ($line | contains("DEGRADATION REQUIREMENT")) then
+                            .inside = true | .selected += [$line]
+                        elif (.inside and ($line | test("^[ \\t]*(BACKGROUND|WHAT|ACCEPTANCE|FILE SURFACE|TRACING|TEST REQUIREMENT|COST OF OMISSION|PARENT EPIC|DEPENDENCIES)[ \\t:]"))) then
+                            .inside = false
+                        elif .inside then
+                            .selected += [$line]
+                        else
+                            .
+                        end
+                      )
+                    | .selected
+                    | join("\n")
+                    | [
+                        scan("code[ \\t]*=[ \\t]*`?[A-Za-z0-9_.-]+")
+                        | sub("^code[ \\t]*=[ \\t]*`?"; "")
+                      ]
+                    | unique
+                    | sort;
+                . as $bead
+                | file_surfaces as $file_surfaces
+                | explicit_surfaces as $explicit_surfaces
+                | referenced_test_paths as $referenced_test_paths
+                | [
+                    ($bead.id // ""),
+                    (($bead.labels // []) | join(",")),
+                    ($bead.description // ""),
+                    ($bead.notes // ""),
+                    ($bead.close_reason // ""),
+                    (($bead.closed_at // $bead.updated_at // $bead.created_at // "") | sub("T.*$"; "")),
+                    (
+                        if (($bead.parent // "") != "") then
+                            $bead.parent
+                        else
+                            ([$bead.dependencies[]? | select((.issue_id // "") == (.id // "") and (.type // "") == "parent-child") | .depends_on_id][0] // "")
+                        end
+                    ),
+                    ($explicit_surfaces | join(" ")),
+                    ($file_surfaces | join(" ")),
+                    ($file_surfaces | map(select(test("^tests/.*\\.rs$"))) | join(" ")),
+                    ($file_surfaces | map(select(test("^src/.*\\.rs$"))) | join(" ")),
+                    ($referenced_test_paths | join(" ")),
+                    (($explicit_surfaces + inferred_surfaces($file_surfaces)) | unique | join(" ")),
+                    (($bead.description // "") | test("(^|\\n)[ \\t]*AUDIT EMISSION:")),
+                    (($bead.description // "") | test("event_type[ \\t]*=")),
+                    (($bead.description // "") | test("chain_continuity|chain_hash|chain-hash continuity"; "i")),
+                    ([($bead.description // ""), ($bead.notes // ""), ($bead.close_reason // "")] | join("\n") | contains("REJECTION CRITERIA")),
+                    ($bead | degradation_codes | join(" "))
+                ]
+                | map(
+                    tostring
+                    | gsub("\u001e"; " ")
+                    | gsub("\u001f"; " ")
+                    | gsub("\n"; "\u001e")
+                  )
+                | join("\u001f")
             '
     )
+
+    saved_ifs="$IFS"
+    IFS="$FIELD_SEPARATOR"
+    read -r \
+        CURRENT_BEAD_ID \
+        CURRENT_BEAD_LABELS \
+        CURRENT_BEAD_DESCRIPTION \
+        CURRENT_BEAD_NOTES \
+        CURRENT_BEAD_CLOSE_REASON \
+        CURRENT_BEAD_CLOSED_DATE \
+        CURRENT_BEAD_PARENT \
+        CURRENT_BEAD_EXPLICIT_SURFACES \
+        CURRENT_BEAD_FILE_SURFACES \
+        CURRENT_BEAD_RUST_FILE_SURFACES \
+        CURRENT_BEAD_SRC_FILE_SURFACES \
+        CURRENT_BEAD_REFERENCED_TEST_PATHS \
+        CURRENT_BEAD_IMPLEMENTATION_SURFACES \
+        CURRENT_BEAD_AUDIT_EMISSION_DECLARED \
+        CURRENT_BEAD_AUDIT_EVENT_TYPE \
+        CURRENT_BEAD_AUDIT_CHAIN_CONTINUITY \
+        CURRENT_BEAD_REJECTION_CRITERIA \
+        CURRENT_BEAD_DEGRADATION_CODES <<EOF
+$parsed_fields
+EOF
+    IFS="$saved_ifs"
+
+    [ -n "$CURRENT_BEAD_ID" ]
 }
 
 write_report() {
@@ -450,8 +588,21 @@ apply_audit_baseline() {
     fi
 }
 
+print_space_separated_lines() {
+    local item
+    for item in $1; do
+        printf "%s\n" "$item"
+    done
+}
+
 explicit_implementation_surfaces_for_bead() {
     local bead_id="$1"
+
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        print_space_separated_lines "$CURRENT_BEAD_EXPLICIT_SURFACES"
+        return 0
+    fi
+
     jq -r --arg bead_id "$bead_id" '
         select(.id == $bead_id)
         | [
@@ -464,6 +615,11 @@ explicit_implementation_surfaces_for_bead() {
 
 implementation_surfaces_for_bead() {
     local bead_id="$1"
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        print_space_separated_lines "$CURRENT_BEAD_IMPLEMENTATION_SURFACES"
+        return 0
+    fi
+
     {
         explicit_implementation_surfaces_for_bead "$bead_id"
         inferred_implementation_surfaces_for_bead "$bead_id"
@@ -500,6 +656,49 @@ ALL_IMPLEMENTATION_SURFACES_JSON=$(
     ' "$BEADS_FILE" 2>/dev/null || echo '[]'
 )
 
+GOLDEN_ARTIFACT_PATHS=$(
+    find "$GOLDEN_DIR" "$SNAPSHOT_DIR" "tests/fixtures/golden" -type f 2>/dev/null || true
+)
+
+SENTINEL_DECLARATIONS=$(
+    for file in $SENTINEL_SRC_FILES; do
+        [ -f "$file" ] || continue
+        grep -oE "[A-Za-z0-9_]+${SENTINEL_CODE_SUFFIX_REGEX}|daemon_jobs_unavailable" "$file" 2>/dev/null |
+            sort -u |
+            while IFS= read -r declaration; do
+                [ -n "$declaration" ] || continue
+                printf '%s\t%s\n' "$declaration" "$file"
+            done
+    done
+)
+
+SENTINEL_MATCHES=$(
+    printf "%s\n" "$SENTINEL_DECLARATIONS" |
+        jq -Rrsc --argjson known_surfaces "$ALL_IMPLEMENTATION_SURFACES_JSON" '
+            def suffix_regex: "_(UNAVAILABLE|NOT_YET_IMPLEMENTED|NOT_IMPLEMENTED)_CODE";
+            def sentinel_regex($surface):
+                if $surface == "daemon_hot_mode" then
+                    "DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE|DAEMON_HOT_MODE" + suffix_regex
+                elif $surface == "daemon" then
+                    "DAEMON" + suffix_regex + "|DAEMON_JOBS_UNAVAILABLE_CODE|daemon_jobs_unavailable"
+                else
+                    ($surface | ascii_upcase | gsub("-"; "_")) + suffix_regex
+                end;
+            (
+                split("\n")
+                | map(select(length > 0))
+                | map(capture("^(?<constant>[^\\t]+)\\t(?<file>.+)$"))
+            ) as $declarations
+            | [
+                ($known_surfaces | map(.surface) | unique)[] as $surface
+                | sentinel_regex($surface) as $regex
+                | $declarations[]
+                | select(.constant | test($regex))
+                | [$surface, .constant, .file] | join("|")
+              ][]
+        '
+)
+
 surface_unavailable_constant() {
     local surface="$1"
     echo "$(echo "$surface" | tr '[:lower:]-' '[:upper:]_')_UNAVAILABLE_CODE"
@@ -524,16 +723,19 @@ surface_sentinel_regex() {
 # the surface is still declared in a sentinel source file; return 1 if none.
 surface_matched_sentinel() {
     local surface="$1"
-    local regex
-    regex=$(surface_sentinel_regex "$surface")
-    local file hit
-    for file in $SENTINEL_SRC_FILES; do
-        [ -f "$file" ] || continue
-        hit=$(grep -oE "$regex" "$file" 2>/dev/null | head -n1)
-        if [ -n "$hit" ]; then
-            printf '%s (%s)' "$hit" "$file"
-            return 0
-        fi
+    local record
+    local matched_surface
+    local remainder
+    local hit
+    local file
+    for record in $SENTINEL_MATCHES; do
+        matched_surface=${record%%|*}
+        [ "$matched_surface" = "$surface" ] || continue
+        remainder=${record#*|}
+        hit=${remainder%%|*}
+        file=${remainder#*|}
+        printf '%s (%s)' "$hit" "$file"
+        return 0
     done
     return 1
 }
@@ -563,23 +765,13 @@ surface_has_golden_snapshot() {
     local underscored
     underscored=$(echo "$surface" | tr '-' '_')
 
-    # CLAUDE.md lists three canonical golden artifact locations:
-    # tests/golden/*.snap, tests/snapshots/*.snap (insta), and
-    # tests/fixtures/golden/**. All three count as evidence.
-    [ -f "$GOLDEN_DIR/$surface.snap" ] && return 0
-    [ -d "$GOLDEN_DIR/$surface" ] &&
-        find "$GOLDEN_DIR/$surface" -type f 2>/dev/null | grep -q . &&
-        return 0
-    [ -f "$SNAPSHOT_DIR/$surface.snap" ] && return 0
-    [ -d "$SNAPSHOT_DIR/$surface" ] &&
-        find "$SNAPSHOT_DIR/$surface" -type f 2>/dev/null | grep -q . &&
-        return 0
-    [ -d "tests/fixtures/golden/$surface" ] &&
-        find "tests/fixtures/golden/$surface" -type f 2>/dev/null | grep -q . &&
-        return 0
-    find "$GOLDEN_DIR" "$SNAPSHOT_DIR" "tests/fixtures/golden" -type f \
-        \( -name "*$surface*" -o -name "*$underscored*" \) 2>/dev/null |
-        grep -q .
+    # CLAUDE.md lists three canonical golden artifact locations. Their file
+    # inventory is captured once above because audit mode checks hundreds of
+    # surfaces and the artifacts do not change during one lint invocation.
+    case "$GOLDEN_ARTIFACT_PATHS" in
+        *"$surface"*|*"$underscored"*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 bead_is_bd3usjw_family() {
@@ -596,10 +788,12 @@ bead_is_bd3usjw_family() {
 
 bead_declared_rust_file_surfaces() {
     local bead_id="$1"
-    jq -r --arg bead_id "$bead_id" '
-        select(.id == $bead_id)
-        | (.description // "")
-    ' "$BEADS_FILE" 2>/dev/null |
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        print_space_separated_lines "$CURRENT_BEAD_RUST_FILE_SURFACES"
+        return 0
+    fi
+
+    bead_description_text "$bead_id" |
         sed -n 's/^FILE SURFACE:[[:space:]]*//p' |
         tr ',' '\n' |
         sed -E 's/^[[:space:]]*//; s/[[:space:]].*$//; s/^`//; s/`$//' |
@@ -608,6 +802,11 @@ bead_declared_rust_file_surfaces() {
 
 bead_declared_file_surfaces() {
     local bead_id="$1"
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        print_space_separated_lines "$CURRENT_BEAD_FILE_SURFACES"
+        return 0
+    fi
+
     bead_description_text "$bead_id" |
         sed -n 's/^FILE SURFACE:[[:space:]]*//p' |
         tr ',' '\n' |
@@ -658,6 +857,13 @@ bead_has_explicit_implementation_surface() {
     local bead_id="$1"
     local surface="$2"
 
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        for declared_surface in $CURRENT_BEAD_EXPLICIT_SURFACES; do
+            [ "$declared_surface" = "$surface" ] && return 0
+        done
+        return 1
+    fi
+
     jq -e --arg bead_id "$bead_id" --arg surface "$surface" '
         select(.id == $bead_id)
         | (
@@ -686,6 +892,11 @@ check_inferred_implementation_surface_labels() {
 
 bead_referenced_test_paths() {
     local bead_id="$1"
+
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        print_space_separated_lines "$CURRENT_BEAD_REFERENCED_TEST_PATHS"
+        return 0
+    fi
 
     bead_description_and_notes_text "$bead_id" |
         tr '`"'"'"'[]{}<>' '\n' |
@@ -735,6 +946,11 @@ rust_test_file_has_only_ignored_tests() {
 # inline #[cfg(test)] unit tests alongside the implementation."
 bead_declared_src_file_surfaces() {
     local bead_id="$1"
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        print_space_separated_lines "$CURRENT_BEAD_SRC_FILE_SURFACES"
+        return 0
+    fi
+
     bead_declared_file_surfaces "$bead_id" |
         grep -E '^src/.*\.rs$' || true
 }
@@ -836,6 +1052,11 @@ check_implementation_unit_test_obligation() {
 # leniently with leading whitespace allowed.
 bead_declares_audit_emission_block() {
     local bead_id="$1"
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        [ "$CURRENT_BEAD_AUDIT_EMISSION_DECLARED" = "true" ]
+        return
+    fi
+
     bead_description_text "$bead_id" |
         grep -qE '^[[:space:]]*AUDIT EMISSION:'
 }
@@ -847,7 +1068,7 @@ bead_description_text() {
     local bead_id="$1"
 
     if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
-        printf "%s\n" "$CURRENT_BEAD_DESCRIPTION"
+        printf "%s\n" "$CURRENT_BEAD_DESCRIPTION" | tr "$RECORD_NEWLINE" '\n'
         return 0
     fi
 
@@ -861,7 +1082,8 @@ bead_description_and_notes_text() {
     local bead_id="$1"
 
     if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
-        printf "%s\n%s\n" "$CURRENT_BEAD_DESCRIPTION" "$CURRENT_BEAD_NOTES"
+        printf "%s\n%s\n" "$CURRENT_BEAD_DESCRIPTION" "$CURRENT_BEAD_NOTES" |
+            tr "$RECORD_NEWLINE" '\n'
         return 0
     fi
 
@@ -875,7 +1097,8 @@ bead_description_notes_close_reason_text() {
     local bead_id="$1"
 
     if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
-        printf "%s\n%s\n%s\n" "$CURRENT_BEAD_DESCRIPTION" "$CURRENT_BEAD_NOTES" "$CURRENT_BEAD_CLOSE_REASON"
+        printf "%s\n%s\n%s\n" "$CURRENT_BEAD_DESCRIPTION" "$CURRENT_BEAD_NOTES" "$CURRENT_BEAD_CLOSE_REASON" |
+            tr "$RECORD_NEWLINE" '\n'
         return 0
     fi
 
@@ -890,6 +1113,11 @@ bead_description_notes_close_reason_text() {
 # Required so the audit-row contract carries a concrete emission name.
 bead_audit_block_has_event_type() {
     local bead_id="$1"
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        [ "$CURRENT_BEAD_AUDIT_EVENT_TYPE" = "true" ]
+        return
+    fi
+
     bead_description_text "$bead_id" |
         grep -qE 'event_type[[:space:]]*='
 }
@@ -900,6 +1128,11 @@ bead_audit_block_has_event_type() {
 # prose (which appears in the bd-3usjw.61 source bead itself).
 bead_audit_block_has_chain_continuity() {
     local bead_id="$1"
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        [ "$CURRENT_BEAD_AUDIT_CHAIN_CONTINUITY" = "true" ]
+        return
+    fi
+
     bead_description_text "$bead_id" |
         grep -qEi 'chain_continuity|chain_hash|chain-hash continuity'
 }
@@ -1059,6 +1292,11 @@ check_bd3usjw_e2e_test_tracing() {
 bead_degradation_requirement_codes() {
     local bead_id="$1"
 
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        print_space_separated_lines "$CURRENT_BEAD_DEGRADATION_CODES"
+        return 0
+    fi
+
     bead_description_notes_close_reason_text "$bead_id" |
         awk '
             /DEGRADATION REQUIREMENT/ {
@@ -1122,21 +1360,22 @@ check_failure_mode_fixture_obligation() {
 check_unimplemented_failure_mode_honesty_only() {
     local fixture_path
     local code
+    local record
+    local invalid_fixtures
 
     [ -d "$FAILURE_MODE_FIXTURE_DIR" ] || return 0
 
-    for fixture_path in "$FAILURE_MODE_FIXTURE_DIR"/*.json; do
-        [ -f "$fixture_path" ] || continue
-
-        code=$(jq -r '.code // ""' "$fixture_path" 2>/dev/null || printf "")
-        case "$code" in
-            *_unimplemented)
-                if ! jq -e '.honesty_only == true' "$fixture_path" >/dev/null 2>&1; then
-                    add_violation "bd-38mpa" "failure-mode-taxonomy" "$code" \
-                        "$fixture_path declares *_unimplemented degraded code without honesty_only:true"
-                fi
-                ;;
-        esac
+    invalid_fixtures=$(
+        jq -r '
+            select(((.code // "") | endswith("_unimplemented")) and .honesty_only != true)
+            | input_filename + "|" + (.code // "")
+        ' "$FAILURE_MODE_FIXTURE_DIR"/*.json 2>/dev/null
+    )
+    for record in $invalid_fixtures; do
+        fixture_path=${record%%|*}
+        code=${record#*|}
+        add_violation "bd-38mpa" "failure-mode-taxonomy" "$code" \
+            "$fixture_path declares *_unimplemented degraded code without honesty_only:true"
     done
 }
 
@@ -1148,32 +1387,27 @@ close_reason_contains_abstention() {
         return 1
     fi
 
+    # False-positive scrubs cover explicit negation, fixture/code-name
+    # conventions, failure-mode taxonomy references, and "placeholder" in a
+    # removal context. A genuine abstention keeps no removal framing and still
+    # trips the final regex below.
     scrubbed=$(
         printf "%s\n" "$close_reason" |
-            sed -E 's/[A-Z0-9_]+_(UNAVAILABLE|NOT_YET_IMPLEMENTED|NOT_IMPLEMENTED)_CODE[[:space:]]+(deleted|removed)//Ig' |
-            sed -E 's/(deleted|removed)[[:space:]]+[A-Z0-9_]+_(UNAVAILABLE|NOT_YET_IMPLEMENTED|NOT_IMPLEMENTED)_CODE//Ig' |
-            sed -E 's/unavailable stubs removed//Ig' |
-            sed -E 's/instead of degraded-mode errors//Ig' |
-            # bd-37u08 false-positive scrubs: explicit negation, fixture/code
-            # name conventions, and references to the failure-mode taxonomy.
-            sed -E 's/non-abstention//Ig' |
-            sed -E 's/\*_(UNAVAILABLE|NOT_YET_IMPLEMENTED|NOT_IMPLEMENTED)_CODE//g' |
-            sed -E 's/docs\/degraded_code(s|_taxonomy)\.md//Ig' |
-            sed -E 's/degraded[[:space:]]+(case|code|mode|entry)s?//Ig' |
-            sed -E 's/degraded_codes?(:?[[:space:]]+(none|\[\]|empty))?//Ig' |
-            sed -E 's/[a-z][a-z0-9_]*_unavailable//Ig' |
-            # bd-2pos6.3/.4/.5 false-positive scrubs: "placeholder" in a
-            # REMOVAL / negation / all-caps-code-symbol context is the OPPOSITE
-            # of an abstention close — the section USED to be placeholder-backed
-            # and no longer is. A genuine abstention ("returns a placeholder",
-            # "replaced with a placeholder", "added a placeholder") keeps no
-            # removal framing and still trips the rule. Order matters: scrub the
-            # all-caps code symbol (e.g. PLACEHOLDER_BACKED_SECTIONS) and the
-            # explicit "no placeholder" negation before the removal-verb forms.
-            sed -E 's/(PLACEHOLDER_[A-Z0-9_]+|[A-Z0-9_]+_PLACEHOLDER[A-Z0-9_]*)//g' |
-            sed -E 's/\bno[[:space:]]+placeholders?\b//Ig' |
-            sed -E 's/placeholders?[[:space:]]+((backed[- ]?)?(section|mechanism|item|entry|entries|impl|implementation)s?[[:space:]]+)?(retired|removed|deleted|replaced|eliminated|dropped|gone)//Ig' |
-            sed -E 's/(retired|removed|deleted|replaced|eliminated|dropped)[[:space:]]+(the[[:space:]]+)?placeholders?//Ig'
+            sed -E \
+                -e 's/[A-Z0-9_]+_(UNAVAILABLE|NOT_YET_IMPLEMENTED|NOT_IMPLEMENTED)_CODE[[:space:]]+(deleted|removed)//Ig' \
+                -e 's/(deleted|removed)[[:space:]]+[A-Z0-9_]+_(UNAVAILABLE|NOT_YET_IMPLEMENTED|NOT_IMPLEMENTED)_CODE//Ig' \
+                -e 's/unavailable stubs removed//Ig' \
+                -e 's/instead of degraded-mode errors//Ig' \
+                -e 's/non-abstention//Ig' \
+                -e 's/\*_(UNAVAILABLE|NOT_YET_IMPLEMENTED|NOT_IMPLEMENTED)_CODE//g' \
+                -e 's/docs\/degraded_code(s|_taxonomy)\.md//Ig' \
+                -e 's/degraded[[:space:]]+(case|code|mode|entry)s?//Ig' \
+                -e 's/degraded_codes?(:?[[:space:]]+(none|\[\]|empty))?//Ig' \
+                -e 's/[a-z][a-z0-9_]*_unavailable//Ig' \
+                -e 's/(PLACEHOLDER_[A-Z0-9_]+|[A-Z0-9_]+_PLACEHOLDER[A-Z0-9_]*)//g' \
+                -e 's/\bno[[:space:]]+placeholders?\b//Ig' \
+                -e 's/placeholders?[[:space:]]+((backed[- ]?)?(section|mechanism|item|entry|entries|impl|implementation)s?[[:space:]]+)?(retired|removed|deleted|replaced|eliminated|dropped|gone)//Ig' \
+                -e 's/(retired|removed|deleted|replaced|eliminated|dropped)[[:space:]]+(the[[:space:]]+)?placeholders?//Ig'
     )
 
     echo "$scrubbed" | grep -qiE "$ABSTENTION_REGEX"
@@ -1367,6 +1601,24 @@ validate_defer_deadline() {
 
 honesty_surfaces_for_bead() {
     local bead_id="$1"
+
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        printf "%s" "$CURRENT_BEAD_JSON" |
+            jq -r --argjson known_surfaces "$ALL_IMPLEMENTATION_SURFACES_JSON" '
+                . as $bead
+                | [
+                    ($known_surfaces | map(.surface) | unique)[] as $surface
+                    | select(
+                        (($bead.labels // []) | index($surface))
+                        or any(($bead.labels // [])[]?; . as $label | $surface | startswith($label + "-"))
+                    )
+                    | $surface
+                ]
+                | unique[]
+            '
+        return 0
+    fi
+
     jq -r --arg bead_id "$bead_id" --argjson known_surfaces "$ALL_IMPLEMENTATION_SURFACES_JSON" '
         select(.id == $bead_id)
         | . as $bead
@@ -1384,10 +1636,12 @@ honesty_surfaces_for_bead() {
 
 bead_has_rejection_criteria() {
     local bead_id="$1"
-    jq -r --arg bead_id "$bead_id" '
-        select(.id == $bead_id)
-        | [(.description // ""), (.notes // ""), (.close_reason // "")] | join("\n")
-    ' "$BEADS_FILE" 2>/dev/null |
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        [ "$CURRENT_BEAD_REJECTION_CRITERIA" = "true" ]
+        return
+    fi
+
+    bead_description_notes_close_reason_text "$bead_id" |
         grep -q 'REJECTION CRITERIA'
 }
 
@@ -1436,6 +1690,46 @@ relevant_closed_bead_ids() {
     ' "$BEADS_FILE" 2>/dev/null || true
 }
 
+relevant_closed_bead_rows() {
+    jq -c '
+        select(.status == "closed")
+        | select(
+            ((.labels // []) | index("honesty-only"))
+            or ((.labels // []) | index("math-ambition"))
+            or ((.labels // []) | any(startswith("implements-surface:")))
+            or ((.title // "") | test("\\[implements-surface:"))
+            or ((.description // "") | test("(^|\\n)FILE SURFACE:[^\\n]*src/"))
+          )
+    ' "$BEADS_FILE" 2>/dev/null || true
+}
+
+recently_changed_closed_bead_rows() {
+    local changed_ids="$1"
+    local changed_ids_json
+
+    changed_ids_json=$(
+        printf "%s\n" "$changed_ids" |
+            jq -Rsc '
+                split("\n")
+                | map(select(length > 0))
+                | map({key: ., value: true})
+                | from_entries
+            '
+    )
+
+    jq -c --argjson changed_ids "$changed_ids_json" '
+        select($changed_ids[.id] == true)
+        | select(.status == "closed")
+        | select(
+            ((.labels // []) | index("honesty-only"))
+            or ((.labels // []) | index("math-ambition"))
+            or ((.labels // []) | any(startswith("implements-surface:")))
+            or ((.title // "") | test("\\[implements-surface:"))
+            or ((.description // "") | test("(^|\\n)FILE SURFACE:[^\\n]*src/"))
+          )
+    ' "$BEADS_FILE" 2>/dev/null || true
+}
+
 recently_changed_bead_ids() {
     if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         relevant_closed_bead_ids
@@ -1454,26 +1748,10 @@ recently_changed_bead_ids() {
 }
 
 if [ "$AUDIT_MODE" = true ]; then
-    BEAD_IDS=$(relevant_closed_bead_ids)
+    BEAD_ROWS=$(relevant_closed_bead_rows)
 else
     CHANGED_IDS=$(recently_changed_bead_ids)
-    BEAD_IDS=""
-    for changed_id in $CHANGED_IDS; do
-        if jq -e --arg bead_id "$changed_id" '
-            select(.id == $bead_id)
-            | select(.status == "closed")
-            | select(
-                ((.labels // []) | index("honesty-only"))
-                or ((.labels // []) | index("math-ambition"))
-                or ((.labels // []) | any(startswith("implements-surface:")))
-                or ((.title // "") | test("\\[implements-surface:"))
-                or ((.description // "") | test("(^|\\n)FILE SURFACE:[^\\n]*src/"))
-              )
-        ' "$BEADS_FILE" >/dev/null 2>&1; then
-            BEAD_IDS="${BEAD_IDS}${changed_id}
-"
-        fi
-    done
+    BEAD_ROWS=$(recently_changed_closed_bead_rows "$CHANGED_IDS")
 fi
 
 check_graph_schema_docs() {
@@ -1503,7 +1781,7 @@ check_unimplemented_failure_mode_honesty_only
 
 write_closure_quality_report
 
-if [ -z "$BEAD_IDS" ] && [ "$VIOLATION_COUNT" -eq 0 ]; then
+if [ -z "$BEAD_ROWS" ] && [ "$VIOLATION_COUNT" -eq 0 ]; then
     if [ "$JSON_OUTPUT" != true ]; then
         if [ "$AUDIT_MODE" = true ]; then
             echo "No closed beads with implements-surface or honesty-only labels found."
@@ -1517,16 +1795,19 @@ if [ -z "$BEAD_IDS" ] && [ "$VIOLATION_COUNT" -eq 0 ]; then
     exit 0
 fi
 
-# Process each bead by ID
-for bead_id in $BEAD_IDS; do
-    # Get bead data
-    load_current_bead "$bead_id" || continue
+# Process each bead from the single ledger scan above. Keeping the current
+# record in memory avoids reparsing the complete Beads JSONL file for every
+# rule and turns audit mode from quadratic ledger work into one linear pass.
+while IFS= read -r bead_json; do
+    [ -n "$bead_json" ] || continue
+    load_current_bead_json "$bead_json" || continue
+    bead_id="$CURRENT_BEAD_ID"
     labels="$CURRENT_BEAD_LABELS"
     close_reason="$CURRENT_BEAD_CLOSE_REASON"
 
-    if echo "$labels" | grep -qE '\bmath-ambition\b'; then
-        check_math_ambition_closure "$bead_id" "$close_reason"
-    fi
+    case ",$labels," in
+        *,math-ambition,*) check_math_ambition_closure "$bead_id" "$close_reason" ;;
+    esac
 
     implementation_surfaces=$(implementation_surfaces_for_bead "$bead_id")
     if [ -n "$implementation_surfaces" ]; then
@@ -1590,7 +1871,8 @@ for bead_id in $BEAD_IDS; do
     fi
 
     # Check honesty-only beads
-    if echo "$labels" | grep -qE '\bhonesty-only\b'; then
+    case ",$labels," in
+        *,honesty-only,*)
         honesty_surfaces=$(honesty_surfaces_for_bead "$bead_id")
         if [ -z "$honesty_surfaces" ]; then
             add_violation "$bead_id" "honesty-only" "unknown" "no implements-surface sibling matches this bead's surface labels"
@@ -1606,8 +1888,11 @@ for bead_id in $BEAD_IDS; do
             fi
             add_violation "$bead_id" "honesty-only" "$surface" "missing open or completed implements-surface sibling"
         done
-    fi
-done
+        ;;
+    esac
+done <<EOF
+$BEAD_ROWS
+EOF
 
 apply_audit_baseline
 

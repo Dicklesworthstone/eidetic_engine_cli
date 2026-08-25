@@ -158,11 +158,19 @@ mod tests {
     use ee::steward::{JobType, ManualRunner, RunOutcome, RunnerOptions};
     use std::path::Path;
     use std::process::{Command, Output};
+    use std::sync::{Mutex, MutexGuard};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     type TestResult = Result<(), String>;
     const DOCTOR_GOLDEN_WORKSPACE: &str = "tests/fixtures";
     const MISSING_GOLDEN_WORKSPACE: &str = "tests/fixtures/missing-ee-workspace";
+    static SEARCH_WORKFLOW_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_search_workflow() -> MutexGuard<'static, ()> {
+        SEARCH_WORKFLOW_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     fn ee_binary_path() -> Result<PathBuf, String> {
         let cargo_path = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
@@ -302,9 +310,6 @@ mod tests {
 
     fn assert_doctor_json_golden(category: &str, name: &str, actual: &str) -> TestResult {
         let test = GoldenTest::new(category, name);
-        if env::var("UPDATE_GOLDEN").is_ok() {
-            return Ok(());
-        }
         let expected = test.load_golden()?;
         let mut expected = serde_json::from_str::<serde_json::Value>(&expected)
             .map_err(|error| format!("parse deterministic doctor golden: {error}"))?;
@@ -315,6 +320,33 @@ mod tests {
         normalize_doctor_platform_variants(&mut actual);
         ensure_doctor_typed_subtrees(&expected, "deterministic doctor golden")?;
         ensure_doctor_typed_subtrees(&actual, "live doctor response")?;
+
+        if env::var("UPDATE_GOLDEN").is_ok() {
+            ensure(
+                cfg!(target_os = "linux"),
+                "doctor golden updates must run on Linux, which owns the canonical contract",
+            )?;
+            for pointer in [
+                "/data/posture",
+                "/data/healthy",
+                "/data/advisories",
+                "/data/checks",
+                "/degraded",
+            ] {
+                let replacement = actual
+                    .pointer(pointer)
+                    .cloned()
+                    .ok_or_else(|| format!("live doctor response is missing {pointer}"))?;
+                *expected
+                    .pointer_mut(pointer)
+                    .ok_or_else(|| format!("doctor golden is missing {pointer}"))? = replacement;
+            }
+            let updated = serde_json::to_string(&expected)
+                .map_err(|error| format!("serialize deterministic doctor golden: {error}"))?
+                + "\n";
+            return test.update_golden(&updated);
+        }
+
         ensure_same_json_shape(&actual, &expected, "/")?;
         for pointer in [
             "/data/posture",
@@ -2666,7 +2698,8 @@ mod tests {
             format!("search stdout must end with a newline, got: {stdout:?}"),
         )?;
 
-        assert_golden("agent", "search_unavailable.json", &stdout)
+        let normalized = normalize_context_pack_artifact_paths(&stdout);
+        assert_golden("agent", "search_unavailable.json", &normalized)
     }
 
     #[test]
@@ -2842,6 +2875,7 @@ mod tests {
 
     #[test]
     fn agent_search_json_returns_indexed_memory() -> TestResult {
+        let _search_workflow = lock_search_workflow();
         let artifact_dir = unique_artifact_dir("search-json")?;
         let workspace = artifact_dir.join("workspace");
         let database = workspace.join(".ee").join("ee.db");
@@ -2972,6 +3006,7 @@ mod tests {
 
     #[test]
     fn agent_context_json_returns_indexed_memory() -> TestResult {
+        let _search_workflow = lock_search_workflow();
         let artifact_dir = unique_artifact_dir("context-json")?;
         let workspace = artifact_dir.join("workspace");
         let database = workspace.join(".ee").join("ee.db");
@@ -3071,23 +3106,18 @@ mod tests {
             "context production rerank schema",
         )?;
         ensure_equal(
-            &value["data"]["rerank"]["advisory"]["code"],
-            &serde_json::json!("rerank_model_unavailable"),
-            "context production rerank advisory",
+            &value["data"]["rerank"]["configured"],
+            &serde_json::json!("off"),
+            "context configured rerank mode",
         )?;
         ensure_equal(
-            &value["data"]["rerank"]["advisory"]["resolution"],
-            &serde_json::json!("automatic_repair_unavailable"),
-            "context production rerank resolution",
-        )?;
-        ensure_equal(
-            &value["data"]["rerank"]["advisory"]["repair"],
+            &value["data"]["rerank"]["advisory"],
             &serde_json::Value::Null,
-            "context permanent rerank advisory has no fake repair",
+            "context disabled reranker has no false advisory",
         )?;
         ensure_equal(
             &value["data"]["rerank"]["advisorySummary"]["scope"],
-            &serde_json::json!("process"),
+            &serde_json::json!("response"),
             "context production rerank advisory scope",
         )?;
         ensure_equal(
@@ -3133,6 +3163,7 @@ mod tests {
 
     #[test]
     fn agent_pack_query_file_json_matches_context_pack_golden() -> TestResult {
+        let _search_workflow = lock_search_workflow();
         let artifact_dir = unique_artifact_dir("pack-query-file-json")?;
         let workspace = artifact_dir.join("workspace");
         let database = workspace.join(".ee").join("ee.db");
@@ -3231,9 +3262,14 @@ mod tests {
             "query-file production rerank schema",
         )?;
         ensure_equal(
-            &value["data"]["rerank"]["advisory"]["code"],
-            &serde_json::json!("rerank_model_unavailable"),
-            "query-file production rerank advisory",
+            &value["data"]["rerank"]["configured"],
+            &serde_json::json!("off"),
+            "query-file configured rerank mode",
+        )?;
+        ensure_equal(
+            &value["data"]["rerank"]["advisory"],
+            &serde_json::Value::Null,
+            "query-file disabled reranker has no false advisory",
         )?;
         ensure(
             value.pointer("/data/pack/selectionAudit").is_some(),
@@ -3312,6 +3348,7 @@ mod tests {
 
     #[test]
     fn agent_pack_query_file_graph_hints_match_context_pack_golden() -> TestResult {
+        let _search_workflow = lock_search_workflow();
         let artifact_dir = unique_artifact_dir("pack-query-file-graph")?;
         let workspace = artifact_dir.join("workspace");
         let database = workspace.join(".ee").join("ee.db");
@@ -3400,6 +3437,7 @@ mod tests {
 
     #[test]
     fn agent_context_markdown_returns_formatted_pack() -> TestResult {
+        let _search_workflow = lock_search_workflow();
         let artifact_dir = unique_artifact_dir("context-markdown")?;
         let workspace = artifact_dir.join("workspace");
         let database = workspace.join(".ee").join("ee.db");
@@ -3465,6 +3503,7 @@ mod tests {
 
     #[test]
     fn agent_context_markdown_provenance_hash_stability_and_artifact_logging() -> TestResult {
+        let _search_workflow = lock_search_workflow();
         let artifact_dir = unique_artifact_dir("context-md-provenance")?;
         let workspace = artifact_dir.join("workspace");
         let database = workspace.join(".ee").join("ee.db");
@@ -3482,6 +3521,12 @@ mod tests {
         // Run context --json twice to verify pack hash stability (determinism).
         let run_context_json = || {
             Command::new(env!("CARGO_BIN_EXE_ee"))
+                .env("EE_EMBED_DOWNLOAD", "off")
+                .env(
+                    "EE_EMBED_MODEL_DIR",
+                    workspace.join(".ee").join("empty-model-cache"),
+                )
+                .env("EE_L2_PACK_CACHE_DISABLE", "1")
                 .arg("--json")
                 .arg("--workspace")
                 .arg(&workspace)
@@ -3542,6 +3587,12 @@ mod tests {
 
         // Run context --format markdown and verify provenance elements.
         let output_md = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .env(
+                "EE_EMBED_MODEL_DIR",
+                workspace.join(".ee").join("empty-model-cache"),
+            )
+            .env("EE_L2_PACK_CACHE_DISABLE", "1")
             .arg("--format")
             .arg("markdown")
             .arg("--workspace")

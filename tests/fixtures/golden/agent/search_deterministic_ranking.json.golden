@@ -1,158 +1,305 @@
 {
   "schema": "ee.response.v2",
   "success": true,
-  "degraded": [],
   "data": {
     "command": "search",
     "status": "success",
     "embed_backend": "hash_fallback",
     "query": "cargo test before release",
+    "request": {
+      "sourceMode": "hybrid",
+      "strictSourceMode": false,
+      "memoryScope": "swarm",
+      "strictScope": false
+    },
+    "scopeStats": {
+      "scopeApplied": "swarm",
+      "strictScope": false,
+      "currentAgent": null,
+      "teamSize": 0,
+      "candidatesTotal": 3,
+      "candidatesInScope": 3,
+      "candidatesExcludedByScope": 0,
+      "strictViolations": 0,
+      "excludedMemoryIds": []
+    },
     "results": [
       {
         "docId": "mem_00000000000000000000010001",
-        "memoryId": "mem_00000000000000000000010001",
-        "score": 0.032786883413791656,
+        "score": 1.0,
+        "relevanceScore": 1.0,
+        "scoreKind": "unit_normalized",
         "scoreInterval": [
           0.0,
           1.0
         ],
         "coverageGuarantee": null,
         "calibrated": false,
-        "source": "hybrid",
-        "why": "Score 0.0328 via RRF fusion of 2 signals",
+        "source": "lexical",
+        "why": "Relevance 1.0000 from score 1.0000 (unit_normalized) via lexical match (1.70).",
         "provenance": [
+          {
+            "kind": "provenance_uri",
+            "uri": "fixture://tests/search_deterministic_golden"
+          },
           {
             "kind": "search_document",
             "docId": "mem_00000000000000000000010001"
           }
         ],
-        "fastScore": 0.5892333984375,
-        "lexicalScore": 1.7022392749786377,
+        "memoryId": "mem_00000000000000000000010001",
+        "lexicalScore": 1.7022393,
+        "content": "Before release, run cargo fmt --check and cargo test to verify formatting.",
         "metadata": {
+          "calibrated": false,
+          "content": "Before release, run cargo fmt --check and cargo test to verify formatting.",
+          "content_truncated": false,
+          "coverageGuarantee": null,
           "created_at": "2026-04-30T10:00:00+00:00",
           "kind": "rule",
           "level": "procedural",
+          "memory_scope": "swarm",
+          "provenanceChainHash": "[PROVENANCE_CHAIN_HASH]",
+          "provenanceVerificationStatus": "unverified",
           "schema": "ee.search.document.v1",
+          "scoreCalibration": {
+            "schema": "ee.search.score_calibration.v1",
+            "method": "scaled_split_conformal",
+            "status": "absent",
+            "coverage": 0.95,
+            "sampleCount": 0,
+            "minimumSamples": 20,
+            "sourceBreakdown": {
+              "jsonl": 0,
+              "feedbackEvents": 0,
+              "feedbackEventsMalformed": 0,
+              "feedbackEventsReadStatus": "ok",
+              "feedbackEventsUnavailableReason": null
+            },
+            "corruptRowCount": 0,
+            "corruptLineNumbers": [],
+            "residualQuantile": null,
+            "unreadableReason": null,
+            "provenance": {
+              "jsonlHash": null,
+              "jsonlPath": ".ee/search/calibration.jsonl",
+              "feedbackEventIds": [],
+              "feedbackEventIdsTruncated": false
+            }
+          },
+          "scoreInterval": [
+            0.0,
+            1.0
+          ],
           "source": "memory",
+          "trust_class": "human_explicit",
+          "trust_subclass": "search-ranking-golden",
+          "valid_from": "2026-04-30T10:00:00+00:00",
+          "validity_status": "current",
+          "validity_window_kind": "starts_at",
           "workspace": "[WORKSPACE]"
         },
+        "validFrom": "2026-04-30T10:00:00+00:00",
+        "validityStatus": "current",
+        "validityWindowKind": "starts_at",
         "explanation": {
-          "summary": "Score 0.0328 via RRF fusion of 2 signals",
+          "summary": "Relevance 1.0000 from score 1.0000 (unit_normalized) via lexical match (1.70).",
           "factors": [
             {
-              "name": "semantic_fast",
-              "value": 0.5892333984375,
-              "contribution": "hash-based embedding similarity",
-              "sourceField": "fast_score",
-              "formula": "component = fast_score; final score = score"
-            },
-            {
               "name": "lexical",
-              "value": 1.7022392749786377,
-              "contribution": "BM25 term matching",
+              "value": 1.7022393,
+              "contribution": "raw BM25 term matching before returned-pool normalization",
               "sourceField": "lexical_score",
-              "formula": "component = lexical_score; final score = score"
+              "formula": "score = minmax(lexical_score, returned_pool)"
             }
           ]
         }
       },
       {
         "docId": "mem_00000000000000000000010002",
-        "memoryId": "mem_00000000000000000000010002",
-        "score": 0.0320020467042923,
+        "score": 0.40871692,
+        "relevanceScore": 0.408717,
+        "scoreKind": "unit_normalized",
         "scoreInterval": [
           0.0,
           1.0
         ],
         "coverageGuarantee": null,
         "calibrated": false,
-        "source": "hybrid",
-        "why": "Score 0.0320 via RRF fusion of 2 signals",
+        "source": "lexical",
+        "why": "Relevance 0.4087 from score 0.4087 (unit_normalized) via lexical match (1.06).",
         "provenance": [
+          {
+            "kind": "provenance_uri",
+            "uri": "fixture://tests/search_deterministic_golden"
+          },
           {
             "kind": "search_document",
             "docId": "mem_00000000000000000000010002"
           }
         ],
-        "fastScore": 0.28857421875,
-        "lexicalScore": 1.0611357688903809,
+        "memoryId": "mem_00000000000000000000010002",
+        "lexicalScore": 1.0611359,
+        "content": "Before pushing to main, run cargo test and inspect failing integration logs.",
         "metadata": {
+          "calibrated": false,
+          "content": "Before pushing to main, run cargo test and inspect failing integration logs.",
+          "content_truncated": false,
+          "coverageGuarantee": null,
           "created_at": "2026-04-30T10:01:00+00:00",
           "kind": "rule",
           "level": "procedural",
+          "memory_scope": "swarm",
+          "provenanceChainHash": "[PROVENANCE_CHAIN_HASH]",
+          "provenanceVerificationStatus": "unverified",
           "schema": "ee.search.document.v1",
+          "scoreCalibration": {
+            "schema": "ee.search.score_calibration.v1",
+            "method": "scaled_split_conformal",
+            "status": "absent",
+            "coverage": 0.95,
+            "sampleCount": 0,
+            "minimumSamples": 20,
+            "sourceBreakdown": {
+              "jsonl": 0,
+              "feedbackEvents": 0,
+              "feedbackEventsMalformed": 0,
+              "feedbackEventsReadStatus": "ok",
+              "feedbackEventsUnavailableReason": null
+            },
+            "corruptRowCount": 0,
+            "corruptLineNumbers": [],
+            "residualQuantile": null,
+            "unreadableReason": null,
+            "provenance": {
+              "jsonlHash": null,
+              "jsonlPath": ".ee/search/calibration.jsonl",
+              "feedbackEventIds": [],
+              "feedbackEventIdsTruncated": false
+            }
+          },
+          "scoreInterval": [
+            0.0,
+            1.0
+          ],
           "source": "memory",
+          "trust_class": "human_explicit",
+          "trust_subclass": "search-ranking-golden",
+          "valid_from": "2026-04-30T10:01:00+00:00",
+          "validity_status": "current",
+          "validity_window_kind": "starts_at",
           "workspace": "[WORKSPACE]"
         },
+        "validFrom": "2026-04-30T10:01:00+00:00",
+        "validityStatus": "current",
+        "validityWindowKind": "starts_at",
         "explanation": {
-          "summary": "Score 0.0320 via RRF fusion of 2 signals",
+          "summary": "Relevance 0.4087 from score 0.4087 (unit_normalized) via lexical match (1.06).",
           "factors": [
             {
-              "name": "semantic_fast",
-              "value": 0.28857421875,
-              "contribution": "hash-based embedding similarity",
-              "sourceField": "fast_score",
-              "formula": "component = fast_score; final score = score"
-            },
-            {
               "name": "lexical",
-              "value": 1.0611357688903809,
-              "contribution": "BM25 term matching",
+              "value": 1.0611359,
+              "contribution": "raw BM25 term matching before returned-pool normalization",
               "sourceField": "lexical_score",
-              "formula": "component = lexical_score; final score = score"
+              "formula": "score = minmax(lexical_score, returned_pool)"
             }
           ]
         }
       },
       {
         "docId": "mem_00000000000000000000010003",
-        "memoryId": "mem_00000000000000000000010003",
-        "score": 0.0320020467042923,
+        "score": 0.0,
+        "relevanceScore": 0.0,
+        "scoreKind": "unit_normalized",
         "scoreInterval": [
           0.0,
           1.0
         ],
         "coverageGuarantee": null,
         "calibrated": false,
-        "source": "hybrid",
-        "why": "Score 0.0320 via RRF fusion of 2 signals",
+        "source": "lexical",
+        "why": "Relevance 0.0000 from score 0.0000 (unit_normalized) via lexical match (0.62).",
         "provenance": [
+          {
+            "kind": "provenance_uri",
+            "uri": "fixture://tests/search_deterministic_golden"
+          },
           {
             "kind": "search_document",
             "docId": "mem_00000000000000000000010003"
           }
         ],
-        "fastScore": 0.316162109375,
-        "lexicalScore": 0.6179813742637634,
+        "memoryId": "mem_00000000000000000000010003",
+        "lexicalScore": 0.6179814,
+        "content": "A prior release failed because formatting checks were skipped before packaging.",
         "metadata": {
+          "calibrated": false,
+          "content": "A prior release failed because formatting checks were skipped before packaging.",
+          "content_truncated": false,
+          "coverageGuarantee": null,
           "created_at": "2026-04-30T10:02:00+00:00",
           "kind": "fact",
           "level": "episodic",
+          "memory_scope": "swarm",
+          "provenanceChainHash": "[PROVENANCE_CHAIN_HASH]",
+          "provenanceVerificationStatus": "unverified",
           "schema": "ee.search.document.v1",
+          "scoreCalibration": {
+            "schema": "ee.search.score_calibration.v1",
+            "method": "scaled_split_conformal",
+            "status": "absent",
+            "coverage": 0.95,
+            "sampleCount": 0,
+            "minimumSamples": 20,
+            "sourceBreakdown": {
+              "jsonl": 0,
+              "feedbackEvents": 0,
+              "feedbackEventsMalformed": 0,
+              "feedbackEventsReadStatus": "ok",
+              "feedbackEventsUnavailableReason": null
+            },
+            "corruptRowCount": 0,
+            "corruptLineNumbers": [],
+            "residualQuantile": null,
+            "unreadableReason": null,
+            "provenance": {
+              "jsonlHash": null,
+              "jsonlPath": ".ee/search/calibration.jsonl",
+              "feedbackEventIds": [],
+              "feedbackEventIdsTruncated": false
+            }
+          },
+          "scoreInterval": [
+            0.0,
+            1.0
+          ],
           "source": "memory",
+          "trust_class": "human_explicit",
+          "trust_subclass": "search-ranking-golden",
+          "valid_from": "2026-04-30T10:02:00+00:00",
+          "validity_status": "current",
+          "validity_window_kind": "starts_at",
           "workspace": "[WORKSPACE]"
         },
+        "validFrom": "2026-04-30T10:02:00+00:00",
+        "validityStatus": "current",
+        "validityWindowKind": "starts_at",
         "explanation": {
-          "summary": "Score 0.0320 via RRF fusion of 2 signals",
+          "summary": "Relevance 0.0000 from score 0.0000 (unit_normalized) via lexical match (0.62).",
           "factors": [
             {
-              "name": "semantic_fast",
-              "value": 0.316162109375,
-              "contribution": "hash-based embedding similarity",
-              "sourceField": "fast_score",
-              "formula": "component = fast_score; final score = score"
-            },
-            {
               "name": "lexical",
-              "value": 0.6179813742637634,
-              "contribution": "BM25 term matching",
+              "value": 0.6179814,
+              "contribution": "raw BM25 term matching before returned-pool normalization",
               "sourceField": "lexical_score",
-              "formula": "component = lexical_score; final score = score"
+              "formula": "score = minmax(lexical_score, returned_pool)"
             }
           ]
         }
       }
     ],
+    "consensus": [],
+    "conflicts": [],
     "resultCount": 3,
     "elapsedMs": 0.0,
     "metrics": {
@@ -161,20 +308,20 @@
       "errorCount": 0,
       "elapsedMs": 0.0,
       "sourceCounts": {
-        "lexical": 0,
+        "lexical": 3,
         "semanticFast": 0,
         "semanticQuality": 0,
-        "hybrid": 3,
+        "hybrid": 0,
         "reranked": 0
       },
       "scoreDistribution": {
-        "top": 0.03278699889779091,
-        "min": 0.03200199827551842,
-        "max": 0.03278699889779091,
-        "mean": 0.03226400166749954
+        "top": 1.0,
+        "min": 0.0,
+        "max": 1.0,
+        "mean": 0.469572
       },
       "fieldCoverage": {
-        "fastScoreCount": 3,
+        "fastScoreCount": 0,
         "qualityScoreCount": 0,
         "lexicalScoreCount": 3,
         "rerankScoreCount": 0,
@@ -185,39 +332,45 @@
       "candidatesAboveFloor": 3,
       "candidatesBelowFloor": 0,
       "qualityAssessment": "good",
-      "honestQualityScore": 0.995212972164154
+      "honestQualityScore": 0.8,
+      "sourceModeRequested": "hybrid",
+      "sourceModeApplied": "lexical_only",
+      "fallbackApplied": true,
+      "strictSourceMode": false,
+      "memoryScope": "swarm",
+      "strictScope": false
     },
     "rerank": {
+      "schema": "ee.rerank_posture.v1",
+      "mode": "fusion_only_degraded",
+      "configured": "auto",
+      "topK": 50,
+      "rerankScoreCount": 0,
+      "scoreKind": "rrf_fused",
+      "available": false,
+      "degradedCode": "rerank_model_unavailable",
       "advisory": {
         "code": "rerank_model_unavailable",
-        "message": "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.",
+        "severity": "low",
         "permanent": true,
+        "message": "No usable local reranker is registered. Search is using fusion-only ranking. Network download is unavailable, but a verified offline reranker artifact can be imported explicitly.",
         "repair": null,
-        "resolution": "automatic_repair_unavailable",
-        "severity": "low"
+        "resolution": "automatic_repair_unavailable"
       },
       "advisorySummary": {
+        "scope": "process",
+        "permanent": true,
         "distinctCount": 1,
         "emittedCount": 1,
-        "permanent": true,
-        "scope": "process",
+        "suppressedCount": 0,
         "sessionOccurrenceCount": 1,
-        "sessionSuppressedCount": 0,
-        "suppressedCount": 0
-      },
-      "available": false,
-      "configured": "auto",
-      "degradedCode": "rerank_model_unavailable",
-      "mode": "fusion_only_degraded",
-      "rerankScoreCount": 0,
-      "schema": "ee.rerank_posture.v1",
-      "scoreKind": "rrf_fused",
-      "topK": 50
+        "sessionSuppressedCount": 0
+      }
     },
     "profileRuntime": {
       "schema": "ee.profile.runtime.v1",
       "activeProfile": "swarm",
-      "source": "host_probe",
+      "source": "golden_fixture",
       "budgets": {
         "search": {
           "candidateLimit": 240,
@@ -257,6 +410,116 @@
       }
     },
     "errors": [],
-    "degraded": []
-  }
+    "degraded": [
+      {
+        "code": "embed_model_unavailable",
+        "severity": "warning",
+        "message": "Embedding model unavailable (active embedder source frankensearch_hash_fallback reports semantic=false); semantic similarity is disabled and lexical search remains available.",
+        "repair": "ee index reembed --workspace .",
+        "sources": [
+          "search"
+        ],
+        "details": {
+          "recovery": [
+            {
+              "priority": 1,
+              "kind": "rebuild",
+              "rationale": "The embedder model is unloadable; re-embed forces a fresh initialization.",
+              "riskClass": "idempotent_refresh",
+              "requiresHumanApproval": false,
+              "mutatesExternalState": false,
+              "mutatesTrackerState": false,
+              "privacyClass": "bounded_command_no_raw_state",
+              "evidence": [
+                "derived_asset_refresh_command"
+              ],
+              "preconditions": [
+                "workspace_must_be_explicit",
+                "toolchain_or_feature_profile_must_match_request"
+              ],
+              "command": "ee index reembed --workspace .",
+              "resultsIn": "Rebuilds the embedding index against the current embed-fast feature and model configuration."
+            },
+            {
+              "priority": 2,
+              "kind": "rebuild",
+              "rationale": "If this binary was built without the dense embedder, rebuild with the supported embed-fast feature.",
+              "riskClass": "mutating_local_repair",
+              "requiresHumanApproval": false,
+              "mutatesExternalState": false,
+              "mutatesTrackerState": false,
+              "privacyClass": "bounded_command_no_raw_state",
+              "evidence": [
+                "local_toolchain_or_install_command"
+              ],
+              "preconditions": [
+                "use_rch_for_cargo_when_applicable",
+                "toolchain_or_feature_profile_must_match_request"
+              ],
+              "command": "cargo build --features embed-fast"
+            }
+          ],
+          "modelId": "EE_EMBED_MODEL_PATH",
+          "featureFlag": "embed-fast",
+          "lexicalAvailable": true
+        }
+      }
+    ],
+    "resultPath": "data.results"
+  },
+  "degraded": [
+    {
+      "code": "embed_model_unavailable",
+      "severity": "warning",
+      "message": "Embedding model unavailable (active embedder source frankensearch_hash_fallback reports semantic=false); semantic similarity is disabled and lexical search remains available.",
+      "repair": "ee index reembed --workspace .",
+      "sources": [
+        "search"
+      ],
+      "details": {
+        "recovery": [
+          {
+            "priority": 1,
+            "kind": "rebuild",
+            "rationale": "The embedder model is unloadable; re-embed forces a fresh initialization.",
+            "riskClass": "idempotent_refresh",
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "bounded_command_no_raw_state",
+            "evidence": [
+              "derived_asset_refresh_command"
+            ],
+            "preconditions": [
+              "workspace_must_be_explicit",
+              "toolchain_or_feature_profile_must_match_request"
+            ],
+            "command": "ee index reembed --workspace .",
+            "resultsIn": "Rebuilds the embedding index against the current embed-fast feature and model configuration."
+          },
+          {
+            "priority": 2,
+            "kind": "rebuild",
+            "rationale": "If this binary was built without the dense embedder, rebuild with the supported embed-fast feature.",
+            "riskClass": "mutating_local_repair",
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "bounded_command_no_raw_state",
+            "evidence": [
+              "local_toolchain_or_install_command"
+            ],
+            "preconditions": [
+              "use_rch_for_cargo_when_applicable",
+              "toolchain_or_feature_profile_must_match_request"
+            ],
+            "command": "cargo build --features embed-fast"
+          }
+        ],
+        "modelId": "EE_EMBED_MODEL_PATH",
+        "featureFlag": "embed-fast",
+        "lexicalAvailable": true
+      }
+    }
+  ]
 }

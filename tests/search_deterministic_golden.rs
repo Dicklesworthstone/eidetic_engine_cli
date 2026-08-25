@@ -5,6 +5,7 @@
 //! canonicalized CLI JSON output byte-for-byte against a committed golden file.
 
 use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
+use ee::core::profile::{OperatingProfile, RuntimeProfileReport};
 use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 use ee::search::{Embedder, HashEmbedder};
 use serde_json::Value as JsonValue;
@@ -12,6 +13,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 type TestResult = Result<(), String>;
@@ -22,6 +24,11 @@ const TIE_WORKSPACE_ID: &str = "wsp_searchtie00000000000000001";
 const TIE_QUERY: &str = "stable equal ranking tie release check";
 const GOLDEN_CATEGORY: &str = "agent";
 const GOLDEN_NAME: &str = "search_deterministic_ranking.json";
+
+fn search_golden_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
@@ -270,7 +277,7 @@ fn seed_search_workspace(workspace: &Path, database: &Path) -> TestResult {
             .map_err(|error| error.to_string())?;
         connection
             .execute_raw(&format!(
-                "UPDATE memories SET created_at = '{timestamp}', updated_at = '{timestamp}' WHERE id = '{id}'"
+                "UPDATE memories SET created_at = '{timestamp}', updated_at = '{timestamp}', valid_from = '{timestamp}' WHERE id = '{id}'"
             ))
             .map_err(|error| error.to_string())?;
     }
@@ -494,11 +501,16 @@ fn canonicalize_search_json(stdout: &str) -> Result<String, String> {
         serde_json::from_str(stdout).map_err(|error| format!("stdout must be JSON: {error}"))?;
     value["data"]["elapsedMs"] = serde_json::json!(0.0);
     value["data"]["metrics"]["elapsedMs"] = serde_json::json!(0.0);
+    value["data"]["profileRuntime"] =
+        RuntimeProfileReport::for_profile(OperatingProfile::Swarm, "golden_fixture").data_json();
 
     if let Some(results) = value["data"]["results"].as_array_mut() {
         for result in results {
             if let Some(metadata) = result.get_mut("metadata") {
                 metadata["workspace"] = serde_json::json!("[WORKSPACE]");
+                if metadata.get("provenanceChainHash").is_some() {
+                    metadata["provenanceChainHash"] = serde_json::json!("[PROVENANCE_CHAIN_HASH]");
+                }
                 sort_object_keys(metadata);
             }
         }
@@ -742,6 +754,9 @@ fn assert_search_contract(value: &JsonValue) -> TestResult {
 
 #[test]
 fn search_json_deterministic_ranking_matches_golden() -> TestResult {
+    let _serial = search_golden_test_lock()
+        .lock()
+        .map_err(|_| "search golden test lock poisoned".to_owned())?;
     assert_hash_embedder_determinism()?;
 
     let artifact_dir = unique_artifact_dir("search-deterministic-ranking")?;
@@ -770,6 +785,9 @@ fn search_json_deterministic_ranking_matches_golden() -> TestResult {
 
 #[test]
 fn identical_content_search_ties_order_by_memory_id_across_runs() -> TestResult {
+    let _serial = search_golden_test_lock()
+        .lock()
+        .map_err(|_| "search golden test lock poisoned".to_owned())?;
     let artifact_dir = unique_artifact_dir("search-equal-score-ties")?;
     let workspace = artifact_dir.join("workspace");
     let database = workspace.join(".ee").join("ee.db");

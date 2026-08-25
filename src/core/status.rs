@@ -59,7 +59,7 @@ use super::derived_asset_freshness::{
 };
 use super::index::{
     DEFAULT_INDEX_SUBDIR, IndexHealth, IndexStatusOptions, IndexStatusReport, get_index_status,
-    get_index_status_with_connection,
+    get_index_status_in_current_snapshot, prepare_index_status_embedder_for_workspace,
 };
 use super::outcome::{DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR};
 use super::source_run::SourceRunKind;
@@ -2271,6 +2271,15 @@ impl StatusReport {
         let database_path = workspace_database_path(workspace_path);
         if !database_path.exists() {
             return Self::gather_with_connection(options, None);
+        }
+        if let Err(error) =
+            prepare_index_status_embedder_for_workspace(workspace_path, &database_path)
+        {
+            tracing::debug!(
+                target: "ee::status::gather",
+                error = %error,
+                "status embedder preparation did not complete before snapshot acquisition"
+            );
         }
         let read_pool = registered_process_read_pool(
             DatabaseConfig::file(database_path.clone()),
@@ -4688,7 +4697,13 @@ fn gather_status_index_status(
         database_path: None,
         index_dir: None,
     };
-    Some(get_index_status_with_connection(&options, connection).map_err(|_| ()))
+    Some(
+        match connection {
+            Some(connection) => get_index_status_in_current_snapshot(&options, connection),
+            None => get_index_status(&options),
+        }
+        .map_err(|_| ()),
+    )
 }
 
 #[cfg(test)]
@@ -6972,6 +6987,52 @@ mod tests {
             1_u32,
             "new status snapshot observes committed memory",
         )
+    }
+
+    #[test]
+    fn status_index_probe_reuses_pinned_snapshot_without_nested_transaction() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee_dir = temp.path().join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let database_path = ee_dir.join("ee.db");
+        let writer = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        writer.migrate().map_err(|error| error.to_string())?;
+        let canonical_workspace = temp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| temp.path().to_path_buf());
+        let workspace_id = stable_workspace_id(&canonical_workspace);
+        writer
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: canonical_workspace.display().to_string(),
+                    name: Some("status-index-snapshot".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let _embedder_guard =
+            crate::core::index::install_test_hash_workspace_embedder(&workspace_id);
+
+        let read_pool = registered_process_read_pool(
+            DatabaseConfig::file(database_path),
+            PoolConfig::default_single(),
+        );
+        let snapshot = read_pool
+            .pin_snapshot()
+            .map_err(|error| error.to_string())?;
+        let connection = snapshot
+            .checked_connection()
+            .map_err(|error| error.to_string())?;
+        let status = gather_status_index_status(Some(temp.path()), Some(connection))
+            .ok_or_else(|| "explicit workspace must produce an index status probe".to_owned())?
+            .map_err(|()| {
+                "pinned status snapshot must not start a nested evidence transaction".to_owned()
+            })?;
+
+        ensure(status.health, IndexHealth::Missing, "missing fixture index")?;
+        ensure(status.db_memory_count, 0_u32, "empty fixture memory count")?;
+        snapshot.commit().map_err(|error| error.to_string())
     }
 
     #[test]
