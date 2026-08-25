@@ -268,5 +268,11 @@ fn verify_stage_reaches_tracing_paragraph_contract() -> TestResult {
     ensure(
         verify.contains("cargo test --workspace --lib --bins --tests --examples"),
         "scripts/verify.sh must keep the all-tests stage that runs tests/contracts.rs",
+    )?;
+    ensure(
+        verify.contains(
+            "cargo test --workspace --lib --bins --tests --examples -- --test-threads=1",
+        ),
+        "scripts/verify.sh must serialize the all-tests stage because the suite contains process-global fixtures",
     )
 }

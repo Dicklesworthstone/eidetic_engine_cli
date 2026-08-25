@@ -1091,7 +1091,7 @@ fi
 
 # Gate 5: Core Cargo Tests (Contracts, Logic, Golden). Benchmarks are
 # deliberately excluded here and run only through the explicit benchmark gate.
-run_stage "Unit, Contract, and Golden Tests" "cargo test --workspace --lib --bins --tests --examples"
+run_stage "Unit, Contract, and Golden Tests" "cargo test --workspace --lib --bins --tests --examples -- --test-threads=1"
 
 # Gate 6: Basic End-to-End
 run_stage "Basic E2E Scripts" "./scripts/e2e_test.sh"

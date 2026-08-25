@@ -68057,11 +68057,18 @@ mod tests {
             "/fixture/best campaign/.ee-campaign",
             "17 documents",
             "last write 2026-08-10T14:15:16Z",
-            "Nearby-store discovery outcome: truncated after the 750 ms budget; the candidate list may be incomplete.",
             "ee resume --workspace '/fixture/best campaign' --database '/fixture/best campaign/.ee-campaign/ee.db' --json",
         ] {
             ensure_contains(&human, expected, "resume nearby-store human posture")?;
         }
+        ensure_contains(
+            &human,
+            &format!(
+                "Nearby-store discovery outcome: truncated after the {} ms budget; the candidate list may be incomplete.",
+                crate::core::resume::RESUME_NEARBY_SCAN_BUDGET_MS
+            ),
+            "resume nearby-store budget posture",
+        )?;
         Ok(())
     }
 
@@ -68629,7 +68636,7 @@ mod tests {
         let fixture_workspace_id = crate::core::workspace::stable_workspace_id(workspace);
         fixture_connection
             .insert_model_registry_entry(
-                "mreg_model_parity_unavailable_reranker_fixture",
+                "mdl_01234567890123456789012346",
                 &crate::db::CreateModelRegistryInput {
                     workspace_id: fixture_workspace_id,
                     provider: crate::models::model_registry::ModelProvider::Hash,
@@ -68687,25 +68694,30 @@ mod tests {
                 .is_some_and(|entries| !entries.is_empty()),
             "model status fixture must exercise a real degradation",
         )?;
-        // The envelope mirror normalizes report degradations: entries missing
-        // required envelope fields (code/severity/message) are omitted from
-        // the top-level `degraded[]` while the report payload keeps them.
-        // Parity is therefore subset-by-(code,message), not strict equality.
+        // The envelope mirrors both report-level and lifecycle degradations.
+        // Every normalized top-level entry must therefore be traceable to one
+        // of those two authoritative payload arrays.
         ensure(
             status_value["degraded"].as_array().is_some_and(|top| {
                 !top.is_empty()
                     && top.iter().all(|entry| {
                         status_value["data"]["degradations"]
                             .as_array()
-                            .is_some_and(|report| {
-                                report.iter().any(|candidate| {
-                                    candidate.get("code") == entry.get("code")
-                                        && candidate.get("message") == entry.get("message")
-                                })
+                            .into_iter()
+                            .flatten()
+                            .chain(
+                                status_value["data"]["modelLifecycle"]["degraded"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten(),
+                            )
+                            .any(|candidate| {
+                                candidate.get("code") == entry.get("code")
+                                    && candidate.get("message") == entry.get("message")
                             })
                     })
             }),
-            "model status top-level degraded mirrors normalized report entries",
+            "model status top-level degraded mirrors normalized report and lifecycle entries",
         )?;
 
         let mut list_json = Vec::new();
@@ -71563,9 +71575,23 @@ mod tests {
         )?;
         ensure_equal(
             &envelope["data"]["fastContent"]["posture"],
-            &serde_json::json!("ready"),
-            "fast-content posture",
+            &serde_json::json!("partial"),
+            "fast-content posture reflects missing provenance source",
         )?;
+        for pointer in ["/degraded", "/data/fastContent/issues"] {
+            ensure(
+                envelope
+                    .pointer(pointer)
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|entries| {
+                        entries.iter().any(|entry| {
+                            entry["code"]
+                                == serde_json::json!("context_evidence_freshness_missing_source")
+                        })
+                    }),
+                &format!("missing-source evidence posture must be visible at {pointer}"),
+            )?;
+        }
         ensure_equal(
             &envelope["data"]["fastContent"]["strategy"]["recent"],
             &serde_json::json!("context_admitted_recency_v1"),
@@ -71648,9 +71674,11 @@ mod tests {
             .and_then(|item| item["why"].as_str())
             .ok_or_else(|| "relevant item missing why".to_owned())?;
         ensure(
-            relevant_why.starts_with("Score ") && relevant_why.contains("lexical match"),
+            relevant_why.starts_with("Relevance ")
+                && relevant_why.contains("unit_normalized")
+                && relevant_why.contains("lexical match"),
             &format!(
-                "relevant JSON why must preserve lexical explanation evidence: {relevant_why:?}"
+                "relevant JSON why must preserve normalized lexical explanation evidence: {relevant_why:?}"
             ),
         )?;
         let forbidden_ids = [
@@ -71774,6 +71802,20 @@ mod tests {
             allow_secret_mention: false,
         })
         .map_err(|error| format!("remember orient provider-failure fixture: {error:?}"))?;
+
+        // `remember` keeps the derived index current, so an absent index no
+        // longer proves provider failure. Preserve that healthy derived asset
+        // and put a regular file at the canonical index path to exercise a
+        // genuine lexical-open failure without mutating the source-of-truth DB.
+        let index_dir = workspace
+            .join(".ee")
+            .join(crate::core::index::DEFAULT_INDEX_SUBDIR);
+        if index_dir.is_dir() {
+            std::fs::rename(&index_dir, workspace.join(".ee").join("index-preserved"))
+                .map_err(|error| format!("preserve orient provider index fixture: {error}"))?;
+        }
+        std::fs::write(&index_dir, b"not a lexical index directory")
+            .map_err(|error| format!("write orient provider failure fixture: {error}"))?;
 
         let workspace_arg = workspace.display().to_string();
         let mut stdout = Vec::new();
@@ -76537,7 +76579,15 @@ mod tests {
         ensure(stderr.is_empty(), "missing database stderr clean")?;
         let value: serde_json::Value =
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
-        ensure_equal(&value["success"], &serde_json::json!(false), "success flag")?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.error.v2"),
+            "error envelope schema",
+        )?;
+        ensure(
+            value.get("success").is_none(),
+            "ee.error.v2 must not include the success field from ee.response.v2",
+        )?;
         ensure_equal(
             &value["error"]["code"],
             &serde_json::json!("workspace_store_missing"),
@@ -77361,6 +77411,30 @@ mod tests {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let records_path = tempdir.path().join("verification-runs.json");
         let records = crate::models::sample_verification_run_records();
+        let remote_attestation = records
+            .first()
+            .and_then(|record| record.remote_artifact_attestation.as_ref())
+            .ok_or_else(|| "sample remote verification record needs an attestation".to_owned())?;
+        let target_triple = remote_attestation
+            .target
+            .as_deref()
+            .ok_or_else(|| "sample remote attestation needs a target".to_owned())?;
+        let target_profile = remote_attestation
+            .profile
+            .as_deref()
+            .ok_or_else(|| "sample remote attestation needs a profile".to_owned())?;
+        let build_command_hash = remote_attestation
+            .build_command_hash
+            .as_deref()
+            .ok_or_else(|| "sample remote attestation needs a build-command hash".to_owned())?;
+        let effective_input_hash = remote_attestation
+            .effective_input_hash
+            .as_deref()
+            .ok_or_else(|| "sample remote attestation needs an effective-input hash".to_owned())?;
+        let provenance_hash = remote_attestation
+            .provenance_hash
+            .as_deref()
+            .ok_or_else(|| "sample remote attestation needs a provenance hash".to_owned())?;
         let records_json = serde_json::to_string(&records)
             .map_err(|error| format!("serialize broker records: {error}"))?;
         fs::write(&records_path, records_json)
@@ -77385,6 +77459,16 @@ mod tests {
             "cargo_test",
             "--execution-substrate",
             "remote_artifact",
+            "--target-triple",
+            target_triple,
+            "--target-profile",
+            target_profile,
+            "--build-command-hash",
+            build_command_hash,
+            "--effective-input-hash",
+            effective_input_hash,
+            "--provenance-hash",
+            provenance_hash,
             "--bead-id",
             "bd-example",
         ]);

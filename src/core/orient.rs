@@ -20,7 +20,7 @@ use super::context::{
 };
 use super::decide::{DecideItem, DecideRevisitOptions, decide_revisit};
 use super::search::{
-    SearchDedupMode, SearchDegradation, SearchHit, SearchOptions, SearchSourceMode, SearchStatus,
+    SearchDedupMode, SearchDegradation, SearchOptions, SearchSourceMode, SearchStatus,
     run_context_search_with_preloaded_memories,
 };
 use crate::db::{DbConnection, StoredMemory, StoredWorkspace};
@@ -363,6 +363,24 @@ fn orient_fast_relevant_content(
         )));
     }
 
+    // The index is derived state; render tags from the authoritative store so
+    // adapter metadata projection changes cannot silently strip them from an
+    // otherwise valid fast-orientation result.
+    let hit_doc_ids = context_search
+        .report
+        .results
+        .iter()
+        .take(ORIENT_FAST_CONTENT_LIMIT)
+        .map(|hit| hit.doc_id.as_str())
+        .collect::<Vec<_>>();
+    let tags_by_memory = connection
+        .get_memory_tags_batch(&hit_doc_ids)
+        .map_err(|error| {
+            orient_fast_relevant_unavailable(format!(
+                "Bounded lexical retrieval could not load authoritative memory tags: {error}"
+            ))
+        })?;
+
     let mut rendered = Vec::with_capacity(ORIENT_FAST_CONTENT_LIMIT);
     let mut freshness_file_cache = crate::core::memory::EvidenceFreshnessFileCache::default();
     for hit in &context_search.report.results {
@@ -425,7 +443,9 @@ fn orient_fast_relevant_content(
             id: memory.id.clone(),
             snippet: orient_fast_snippet(&memory.content),
             created_at: memory.created_at.clone(),
-            tags: orient_fast_public_tags(orient_fast_search_hit_tags(hit)),
+            tags: orient_fast_public_tags(
+                tags_by_memory.get(&hit.doc_id).cloned().unwrap_or_default(),
+            ),
             provenance: vec![provenance],
             why: why.to_owned(),
         });
@@ -477,32 +497,6 @@ fn orient_fast_relevant_provider_issue(
         severity: degradation.severity.clone(),
         message: degradation.message.clone(),
         repair: degradation.repair.clone(),
-    })
-}
-
-fn orient_fast_search_hit_tags(hit: &SearchHit) -> Vec<String> {
-    let Some(value) = hit
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("tags"))
-    else {
-        return Vec::new();
-    };
-    if let Some(tags) = value.as_array() {
-        return tags
-            .iter()
-            .filter_map(JsonValue::as_str)
-            .map(str::trim)
-            .filter(|tag| !tag.is_empty())
-            .map(str::to_owned)
-            .collect();
-    }
-    value.as_str().map_or_else(Vec::new, |tags| {
-        tags.split(',')
-            .map(str::trim)
-            .filter(|tag| !tag.is_empty())
-            .map(str::to_owned)
-            .collect()
     })
 }
 
