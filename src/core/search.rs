@@ -15919,7 +15919,7 @@ mod tests {
         let connection =
             DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
         for offset in 0..=SEARCH_INDEX_LARGE_GAP_THRESHOLD {
-            let memory_id = format!("mem_live_large_gap_{offset:08}");
+            let memory_id = format!("mem_live_large_gap_{offset:011}");
             let content = format!("Unindexed live large-gap memory number {offset}.");
             connection
                 .insert_memory(&memory_id, &test_memory_input(workspace_id, &content))
@@ -18641,7 +18641,7 @@ mod tests {
             hits[0]
                 .explanation
                 .as_ref()
-                .is_some_and(|explanation| explanation.summary.contains("Score 1.0000"))
+                .is_some_and(|explanation| explanation.summary.contains("Relevance 1.0000"))
         );
     }
 
@@ -19579,7 +19579,7 @@ mod tests {
                 &crate::db::CreateModelRegistryInput {
                     workspace_id: registry_entry.workspace_id.clone(),
                     provider: registry_entry.provider,
-                    model_name: registry_entry.model_name.clone(),
+                    model_name: "test-unavailable-model".to_owned(),
                     purpose: registry_entry.purpose,
                     dimension: registry_entry.dimension,
                     distance_metric: registry_entry.distance_metric,
