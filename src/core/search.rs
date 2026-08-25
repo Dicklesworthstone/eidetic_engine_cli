@@ -566,28 +566,15 @@ struct SearchTierState<'a> {
     semantic_embedder_degraded: Option<&'a str>,
 }
 
-/// Default relevance floor for 0..=1-normalized score sources (bead
+/// Default relevance floor for the public `relevanceScore` projection (bead
 /// bd-17c65.2.1 / B1).
 ///
 /// Calibrated against the 2026-05-10 corpus where junk semantic_fast hits
-/// scored `< 0.03` and meaningful hits scored `0.10..=0.50`. Applies to
-/// `Lexical` (normalized BM25), `SemanticFast`, `SemanticQuality`, and
-/// `Reranked` (cross-encoder) score sources. Configurable per-call via
-/// `--relevance-floor` and per-workspace via `search.relevance_floor`
-/// config.
+/// scored `< 0.03` and meaningful hits scored `0.10..=0.50`. Every retrieval
+/// scale is projected into this `0.0..=1.0` domain before the floor is applied.
+/// Configurable per-call via `--relevance-floor` and per-workspace via
+/// `search.relevance_floor` config.
 pub const DEFAULT_RELEVANCE_FLOOR: f32 = 0.05;
-
-/// Default relevance floor for `Hybrid` (RRF-fused) score-source (bead
-/// bd-n22a4, B2-followup).
-///
-/// RRF scores have magnitude `arms_contributing / (k + 1)` which tops out
-/// around `0.033` for k=60 and two arms — applying the cosine-domain
-/// [`DEFAULT_RELEVANCE_FLOOR`] of 0.05 to those scores would filter every
-/// reasonable hybrid result and surface only `no_relevant_results`
-/// degraded entries to the agent. This floor preserves the noise-vs-
-/// signal cut for RRF-magnitude scores (top hit at 1/61 ≈ 0.0164 still
-/// passes; rank ~190 single-arm RRF gets filtered).
-pub const DEFAULT_RELEVANCE_FLOOR_HYBRID: f32 = 0.005;
 
 const DEFAULT_SEARCH_LEXICAL_WEIGHT: f32 = 0.45;
 const DEFAULT_SEARCH_SEMANTIC_WEIGHT: f32 = 0.45;
@@ -605,55 +592,37 @@ pub const RRF_HYBRID_TYPICAL_MAX: f32 = 2.0 / 61.0;
 
 /// Deterministic normalized relevance score in `0.0..=1.0` (bd-1et0v.11).
 ///
-/// Maps a raw [`SearchHit::score`] to a self-describing `0..1` value an agent
-/// can read as "how relevant". `score` magnitudes differ by [`ScoreSource`]:
-/// cosine-domain sources are already unit-normalized and only need clamping,
-/// while `Hybrid` carries an RRF-fused magnitude topping out near
+/// Maps a [`SearchHit::score`] to a self-describing `0..1` value an agent can
+/// read as "how relevant". Lexical-only results are batch-normalized at the
+/// Frankensearch adapter boundary while retaining raw BM25 in `lexicalScore`.
+/// Cosine-domain sources are clamped to positive similarity, while `Hybrid`
+/// carries an RRF-fused magnitude topping out near
 /// [`RRF_HYBRID_TYPICAL_MAX`] (`~0.033`). Dividing the hybrid magnitude by that
 /// reference rescales a top hit to `~1.0` so an agent does not misread the
-/// inherent `~0.03` RRF score as "no match". Pure and order-preserving within a
-/// source — an interpretability projection, never a ranking input.
+/// inherent `~0.03` RRF score as "no match". The projection is pure and
+/// order-preserving within a scale. Native engine scores still rank one search
+/// execution; the projection only compares hits when independently scored
+/// result sets are merged across scales.
 #[must_use]
-pub fn normalized_relevance_score(source: ScoreSource, raw_score: f32) -> f32 {
+pub fn normalized_relevance_score(source: ScoreSource, score: f32) -> f32 {
     let normalized = match source {
-        ScoreSource::Hybrid => raw_score / RRF_HYBRID_TYPICAL_MAX,
+        ScoreSource::Hybrid => score / RRF_HYBRID_TYPICAL_MAX,
         ScoreSource::Lexical
         | ScoreSource::SemanticFast
         | ScoreSource::SemanticQuality
         | ScoreSource::Reranked
-        | ScoreSource::HashControl => raw_score,
+        | ScoreSource::HashControl => score,
     };
     normalized.clamp(0.0, 1.0)
-}
-
-/// Per-source default relevance floor.
-///
-/// Returns [`DEFAULT_RELEVANCE_FLOOR_HYBRID`] for `Hybrid` (RRF-fused)
-/// hits and [`DEFAULT_RELEVANCE_FLOOR`] for every source whose scores
-/// are already 0..=1 normalized. Used when the caller passes no explicit
-/// `relevance_floor` override — the explicit override still applies
-/// uniformly to every hit regardless of source so existing test fixtures
-/// and `--relevance-floor 0.0` keep working unchanged.
-///
-/// Bead bd-n22a4 (B2-followup).
-#[must_use]
-pub const fn default_floor_for_source(source: ScoreSource) -> f32 {
-    match source {
-        ScoreSource::Hybrid => DEFAULT_RELEVANCE_FLOOR_HYBRID,
-        ScoreSource::Lexical
-        | ScoreSource::SemanticFast
-        | ScoreSource::SemanticQuality
-        | ScoreSource::Reranked
-        | ScoreSource::HashControl => DEFAULT_RELEVANCE_FLOOR,
-    }
 }
 
 pub(crate) fn search_hit_meets_relevance_floor(
     hit: &SearchHit,
     user_floor_override: Option<f32>,
 ) -> bool {
-    let floor = user_floor_override.unwrap_or_else(|| default_floor_for_source(hit.source));
-    hit.score.is_finite() && hit.score >= floor
+    let floor = user_floor_override.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
+    let relevance_score = hit.relevance_score();
+    relevance_score.is_finite() && relevance_score >= floor
 }
 
 impl SearchOptions {
@@ -1744,7 +1713,7 @@ impl SearchHit {
         normalized_relevance_score(self.source, self.score)
     }
 
-    /// Interpretation tag for the raw `score` scale (bd-1et0v.11).
+    /// Interpretation tag for the `score` scale (bd-1et0v.11).
     ///
     /// See [`ScoreSource::score_kind`]. Surfaced as `scoreKind`.
     #[must_use]
@@ -2742,22 +2711,20 @@ impl ScoreSource {
         }
     }
 
-    /// Interpretation tag for the raw `score` scale (bd-1et0v.11).
+    /// Interpretation tag for the `score` scale (bd-1et0v.11).
     ///
-    /// Cosine-domain sources are already unit-normalized (`0.0..=1.0`), so
-    /// `unit_normalized`. `Hybrid` carries an RRF-fused magnitude that tops out
-    /// near [`RRF_HYBRID_TYPICAL_MAX`] (`~0.033`), so `rrf_fused` — the tag tells
-    /// an agent the raw `score` is *not* a probability and must be read via
-    /// `relevanceScore`, not at face value. `Reranked` means the raw score is
-    /// the cross-encoder score carried in `rerankScore`.
+    /// Lexical-only results expose a unit-normalized ranking score while
+    /// retaining raw BM25 in `lexicalScore`. Semantic and hash-control results
+    /// expose raw cosine similarity. `Hybrid` carries an RRF-fused magnitude
+    /// that tops out near [`RRF_HYBRID_TYPICAL_MAX`] (`~0.033`). `Reranked`
+    /// means the score is the cross-encoder score carried in `rerankScore`.
     #[must_use]
     pub const fn score_kind(self) -> &'static str {
         match self {
             Self::Hybrid => "rrf_fused",
             Self::Reranked => "reranked",
-            Self::Lexical | Self::SemanticFast | Self::SemanticQuality | Self::HashControl => {
-                "unit_normalized"
-            }
+            Self::Lexical => "unit_normalized",
+            Self::SemanticFast | Self::SemanticQuality | Self::HashControl => "cosine_similarity",
         }
     }
 }
@@ -2827,11 +2794,13 @@ impl SearchReport {
         for (i, hit) in visible_results.iter().enumerate() {
             let attribution = team_search_attribution_suffix(hit).unwrap_or_default();
             output.push_str(&format!(
-                "  {}. {}{} (score: {:.4}, source: {})\n",
+                "  {}. {}{} (relevance: {:.4}, score: {:.4} {}, source: {})\n",
                 i + 1,
                 hit.doc_id,
                 attribution,
+                hit.relevance_score(),
                 hit.score,
+                hit.score_kind(),
                 hit.source.as_str()
             ));
             // Show a one-line body preview so a human/agent can tell what each
@@ -3530,9 +3499,11 @@ impl SearchHit {
             .map(|explanation| explanation.summary.clone())
             .unwrap_or_else(|| {
                 format!(
-                    "Selected by {} retrieval with score {:.4}.",
+                    "Selected by {} retrieval with relevance {:.4} from score {:.4} ({}).",
                     self.source.as_str(),
-                    self.score
+                    self.relevance_score(),
+                    self.score,
+                    self.score_kind(),
                 )
             })
     }
@@ -4522,7 +4493,7 @@ fn annotate_hits_with_score_calibration(
     // "unknown", not "95% sure".
     let calibrated = calibration.residual_quantile.is_some();
     for hit in hits {
-        let interval = calibration.interval_for_score(hit.score);
+        let interval = calibration.interval_for_score(hit.relevance_score());
         let mut metadata = hit
             .metadata
             .take()
@@ -5467,12 +5438,7 @@ fn search_hit_pack_item(index: usize, hit: &SearchHit) -> Option<PackDraftItem> 
                 .or_else(|| metadata_string(metadata, "content"))
                 .unwrap_or_default(),
         ),
-        relevance: UnitScore::parse(if hit.score.is_nan() {
-            0.0
-        } else {
-            hit.score.clamp(0.0, 1.0)
-        })
-        .unwrap_or_else(|_| UnitScore::neutral()),
+        relevance: UnitScore::parse(hit.relevance_score()).unwrap_or_else(|_| UnitScore::neutral()),
         utility: metadata_f32(metadata, SEARCH_ANALYSIS_UTILITY_KEY)
             .and_then(|value| {
                 UnitScore::parse(if value.is_nan() {
@@ -5638,9 +5604,10 @@ impl RetrievalMetrics {
         for hit in hits {
             source_counts.record(hit.source);
             field_coverage.record(hit);
-            min_score = Some(min_score.map_or(hit.score, |score| score.min(hit.score)));
-            max_score = Some(max_score.map_or(hit.score, |score| score.max(hit.score)));
-            score_sum += hit.score;
+            let relevance_score = hit.relevance_score();
+            min_score = Some(min_score.map_or(relevance_score, |score| score.min(relevance_score)));
+            max_score = Some(max_score.map_or(relevance_score, |score| score.max(relevance_score)));
+            score_sum += relevance_score;
         }
 
         let mean = if hits.is_empty() {
@@ -5656,7 +5623,7 @@ impl RetrievalMetrics {
             elapsed_ms,
             source_counts,
             score_distribution: RetrievalScoreDistribution {
-                top: hits.first().map(|hit| hit.score),
+                top: hits.first().map(SearchHit::relevance_score),
                 min: min_score,
                 max: max_score,
                 mean,
@@ -6171,9 +6138,9 @@ impl ScoreExplanation {
                     factors.push(ScoreFactor::new(
                         "lexical",
                         lex,
-                        "BM25 term matching",
+                        "raw BM25 term matching before returned-pool normalization",
                         "lexical_score",
-                        "score = lexical_score",
+                        "score = minmax(lexical_score, returned_pool)",
                     ));
                     summary_parts.push(format!("lexical match ({:.2})", lex));
                 }
@@ -6268,26 +6235,39 @@ impl ScoreExplanation {
         }
 
         let summary = if summary_parts.is_empty() {
-            format!("Score {:.4} from {} source", hit.score, hit.source.as_str())
+            format!(
+                "Relevance {:.4} from {} score {:.4} ({}).",
+                hit.relevance_score(),
+                hit.source.as_str(),
+                hit.score,
+                hit.score_kind()
+            )
         } else {
-            format!("Score {:.4} via {}", hit.score, summary_parts.join(", "))
+            format!(
+                "Relevance {:.4} from score {:.4} ({}) via {}.",
+                hit.relevance_score(),
+                hit.score,
+                hit.score_kind(),
+                summary_parts.join(", ")
+            )
         };
 
         Self { summary, factors }
     }
 }
 
-/// Dedupe a hit list on `docId`, keeping the highest-scoring occurrence
+/// Dedupe a hit list on `docId`, keeping the highest-relevance occurrence
 /// of each distinct id. Stable: the position of the first occurrence is
-/// preserved; only the score / source / explanation fields are upgraded
-/// in place when a higher-scoring duplicate is found later in the list.
+/// preserved; the complete hit is upgraded in place when a more relevant
+/// duplicate is found later in the list.
 ///
 /// Returns `(deduped, collapsed_count)`. Bead bd-17c65.2.3 (B3).
 fn dedupe_hits_on_doc_id(hits: Vec<SearchHit>) -> (Vec<SearchHit>, usize) {
     // Use a HashMap to track first-seen index per doc_id. Iterate in
     // input order so the first occurrence's index is stable. For each
-    // duplicate, compare scores and (only if strictly higher) overwrite
-    // the stored hit in place — preserving ordering.
+    // duplicate, compare the cross-source relevance projection and (only if
+    // strictly higher) overwrite the stored hit in place — preserving
+    // ordering. Raw BM25, cosine, and RRF scores are not directly comparable.
     let mut seen: std::collections::HashMap<String, usize> =
         std::collections::HashMap::with_capacity(hits.len());
     let mut deduped: Vec<SearchHit> = Vec::with_capacity(hits.len());
@@ -6295,15 +6275,19 @@ fn dedupe_hits_on_doc_id(hits: Vec<SearchHit>) -> (Vec<SearchHit>, usize) {
     for hit in hits {
         if let Some(&index) = seen.get(&hit.doc_id) {
             collapsed += 1;
-            // Upgrade only on strictly higher finite score so ties keep the
-            // first-seen entry (deterministic). A later finite score must
-            // still displace an earlier non-finite score; otherwise one
+            // Upgrade only on strictly higher finite relevance so ties keep
+            // the first-seen entry (deterministic). A later finite relevance
+            // must still displace an earlier non-finite relevance; otherwise one
             // malformed arm can cause the relevance floor to drop a valid
             // duplicate result.
-            let existing_score = deduped[index].score;
-            let should_replace = match (existing_score.is_finite(), hit.score.is_finite()) {
+            let existing_relevance = deduped[index].relevance_score();
+            let candidate_relevance = hit.relevance_score();
+            let should_replace = match (
+                existing_relevance.is_finite(),
+                candidate_relevance.is_finite(),
+            ) {
                 (false, true) => true,
-                (true, true) => hit.score > existing_score,
+                (true, true) => candidate_relevance > existing_relevance,
                 _ => false,
             };
             if should_replace {
@@ -8210,16 +8194,15 @@ async fn run_search_inner_with_performance(
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     match search_result {
-        Ok((raw_hits, errors)) => {
+        Ok((mut raw_hits, errors)) => {
             // Bead bd-17c65.2.3 (B3): dedupe on docId BEFORE the floor
             // filter so the floor metrics reflect the deduped pool.
             // After fusion, the same docId can appear multiple times
             // (different arms promoting it, MMR rescoring tied
-            // candidates, etc.). Keep the highest-scoring occurrence
-            // and discard the rest. Stable ordering is preserved (first
-            // occurrence's position wins among ties).
-            let dedupe_doc_id_start = Instant::now();
-            let (mut raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(raw_hits);
+            // candidates, or a global-memory lane overlapping the local
+            // result set). Keep the highest-relevance occurrence and discard
+            // the rest. Stable ordering is preserved (first occurrence's
+            // position wins among ties).
             let global_hits = global_store_lexical_hits(
                 options,
                 effective_limit,
@@ -8230,6 +8213,8 @@ async fn run_search_inner_with_performance(
                 raw_hits.extend(global_hits);
                 sort_search_hits_by_score_order(&mut raw_hits);
             }
+            let dedupe_doc_id_start = Instant::now();
+            let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(raw_hits);
             let evidence_visibility_start = Instant::now();
             let raw_hits =
                 apply_live_evidence_visibility(options, raw_hits, &mut degraded, read_connection);
@@ -8247,22 +8232,16 @@ async fn run_search_inner_with_performance(
                 };
             trace.record_elapsed("search::dedupeMutualInformation", dedupe_mi_start);
 
-            // Bead bd-17c65.2.1 (B1): apply relevance floor.
-            // Bead bd-n22a4 (B2-followup): when the caller does not pass an
-            // explicit override the floor is per-hit-source — RRF-fused
-            // hybrid hits get `DEFAULT_RELEVANCE_FLOOR_HYBRID` (≈0.005)
-            // while 0..=1-normalized sources keep `DEFAULT_RELEVANCE_FLOOR`
-            // (0.05). An explicit override still applies uniformly so
-            // `--relevance-floor 0.0` and existing golden fixtures with a
-            // pinned floor keep behaving exactly as before.
+            // Bead bd-17c65.2.1 (B1): apply the floor to the comparable
+            // `relevanceScore` projection, never to source-dependent raw
+            // BM25, cosine, or RRF magnitudes.
             let user_floor_override = options.relevance_floor;
             let pre_floor_count = raw_hits.len();
-            let pre_floor_top_score = raw_hits.first().map(|hit| hit.score);
-            let pre_floor_top_source = raw_hits.first().map(|hit| hit.source);
+            let pre_floor_top_score = raw_hits.first().map(SearchHit::relevance_score);
 
             // Partition into above-floor (kept) and below-floor (dropped).
-            // Floor of 0.0 is "disabled" — keep everything. NaN scores are
-            // always dropped because NaN >= per_hit_floor is false.
+            // Floor of 0.0 is "disabled" — keep everything. Non-finite
+            // relevance projections are always dropped.
             let relevance_floor_start = Instant::now();
             let (above_floor, below_floor): (Vec<_>, Vec<_>) = raw_hits
                 .into_iter()
@@ -8321,19 +8300,7 @@ async fn run_search_inner_with_performance(
             trace.record_elapsed("search::preloadReturnedMemories", preload_start);
             let kept = above_floor.len();
 
-            // Representative floor for degradation reporting + metrics:
-            // pick the floor that applies to the top remaining hit, or to
-            // the top pre-filter hit when the result set is empty. Falls
-            // back to `DEFAULT_RELEVANCE_FLOOR` when there were no hits at
-            // all (NoResults). The user override always wins if set.
-            let representative_floor = user_floor_override.unwrap_or_else(|| {
-                above_floor
-                    .first()
-                    .map(|hit| hit.source)
-                    .or(pre_floor_top_source)
-                    .map_or(DEFAULT_RELEVANCE_FLOOR, default_floor_for_source)
-            });
-            let floor = representative_floor;
+            let floor = user_floor_override.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
 
             // Surface dedupe count as a low-severity info signal when
             // it fired; agents reading the metrics can correlate with
@@ -8360,7 +8327,7 @@ async fn run_search_inner_with_performance(
             // the floor but the top score is below 2× the floor (the
             // B4 "weak" classifier), emit a low-severity signal so
             // agents can pre-empt low-confidence retrieval failures.
-            if let Some(top) = above_floor.first().map(|hit| hit.score) {
+            if let Some(top) = above_floor.first().map(SearchHit::relevance_score) {
                 if top.is_finite() && top >= floor && top < floor * 2.0 {
                     degraded.push(SearchDegradation::weak_query_recall(floor, top));
                 }
@@ -8383,7 +8350,7 @@ async fn run_search_inner_with_performance(
                 kept,
                 floor_counts,
                 floor,
-                above_floor.first().map(|hit| hit.score),
+                above_floor.first().map(SearchHit::relevance_score),
                 dropped,
                 &query_assist_candidates,
             );
@@ -8459,7 +8426,7 @@ async fn run_search_inner_with_performance(
                     if let Some(miss_reason) = classify_search_query_miss(
                         floor_counts,
                         floor,
-                        above_floor.first().map(|hit| hit.score),
+                        above_floor.first().map(SearchHit::relevance_score),
                     ) {
                         let miss_details =
                             search_query_miss_audit_details(SearchQueryMissAuditDetails {
@@ -8471,7 +8438,9 @@ async fn run_search_inner_with_performance(
                                 dropped_below_floor: dropped,
                                 floor,
                                 top_score_before_floor: pre_floor_top_score,
-                                top_score_after_floor: above_floor.first().map(|hit| hit.score),
+                                top_score_after_floor: above_floor
+                                    .first()
+                                    .map(SearchHit::relevance_score),
                             });
                         audit_batch.push(
                             audit_ids,
@@ -8487,6 +8456,8 @@ async fn run_search_inner_with_performance(
                             "queryHash": &q_hash,
                             "rank": (rank + 1) as u32,
                             "score": hit.score,
+                            "relevanceScore": hit.relevance_score(),
+                            "scoreKind": hit.score_kind(),
                             "source": hit.source.as_str(),
                         })
                         .to_string();
@@ -8743,15 +8714,11 @@ async fn run_diag_search_with_cx_and_embedder_policy(
         } else {
             (raw_hits, 0, 0)
         };
-    // Bead bd-n22a4 (B2-followup): mirror `run_search`'s per-source
-    // adaptive floor so `ee diag search` reports the same floor
-    // semantics that the live search path applies — without this the
-    // diag arm would silently disagree with `ee search` on which hits
-    // pass the default floor.
+    // Mirror `run_search`'s relevance projection and shared floor so
+    // `ee diag search` cannot silently disagree with the live path.
     let user_floor_override = options.relevance_floor;
     let pre_floor_count = raw_hits.len();
-    let pre_floor_top_score = raw_hits.first().map(|hit| hit.score);
-    let pre_floor_top_source = raw_hits.first().map(|hit| hit.source);
+    let pre_floor_top_score = raw_hits.first().map(SearchHit::relevance_score);
     let (above_floor, below_floor): (Vec<_>, Vec<_>) = raw_hits
         .into_iter()
         .partition(|hit| search_hit_meets_relevance_floor(hit, user_floor_override));
@@ -8768,13 +8735,7 @@ async fn run_diag_search_with_cx_and_embedder_policy(
     let kept = above_floor.len();
     let dropped = below_floor.len();
     let query_assist_candidates = query_assist_visible_candidates(options, &below_floor);
-    let floor = user_floor_override.unwrap_or_else(|| {
-        above_floor
-            .first()
-            .map(|hit| hit.source)
-            .or(pre_floor_top_source)
-            .map_or(DEFAULT_RELEVANCE_FLOOR, default_floor_for_source)
-    });
+    let floor = user_floor_override.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
 
     if duplicates_collapsed > 0 {
         degraded.push(SearchDegradation::duplicates_collapsed(
@@ -8792,7 +8753,7 @@ async fn run_diag_search_with_cx_and_embedder_policy(
             ));
         }
     }
-    if let Some(top) = above_floor.first().map(|hit| hit.score) {
+    if let Some(top) = above_floor.first().map(SearchHit::relevance_score) {
         if top.is_finite() && top >= floor && top < floor * 2.0 {
             degraded.push(SearchDegradation::weak_query_recall(floor, top));
         }
@@ -8812,7 +8773,7 @@ async fn run_diag_search_with_cx_and_embedder_policy(
         kept,
         floor_counts,
         floor,
-        above_floor.first().map(|hit| hit.score),
+        above_floor.first().map(SearchHit::relevance_score),
         dropped,
         &query_assist_candidates,
     );
@@ -9814,17 +9775,12 @@ async fn diag_search_sync(
                     .search(&cx, &query_owned, limit)
                     .await
                     .map(|results| {
-                        results
-                            .into_iter()
-                            .map(|result| {
-                                search_hit_from_scored_result(
-                                    result,
-                                    explain,
-                                    source_mode,
-                                    fusion_weights,
-                                )
-                            })
-                            .collect()
+                        search_hits_from_scored_results(
+                            results,
+                            explain,
+                            FrankensearchFinalScoreScale::Native,
+                            fusion_weights,
+                        )
                     })
                     .map_err(|error| {
                         map_frankensearch_error(&cx, "Diagnostic lexical search failed", error)
@@ -9848,18 +9804,15 @@ async fn diag_search_sync(
                     searcher
                         .search_collect(&cx, &query_owned, limit)
                         .await
-                        .map(|(results, _metrics)| {
-                            results
-                                .into_iter()
-                                .map(|result| {
-                                    search_hit_from_scored_result(
-                                        result,
-                                        explain,
-                                        source_mode,
-                                        fusion_weights,
-                                    )
-                                })
-                                .collect()
+                        .map(|(results, metrics)| {
+                            let final_score_scale =
+                                two_tier_final_score_scale(source_mode, &results, &metrics);
+                            search_hits_from_scored_results(
+                                results,
+                                explain,
+                                final_score_scale,
+                                fusion_weights,
+                            )
                         })
                         .map_err(|error| {
                             map_frankensearch_error(&cx, "Diagnostic search failed", error)
@@ -10110,13 +10063,10 @@ fn weighted_available_component_mix(
 
 pub(crate) fn configured_fusion_adjustment(
     hit: &SearchHit,
-    source_mode: SearchSourceMode,
+    score_is_rrf_fused: bool,
     weights: SearchFusionWeights,
 ) -> Option<SearchFusionAdjustment> {
-    if source_mode != SearchSourceMode::Hybrid
-        || hit.source == ScoreSource::Reranked
-        || !hit.score.is_finite()
-    {
+    if !score_is_rrf_fused || hit.source == ScoreSource::Reranked || !hit.score.is_finite() {
         return None;
     }
 
@@ -10179,13 +10129,59 @@ fn append_configured_fusion_weight_factor(
     ));
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FrankensearchFinalScoreScale {
+    Native,
+    RrfFused,
+}
+
+fn two_tier_final_score_scale(
+    source_mode: SearchSourceMode,
+    results: &[crate::search::ScoredResult],
+    metrics: &frankensearch::TwoTierMetrics,
+) -> FrankensearchFinalScoreScale {
+    if source_mode != SearchSourceMode::Hybrid {
+        return FrankensearchFinalScoreScale::Native;
+    }
+
+    // `ScoreSource` identifies contributing lanes, not the final score scale:
+    // an RRF result with only one contributing lane is labelled Lexical or
+    // SemanticFast upstream. Conversely, the hybrid orchestrator can return
+    // native BM25 directly when it deliberately short-circuits or degrades.
+    // Frankensearch records time only when the fusion call actually ran; the
+    // explicit Hybrid source is a second semantic witness for synthetic and
+    // zero-duration executions.
+    if metrics.rrf_fusion_ms > 0.0
+        || results
+            .iter()
+            .any(|result| result.source == crate::search::ScoreSource::Hybrid)
+    {
+        FrankensearchFinalScoreScale::RrfFused
+    } else {
+        FrankensearchFinalScoreScale::Native
+    }
+}
+
 fn search_hit_from_scored_result(
     result: crate::search::ScoredResult,
     explain: bool,
-    source_mode: SearchSourceMode,
+    final_score_scale: FrankensearchFinalScoreScale,
     fusion_weights: SearchFusionWeights,
 ) -> SearchHit {
-    let source = score_source_from_frankensearch(result.source);
+    let upstream_source = score_source_from_frankensearch(result.source);
+    // Frankensearch reports which arm(s) contributed to a hit in `source`.
+    // When fusion actually ran, even a one-arm contribution is ranked on the
+    // RRF scale; when the orchestrator short-circuited to native lexical or
+    // semantic retrieval, the upstream source remains authoritative. Keep the
+    // component scores as arm-level provenance and classify the final score by
+    // the execution evidence captured above.
+    let source = if final_score_scale == FrankensearchFinalScoreScale::RrfFused
+        && upstream_source != ScoreSource::Reranked
+    {
+        ScoreSource::Hybrid
+    } else {
+        upstream_source
+    };
     let rerank_score = result.rerank_score.filter(|score| score.is_finite());
     // Frankensearch intentionally retains the pre-rerank retrieval score in
     // `ScoredResult::score` and writes the cross-encoder's final score to
@@ -10198,18 +10194,27 @@ fn search_hit_from_scored_result(
     } else {
         result.score
     };
+    let lexical_score = if upstream_source == ScoreSource::Lexical {
+        result.lexical_score.or(Some(result.score))
+    } else {
+        result.lexical_score
+    };
     let mut hit = SearchHit {
         doc_id: result.doc_id.to_string(),
         score,
         source,
         fast_score: result.fast_score,
         quality_score: result.quality_score,
-        lexical_score: result.lexical_score,
+        lexical_score,
         rerank_score,
         metadata: result.metadata.map(|m| (*m).clone()),
         explanation: None,
     };
-    let fusion_adjustment = configured_fusion_adjustment(&hit, source_mode, fusion_weights);
+    let fusion_adjustment = configured_fusion_adjustment(
+        &hit,
+        final_score_scale == FrankensearchFinalScoreScale::RrfFused,
+        fusion_weights,
+    );
     if let Some(adjustment) = fusion_adjustment {
         hit.score = (hit.score * adjustment.multiplier).max(0.0);
     }
@@ -10223,14 +10228,51 @@ fn search_hit_from_scored_result(
     hit
 }
 
+/// Convert one complete Frankensearch result pool into EE search hits.
+///
+/// Pure lexical retrieval carries unbounded, query-dependent BM25 values.
+/// Normalize that complete pool with Frankensearch's canonical min-max
+/// primitive before any relevance-floor, quality, calibration, or pack
+/// consumer sees it. The original engine value remains available in
+/// `lexicalScore`; ordering is unchanged because min-max normalization is
+/// monotone. Other execution modes retain their raw final ranking score.
+fn search_hits_from_scored_results(
+    results: Vec<crate::search::ScoredResult>,
+    explain: bool,
+    final_score_scale: FrankensearchFinalScoreScale,
+    fusion_weights: SearchFusionWeights,
+) -> Vec<SearchHit> {
+    let mut hits = results
+        .into_iter()
+        .map(|result| {
+            search_hit_from_scored_result(result, explain, final_score_scale, fusion_weights)
+        })
+        .collect::<Vec<_>>();
+
+    if final_score_scale == FrankensearchFinalScoreScale::Native
+        && hits.iter().all(|hit| hit.source == ScoreSource::Lexical)
+    {
+        let raw_scores = hits.iter().map(|hit| hit.score).collect::<Vec<_>>();
+        let normalized_scores = frankensearch::fusion::normalize_scores(&raw_scores);
+        for (hit, normalized_score) in hits.iter_mut().zip(normalized_scores) {
+            hit.score = normalized_score;
+            if explain {
+                hit.explanation = Some(ScoreExplanation::generate(hit));
+            }
+        }
+    }
+
+    hits
+}
+
 pub(crate) fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
     // bd-2vq2z.30: when a reranker ran, its order must survive to the output.
     // Frankensearch returns reranked candidates carrying `rerank_score`;
     // `search_hit_from_scored_result` promotes that value into the public
     // `.score`. The marker still determines that reranked hits sort ahead of
     // fusion-only hits and amongst themselves by descending rerank score;
-    // fusion-only hits keep the prior descending `.score` order, so
-    // non-reranked queries are unchanged.
+    // non-reranked hits use the cross-scale relevance projection and retain
+    // native score ordering within one score kind.
     hits.sort_by(rerank_aware_hit_order);
     let mut run_start = 0_usize;
     while run_start < hits.len() {
@@ -10485,14 +10527,20 @@ fn preload_returned_search_memories(
 /// Ranking order for final search hits (bd-2vq2z.30). Reranked hits (those
 /// carrying a `rerank_score`) outrank fusion-only hits and order amongst
 /// themselves by descending rerank score, so a reranker's decision survives to
-/// the output instead of being discarded by a fusion-score re-sort. Fusion-only
-/// hits fall back to descending fusion `.score`.
+/// the output instead of being discarded by a fusion-score re-sort. Non-reranked
+/// hits use `relevanceScore`, the only comparable cross-source projection. The
+/// native score breaks relevance ties within a score kind, preserving engine
+/// ordering where the projection clamps multiple values to the same endpoint.
 fn rerank_aware_hit_order(left: &SearchHit, right: &SearchHit) -> std::cmp::Ordering {
     match (left.rerank_score, right.rerank_score) {
         (Some(left_rerank), Some(right_rerank)) => right_rerank.total_cmp(&left_rerank),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => right.score.total_cmp(&left.score),
+        (None, None) => right
+            .relevance_score()
+            .total_cmp(&left.relevance_score())
+            .then_with(|| left.score_kind().cmp(right.score_kind()))
+            .then_with(|| right.score.total_cmp(&left.score)),
     }
 }
 
@@ -11004,17 +11052,12 @@ async fn search_sync_with_performance(
             let convert_start = Instant::now();
             let converted = match search_result {
                 Ok(results) => {
-                    let mut hits: Vec<SearchHit> = results
-                        .into_iter()
-                        .map(|result| {
-                            search_hit_from_scored_result(
-                                result,
-                                explain,
-                                source_mode,
-                                fusion_weights,
-                            )
-                        })
-                        .collect();
+                    let mut hits = search_hits_from_scored_results(
+                        results,
+                        explain,
+                        FrankensearchFinalScoreScale::Native,
+                        fusion_weights,
+                    );
                     canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
                     sort_search_hits_by_score_order(&mut hits);
                     Ok((hits, Vec::new()))
@@ -11165,7 +11208,8 @@ async fn search_sync_with_performance(
 
         let convert_start = Instant::now();
         let converted = match search_result {
-            Ok((results, _metrics)) => {
+            Ok((results, metrics)) => {
+                let final_score_scale = two_tier_final_score_scale(source_mode, &results, &metrics);
                 let reranked_count = results
                     .iter()
                     .filter(|result| result.rerank_score.is_some())
@@ -11183,12 +11227,12 @@ async fn search_sync_with_performance(
                         reranked_count,
                     );
                 }
-                let mut hits: Vec<SearchHit> = results
-                    .into_iter()
-                    .map(|result| {
-                        search_hit_from_scored_result(result, explain, source_mode, fusion_weights)
-                    })
-                    .collect();
+                let mut hits = search_hits_from_scored_results(
+                    results,
+                    explain,
+                    final_score_scale,
+                    fusion_weights,
+                );
                 canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
                 sort_search_hits_by_score_order(&mut hits);
                 Ok((hits, Vec::new()))
@@ -15823,7 +15867,7 @@ mod tests {
         std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
         let database_path = workspace.join("ee.db");
         let index_dir = workspace.join("index");
-        let workspace_id = "wsp_live_large_gap_0000000000";
+        let workspace_id = "wsp_live_large_gap_00000000000";
         let seed_id = "mem_live_large_gap_seed_000000";
         let seed_content = "Live large-gap seed remains in the old lexical index.";
 
@@ -16560,6 +16604,10 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
+        let indexed_generation = connection
+            .get_workspace_generation(&workspace_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "evidence fixture omitted workspace generation".to_owned())?;
         // Public search commands acquire their own read-only snapshot. Close
         // the setup writer before crossing that boundary so the regression
         // observes durable storage rather than a backend-specific live
@@ -16593,7 +16641,12 @@ mod tests {
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;
-        write_current_index_metadata(&index_dir, 2)?;
+        crate::core::index::write_memory_eval_index_metadata_for_generation(
+            &index_dir,
+            indexed_generation,
+            2,
+        )
+        .map_err(|error| error.to_string())?;
 
         let initially_admitted = run_search(&SearchOptions {
             workspace_path: workspace.clone(),
@@ -17322,7 +17375,7 @@ mod tests {
     fn retrieval_metrics_summarize_sources_scores_and_coverage() {
         let mut explained_hit = SearchHit {
             doc_id: "doc-hybrid".to_string(),
-            score: 0.9,
+            score: RRF_HYBRID_TYPICAL_MAX * 0.9,
             source: ScoreSource::Hybrid,
             fast_score: Some(0.7),
             quality_score: Some(0.9),
@@ -17466,7 +17519,10 @@ mod tests {
         assert!((explanation.factors[0].value - 0.75).abs() < 0.001);
         assert!(explanation.factors[0].contribution.contains("BM25"));
         assert_eq!(explanation.factors[0].source_field, "lexical_score");
-        assert_eq!(explanation.factors[0].formula, "score = lexical_score");
+        assert_eq!(
+            explanation.factors[0].formula,
+            "score = minmax(lexical_score, returned_pool)"
+        );
     }
 
     #[test]
@@ -17691,7 +17747,7 @@ mod tests {
         let summary = report.human_summary();
         assert!(
             summary.contains(
-                "1. mem_teamhit · from Priya / acme-analysis · 2026-07-30T14:02:00Z (score: 0.7000, source: lexical)"
+                "1. mem_teamhit · from Priya / acme-analysis · 2026-07-30T14:02:00Z (relevance: 0.7000, score: 0.7000 unit_normalized, source: lexical)"
             ),
             "human search must attribute teammate hits: {summary}"
         );
@@ -17704,7 +17760,7 @@ mod tests {
         let unbound_summary = unbound.human_summary();
         assert!(
             unbound_summary.contains(
-                "1. mem_teamhit · from Priya · 2026-07-30T14:02:00Z (score: 0.7000, source: lexical)"
+                "1. mem_teamhit · from Priya · 2026-07-30T14:02:00Z (relevance: 0.7000, score: 0.7000 unit_normalized, source: lexical)"
             ),
             "missing project must still name the teammate: {unbound_summary}"
         );
@@ -18367,6 +18423,40 @@ mod tests {
     }
 
     #[test]
+    fn search_hit_sort_compares_mixed_score_scales_by_relevance() {
+        let lexical = SearchHit {
+            doc_id: "mem_lexical".to_owned(),
+            score: 0.40,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(8.25),
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        };
+        let hybrid = SearchHit {
+            doc_id: "mem_hybrid".to_owned(),
+            score: RRF_HYBRID_TYPICAL_MAX * 0.80,
+            source: ScoreSource::Hybrid,
+            fast_score: Some(0.72),
+            quality_score: None,
+            lexical_score: Some(5.50),
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        };
+        let mut hits = vec![lexical, hybrid];
+
+        sort_search_hits_by_score_order(&mut hits);
+
+        assert_eq!(hits[0].doc_id, "mem_hybrid");
+        assert!((hits[0].relevance_score() - 0.80).abs() < 1e-6);
+        assert_eq!(hits[1].doc_id, "mem_lexical");
+        assert!((hits[1].relevance_score() - 0.40).abs() < 1e-6);
+    }
+
+    #[test]
     fn search_hit_sort_orders_cross_shard_ties_by_workspace_then_memory() {
         let mut shard_b = synthetic_hit("mem_01J0000000000000000000000A", 0.20);
         shard_b.metadata = Some(serde_json::json!({"workspace_id": "wsp_b"}));
@@ -18473,48 +18563,6 @@ mod tests {
         assert!((DEFAULT_RELEVANCE_FLOOR - 0.05).abs() < f32::EPSILON);
     }
 
-    // ========================================================================
-    // bd-n22a4 (B2-followup): per-source default floor coverage. RRF-fused
-    // hybrid hits get the hybrid floor (≈0.005) while 0..=1-normalized
-    // sources keep the semantic-domain floor (0.05).
-    // ========================================================================
-
-    #[test]
-    fn default_floor_hybrid_is_one_in_two_hundred() {
-        // 0.005 covers RRF magnitudes down to 1-arm rank ~190 (1/(60+1) at
-        // rank N is ≈ 0.0164 at rank 1, ≈ 0.005 at rank 190). Changing
-        // this value is a contract change — `ee search` users see
-        // dramatically different recall on hybrid queries.
-        assert!((DEFAULT_RELEVANCE_FLOOR_HYBRID - 0.005).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn default_floor_for_hybrid_returns_hybrid_constant() {
-        assert!(
-            (default_floor_for_source(ScoreSource::Hybrid) - DEFAULT_RELEVANCE_FLOOR_HYBRID).abs()
-                < f32::EPSILON
-        );
-    }
-
-    #[test]
-    fn default_floor_for_normalized_sources_returns_standard_floor() {
-        // Every source whose scores live in the 0..=1 cosine/BM25 domain
-        // keeps the standard floor — only the RRF-magnitude `Hybrid`
-        // source gets the lower one.
-        for source in [
-            ScoreSource::Lexical,
-            ScoreSource::SemanticFast,
-            ScoreSource::SemanticQuality,
-            ScoreSource::Reranked,
-        ] {
-            assert!(
-                (default_floor_for_source(source) - DEFAULT_RELEVANCE_FLOOR).abs() < f32::EPSILON,
-                "{:?} should use DEFAULT_RELEVANCE_FLOOR",
-                source,
-            );
-        }
-    }
-
     #[test]
     fn normalized_relevance_score_rescales_rrf_and_tags_kind() {
         // bd-1et0v.11: a top hybrid hit scores at the RRF-fused magnitude
@@ -18532,52 +18580,193 @@ mod tests {
         // Hybrid magnitudes above the reference (3+ contributing arms) clamp.
         assert!((normalized_relevance_score(ScoreSource::Hybrid, 0.06) - 1.0).abs() < f32::EPSILON);
 
-        // Cosine/BM25-domain sources are already 0..=1: pass through, only
-        // clamp out-of-range, and tag `unit_normalized`.
-        for source in [
-            ScoreSource::Lexical,
-            ScoreSource::SemanticFast,
-            ScoreSource::SemanticQuality,
-        ] {
-            assert!(
-                (normalized_relevance_score(source, 0.42) - 0.42).abs() < f32::EPSILON,
-                "{source:?} should pass a 0..=1 score through unchanged",
-            );
-            assert_eq!(source.score_kind(), "unit_normalized", "{source:?}");
-        }
+        assert_eq!(ScoreSource::Lexical.score_kind(), "unit_normalized");
+        assert_eq!(ScoreSource::SemanticFast.score_kind(), "cosine_similarity");
+        assert_eq!(
+            ScoreSource::SemanticQuality.score_kind(),
+            "cosine_similarity"
+        );
+        assert_eq!(ScoreSource::HashControl.score_kind(), "cosine_similarity");
+        assert!(
+            (normalized_relevance_score(ScoreSource::SemanticFast, 0.42) - 0.42).abs()
+                < f32::EPSILON
+        );
+        assert_eq!(
+            normalized_relevance_score(ScoreSource::SemanticFast, -0.3),
+            0.0
+        );
         assert_eq!(ScoreSource::Reranked.score_kind(), "reranked");
         assert!(
             (normalized_relevance_score(ScoreSource::Reranked, 0.42) - 0.42).abs() < f32::EPSILON
         );
-        assert!((normalized_relevance_score(ScoreSource::Lexical, 1.5) - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn lexical_batch_normalizes_raw_bm25_without_saturating_distinct_hits() {
+        let results = [9.0_f32, 5.0, 2.0]
+            .into_iter()
+            .enumerate()
+            .map(|(index, score)| crate::search::ScoredResult {
+                doc_id: format!("mem_bm25_{index}").into(),
+                score,
+                source: crate::search::ScoreSource::Lexical,
+                index: None,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some(score),
+                rerank_score: None,
+                explanation: None,
+                metadata: None,
+            })
+            .collect();
+        let hits = search_hits_from_scored_results(
+            results,
+            true,
+            FrankensearchFinalScoreScale::Native,
+            SearchFusionWeights::default(),
+        );
+
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].score, 1.0);
+        assert!((hits[1].score - (3.0 / 7.0)).abs() < 1e-6);
+        assert_eq!(hits[2].score, 0.0);
+        assert_eq!(hits[0].lexical_score, Some(9.0));
+        assert_eq!(hits[1].lexical_score, Some(5.0));
+        assert_eq!(hits[2].lexical_score, Some(2.0));
+        assert_eq!(hits[0].score_kind(), "unit_normalized");
+        assert_eq!(hits[0].relevance_score(), 1.0);
+        assert!(hits[0].relevance_score() > hits[1].relevance_score());
+        assert!(hits[1].relevance_score() > hits[2].relevance_score());
         assert!(
-            (normalized_relevance_score(ScoreSource::Lexical, -0.3) - 0.0).abs() < f32::EPSILON
+            hits[0]
+                .explanation
+                .as_ref()
+                .is_some_and(|explanation| explanation.summary.contains("Score 1.0000"))
         );
     }
 
     #[test]
-    fn hybrid_floor_admits_typical_rrf_scores_that_semantic_floor_would_reject() {
-        // The exact bug bd-n22a4 was filed for: a hybrid hit with score
-        // ≈0.0328 (the 2-arm-rank-1 RRF top) gets filtered out by the
-        // semantic-domain floor of 0.05, leaving every default-floor
-        // hybrid search empty. The hybrid floor of 0.005 admits it.
-        let rrf_top_two_arm: f32 = 2.0 / 61.0; // ≈ 0.03278
-        assert!(rrf_top_two_arm >= DEFAULT_RELEVANCE_FLOOR_HYBRID);
-        assert!(rrf_top_two_arm < DEFAULT_RELEVANCE_FLOOR);
-        // Single-arm RRF rank-1: 1/61 ≈ 0.0164 — still well above the
-        // hybrid floor, still below the semantic floor.
-        let rrf_rank_one_one_arm: f32 = 1.0 / 61.0;
-        assert!(rrf_rank_one_one_arm >= DEFAULT_RELEVANCE_FLOOR_HYBRID);
-        assert!(rrf_rank_one_one_arm < DEFAULT_RELEVANCE_FLOOR);
+    fn lexical_batch_maps_a_degenerate_bm25_pool_to_midpoint() {
+        let results = [4.25_f32, 4.25]
+            .into_iter()
+            .enumerate()
+            .map(|(index, score)| crate::search::ScoredResult {
+                doc_id: format!("mem_bm25_tie_{index}").into(),
+                score,
+                source: crate::search::ScoreSource::Lexical,
+                index: None,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some(score),
+                rerank_score: None,
+                explanation: None,
+                metadata: None,
+            })
+            .collect();
+        let hits = search_hits_from_scored_results(
+            results,
+            false,
+            FrankensearchFinalScoreScale::Native,
+            SearchFusionWeights::default(),
+        );
+
+        assert!(hits.iter().all(|hit| (hit.score - 0.5).abs() < 1e-6));
+        assert!(hits.iter().all(|hit| hit.lexical_score == Some(4.25)));
     }
 
     #[test]
-    fn hybrid_floor_still_rejects_genuinely_weak_rrf_scores() {
-        // The floor must still be a noise/signal cut, not "accept
-        // everything". Scores at single-arm rank ~250 (1/(60+250) ≈
-        // 0.0032) sit below the hybrid floor and get filtered.
-        let rrf_deep_rank: f32 = 1.0 / 310.0; // ≈ 0.00323
-        assert!(rrf_deep_rank < DEFAULT_RELEVANCE_FLOOR_HYBRID);
+    fn hybrid_single_arm_hit_is_tagged_by_rrf_score_scale() {
+        let raw_rrf_score = 1.0 / 61.0;
+        let hits = search_hits_from_scored_results(
+            vec![crate::search::ScoredResult {
+                doc_id: "mem_hybrid_single_arm".into(),
+                score: raw_rrf_score,
+                source: crate::search::ScoreSource::Lexical,
+                index: None,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some(7.5),
+                rerank_score: None,
+                explanation: None,
+                metadata: None,
+            }],
+            false,
+            FrankensearchFinalScoreScale::RrfFused,
+            SearchFusionWeights::default(),
+        );
+
+        assert_eq!(hits[0].source, ScoreSource::Hybrid);
+        assert_eq!(hits[0].score_kind(), "rrf_fused");
+        assert!((hits[0].score - raw_rrf_score).abs() < f32::EPSILON);
+        assert!((hits[0].relevance_score() - 0.5).abs() < 1e-6);
+        assert_eq!(hits[0].lexical_score, Some(7.5));
+    }
+
+    #[test]
+    fn hybrid_lexical_short_circuit_keeps_native_scale_then_normalizes_bm25() {
+        let result = crate::search::ScoredResult {
+            doc_id: "mem_hybrid_lexical_short_circuit".into(),
+            score: 4.25,
+            source: crate::search::ScoreSource::Lexical,
+            index: None,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(4.25),
+            rerank_score: None,
+            explanation: None,
+            metadata: None,
+        };
+        let metrics = frankensearch::TwoTierMetrics {
+            skip_reason: Some("non_semantic_fast_embedder_lexical_short_circuit".to_owned()),
+            ..frankensearch::TwoTierMetrics::default()
+        };
+
+        let scale = two_tier_final_score_scale(
+            SearchSourceMode::Hybrid,
+            std::slice::from_ref(&result),
+            &metrics,
+        );
+        let hits = search_hits_from_scored_results(
+            vec![result],
+            false,
+            scale,
+            SearchFusionWeights::default(),
+        );
+
+        assert_eq!(scale, FrankensearchFinalScoreScale::Native);
+        assert_eq!(hits[0].source, ScoreSource::Lexical);
+        assert_eq!(hits[0].score_kind(), "unit_normalized");
+        assert!((hits[0].score - 0.5).abs() < 1e-6);
+        assert_eq!(hits[0].lexical_score, Some(4.25));
+    }
+
+    #[test]
+    fn hybrid_execution_metrics_identify_single_arm_rrf_scale() {
+        let result = crate::search::ScoredResult {
+            doc_id: "mem_hybrid_single_arm_metrics".into(),
+            score: 1.0 / 61.0,
+            source: crate::search::ScoreSource::Lexical,
+            index: None,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(4.25),
+            rerank_score: None,
+            explanation: None,
+            metadata: None,
+        };
+        let metrics = frankensearch::TwoTierMetrics {
+            rrf_fusion_ms: 0.01,
+            ..frankensearch::TwoTierMetrics::default()
+        };
+
+        assert_eq!(
+            two_tier_final_score_scale(
+                SearchSourceMode::Hybrid,
+                std::slice::from_ref(&result),
+                &metrics,
+            ),
+            FrankensearchFinalScoreScale::RrfFused
+        );
     }
 
     #[test]
@@ -18603,7 +18792,7 @@ mod tests {
                 metadata: None,
             },
             true,
-            SearchSourceMode::Hybrid,
+            FrankensearchFinalScoreScale::RrfFused,
             SearchFusionWeights::default(),
         );
 
@@ -18644,7 +18833,7 @@ mod tests {
                 metadata: None,
             },
             true,
-            SearchSourceMode::Hybrid,
+            FrankensearchFinalScoreScale::RrfFused,
             SearchFusionWeights {
                 lexical: 1.0,
                 semantic: 0.0,
@@ -18681,7 +18870,7 @@ mod tests {
                 metadata: None,
             },
             true,
-            SearchSourceMode::Hybrid,
+            FrankensearchFinalScoreScale::RrfFused,
             SearchFusionWeights {
                 lexical: 0.0,
                 semantic: 0.0,
@@ -18690,7 +18879,7 @@ mod tests {
         );
 
         assert!(
-            hit.score >= DEFAULT_RELEVANCE_FLOOR_HYBRID,
+            hit.relevance_score() >= DEFAULT_RELEVANCE_FLOOR,
             "graph-only config must not erase an otherwise relevant hybrid hit"
         );
         assert!((hit.score - 0.02).abs() < 1e-6);
@@ -19342,7 +19531,7 @@ mod tests {
                 kind: "rule",
                 tags: Some("auto-reconcile-rearm"),
                 confidence: 0.9,
-                source: Some("test://auto-reconcile-rearm"),
+                source: Some("manual://auto-reconcile-rearm"),
                 allow_secret_mention: false,
                 valid_from: None,
                 valid_to: None,
@@ -19367,8 +19556,49 @@ mod tests {
                     .map_err(|error| error.to_string())
             }
         };
+        let database_path = init.database_path.clone();
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let workspace_record = connection
+            .get_workspace_by_path(&init.workspace.to_string_lossy())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "initialized workspace must be bound in the database".to_owned())?;
+        let registry_entries = connection
+            .list_model_registry_entries(&workspace_record.id)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            registry_entries.len() == 1,
+            format!(
+                "auto-reconcile fixture must start with one bundled model declaration: {registry_entries:?}"
+            ),
+        )?;
+        let registry_entry = &registry_entries[0];
+        let registry_updated = connection
+            .update_model_registry_entry(
+                &registry_entry.id,
+                &crate::db::CreateModelRegistryInput {
+                    workspace_id: registry_entry.workspace_id.clone(),
+                    provider: registry_entry.provider,
+                    model_name: registry_entry.model_name.clone(),
+                    purpose: registry_entry.purpose,
+                    dimension: registry_entry.dimension,
+                    distance_metric: registry_entry.distance_metric,
+                    status: crate::models::ModelRegistryStatus::Unavailable,
+                    version: registry_entry.version.clone(),
+                    source_uri: Some("test://unavailable-model".to_owned()),
+                    content_hash: None,
+                    metadata_json: registry_entry.metadata_json.clone(),
+                    last_checked_at: registry_entry.last_checked_at.clone(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            registry_updated,
+            "auto-reconcile fixture must force deterministic hash fallback",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+
         remember("Initial indexed auto-reconcile rearm rule.", false)?;
-        let database_path = workspace.join(".ee").join("ee.db");
         let rebuild = crate::core::index::rebuild_index(&crate::core::index::IndexRebuildOptions {
             workspace_path: workspace.to_path_buf(),
             database_path: Some(database_path.clone()),
@@ -19960,7 +20190,7 @@ mod tests {
         let top_hit = search_hit_from_scored_result(
             top_candidate,
             true,
-            SearchSourceMode::Hybrid,
+            FrankensearchFinalScoreScale::RrfFused,
             SearchFusionWeights::default(),
         );
         assert_eq!(top_hit.source, ScoreSource::Reranked);
@@ -20098,11 +20328,8 @@ mod tests {
 
     #[test]
     fn adaptive_partition_keeps_typical_hybrid_hit_with_no_override() {
-        // Reproduces the bd-n22a4 acceptance path: a hybrid hit at the
-        // typical 2-arm RRF top of ≈0.0328 must survive the default
-        // floor when no explicit override is set, so `ee search` on a
-        // one-memory workspace returns the matching memory instead of a
-        // `no_relevant_results` degraded entry.
+        // A hybrid hit at the typical 2-arm RRF top of ≈0.0328 projects to
+        // relevance 1.0 and must survive the shared relevance floor.
         let hits = vec![synthetic_hybrid_hit("mem_canonical", 2.0 / 61.0)];
         let kept: Vec<_> = hits
             .into_iter()
@@ -20140,8 +20367,8 @@ mod tests {
         // semantics — the adaptive policy ONLY kicks in when no
         // explicit override is set.
         let hits = vec![
-            synthetic_hybrid_hit("mem_hybrid_strong", 0.20),
-            synthetic_hybrid_hit("mem_hybrid_weak", 0.02),
+            synthetic_hybrid_hit("mem_hybrid_strong", RRF_HYBRID_TYPICAL_MAX * 0.20),
+            synthetic_hybrid_hit("mem_hybrid_weak", RRF_HYBRID_TYPICAL_MAX * 0.02),
             synthetic_hit("mem_semantic_strong", 0.20),
             synthetic_hit("mem_semantic_weak", 0.02),
         ];
@@ -20562,6 +20789,19 @@ mod tests {
         assert!((deduped[0].score - 0.5).abs() < 1e-5);
         assert_eq!(deduped[1].doc_id, "b");
         assert!((deduped[1].score - 0.3).abs() < 1e-5);
+    }
+
+    #[test]
+    fn dedupe_compares_duplicate_hits_on_cross_source_relevance() {
+        let hybrid = synthetic_hybrid_hit("a", RRF_HYBRID_TYPICAL_MAX * 0.80);
+        let lexical = synthetic_hit("a", 0.60);
+
+        let (deduped, collapsed) = dedupe_hits_on_doc_id(vec![hybrid, lexical]);
+
+        assert_eq!(collapsed, 1);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].source, ScoreSource::Hybrid);
+        assert!((deduped[0].relevance_score() - 0.80).abs() < 1e-6);
     }
 
     #[test]

@@ -8726,7 +8726,7 @@ fn adaptive_budget_decision_for_context(
     let retrieval_scores = search_report
         .results
         .iter()
-        .map(|hit| hit.score)
+        .map(SearchHit::relevance_score)
         .collect::<Vec<_>>();
     Ok(Some(classify_adaptive_budget(
         AdaptiveBudgetInput::new(&request.query, &retrieval_scores, 0.0)
@@ -9841,13 +9841,8 @@ fn personalized_pagerank_seed_map(
         if !candidate_ids.contains(&memory_id) {
             continue;
         }
-        let vector_weight = positive_f32_score(hit.score);
-        let lexical_weight = hit.lexical_score.and_then(positive_f32_score);
-        let weight = match (vector_weight, lexical_weight) {
-            (Some(vector), Some(lexical)) => vector.max(lexical),
-            (Some(vector), None) => vector,
-            (None, Some(lexical)) => lexical,
-            (None, None) => continue,
+        let Some(weight) = positive_f32_score(hit.relevance_score()) else {
+            continue;
         };
         seed_map
             .entry(memory_id)
@@ -11531,7 +11526,7 @@ fn focus_candidate_why(
 /// Bead bd-17c65.1.3 (A3) — replaced the previous 350-character math-
 /// identity boilerplate ("Deterministic retrieval explanation for query
 /// `...`: source=memory search_source=...; score_components=[relevance=
-/// unit_score(search_hit.score)...]; formula=unit_score(field)=clamp(...);
+/// unit_score(search_hit.relevance_score())...]; formula=unit_score(field)=clamp(...);
 /// inputs are stored memory/link fields and the explicit search hit,
 /// not agent reasoning.") with a one-line actionable reason.
 ///

@@ -720,21 +720,21 @@ fn assert_search_contract(value: &JsonValue) -> TestResult {
     )?;
     ensure_json_number_close(
         &value["data"]["metrics"]["scoreDistribution"]["top"],
-        &results[0]["score"],
+        &results[0]["relevanceScore"],
         0.000_001,
-        "score distribution top tracks first result",
+        "score distribution top tracks first result relevance",
     )?;
     ensure_json_number_close(
         &value["data"]["metrics"]["scoreDistribution"]["max"],
-        &results[0]["score"],
+        &results[0]["relevanceScore"],
         0.000_001,
-        "score distribution max tracks first result",
+        "score distribution max tracks first result relevance",
     )?;
     ensure_json_number_close(
         &value["data"]["metrics"]["scoreDistribution"]["min"],
-        &results[2]["score"],
+        &results[2]["relevanceScore"],
         0.000_001,
-        "score distribution min tracks last result",
+        "score distribution min tracks last result relevance",
     )?;
 
     Ok(())

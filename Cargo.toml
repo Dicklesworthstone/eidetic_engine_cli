@@ -112,6 +112,10 @@ fnx-algorithms = { version = "0.2.0", path = "../franken_networkx/crates/fnx-alg
 fnx-classes = { version = "0.2.0", path = "../franken_networkx/crates/fnx-classes" }
 fnx-runtime = { version = "0.2.0", path = "../franken_networkx/crates/fnx-runtime", default-features = false, features = ["asupersync-integration"] }
 frankensearch = { version = "0.3.2", path = "../frankensearch/frankensearch", default-features = false, features = ["hash", "storage", "model2vec", "download", "rerank", "native"] }
+# EE's schema uses json_valid() in unconditional CHECK constraints. SQLModel
+# intentionally disables FrankenSQLite's default extension set, so unify the
+# JSON feature explicitly instead of depending on a transitive default.
+fsqlite = { version = "0.3.9", path = "../frankensqlite/crates/fsqlite", default-features = false, features = ["json"] }
 # MSRV-compatible, safe advisory file locking for doctor fix/undo coordination.
 # Keep async features disabled: Tokio/async-std/smol are forbidden here.
 fs4 = { version = "0.13.1", default-features = false, features = ["sync"] }

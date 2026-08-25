@@ -41,20 +41,20 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["memoryId", "docId", "score", "source", "why", "provenance"],
+            "required": ["memoryId", "docId", "score", "relevanceScore", "scoreKind", "scoreInterval", "coverageGuarantee", "calibrated", "source", "why", "provenance"],
             "additionalProperties": false,
             "properties": {
               "memoryId": {"type": "string"},
               "docId": {"type": "string"},
               "score": {"type": "number"},
               "relevanceScore": {"type": "number", "minimum": 0, "maximum": 1},
-              "scoreKind": {"type": "string", "enum": ["unit_normalized", "rrf_fused", "reranked"]},
+              "scoreKind": {"type": "string", "enum": ["unit_normalized", "cosine_similarity", "rrf_fused", "reranked"]},
               "scoreInterval": {
                 "type": "array",
                 "items": {"type": "number"},
                 "minItems": 2,
                 "maxItems": 2,
-                "description": "Closed [lo, hi] uncertainty interval around `score`."
+                "description": "Closed [lo, hi] uncertainty interval around `relevanceScore`."
               },
               "coverageGuarantee": {
                 "type": ["number", "null"],
@@ -64,9 +64,9 @@
               },
               "calibrated": {
                 "type": "boolean",
-                "description": "True when a conformal residual quantile produced the scoreInterval/coverageGuarantee. When false, scoreInterval is the trivial [0,1] band and coverageGuarantee is null; treat `score` as an uncalibrated raw fusion score, not a calibrated [0,1] relevance."
+                "description": "True when a conformal residual quantile produced the scoreInterval/coverageGuarantee around relevanceScore. When false, scoreInterval is the trivial [0,1] band and coverageGuarantee is null."
               },
-              "source": {"type": "string", "enum": ["lexical", "semantic_fast", "semantic_quality", "hybrid", "reranked"]},
+              "source": {"type": "string", "enum": ["lexical", "semantic_fast", "semantic_quality", "hash_control", "hybrid", "reranked"]},
               "why": {"type": "string"},
               "fastScore": {"type": ["number", "null"]},
               "qualityScore": {"type": ["number", "null"]},

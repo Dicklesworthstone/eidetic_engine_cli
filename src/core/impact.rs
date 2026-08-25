@@ -529,7 +529,7 @@ fn append_fallback_results(
             rank: 0,
             memory_id: memory_id.to_owned(),
             match_type: ImpactMatchType::SearchFallback,
-            score: hit.score,
+            score: hit.relevance_score(),
             memory: ImpactMemorySummary::from_memory(&memory),
             anchor: None,
             fallback_hit: rendered_by_memory_id.get(memory_id).cloned(),

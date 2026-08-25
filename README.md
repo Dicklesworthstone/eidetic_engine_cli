@@ -240,8 +240,18 @@ Every returned memory answers six questions:
 - **What supports it?** Provenance URI(s).
 - **How fresh?** Recency decay term.
 - **How reliable?** Confidence, evidence count, harmful-feedback weight.
-- **What scores mattered?** Raw score, `scoreKind`, normalized `relevanceScore`, and component breakdown.
+- **What scores mattered?** Final ranking `score`, `scoreKind`, normalized `relevanceScore`, and raw component breakdown.
 - **What would change the decision?** Counterfactual hint when available.
+
+`relevanceScore` is the only cross-source comparison surface. Lexical-only
+search min-max normalizes the returned BM25 pool through Frankensearch while
+retaining raw BM25 as `lexicalScore`; semantic results identify their raw
+`score` as `cosine_similarity`; results from an executed hybrid fusion identify
+it as `rrf_fused` even when only one arm contributed; deliberate hybrid
+short-circuits retain the native lexical or semantic scale; and reranked results
+use `reranked`. Relevance floors, quality metrics, calibration intervals, and
+context packing all consume the normalized relevance projection rather than
+comparing those native scales.
 
 ### 6. Search Indexes Are Derived Assets
 

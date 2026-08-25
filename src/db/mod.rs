@@ -40432,6 +40432,35 @@ mod tests {
     }
 
     #[test]
+    fn frankensqlite_json_functions_are_registered() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        let rows = connection.query(
+            "SELECT json_valid(?1), json_valid(?2)",
+            &[
+                Value::Text(r#"{"valid":true}"#.to_string()),
+                Value::Text("not json".to_string()),
+            ],
+        )?;
+        let row = rows
+            .first()
+            .ok_or_else(|| TestFailure::new("json_valid query returned no row"))?;
+
+        ensure_equal(
+            &row.get(0).and_then(Value::as_i64),
+            &Some(1),
+            "json_valid accepts valid JSON",
+        )?;
+        ensure_equal(
+            &row.get(1).and_then(Value::as_i64),
+            &Some(0),
+            "json_valid rejects invalid JSON",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn rejects_schema_only_memory_connections() -> TestResult {
         let result = DbConnection::open(DatabaseConfig {
             location: DatabaseLocation::Memory,

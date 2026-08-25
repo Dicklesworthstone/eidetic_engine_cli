@@ -2951,9 +2951,9 @@ mod tests {
         )?;
         ensure_json_number_close(
             &value["data"]["metrics"]["scoreDistribution"]["top"],
-            &value["data"]["results"][0]["score"],
+            &value["data"]["results"][0]["relevanceScore"],
             0.000_001,
-            "search metrics top score",
+            "search metrics top relevance",
         )?;
         let source = value["data"]["results"][0]["source"]
             .as_str()

@@ -3830,10 +3830,17 @@ fn validate_canonical_search_result(
     }
     if !matches!(
         result.get("scoreKind").and_then(serde_json::Value::as_str),
-        Some("unit_normalized" | "rrf_fused" | "reranked")
+        Some("unit_normalized" | "cosine_similarity" | "rrf_fused" | "reranked")
     ) || !matches!(
         result.get("source").and_then(serde_json::Value::as_str),
-        Some("lexical" | "semantic_fast" | "semantic_quality" | "hybrid" | "reranked")
+        Some(
+            "lexical"
+                | "semantic_fast"
+                | "semantic_quality"
+                | "hash_control"
+                | "hybrid"
+                | "reranked"
+        )
     ) {
         return Err(format!("{context} score/source vocabulary drifted"));
     }

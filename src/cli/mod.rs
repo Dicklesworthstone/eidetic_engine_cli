@@ -46869,6 +46869,8 @@ where
                         serde_json::json!({
                             "docId": hit.doc_id,
                             "score": hit.score,
+                            "relevanceScore": hit.relevance_score(),
+                            "scoreKind": hit.score_kind(),
                             "source": hit.source.as_str(),
                             "storeLane": hit
                                 .metadata

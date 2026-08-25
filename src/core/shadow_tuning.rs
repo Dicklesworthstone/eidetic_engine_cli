@@ -716,9 +716,7 @@ pub async fn collect_query_replays_with_cx(
             // workspace adjustment; divide it back out so candidate
             // re-fusion starts from the raw basis. The multiplier depends
             // only on the hit's arm components, which are unchanged.
-            if let Some(adjustment) =
-                configured_fusion_adjustment(&hit, SearchSourceMode::Hybrid, workspace_weights)
-            {
+            if let Some(adjustment) = configured_fusion_adjustment(&hit, true, workspace_weights) {
                 if adjustment.multiplier > f32::EPSILON {
                     hit.score /= adjustment.multiplier;
                 } else {
@@ -803,9 +801,7 @@ fn group_label_gains(labels: &[LabeledTriple]) -> GroupedLabels {
 fn ranked_pool(hits: &[SearchHit], weights: SearchFusionWeights) -> BTreeMap<String, usize> {
     let mut pool: Vec<SearchHit> = hits.to_vec();
     for hit in &mut pool {
-        if let Some(adjustment) =
-            configured_fusion_adjustment(hit, SearchSourceMode::Hybrid, weights)
-        {
+        if let Some(adjustment) = configured_fusion_adjustment(hit, true, weights) {
             hit.score = (hit.score * adjustment.multiplier).max(0.0);
         }
     }

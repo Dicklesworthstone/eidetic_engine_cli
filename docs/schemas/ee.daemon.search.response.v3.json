@@ -320,6 +320,7 @@
         },
         "scoreDistribution": {
           "type": "object",
+          "description": "Distribution of normalized relevanceScore values, never a mixture of native BM25, cosine, RRF, or reranker scales.",
           "required": ["top", "min", "max", "mean"],
           "additionalProperties": false,
           "properties": {
@@ -411,11 +412,11 @@
         "memoryId": {"type": "string"},
         "score": {"type": "number"},
         "relevanceScore": {"type": "number", "minimum": 0, "maximum": 1},
-        "scoreKind": {"type": "string", "enum": ["unit_normalized", "rrf_fused", "reranked"]},
+        "scoreKind": {"type": "string", "enum": ["unit_normalized", "cosine_similarity", "rrf_fused", "reranked"]},
         "scoreInterval": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
         "coverageGuarantee": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
         "calibrated": {"type": "boolean"},
-        "source": {"type": "string", "enum": ["lexical", "semantic_fast", "semantic_quality", "hybrid", "reranked"]},
+        "source": {"type": "string", "enum": ["lexical", "semantic_fast", "semantic_quality", "hash_control", "hybrid", "reranked"]},
         "why": {"type": "string"},
         "provenance": {"type": "array"},
         "fastScore": {"type": "number"},

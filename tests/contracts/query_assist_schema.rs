@@ -38,7 +38,7 @@ fn sample_search_query_assist() -> Value {
             "memoryId": "mem_installer_smoke",
             "score": 0.02,
             "relevanceScore": 0.02,
-            "scoreKind": "unit_normalized",
+            "scoreKind": "cosine_similarity",
             "source": "semantic_fast",
             "candidateStatus": "below_relevance_floor",
             "content": "Use installer live smoke validation before publishing release artifacts.",

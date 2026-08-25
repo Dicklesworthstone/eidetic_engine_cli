@@ -99,7 +99,14 @@
     },
     "didYouMean": {
       "type": "object",
-      "required": ["score", "source", "candidateStatus", "why"],
+      "required": [
+        "score",
+        "relevanceScore",
+        "scoreKind",
+        "source",
+        "candidateStatus",
+        "why"
+      ],
       "additionalProperties": {
         "$ref": "#/$defs/jsonValue"
       },
@@ -119,10 +126,24 @@
           "maximum": 1
         },
         "scoreKind": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "unit_normalized",
+            "cosine_similarity",
+            "rrf_fused",
+            "reranked"
+          ]
         },
         "source": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "lexical",
+            "semantic_fast",
+            "semantic_quality",
+            "hash_control",
+            "hybrid",
+            "reranked"
+          ]
         },
         "candidateStatus": {
           "type": "string",

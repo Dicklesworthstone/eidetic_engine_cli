@@ -33,16 +33,17 @@
       "type": "number",
       "minimum": 0,
       "maximum": 1,
-      "description": "Deterministic 0..1 relevance projection for agent interpretation. Hybrid/RRF scores are rescaled from their small raw magnitude; unit-normalized sources are clamped."
+      "description": "Deterministic 0..1 relevance projection for agent interpretation. Hybrid/RRF scores are rescaled from their small raw magnitude, cosine similarities are clamped to positive similarity, and lexical-only BM25 pools are min-max normalized."
     },
     "scoreKind": {
       "type": "string",
       "enum": [
         "unit_normalized",
+        "cosine_similarity",
         "rrf_fused",
         "reranked"
       ],
-      "description": "Interpretation tag for the raw score field. Use relevanceScore for cross-source relevance; score remains the retrieval engine's raw ranking score."
+      "description": "Interpretation tag for score. Use relevanceScore for cross-source relevance. Lexical-only score is unit-normalized and its raw BM25 value remains in lexicalScore; cosine, RRF, and reranker scores retain their native ranking scale."
     },
     "scoreInterval": {
       "type": "array",
@@ -59,7 +60,7 @@
     },
     "calibrated": {
       "type": "boolean",
-      "description": "True when a conformal residual quantile produced scoreInterval/coverageGuarantee. When false, treat `score` as a raw uncalibrated fusion score over a trivial [0,1] band."
+      "description": "True when a conformal residual quantile produced scoreInterval/coverageGuarantee around relevanceScore. When false, scoreInterval is the trivial [0,1] band."
     },
     "source": {
       "type": "string",
@@ -67,6 +68,7 @@
         "lexical",
         "semantic_fast",
         "semantic_quality",
+        "hash_control",
         "hybrid",
         "reranked"
       ]

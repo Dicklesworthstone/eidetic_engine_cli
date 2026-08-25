@@ -37,7 +37,7 @@ use crate::search::{
     session_to_document,
 };
 #[cfg(feature = "lexical-bm25")]
-use crate::search::{LexicalRead, LexicalWrite, TantivyIndex};
+use crate::search::{LexicalWrite, TantivyIndex};
 use asupersync::sync::OnceCell as AsyncOnceCell;
 use frankensearch::embed::{
     ConsentSource, DownloadConsent, DownloadProgress, ModelDownloader, ModelLifecycle,
@@ -4003,6 +4003,22 @@ pub(crate) fn write_memory_eval_index_metadata(
     write_index_metadata(index_dir, 0, documents_total, None)
 }
 
+/// Stamp an evaluation index that mirrors a known workspace generation.
+///
+/// Most synthetic indexes have no database and use generation zero through
+/// [`write_memory_eval_index_metadata`]. Database-backed fixtures must stamp
+/// the generation they actually indexed; otherwise the public search path can
+/// correctly interpret the fixture as stale and replace it before the behavior
+/// under test is observed.
+#[cfg(test)]
+pub(crate) fn write_memory_eval_index_metadata_for_generation(
+    index_dir: &Path,
+    generation: u64,
+    documents_total: u32,
+) -> Result<(), IndexRebuildError> {
+    write_index_metadata(index_dir, generation, documents_total, None)
+}
+
 #[derive(Clone, Debug)]
 struct ParsedIndexMetadata {
     schema: Option<String>,
@@ -5021,14 +5037,31 @@ fn verify_published_tier_counts(
     #[cfg(feature = "lexical-bm25")]
     {
         let lexical_path = index_dir.join(LEXICAL_INDEX_SUBDIR);
-        let lexical = TantivyIndex::open(&lexical_path).map_err(|error| {
+        let lexical =
+            frankensearch::lexical_tantivy::Index::open_in_dir(&lexical_path).map_err(|error| {
+                format!(
+                    "failed to open lexical tier {} for count verification: {error}",
+                    lexical_path.display()
+                )
+            })?;
+        let reader: frankensearch::lexical_tantivy::IndexReader = lexical
+            .reader_builder()
+            .reload_policy(frankensearch::lexical_tantivy::ReloadPolicy::Manual)
+            .try_into()
+            .map_err(|error| {
+                format!(
+                    "failed to open lexical-tier reader {} for count verification: {error}",
+                    lexical_path.display()
+                )
+            })?;
+        reader.reload().map_err(|error| {
             format!(
-                "failed to open lexical tier {} for count verification: {error}",
+                "failed to reload lexical-tier reader {} for count verification: {error}",
                 lexical_path.display()
             )
         })?;
-        let actual = LexicalRead::doc_count(&lexical)
-            .map_err(|error| format!("failed to read lexical-tier document count: {error}"))?;
+        let actual = usize::try_from(reader.searcher().num_docs())
+            .map_err(|_| "lexical-tier persisted document count does not fit usize".to_owned())?;
         if actual != expected {
             return Err(format!(
                 "lexical-tier persisted document count mismatch: expected {expected}, found {actual}"
