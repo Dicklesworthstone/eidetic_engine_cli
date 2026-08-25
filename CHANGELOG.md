@@ -17,19 +17,23 @@ checked-in Beads records. The durable research ledger is
 | 2026-08-06 → 2026-08-18 | **`0.14.0`** team confederation product, Windows mesh control, port migrate. |
 | 2026-08-18 | **`0.14.1`** franken-stack refresh (asupersync 0.4.8, fsqlite 0.3.5) on the 0.14 product. |
 | 2026-08-18 → 2026-08-20 | **`0.14.2`** workspace-id bind campaign plus franken-stack refresh (asupersync 0.4.9, fsqlite 0.3.7). |
+| 2026-08-20 → 2026-08-25 | **`0.14.3`** retrieval correctness, deterministic contract hardening, and crates.io/Homebrew distribution. |
 
-Release surface (as of 2026-08-20):
+Release surface (as of 2026-08-25):
 
-- Latest **published** GitHub Release before this cut: [`v0.14.1`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.14.1) (2026-08-19).
-- `Cargo.toml` carries `version = "0.14.2"` for this cut; the historical
-  `v0.13.1`, un-asset `v0.14.0`, and `v0.14.1` tags remain unchanged.
-- Install path: `curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash -s -- --easy-mode --verify`
+- Latest **published** GitHub Release before this cut: [`v0.14.2`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.14.2) (2026-08-20).
+- `Cargo.toml` carries `version = "0.14.3"` for this cut; prior tags remain
+  unchanged.
+- Distribution paths: verified GitHub release installers,
+  `brew install Dicklesworthstone/tap/ee`, and
+  `cargo install eidetic-engine`.
 
 ### Version timeline (tags and GitHub Releases)
 
 | Version | Date | GitHub Release | Notes |
 | --- | --- | --- | --- |
-| [0.14.2](#0142---2026-08-20) | 2026-08-20 | this cut | Workspace-id bind campaign plus franken-stack refresh: asupersync 0.4.9, FrankenSQLite 0.3.7, frankensearch 0.3.2 |
+| [0.14.3](#0143---2026-08-25) | 2026-08-25 | this cut | Retrieval correctness, deterministic contract hardening, FrankenSQLite 0.3.9, and crates.io/Homebrew distribution |
+| [0.14.2](#0142---2026-08-20) | 2026-08-20 | yes | Workspace-id bind campaign plus franken-stack refresh: asupersync 0.4.9, FrankenSQLite 0.3.7, frankensearch 0.3.2 |
 | [0.14.1](#0141---2026-08-18) | 2026-08-18 | yes | Franken-stack refresh on the 0.14 product: asupersync 0.4.8, FrankenSQLite 0.3.5, crates.io `cargo update` |
 | [0.14.0](#0140---2026-08-18) | 2026-08-18 | tag only | Team confederation (ADR 0086), Windows scheduled-task + loopback control, encrypted credential backup, versioned team port migrate |
 | [0.13.1](#0131---2026-08-06) | 2026-08-06 | yes | Pure-Rust native reranking on every release target, model bootstrap, checksum and publication hardening |
@@ -74,6 +78,9 @@ contract hardening, and the first crates.io-ready package layout.
 - **The Rust packages are ready for leaf-first crates.io publication.** The
   internal attribute macro ships as `ee-determinism`; the public package remains
   `eidetic-engine` with the `ee` binary and a bounded source package.
+- **Homebrew and crates.io join the verified release-installer path.** Release
+  v0.14.3 is distributed through `Dicklesworthstone/tap/ee` and the
+  `eidetic-engine` crate in addition to the six-platform GitHub artifacts.
 
 ### Changed
 

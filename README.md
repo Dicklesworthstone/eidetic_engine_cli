@@ -319,7 +319,16 @@ Hard constraints. CI fails if any of them break.
 
 ## Installation
 
-**Recommended — release installer:**
+### Installation status
+
+| Method | Status | Evidence |
+|---|---|---|
+| GitHub release installer | available | [latest release](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest) |
+| Homebrew tap | available beginning with v0.14.3 | [`Dicklesworthstone/homebrew-tap`](https://github.com/Dicklesworthstone/homebrew-tap/blob/main/Formula/ee.rb) |
+| crates.io | available beginning with v0.14.3; package `eidetic-engine`; binary `ee` | [`eidetic-engine`](https://crates.io/crates/eidetic-engine) |
+| Source build | available now | this README |
+
+### Release installer
 
 ```bash
 f="$(mktemp)"
@@ -362,7 +371,7 @@ with musl where published), and Windows (`x86_64`). On x86_64 Linux the
 installer prefers the portable musl build, then automatically retries the
 compatible GNU build when that release does not include musl.
 
-**Windows (PowerShell):**
+#### Windows (PowerShell)
 
 ```powershell
 $f = Join-Path $env:TEMP 'install-ee.ps1'
@@ -400,7 +409,23 @@ enforce Sigstore signature verification.
 The Windows installer conformance contract is tracked in
 [`tests/CONFORMANCE.md`](tests/CONFORMANCE.md#windows-installer-conformance-installps1).
 
-**From source** (nightly Rust toolchain):
+### Homebrew (macOS / Linux)
+
+```bash
+brew install Dicklesworthstone/tap/ee
+```
+
+### Cargo
+
+Requires the nightly Rust toolchain pinned by this project.
+
+```bash
+cargo install eidetic-engine
+```
+
+### From source
+
+Requires a nightly Rust toolchain.
 
 ```bash
 mkdir ee-source
@@ -2452,9 +2477,9 @@ Boundaries to know:
 | Retention model | Forgetting and decay are product features. Export JSONL into git when you need sealed long-term records. |
 | Model choice | Embeddings are delegated to Frankensearch. Default installs use the pinned local `potion-multilingual-128M` fast tier; semantic quality follows that model and the derived index unless the operator explicitly changes Frankensearch posture. |
 | MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
-| Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the `curl | bash` installer. Sigstore/provenance verification is enforced when published or explicitly required; asset coverage can vary by release. Homebrew and crates.io publication are still planned. |
+| Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the release installer. Homebrew (`Dicklesworthstone/tap/ee`) and crates.io (`eidetic-engine`) are supported beginning with v0.14.3. Sigstore/provenance verification is enforced when published or explicitly required; asset coverage can vary by release. |
 | Mesh | Unix live EE-to-EE is shipped (`TcpMeshForegroundSyncTransport`). Two-human Tailscale soak, Windows-host DACL/crash soak, and production IdP vendor soak remain environment remainders. FrankenSQLite remains the local source of truth. |
-| Reserved adapters | `serve` and `science-analytics` report capability gaps until their adapters mature. |
+| Reserved adapters | `science-analytics` reports a capability gap until its adapter matures. The loopback-only `serve` adapter is implemented. |
 | Doctor repairs | Start with `ee doctor --fix-plan --json`; use `--fix` only after reviewing the run summary and undo path. |
 
 ---
