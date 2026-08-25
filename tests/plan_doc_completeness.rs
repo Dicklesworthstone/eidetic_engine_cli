@@ -79,6 +79,13 @@ fn evidence_path_exists(path: &str) -> bool {
     Path::new(path).exists()
 }
 
+fn cargo_owned_evidence_path(path: &str) -> bool {
+    // The tracker is verified by closure-lint and vision-coverage. RCH's
+    // source transport intentionally excludes live `.beads` state, so this
+    // Cargo contract must not duplicate that ownership boundary.
+    path != ".beads/issues.jsonl"
+}
+
 #[test]
 fn plan_sweep_matrix_covers_every_major_plan_section() -> TestResult {
     let rows = matrix_rows()?;
@@ -153,7 +160,10 @@ fn plan_sweep_matrix_rows_have_evidence_or_tracking_beads() -> TestResult {
                     !row.verify_cmd.contains('|'),
                     format!("{} verify_cmd must not contain a pipe", row.section_id),
                 )?;
-                for path in evidence {
+                for path in evidence
+                    .into_iter()
+                    .filter(|path| cargo_owned_evidence_path(path))
+                {
                     ensure(
                         evidence_path_exists(path),
                         format!(
