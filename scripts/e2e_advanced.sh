@@ -136,8 +136,10 @@ setup_workspace() {
 
     mkdir -p "${TEST_HOME}" "${ARTIFACTS_DIR}"
 
-    # Create minimal workspace structure
-    mkdir -p "${TEST_WORKSPACE}/ws/.ee"
+    # Create the workspace root. The initialized store is created explicitly
+    # after binary resolution so mutating scenarios exercise the real setup
+    # contract instead of operating against an empty `.ee/` placeholder.
+    mkdir -p "${TEST_WORKSPACE}/ws"
 
     log_info "Test workspace: ${TEST_WORKSPACE}"
     log_info "Artifacts: ${ARTIFACTS_DIR}"
@@ -169,6 +171,21 @@ check_binary() {
     log_info "Using binary: ${EE_BINARY}"
 }
 
+initialize_workspace() {
+    run_ee setup init init --json
+    if [[ "${LAST_EXIT_CODE}" -ne 0 ]]; then
+        log_error "Failed to initialize advanced E2E workspace (exit ${LAST_EXIT_CODE})"
+        log_error "stdout=${LAST_STDOUT_FILE}"
+        log_error "stderr=${LAST_STDERR_FILE}"
+        exit 3
+    fi
+    if ! python3 -c "import json; d=json.load(open('${LAST_STDOUT_FILE}')); assert d.get('schema') == 'ee.response.v2' and d.get('success') is True" 2>/dev/null; then
+        log_error "Advanced E2E workspace initialization returned an invalid success envelope"
+        exit 3
+    fi
+    log_info "Initialized workspace store: ${TEST_WORKSPACE}/ws/.ee/ee.db"
+}
+
 # ============================================================================
 # Test Execution Framework
 # ============================================================================
@@ -193,7 +210,7 @@ run_ee() {
         HOME="${TEST_HOME}" \
         EE_WORKSPACE="${TEST_WORKSPACE}/ws" \
         NO_COLOR=1 \
-        "${EE_BINARY}" "${cmd_args[@]}" \
+        "${EE_BINARY}" --workspace "${TEST_WORKSPACE}/ws" "${cmd_args[@]}" \
         >"${stdout_file}" 2>"${stderr_file}" || exit_code=$?
 
     local elapsed
@@ -202,7 +219,7 @@ run_ee() {
     # Log result
     {
         echo "## ${scenario}/${step}"
-        echo "Command: ee ${cmd_args[*]}"
+        echo "Command: ee --workspace ${TEST_WORKSPACE}/ws ${cmd_args[*]}"
         echo "Exit code: ${exit_code}"
         echo "Elapsed: ${elapsed}ms"
         echo "Stdout: ${stdout_file}"
@@ -265,6 +282,20 @@ assert_json_schema() {
 
     if [[ "${actual}" != "${expected_schema}" ]]; then
         log_fail "${context}: expected schema '${expected_schema}', got '${actual}'"
+        return 1
+    fi
+    return 0
+}
+
+assert_json_error_code() {
+    local expected_code="$1"
+    local context="${2:-}"
+
+    local actual
+    actual=$(python3 -c "import json; print(json.load(open('${LAST_STDOUT_FILE}')).get('error', {}).get('code', ''))" 2>/dev/null || echo "")
+
+    if [[ "${actual}" != "${expected_code}" ]]; then
+        log_fail "${context}: expected error code '${expected_code}', got '${actual}'"
         return 1
     fi
     return 0
@@ -435,7 +466,7 @@ scenario_preflight() {
     fi
 
     # Test: preflight show --json
-    run_ee preflight show preflight show preflight_test --json
+    run_ee preflight show preflight show pf_test --json
     if [[ "${LAST_EXIT_CODE}" -eq 0 ]]; then
         if assert_stdout_json "preflight show format"; then
             ((passed++))
@@ -443,7 +474,8 @@ scenario_preflight() {
         else
             ((failed++))
         fi
-    elif [[ "${LAST_EXIT_CODE}" -eq 10 ]]; then
+    elif [[ "${LAST_EXIT_CODE}" -eq 1 ]] && \
+         assert_json_error_code "not_found" "preflight show error code"; then
         ((passed++))
         log_pass "preflight show --json (not found, expected)"
     elif record_degraded_or_usage_failure "preflight show --json"; then
@@ -491,8 +523,9 @@ scenario_procedure() {
         else
             ((failed++))
         fi
-    elif [[ "${LAST_EXIT_CODE}" -eq 10 ]]; then
-        # NotFound is acceptable for placeholder ID
+    elif [[ "${LAST_EXIT_CODE}" -eq 1 ]] && \
+         assert_json_error_code "not_found" "procedure show error code"; then
+        # NotFound is acceptable for a syntactically valid placeholder ID.
         ((passed++))
         log_pass "procedure show --json (not found, expected)"
     elif record_degraded_or_usage_failure "procedure show --json"; then
@@ -560,8 +593,9 @@ scenario_economy() {
         else
             ((failed++))
         fi
-    elif [[ "${LAST_EXIT_CODE}" -eq 10 ]]; then
-        # NotFound is acceptable for placeholder ID
+    elif [[ "${LAST_EXIT_CODE}" -eq 1 ]] && \
+         assert_json_error_code "not_found" "economy score error code"; then
+        # NotFound is acceptable for a syntactically valid placeholder ID.
         ((passed++))
         log_pass "economy score --json (not found, expected)"
     elif record_degraded_or_usage_failure "economy score --json"; then
@@ -639,7 +673,8 @@ scenario_causal() {
         else
             ((failed++))
         fi
-    elif [[ "${LAST_EXIT_CODE}" -eq 10 ]]; then
+    elif [[ "${LAST_EXIT_CODE}" -eq 1 ]] && \
+         assert_json_error_code "not_found" "causal trace error code"; then
         ((passed++))
         log_pass "causal trace --json (not found, expected)"
     elif record_degraded_or_usage_failure "causal trace --json"; then
@@ -657,7 +692,8 @@ scenario_causal() {
         else
             ((failed++))
         fi
-    elif [[ "${LAST_EXIT_CODE}" -eq 10 ]]; then
+    elif [[ "${LAST_EXIT_CODE}" -eq 1 ]] && \
+         assert_json_error_code "not_found" "causal estimate error code"; then
         ((passed++))
         log_pass "causal estimate --json (not found, expected)"
     elif record_degraded_or_usage_failure "causal estimate --json"; then
@@ -950,6 +986,7 @@ main() {
 
     check_binary
     setup_workspace
+    initialize_workspace
 
     log_info "Running ${#target_scenarios[@]} scenario(s): ${target_scenarios[*]}"
     echo ""

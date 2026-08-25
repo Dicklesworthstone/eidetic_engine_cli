@@ -20,7 +20,7 @@ use super::context::{
 };
 use super::decide::{DecideItem, DecideRevisitOptions, decide_revisit};
 use super::search::{
-    SearchDedupMode, SearchDegradation, SearchOptions, SearchSourceMode, SearchStatus,
+    SearchDedupMode, SearchDegradation, SearchHit, SearchOptions, SearchSourceMode, SearchStatus,
     run_context_search_with_preloaded_memories,
 };
 use crate::db::{DbConnection, StoredMemory, StoredWorkspace};
@@ -383,6 +383,7 @@ fn orient_fast_relevant_content(
 
     let mut rendered = Vec::with_capacity(ORIENT_FAST_CONTENT_LIMIT);
     let mut freshness_file_cache = crate::core::memory::EvidenceFreshnessFileCache::default();
+    let active_workspace_id = crate::core::curate::stable_workspace_id(options.workspace_path);
     for hit in &context_search.report.results {
         if rendered.len() >= ORIENT_FAST_CONTENT_LIMIT {
             break;
@@ -439,13 +440,19 @@ fn orient_fast_relevant_content(
         ) else {
             continue;
         };
+        let tags = if memory.workspace_id == active_workspace_id {
+            tags_by_memory.get(&hit.doc_id).cloned().unwrap_or_default()
+        } else {
+            // Cross-shard global memories are read from their own authoritative
+            // store and carry the admitted scope tag in search metadata; the
+            // workspace DB cannot answer a tag query for those IDs.
+            orient_fast_search_hit_tags(hit)
+        };
         rendered.push(OrientFastContentItem {
             id: memory.id.clone(),
             snippet: orient_fast_snippet(&memory.content),
             created_at: memory.created_at.clone(),
-            tags: orient_fast_public_tags(
-                tags_by_memory.get(&hit.doc_id).cloned().unwrap_or_default(),
-            ),
+            tags: orient_fast_public_tags(tags),
             provenance: vec![provenance],
             why: why.to_owned(),
         });
@@ -497,6 +504,32 @@ fn orient_fast_relevant_provider_issue(
         severity: degradation.severity.clone(),
         message: degradation.message.clone(),
         repair: degradation.repair.clone(),
+    })
+}
+
+fn orient_fast_search_hit_tags(hit: &SearchHit) -> Vec<String> {
+    let Some(value) = hit
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("tags"))
+    else {
+        return Vec::new();
+    };
+    if let Some(tags) = value.as_array() {
+        return tags
+            .iter()
+            .filter_map(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_owned)
+            .collect();
+    }
+    value.as_str().map_or_else(Vec::new, |tags| {
+        tags.split(',')
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_owned)
+            .collect()
     })
 }
 
@@ -1786,9 +1819,13 @@ mod tests {
             candidate_pool: 100,
         });
         ensure(
-            report.posture == "ready",
+            report.posture == "partial"
+                && report.issues.iter().all(|issue| {
+                    issue.code == "context_evidence_freshness_missing_source"
+                        && issue.severity == "low"
+                }),
             format!(
-                "fast-content posture: expected \"ready\", got {:?}; issues={:?}",
+                "fast-content posture: expected provenance-limited partial, got {:?}; issues={:?}",
                 report.posture, report.issues
             ),
         )?;
@@ -1863,7 +1900,8 @@ mod tests {
             "exact admitted-recency why",
         )?;
         ensure(
-            positive.why.starts_with("Score ")
+            positive.why.starts_with("Relevance ")
+                && positive.why.contains("unit_normalized")
                 && positive.why.contains("lexical match")
                 && positive.why != positive.provenance[0].note,
             format!(
@@ -2250,6 +2288,13 @@ mod tests {
                 .iter()
                 .any(|tag| tag == GLOBAL_MEMORY_SCOPE_TAG),
             format!("global scope tag missing from item: {global_item:?}"),
+        )?;
+        ensure(
+            global_item
+                .why
+                .contains("bounded global lexical term coverage")
+                && !global_item.why.contains("BM25"),
+            format!("global explanation misidentified its scorer: {global_item:?}"),
         )?;
         ensure(
             global_item
