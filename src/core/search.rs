@@ -10507,18 +10507,43 @@ fn global_store_lexical_hits(
     scored
         .into_iter()
         .take(usize::try_from(effective_limit).unwrap_or(usize::MAX))
-        .map(|(memory, score)| SearchHit {
-            doc_id: memory.id.clone(),
-            score,
-            source: ScoreSource::Lexical,
-            fast_score: None,
-            quality_score: None,
-            lexical_score: Some(score),
-            rerank_score: None,
-            metadata: Some(global_store_search_metadata(&memory, reference_time)),
-            explanation: None,
+        .map(|(memory, score)| {
+            let mut hit = SearchHit {
+                doc_id: memory.id.clone(),
+                score,
+                source: ScoreSource::Lexical,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some(score),
+                rerank_score: None,
+                metadata: Some(global_store_search_metadata(&memory, reference_time)),
+                explanation: None,
+            };
+            if options.explain {
+                hit.explanation = Some(global_store_lexical_explanation(&hit));
+            }
+            hit
         })
         .collect()
+}
+
+fn global_store_lexical_explanation(hit: &SearchHit) -> ScoreExplanation {
+    let score = hit.lexical_score.unwrap_or(hit.score);
+    ScoreExplanation {
+        summary: format!(
+            "Relevance {:.4} from score {:.4} ({}) via bounded global lexical term coverage ({score:.2}).",
+            hit.relevance_score(),
+            hit.score,
+            hit.score_kind(),
+        ),
+        factors: vec![ScoreFactor::new(
+            "lexical",
+            score,
+            "query-term coverage in the admitted global memory",
+            "lexical_score",
+            "score = matched_query_terms / query_terms",
+        )],
+    }
 }
 
 fn global_store_participates_in_scope(scope: MemoryScope) -> bool {
