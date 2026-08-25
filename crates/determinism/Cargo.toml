@@ -1,8 +1,17 @@
 [package]
-name = "determinism"
+name = "ee-determinism"
 version = "0.1.0"
 edition = "2024"
-publish = false
+rust-version = "1.85"
+license = "MIT"
+description = "Compile-time determinism guardrails for Eidetic Engine code paths."
+repository = "https://github.com/Dicklesworthstone/eidetic_engine_cli"
+homepage = "https://github.com/Dicklesworthstone/eidetic_engine_cli"
+documentation = "https://docs.rs/ee-determinism"
+keywords = ["determinism", "proc-macro", "agents"]
+categories = ["development-tools"]
+publish = true
 
 [lib]
+name = "determinism"
 proc-macro = true

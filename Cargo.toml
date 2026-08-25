@@ -34,27 +34,15 @@ keywords = ["memory", "agents", "cli", "local-first", "search"]
 categories = ["command-line-utilities", "database", "development-tools"]
 default-run = "ee"
 publish = true
-exclude = [
-    "tests/fixtures/*",
-    "tests/golden/*",
-    "tests/artifacts/*",
-    ".beads/*",
-    ".beads.snapshot_*",
-    ".beads.snapshot_*/*",
-    "FINAL_AUDIT_REPORT",
-    "FINAL_AUDIT_REPORT.*",
-    ".audit_log",
-    ".audit_log/*",
-    "*.audit_log",
-    ".*-report.json",
-    "perf-target/*",
-    "perf.data",
-    "*.profraw",
-    "*.json,bak",
-    "tmp/*",
-    "temp/*",
-    ".tmp/*",
-    ".temp/*",
+include = [
+    "/src/**",
+    "/docs/schemas/**",
+    "/tests/fixtures/swarm_scale/workloads.json",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
 ]
 
 [lib]
@@ -103,7 +91,7 @@ arc-swap = { version = "=1.9.2" }
 base64 = { version = "0.22.1" }
 blake3 = { version = "1.5" }
 crossbeam-queue = { version = "0.3" }
-determinism = { version = "0.1.0", path = "crates/determinism" }
+determinism = { package = "ee-determinism", version = "0.1.0", path = "crates/determinism" }
 franken-agent-detection = { version = "0.2", path = "../franken_agent_detection", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.1", features = ["derive"] }
