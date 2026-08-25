@@ -118,6 +118,10 @@ FORBIDDEN_CARGO_SUBCOMMANDS="build check test bench clippy doc run install rustc
 REPO_PATH_HINTS="eidetic_engine_cli /data/projects/eidetic_engine_cli /Users/jemanuel/projects/eidetic_engine_cli"
 READ_ONLY_CARGO_SUBCOMMANDS="metadata locate-project pkgid tree"
 
+regex_matches() {
+    [[ "$1" =~ $2 ]]
+}
+
 classify_command() {
     # Returns a single line "<allowed>\t<reason>\t<subcommand>\t<detail>"
     # where allowed is "allowed" or "denied". The detail field carries
@@ -138,7 +142,7 @@ classify_command() {
     # sees the comment text. Deny Rust verifier commands in substitution
     # forms before applying the RCH-wrapper allowlist below.
     # shellcheck disable=SC2016 # literal shell-substitution syntax is the pattern.
-    if printf '%s' "$cmd" | grep -Eq '`[^`]*(cargo|rustc|rustdoc)[^`]*`|\$\([^)]*(cargo|rustc|rustdoc)[^)]*\)'; then
+    if regex_matches "$cmd" '`[^`]*(cargo|rustc|rustdoc)[^`]*`|\$\([^)]*(cargo|rustc|rustdoc)[^)]*\)'; then
         printf 'denied\tshell command substitution would execute Rust verification before the outer command\tcommand_substitution\tcommand substitution containing cargo/rustc/rustdoc must not be used for tracker or mail evidence\n'
         return
     fi
@@ -164,8 +168,8 @@ classify_command() {
     # admission fails, so the tripwire denies it and points callers at
     # scripts/rch_verify.sh or RCH_REQUIRE_REMOTE=1.
     if is_rch_exec_command "$cmd"; then
-        if printf '%s' "$cmd" | grep -Eq "(cargo|rustc|rustdoc)[[:space:]]"; then
-            if printf '%s' "$cmd" | grep -Eq 'RCH_REQUIRE_REMOTE[[:space:]]*=[[:space:]]*1'; then
+        if regex_matches "$cmd" '(cargo|rustc|rustdoc)[[:space:]]'; then
+            if regex_matches "$cmd" 'RCH_REQUIRE_REMOTE[[:space:]]*=[[:space:]]*1'; then
                 printf 'allowed\tcargo wrapped through remote-required rch exec\t-\t-\n'
                 return
             fi
@@ -178,13 +182,13 @@ classify_command() {
 
     # Whitelist the repo-local verifier wrapper. It performs the RCH-only
     # admission checks and is the expected agent-facing entrypoint.
-    if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]/.])scripts/rch_verify\.sh([[:space:]]|$)'; then
+    if regex_matches "$cmd" '(^|[[:space:]/.])scripts/rch_verify\.sh([[:space:]]|$)'; then
         printf 'allowed\tcargo wrapped through scripts/rch_verify.sh\t-\t-\n'
         return
     fi
 
     for tool in rustc rustdoc; do
-        if printf '%s' "$cmd" | grep -Eq "(^|[[:space:]/])${tool}([[:space:]]|$)"; then
+        if regex_matches "$cmd" "(^|[[:space:]/])${tool}([[:space:]]|$)"; then
             printf 'denied\tdirect %s invocation bypasses the RCH wrapper\t%s\t%s invocation has no rch exec wrapper in the command string\n' \
                 "$tool" "$tool" "$tool"
             return
@@ -208,7 +212,7 @@ classify_command() {
     # Bonus diagnostic: the bead body specifically cites the failure
     # where the caller set RCH_REQUIRE_REMOTE=1 but did NOT prefix with
     # `rch exec`. Surface that case with a more specific detail line.
-    if printf '%s' "$cmd" | grep -Eq 'RCH_REQUIRE_REMOTE[[:space:]]*=[[:space:]]*1'; then
+    if regex_matches "$cmd" 'RCH_REQUIRE_REMOTE[[:space:]]*=[[:space:]]*1'; then
         detail="$detail (RCH_REQUIRE_REMOTE=1 was set but rch exec wrapper is absent — exact bd-1h8ji.2 failure mode)"
     fi
 
@@ -328,11 +332,12 @@ probe_processes() {
         local elapsed
         local executable_name
         local cmd
-        pid=$(printf '%s' "$line" | awk '{print $1}')
-        ppid=$(printf '%s' "$line" | awk '{print $2}')
-        elapsed=$(printf '%s' "$line" | awk '{print $3}')
-        executable_name=$(printf '%s' "$line" | awk '{print $4}')
-        cmd=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+//')
+        # `read` assigns the untouched remainder to its final variable, so
+        # one shell parse recovers the four fixed ps columns and full command
+        # without five awk/sed subprocesses for every candidate process.
+        read -r pid ppid elapsed executable_name cmd <<EOF
+$line
+EOF
         [ -n "$pid" ] || continue
         [ -n "$executable_name" ] || continue
         [ -n "$cmd" ] || continue
@@ -690,7 +695,7 @@ process_cwd() {
 }
 
 command_mentions_rust_tool() {
-    printf '%s' "$1" | grep -Eq "(^|[[:space:]/'\"(;])cargo([[:space:]]|$)|(^|[[:space:]/'\"(;])rustc([[:space:]]|$)|(^|[[:space:]/'\"(;])rustdoc([[:space:]]|$)"
+    regex_matches "$1" "(^|[[:space:]/'\"(;])cargo([[:space:]]|$)|(^|[[:space:]/'\"(;])rustc([[:space:]]|$)|(^|[[:space:]/'\"(;])rustdoc([[:space:]]|$)"
 }
 
 process_executable_is_rust_tool() {
@@ -703,7 +708,7 @@ process_executable_is_rust_tool() {
 }
 
 is_stable_rch_verify_wrapper_command() {
-    printf '%s' "$1" | grep -Eq '(^|[[:space:]/])bash[[:space:]]+-s[[:space:]]+--([[:space:]]|$)' &&
+    regex_matches "$1" '(^|[[:space:]/])bash[[:space:]]+-s[[:space:]]+--([[:space:]]|$)' &&
         command_mentions_rust_tool "$1"
 }
 
@@ -712,19 +717,19 @@ is_rch_payload_inspection_command() {
 }
 
 is_rch_diagnose_command() {
-    printf '%s' "$1" | grep -Eq '(^|[[:space:]/])rch([._-][^[:space:]/]+)?([[:space:]]+--json)?[[:space:]]+diagnose([[:space:]]|$)'
+    regex_matches "$1" '(^|[[:space:]/])rch([._-][^[:space:]/]+)?([[:space:]]+--json)?[[:space:]]+diagnose([[:space:]]|$)'
 }
 
 is_rch_workers_capabilities_command() {
-    printf '%s' "$1" | grep -Eq '(^|[[:space:]/])rch([._-][^[:space:]/]+)?([[:space:]]+--json)?[[:space:]]+workers[[:space:]]+capabilities([[:space:]]|$)'
+    regex_matches "$1" '(^|[[:space:]/])rch([._-][^[:space:]/]+)?([[:space:]]+--json)?[[:space:]]+workers[[:space:]]+capabilities([[:space:]]|$)'
 }
 
 is_rch_exec_command() {
-    printf '%s' "$1" | grep -Eq '(^|[[:space:]/])rch([._-][^[:space:]/]+)?([[:space:]]+--json)?[[:space:]]+exec([[:space:]]|--)'
+    regex_matches "$1" '(^|[[:space:]/])rch([._-][^[:space:]/]+)?([[:space:]]+--json)?[[:space:]]+exec([[:space:]]|--)'
 }
 
 is_ssh_remote_rust_payload_command() {
-    printf '%s' "$1" | grep -Eq '(^|[[:space:]/])ssh([[:space:]]|$)' &&
+    regex_matches "$1" '(^|[[:space:]/])ssh([[:space:]]|$)' &&
         command_mentions_rust_tool "$1"
 }
 
@@ -733,10 +738,10 @@ is_tracker_evidence_command() {
     # Do not bless shell command lists that run Cargo after the tracker
     # write. Plain prose such as "Command: cargo test ..." is handled by
     # the evidence-command shape below.
-    if printf '%s' "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*(cargo|rustc|rustdoc)([[:space:]]|$)'; then
+    if regex_matches "$cmd" '(^|[;&|])[[:space:]]*(cargo|rustc|rustdoc)([[:space:]]|$)'; then
         return 1
     fi
-    printf '%s' "$cmd" | grep -Eq '(^|[[:space:]/.])scripts/br_retry\.sh[[:space:]]+comments[[:space:]]+add([[:space:]]|$)|(^|[[:space:]/])br[[:space:]]+comments[[:space:]]+add([[:space:]]|$)'
+    regex_matches "$cmd" '(^|[[:space:]/.])scripts/br_retry\.sh[[:space:]]+comments[[:space:]]+add([[:space:]]|$)|(^|[[:space:]/])br[[:space:]]+comments[[:space:]]+add([[:space:]]|$)'
 }
 
 is_tracker_evidence_process_command() {
@@ -748,7 +753,7 @@ is_tracker_evidence_process_command() {
     # Cargo text as inert prose. Trust only the live executable boundary here:
     # a direct br process is evidence plumbing, while `sh -c 'br ...; cargo'`
     # still starts with sh and remains visible to the ordinary Cargo scan.
-    if printf '%s' "$cmd" | grep -Eq '^([^[:space:]]*/)?br[[:space:]]+comments[[:space:]]+add([[:space:]]|$)'; then
+    if regex_matches "$cmd" '^([^[:space:]]*/)?br[[:space:]]+comments[[:space:]]+add([[:space:]]|$)'; then
         return 0
     fi
     is_tracker_evidence_command "$cmd"
@@ -756,9 +761,9 @@ is_tracker_evidence_process_command() {
 
 command_kind_from_command() {
     local cmd="$1"
-    if printf '%s' "$cmd" | grep -Eq "(^|[[:space:]/'\"(;])rustdoc([[:space:]]|$)"; then
+    if regex_matches "$cmd" "(^|[[:space:]/'\"(;])rustdoc([[:space:]]|$)"; then
         printf 'rustdoc\n'
-    elif printf '%s' "$cmd" | grep -Eq "(^|[[:space:]/'\"(;])rustc([[:space:]]|$)"; then
+    elif regex_matches "$cmd" "(^|[[:space:]/'\"(;])rustc([[:space:]]|$)"; then
         printf 'rustc\n'
     else
         printf 'cargo\n'

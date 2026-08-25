@@ -153,7 +153,6 @@ VIOLATIONS=""
 VIOLATION_COUNT=0
 BASELINED_VIOLATION_COUNT=0
 CURRENT_BEAD_ID=""
-CURRENT_BEAD_JSON=""
 CURRENT_BEAD_LABELS=""
 CURRENT_BEAD_DESCRIPTION=""
 CURRENT_BEAD_NOTES=""
@@ -171,6 +170,8 @@ CURRENT_BEAD_AUDIT_EVENT_TYPE="false"
 CURRENT_BEAD_AUDIT_CHAIN_CONTINUITY="false"
 CURRENT_BEAD_REJECTION_CRITERIA="false"
 CURRENT_BEAD_DEGRADATION_CODES=""
+CURRENT_BEAD_INFERRED_SURFACE_RECORDS=""
+CURRENT_BEAD_HONESTY_SURFACES=""
 FIELD_SEPARATOR=$(printf '\037')
 RECORD_NEWLINE=$(printf '\036')
 
@@ -181,14 +182,11 @@ add_violation() {
     local reason="$4"
 
     VIOLATION_COUNT=$((VIOLATION_COUNT + 1))
-    local object
-    object=$(jq -cn \
-        --arg bead "$bead_id" \
-        --arg label "$label" \
-        --arg surface "$surface" \
-        --arg reason "$reason" \
-        '{bead:$bead,label:$label,surface:$surface,reason:$reason}')
-    VIOLATIONS="${VIOLATIONS}${object}
+    # All four values come from validated bead identifiers/surfaces or
+    # linter-owned reason strings, so the unit separator cannot occur here.
+    # Encode the complete collection once at report/baseline time instead of
+    # launching jq once per finding (92 known findings in the current audit).
+    VIOLATIONS="${VIOLATIONS}${bead_id}${FIELD_SEPARATOR}${label}${FIELD_SEPARATOR}${surface}${FIELD_SEPARATOR}${reason}${FIELD_SEPARATOR}${FIELD_SEPARATOR}${FIELD_SEPARATOR}${FIELD_SEPARATOR}
 "
 
     if [ "$JSON_OUTPUT" = true ]; then
@@ -207,27 +205,7 @@ add_failure_mode_fixture_violation() {
     local reason="$6"
 
     VIOLATION_COUNT=$((VIOLATION_COUNT + 1))
-    local object
-    object=$(jq -cn \
-        --arg bead "$bead_id" \
-        --arg label "implements-surface" \
-        --arg surface "$surface" \
-        --arg reason "$reason" \
-        --arg bead_id "$bead_id" \
-        --arg missing_fixture_path "$fixture_path" \
-        --arg emitted_code "$emitted_code" \
-        --arg severity "$severity" \
-        '{
-            bead:$bead,
-            label:$label,
-            surface:$surface,
-            reason:$reason,
-            bead_id:$bead_id,
-            missing_fixture_path:$missing_fixture_path,
-            emitted_code:$emitted_code,
-            severity:$severity
-        }')
-    VIOLATIONS="${VIOLATIONS}${object}
+    VIOLATIONS="${VIOLATIONS}${bead_id}${FIELD_SEPARATOR}implements-surface${FIELD_SEPARATOR}${surface}${FIELD_SEPARATOR}${reason}${FIELD_SEPARATOR}${bead_id}${FIELD_SEPARATOR}${fixture_path}${FIELD_SEPARATOR}${emitted_code}${FIELD_SEPARATOR}${severity}
 "
 
     if [ "$JSON_OUTPUT" = true ]; then
@@ -237,10 +215,162 @@ add_failure_mode_fixture_violation() {
     fi
 }
 
-load_current_bead_json() {
-    CURRENT_BEAD_JSON="$1"
+violation_rows_as_json() {
+    printf "%s" "$VIOLATIONS" |
+        jq -Rc '
+            select(length > 0)
+            | split("\u001f") as $fields
+            | {
+                bead: ($fields[0] // ""),
+                label: ($fields[1] // ""),
+                surface: ($fields[2] // ""),
+                reason: ($fields[3] // "")
+              }
+            + if (($fields[4] // "") != "") then
+                {
+                    bead_id: ($fields[4] // ""),
+                    missing_fixture_path: ($fields[5] // ""),
+                    emitted_code: ($fields[6] // ""),
+                    severity: ($fields[7] // "")
+                }
+              else
+                {}
+              end
+        '
+}
 
-    if [ -z "$CURRENT_BEAD_JSON" ]; then
+prepare_bead_rows() {
+    jq -r --argjson known_surfaces "$ALL_IMPLEMENTATION_SURFACES_JSON" '
+        def explicit_surfaces:
+            [
+                ((.labels // [])[]? | select(startswith("implements-surface:")) | sub("^implements-surface:"; "")),
+                (try (.title | capture("\\[implements-surface:(?<surface>[^]]+)\\]").surface) catch empty)
+            ]
+            | unique;
+        def file_surfaces:
+            [
+                (.description // "")
+                | split("\n")[]
+                | select(startswith("FILE SURFACE:"))
+                | sub("^FILE SURFACE:[ \\t]*"; "")
+                | split(",")[]
+                | sub("^[ \\t]*"; "")
+                | sub("[ \\t].*$"; "")
+                | sub("^`"; "")
+                | sub("`$"; "")
+                | select(test("^[A-Za-z0-9_./*?+-]+$"))
+            ];
+        def referenced_test_paths:
+            [
+                [(.description // ""), (.notes // "")]
+                | join("\n")
+                | scan("tests/[A-Za-z0-9_./*?+-]+")
+                | sub("[).,:;]+$"; "")
+                | sub("/$"; "")
+            ]
+            | unique
+            | sort;
+        def inferred_surface_for_path:
+            if . == "src/core/cass_prefetch.rs" then
+                "cass_prefetch"
+              elif (. == "src/daemon.rs" or startswith("src/daemon/")) then
+                "daemon_hot_mode"
+              elif . == "src/graph/numa_pin.rs" then
+                "graph_numa_pin"
+              elif . == "src/search/lexical_ram_tier.rs" then
+                "lexical_ram_tier"
+              else
+                empty
+              end;
+        def inferred_surface_records($paths):
+            [
+                $paths[] as $path
+                | ($path | inferred_surface_for_path) as $surface
+                | $surface + "|" + $path
+            ]
+            | unique;
+        def inferred_surfaces($paths):
+            [inferred_surface_records($paths)[] | split("|")[0]]
+            | unique;
+        def degradation_codes:
+            ([.description // "", .notes // "", .close_reason // ""] | join("\n") | split("\n")) as $lines
+            | reduce $lines[] as $line (
+                {inside: false, selected: []};
+                if ($line | contains("DEGRADATION REQUIREMENT")) then
+                    .inside = true | .selected += [$line]
+                elif (.inside and ($line | test("^[ \\t]*(BACKGROUND|WHAT|ACCEPTANCE|FILE SURFACE|TRACING|TEST REQUIREMENT|COST OF OMISSION|PARENT EPIC|DEPENDENCIES)[ \\t:]"))) then
+                    .inside = false
+                elif .inside then
+                    .selected += [$line]
+                else
+                    .
+                end
+              )
+            | .selected
+            | join("\n")
+            | [
+                scan("code[ \\t]*=[ \\t]*`?[A-Za-z0-9_.-]+")
+                | sub("^code[ \\t]*=[ \\t]*`?"; "")
+              ]
+            | unique
+            | sort;
+        . as $bead
+        | file_surfaces as $file_surfaces
+        | explicit_surfaces as $explicit_surfaces
+        | referenced_test_paths as $referenced_test_paths
+        | [
+            ($bead.id // ""),
+            (($bead.labels // []) | join(",")),
+            ($bead.description // ""),
+            ($bead.notes // ""),
+            ($bead.close_reason // ""),
+            (($bead.closed_at // $bead.updated_at // $bead.created_at // "") | sub("T.*$"; "")),
+            (
+                if (($bead.parent // "") != "") then
+                    $bead.parent
+                else
+                    ([$bead.dependencies[]? | select((.issue_id // "") == (.id // "") and (.type // "") == "parent-child") | .depends_on_id][0] // "")
+                end
+            ),
+            ($explicit_surfaces | join(" ")),
+            ($file_surfaces | join(" ")),
+            ($file_surfaces | map(select(test("^tests/.*\\.rs$"))) | join(" ")),
+            ($file_surfaces | map(select(test("^src/.*\\.rs$"))) | join(" ")),
+            ($referenced_test_paths | join(" ")),
+            (($explicit_surfaces + inferred_surfaces($file_surfaces)) | unique | join(" ")),
+            (($bead.description // "") | test("(^|\\n)[ \\t]*AUDIT EMISSION:")),
+            (($bead.description // "") | test("event_type[ \\t]*=")),
+            (($bead.description // "") | test("chain_continuity|chain_hash|chain-hash continuity"; "i")),
+            ([($bead.description // ""), ($bead.notes // ""), ($bead.close_reason // "")] | join("\n") | contains("REJECTION CRITERIA")),
+            ($bead | degradation_codes | join(" ")),
+            (inferred_surface_records($file_surfaces) | join(" ")),
+            (
+                [
+                    ($known_surfaces | map(.surface) | unique)[] as $surface
+                    | select(
+                        (($bead.labels // []) | index($surface))
+                        or any(($bead.labels // [])[]?; . as $label | $surface | startswith($label + "-"))
+                      )
+                    | $surface
+                ]
+                | unique
+                | join(" ")
+            )
+        ]
+        | map(
+            tostring
+            | gsub("\u001e"; " ")
+            | gsub("\u001f"; " ")
+            | gsub("\n"; "\u001e")
+          )
+        | join("\u001f")
+    '
+}
+
+load_current_bead_row() {
+    local prepared_fields="$1"
+
+    if [ -z "$prepared_fields" ]; then
         CURRENT_BEAD_ID=""
         CURRENT_BEAD_LABELS=""
         CURRENT_BEAD_DESCRIPTION=""
@@ -259,121 +389,12 @@ load_current_bead_json() {
         CURRENT_BEAD_AUDIT_CHAIN_CONTINUITY="false"
         CURRENT_BEAD_REJECTION_CRITERIA="false"
         CURRENT_BEAD_DEGRADATION_CODES=""
+        CURRENT_BEAD_INFERRED_SURFACE_RECORDS=""
+        CURRENT_BEAD_HONESTY_SURFACES=""
         return 1
     fi
 
-    local parsed_fields
     local saved_ifs
-    parsed_fields=$(
-        printf "%s" "$CURRENT_BEAD_JSON" |
-            jq -j '
-                def explicit_surfaces:
-                    [
-                        ((.labels // [])[]? | select(startswith("implements-surface:")) | sub("^implements-surface:"; "")),
-                        (try (.title | capture("\\[implements-surface:(?<surface>[^]]+)\\]").surface) catch empty)
-                    ]
-                    | unique;
-                def file_surfaces:
-                    [
-                        (.description // "")
-                        | split("\n")[]
-                        | select(startswith("FILE SURFACE:"))
-                        | sub("^FILE SURFACE:[ \\t]*"; "")
-                        | split(",")[]
-                        | sub("^[ \\t]*"; "")
-                        | sub("[ \\t].*$"; "")
-                        | sub("^`"; "")
-                        | sub("`$"; "")
-                        | select(test("^[A-Za-z0-9_./*?+-]+$"))
-                    ];
-                def referenced_test_paths:
-                    [
-                        [(.description // ""), (.notes // "")]
-                        | join("\n")
-                        | scan("tests/[A-Za-z0-9_./*?+-]+")
-                        | sub("[).,:;]+$"; "")
-                        | sub("/$"; "")
-                    ]
-                    | unique
-                    | sort;
-                def inferred_surfaces($paths):
-                    [
-                        $paths[]
-                        | if . == "src/core/cass_prefetch.rs" then
-                            "cass_prefetch"
-                          elif (. == "src/daemon.rs" or startswith("src/daemon/")) then
-                            "daemon_hot_mode"
-                          elif . == "src/graph/numa_pin.rs" then
-                            "graph_numa_pin"
-                          elif . == "src/search/lexical_ram_tier.rs" then
-                            "lexical_ram_tier"
-                          else
-                            empty
-                          end
-                    ]
-                    | unique;
-                def degradation_codes:
-                    ([.description // "", .notes // "", .close_reason // ""] | join("\n") | split("\n")) as $lines
-                    | reduce $lines[] as $line (
-                        {inside: false, selected: []};
-                        if ($line | contains("DEGRADATION REQUIREMENT")) then
-                            .inside = true | .selected += [$line]
-                        elif (.inside and ($line | test("^[ \\t]*(BACKGROUND|WHAT|ACCEPTANCE|FILE SURFACE|TRACING|TEST REQUIREMENT|COST OF OMISSION|PARENT EPIC|DEPENDENCIES)[ \\t:]"))) then
-                            .inside = false
-                        elif .inside then
-                            .selected += [$line]
-                        else
-                            .
-                        end
-                      )
-                    | .selected
-                    | join("\n")
-                    | [
-                        scan("code[ \\t]*=[ \\t]*`?[A-Za-z0-9_.-]+")
-                        | sub("^code[ \\t]*=[ \\t]*`?"; "")
-                      ]
-                    | unique
-                    | sort;
-                . as $bead
-                | file_surfaces as $file_surfaces
-                | explicit_surfaces as $explicit_surfaces
-                | referenced_test_paths as $referenced_test_paths
-                | [
-                    ($bead.id // ""),
-                    (($bead.labels // []) | join(",")),
-                    ($bead.description // ""),
-                    ($bead.notes // ""),
-                    ($bead.close_reason // ""),
-                    (($bead.closed_at // $bead.updated_at // $bead.created_at // "") | sub("T.*$"; "")),
-                    (
-                        if (($bead.parent // "") != "") then
-                            $bead.parent
-                        else
-                            ([$bead.dependencies[]? | select((.issue_id // "") == (.id // "") and (.type // "") == "parent-child") | .depends_on_id][0] // "")
-                        end
-                    ),
-                    ($explicit_surfaces | join(" ")),
-                    ($file_surfaces | join(" ")),
-                    ($file_surfaces | map(select(test("^tests/.*\\.rs$"))) | join(" ")),
-                    ($file_surfaces | map(select(test("^src/.*\\.rs$"))) | join(" ")),
-                    ($referenced_test_paths | join(" ")),
-                    (($explicit_surfaces + inferred_surfaces($file_surfaces)) | unique | join(" ")),
-                    (($bead.description // "") | test("(^|\\n)[ \\t]*AUDIT EMISSION:")),
-                    (($bead.description // "") | test("event_type[ \\t]*=")),
-                    (($bead.description // "") | test("chain_continuity|chain_hash|chain-hash continuity"; "i")),
-                    ([($bead.description // ""), ($bead.notes // ""), ($bead.close_reason // "")] | join("\n") | contains("REJECTION CRITERIA")),
-                    ($bead | degradation_codes | join(" "))
-                ]
-                | map(
-                    tostring
-                    | gsub("\u001e"; " ")
-                    | gsub("\u001f"; " ")
-                    | gsub("\n"; "\u001e")
-                  )
-                | join("\u001f")
-            '
-    )
-
     saved_ifs="$IFS"
     IFS="$FIELD_SEPARATOR"
     read -r \
@@ -394,8 +415,10 @@ load_current_bead_json() {
         CURRENT_BEAD_AUDIT_EVENT_TYPE \
         CURRENT_BEAD_AUDIT_CHAIN_CONTINUITY \
         CURRENT_BEAD_REJECTION_CRITERIA \
-        CURRENT_BEAD_DEGRADATION_CODES <<EOF
-$parsed_fields
+        CURRENT_BEAD_DEGRADATION_CODES \
+        CURRENT_BEAD_INFERRED_SURFACE_RECORDS \
+        CURRENT_BEAD_HONESTY_SURFACES <<EOF
+$prepared_fields
 EOF
     IFS="$saved_ifs"
 
@@ -405,7 +428,7 @@ EOF
 write_report() {
     local status="$1"
     if [ -n "$VIOLATIONS" ]; then
-        printf "%s" "$VIOLATIONS" |
+        violation_rows_as_json |
             jq -s \
                 --arg status "$status" \
                 --arg baseline_file "$AUDIT_BASELINE_FILE" \
@@ -542,8 +565,8 @@ apply_audit_baseline() {
 
     before_count="$VIOLATION_COUNT"
     filtered=$(
-        printf "%s" "$VIOLATIONS" |
-            jq -c -s --slurpfile baseline "$AUDIT_BASELINE_FILE" '
+        violation_rows_as_json |
+            jq -r -s --slurpfile baseline "$AUDIT_BASELINE_FILE" '
                 def closure_key: [
                     (.bead // ""),
                     (.label // ""),
@@ -554,12 +577,23 @@ apply_audit_baseline() {
                 (($baseline[0].violations // $baseline[0] // []) | map(closure_key) | unique) as $known
                 | map(select((closure_key as $key | any($known[]; . == $key)) | not))
                 | .[]
+                | [
+                    (.bead // ""),
+                    (.label // ""),
+                    (.surface // ""),
+                    (.reason // ""),
+                    (.bead_id // ""),
+                    (.missing_fixture_path // ""),
+                    (.emitted_code // ""),
+                    (.severity // "")
+                  ]
+                | join("\u001f")
             '
     )
 
     if [ -n "$filtered" ]; then
         VIOLATIONS="$(printf "%s\n" "$filtered")"
-        remaining_count=$(printf "%s" "$VIOLATIONS" | jq -s 'length')
+        remaining_count=$(printf "%s" "$VIOLATIONS" | awk 'END { print NR }')
     else
         VIOLATIONS=""
         remaining_count=0
@@ -571,7 +605,7 @@ apply_audit_baseline() {
     if [ -n "$EXPIRED_DEFERRALS" ]; then
         if [ -n "$VIOLATIONS" ]; then
             EXPIRED_DEFERRALS=$(
-                printf "%s" "$VIOLATIONS" |
+                violation_rows_as_json |
                     jq -r -s --arg reason "$DEFERRAL_EXPIRED_REASON" '
                         [
                             .[]
@@ -626,20 +660,6 @@ implementation_surfaces_for_bead() {
     } | sed '/^$/d' | sort -u
 }
 
-OPEN_SURFACES_JSON=$(
-    jq -sc '
-        [
-          .[]
-          | select(.status != "closed")
-          | (
-              ((.labels // [])[]? | select(startswith("implements-surface:")) | sub("^implements-surface:"; "")),
-              (try (.title | capture("\\[implements-surface:(?<surface>[^]]+)\\]").surface) catch empty)
-            )
-        ]
-        | unique
-    ' "$BEADS_FILE" 2>/dev/null || echo '[]'
-)
-
 ALL_IMPLEMENTATION_SURFACES_JSON=$(
     jq -sc '
         [
@@ -655,6 +675,21 @@ ALL_IMPLEMENTATION_SURFACES_JSON=$(
         | unique_by(.surface, .bead, .status)
     ' "$BEADS_FILE" 2>/dev/null || echo '[]'
 )
+
+SURFACE_STATUS_SETS=$(
+    printf "%s\n" "$ALL_IMPLEMENTATION_SURFACES_JSON" |
+        jq -r '
+            ([.[] | select(.status != "closed") | .surface] | unique | join(" "))
+            + "\u001f"
+            + ([.[] | select(.status == "closed") | .surface] | unique | join(" "))
+        '
+)
+saved_ifs="$IFS"
+IFS="$FIELD_SEPARATOR"
+read -r OPEN_IMPLEMENTATION_SURFACES CLOSED_IMPLEMENTATION_SURFACES <<EOF
+$SURFACE_STATUS_SETS
+EOF
+IFS="$saved_ifs"
 
 GOLDEN_ARTIFACT_PATHS=$(
     find "$GOLDEN_DIR" "$SNAPSHOT_DIR" "tests/fixtures/golden" -type f 2>/dev/null || true
@@ -746,24 +781,24 @@ surface_has_unavailable_constant() {
 
 surface_has_open_implementation() {
     local surface="$1"
-    printf "%s\n" "$ALL_IMPLEMENTATION_SURFACES_JSON" |
-        jq -e --arg surface "$surface" '
-            any(.[]; .surface == $surface and .status != "closed")
-        ' >/dev/null 2>&1
+    case " $OPEN_IMPLEMENTATION_SURFACES " in
+        *" $surface "*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 surface_has_closed_implementation() {
     local surface="$1"
-    printf "%s\n" "$ALL_IMPLEMENTATION_SURFACES_JSON" |
-        jq -e --arg surface "$surface" '
-            any(.[]; .surface == $surface and .status == "closed")
-        ' >/dev/null 2>&1
+    case " $CLOSED_IMPLEMENTATION_SURFACES " in
+        *" $surface "*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 surface_has_golden_snapshot() {
     local surface="$1"
     local underscored
-    underscored=$(echo "$surface" | tr '-' '_')
+    underscored=${surface//-/_}
 
     # CLAUDE.md lists three canonical golden artifact locations. Their file
     # inventory is captured once above because audit mode checks hundreds of
@@ -835,7 +870,14 @@ implementation_surface_for_file_path() {
 
 inferred_implementation_surface_records_for_bead() {
     local bead_id="$1"
-    local path surface
+    local path surface record
+
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        for record in $CURRENT_BEAD_INFERRED_SURFACE_RECORDS; do
+            printf '%s\t%s\n' "${record%%|*}" "${record#*|}"
+        done
+        return 0
+    fi
 
     bead_declared_file_surfaces "$bead_id" |
         while IFS= read -r path; do
@@ -877,7 +919,11 @@ check_inferred_implementation_surface_labels() {
     local bead_id="$1"
     local records record surface path
 
-    records=$(inferred_implementation_surface_records_for_bead "$bead_id" | tr '\t' '|')
+    if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
+        records="$CURRENT_BEAD_INFERRED_SURFACE_RECORDS"
+    else
+        records=$(inferred_implementation_surface_records_for_bead "$bead_id" | tr '\t' '|')
+    fi
     for record in $records; do
         surface=${record%%|*}
         path=${record#*|}
@@ -1379,11 +1425,39 @@ check_unimplemented_failure_mode_honesty_only() {
     done
 }
 
+case_insensitive_line_regex_match() {
+    local text="$1"
+    local regex="$2"
+    local line
+    local matched=false
+    local nocasematch_was_set=false
+
+    if shopt -q nocasematch; then
+        nocasematch_was_set=true
+    else
+        shopt -s nocasematch
+    fi
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ $regex ]]; then
+            matched=true
+            break
+        fi
+    done <<EOF
+$text
+EOF
+
+    if [ "$nocasematch_was_set" = false ]; then
+        shopt -u nocasematch
+    fi
+    [ "$matched" = true ]
+}
+
 close_reason_contains_abstention() {
     local close_reason="$1"
     local scrubbed
 
-    if ! echo "$close_reason" | grep -qiE "$ABSTENTION_REGEX"; then
+    if ! case_insensitive_line_regex_match "$close_reason" "$ABSTENTION_REGEX"; then
         return 1
     fi
 
@@ -1410,12 +1484,12 @@ close_reason_contains_abstention() {
                 -e 's/(retired|removed|deleted|replaced|eliminated|dropped)[[:space:]]+(the[[:space:]]+)?placeholders?//Ig'
     )
 
-    echo "$scrubbed" | grep -qiE "$ABSTENTION_REGEX"
+    case_insensitive_line_regex_match "$scrubbed" "$ABSTENTION_REGEX"
 }
 
 close_reason_contains_defer_v2() {
     local close_reason="$1"
-    echo "$close_reason" | grep -qiE "$DEFER_V2_REGEX"
+    case_insensitive_line_regex_match "$close_reason" "$DEFER_V2_REGEX"
 }
 
 bead_parent() {
@@ -1603,19 +1677,7 @@ honesty_surfaces_for_bead() {
     local bead_id="$1"
 
     if [ "$bead_id" = "$CURRENT_BEAD_ID" ]; then
-        printf "%s" "$CURRENT_BEAD_JSON" |
-            jq -r --argjson known_surfaces "$ALL_IMPLEMENTATION_SURFACES_JSON" '
-                . as $bead
-                | [
-                    ($known_surfaces | map(.surface) | unique)[] as $surface
-                    | select(
-                        (($bead.labels // []) | index($surface))
-                        or any(($bead.labels // [])[]?; . as $label | $surface | startswith($label + "-"))
-                    )
-                    | $surface
-                ]
-                | unique[]
-            '
+        print_space_separated_lines "$CURRENT_BEAD_HONESTY_SURFACES"
         return 0
     fi
 
@@ -1748,10 +1810,10 @@ recently_changed_bead_ids() {
 }
 
 if [ "$AUDIT_MODE" = true ]; then
-    BEAD_ROWS=$(relevant_closed_bead_rows)
+    BEAD_ROWS=$(relevant_closed_bead_rows | prepare_bead_rows)
 else
     CHANGED_IDS=$(recently_changed_bead_ids)
-    BEAD_ROWS=$(recently_changed_closed_bead_rows "$CHANGED_IDS")
+    BEAD_ROWS=$(recently_changed_closed_bead_rows "$CHANGED_IDS" | prepare_bead_rows)
 fi
 
 check_graph_schema_docs() {
@@ -1798,9 +1860,9 @@ fi
 # Process each bead from the single ledger scan above. Keeping the current
 # record in memory avoids reparsing the complete Beads JSONL file for every
 # rule and turns audit mode from quadratic ledger work into one linear pass.
-while IFS= read -r bead_json; do
-    [ -n "$bead_json" ] || continue
-    load_current_bead_json "$bead_json" || continue
+while IFS= read -r bead_row; do
+    [ -n "$bead_row" ] || continue
+    load_current_bead_row "$bead_row" || continue
     bead_id="$CURRENT_BEAD_ID"
     labels="$CURRENT_BEAD_LABELS"
     close_reason="$CURRENT_BEAD_CLOSE_REASON"
