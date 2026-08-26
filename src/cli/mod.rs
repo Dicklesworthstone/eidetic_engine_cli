@@ -21174,6 +21174,22 @@ fn output_write_failure_error(output_path: &Path, error: &io::Error) -> DomainEr
     }
 }
 
+fn validate_output_parent(output_path: &Path) -> io::Result<()> {
+    let parent = output_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let metadata = fs::metadata(parent)?;
+    if metadata.is_dir() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            format!("output parent {} is not a directory", parent.display()),
+        ))
+    }
+}
+
 fn write_output_bytes<W, E>(
     renderer: output::Renderer,
     stdout: &mut W,
@@ -40187,6 +40203,16 @@ where
     W: Write,
     E: Write,
 {
+    if let Some(output_path) = args.output.as_deref()
+        && let Err(error) = validate_output_parent(output_path)
+    {
+        return write_domain_error(
+            &output_write_failure_error(output_path, &error),
+            cli.wants_json(),
+            stdout,
+            stderr,
+        );
+    }
     let profile = match parse_context_profile(&args.profile) {
         Ok(profile) => profile,
         Err(message) => {
