@@ -1011,7 +1011,20 @@ mod tests {
 
     fn workspace() -> Result<tempfile::TempDir, String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        let report = crate::core::init::init_workspace(&crate::core::init::InitOptions {
+            workspace_path: temp.path().to_path_buf(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        if matches!(report.status, crate::core::init::InitStatus::Failed) {
+            return Err(format!(
+                "failed to initialize decision fixture: {:?}",
+                report.action_errors
+            ));
+        }
         Ok(temp)
     }
 

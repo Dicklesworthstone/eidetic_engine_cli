@@ -24871,14 +24871,15 @@ mod tests {
                 < legacy_leaf_decision.ttl_threshold_seconds
         );
 
-        let snapshot = serde_json::json!({
+        let snapshot = serde_json::to_string_pretty(&serde_json::json!({
             "structuralAdjustments": structural.structural_adjustments,
-        });
+        }))
+        .map_err(|error| error.to_string())?;
         let mut settings = insta::Settings::clone_current();
         settings.set_snapshot_path("../../tests/snapshots");
         settings.set_prepend_module_to_snapshot(false);
         settings.bind(|| {
-            insta::assert_json_snapshot!("curation_structural_adjustments_block", snapshot);
+            insta::assert_snapshot!("curation_structural_adjustments_block", snapshot);
         });
         Ok(())
     }

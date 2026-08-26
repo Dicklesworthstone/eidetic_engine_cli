@@ -2773,6 +2773,19 @@ where
     }
     .await;
 
+    if let Err(error) = &result {
+        if matches!(error, IndexRebuildError::Cancelled(_)) {
+            job_finalizer.mark_cancelled();
+        } else {
+            // Errors raised before the staged publisher's inner result (for
+            // example recovery rejecting a symlinked active index) still occur
+            // after the durable job was claimed. Persist that concrete cause
+            // before the drop guard can record its generic last-resort text.
+            let mut error_message = error.to_string();
+            append_failed_index_job_transition(db, &job.id, &mut error_message);
+        }
+    }
+
     result
 }
 

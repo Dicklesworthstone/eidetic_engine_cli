@@ -6530,10 +6530,12 @@ fn context_pack_l2_try_hit(
                         ContextSearchAdvisorySnapshot::from_current_rerank_posture(
                             resolve_search_rerank_runtime_posture(
                                 search_options,
-                                // The cached pack already proved non-fallback
-                                // above; only an explicitly requested lexical
-                                // mode suppresses registry consultation.
-                                source_mode_metadata.requested
+                                // The cache key is derived from the current
+                                // request, so the live request is authoritative
+                                // for whether reranking was explicitly disabled.
+                                // A synthetic missing-index report may not retain
+                                // that source-mode detail in its cached payload.
+                                options.source_mode
                                     == crate::core::search::SearchSourceMode::LexicalOnly,
                                 Some(connection),
                             ),
@@ -14558,7 +14560,7 @@ pub fn unrelated_context() -> u64 {{
     }
 
     #[test]
-    fn context_ppr_seed_map_uses_best_positive_candidate_score() -> Result<(), String> {
+    fn context_ppr_seed_map_uses_best_positive_normalized_relevance() -> Result<(), String> {
         let seed = MemoryId::from_uuid(uuid::Uuid::from_u128(904));
         let lexical_only = MemoryId::from_uuid(uuid::Uuid::from_u128(905));
         let excluded = MemoryId::from_uuid(uuid::Uuid::from_u128(906));
@@ -14572,12 +14574,23 @@ pub fn unrelated_context() -> u64 {{
             doc_id: "not-a-memory-id".to_string(),
             ..ppr_hit(seed, 1.0, Some(1.0))
         };
+        let lexical_only_hit = SearchHit {
+            doc_id: lexical_only.to_string(),
+            score: 0.30,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(0.30),
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        };
         let search_report = ppr_search_report(vec![
-            ppr_hit(seed, 0.10, Some(0.40)),
-            ppr_hit(seed, 0.75, Some(0.20)),
-            ppr_hit(lexical_only, -0.25, Some(0.30)),
+            ppr_hit(seed, 0.01, Some(0.40)),
+            ppr_hit(seed, 0.02, Some(0.20)),
+            lexical_only_hit,
             ppr_hit(zero, 0.0, Some(0.0)),
-            ppr_hit(excluded, 0.95, Some(0.95)),
+            ppr_hit(excluded, 0.03, Some(0.95)),
             invalid_hit,
         ]);
 
@@ -14588,9 +14601,13 @@ pub fn unrelated_context() -> u64 {{
             .get(&seed)
             .copied()
             .ok_or_else(|| "seed should be retained".to_string())?;
+        let expected_seed_weight = f64::from(crate::core::search::normalized_relevance_score(
+            ScoreSource::Hybrid,
+            0.02,
+        ));
         assert!(
-            (seed_weight - 0.75).abs() < 1.0e-6,
-            "duplicate seed hits should keep the best positive vector/lexical weight: {seed_map:?}"
+            (seed_weight - expected_seed_weight).abs() < 1.0e-6,
+            "duplicate seed hits should keep the best positive normalized relevance: {seed_map:?}"
         );
         let lexical_weight = seed_map
             .get(&lexical_only)
@@ -14598,7 +14615,7 @@ pub fn unrelated_context() -> u64 {{
             .ok_or_else(|| "lexical-only hit should be retained".to_string())?;
         assert!(
             (lexical_weight - 0.30).abs() < 1.0e-6,
-            "positive lexical score should seed PPR when vector score is invalid: {seed_map:?}"
+            "positive normalized lexical relevance should seed PPR: {seed_map:?}"
         );
         assert!(
             !seed_map.contains_key(&excluded),
