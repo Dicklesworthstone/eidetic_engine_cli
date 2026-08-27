@@ -405,6 +405,8 @@ fnx-convert = { path = "../franken_networkx/crates/fnx-convert" }
 unsafe_code = "forbid"
 
 [lints.clippy]
+# Token walks index parallel vectors by one counter.
+needless_range_loop = "allow"
 # Core safety lints - discourage panic paths in library code
 dbg_macro = "warn"
 todo = "warn"
