@@ -38,6 +38,9 @@ use crate::policy::store_auth::{
 /// trust but its footer does not authenticate under this store's key
 /// (ADR 0086 TC-D14). Closes the spoofable `import_source=native` bypass.
 pub const UNAUTHENTICATED_NATIVE_IMPORT_TRUST_CODE: &str = "unauthenticated_native_import_trust";
+/// Issue emitted when a verified backup is restored into a fresh store and a
+/// source `human_explicit` row is deliberately capped at `agent_validated`.
+pub const VERIFIED_BACKUP_TRUST_DOWNGRADED_CODE: &str = "verified_backup_trust_downgraded";
 /// JSONL artifacts cannot establish the signed active-member origin required
 /// to mint `peer_human_attested`, even when their store-local MAC is valid.
 pub const PEER_HUMAN_ATTESTED_IMPORT_PATH_REQUIRED_CODE: &str =
@@ -75,6 +78,17 @@ pub struct JsonlImportOptions {
     pub database_path: Option<PathBuf>,
     pub source_path: PathBuf,
     pub dry_run: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeTrustPolicy {
+    /// Ordinary JSONL imports may preserve `human_explicit` only when the
+    /// artifact authenticates under this store and workspace.
+    StoreAuthenticatedOnly,
+    /// A backup that has already passed manifest and artifact verification may
+    /// restore foreign-store rows, but never imports their `human_explicit`
+    /// claim. Those rows are capped at the header-derived trust class.
+    VerifiedBackupRestore,
 }
 
 /// Stable issue severity for JSONL import diagnostics.
@@ -603,6 +617,25 @@ struct PreparedMemory {
 pub fn import_jsonl_records(
     options: &JsonlImportOptions,
 ) -> Result<JsonlImportReport, JsonlImportError> {
+    import_jsonl_records_with_policy(options, NativeTrustPolicy::StoreAuthenticatedOnly)
+}
+
+/// Import records from a backup whose manifest and artifacts have already
+/// passed [`crate::core::backup::verify_backup`].
+///
+/// The integrity verification authorizes restoring the content, not carrying
+/// a foreign store's `human_explicit` trust across the boundary. Such rows are
+/// imported at the header-derived cap and reported as warnings.
+pub(crate) fn import_verified_backup_jsonl_records(
+    options: &JsonlImportOptions,
+) -> Result<JsonlImportReport, JsonlImportError> {
+    import_jsonl_records_with_policy(options, NativeTrustPolicy::VerifiedBackupRestore)
+}
+
+fn import_jsonl_records_with_policy(
+    options: &JsonlImportOptions,
+    native_trust_policy: NativeTrustPolicy,
+) -> Result<JsonlImportReport, JsonlImportError> {
     let workspace_path = normalize_path(&options.workspace_path);
     ensure_import_source_path_is_regular_file(&options.source_path)?;
     let source_path = normalize_path(&options.source_path);
@@ -629,13 +662,15 @@ pub fn import_jsonl_records(
     let workspace_id = ensure_workspace(&connection, &workspace_path)?;
 
     let native_auth = native_import_auth_state(&parsed, &workspace_path, &workspace_id);
-    let prepared = prepare_memories(&parsed, &workspace_id, &native_auth);
+    let prepared =
+        prepare_memories_with_policy(&parsed, &workspace_id, &native_auth, native_trust_policy);
     if prepared.has_errors() {
         report.issues.extend(prepared.issues);
         report.status = "rejected".to_owned();
         report.database_path = Some(database_path.to_string_lossy().into_owned());
         return Ok(report);
     }
+    report.issues.extend(prepared.issues);
 
     // Reimport is an idempotent restore: missing rows import, byte-identical
     // rows no-op, and divergent or tombstone-conflicting rows are preserved
@@ -1422,10 +1457,25 @@ impl PreparedMemories {
     }
 }
 
+#[cfg(test)]
 fn prepare_memories(
     parsed: &ParsedJsonlImport,
     workspace_id: &str,
     native_auth: &NativeAuthState,
+) -> PreparedMemories {
+    prepare_memories_with_policy(
+        parsed,
+        workspace_id,
+        native_auth,
+        NativeTrustPolicy::StoreAuthenticatedOnly,
+    )
+}
+
+fn prepare_memories_with_policy(
+    parsed: &ParsedJsonlImport,
+    workspace_id: &str,
+    native_auth: &NativeAuthState,
+    native_trust_policy: NativeTrustPolicy,
 ) -> PreparedMemories {
     let trust_class = trust_class_for_header(parsed.header.as_ref());
     let trust_subclass = trust_subclass_for_header(parsed.header.as_ref());
@@ -1440,8 +1490,25 @@ fn prepare_memories(
             &trust_subclass,
             parsed,
             native_auth,
+            native_trust_policy,
         ) {
-            Ok(prepared) => memories.push(prepared),
+            Ok(prepared) => {
+                if native_trust_policy == NativeTrustPolicy::VerifiedBackupRestore
+                    && memory.trust_class.as_deref() == Some(TrustClass::HumanExplicit.as_str())
+                    && !matches!(native_auth, NativeAuthState::Authenticated)
+                {
+                    issues.push(JsonlImportIssue::warning(
+                        None,
+                        VERIFIED_BACKUP_TRUST_DOWNGRADED_CODE,
+                        format!(
+                            "memory `{}` restored from a verified backup at {} instead of carrying foreign-store human_explicit trust",
+                            memory.memory_id,
+                            trust_class.as_str(),
+                        ),
+                    ));
+                }
+                memories.push(prepared);
+            }
             Err(issue) => issues.push(issue),
         }
     }
@@ -1456,6 +1523,7 @@ fn prepare_memory(
     trust_subclass: &str,
     parsed: &ParsedJsonlImport,
     native_auth: &NativeAuthState,
+    native_trust_policy: NativeTrustPolicy,
 ) -> Result<PreparedMemory, JsonlImportIssue> {
     let import_memory_id = import_memory_id(memory, parsed)?;
     let import_source = parsed
@@ -1463,7 +1531,13 @@ fn prepare_memory(
         .as_ref()
         .map(|header| header.import_source)
         .unwrap_or(ImportSource::Unknown);
-    let trust_class = trust_class_for_memory(memory, trust_class, import_source, native_auth)?;
+    let trust_class = trust_class_for_memory(
+        memory,
+        trust_class,
+        import_source,
+        native_auth,
+        native_trust_policy,
+    )?;
     let trust_subclass = trust_subclass_for_memory(memory, trust_subclass);
     let level: MemoryLevel = memory.level.parse().map_err(|error| {
         JsonlImportIssue::error(
@@ -1783,6 +1857,7 @@ fn trust_class_for_memory(
     fallback: TrustClass,
     import_source: ImportSource,
     native_auth: &NativeAuthState,
+    native_trust_policy: NativeTrustPolicy,
 ) -> Result<TrustClass, JsonlImportIssue> {
     let Some(raw) = memory.trust_class.as_deref() else {
         return Ok(fallback);
@@ -1832,6 +1907,16 @@ fn trust_class_for_memory(
         // (ADR 0086 TC-D14).
         match native_auth {
             NativeAuthState::Authenticated => {}
+            NativeAuthState::Unauthenticated { .. }
+                if native_trust_policy == NativeTrustPolicy::VerifiedBackupRestore =>
+            {
+                return Ok(fallback);
+            }
+            NativeAuthState::StoreUnavailable { .. }
+                if native_trust_policy == NativeTrustPolicy::VerifiedBackupRestore =>
+            {
+                return Ok(fallback);
+            }
             NativeAuthState::Unauthenticated { reason } => {
                 return Err(JsonlImportIssue::error(
                     None,
@@ -3445,6 +3530,48 @@ mod tests {
                 .is_none(),
             true,
             "refused import must leave zero rows",
+        )
+    }
+
+    #[test]
+    fn verified_backup_restore_caps_foreign_human_explicit_trust() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace, _workspace_id) = authenticated_import_workspace(&tempdir)?;
+        let source = tempdir.path().join("verified-backup.jsonl");
+        fs::write(&source, human_explicit_jsonl()).map_err(|error| error.to_string())?;
+
+        let report = import_verified_backup_jsonl_records(&JsonlImportOptions {
+            workspace_path: workspace.clone(),
+            database_path: None,
+            source_path: source,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure(report.status.as_str(), "completed", "import status")?;
+        ensure(report.memories_imported, 1, "memories imported")?;
+        ensure(
+            report.issues.iter().any(|issue| {
+                issue.code == VERIFIED_BACKUP_TRUST_DOWNGRADED_CODE
+                    && issue.severity == JsonlImportIssueSeverity::Warning
+            }),
+            true,
+            "verified backup trust downgrade warning",
+        )?;
+        let connection = DbConnection::open(DatabaseConfig::file(
+            workspace
+                .join(crate::config::WORKSPACE_MARKER)
+                .join(DEFAULT_DB_FILE),
+        ))
+        .map_err(|error| error.to_string())?;
+        let stored = connection
+            .get_memory("mem_01234567890123456789012345")
+            .map_err(|error| error.to_string())?
+            .ok_or("restored memory missing")?;
+        ensure(
+            stored.trust_class.as_str(),
+            "agent_validated",
+            "verified backup trust cap",
         )
     }
 

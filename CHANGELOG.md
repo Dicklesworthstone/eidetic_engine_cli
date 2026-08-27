@@ -17,9 +17,9 @@ checked-in Beads records. The durable research ledger is
 | 2026-08-06 → 2026-08-18 | **`0.14.0`** team confederation product, Windows mesh control, port migrate. |
 | 2026-08-18 | **`0.14.1`** franken-stack refresh (asupersync 0.4.8, fsqlite 0.3.5) on the 0.14 product. |
 | 2026-08-18 → 2026-08-20 | **`0.14.2`** workspace-id bind campaign plus franken-stack refresh (asupersync 0.4.9, fsqlite 0.3.7). |
-| 2026-08-20 → 2026-08-26 | **`0.14.3`** retrieval correctness, deterministic contract hardening, and crates.io/Homebrew distribution. |
+| 2026-08-20 → 2026-08-27 | **`0.14.3`** retrieval correctness, deterministic contract hardening, and crates.io/Homebrew distribution. |
 
-Release surface (as of 2026-08-26):
+Release surface (as of 2026-08-27):
 
 - Latest **published** GitHub Release before this cut: [`v0.14.2`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.14.2) (2026-08-20).
 - `Cargo.toml` carries `version = "0.14.3"` for this cut; prior tags remain
@@ -32,7 +32,7 @@ Release surface (as of 2026-08-26):
 
 | Version | Date | GitHub Release | Notes |
 | --- | --- | --- | --- |
-| [0.14.3](#0143---2026-08-26) | 2026-08-26 | this cut | Retrieval correctness, deterministic contract hardening, FrankenSQLite 0.3.9, and crates.io/Homebrew distribution |
+| [0.14.3](#0143---2026-08-27) | 2026-08-27 | this cut | Retrieval correctness, deterministic contract hardening, FrankenSQLite 0.3.9, and crates.io/Homebrew distribution |
 | [0.14.2](#0142---2026-08-20) | 2026-08-20 | yes | Workspace-id bind campaign plus franken-stack refresh: asupersync 0.4.9, FrankenSQLite 0.3.7, frankensearch 0.3.2 |
 | [0.14.1](#0141---2026-08-18) | 2026-08-18 | yes | Franken-stack refresh on the 0.14 product: asupersync 0.4.8, FrankenSQLite 0.3.5, crates.io `cargo update` |
 | [0.14.0](#0140---2026-08-18) | 2026-08-18 | tag only | Team confederation (ADR 0086), Windows scheduled-task + loopback control, encrypted credential backup, versioned team port migrate |
@@ -58,7 +58,7 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
-## [0.14.3] - 2026-08-26
+## [0.14.3] - 2026-08-27
 
 Retrieval-correctness, release-readiness, and Franken-stack refresh release.
 This cut combines the WAL compatibility fix in the pinned storage engine with
@@ -126,6 +126,15 @@ contract hardening, and the first crates.io-ready package layout.
 - **Cargo packages exclude generated audit and profiling artifacts through the
   effective bounded include list.** The release gate validates both Cargo
   packaging modes and exercises the negated-include path used by this crate.
+- **Verified backup restore works across store-authentication boundaries.** A
+  verified side-path restore imports foreign-store `human_explicit` rows at the
+  safe `agent_validated` cap with an explicit warning, while ordinary JSONL
+  imports remain fail-closed and graph snapshot, witness, and result caches
+  round-trip with their durable records.
+- **Advanced and boundary E2E gates match the shipped offline contracts.** The
+  daemon recovery companion stays offline, missing-store cases assert the
+  dedicated exit code 10, and the canonical `ee pack` surface replaces the
+  deprecated context alias in boundary coverage.
 - **The walking skeleton and release verification stay offline and reproducible.**
   Remote test inputs, golden contracts, clippy cleanliness, and deterministic
   search snapshots are aligned with the shipped behavior.

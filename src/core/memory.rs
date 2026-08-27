@@ -20660,7 +20660,10 @@ mod tests {
 
     #[test]
     fn remember_batch_dry_run_writes_nothing() -> TestResult {
-        let temp = upgrade_test_workspace()?;
+        // This contract starts from an uninitialized workspace on purpose:
+        // `ee init` now creates the source-of-truth database, so using the
+        // initialized fixture would attribute that setup write to the dry run.
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let input = concat!(
             "{\"content\":\"Dry-run batch line one.\"}\n",
             "{\"content\":\"Dry-run batch line two.\"}\n",

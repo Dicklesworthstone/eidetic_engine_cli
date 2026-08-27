@@ -775,6 +775,7 @@ scenario_daemon_recovery() {
 
     env \
         HOME="${TEST_HOME}" \
+        EE_EMBED_DOWNLOAD=off \
         EE_TRACE_BEAD_ID="bd-3usjw.54" \
         EE_TEST_TRACE=1 \
         RUST_BACKTRACE=1 \

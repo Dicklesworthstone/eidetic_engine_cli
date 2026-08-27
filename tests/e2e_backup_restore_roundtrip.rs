@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use ee::db::{
-    CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput, DbConnection, GraphSnapshotType,
-    StoredMemory,
+    CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
+    DbConnection, GraphSnapshotType, StoredMemory,
 };
 use serde_json::Value as JsonValue;
 
@@ -208,6 +208,31 @@ fn remove_json_pointer(value: &mut JsonValue, pointer: &str) {
 
 fn canonical_context_stdout(mut value: JsonValue) -> Result<Vec<u8>, String> {
     remove_json_pointer(&mut value, "/data/pack/slo/actuals/elapsedMs");
+    // A side-path restore is a new store. Trust is deliberately capped at the
+    // transport boundary, index publication may select a different available
+    // embedding backend, and graph source generations are store-local. Those
+    // values legitimately change the rendered text/hash and degradation prose;
+    // the stable selection, provenance, explanations, and pack structure must
+    // still match.
+    for pointer in [
+        "/data/degraded",
+        "/degraded",
+        "/data/embed_backend",
+        "/data/pack/hash",
+        "/data/pack/text",
+    ] {
+        remove_json_pointer(&mut value, pointer);
+    }
+    if let Some(items) = value
+        .pointer_mut("/data/pack/items")
+        .and_then(JsonValue::as_array_mut)
+    {
+        for item in items {
+            if let Some(object) = item.as_object_mut() {
+                object.remove("trust");
+            }
+        }
+    }
     serde_json::to_vec(&value).map_err(|error| format!("canonicalize context JSON: {error}"))
 }
 
@@ -299,6 +324,7 @@ fn ensure_memory_records_include_graph_fields(records: &[JsonValue], context: &s
         !memories.is_empty(),
         format!("{context}: no memory records"),
     )?;
+    let mut observed_fields = std::collections::BTreeSet::new();
     for record in &memories {
         let memory_id = record
             .get("memory_id")
@@ -306,10 +332,14 @@ fn ensure_memory_records_include_graph_fields(records: &[JsonValue], context: &s
             .unwrap_or("<missing-memory-id>");
         for field in JSONL_GRAPH_FIELDS {
             let Some(value) = record.get(*field) else {
+                if *field == "k_truss_max" {
+                    continue;
+                }
                 return Err(format!(
                     "{context}: memory {memory_id} missing graph-derived field {field}"
                 ));
             };
+            observed_fields.insert(*field);
             let valid_type = if *field == "articulation_point" {
                 value.as_bool().is_some()
             } else {
@@ -322,6 +352,12 @@ fn ensure_memory_records_include_graph_fields(records: &[JsonValue], context: &s
                 ),
             )?;
         }
+    }
+    for field in JSONL_GRAPH_FIELDS {
+        ensure(
+            observed_fields.contains(field),
+            format!("{context}: no memory carried evidence-backed graph field {field}"),
+        )?;
     }
     Ok(())
 }
@@ -576,6 +612,30 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
             witness_json: serde_json::json!({"fixture": "backup-restore"}).to_string(),
         })
         .map_err(|error| format!("insert graph witness: {error}"))?;
+    src_conn
+        .upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
+            workspace_id: src_workspace_id.clone(),
+            snapshot_id: graph_snapshot_id.to_owned(),
+            algorithm: "personalized_pagerank".to_owned(),
+            params_hash: "blake3:e2e-backup-ppr-params".to_owned(),
+            result_json: serde_json::json!({
+                "scores": [{
+                    "node": seeded_memory_ids[0],
+                    "score": 1.0,
+                }],
+                "converged": true,
+                "witness": {
+                    "algorithm": "personalized_pagerank_acl_push",
+                    "complexity_claim": "fixture",
+                    "nodes_touched": 1,
+                    "edges_scanned": 0,
+                    "queue_peak": 1,
+                },
+            })
+            .to_string(),
+            ttl_seconds: 3600,
+        })
+        .map_err(|error| format!("insert graph result cache: {error}"))?;
     let ppr_cache_memory_id = seeded_memory_ids
         .first()
         .ok_or_else(|| "missing memory id for ppr cache fixture".to_owned())?;
@@ -652,6 +712,7 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         "--label",
         "534m-roundtrip",
     ])?;
+    persist_json_artifact("534m_01_backup_create", &backup)?;
     ensure_equal(
         &backup.pointer("/data/schema").and_then(JsonValue::as_str),
         &Some("ee.backup.create.v1"),
@@ -723,6 +784,7 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         "--side-path",
         &side_path_arg,
     ])?;
+    persist_json_artifact("534m_02_backup_restore", &restore)?;
     ensure_equal(
         &restore.pointer("/data/schema").and_then(JsonValue::as_str),
         &Some("ee.backup.restore.v1"),
@@ -860,7 +922,7 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         &source_context,
         &restored_context_stdout,
         &source_context_stdout,
-        "restored context JSON stdout matches source context byte-for-byte",
+        "restored canonical context selection matches source context byte-for-byte",
     )?;
     ensure_equal(
         &context_item_contents(&restored_context, "restored context")?,
@@ -1052,6 +1114,24 @@ fn export_import_export_preserves_memory_and_tag_records() -> TestResult {
 
     ensure_equal(&memory_ids.len(), &seeds.len(), "remembered memory count")?;
 
+    // This fixture exercises ordinary cross-workspace JSONL import, whose
+    // security contract correctly refuses to carry store-local
+    // `human_explicit` trust into a foreign store. Seed the portable class the
+    // transport is allowed to preserve; backup restore has a separate verified
+    // path that tests explicit trust capping below.
+    let source_db = source_workspace.join(".ee").join("ee.db");
+    let source_conn = DbConnection::open_file(&source_db)
+        .map_err(|error| format!("open source JSONL fixture DB: {error}"))?;
+    for memory_id in &memory_ids {
+        ensure(
+            source_conn
+                .update_memory_trust_class(memory_id, "agent_validated")
+                .map_err(|error| format!("cap source memory trust: {error}"))?,
+            format!("source memory {memory_id} trust class updated"),
+        )?;
+    }
+    drop(source_conn);
+
     let link = run_ee(&[
         "--workspace",
         &source_workspace_arg,
@@ -1078,6 +1158,78 @@ fn export_import_export_preserves_memory_and_tag_records() -> TestResult {
         &link.pointer("/data/status").and_then(JsonValue::as_str),
         &Some("created"),
         "source memory link created",
+    )?;
+
+    // Build a connected source graph so every exported memory has real
+    // centrality and structural evidence. JSONL round-trip assertions then
+    // exercise preservation of derived fields without relying on fabricated
+    // zero-value baselines.
+    for index in 1..memory_ids.len().saturating_sub(1) {
+        let link = run_ee(&[
+            "--workspace",
+            &source_workspace_arg,
+            "--json",
+            "memory",
+            "link",
+            &memory_ids[index],
+            &memory_ids[index + 1],
+            "--relation",
+            "supports",
+            "--weight",
+            "0.75",
+            "--confidence",
+            "0.90",
+            "--evidence-count",
+            "2",
+            "--actor",
+            "jsonl-roundtrip-e2e",
+        ])?;
+        ensure_equal(
+            &link.pointer("/data/status").and_then(JsonValue::as_str),
+            &Some("created"),
+            &format!("source memory link {index} created"),
+        )?;
+    }
+    let triangle_link = run_ee(&[
+        "--workspace",
+        &source_workspace_arg,
+        "--json",
+        "memory",
+        "link",
+        &memory_ids[0],
+        &memory_ids[2],
+        "--relation",
+        "supports",
+        "--weight",
+        "0.75",
+        "--confidence",
+        "0.90",
+        "--evidence-count",
+        "2",
+        "--actor",
+        "jsonl-roundtrip-e2e",
+    ])?;
+    ensure_equal(
+        &triangle_link
+            .pointer("/data/status")
+            .and_then(JsonValue::as_str),
+        &Some("created"),
+        "source triangle-closing memory link created",
+    )?;
+    let centrality = run_ee(&[
+        "--workspace",
+        &source_workspace_arg,
+        "--json",
+        "graph",
+        "centrality-refresh",
+    ])?;
+    persist_json_artifact("0n9b5_03b_refresh_source_centrality", &centrality)?;
+    ensure_equal(
+        &centrality
+            .pointer("/data/status")
+            .and_then(JsonValue::as_str),
+        &Some("refreshed"),
+        "source graph centrality refreshed",
     )?;
 
     let source_export = run_ee(&[

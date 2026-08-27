@@ -15,7 +15,9 @@ use serde_json::{Value as JsonValue, json};
 
 use crate::config::{EnvVar, WORKSPACE_MARKER, read_env_var, read_env_var_os};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
-use crate::core::jsonl_import::{IMPORT_ACTION, JsonlImportOptions, import_jsonl_records};
+use crate::core::jsonl_import::{
+    IMPORT_ACTION, JsonlImportOptions, import_verified_backup_jsonl_records,
+};
 use crate::db::shard::{
     ShardFanoutPosture, ShardFanoutResolverInput, ShardFanoutStatusReport,
     resolve_shard_fanout_status, shard_fanout_enabled_from_env_value,
@@ -1589,7 +1591,7 @@ pub fn restore_backup_to_side_path(
     )?;
     restore_shard_fanout_assets(&side_path, &restored_derived)?;
 
-    let import_report = import_jsonl_records(&JsonlImportOptions {
+    let import_report = import_verified_backup_jsonl_records(&JsonlImportOptions {
         workspace_path: side_path.clone(),
         database_path: Some(restored_database_path.clone()),
         source_path: restore_records_path,
@@ -4764,6 +4766,7 @@ fn normalize_restore_side_path(path: &Path) -> Result<PathBuf, DomainError> {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::core::jsonl_import::import_jsonl_records;
     use crate::db::{
         CreateAuditInput, CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput,
         CreateGraphSnapshotInput, CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput,
