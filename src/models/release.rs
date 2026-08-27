@@ -867,7 +867,7 @@ pub fn is_allowed_package_member_path(path: &str) -> bool {
         return false;
     }
     let file_name = normalized.rsplit('/').next().unwrap_or("");
-    if file_name == ".env"
+    !(file_name == ".env"
         || file_name.ends_with(".env")
         || file_name == "config.toml"
         || file_name.contains("secret")
@@ -875,12 +875,7 @@ pub fn is_allowed_package_member_path(path: &str) -> bool {
         || file_name.ends_with(".db")
         || file_name.ends_with(".sqlite")
         || file_name.ends_with(".sqlite3")
-        || file_name.ends_with(".pem")
-        || file_name.ends_with(".key")
-    {
-        return false;
-    }
-    true
+        || file_name.ends_with(".pem") || file_name.ends_with(".key"))
 }
 
 fn is_forbidden_package_root(path: &str, root: &str) -> bool {

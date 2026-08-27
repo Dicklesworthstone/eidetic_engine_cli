@@ -10410,12 +10410,7 @@ fn graph_memory_matches_filters(
             return false;
         }
     }
-    if !filters.redaction.allow_categories.is_empty()
-        && !redaction_allow_categories(&memory.content, &filters.redaction)
-    {
-        return false;
-    }
-    true
+    !(!filters.redaction.allow_categories.is_empty() && !redaction_allow_categories(&memory.content, &filters.redaction))
 }
 
 fn redaction_allow_categories(content: &str, filters: &crate::models::RedactionFilters) -> bool {
