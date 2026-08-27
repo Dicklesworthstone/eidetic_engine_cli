@@ -8040,7 +8040,7 @@ mod tests {
             &created.team.team_id,
             "node_joiner0000000000000000000002",
             "Priya",
-            joiner_addr,
+            "198.51.100.18:54321".parse().expect("fallback addr"),
             "wsp_joinworkspace0000000000002",
             0,
             "2026-08-13T04:01:00Z",
@@ -8059,7 +8059,7 @@ mod tests {
         .expect("record");
         assert_eq!(
             fallback_record.endpoint.endpoint,
-            format!("198.51.100.17:{}", configured_hello_port())
+            format!("198.51.100.18:{}", configured_hello_port())
         );
         assert!(team_join_tailnet_matches(
             TEAM_JOIN_TAILNET_ID,
@@ -8093,37 +8093,34 @@ mod tests {
             std::path::Path::new("/tmp/ee-team-enroll/ee.db"),
             created.team.hello_port,
         );
-        assert_eq!(planned.len(), 1);
-        assert_eq!(planned[0].peer_handle, handle);
-        assert_eq!(planned[0].team_id, created.team.team_id);
-        assert_eq!(planned[0].responder_node_id, created.team.origin_node_id);
+        assert_eq!(planned.len(), 2);
+        let advertised = planned
+            .iter()
+            .find(|registration| registration.peer_handle == handle)
+            .expect("advertised-port peer registration");
+        assert_eq!(advertised.team_id, created.team.team_id);
+        assert_eq!(advertised.responder_node_id, created.team.origin_node_id);
         let api = crate::mesh::responder_broker::TeamJoinLocalApi::from_registrations(
             &connection,
             &planned,
         )
         .expect("team-join local api");
-        let who = api
-            .identity_for_source(
-                format!("127.0.0.1:{}", created.team.hello_port)
-                    .parse()
-                    .expect("addr"),
-            )
-            .expect("whois");
+        let who = api.identity_for_source(joiner_addr).expect("whois");
         assert_eq!(
             who.current_node_pubkey,
-            format!("nodekey:{}", created.team.origin_node_id)
+            "nodekey:node_joiner0000000000000000000001"
         );
         assert!(
             api.identity_for_source("8.8.8.8:41888".parse().expect("other"))
                 .is_none()
         );
-        assert!(api.all_loopback());
+        assert!(!api.all_loopback());
         let selected =
             crate::mesh::responder_broker::InboundLocalApi::prefer(&connection, &planned, None)
                 .expect("prefer");
         assert!(
             selected.is_team_join(),
-            "loopback team-join enroll must not prefer tailscaled"
+            "team-join enroll must not prefer tailscaled"
         );
     }
 
@@ -9269,11 +9266,15 @@ mod tests {
         .expect("create");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let address = listener.local_addr().expect("addr");
+        let invited_at = chrono::Utc::now();
+        let invited_at_text = invited_at.to_rfc3339();
+        let expires_at_text = (invited_at + chrono::Duration::days(7)).to_rfc3339();
+        let joined_at_text = (invited_at + chrono::Duration::minutes(1)).to_rfc3339();
         let minted = mint_team_invite_with_store(
             &inviter,
             &address.to_string(),
-            "2026-08-13T00:00:00Z",
-            "2026-08-20T00:00:00Z",
+            &invited_at_text,
+            &expires_at_text,
             Some(keys.path()),
         )
         .expect("mint");
@@ -9303,7 +9304,7 @@ mod tests {
                 "wsp_joinworkspace0000000000001",
                 &invite_code,
                 "Priya",
-                "2026-08-13T04:00:00Z",
+                &joined_at_text,
                 std::time::Duration::from_secs(5),
                 Some(joiner_path.as_path()),
             )
@@ -13211,10 +13212,12 @@ mod tests {
         assert_eq!(required.policy_generation, 1);
         let status = team_idp_status(&connection).expect("status");
         assert_eq!(status.kind, "tailnet_attested");
+        let checked_at = chrono::Utc::now();
+        let checked_at_text = checked_at.to_rfc3339();
         let first = revalidate_team_identities(
             &connection,
             &tailnet_report("alice@acme.com", None),
-            "2026-08-13T18:01:00Z",
+            &checked_at_text,
         )
         .expect("first");
         assert_eq!(first.attested, 1);
@@ -13226,7 +13229,7 @@ mod tests {
         let reassigned = revalidate_team_identities(
             &connection,
             &tailnet_report("mallory@acme.com", None),
-            "2026-08-13T18:02:00Z",
+            &(checked_at + chrono::Duration::minutes(1)).to_rfc3339(),
         )
         .expect("reassigned");
         assert_eq!(reassigned.attested, 0);
@@ -13244,7 +13247,7 @@ mod tests {
         let outside = revalidate_team_identities(
             &connection,
             &tailnet_report("alice@other.com", None),
-            "2026-08-13T18:03:00Z",
+            &(checked_at + chrono::Duration::minutes(2)).to_rfc3339(),
         )
         .expect("domain");
         assert_eq!(outside.members[0].disposition, "domain_mismatch");

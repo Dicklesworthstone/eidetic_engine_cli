@@ -1285,7 +1285,7 @@ mod tests {
     #[test]
     fn revisit_decision_scan_prefers_canonical_typed_sidecar() {
         let mut decision = memory(
-            "mem_typed_decision",
+            "mem_00000000000000000000000901",
             "semantic",
             "decision",
             "2026-08-09T20:00:00Z",

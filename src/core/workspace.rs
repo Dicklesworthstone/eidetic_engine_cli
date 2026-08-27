@@ -3393,7 +3393,7 @@ mod tests {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
         let empty = StoredWorkspace {
-            id: "wsp_bbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            id: "wsp_bbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
             path: "/tmp/ee-empty".to_owned(),
             name: Some("empty".to_owned()),
             scope_kind: "standalone".to_owned(),
@@ -3404,7 +3404,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".to_owned(),
         };
         let occupied = StoredWorkspace {
-            id: "wsp_aaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            id: "wsp_aaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
             path: "/tmp/ee-occupied".to_owned(),
             name: Some("occupied".to_owned()),
             scope_kind: "standalone".to_owned(),

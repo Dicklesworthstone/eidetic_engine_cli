@@ -449,7 +449,7 @@ fn open_sentinel_target_no_follow(
     relative: &Path,
     budget: &mut RequestBudget,
 ) -> WorkspacePathInspection {
-    use rustix::fs::{Mode, OFlags};
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 
     let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let root_descriptor = match rustix::fs::openat(
@@ -489,8 +489,16 @@ fn open_sentinel_target_no_follow(
         };
         let descriptor = match rustix::fs::openat(&directory, part, flags, Mode::empty()) {
             Ok(descriptor) => descriptor,
-            Err(error) if matches!(error, rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => {
+            Err(error) if error == rustix::io::Errno::NOENT => {
                 return WorkspacePathInspection::Missing;
+            }
+            Err(error) if error == rustix::io::Errno::NOTDIR => {
+                return match rustix::fs::statat(&directory, part, AtFlags::SYMLINK_NOFOLLOW) {
+                    Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::Symlink => {
+                        WorkspacePathInspection::UnsafeOrUnreadable
+                    }
+                    _ => WorkspacePathInspection::Missing,
+                };
             }
             Err(_) => return WorkspacePathInspection::UnsafeOrUnreadable,
         };

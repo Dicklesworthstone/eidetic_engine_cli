@@ -3611,7 +3611,7 @@ mod tests {
             kind: "fact",
             tags: Some("serve-advisory"),
             confidence: 0.9,
-            source: Some("test://serve-context-advisory"),
+            source: Some("manual://serve-context-advisory"),
             valid_from: None,
             valid_to: None,
             dry_run: false,
@@ -5279,8 +5279,8 @@ mod tests {
                 )?;
                 ensure(
                     payload["error"]["code"].as_str(),
-                    Some("storage"),
-                    "events storage error",
+                    Some("workspace_store_missing"),
+                    "events storeless-workspace error",
                 )
             }
             other => Err(format!("unexpected events SSE kind {other:?}: {event}")),

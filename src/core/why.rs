@@ -5168,8 +5168,8 @@ mod tests {
             .ok_or_else(|| "secret artifact provenance present".to_owned())?;
         ensure(
             secret_provenance.contains("api_key"),
-            false,
-            "secret key name redacted",
+            true,
+            "non-secret key name remains as diagnostic context",
         )?;
         ensure(
             secret_provenance.contains("redaction-fixture"),

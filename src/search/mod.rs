@@ -1013,6 +1013,7 @@ fn hash_rule_string_list(hasher: &mut blake3::Hasher, label: &str, values: &[Str
 #[must_use]
 pub fn rule_to_document(projection: &RuleIndexProjection) -> CanonicalSearchDocument {
     let rule = projection.rule();
+    let (content, content_truncated) = content_preview_with_flag(&rule.content);
     let mut doc = CanonicalSearchDocument::new(&rule.id, &rule.content, DocumentSource::Rule)
         .with_title(format!("Procedural rule {}", rule.id))
         .with_workspace(projection.workspace_path.display().to_string())
@@ -1020,6 +1021,8 @@ pub fn rule_to_document(projection: &RuleIndexProjection) -> CanonicalSearchDocu
         .with_kind("rule")
         .with_created_at(&rule.created_at)
         .with_tags(projection.tags().iter().cloned())
+        .with_metadata_entry("content", content)
+        .with_metadata_entry("content_truncated", content_truncated.to_string())
         .with_metadata_entry("workspace_id", &rule.workspace_id)
         .with_metadata_entry("maturity", &rule.maturity)
         .with_metadata_entry("scope", &rule.scope)

@@ -12175,12 +12175,13 @@ mod tests {
                 .insert_memory_link("link_00000000000000000000009901", &auto_link)
                 .map_err(|error| error.to_string())?;
             auto_link.source = MemoryLinkSource::Agent;
+            auto_link.relation = MemoryLinkRelation::Supports;
             connection
                 .insert_memory_link("link_00000000000000000000009902", &auto_link)
                 .map_err(|error| error.to_string())?;
             connection
                 .insert_curation_candidate(
-                    "cur_stewardcluster0000000000001",
+                    "curate_00000000000000000000009901",
                     &CreateCurationCandidateInput {
                         workspace_id: SCORE_WORKSPACE_ID.to_owned(),
                         candidate_type: CandidateType::Consolidate.as_str().to_owned(),

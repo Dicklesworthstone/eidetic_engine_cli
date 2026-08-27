@@ -17,9 +17,9 @@ checked-in Beads records. The durable research ledger is
 | 2026-08-06 → 2026-08-18 | **`0.14.0`** team confederation product, Windows mesh control, port migrate. |
 | 2026-08-18 | **`0.14.1`** franken-stack refresh (asupersync 0.4.8, fsqlite 0.3.5) on the 0.14 product. |
 | 2026-08-18 → 2026-08-20 | **`0.14.2`** workspace-id bind campaign plus franken-stack refresh (asupersync 0.4.9, fsqlite 0.3.7). |
-| 2026-08-20 → 2026-08-25 | **`0.14.3`** retrieval correctness, deterministic contract hardening, and crates.io/Homebrew distribution. |
+| 2026-08-20 → 2026-08-26 | **`0.14.3`** retrieval correctness, deterministic contract hardening, and crates.io/Homebrew distribution. |
 
-Release surface (as of 2026-08-25):
+Release surface (as of 2026-08-26):
 
 - Latest **published** GitHub Release before this cut: [`v0.14.2`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.14.2) (2026-08-20).
 - `Cargo.toml` carries `version = "0.14.3"` for this cut; prior tags remain
@@ -32,7 +32,7 @@ Release surface (as of 2026-08-25):
 
 | Version | Date | GitHub Release | Notes |
 | --- | --- | --- | --- |
-| [0.14.3](#0143---2026-08-25) | 2026-08-25 | this cut | Retrieval correctness, deterministic contract hardening, FrankenSQLite 0.3.9, and crates.io/Homebrew distribution |
+| [0.14.3](#0143---2026-08-26) | 2026-08-26 | this cut | Retrieval correctness, deterministic contract hardening, FrankenSQLite 0.3.9, and crates.io/Homebrew distribution |
 | [0.14.2](#0142---2026-08-20) | 2026-08-20 | yes | Workspace-id bind campaign plus franken-stack refresh: asupersync 0.4.9, FrankenSQLite 0.3.7, frankensearch 0.3.2 |
 | [0.14.1](#0141---2026-08-18) | 2026-08-18 | yes | Franken-stack refresh on the 0.14 product: asupersync 0.4.8, FrankenSQLite 0.3.5, crates.io `cargo update` |
 | [0.14.0](#0140---2026-08-18) | 2026-08-18 | tag only | Team confederation (ADR 0086), Windows scheduled-task + loopback control, encrypted credential backup, versioned team port migrate |
@@ -58,7 +58,7 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
-## [0.14.3] - 2026-08-25
+## [0.14.3] - 2026-08-26
 
 Retrieval-correctness, release-readiness, and Franken-stack refresh release.
 This cut combines the WAL compatibility fix in the pinned storage engine with
@@ -75,6 +75,9 @@ contract hardening, and the first crates.io-ready package layout.
   evidence chain.
 - **Graph PPR unavailability has a typed degradation contract.** Callers can
   distinguish an unavailable upstream PPR signal from an unusable context pack.
+- **Team join state records first-sync completion durably.** Migration V120
+  rebuilds existing join-attempt rows with the new state while preserving their
+  data and constraints.
 - **The Rust packages are ready for leaf-first crates.io publication.** The
   internal attribute macro ships as `ee-determinism`; the public package remains
   `eidetic-engine` with the `ee` binary and a bounded source package.
@@ -90,6 +93,13 @@ contract hardening, and the first crates.io-ready package layout.
 - **Context, robot output, and mesh command surfaces are more precise.** JSONL
   audit records are validated, store-auth failures are typed, and context-pack
   selection explanations better match the evidence actually used.
+- **Search and indexing hydrate evidence from FrankenSQLite at the point of
+  use.** Derived index metadata no longer substitutes for the durable source of
+  truth, and semantic quality tiers use their real embedders instead of a
+  mislabeled hash fallback.
+- **Curation-generation bookkeeping is enforced in the database.** The restored
+  V119 indexes and triggers keep candidate-generation and queue state coherent
+  across every write path.
 - **Verification is serialized where tests share process-global state.** The
   canonical verifier no longer creates false reds by racing integration tests
   that intentionally exercise global registries or real CLI subprocesses.
@@ -109,6 +119,13 @@ contract hardening, and the first crates.io-ready package layout.
   or registry failure.
 - **Nearby-store resume preserves provenance and survives worker-load discovery
   starvation.** Serialization errors now flow through the typed result path.
+- **Machine-facing inputs reject ambiguous payloads.** Daemon requests and JSONL
+  union records now use strict schema validation, and pack-selection ledgers
+  deserialize through their versioned contract rather than permissive derived
+  behavior.
+- **Cargo packages exclude generated audit and profiling artifacts through the
+  effective bounded include list.** The release gate validates both Cargo
+  packaging modes and exercises the negated-include path used by this crate.
 - **The walking skeleton and release verification stay offline and reproducible.**
   Remote test inputs, golden contracts, clippy cleanliness, and deterministic
   search snapshots are aligned with the shipped behavior.

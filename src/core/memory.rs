@@ -1805,7 +1805,6 @@ fn remember_memory_inner_with_store(
         };
 
     let index_status = authoritative_remember_index_status(
-        &connection,
         &prepared.workspace_id,
         &prepared.workspace_path,
         &prepared.database_path,
@@ -2041,7 +2040,6 @@ fn remember_index_status(report: &IndexProcessingJobReport) -> String {
 /// publisher may have claimed a peer job, and remember-time side effects may
 /// advance the database generation after this writer's own job completed.
 fn authoritative_remember_index_status(
-    connection: &DbConnection,
     workspace_id: &str,
     workspace_path: &Path,
     database_path: &Path,
@@ -2053,7 +2051,19 @@ fn authoritative_remember_index_status(
         return "failed".to_owned();
     }
 
-    let jobs = match connection.list_search_index_jobs(workspace_id, None) {
+    let verification_connection = match DbConnection::open_file_read_only(database_path) {
+        Ok(connection) => connection,
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::memory",
+                workspace_id,
+                error = %error,
+                "could not open a fresh durable index view after remember; reporting queued"
+            );
+            return "queued".to_owned();
+        }
+    };
+    let jobs = match verification_connection.list_search_index_jobs(workspace_id, None) {
         Ok(jobs) => jobs,
         Err(error) => {
             tracing::warn!(
@@ -2099,7 +2109,7 @@ fn authoritative_remember_index_status(
             database_path: Some(database_path.to_path_buf()),
             index_dir: Some(index_dir.to_path_buf()),
         },
-        Some(connection),
+        Some(&verification_connection),
     ) {
         Ok(status)
             if status.health == IndexHealth::Ready
@@ -4999,7 +5009,6 @@ fn finish_remember_memory_after_primary_commit(
         };
 
     let index_status = authoritative_remember_index_status(
-        connection,
         &prepared.workspace_id,
         &prepared.workspace_path,
         &prepared.database_path,
@@ -8657,7 +8666,6 @@ where
             }
         };
         index_status = authoritative_remember_index_status(
-            &connection,
             &workspace_id,
             &workspace_path,
             &database_path,
@@ -12488,6 +12496,24 @@ mod tests {
         }
     }
 
+    fn initialize_test_workspace(path: &Path) -> Result<(), String> {
+        let report = crate::core::init::init_workspace(&crate::core::init::InitOptions {
+            workspace_path: path.to_path_buf(),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        });
+        if matches!(report.status, crate::core::init::InitStatus::Failed) {
+            return Err(format!(
+                "failed to initialize memory fixture: {:?}",
+                report.action_errors
+            ));
+        }
+        Ok(())
+    }
+
     #[test]
     fn remember_cross_wire_guard_flags_levels_passed_as_kind() -> TestResult {
         for (provided, canonical) in [
@@ -13646,7 +13672,7 @@ mod tests {
             .ok_or_else(|| "enabled first writer omitted content SimHash".to_owned())?;
         connection
             .insert_memory_with_content_simhash(
-                "mem_serializeddedupfirst0000000",
+                "mem_00000000000000000000000901",
                 &memory_input,
                 first_simhash,
             )
@@ -13664,7 +13690,7 @@ mod tests {
                 .link
                 .as_ref()
                 .map(|link| link.target_memory_id.as_str()),
-            Some("mem_serializeddedupfirst0000000"),
+            Some("mem_00000000000000000000000901"),
             "second writer links its serialized predecessor",
         )?;
 
@@ -14070,7 +14096,7 @@ mod tests {
         content: &str,
     ) -> Result<(tempfile::TempDir, RememberMemoryReport), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        initialize_test_workspace(temp.path())?;
 
         let created = remember_memory(&RememberMemoryOptions {
             workspace_path: temp.path(),
@@ -14148,7 +14174,7 @@ mod tests {
             seed: u64,
         ) -> Result<(String, Option<String>, Option<String>), String> {
             let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-            std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+            initialize_test_workspace(temp.path())?;
             let mut determinism = Deterministic::from_seed(seed);
             let report = remember_memory_seeded(
                 &RememberMemoryOptions {
@@ -14841,7 +14867,7 @@ mod tests {
     #[test]
     fn three_remembers_leave_index_fresh_and_all_content_searchable() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        initialize_test_workspace(temp.path())?;
 
         let contents = [
             "Freshness proof row one about release gates.",
@@ -14943,7 +14969,7 @@ mod tests {
     #[test]
     fn remember_memory_persists_memory_audit_and_publishes_index_job() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        initialize_test_workspace(temp.path())?;
 
         let report = remember_memory(&RememberMemoryOptions {
             workspace_path: temp.path(),
@@ -15150,7 +15176,7 @@ mod tests {
     #[test]
     fn remember_memory_populates_typed_fields_sidecar_from_body() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        initialize_test_workspace(temp.path())?;
 
         let report = remember_memory(&RememberMemoryOptions {
             workspace_path: temp.path(),
@@ -15217,7 +15243,7 @@ mod tests {
     #[test]
     fn remember_memory_persists_explicit_typed_fields_and_reports_them() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        initialize_test_workspace(temp.path())?;
         let options = RememberMemoryOptions {
             workspace_path: temp.path(),
             database_path: None,
@@ -15286,7 +15312,7 @@ mod tests {
     #[test]
     fn remember_memory_validates_and_stores_temporal_validity_window() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        initialize_test_workspace(temp.path())?;
 
         let report = remember_memory(&RememberMemoryOptions {
             workspace_path: temp.path(),
@@ -15434,7 +15460,7 @@ mod tests {
         // wakes up from ordinary tagged remembers. A weak neighbor (one shared
         // tag out of three => score 0.683) stays an advisory suggestion.
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        initialize_test_workspace(temp.path())?;
 
         // High-overlap neighbor: shares {alpha, beta} with `third` (2/3 tags).
         let high = remember_memory(&RememberMemoryOptions {
@@ -15547,7 +15573,7 @@ mod tests {
         // suppress co-tag auto-links too, leaving strong neighbors as advisory
         // suggestions and the graph empty.
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        initialize_test_workspace(temp.path())?;
 
         let _first = remember_memory(&RememberMemoryOptions {
             workspace_path: temp.path(),
@@ -15612,7 +15638,7 @@ mod tests {
     #[test]
     fn remember_memory_auto_links_recent_workflow_memories() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        initialize_test_workspace(temp.path())?;
         let workflow_id = "wf-auto-link";
 
         let first = remember_memory(&RememberMemoryOptions {
@@ -15745,7 +15771,7 @@ mod tests {
     #[test]
     fn remember_memory_without_workflow_emits_auto_link_disabled_degradation() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        initialize_test_workspace(temp.path())?;
 
         let report = remember_memory(&RememberMemoryOptions {
             workspace_path: temp.path(),
@@ -15815,7 +15841,7 @@ mod tests {
     #[test]
     fn remember_memory_auto_link_can_be_disabled() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        initialize_test_workspace(temp.path())?;
         let workflow_id = "wf-no-auto-link";
 
         remember_memory(&RememberMemoryOptions {
@@ -15877,7 +15903,7 @@ mod tests {
     #[test]
     fn remember_memory_proposes_curation_candidate_after_repeated_tagged_rules() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        initialize_test_workspace(temp.path())?;
 
         let mut reports = Vec::new();
         for index in 0..3 {
@@ -16018,7 +16044,7 @@ mod tests {
     #[test]
     fn remember_memory_curation_candidate_proposal_can_be_disabled() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        initialize_test_workspace(temp.path())?;
 
         let report = remember_memory(&RememberMemoryOptions {
             workspace_path: temp.path(),
@@ -16054,7 +16080,7 @@ mod tests {
     #[test]
     fn remember_memory_skips_curation_candidate_when_existing_rule_covers_cluster() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        initialize_test_workspace(temp.path())?;
 
         let mut reports = Vec::new();
         for index in 0..2 {
@@ -16363,7 +16389,7 @@ mod tests {
     #[test]
     fn remember_memory_allow_secret_mention_persists_with_policy_bypass_audit() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        initialize_test_workspace(temp.path())?;
         let secret_like_content =
             "Document redacted sample API_KEY=sk-FAKEabc123def456ghi789jkl012.";
 
@@ -16419,8 +16445,8 @@ mod tests {
     #[test]
     fn remember_memory_secret_detector_allow_phrase_masks_configured_sentence() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        initialize_test_workspace(temp.path())?;
         let config_dir = temp.path().join(".ee");
-        std::fs::create_dir(&config_dir).map_err(|error| error.to_string())?;
         std::fs::write(
             config_dir.join("config.toml"),
             "[policy.secret_detector]\nallow_phrases = [\"OAuth refresh token\"]\n",
@@ -18108,7 +18134,7 @@ mod tests {
     }
 
     #[test]
-    fn remember_authority_rejects_empty_pending_probe_during_real_claim_race() -> TestResult {
+    fn remember_authority_reports_queued_while_real_publisher_owns_peer_work() -> TestResult {
         let temp = upgrade_test_workspace()?;
         let claimed_write = remember_memory_with_index_mode(
             &upgrade_remember_options(
@@ -18144,8 +18170,23 @@ mod tests {
         let connection = open_upgrade_test_db(&canonical)?;
 
         // A distinct connection represents the concurrent publisher and
-        // performs the real pending -> running compare-and-set claim.
+        // performs the real publish-lease + pending -> running claim.
         let publisher = open_upgrade_test_db(&canonical)?;
+        let publish_lock = AdvisoryLockId::index(&workspace_id);
+        let publisher_holder = format!("remember:{}:single-claim-race", std::process::id());
+        let acquired = publisher
+            .acquire_advisory_lock(
+                &publish_lock,
+                &publisher_holder,
+                Some(60),
+                Some("deterministic single-memory claim race"),
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            acquired.is_acquired(),
+            true,
+            "concurrent publisher acquires the real publish lease",
+        )?;
         ensure(
             publisher
                 .start_search_index_job(&claimed_job_id)
@@ -18154,9 +18195,8 @@ mod tests {
             "concurrent publisher claims the exact durable job",
         )?;
 
-        // A second public remember can publish its own job successfully while
-        // the peer-owned row is Running. Its one successful outcome and the
-        // now-empty Pending query are still insufficient to claim `indexed`.
+        // A second public remember must defer while the peer-owned row is
+        // Running under a live publish lease.
         let raced_write = remember_memory(&upgrade_remember_options(
             temp.path(),
             "Public claim-race writer preserves this exact periwinkle memory.",
@@ -18171,29 +18211,21 @@ mod tests {
             "public remember reports queued while a concurrent publisher owns peer work",
         )?;
 
-        let empty_pending =
-            reconcile_pending_remember_index_jobs(&connection, &workspace_id, &index_dir)
-                .map_err(|error| error.to_string())?;
+        let pending_during = connection
+            .list_pending_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
         ensure(
-            empty_pending.is_none(),
-            true,
-            "pending-only probe cannot see a concurrently running job",
-        )?;
-        let ready = get_index_status_with_connection(
-            &IndexStatusOptions {
-                workspace_path: canonical.clone(),
-                database_path: Some(database_path.clone()),
-                index_dir: Some(index_dir.clone()),
-            },
-            Some(&connection),
-        )
-        .map_err(|error| error.to_string())?;
-        ensure(
-            ready.health == IndexHealth::Ready
-                && ready.db_generation.is_some()
-                && ready.db_generation == ready.index_generation,
-            true,
-            "the raced writer's own publish leaves a ready, generation-equal index",
+            pending_during
+                .iter()
+                .map(|job| job.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                raced_write
+                    .index_job_id
+                    .as_deref()
+                    .ok_or_else(|| "raced remember omitted its index job id".to_owned())?,
+            ],
+            "the live publisher lease preserves the raced writer's queued job",
         )?;
 
         let durable_claimed_memory = connection
@@ -18238,7 +18270,6 @@ mod tests {
             "concurrent publisher persists the real failure outcome",
         )?;
         let failed_status = authoritative_remember_index_status(
-            &connection,
             &workspace_id,
             &canonical,
             &database_path,
@@ -18250,6 +18281,13 @@ mod tests {
             failed_status,
             "failed".to_owned(),
             "durable publisher failure overrides provisional success",
+        )?;
+        ensure(
+            publisher
+                .release_advisory_lock(&publish_lock, &publisher_holder)
+                .map_err(|error| error.to_string())?,
+            true,
+            "concurrent publisher releases its real publish lease",
         )
     }
 
@@ -18721,6 +18759,11 @@ mod tests {
 
     #[test]
     fn remember_absent_drain_report_resolves_from_durable_state() -> TestResult {
+        const PENDING_JOB_ID: &str = "sidx_00000000000000000000001001";
+        const COMPLETED_JOB_ID: &str = "sidx_00000000000000000000001002";
+        const FAILED_JOB_ID: &str = "sidx_00000000000000000000001003";
+        const MISSING_JOB_ID: &str = "sidx_00000000000000000000001004";
+
         let temp = upgrade_test_workspace()?;
         let connection = open_upgrade_test_db(temp.path())?;
         let canonical = temp
@@ -18738,12 +18781,9 @@ mod tests {
 
         // Pending: publish unproven, so the posture stays queued.
         connection
-            .insert_search_index_job("sidx_durable_pending_000000000", &job_input(1))
+            .insert_search_index_job(PENDING_JOB_ID, &job_input(1))
             .map_err(|error| error.to_string())?;
-        let pending = remember_index_job_report_from_durable_state(
-            &connection,
-            "sidx_durable_pending_000000000",
-        );
+        let pending = remember_index_job_report_from_durable_state(&connection, PENDING_JOB_ID);
         ensure(
             remember_index_status(&pending),
             "queued".to_owned(),
@@ -18752,18 +18792,15 @@ mod tests {
 
         // Completed: report indexed with the durable counts, not invented ones.
         connection
-            .insert_search_index_job("sidx_durable_done_00000000000", &job_input(1))
+            .insert_search_index_job(COMPLETED_JOB_ID, &job_input(1))
             .map_err(|error| error.to_string())?;
         connection
-            .start_search_index_job("sidx_durable_done_00000000000")
+            .start_search_index_job(COMPLETED_JOB_ID)
             .map_err(|error| error.to_string())?;
         connection
-            .complete_search_index_job("sidx_durable_done_00000000000", 1)
+            .complete_search_index_job(COMPLETED_JOB_ID, 1)
             .map_err(|error| error.to_string())?;
-        let done = remember_index_job_report_from_durable_state(
-            &connection,
-            "sidx_durable_done_00000000000",
-        );
+        let done = remember_index_job_report_from_durable_state(&connection, COMPLETED_JOB_ID);
         ensure(
             remember_index_status(&done),
             "indexed".to_owned(),
@@ -18773,18 +18810,15 @@ mod tests {
 
         // Failed: stay truthful and keep the durable error message.
         connection
-            .insert_search_index_job("sidx_durable_failed_000000000", &job_input(1))
+            .insert_search_index_job(FAILED_JOB_ID, &job_input(1))
             .map_err(|error| error.to_string())?;
         connection
-            .start_search_index_job("sidx_durable_failed_000000000")
+            .start_search_index_job(FAILED_JOB_ID)
             .map_err(|error| error.to_string())?;
         connection
-            .fail_search_index_job("sidx_durable_failed_000000000", "synthetic durable failure")
+            .fail_search_index_job(FAILED_JOB_ID, "synthetic durable failure")
             .map_err(|error| error.to_string())?;
-        let failed = remember_index_job_report_from_durable_state(
-            &connection,
-            "sidx_durable_failed_000000000",
-        );
+        let failed = remember_index_job_report_from_durable_state(&connection, FAILED_JOB_ID);
         ensure(
             remember_index_status(&failed),
             "failed".to_owned(),
@@ -18797,10 +18831,7 @@ mod tests {
         )?;
 
         // Missing: absence of the row is not proof of anything but pending.
-        let missing = remember_index_job_report_from_durable_state(
-            &connection,
-            "sidx_durable_missing_00000000",
-        );
+        let missing = remember_index_job_report_from_durable_state(&connection, MISSING_JOB_ID);
         ensure(
             remember_index_status(&missing),
             "queued".to_owned(),
@@ -19028,7 +19059,7 @@ mod tests {
             .canonicalize()
             .map_err(|error| error.to_string())?;
         let workspace_id = stable_workspace_id(&canonical);
-        let own_job_id = "sidx_release_failure_own_00000";
+        let own_job_id = "sidx_00000000000000000000001005";
         connection
             .insert_search_index_job(
                 own_job_id,
@@ -19590,7 +19621,7 @@ mod tests {
 
     fn upgrade_test_workspace() -> Result<tempfile::TempDir, String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        initialize_test_workspace(temp.path())?;
         Ok(temp)
     }
 

@@ -1929,8 +1929,8 @@ fsqlite = { path = "../frankensqlite/crates/fsqlite" }
         let report = audit_rch_topology_closure(
             &proof,
             manifest,
-            Path::new("/Users/jemanuel/projects/eidetic_engine_cli"),
-            Some(Path::new("/Users/jemanuel/projects")),
+            Path::new("/synthetic/projects/eidetic_engine_cli"),
+            Some(Path::new("/synthetic/projects")),
         )
         .expect("audit");
 

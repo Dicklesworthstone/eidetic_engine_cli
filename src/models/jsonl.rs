@@ -1988,7 +1988,7 @@ impl ExportAgentRecordBuilder {
 }
 
 /// Typed union of all export record types.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub enum ExportRecord {
     Header(ExportHeader),
@@ -2000,6 +2000,52 @@ pub enum ExportRecord {
     Workspace(ExportWorkspaceRecord),
     Audit(ExportAuditRecord),
     Footer(ExportFooter),
+}
+
+impl<'de> Deserialize<'de> for ExportRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let schema = value
+            .get("schema")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| serde::de::Error::custom("export record requires string schema"))?;
+        match schema {
+            EXPORT_HEADER_SCHEMA_V1 => serde_json::from_value(value)
+                .map(Self::Header)
+                .map_err(serde::de::Error::custom),
+            EXPORT_MEMORY_SCHEMA_V1 => serde_json::from_value(value)
+                .map(Box::new)
+                .map(Self::Memory)
+                .map_err(serde::de::Error::custom),
+            EXPORT_ARTIFACT_SCHEMA_V1 => serde_json::from_value(value)
+                .map(Self::Artifact)
+                .map_err(serde::de::Error::custom),
+            EXPORT_LINK_SCHEMA_V1 => serde_json::from_value(value)
+                .map(Self::Link)
+                .map_err(serde::de::Error::custom),
+            EXPORT_TAG_SCHEMA_V1 => serde_json::from_value(value)
+                .map(Self::Tag)
+                .map_err(serde::de::Error::custom),
+            EXPORT_AGENT_SCHEMA_V1 => serde_json::from_value(value)
+                .map(Self::Agent)
+                .map_err(serde::de::Error::custom),
+            EXPORT_WORKSPACE_SCHEMA_V1 => serde_json::from_value(value)
+                .map(Self::Workspace)
+                .map_err(serde::de::Error::custom),
+            EXPORT_AUDIT_SCHEMA_V1 => serde_json::from_value(value)
+                .map(Self::Audit)
+                .map_err(serde::de::Error::custom),
+            EXPORT_FOOTER_SCHEMA_V1 => serde_json::from_value(value)
+                .map(Self::Footer)
+                .map_err(serde::de::Error::custom),
+            _ => Err(serde::de::Error::custom(format!(
+                "unsupported export record schema `{schema}`"
+            ))),
+        }
+    }
 }
 
 impl ExportRecord {

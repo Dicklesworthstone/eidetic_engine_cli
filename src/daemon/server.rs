@@ -3561,7 +3561,7 @@ fn validate_canonical_search_data(data: &serde_json::Value) -> Result<(), String
         data,
         "canonical search data",
         REQUIRED,
-        &["queryAssist", "resultPath"],
+        &["queryAssist", "resultPath", "indexFreshness"],
     )?;
     if data.get("command").and_then(serde_json::Value::as_str) != Some("search") {
         return Err("canonical search data command drifted".to_owned());
@@ -3593,6 +3593,9 @@ fn validate_canonical_search_data(data: &serde_json::Value) -> Result<(), String
         data.get("rerank")
             .ok_or_else(|| "canonical search rerank posture missing".to_owned())?,
     )?;
+    if let Some(index_freshness) = data.get("indexFreshness") {
+        validate_canonical_search_index_freshness(index_freshness)?;
+    }
     let elapsed_ms = data
         .get("elapsedMs")
         .and_then(serde_json::Value::as_f64)
@@ -3625,6 +3628,32 @@ fn validate_canonical_search_data(data: &serde_json::Value) -> Result<(), String
         .is_some_and(|value| value.as_str() != Some("data.results"))
     {
         return Err("canonical search resultPath drifted".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_canonical_search_index_freshness(value: &serde_json::Value) -> Result<(), String> {
+    validate_exact_object_fields(
+        value,
+        "canonical search indexFreshness",
+        &["stale", "largeGap"],
+        &["dbGeneration", "indexGeneration", "generationGap"],
+    )?;
+    if !value
+        .get("stale")
+        .is_some_and(serde_json::Value::is_boolean)
+        || !value
+            .get("largeGap")
+            .is_some_and(serde_json::Value::is_boolean)
+        || ["dbGeneration", "indexGeneration", "generationGap"]
+            .iter()
+            .any(|field| {
+                value
+                    .get(*field)
+                    .is_some_and(|number| !is_json_unsigned(number))
+            })
+    {
+        return Err("canonical search indexFreshness field types drifted".to_owned());
     }
     Ok(())
 }
@@ -6879,7 +6908,26 @@ mod tests {
                 "resultCount": 0,
                 "elapsedMs": 1.0,
                 "metrics": {},
-                "rerank": {},
+                "rerank": {
+                    "schema": "ee.rerank_posture.v1",
+                    "mode": "fusion_only",
+                    "configured": "off",
+                    "topK": 0,
+                    "rerankScoreCount": 0,
+                    "scoreKind": "rrf_fused",
+                    "available": false,
+                    "degradedCode": null,
+                    "advisory": null,
+                    "advisorySummary": {
+                        "scope": "response",
+                        "permanent": null,
+                        "distinctCount": 0,
+                        "emittedCount": 0,
+                        "suppressedCount": 0,
+                        "sessionOccurrenceCount": 0,
+                        "sessionSuppressedCount": 0
+                    }
+                },
                 "profileRuntime": {},
                 "errors": [],
                 "degraded": []
@@ -6969,7 +7017,7 @@ mod tests {
             (serde_json::json!(1e3), 1_000),
             (
                 serde_json::json!(18_446_744_073_709_549_568.0),
-                18_446_744_073_709_549_568,
+                18_446_744_073_709_550_000,
             ),
             (serde_json::json!(u64::MAX), u64::MAX),
         ] {

@@ -341,7 +341,7 @@ mod tests {
         let database_path = temp.path().join("ee.db");
         let connection = DbConnection::open_file(&database_path).expect("open");
         connection.migrate().expect("migrate");
-        let workspace_id = "wsp_affinity_test_0000000000".to_owned();
+        let workspace_id = "wsp_00000000000000000000000901".to_owned();
         connection
             .execute_raw(&format!(
                 "INSERT INTO workspaces (id, path, name, created_at, updated_at) VALUES ('{workspace_id}', '/tmp/affinity', 'affinity', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')"

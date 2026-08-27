@@ -5324,7 +5324,7 @@ fn default_search_embedder_for_settings(settings: &EeEmbedderSettings) -> Defaul
                         "EE_EMBED_DOWNLOAD=off; using verified on-disk semantic model"
                     );
                     return DefaultSearchEmbedder::ready(
-                        stack_with_hash_quality_fallback(stack),
+                        stack,
                         EmbedModelResolution::ready(settings.local_source),
                     );
                 }
@@ -5349,10 +5349,9 @@ fn default_search_embedder_for_settings(settings: &EeEmbedderSettings) -> Defaul
     }
 
     match EmbedderStack::auto_detect_with(Some(&settings.model_root)) {
-        Ok(stack) if stack.fast().is_semantic() => DefaultSearchEmbedder::ready(
-            stack_with_hash_quality_fallback(stack),
-            EmbedModelResolution::ready(settings.local_source),
-        ),
+        Ok(stack) if stack.fast().is_semantic() => {
+            DefaultSearchEmbedder::ready(stack, EmbedModelResolution::ready(settings.local_source))
+        }
         Ok(stack) => {
             tracing::info!(
                 target: "ee::index::embedder",
@@ -5376,21 +5375,9 @@ fn default_embedder_stack() -> EmbedderStack {
     default_search_embedder_stack()
 }
 
-fn stack_with_hash_quality_fallback(stack: EmbedderStack) -> EmbedderStack {
-    if stack.quality().is_some() || stack.fast().is_semantic() {
-        return stack;
-    }
-    let fast_embedder = stack.fast_arc();
-    let quality_embedder =
-        Arc::new(HashEmbedder::default_384()) as Arc<dyn crate::search::Embedder>;
-    EmbedderStack::from_parts(fast_embedder, Some(quality_embedder))
-}
-
 fn hash_fallback_embedder_stack() -> EmbedderStack {
     let fast_embedder = Arc::new(HashEmbedder::default_256()) as Arc<dyn crate::search::Embedder>;
-    let quality_embedder =
-        Arc::new(HashEmbedder::default_384()) as Arc<dyn crate::search::Embedder>;
-    EmbedderStack::from_parts(fast_embedder, Some(quality_embedder))
+    EmbedderStack::from_parts(fast_embedder, None)
 }
 
 fn ee_auto_download_embedder(model_root: PathBuf) -> DefaultSearchEmbedder {
@@ -5750,7 +5737,7 @@ fn registered_model2vec_resolution(
         return Ok(rejected_registered_model2vec(entry, reason));
     };
     Ok(RegisteredModel2VecResolution::Ready(
-        stack_with_hash_quality_fallback(EmbedderStack::from_parts(fast, None)),
+        EmbedderStack::from_parts(fast, None),
     ))
 }
 
@@ -8200,7 +8187,13 @@ mod tests {
             _cx: &'a asupersync::Cx,
             _text: &'a str,
         ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
-            Box::pin(async move { Ok(vec![0.0; self.dimension]) })
+            Box::pin(async move {
+                let mut vector = vec![0.0; self.dimension];
+                if let Some(first) = vector.first_mut() {
+                    *first = 1.0;
+                }
+                Ok(vector)
+            })
         }
 
         fn dimension(&self) -> usize {
@@ -8310,7 +8303,7 @@ mod tests {
     }
 
     #[test]
-    fn hash_fallback_stack_keeps_fast_and_quality_hash_tiers() -> TestResult {
+    fn hash_fallback_stack_is_fast_only() -> TestResult {
         let stack = hash_fallback_embedder_stack();
         ensure(
             !stack.fast().is_semantic(),
@@ -8320,13 +8313,9 @@ mod tests {
             stack.fast().id() == HashEmbedder::default_256().id(),
             "fast tier should be the 256d hash fallback",
         )?;
-        let quality = stack
-            .quality()
-            .ok_or_else(|| "quality hash fallback should be present".to_owned())?;
-        ensure(!quality.is_semantic(), "quality hash tier is non-semantic")?;
         ensure(
-            quality.id() == HashEmbedder::default_384().id(),
-            "quality tier should be the 384d hash fallback",
+            stack.quality().is_none(),
+            "non-semantic hash fallback must not advertise an unpublished quality tier",
         )
     }
 
@@ -8474,11 +8463,11 @@ mod tests {
 
     #[test]
     fn semantic_stack_remains_fast_only_without_hash_quality_graft() -> TestResult {
-        let stack = stack_with_hash_quality_fallback(EmbedderStack::from_parts(
+        let stack = EmbedderStack::from_parts(
             Arc::new(TestSemanticEmbedder::new("potion-multilingual-128M", 256))
                 as Arc<dyn crate::search::Embedder>,
             None,
-        ));
+        );
 
         ensure(stack.fast().is_semantic(), "fast tier should stay semantic")?;
         ensure(
@@ -8992,7 +8981,7 @@ mod tests {
     }
 
     #[test]
-    fn embed_download_off_keeps_hash_fallback_stack() -> TestResult {
+    fn embed_download_off_keeps_fast_only_hash_fallback_stack() -> TestResult {
         let settings = EeEmbedderSettings {
             model_root: unique_test_dir("embed-download-off"),
             download_mode: EeEmbedDownloadMode::Off,
@@ -9005,10 +8994,8 @@ mod tests {
             "EE_EMBED_DOWNLOAD=off should keep the deterministic hash fast tier",
         )?;
         ensure(
-            stack
-                .quality()
-                .is_some_and(|quality| !quality.is_semantic()),
-            "offline opt-out should retain the hash quality fallback",
+            stack.quality().is_none(),
+            "offline opt-out must not advertise a fake hash-backed quality tier",
         )
     }
 
@@ -9414,11 +9401,11 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
 
-        let stack = stack_with_hash_quality_fallback(EmbedderStack::from_parts(
+        let stack = EmbedderStack::from_parts(
             Arc::new(TestSemanticEmbedder::new("potion-multilingual-128M", 256))
                 as Arc<dyn crate::search::Embedder>,
             None,
-        ));
+        );
         ensure_active_embedding_registry_record(&connection, workspace_id, &stack)
             .map_err(|error| error.to_string())?;
         let summary = reembed_embedding_summary(
@@ -9475,11 +9462,11 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
 
-        let stack = stack_with_hash_quality_fallback(EmbedderStack::from_parts(
+        let stack = EmbedderStack::from_parts(
             Arc::new(TestSemanticEmbedder::new("potion-multilingual-128M", 256))
                 as Arc<dyn crate::search::Embedder>,
             None,
-        ));
+        );
         ensure_active_embedding_registry_record(&connection, workspace_id, &stack)
             .map_err(|error| error.to_string())?;
 
@@ -10188,7 +10175,7 @@ mod tests {
                 11_u32,
             ),
         ] {
-            let hit = published_search_hit(&index_dir, query, evidence_id)?;
+            let hit = published_search_hit(&connection, &index_dir, query, evidence_id)?;
             let expected = PublishedSearchHit {
                 doc_id: evidence_id.to_owned(),
                 content: excerpt.to_owned(),
@@ -10433,6 +10420,7 @@ mod tests {
     }
 
     fn published_search_hit(
+        connection: &DbConnection,
         index_dir: &Path,
         query: &str,
         expected_doc_id: &str,
@@ -10448,7 +10436,7 @@ mod tests {
         );
         let query = query.to_owned();
         let expected_doc_id = expected_doc_id.to_owned();
-        crate::core::run_cli_future(async move {
+        let doc_id = crate::core::run_cli_future(async move {
             let cx = asupersync::Cx::for_testing();
             let (results, _) = searcher
                 .search_collect(&cx, &query, 4)
@@ -10462,30 +10450,36 @@ mod tests {
                         "published TwoTierSearcher did not return expected evidence {expected_doc_id} among four hits for {query:?}"
                     )
                 })?;
-            let metadata = result
-                .metadata
-                .as_deref()
-                .ok_or_else(|| format!("published search hit {} had no metadata", result.doc_id))?;
-            let required = |key: &str| {
-                metadata
-                    .get(key)
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-                    .ok_or_else(|| {
-                        format!(
-                            "published search hit {} omitted string metadata {key}",
-                            result.doc_id
-                        )
-                    })
-            };
-            Ok::<PublishedSearchHit, String>(PublishedSearchHit {
-                doc_id: result.doc_id.to_string(),
-                content: required("content")?,
-                provenance_uri: required("provenance_uri")?,
-                kind: required("kind")?,
-            })
+            Ok::<String, String>(result.doc_id.to_string())
         })
-        .map_err(|error| format!("published search runtime failed: {error}"))?
+        .map_err(|error| format!("published search runtime failed: {error}"))??;
+
+        // Frankensearch semantic hits intentionally carry ids and scores only.
+        // Hydrate the raw published hit from the live source of truth, matching
+        // the production search boundary in `apply_live_evidence_visibility`.
+        let span = connection
+            .get_evidence_span(&doc_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("published evidence hit {doc_id} is absent from storage"))?;
+        let metadata = crate::core::search::canonical_evidence_search_metadata(&span);
+        let required = |key: &str| {
+            metadata
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    format!("hydrated search hit {doc_id} omitted string metadata {key}")
+                })
+        };
+        let content = required("content")?;
+        let provenance_uri = required("provenance_uri")?;
+        let kind = required("kind")?;
+        Ok(PublishedSearchHit {
+            doc_id,
+            content,
+            provenance_uri,
+            kind,
+        })
     }
 
     fn ensure_search_results_match_full_rebuild(
@@ -12206,7 +12200,10 @@ mod tests {
 
         ensure(
             report.status == IndexReembedStatus::Success,
-            format!("unexpected semantic reembed status: {:?}", report.status),
+            format!(
+                "unexpected semantic reembed status: {:?}; errors={:?}",
+                report.status, report.errors
+            ),
         )?;
         ensure(
             report.embedding.semantic,
@@ -13696,7 +13693,7 @@ mod tests {
         )?;
         connection
             .insert_memory(
-                "mem_boundedgrowth00000000000000",
+                "mem_00000000000000000000000901",
                 &crate::db::CreateMemoryInput {
                     workspace_id: "wsp_01234567890123456789012345".to_owned(),
                     level: "episodic".to_owned(),
@@ -13822,8 +13819,8 @@ mod tests {
         let database = workspace.join(".ee").join("ee.db");
         let index_dir = workspace.join(".ee").join("index");
         const WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
-        const ORDINARY_JOB_ID: &str = "sidx_preclaimordinary000000000";
-        const COALESCED_JOB_ID: &str = "sidx_preclaimcoalesced0000000";
+        const ORDINARY_JOB_ID: &str = "sidx_00000000000000000000000901";
+        const COALESCED_JOB_ID: &str = "sidx_00000000000000000000000902";
         seed_reembed_database(&workspace, &database)?;
         queue_pending_index_job(&database, ORDINARY_JOB_ID)?;
 

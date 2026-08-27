@@ -1285,17 +1285,6 @@ impl EffectManifest {
                 "conflict list",
                 "List persisted contradiction/conflict evidence",
             ),
-            CommandEffect::durable_write(
-                "conflict resolve",
-                vec![
-                    "memories",
-                    "memory_links",
-                    "memory_tags",
-                    "search_index_jobs",
-                    "audit_log",
-                ],
-                "Resolve one live conflict pair via verb-mapped EXISTING audited atoms (decide record / memory expire / memory link / memory tags); dry-run plan by default, --apply executes (ADR 0066)",
-            ),
             CommandEffect::read_only_db("context", "Assemble context pack (reads only)"),
             CommandEffect::read_only_db("context-show", "Show a persisted context pack"),
             CommandEffect::read_only_db(
@@ -1453,11 +1442,6 @@ impl EffectManifest {
             CommandEffect::read_only_db("graph neighborhood", "Inspect graph neighborhood"),
             CommandEffect::read_only_db("graph pagerank", "Compute graph PageRank scores"),
             CommandEffect::read_only_db("graph path", "Find graph shortest path"),
-            CommandEffect::durable_write(
-                "graph suggest-links",
-                vec!["curation_candidates"],
-                "Predict missing memory links with bounded, typed, explained blended scoring (ADR 0066); default is a read-only report, --propose writes link/contradiction-review curation candidates (dedup on re-propose), never links directly",
-            ),
             CommandEffect::read_only(
                 "handoff completion-audit",
                 "Audit objective completion evidence without mutation",
@@ -1720,6 +1704,10 @@ impl EffectManifest {
             CommandEffect::read_only(
                 "review session",
                 "Analyze session evidence spans for curation candidates",
+            ),
+            CommandEffect::read_only_db(
+                "resume",
+                "Assemble the session-resume bundle: recent episodic sessions, revisit-conditioned decisions, queued-tag items, staleness flags, nearby stores (reads only)",
             ),
             CommandEffect::read_only(
                 "sandbox diff",
@@ -2176,6 +2164,22 @@ impl EffectManifest {
     fn durable_write_commands() -> Vec<CommandEffect> {
         vec![
             CommandEffect::durable_write(
+                "graph suggest-links",
+                vec!["curation_candidates"],
+                "Predict missing memory links with bounded, typed, explained blended scoring (ADR 0066); default is a read-only report, --propose writes link/contradiction-review curation candidates (dedup on re-propose), never links directly",
+            ),
+            CommandEffect::durable_write(
+                "conflict resolve",
+                vec![
+                    "memories",
+                    "memory_links",
+                    "memory_tags",
+                    "search_index_jobs",
+                    "audit_log",
+                ],
+                "Resolve one live conflict pair via verb-mapped EXISTING audited atoms (decide record / memory expire / memory link / memory tags); dry-run plan by default, --apply executes (ADR 0066)",
+            ),
+            CommandEffect::durable_write(
                 "diagnose-error",
                 vec!["error_fingerprints"],
                 "Diagnose a tool error against the fingerprint recall store; --record persists its fingerprint",
@@ -2397,10 +2401,6 @@ impl EffectManifest {
                 "remember",
                 vec!["memories", "memory_tags", "audit_log"],
                 "Store a new memory with direct or audit-lane-backed audit_log provenance",
-            ),
-            CommandEffect::read_only_db(
-                "resume",
-                "Assemble the session-resume bundle: recent episodic sessions, revisit-conditioned decisions, queued-tag items, staleness flags, nearby stores (reads only)",
             ),
             CommandEffect::durable_write(
                 "decide record",

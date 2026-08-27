@@ -84,10 +84,21 @@ required = set(sys.argv[2:])
 with open(manifest_path, "rb") as handle:
     manifest = tomllib.load(handle)
 
-exclude = set(manifest.get("package", {}).get("exclude", []))
-missing = sorted(required - exclude)
+package = manifest.get("package", {})
+include = set(package.get("include", []))
+if include:
+    # Cargo documents include/exclude as mutually exclusive: once `include`
+    # exists, it overrides `exclude`. Validate effective negated include
+    # patterns instead of accepting decorative excludes Cargo would ignore.
+    active_deny = {item[1:] for item in include if item.startswith("!")}
+    mode = "negated [package].include"
+else:
+    active_deny = set(package.get("exclude", []))
+    mode = "[package].exclude"
+
+missing = sorted(required - active_deny)
 if missing:
-    print("error: Cargo.toml [package].exclude is missing generated-artifact deny patterns:", file=sys.stderr)
+    print(f"error: Cargo.toml {mode} is missing generated-artifact deny patterns:", file=sys.stderr)
     for item in missing:
         print(f"  {item}", file=sys.stderr)
     sys.exit(1)
@@ -116,6 +127,23 @@ generated_manifest_with_excludes() {
     printf ']\n'
 }
 
+generated_manifest_with_includes() {
+    local skip_pattern="${1:-}"
+    local pattern
+
+    printf '[package]\n'
+    printf 'name = "package-artifact-leak-self-test"\n'
+    printf 'version = "0.0.0"\n'
+    printf 'edition = "2024"\n'
+    printf 'include = [\n'
+    printf '  "/src/**",\n'
+    for pattern in "${REQUIRED_EXCLUDES[@]}"; do
+        [ "$pattern" != "$skip_pattern" ] || continue
+        printf '  "!%s",\n' "$pattern"
+    done
+    printf ']\n'
+}
+
 assert_forbidden_path() {
     local path="$1"
 
@@ -139,6 +167,7 @@ self_test() {
     local stderr_output
 
     check_manifest_excludes <(generated_manifest_with_excludes)
+    check_manifest_excludes <(generated_manifest_with_includes)
 
     set +e
     stderr_output="$(check_manifest_excludes <(generated_manifest_with_excludes ".audit_log") 2>&1)"
@@ -150,6 +179,19 @@ self_test() {
     fi
     if ! printf '%s\n' "$stderr_output" | grep -Fq ".audit_log"; then
         printf 'package_artifact_leak self-test: missing exclude error did not name .audit_log\n' >&2
+        exit 1
+    fi
+
+    set +e
+    stderr_output="$(check_manifest_excludes <(generated_manifest_with_includes ".audit_log") 2>&1)"
+    status=$?
+    set -e
+    if [ "$status" -eq 0 ]; then
+        printf 'package_artifact_leak self-test: manifest missing negated include .audit_log should fail\n' >&2
+        exit 1
+    fi
+    if ! printf '%s\n' "$stderr_output" | grep -Fq ".audit_log"; then
+        printf 'package_artifact_leak self-test: missing negated include error did not name .audit_log\n' >&2
         exit 1
     fi
 

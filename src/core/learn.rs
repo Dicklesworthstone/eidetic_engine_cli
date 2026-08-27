@@ -4287,7 +4287,7 @@ mod tests {
                     proposed_content: Some(format!("Close query gap for {query_hash}.")),
                     proposed_confidence: Some(0.7),
                     proposed_trust_class: Some(TrustClass::AgentAssertion.as_str().to_string()),
-                    source_type: "learn_gaps".to_string(),
+                    source_type: "agent_inference".to_string(),
                     source_id: Some(query_hash.to_string()),
                     reason: format!("Repeated query miss for {query_hash}."),
                     confidence: 0.7,
@@ -4578,8 +4578,27 @@ mod tests {
             Some("search"),
             Some("zebra hovercraft docking protocol"),
         )?;
+        insert_query_miss_audit(
+            &database,
+            &workspace_id,
+            "audit_00000000000000000000000015",
+            "hash_covered_a",
+            "weak_query_recall",
+            Some("search"),
+            Some("zebra hovercraft docking protocol"),
+        )?;
+        insert_query_miss_audit(
+            &database,
+            &workspace_id,
+            "audit_00000000000000000000000016",
+            "hash_covered_a",
+            "weak_query_recall",
+            Some("search"),
+            Some("zebra hovercraft docking protocol"),
+        )?;
 
-        // Before any covering memory: the cluster is open.
+        // Before any covering memory: the repeated cluster is open. One-off
+        // misses are intentionally excluded by the learning threshold.
         let report = show_gaps(&LearnGapsOptions {
             workspace: workspace.path().to_path_buf(),
             since: None,
@@ -4986,7 +5005,7 @@ mod tests {
                     proposed_content: Some(format!("Learned summary candidate {id}.")),
                     proposed_confidence: Some(0.7),
                     proposed_trust_class: Some(TrustClass::AgentAssertion.as_str().to_string()),
-                    source_type: "learn_summary_test".to_string(),
+                    source_type: "agent_inference".to_string(),
                     source_id: Some(id.to_string()),
                     reason: format!("Summary period regression candidate {id}."),
                     confidence: 0.7,

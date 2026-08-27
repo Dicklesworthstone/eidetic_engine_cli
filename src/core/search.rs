@@ -11428,7 +11428,7 @@ fn push_search_performance_timing(
 /// posture changed after indexing cannot survive through a below-floor hint.
 fn apply_live_evidence_visibility(
     options: &SearchOptions,
-    hits: Vec<SearchHit>,
+    mut hits: Vec<SearchHit>,
     degraded: &mut Vec<SearchDegradation>,
     read_connection: Option<&DbConnection>,
 ) -> Vec<SearchHit> {
@@ -11441,16 +11441,27 @@ fn apply_live_evidence_visibility(
         return hits;
     }
 
-    let admitted = live_admitted_evidence_doc_ids(options, &evidence_ids, read_connection);
+    let admitted = live_admitted_evidence_spans(options, &evidence_ids, read_connection);
     let mut filtered = 0usize;
     let visible = hits
-        .into_iter()
-        .filter(|hit| {
-            let visible = !hit.doc_id.starts_with("ev_") || admitted.contains(hit.doc_id.as_str());
-            if !visible {
-                filtered = filtered.saturating_add(1);
+        .drain(..)
+        .filter_map(|mut hit| {
+            if !hit.doc_id.starts_with("ev_") {
+                return Some(hit);
             }
-            visible
+
+            let Some(span) = admitted.get(hit.doc_id.as_str()) else {
+                filtered = filtered.saturating_add(1);
+                return None;
+            };
+            // Frankensearch's semantic result contract intentionally carries
+            // identifiers and scores, not stored document bodies. Hydrate the
+            // admitted evidence hit from the live FrankenSQLite source of
+            // truth so semantic-only winners retain the same safe content and
+            // provenance fields as lexical winners. Rebuilding the canonical
+            // projection also repeats the evidence egress screen.
+            hit.metadata = Some(canonical_evidence_search_metadata(span));
+            Some(hit)
         })
         .collect();
     if filtered > 0 {
@@ -11461,27 +11472,50 @@ fn apply_live_evidence_visibility(
     visible
 }
 
+pub(crate) fn canonical_evidence_search_metadata(
+    span: &crate::db::StoredEvidenceSpan,
+) -> serde_json::Value {
+    let document = crate::search::evidence_span_to_document(span).into_indexable();
+    serde_json::Value::Object(
+        document
+            .metadata
+            .into_iter()
+            .map(|(key, value)| (key, serde_json::Value::String(value)))
+            .collect(),
+    )
+}
+
+fn live_admitted_evidence_spans(
+    options: &SearchOptions,
+    evidence_ids: &BTreeSet<String>,
+    read_connection: Option<&DbConnection>,
+) -> BTreeMap<String, crate::db::StoredEvidenceSpan> {
+    if let Some(connection) = read_connection {
+        return live_admitted_evidence_spans_with_connection(options, evidence_ids, connection);
+    }
+
+    let database_path = options.resolve_database_path();
+    let Ok(connection) = DbConnection::open_file_read_only(&database_path) else {
+        return BTreeMap::new();
+    };
+    live_admitted_evidence_spans_with_connection(options, evidence_ids, &connection)
+}
+
 fn live_admitted_evidence_doc_ids(
     options: &SearchOptions,
     evidence_ids: &BTreeSet<String>,
     read_connection: Option<&DbConnection>,
 ) -> BTreeSet<String> {
-    if let Some(connection) = read_connection {
-        return live_admitted_evidence_doc_ids_with_connection(options, evidence_ids, connection);
-    }
-
-    let database_path = options.resolve_database_path();
-    let Ok(connection) = DbConnection::open_file_read_only(&database_path) else {
-        return BTreeSet::new();
-    };
-    live_admitted_evidence_doc_ids_with_connection(options, evidence_ids, &connection)
+    live_admitted_evidence_spans(options, evidence_ids, read_connection)
+        .into_keys()
+        .collect()
 }
 
-fn live_admitted_evidence_doc_ids_with_connection(
+fn live_admitted_evidence_spans_with_connection(
     options: &SearchOptions,
     evidence_ids: &BTreeSet<String>,
     connection: &DbConnection,
-) -> BTreeSet<String> {
+) -> BTreeMap<String, crate::db::StoredEvidenceSpan> {
     let canonical_workspace = default_workspace_root(&options.workspace_path);
     let requested = crate::core::curate::stable_workspace_id(&canonical_workspace);
     let Some(workspace_id) = crate::core::workspace::select_existing_workspace_row(
@@ -11492,7 +11526,7 @@ fn live_admitted_evidence_doc_ids_with_connection(
     .ok()
     .flatten()
     .map(|workspace| workspace.id) else {
-        return BTreeSet::new();
+        return BTreeMap::new();
     };
     evidence_ids
         .iter()
@@ -11504,7 +11538,7 @@ fn live_admitted_evidence_doc_ids_with_connection(
             let span = connection.get_evidence_span(doc_id).ok()??;
             let session = connection.get_session(&span.session_id).ok()??;
             span.is_search_admitted_for_session(&workspace_id, &session)
-                .then(|| doc_id.clone())
+                .then(|| (doc_id.clone(), span))
         })
         .collect()
 }

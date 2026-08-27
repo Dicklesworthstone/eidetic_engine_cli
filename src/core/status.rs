@@ -778,6 +778,9 @@ fn freshness_watermarks(
     source: Option<u64>,
     asset: Option<u64>,
 ) -> (Option<u64>, Option<u64>) {
+    if status == DerivedAssetStatus::Current && source == Some(0) && asset.is_none() {
+        return (Some(0), Some(0));
+    }
     if status == DerivedAssetStatus::Stale
         && source
             .zip(asset)
@@ -4749,7 +4752,7 @@ fn gather_derived_assets_with_index_status(
             PACK_L2_CACHE_ASSET_NAME,
             PACK_L2_CACHE_ASSET_KIND,
             PACK_L2_CACHE_PATH,
-            Some("Run `ee status --workspace . --json` to inspect this asset."),
+            Some(PACK_L2_CACHE_REPAIR_COMMAND),
         ),
     };
 

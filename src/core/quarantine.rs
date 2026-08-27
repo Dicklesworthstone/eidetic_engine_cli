@@ -901,7 +901,8 @@ mod tests {
     }
 
     #[test]
-    fn gather_for_workspace_schema_errors_use_current_migrate_repair() -> TestResult {
+    fn gather_for_workspace_uninitialized_database_reports_workspace_resolution_failure()
+    -> TestResult {
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = dir.path().join("workspace");
         let metadata = workspace.join(".ee");
@@ -915,18 +916,12 @@ mod tests {
             QuarantineStorageStatus::Unavailable,
             "storage status",
         )?;
-        for code in [
-            "quarantine_feedback_events_unreadable",
-            "quarantine_rows_unreadable",
-            "trust_quarantine_rows_unreadable",
-        ] {
-            let degraded = report
-                .degraded
-                .iter()
-                .find(|degraded| degraded.code == code)
-                .ok_or_else(|| format!("missing degradation {code}"))?;
-            ensure(degraded.repair, MIGRATE_REPAIR_COMMAND, code)?;
-        }
+        let degraded = report
+            .degraded
+            .iter()
+            .find(|degraded| degraded.code == "quarantine_database_unreadable")
+            .ok_or_else(|| "missing workspace-resolution degradation".to_owned())?;
+        ensure(degraded.repair, "ee doctor --json", "repair")?;
         ensure(
             report
                 .degraded

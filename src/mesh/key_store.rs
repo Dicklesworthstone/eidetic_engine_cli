@@ -2997,6 +2997,16 @@ mod tests {
         std::fs::create_dir_all(&real).expect("mkdir");
         let keys_dir = mesh_keys_dir(workspace.path());
         std::fs::create_dir_all(keys_dir.parent().expect("parent")).expect("mkdir parents");
+        std::fs::set_permissions(
+            workspace.path().join(".ee"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .expect("secure marker permissions");
+        std::fs::set_permissions(
+            keys_dir.parent().expect("parent"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .expect("secure keys-parent permissions");
         std::os::unix::fs::symlink(&real, &keys_dir).expect("symlink");
         let error = MeshKeyStore::open_or_create(workspace.path()).expect_err("must refuse");
         assert!(
@@ -3048,6 +3058,8 @@ mod tests {
         let marker = workspace.path().join(".ee");
         let elsewhere = workspace.path().join("elsewhere");
         std::fs::create_dir(&marker).expect("create marker");
+        std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o700))
+            .expect("secure marker permissions");
         std::fs::create_dir(&elsewhere).expect("create target");
         std::os::unix::fs::symlink(&elsewhere, marker.join("keys")).expect("symlink keys parent");
 

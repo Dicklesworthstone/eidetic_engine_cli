@@ -43,6 +43,23 @@ include = [
     "/README.md",
     "/LICENSE",
     "/CHANGELOG.md",
+    "!tests/artifacts/*",
+    "!.beads.snapshot_*",
+    "!.beads.snapshot_*/*",
+    "!FINAL_AUDIT_REPORT",
+    "!FINAL_AUDIT_REPORT.*",
+    "!.audit_log",
+    "!.audit_log/*",
+    "!*.audit_log",
+    "!.*-report.json",
+    "!perf-target/*",
+    "!perf.data",
+    "!*.profraw",
+    "!*.json,bak",
+    "!tmp/*",
+    "!temp/*",
+    "!.tmp/*",
+    "!.temp/*",
 ]
 
 [lib]

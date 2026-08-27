@@ -10027,6 +10027,117 @@ CREATE TABLE team_admission_peer_state (
     "blake3:v118_team_admission_peers_2026_08_14",
 );
 
+/// V119: Restore curation generation triggers and secondary indexes omitted by
+/// the V103 table rebuild. The forward repair preserves immutable migration
+/// history while restoring the derived-asset generation fence for every
+/// curation insert, update, and delete.
+pub const V119_CURATION_GENERATION_TRIGGER_REPAIR: Migration = Migration::new(
+    119,
+    "curation_generation_trigger_repair",
+    r#"
+CREATE INDEX idx_curation_candidates_v119_state_entered
+    ON curation_candidates(state_entered_at)
+    WHERE state_entered_at IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v119_last_action
+    ON curation_candidates(last_action_at)
+    WHERE last_action_at IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v119_ttl_policy
+    ON curation_candidates(ttl_policy_id)
+    WHERE ttl_policy_id IS NOT NULL;
+
+CREATE TRIGGER trg_workspace_generations_curation_candidates_insert
+AFTER INSERT ON curation_candidates
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.created_at);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.created_at
+     WHERE workspace_id = NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_curation_candidates_update
+AFTER UPDATE ON curation_candidates
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, COALESCE(NEW.last_action_at, NEW.reviewed_at, NEW.applied_at, NEW.created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')));
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = COALESCE(NEW.last_action_at, NEW.reviewed_at, NEW.applied_at, NEW.created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+     WHERE workspace_id = NEW.workspace_id;
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = COALESCE(NEW.last_action_at, NEW.reviewed_at, NEW.applied_at, NEW.created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+     WHERE workspace_id = OLD.workspace_id
+       AND OLD.workspace_id <> NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_curation_candidates_delete
+AFTER DELETE ON curation_candidates
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id = OLD.workspace_id;
+END;
+"#,
+    "blake3:v119_curation_generation_trigger_repair_2026_08_26",
+);
+
+/// V120: Admit the durable terminal phase written after a joiner's first
+/// synchronized team snapshot. V110 predated first-sync completion and only
+/// admitted the handshake phases, so otherwise-valid completed joins could not
+/// persist their terminal state.
+pub const V120_TEAM_JOIN_ATTEMPT_FIRST_SYNC_PHASE: Migration = Migration::new(
+    120,
+    "team_join_attempt_first_sync_phase",
+    r#"
+ALTER TABLE team_join_attempts RENAME TO team_join_attempts_v110;
+CREATE TABLE team_join_attempts (
+    invite_id TEXT PRIMARY KEY CHECK (length(trim(invite_id)) = 32 AND invite_id NOT GLOB '*[^0-9a-f]*'),
+    team_id TEXT NOT NULL CHECK (
+        team_id GLOB 'team_*'
+        AND length(trim(team_id)) > 5
+        AND team_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    joiner_node_id TEXT NOT NULL CHECK (
+        joiner_node_id GLOB 'node_*'
+        AND length(trim(joiner_node_id)) > 5
+    ),
+    joiner_nonce TEXT NOT NULL CHECK (length(trim(joiner_nonce)) > 0),
+    inviter_nonce TEXT CHECK (inviter_nonce IS NULL OR length(trim(inviter_nonce)) > 0),
+    phase TEXT NOT NULL CHECK (phase IN ('hello', 'challenged', 'granted', 'first_sync_complete')),
+    granted_json TEXT,
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0)
+);
+INSERT INTO team_join_attempts (
+    invite_id,
+    team_id,
+    joiner_node_id,
+    joiner_nonce,
+    inviter_nonce,
+    phase,
+    granted_json,
+    updated_at
+)
+SELECT
+    invite_id,
+    team_id,
+    joiner_node_id,
+    joiner_nonce,
+    inviter_nonce,
+    phase,
+    granted_json,
+    updated_at
+FROM team_join_attempts_v110;
+DROP TABLE team_join_attempts_v110;
+"#,
+    "blake3:v120_team_join_attempt_first_sync_phase_2026_08_26",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -10147,6 +10258,8 @@ pub const MIGRATIONS: &[Migration] = &[
     V116_TEAM_PROJECTS_RECONCILED,
     V117_TEAM_REMOVAL_ACKS,
     V118_TEAM_ADMISSION_PEERS,
+    V119_CURATION_GENERATION_TRIGGER_REPAIR,
+    V120_TEAM_JOIN_ATTEMPT_FIRST_SYNC_PHASE,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -10235,6 +10348,10 @@ impl DbConnection {
     /// idempotency guarantee comes from re-checking under the transaction in
     /// `apply_migration`.
     pub fn migrate(&self) -> Result<MigrationResult> {
+        self.with_write_owner_fence(|error| error, || self.migrate_under_owner_fence())
+    }
+
+    fn migrate_under_owner_fence(&self) -> Result<MigrationResult> {
         self.ensure_migration_table()?;
         self.validate_applied_migrations()?;
 
@@ -28449,12 +28566,32 @@ struct PackSelectionLedgerCore {
     degraded: Vec<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackSelectionLedger {
     #[serde(flatten)]
     core: PackSelectionLedgerCore,
     ledger_hash: String,
+}
+
+impl<'de> Deserialize<'de> for PackSelectionLedger {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let object = value.as_object_mut().ok_or_else(|| {
+            serde::de::Error::custom("pack selection ledger must be a JSON object")
+        })?;
+        let ledger_hash = object
+            .remove("ledgerHash")
+            .and_then(|hash| hash.as_str().map(str::to_owned))
+            .ok_or_else(|| {
+                serde::de::Error::custom("pack selection ledger requires string ledgerHash")
+            })?;
+        let core = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        Ok(Self { core, ledger_hash })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -37264,13 +37401,12 @@ mod tests {
         setup_workspace(&connection)?;
 
         let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::nil()).to_string();
-        connection.insert_memory(
-            &memory_id,
-            &test_memory_input(
-                "wsp_01234567890123456789012345",
-                "V096 preserves sentinel spec and result rows across the rebuild.",
-            ),
-        )?;
+        let mut current_input = test_memory_input(
+            "wsp_01234567890123456789012345",
+            "V096 preserves sentinel spec and result rows across the rebuild.",
+        );
+        current_input.valid_from = Some("2026-08-08T00:00:00Z".to_owned());
+        connection.insert_memory(&memory_id, &current_input)?;
 
         // Seed a v069-shape gate spec + one result the way any pre-polarity
         // build would have written them (no polarity column exists yet).
@@ -51135,8 +51271,8 @@ mod tests {
         // Intentional corruption fixture: bypass the normal writer, which now
         // rejects cross-workspace memories and inconsistent declared counts.
         connection.execute_raw(&format!(
-            r#"INSERT INTO pack_records (id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, created_at, created_by) VALUES ('{pack_id}', 'wsp_01234567890123456789012345', 'cross workspace pack', 'compact', 256, 64, 2, 0, '{}', NULL, '2026-07-11T00:00:00Z', 'agent:test');\
-             INSERT INTO pack_items (pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key, provenance_json, trust_class, trust_subclass) VALUES ('{pack_id}', 'mem_00000000000000000000000102', 1, 'evidence', 32, 0.9, 0.7, 'cross workspace item', NULL, '{{"schema":"ee.pack_item.provenance.v1","entries":[]}}', 'agent_assertion', NULL);\
+            r#"INSERT INTO pack_records (id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, created_at, created_by) VALUES ('{pack_id}', 'wsp_01234567890123456789012345', 'cross workspace pack', 'compact', 256, 64, 2, 0, '{}', NULL, '2026-07-11T00:00:00Z', 'agent:test');
+             INSERT INTO pack_items (pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key, provenance_json, trust_class, trust_subclass) VALUES ('{pack_id}', 'mem_00000000000000000000000102', 1, 'evidence', 32, 0.9, 0.7, 'cross workspace item', NULL, '{{"schema":"ee.pack_item.provenance.v1","entries":[]}}', 'agent_assertion', NULL);
              INSERT INTO pack_omissions (pack_id, memory_id, estimated_tokens, reason) VALUES ('{pack_id}', 'mem_00000000000000000000000102', 32, 'token_budget_exceeded');"#,
             pack_test_hash("cross-workspace-reference-fixture"),
         ))?;

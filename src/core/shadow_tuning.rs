@@ -1654,7 +1654,7 @@ mod tests {
 
     type TestResult = Result<(), String>;
 
-    const WORKSPACE: &str = "ws-shadow-tuning";
+    const WORKSPACE: &str = "wsp_00000000000000000000000901";
 
     fn ts(minute: i64) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 8, 1, 12, 0, 0).unwrap() + Duration::minutes(minute)
@@ -2073,16 +2073,18 @@ mod tests {
             .map_err(|error| error.to_string())?;
         connection
             .insert_pack_record(
-                "pack-1",
+                "pack_00000000000000000000001001",
                 &CreatePackRecordInput {
                     workspace_id: WORKSPACE.to_owned(),
                     query: "prepare release".to_owned(),
-                    profile: "default".to_owned(),
+                    profile: "balanced".to_owned(),
                     max_tokens: 4000,
                     used_tokens: 0,
                     item_count: 0,
                     omitted_count: 0,
-                    pack_hash: "blake3:test".to_owned(),
+                    pack_hash:
+                        "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+                            .to_owned(),
                     degraded_json: None,
                     created_by: None,
                 },
@@ -2092,17 +2094,17 @@ mod tests {
             .map_err(|error| error.to_string())?;
         connection
             .insert_feedback_event(
-                "fev-dense",
+                "fb_00000000000000000000001001",
                 &CreateFeedbackEventInput {
                     workspace_id: WORKSPACE.to_owned(),
                     target_type: "memory".to_owned(),
-                    target_id: "mem-1".to_owned(),
+                    target_id: "mem_00000000000000000000001001".to_owned(),
                     signal: "helpful".to_owned(),
                     weight: 1.0,
                     source_type: "outcome_observed".to_owned(),
                     source_id: None,
                     reason: None,
-                    evidence_json: Some(pack_item_evidence("pack-1")),
+                    evidence_json: Some(pack_item_evidence("pack_00000000000000000000001001")),
                     session_id: None,
                 },
             )
@@ -2111,12 +2113,12 @@ mod tests {
         // must never reach the join.
         connection
             .insert_feedback_quarantine(
-                "fq-1",
+                "fq_00000000000000000000001001",
                 &CreateFeedbackQuarantineInput {
                     workspace_id: WORKSPACE.to_owned(),
                     source_id: "poisoned-source".to_owned(),
                     target_type: "memory".to_owned(),
-                    target_id: "mem-1".to_owned(),
+                    target_id: "mem_00000000000000000000001001".to_owned(),
                     signal: "harmful".to_owned(),
                     weight: 1.0,
                     source_type: "agent_inference".to_owned(),
@@ -2146,7 +2148,7 @@ mod tests {
         }
         let triple = &report.triples[0];
         if triple.query != "prepare release"
-            || triple.feedback_event_id != "fev-dense"
+            || triple.feedback_event_id != "fb_00000000000000000000001001"
             || triple.signal != "helpful"
         {
             return Err(format!("db dense triple wrong: {triple:?}"));
@@ -2178,16 +2180,18 @@ mod tests {
         let query = "hunt flaky mesh test";
         connection
             .insert_pack_record(
-                "pack-weak",
+                "pack_00000000000000000000001002",
                 &CreatePackRecordInput {
                     workspace_id: WORKSPACE.to_owned(),
                     query: query.to_owned(),
-                    profile: "default".to_owned(),
+                    profile: "balanced".to_owned(),
                     max_tokens: 4000,
                     used_tokens: 0,
                     item_count: 0,
                     omitted_count: 0,
-                    pack_hash: "blake3:test-weak".to_owned(),
+                    pack_hash:
+                        "blake3:1111111111111111111111111111111111111111111111111111111111111111"
+                            .to_owned(),
                     degraded_json: None,
                     created_by: None,
                 },
@@ -2199,13 +2203,13 @@ mod tests {
         // outcome falls inside the default label window.
         connection
             .insert_audit(
-                "aud-weak",
+                "audit_00000000000000000000001001",
                 &CreateAuditInput {
                     workspace_id: Some(WORKSPACE.to_owned()),
                     actor: None,
                     action: audit_actions::SEARCH_RETURNED_MEM.to_owned(),
                     target_type: Some("memory".to_owned()),
-                    target_id: Some("mem-9".to_owned()),
+                    target_id: Some("mem_00000000000000000000001002".to_owned()),
                     details: Some(
                         serde_json::json!({
                             "queryHash": audit_query_hash(query),
@@ -2220,11 +2224,11 @@ mod tests {
             .map_err(|error| error.to_string())?;
         connection
             .insert_feedback_event(
-                "fev-weak",
+                "fb_00000000000000000000001002",
                 &CreateFeedbackEventInput {
                     workspace_id: WORKSPACE.to_owned(),
                     target_type: "memory".to_owned(),
-                    target_id: "mem-9".to_owned(),
+                    target_id: "mem_00000000000000000000001002".to_owned(),
                     signal: "helpful".to_owned(),
                     weight: 1.0,
                     source_type: "outcome_observed".to_owned(),
@@ -2252,7 +2256,7 @@ mod tests {
         let triple = &report.triples[0];
         if triple.query != query
             || triple.source != LabelSource::SearchWindowAssociation
-            || triple.audit_row_id.as_deref() != Some("aud-weak")
+            || triple.audit_row_id.as_deref() != Some("audit_00000000000000000000001001")
             || !approx_eq(triple.base_weight, 0.5)
         {
             return Err(format!("db weak triple wrong: {triple:?}"));
@@ -2649,12 +2653,21 @@ mod tests {
         let connection =
             DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
 
         let report = promotable_report_fixture()?;
         persist_retrieval_tuning_report(workspace, &report).map_err(|error| error.to_string())?;
 
         // Dry-run writes nothing.
-        let plan = promote_retrieval_weights(workspace, &connection, "ws-promote", true)
+        let plan = promote_retrieval_weights(workspace, &connection, WORKSPACE, true)
             .map_err(|error| error.to_string())?
             .map_err(|refusal| format!("unexpected refusal: {refusal:?}"))?;
         if plan.applied || workspace.join(".ee").join("config.toml").exists() {
@@ -2663,7 +2676,7 @@ mod tests {
 
         // Apply: config gains the winner weights; the promotion is audited
         // with the full prior bytes (empty — no config existed).
-        let change = promote_retrieval_weights(workspace, &connection, "ws-promote", false)
+        let change = promote_retrieval_weights(workspace, &connection, WORKSPACE, false)
             .map_err(|error| error.to_string())?
             .map_err(|refusal| format!("unexpected refusal: {refusal:?}"))?;
         let written = std::fs::read_to_string(workspace.join(".ee").join("config.toml"))
@@ -2682,7 +2695,7 @@ mod tests {
         }
 
         // Demote: byte-identical restoration of the pre-promotion state.
-        let demotion = demote_retrieval_weights(workspace, &connection, "ws-promote", false)
+        let demotion = demote_retrieval_weights(workspace, &connection, WORKSPACE, false)
             .map_err(|error| error.to_string())?
             .map_err(|refusal| format!("unexpected refusal: {refusal:?}"))?;
         let restored = std::fs::read_to_string(workspace.join(".ee").join("config.toml"))
