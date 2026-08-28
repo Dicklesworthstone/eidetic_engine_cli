@@ -51,6 +51,7 @@ fn run_ee_with_home(args: &[&str], home: &Path) -> Result<Output, String> {
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
         .env_remove("EE_AGENT_NAME")
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env("HOME", home)
         .env("USERPROFILE", home)
         .output()
