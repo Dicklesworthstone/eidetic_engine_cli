@@ -46,7 +46,8 @@ use crate::db::{
 use crate::models::{
     DomainError, GLOBAL_MEMORY_SCOPE_TAG, KNOWN_MEMORY_KINDS, KNOWN_MEMORY_LEVELS, MAX_TAG_BYTES,
     MemoryContent, MemoryId, MemoryKind, MemoryLevel, MemorySeal, MemoryValidationError,
-    ProducerMetadata, ProducerSourceSystem, ProvenanceUri, Tag, TrustClass, UnitScore,
+    ProducerMetadata, ProducerSourceSystem, ProvenanceUri, ProvenanceUriError, Tag, TrustClass,
+    UnitScore,
 };
 use crate::obs::{AuditEvent, AuditOutcome, now_rfc3339_nanos};
 use crate::runtime::determinism::{Deterministic, Seed};
@@ -3240,11 +3241,7 @@ fn prepare_remember_memory_with_store(
     let tags = parse_tags(options.tags)?;
     let provenance_uri = options
         .source
-        .map(|source| {
-            ProvenanceUri::from_str(source)
-                .map(|uri| uri.to_string())
-                .map_err(|error| remember_usage_error(format!("invalid provenance URI: {error}")))
-        })
+        .map(parse_remember_provenance_uri)
         .transpose()?;
     let validity = prepare_validity_window(options.valid_from, options.valid_to)?;
     let attempt_family = attempt_family
@@ -6627,6 +6624,25 @@ fn remember_usage_error(message: String) -> DomainError {
     }
 }
 
+fn parse_remember_provenance_uri(source: &str) -> Result<String, DomainError> {
+    ProvenanceUri::from_str(source)
+        .map(|uri| uri.to_string())
+        .map_err(remember_provenance_uri_usage_error)
+}
+
+fn remember_provenance_uri_usage_error(error: ProvenanceUriError) -> DomainError {
+    let repair = if matches!(error, ProvenanceUriError::MissingScheme { .. }) {
+        "Prefix local filesystem paths with `file://`, for example `file:///abs/path.md`."
+            .to_owned()
+    } else {
+        "ee remember --help".to_owned()
+    };
+    DomainError::Usage {
+        message: format!("invalid provenance URI: {error}"),
+        repair: Some(repair),
+    }
+}
+
 fn typed_assignment_field_hint(kind: &MemoryKind, assignments: &[String]) -> Option<String> {
     let assignment = assignments.first()?.trim();
     let separator = assignment
@@ -7438,11 +7454,7 @@ fn apply_remember_reinforce(
     let confidence_after = (confidence_before + mean_gain).clamp(confidence_before, 1.0_f32);
     let source_uris = context
         .source
-        .map(|source| {
-            ProvenanceUri::from_str(source)
-                .map(|uri| uri.to_string())
-                .map_err(|error| remember_usage_error(format!("invalid provenance URI: {error}")))
-        })
+        .map(parse_remember_provenance_uri)
         .transpose()?
         .into_iter()
         .collect::<Vec<_>>();

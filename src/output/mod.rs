@@ -8503,7 +8503,10 @@ fn render_memory_fields(b: &mut JsonBuilder, details: &MemoryDetails) {
     b.field_raw("utility", &format!("{:.4}", mem.utility));
     b.field_raw("importance", &format!("{:.4}", mem.importance));
     if let Some(ref uri) = mem.provenance_uri {
-        b.field_str("provenance_uri", &redact_memory_output_provenance_uri(uri));
+        b.field_str(
+            "provenance_uri",
+            &redact_local_memory_provenance_uri(uri),
+        );
     }
     b.field_str("trust_class", &mem.trust_class);
     if let Some(ref sub) = mem.trust_subclass {
@@ -8563,7 +8566,7 @@ pub fn render_memory_show_human(report: &MemoryShowReport) -> String {
     if let Some(ref uri) = mem.provenance_uri {
         output.push_str(&format!(
             "  Provenance: {}\n",
-            redact_memory_output_provenance_uri(uri)
+            redact_local_memory_provenance_uri(uri)
         ));
     }
     output.push_str(&format!("  Created: {}\n", mem.created_at));
@@ -8624,7 +8627,10 @@ pub fn render_memory_list_json(report: &MemoryListReport) -> String {
             obj.field_bool("content_truncated", m.content_truncated);
             obj.field_raw("confidence", &format!("{:.4}", m.confidence));
             if let Some(ref uri) = m.provenance_uri {
-                obj.field_str("provenance_uri", &redact_memory_output_provenance_uri(uri));
+                obj.field_str(
+                    "provenance_uri",
+                    &redact_local_memory_provenance_uri(uri),
+                );
             }
             obj.field_bool("is_tombstoned", m.is_tombstoned);
             field_optional_str(obj, "valid_from", m.valid_from.as_deref());
@@ -8707,6 +8713,10 @@ pub fn render_memory_drift_report_toon(
 fn redact_memory_output_provenance_uri(value: &str) -> String {
     let redacted_paths = redact_memory_output_path_like_segments(value);
     redact_memory_output_secret_like_segments(&redacted_paths)
+}
+
+fn redact_local_memory_provenance_uri(value: &str) -> String {
+    redact_memory_output_secret_like_segments(value)
 }
 
 fn redact_memory_output_path_like_segments(value: &str) -> String {
