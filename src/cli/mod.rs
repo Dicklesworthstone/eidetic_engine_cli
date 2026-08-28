@@ -46,7 +46,7 @@ use crate::core::backup::{
     BackupRestoreOptions, BackupVerifyOptions, create_backup, inspect_backup, list_backups,
     restore_backup_to_side_path, verify_backup,
 };
-use crate::core::capabilities::CapabilitiesReport;
+use crate::core::capabilities::{CapabilitiesReport, CommandEntry};
 use crate::core::causal::{
     CompareOptions, EstimateOptions, PromotePlanOptions, TraceOptions,
     compare_causal_chains_from_store, compare_causal_evidence, compare_causal_filtered_from_store,
@@ -497,6 +497,67 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+/// Build the canonical public command inventory from the same Clap tree that
+/// parses real invocations. Keeping this projection in the CLI layer avoids a
+/// second hand-maintained registry in core while preserving `cli -> core`.
+fn public_cli_command_entries() -> Vec<CommandEntry> {
+    let root = Cli::command();
+    let mut entries = Vec::new();
+    for command in root.get_subcommands() {
+        collect_public_cli_command_entries(Vec::new(), command, &mut entries);
+    }
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    entries
+}
+
+fn collect_public_cli_command_entries(
+    mut prefix: Vec<String>,
+    command: &clap::Command,
+    entries: &mut Vec<CommandEntry>,
+) {
+    if command.is_hide_set() {
+        return;
+    }
+
+    prefix.push(command.get_name().to_owned());
+    let path = prefix.join(" ");
+    let description = command
+        .get_about()
+        .map(ToString::to_string)
+        .filter(|description| !description.trim().is_empty())
+        .unwrap_or_else(|| "Registered CLI command".to_owned());
+    entries.push(CommandEntry::new(
+        path.clone(),
+        public_cli_command_available(&path),
+        description,
+    ));
+
+    for child in command.get_subcommands() {
+        collect_public_cli_command_entries(prefix.clone(), child, entries);
+    }
+}
+
+/// Registration and operational availability are separate. Disabled feature
+/// leaves remain discoverable but must not claim that their implementation is
+/// available in this build.
+fn public_cli_command_available(path: &str) -> bool {
+    match path {
+        "mcp serve-stdio" => cfg!(feature = "mcp"),
+        "proximity"
+        | "graph articulation"
+        | "graph betweenness"
+        | "graph communities"
+        | "graph explain-link"
+        | "graph hits"
+        | "graph k-core"
+        | "graph louvain"
+        | "graph pagerank"
+        | "graph path"
+        | "graph suggest-links" => cfg!(feature = "graph"),
+        _ => true,
+    }
 }
 
 /// How the workspace path was discovered (D7).
@@ -13039,10 +13100,14 @@ where
             handle_bootstrap_command(&cli, bootstrap_cmd, stdout, stderr)
         }
         Some(Command::Capabilities) => {
-            let report = cli.workspace.as_deref().map_or_else(
-                CapabilitiesReport::gather,
-                CapabilitiesReport::gather_for_workspace,
-            );
+            let report = cli
+                .workspace
+                .as_deref()
+                .map_or_else(
+                    CapabilitiesReport::gather,
+                    CapabilitiesReport::gather_for_workspace,
+                )
+                .with_commands(public_cli_command_entries());
             let profile = cli.fields_level().to_field_profile();
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
@@ -79358,6 +79423,174 @@ mod tests {
         ensure(
             full.len() > minimal.len(),
             "full output is larger than minimal",
+        )
+    }
+
+    #[test]
+    fn capabilities_inventory_matches_visible_canonical_clap_paths() -> TestResult {
+        fn collect_visible_paths(
+            mut prefix: Vec<String>,
+            command: &clap::Command,
+            paths: &mut Vec<String>,
+        ) {
+            if command.is_hide_set() {
+                return;
+            }
+            prefix.push(command.get_name().to_owned());
+            paths.push(prefix.join(" "));
+            for child in command.get_subcommands() {
+                collect_visible_paths(prefix.clone(), child, paths);
+            }
+        }
+
+        let root = Cli::command();
+        let mut expected = Vec::new();
+        for command in root.get_subcommands() {
+            collect_visible_paths(Vec::new(), command, &mut expected);
+        }
+        expected.sort();
+
+        let entries = super::public_cli_command_entries();
+        let names = entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<Vec<_>>();
+        ensure_equal(&names, &expected, "capabilities matches visible Clap tree")?;
+
+        let unique = names.iter().collect::<BTreeSet<_>>();
+        ensure_equal(&unique.len(), &names.len(), "capability paths are unique")?;
+        ensure(
+            entries
+                .iter()
+                .all(|entry| !entry.description.trim().is_empty()),
+            "every capability path has a description",
+        )?;
+
+        for expected_path in [
+            "insights",
+            "situation adopt",
+            "situation classify",
+            "situation compare",
+            "situation explain",
+            "situation link",
+            "situation show",
+            "plan explain",
+            "plan goal",
+            "plan recipe list",
+            "plan recipe show",
+            "plan recommend",
+            "playbook export",
+            "playbook extract",
+            "playbook import",
+            "playbook list",
+            "handoff completion-audit",
+            "handoff create",
+            "handoff inspect",
+            "handoff preview",
+            "handoff resume",
+            "handoff rotate-key",
+            "workflow close",
+            "workflow create",
+            "reflect ingest",
+            "reflect propose",
+            "reflect request-ledger",
+            "review session",
+            "review workspace",
+        ] {
+            ensure(
+                names.iter().any(|path| path == expected_path),
+                &format!("missing canonical capability path {expected_path}"),
+            )?;
+        }
+
+        for forbidden_path in [
+            "robot-docs",
+            "team steward run-once",
+            "verify record",
+            "verification record",
+            "pack --lens",
+            "diag contention --use-daemon",
+            "ee.daemon.telemetry",
+            "ee.daemon.write",
+            "ee.daemon.write_journal",
+            "daemon foreground decay_sweep",
+            "daemon foreground non-decay",
+        ] {
+            ensure(
+                !names.iter().any(|path| path == forbidden_path),
+                &format!("non-canonical capability path leaked: {forbidden_path}"),
+            )?;
+        }
+        ensure(
+            names
+                .iter()
+                .all(|path| path.split_whitespace().all(|part| !part.starts_with('-'))),
+            "flags never appear as command-path segments",
+        )?;
+
+        let mcp_stdio = entries
+            .iter()
+            .find(|entry| entry.name == "mcp serve-stdio")
+            .ok_or_else(|| "mcp serve-stdio capability missing".to_owned())?;
+        ensure_equal(
+            &mcp_stdio.available,
+            &cfg!(feature = "mcp"),
+            "mcp feature availability",
+        )?;
+        let graph_path = entries
+            .iter()
+            .find(|entry| entry.name == "graph path")
+            .ok_or_else(|| "graph path capability missing".to_owned())?;
+        ensure_equal(
+            &graph_path.available,
+            &cfg!(feature = "graph"),
+            "graph feature availability",
+        )
+    }
+
+    #[test]
+    fn capabilities_json_emits_the_canonical_inventory_once() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "capabilities", "--json", "--fields", "full"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "capabilities exit")?;
+        ensure(stderr.is_empty(), "capabilities JSON stderr is empty")?;
+
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|error| format!("capabilities output must be JSON: {error}"))?;
+        let output_commands = value["data"]["commands"]
+            .as_array()
+            .ok_or_else(|| "capabilities data.commands must be an array".to_owned())?;
+        let output_names = output_commands
+            .iter()
+            .map(|command| {
+                command["name"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("capability command missing name: {command}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected_names = super::public_cli_command_entries()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &output_names,
+            &expected_names,
+            "rendered canonical command inventory",
+        )?;
+
+        let available_count = output_commands
+            .iter()
+            .filter(|command| command["available"].as_bool() == Some(true))
+            .count() as u64;
+        ensure_equal(
+            &value["data"]["summary"]["totalCommands"].as_u64(),
+            &Some(output_commands.len() as u64),
+            "summary total command count",
+        )?;
+        ensure_equal(
+            &value["data"]["summary"]["availableCommands"].as_u64(),
+            &Some(available_count),
+            "summary available command count",
         )
     }
 

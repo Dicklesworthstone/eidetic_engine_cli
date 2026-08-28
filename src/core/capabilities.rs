@@ -40,18 +40,18 @@ impl CapabilityEntry {
 /// A command entry describing CLI command availability.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandEntry {
-    pub name: &'static str,
+    pub name: String,
     pub available: bool,
-    pub description: &'static str,
+    pub description: String,
 }
 
 impl CommandEntry {
     #[must_use]
-    pub const fn new(name: &'static str, available: bool, description: &'static str) -> Self {
+    pub fn new(name: impl Into<String>, available: bool, description: impl Into<String>) -> Self {
         Self {
-            name,
+            name: name.into(),
             available,
-            description,
+            description: description.into(),
         }
     }
 }
@@ -379,163 +379,10 @@ impl CapabilitiesReport {
         ));
         unimplemented.sort_by(|left, right| left.code.cmp(right.code));
 
-        let commands = vec![
-            CommandEntry::new(
-                "agent",
-                true,
-                "Detect and manage coding agent installations",
-            ),
-            CommandEntry::new(
-                "agent-docs",
-                true,
-                "Agent-oriented documentation for commands and contracts",
-            ),
-            CommandEntry::new(
-                "ask",
-                true,
-                "Answer direct questions from stored memories with citations",
-            ),
-            CommandEntry::new("attest", true, "Emit local provenance attestation bundles"),
-            CommandEntry::new("backup", true, "Create, verify, and inspect local backups"),
-            CommandEntry::new(
-                "bootstrap",
-                true,
-                "Compile docs into reviewable bootstrap candidates",
-            ),
-            CommandEntry::new(
-                "bootstrap docs",
-                true,
-                "Dry-run allowlisted docs into candidate proposals",
-            ),
-            CommandEntry::new(
-                "bootstrap apply",
-                true,
-                "Materialize approved docs bootstrap candidates through curation",
-            ),
-            CommandEntry::new("capabilities", true, "Report feature availability"),
-            CommandEntry::new("check", true, "Quick posture summary"),
-            CommandEntry::new("context", true, "Context packing"),
-            CommandEntry::new("curate", true, "Rule curation"),
-            CommandEntry::new("db", true, "Inspect database state without mutation"),
-            CommandEntry::new("doctor", true, "Health checks"),
-            CommandEntry::new("eval", true, "Evaluation scenarios"),
-            CommandEntry::new("export", true, "Export redacted memory records"),
-            CommandEntry::new("health", true, "Run workspace and subsystem health checks"),
-            CommandEntry::new("help", true, "Command help"),
-            CommandEntry::new("hook", true, "Generate agent-harness hook helpers"),
-            CommandEntry::new(
-                "impact",
-                true,
-                "Find memories attached to a path or typed surface",
-            ),
-            CommandEntry::new("import", true, "Import from external sources"),
-            CommandEntry::new("init", true, "Workspace initialization"),
-            CommandEntry::new("index", true, "Search index management"),
-            CommandEntry::new("lens", true, "Inspect named task lens policy overlays"),
-            CommandEntry::new("lens list", true, "List built-in and workspace task lenses"),
-            CommandEntry::new(
-                "lens explain",
-                true,
-                "Show a task lens effective policy, version, and hash",
-            ),
-            CommandEntry::new("mcp", true, "Inspect the optional MCP adapter manifest"),
-            CommandEntry::new("memory", true, "Manage stored memories"),
-            CommandEntry::new(
-                "migrate",
-                true,
-                "Inspect or apply workspace schema migrations",
-            ),
-            CommandEntry::new("orient", true, "Agent orientation bundle"),
-            CommandEntry::new("outcome", true, "Record feedback about memories and packs"),
-            CommandEntry::new(
-                "pack",
-                true,
-                "Assemble task-specific context packs with optional task lenses",
-            ),
-            CommandEntry::new(
-                "pack --lens",
-                true,
-                "Apply a named task lens and persist its lens hash in pack records",
-            ),
-            CommandEntry::new("preflight", true, "Run, show, or close risk assessments"),
-            CommandEntry::new(
-                "preflight check",
-                true,
-                "Check shell commands against the policy guard",
-            ),
-            CommandEntry::new("primer", true, "Render the cached workspace charter"),
-            CommandEntry::new(
-                "recall",
-                true,
-                "Fetch memories anchored to paths, symbols, or diffs",
-            ),
-            CommandEntry::new("remember", true, "Store memories"),
-            CommandEntry::new(
-                "resume",
-                true,
-                "Resume recent session end-state, open loops, and stale next steps",
-            ),
-            CommandEntry::new("rule", true, "Manage procedural rules"),
-            CommandEntry::new("schema", true, "Schema registry"),
-            CommandEntry::new("search", true, "Memory search"),
-            CommandEntry::new("similar", true, "Find memories similar to a seed memory"),
-            CommandEntry::new("status", true, "Subsystem readiness"),
-            CommandEntry::new("support", true, "Create redacted diagnostic bundles"),
-            CommandEntry::new(
-                "swarm",
-                true,
-                "Inspect crowded-checkout coordination posture",
-            ),
-            CommandEntry::new(
-                "swarm brief",
-                true,
-                "Read-only swarm coordination preflight",
-            ),
-            CommandEntry::new("timeline", true, "Reconstruct topic state at a past time"),
-            CommandEntry::new("version", true, "Version info"),
-            CommandEntry::new("why", true, "Explainability"),
-            CommandEntry::new(
-                "why-not",
-                true,
-                "Explain why a memory was not selected for a task",
-            ),
-            CommandEntry::new("workspace", true, "Resolve and manage workspace identities"),
-            CommandEntry::new(
-                "diag contention --use-daemon",
-                true,
-                "Read live daemon contention telemetry, including group-commit coalescing",
-            ),
-            CommandEntry::new(
-                "ee.daemon.telemetry",
-                true,
-                "Daemon RPC method for live contention and group-commit telemetry",
-            ),
-            CommandEntry::new(
-                "ee.daemon.write",
-                true,
-                "Daemon RPC method for durable memory writes through the write-owner actor",
-            ),
-            CommandEntry::new(
-                "ee.daemon.write_journal",
-                true,
-                "Daemon RPC method for durable journal writes through the write-owner actor",
-            ),
-            CommandEntry::new(
-                "daemon foreground decay_sweep",
-                true,
-                "Bounded foreground score-decay steward job",
-            ),
-            CommandEntry::new(
-                "daemon background",
-                true,
-                "Detached background steward scheduler",
-            ),
-            CommandEntry::new(
-                "daemon foreground non-decay",
-                true,
-                "Bounded foreground steward jobs beyond decay_sweep",
-            ),
-        ];
+        // Command registration belongs to the CLI layer. The CLI injects its
+        // canonical visible Clap tree before rendering this report so core
+        // never maintains a second, drift-prone command registry.
+        let commands = Vec::new();
 
         let output_formats = vec![
             OutputFormatEntry::new("json", true, true, "Canonical stable response envelope"),
@@ -563,6 +410,13 @@ impl CapabilitiesReport {
             index,
             toon: ToonOutputCapability::gather(),
         }
+    }
+
+    /// Attach command metadata supplied by the CLI registration boundary.
+    #[must_use]
+    pub fn with_commands(mut self, commands: Vec<CommandEntry>) -> Self {
+        self.commands = commands;
+        self
     }
 
     /// Count of ready subsystems.
@@ -632,7 +486,11 @@ mod tests {
         )?;
         ensure_at_least(report.subsystems.len(), 3, "at least 3 subsystems")?;
         ensure_at_least(report.features.len(), 3, "at least 3 features")?;
-        ensure_at_least(report.commands.len(), 5, "at least 5 commands")?;
+        ensure(
+            report.commands.is_empty(),
+            true,
+            "core does not duplicate the CLI command registry",
+        )?;
         ensure_at_least(report.output_formats.len(), 8, "all output formats")
     }
 
@@ -690,13 +548,17 @@ mod tests {
 
     #[test]
     fn capabilities_report_counts_are_consistent() -> TestResult {
-        let report = CapabilitiesReport::gather();
+        let report = CapabilitiesReport::gather().with_commands(vec![
+            CommandEntry::new("capabilities", true, "Report capabilities"),
+            CommandEntry::new("mcp serve-stdio", false, "Run the MCP adapter"),
+        ]);
 
         ensure_at_least(report.ready_subsystem_count(), 1, "at least 1 ready")?;
-        ensure_at_least(
+        ensure(report.commands.len(), 2, "injected command count")?;
+        ensure(
             report.available_command_count(),
-            5,
-            "at least 5 available commands",
+            1,
+            "available command count",
         )
     }
 
@@ -728,151 +590,23 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_report_includes_capabilities_command() -> TestResult {
-        let report = CapabilitiesReport::gather();
-
-        let cmd = report
-            .commands
-            .iter()
-            .find(|c| c.name == "capabilities")
-            .unwrap_or_else(|| panic!("capabilities command must exist")); // ubs:ignore
-        ensure(cmd.available, true, "capabilities command is available")
-    }
-
-    #[test]
-    fn capabilities_report_includes_documented_agent_loop_commands() -> TestResult {
-        let report = CapabilitiesReport::gather();
+    fn capabilities_report_accepts_cli_owned_command_inventory() -> TestResult {
+        let report = CapabilitiesReport::gather().with_commands(vec![
+            CommandEntry::new("capabilities", true, "Report capabilities"),
+            CommandEntry::new("insights", true, "Bundle operational insights"),
+        ]);
         let names = report
             .commands
             .iter()
-            .map(|command| command.name)
+            .map(|command| command.name.as_str())
             .collect::<Vec<_>>();
 
-        for expected in [
-            "ask",
-            "recall",
-            "preflight check",
-            "swarm brief",
-            "outcome",
-            "why-not",
-        ] {
-            let command = report
-                .commands
-                .iter()
-                .find(|command| command.name == expected)
-                .ok_or_else(|| {
-                    format!("documented agent-loop command {expected} missing from {names:?}")
-                })?;
-            ensure(command.available, true, &format!("{expected} is available"))?;
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn capabilities_report_includes_impact_command() -> TestResult {
-        let report = CapabilitiesReport::gather();
-
-        let cmd = report
-            .commands
-            .iter()
-            .find(|c| c.name == "impact")
-            .unwrap_or_else(|| panic!("impact command must exist")); // ubs:ignore
-        ensure(cmd.available, true, "impact command is available")?;
-        if !cmd.description.contains("path") || !cmd.description.contains("surface") {
-            return Err(format!(
-                "impact command description should mention paths and typed surfaces; got {:?}",
-                cmd.description
-            ));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn capabilities_report_includes_docs_bootstrap_commands() -> TestResult {
-        let report = CapabilitiesReport::gather();
-        let names = report
-            .commands
-            .iter()
-            .map(|command| command.name)
-            .collect::<Vec<_>>();
-
-        for expected in ["bootstrap", "bootstrap docs", "bootstrap apply"] {
-            let command = report
-                .commands
-                .iter()
-                .find(|command| command.name == expected)
-                .ok_or_else(|| {
-                    format!(
-                        "docs bootstrap command {expected} should be in capabilities; got {names:?}"
-                    )
-                })?;
-            ensure(command.available, true, &format!("{expected} is available"))?;
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn capabilities_report_marks_daemon_maintenance_posture() -> TestResult {
-        let report = CapabilitiesReport::gather();
-
-        let decay = report
-            .commands
-            .iter()
-            .find(|c| c.name == "daemon foreground decay_sweep")
-            .unwrap_or_else(|| panic!("daemon foreground decay_sweep command must exist")); // ubs:ignore
-        ensure(decay.available, true, "decay sweep daemon job is available")?;
-
-        let background = report
-            .commands
-            .iter()
-            .find(|c| c.name == "daemon background")
-            .unwrap_or_else(|| panic!("daemon background command must exist")); // ubs:ignore
         ensure(
-            background.available,
-            true,
-            "detached background daemon scheduler is available",
+            names,
+            vec!["capabilities", "insights"],
+            "CLI-owned inventory",
         )?;
-
-        let non_decay = report
-            .commands
-            .iter()
-            .find(|c| c.name == "daemon foreground non-decay")
-            .unwrap_or_else(|| panic!("daemon foreground non-decay command must exist")); // ubs:ignore
-        ensure(
-            non_decay.available,
-            true,
-            "non-decay foreground daemon jobs are available",
-        )
-    }
-
-    #[test]
-    fn capabilities_report_advertises_group_commit_daemon_write_methods() -> TestResult {
-        let report = CapabilitiesReport::gather();
-        let names = report
-            .commands
-            .iter()
-            .map(|command| command.name)
-            .collect::<Vec<_>>();
-
-        for expected in [
-            "diag contention --use-daemon",
-            "ee.daemon.telemetry",
-            "ee.daemon.write",
-            "ee.daemon.write_journal",
-        ] {
-            let command = report
-                .commands
-                .iter()
-                .find(|command| command.name == expected)
-                .ok_or_else(|| {
-                    format!("daemon write capability {expected} missing from {names:?}")
-                })?;
-            ensure(command.available, true, &format!("{expected} is available"))?;
-        }
-
-        Ok(())
+        ensure(report.available_command_count(), 2, "available commands")
     }
 
     #[test]

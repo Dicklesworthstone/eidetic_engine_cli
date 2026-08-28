@@ -9695,9 +9695,9 @@ pub fn render_capabilities_json(report: &CapabilitiesReport) -> String {
             obj.field_str("userMessage", gap.user_message);
         });
         d.field_array_of_objects("commands", &report.commands, |obj, cmd| {
-            obj.field_str("name", cmd.name);
+            obj.field_str("name", &cmd.name);
             obj.field_bool("available", cmd.available);
-            obj.field_str("description", cmd.description);
+            obj.field_str("description", &cmd.description);
         });
         // Bead bd-17c65.6.4/F5 — discovered binaries and registry-backed
         // EE_* environment overrides. Agents reading capabilities can
@@ -15636,10 +15636,10 @@ pub fn render_capabilities_json_filtered(
                 }
             });
             d.field_array_of_objects("commands", &report.commands, |obj, cmd| {
-                obj.field_str("name", cmd.name);
+                obj.field_str("name", &cmd.name);
                 obj.field_bool("available", cmd.available);
                 if profile.include_verbose_details() {
-                    obj.field_str("description", cmd.description);
+                    obj.field_str("description", &cmd.description);
                 }
             });
             // Bead bd-17c65.6.4 (F4) — binaries + envOverrides in
