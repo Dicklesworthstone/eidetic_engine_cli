@@ -7943,6 +7943,9 @@ fn remember_tags_with_global_scope(tags: Option<&str>) -> String {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    // Hyphen/underscore folding is deliberately limited to recognizing the
+    // global-scope keyword aliases. Ordinary stored and queried tags keep the
+    // two separators distinct through the shared Tag::parse contract.
     let already_global = values.iter().any(|tag| {
         let normalized = tag.trim().to_ascii_lowercase().replace('-', "_");
         matches!(normalized.as_str(), "global" | "house_rule")
@@ -12512,6 +12515,20 @@ mod tests {
             ));
         }
         Ok(())
+    }
+
+    #[test]
+    fn global_scope_alias_folding_does_not_rewrite_ordinary_tags() -> TestResult {
+        ensure(
+            remember_tags_with_global_scope(Some("Ticker:ZZZZ,house-rule")),
+            "Ticker:ZZZZ,house-rule".to_owned(),
+            "house-rule alias suppresses an added global tag without rewriting tags",
+        )?;
+        ensure(
+            remember_tags_with_global_scope(Some("screening-probe")),
+            "screening-probe,global".to_owned(),
+            "ordinary hyphenated tag remains unchanged",
+        )
     }
 
     #[test]

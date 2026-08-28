@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::models::canonicalize_tag_filter;
+
 /// Deterministic per-tag document ordinal index for the SRR4 search hot path.
 ///
 /// The representation deliberately stays behind this module boundary. It is
@@ -137,7 +139,7 @@ impl TagBitmapQuery {
 }
 
 fn normalize_tag(tag: &str) -> String {
-    tag.trim().to_ascii_lowercase()
+    canonicalize_tag_filter(tag)
 }
 
 #[cfg(test)]
@@ -213,5 +215,20 @@ mod tests {
         let query = TagBitmapQuery::new([" Rust ", "rust", ""], [" Archived ", "archived"]);
         assert_eq!(query.includes(), &["rust".to_string()]);
         assert_eq!(query.excludes(), &["archived".to_string()]);
+    }
+
+    #[test]
+    fn query_uses_storage_case_rules_without_folding_separators() {
+        let index = TagBitmapIndex::from_documents([(1, vec!["ticker:zzzz", "screening-probe"])]);
+
+        assert_eq!(index.cardinality(" TICKER:ZZZZ "), 1);
+        assert_eq!(
+            index.matching(&TagBitmapQuery::new(
+                ["SCREENING-PROBE"],
+                std::iter::empty::<&str>()
+            )),
+            vec![1]
+        );
+        assert_eq!(index.cardinality("screening_probe"), 0);
     }
 }

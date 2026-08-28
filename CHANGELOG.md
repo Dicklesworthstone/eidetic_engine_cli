@@ -58,6 +58,13 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Tag filters now round-trip the same canonical form used by `ee remember`.**
+  `ee memory list --tag` and tag bitmap queries accept mixed-case filters for
+  existing canonical rows without requiring reindexing. Hyphens and
+  underscores remain distinct outside documented scope-keyword aliases.
+
 ## [0.14.3] - 2026-08-27
 
 Retrieval-correctness, release-readiness, and Franken-stack refresh release.

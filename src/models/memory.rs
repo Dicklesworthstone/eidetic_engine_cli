@@ -1265,6 +1265,20 @@ impl FromStr for Tag {
     }
 }
 
+/// Canonicalize a tag supplied at a read or query boundary.
+///
+/// Valid filters use the exact same [`Tag::parse`] pipeline as stored tags.
+/// Invalid filters retain their trimmed bytes so existing read surfaces keep
+/// returning an empty match instead of acquiring a new validation error.
+/// Hyphens and underscores remain distinct tag characters; any equivalence
+/// between them is limited to explicitly documented keyword aliases such as
+/// the global-scope `house-rule` spelling.
+#[must_use]
+pub fn canonicalize_tag_filter(input: &str) -> String {
+    let trimmed = input.trim();
+    Tag::parse(trimmed).map_or_else(|_| trimmed.to_owned(), |tag| tag.to_string())
+}
+
 /// Validated memory body. Non-empty, ≤ [`MAX_CONTENT_BYTES`].
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct MemoryContent(String);
@@ -1582,7 +1596,7 @@ mod tests {
         Confidence, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES,
         MAX_TYPED_MEMORY_FIELD_LIST_ITEMS, MAX_TYPED_MEMORY_FIELD_VALUE_BYTES,
         MAX_TYPED_MEMORY_FIELDS, MemoryContent, MemoryKind, MemoryLevel, MemoryValidationError,
-        TYPED_MEMORY_FIELDS_SCHEMA_V2, Tag, UnitScore,
+        TYPED_MEMORY_FIELDS_SCHEMA_V2, Tag, UnitScore, canonicalize_tag_filter,
         canonicalize_typed_memory_field_assignments_json_with_redactor,
         canonicalize_typed_memory_fields_json, canonicalize_typed_memory_fields_json_with_redactor,
         extract_typed_memory_fields_json_with_redactor, merge_typed_memory_fields_json,
@@ -2252,6 +2266,24 @@ mod tests {
         };
         assert_eq!(tag.as_str(), "security:auth-bypass");
         assert_eq!(tag.to_string(), "security:auth-bypass");
+    }
+
+    #[test]
+    fn tag_filter_uses_storage_canonicalization_without_folding_separators() {
+        assert_eq!(canonicalize_tag_filter(" Ticker:ZZZZ "), "ticker:zzzz");
+        assert_eq!(
+            canonicalize_tag_filter("screening-probe"),
+            "screening-probe"
+        );
+        assert_eq!(
+            canonicalize_tag_filter("screening_probe"),
+            "screening_probe"
+        );
+        assert_ne!(
+            canonicalize_tag_filter("screening-probe"),
+            canonicalize_tag_filter("screening_probe")
+        );
+        assert_eq!(canonicalize_tag_filter(" invalid tag "), "invalid tag");
     }
 
     #[test]

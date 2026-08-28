@@ -657,6 +657,136 @@ fn remember_creates_searchable_memory() -> TestResult {
 }
 
 #[test]
+fn memory_list_tag_filter_round_trips_mixed_case_without_reindex() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(&init.status.code(), &Some(EXIT_SUCCESS), "tag fixture init")?;
+
+    let remember = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "Mixed-case tag round-trip fixture",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--tags",
+        "ticker:ZZZZ,screening-probe",
+        "--json",
+    ])?;
+    ensure_equal(
+        &remember.status.code(),
+        &Some(EXIT_SUCCESS),
+        "tag fixture remember",
+    )?;
+    let remember_json = stdout_json(&remember)?;
+    let remembered_id =
+        json_str(&remember_json, "/data/memory_id", "tag fixture remember")?.to_owned();
+
+    let list_ids = |json: &serde_json::Value, context: &str| -> Result<BTreeSet<String>, String> {
+        json_array(json, "/data/memories", context)?
+            .iter()
+            .map(|memory| {
+                memory
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("{context}: memory entry must contain a string id"))
+            })
+            .collect()
+    };
+
+    let lower = run_ee(&[
+        "--workspace",
+        &workspace,
+        "memory",
+        "list",
+        "--tag",
+        "ticker:zzzz",
+        "--json",
+    ])?;
+    ensure_equal(
+        &lower.status.code(),
+        &Some(EXIT_SUCCESS),
+        "lowercase tag list",
+    )?;
+    let lower_json = stdout_json(&lower)?;
+    let lower_ids = list_ids(&lower_json, "lowercase tag list")?;
+
+    let upper = run_ee(&[
+        "--workspace",
+        &workspace,
+        "memory",
+        "list",
+        "--tag",
+        "TICKER:ZZZZ",
+        "--json",
+    ])?;
+    ensure_equal(
+        &upper.status.code(),
+        &Some(EXIT_SUCCESS),
+        "uppercase tag list",
+    )?;
+    let upper_json = stdout_json(&upper)?;
+    let upper_ids = list_ids(&upper_json, "uppercase tag list")?;
+
+    ensure_equal(
+        &upper_ids,
+        &lower_ids,
+        "uppercase and lowercase tag filters return identical rows",
+    )?;
+    ensure_equal(
+        &lower_ids,
+        &BTreeSet::from([remembered_id.clone()]),
+        "case-insensitive filter returns the remembered row",
+    )?;
+
+    let hyphenated = run_ee(&[
+        "--workspace",
+        &workspace,
+        "memory",
+        "list",
+        "--tag",
+        "SCREENING-PROBE",
+        "--json",
+    ])?;
+    ensure_equal(
+        &hyphenated.status.code(),
+        &Some(EXIT_SUCCESS),
+        "hyphenated tag list",
+    )?;
+    let hyphenated_json = stdout_json(&hyphenated)?;
+    ensure_equal(
+        &list_ids(&hyphenated_json, "hyphenated tag list")?,
+        &BTreeSet::from([remembered_id]),
+        "hyphenated tag round-trips through the same case rules",
+    )?;
+
+    let underscored = run_ee(&[
+        "--workspace",
+        &workspace,
+        "memory",
+        "list",
+        "--tag",
+        "screening_probe",
+        "--json",
+    ])?;
+    ensure_equal(
+        &underscored.status.code(),
+        &Some(EXIT_SUCCESS),
+        "underscore tag list",
+    )?;
+    let underscored_json = stdout_json(&underscored)?;
+    ensure(
+        list_ids(&underscored_json, "underscore tag list")?.is_empty(),
+        "underscore tag must remain distinct from the stored hyphenated tag",
+    )
+}
+
+#[test]
 fn search_family_is_queryless_complete_scoped_and_redaction_safe() -> TestResult {
     let first = tempfile::tempdir().map_err(|error| error.to_string())?;
     let second = tempfile::tempdir().map_err(|error| error.to_string())?;

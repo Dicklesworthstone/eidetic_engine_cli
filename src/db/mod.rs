@@ -39,7 +39,10 @@ use crate::models::{
     MemoryAnchorSource, StoredMemoryAnchor, extract_memory_anchor_surfaces,
     extract_precision_memory_anchors,
 };
-use crate::models::{MemoryKind, MemoryValidationError, canonicalize_typed_memory_fields_json};
+use crate::models::{
+    MemoryKind, MemoryValidationError, canonicalize_tag_filter,
+    canonicalize_typed_memory_fields_json,
+};
 use crate::models::{MemorySeal, validate_attestation_seal_fields};
 
 pub mod migrate;
@@ -24142,10 +24145,14 @@ impl DbConnection {
 
     /// List memory IDs that have a specific tag in a workspace.
     pub fn list_memories_by_tag(&self, workspace_id: &str, tag: &str) -> Result<Vec<String>> {
+        let canonical_tag = canonicalize_tag_filter(tag);
         let rows = self.query_for(
             DbOperation::Query,
             "SELECT m.id FROM memories m JOIN memory_tags mt ON m.id = mt.memory_id WHERE m.workspace_id = ?1 AND mt.tag = ?2 AND m.tombstoned_at IS NULL AND m.valid_to IS NULL ORDER BY m.id ASC",
-            &[Value::Text(workspace_id.to_string()), Value::Text(tag.to_string())],
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(canonical_tag),
+            ],
         )?;
 
         rows.iter()
@@ -51622,7 +51629,11 @@ mod tests {
             provenance_uri: None,
             trust_class: "agent_assertion".to_string(),
             trust_subclass: None,
-            tags: vec!["target".to_string()],
+            tags: vec![
+                "target".to_string(),
+                "ticker:zzzz".to_string(),
+                "screening-probe".to_string(),
+            ],
             valid_from: None,
             valid_to: None,
         };
@@ -51677,6 +51688,28 @@ mod tests {
 
         let other = connection.list_memories_by_tag("wsp_01234567890123456789012345", "other")?;
         ensure_equal(&other.len(), &1, "one memory with other tag")?;
+
+        let mixed_case =
+            connection.list_memories_by_tag("wsp_01234567890123456789012345", " TICKER:ZZZZ ")?;
+        ensure_equal(
+            &mixed_case,
+            &vec!["mem_bytag000000000000000000001".to_string()],
+            "mixed-case filter matches canonical stored tag",
+        )?;
+
+        let hyphenated =
+            connection.list_memories_by_tag("wsp_01234567890123456789012345", "SCREENING-PROBE")?;
+        ensure_equal(
+            &hyphenated,
+            &vec!["mem_bytag000000000000000000001".to_string()],
+            "mixed-case hyphenated filter matches canonical stored tag",
+        )?;
+        let underscored =
+            connection.list_memories_by_tag("wsp_01234567890123456789012345", "screening_probe")?;
+        ensure(
+            underscored.is_empty(),
+            "underscore filter remains distinct from hyphenated stored tag",
+        )?;
 
         let none =
             connection.list_memories_by_tag("wsp_01234567890123456789012345", "nonexistent")?;

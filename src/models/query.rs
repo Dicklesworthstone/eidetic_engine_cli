@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
-use super::{memory::Tag, trust::TrustClass};
+use super::{memory::canonicalize_tag_filter, trust::TrustClass};
 
 fn normalized_query_token(value: &str) -> String {
     value.trim().to_ascii_lowercase().replace('-', "_")
@@ -1371,13 +1371,8 @@ fn canonical_query_tag_array(value: Option<&serde_json::Value>) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter_map(serde_json::Value::as_str)
-        .map(canonical_query_tag_filter)
+        .map(canonicalize_tag_filter)
         .collect()
-}
-
-fn canonical_query_tag_filter(raw: &str) -> String {
-    let trimmed = raw.trim();
-    Tag::parse(trimmed).map_or_else(|_| trimmed.to_owned(), |tag| tag.to_string())
 }
 
 /// Trust filters from ee.query.v1 trust object.
