@@ -19,7 +19,7 @@ use super::audit_lane::{
     AuditEvent as AuditLaneEvent, AuditLaneHandle, emit_with_direct_fallback, insert_audit_event,
 };
 use super::bayes::BetaPosterior;
-use super::config_surface::{ConfigSurfaceOptions, get_config};
+use super::config_surface::{ConfigSurfaceOptions, get_config, merged_workspace_config};
 use super::index::{
     DEFAULT_INDEX_SUBDIR, IndexHealth, IndexProcessingJobReport, IndexRebuildError,
     IndexStatusOptions, get_index_status_with_connection, process_index_job_for_connection,
@@ -4041,29 +4041,18 @@ struct SecretDetectorAllowConfig {
 fn load_secret_detector_allow_config(
     workspace_path: &Path,
 ) -> Result<SecretDetectorAllowConfig, DomainError> {
-    let Some((path, contents)) =
-        read_workspace_config_if_present(workspace_path, "workspace config")?
-    else {
-        return Ok(SecretDetectorAllowConfig::default());
-    };
-    let config = ConfigFile::parse(&contents).map_err(|error| DomainError::Configuration {
-        message: format!(
-            "Failed to parse workspace config {}: {error}",
-            path.display()
-        ),
-        repair: Some("Fix [policy.secret_detector] in .ee/config.toml.".to_owned()),
-    })?;
+    let merged =
+        merged_workspace_config(workspace_path).map_err(|error| DomainError::Configuration {
+            message: format!("Failed to load secret detector config: {error}"),
+            repair: Some(
+                "Fix [policy.secret_detector] in .ee/config.toml or ~/.config/ee/config.toml."
+                    .to_owned(),
+            ),
+        })?;
+    let config = merged.values.policy.secret_detector;
     Ok(SecretDetectorAllowConfig {
-        allow_phrases: config
-            .policy
-            .secret_detector
-            .allow_phrases
-            .unwrap_or_default(),
-        allow_regex: config
-            .policy
-            .secret_detector
-            .allow_regex
-            .unwrap_or_default(),
+        allow_phrases: config.allow_phrases.unwrap_or_default(),
+        allow_regex: config.allow_regex.unwrap_or_default(),
     })
 }
 
@@ -4346,7 +4335,8 @@ fn secret_detector_allow_matches(
             regex_lite::Regex::new(pattern).map_err(|error| DomainError::Configuration {
                 message: format!("Invalid policy.secret_detector.allow_regex `{pattern}`: {error}"),
                 repair: Some(
-                    "Fix [policy.secret_detector].allow_regex in .ee/config.toml.".to_owned(),
+                    "Fix [policy.secret_detector].allow_regex in .ee/config.toml or ~/.config/ee/config.toml."
+                        .to_owned(),
                 ),
             })?;
         for matched in regex.find_iter(content) {

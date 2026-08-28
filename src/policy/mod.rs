@@ -46,6 +46,14 @@ use serde::{Deserialize, Serialize};
 
 pub const SUBSYSTEM: &str = "policy";
 
+/// NANP-shaped phone numbers accepted by the PII detector.
+///
+/// Area codes and central-office codes cannot begin with `0` or `1`. Keeping
+/// separators optional preserves detection of ordinary ten-digit phone values
+/// without treating zero-padded public identifiers such as SEC CIKs and
+/// accession prefixes as phone numbers.
+pub(crate) const PHONE_NUMBER_PATTERN: &str = r"\b[2-9]\d{2}[-.]?[2-9]\d{2}[-.]?\d{4}\b";
+
 /// Constant-time byte-slice equality comparison.
 ///
 /// Returns true iff both slices have equal length and equal bytes.
@@ -2123,7 +2131,7 @@ fn detect_pii_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
             "email_address",
         ),
         (r"\b\d{3}-\d{2}-\d{4}\b", "ssn"),
-        (r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b", "phone_number"),
+        (PHONE_NUMBER_PATTERN, "phone_number"),
     ] {
         let Ok(regex) = regex_lite::Regex::new(pattern) else {
             continue;
@@ -3314,12 +3322,8 @@ fn redact_pii_values(input: &str, reasons: &mut Vec<&'static str>) -> (String, b
     );
     let (without_ssns, ssn_redacted) =
         redact_regex_matches(&without_emails, r"\b\d{3}-\d{2}-\d{4}\b", "ssn", reasons);
-    let (without_phones, phone_redacted) = redact_regex_matches(
-        &without_ssns,
-        r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b",
-        "phone_number",
-        reasons,
-    );
+    let (without_phones, phone_redacted) =
+        redact_regex_matches(&without_ssns, PHONE_NUMBER_PATTERN, "phone_number", reasons);
     (
         without_phones,
         email_redacted || ssn_redacted || phone_redacted,
@@ -5267,6 +5271,37 @@ mod tests {
         assert!(!report.content.contains(&email));
         assert!(!report.content.contains(&ssn));
         assert!(!report.content.contains(&phone));
+    }
+
+    #[test]
+    fn secret_redactor_distinguishes_nanp_numbers_from_sec_identifiers() {
+        for phone in ["212-555-0199", "212.555.0199", "2125550199"] {
+            let report = redact_secret_like_content(&format!("Contact {phone}."));
+            assert!(report.redacted, "NANP phone must be redacted: {phone}");
+            assert!(
+                report.redacted_reasons.contains(&"phone_number"),
+                "NANP phone must retain the phone_number reason: {phone}"
+            );
+            assert!(
+                !report.content.contains(phone),
+                "NANP phone must not survive redaction: {phone}"
+            );
+        }
+
+        for public_identifier in [
+            "Fund Alpha SEC CIK 0001720116.",
+            "Fund Beta CIK 1720116.",
+            "Issuer C 10-K accession 0001957132-26-000015 filed.",
+            "The inline canonical CIK is 0001957132 in this filing note.",
+        ] {
+            let report = redact_secret_like_content(public_identifier);
+            assert!(
+                !report.redacted,
+                "public SEC identifier must not be redacted: {public_identifier}; reasons={:?}",
+                report.redacted_reasons
+            );
+            assert_eq!(report.content, public_identifier);
+        }
     }
 
     #[test]

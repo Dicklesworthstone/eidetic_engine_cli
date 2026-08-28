@@ -11,7 +11,7 @@ mod test_tracing;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 type TestResult = Result<(), String>;
@@ -41,6 +41,18 @@ fn run_ee_as_agent(args: &[&str]) -> Result<Output, String> {
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
         .env("EE_AGENT_NAME", "GreenOsprey")
+        .output()
+        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
+fn run_ee_with_home(args: &[&str], home: &Path) -> Result<Output, String> {
+    Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(args)
+        .env_remove("EE_WORKSPACE")
+        .env_remove("EE_WORKSPACE_REGISTRY")
+        .env_remove("EE_AGENT_NAME")
+        .env("HOME", home)
+        .env("USERPROFILE", home)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
@@ -256,6 +268,176 @@ fn init_publishes_ready_empty_search_index() -> TestResult {
         &search_json.pointer("/data/errors"),
         &Some(&serde_json::json!([])),
         "empty-index search errors",
+    )
+}
+
+#[test]
+fn remember_accepts_sec_identifiers_preserves_pii_refusal_and_loads_user_allow_regex() -> TestResult
+{
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace_path = tempdir.path().join("workspace");
+    let home_path = tempdir.path().join("home");
+    let user_config_dir = home_path.join(".config").join("ee");
+    fs::create_dir_all(&workspace_path).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&user_config_dir).map_err(|error| error.to_string())?;
+    fs::write(
+        user_config_dir.join("config.toml"),
+        "[policy.secret_detector]\nallow_regex = ['212-555-0199']\n",
+    )
+    .map_err(|error| error.to_string())?;
+    let workspace = workspace_path.to_string_lossy().to_string();
+
+    let init = run_ee_with_home(&["--workspace", &workspace, "init", "--json"], &home_path)?;
+    ensure_equal(
+        &init.status.code(),
+        &Some(EXIT_SUCCESS),
+        "SEC identifier workspace init",
+    )?;
+    assert_stderr_empty(&init, "SEC identifier workspace init")?;
+
+    for (label, content) in [
+        ("zero-padded CIK", "Fund Alpha SEC CIK 0001720116."),
+        ("unpadded labeled CIK", "Fund Beta CIK 1720116."),
+        (
+            "SEC accession",
+            "Issuer C 10-K accession 0001957132-26-000015 filed.",
+        ),
+        (
+            "inline canonical CIK",
+            "The inline canonical CIK is 0001957132 in this filing note.",
+        ),
+    ] {
+        let remember = run_ee_with_home(
+            &[
+                "--workspace",
+                &workspace,
+                "remember",
+                content,
+                "--level",
+                "semantic",
+                "--kind",
+                "fact",
+                "--json",
+            ],
+            &home_path,
+        )?;
+        ensure_equal(
+            &remember.status.code(),
+            &Some(EXIT_SUCCESS),
+            &format!("{label} remember exit"),
+        )?;
+        assert_stderr_empty(&remember, &format!("{label} remember"))?;
+        let json = stdout_json(&remember)?;
+        ensure_equal(
+            &json.pointer("/data/content"),
+            &Some(&serde_json::Value::String(content.to_owned())),
+            &format!("{label} content round trip"),
+        )?;
+        ensure_equal(
+            &json.pointer("/data/persisted"),
+            &Some(&serde_json::Value::Bool(true)),
+            &format!("{label} persisted"),
+        )?;
+    }
+
+    for (label, content) in [
+        ("dashed NANP", "Contact 646-555-0123."),
+        ("dotted NANP", "Contact 646.555.0123."),
+        ("bare NANP", "Contact 6465550123."),
+        ("SSN", "Taxpayer SSN 123-45-6789."),
+    ] {
+        let remember = run_ee_with_home(
+            &[
+                "--workspace",
+                &workspace,
+                "remember",
+                content,
+                "--level",
+                "semantic",
+                "--kind",
+                "fact",
+                "--json",
+            ],
+            &home_path,
+        )?;
+        ensure(
+            !remember.status.success(),
+            format!("{label} must remain refused"),
+        )?;
+        let json = stdout_json(&remember)?;
+        ensure_equal(
+            &json.pointer("/error/code"),
+            &Some(&serde_json::Value::String("policy_denied".to_owned())),
+            &format!("{label} refusal code"),
+        )?;
+    }
+
+    let user_allowed = run_ee_with_home(
+        &[
+            "--workspace",
+            &workspace,
+            "remember",
+            "Configured documentation contact 212-555-0199.",
+            "--level",
+            "semantic",
+            "--kind",
+            "fact",
+            "--json",
+        ],
+        &home_path,
+    )?;
+    ensure_equal(
+        &user_allowed.status.code(),
+        &Some(EXIT_SUCCESS),
+        "user allow_regex remember exit",
+    )?;
+    let allowed_json = stdout_json(&user_allowed)?;
+    ensure_equal(
+        &allowed_json.pointer("/data/policy_bypass_used"),
+        &Some(&serde_json::Value::Bool(true)),
+        "user allow_regex bypass used",
+    )?;
+    ensure_equal(
+        &allowed_json.pointer("/data/policy_bypass/kind"),
+        &Some(&serde_json::Value::String("config_regex".to_owned())),
+        "user allow_regex bypass kind",
+    )?;
+
+    fs::write(
+        user_config_dir.join("config.toml"),
+        "[policy.secret_detector]\nallow_regex = ['(']\n",
+    )
+    .map_err(|error| error.to_string())?;
+    let malformed = run_ee_with_home(
+        &[
+            "--workspace",
+            &workspace,
+            "remember",
+            "Malformed regex must not silently allow 212-555-0199.",
+            "--level",
+            "semantic",
+            "--kind",
+            "fact",
+            "--json",
+        ],
+        &home_path,
+    )?;
+    ensure(
+        !malformed.status.success(),
+        "malformed user allow_regex must fail explicitly",
+    )?;
+    let malformed_json = stdout_json(&malformed)?;
+    ensure_equal(
+        &malformed_json.pointer("/error/code"),
+        &Some(&serde_json::Value::String("configuration".to_owned())),
+        "malformed user allow_regex error code",
+    )?;
+    ensure(
+        malformed_json
+            .pointer("/error/message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|message| message.contains("Invalid policy.secret_detector.allow_regex")),
+        format!("malformed allow_regex error must name the key: {malformed_json}"),
     )
 }
 

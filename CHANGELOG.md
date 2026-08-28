@@ -60,6 +60,11 @@ future changelog pass expands those rows into full capability sections.
 
 ### Fixed
 
+- **SEC identifiers no longer trip the phone-number policy.** Canonical
+  zero-padded CIKs and accession numbers pass through `ee remember`, while
+  valid NANP phone forms and SSNs remain protected. Secret-detector allow
+  phrases and regexes now honor the documented user config layer beneath
+  project config.
 - **Tag filters now round-trip the same canonical form used by `ee remember`.**
   `ee memory list --tag` and tag bitmap queries accept mixed-case filters for
   existing canonical rows without requiring reindexing. Hyphens and

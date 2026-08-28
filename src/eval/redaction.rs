@@ -5,6 +5,7 @@
 //! other sensitive content classes.
 
 use super::RedactionClass;
+use crate::policy::PHONE_NUMBER_PATTERN;
 
 /// Pattern-based redaction leak detector.
 #[derive(Clone, Debug)]
@@ -527,7 +528,7 @@ fn default_leak_patterns() -> Vec<LeakPattern> {
         RedactionClass::Pii,
         "phone_number",
         "Phone number pattern",
-        r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b",
+        PHONE_NUMBER_PATTERN,
     ) {
         patterns.push(p);
     }
@@ -685,11 +686,42 @@ mod tests {
     #[test]
     fn detector_detects_phone_number() -> TestResult {
         let detector = RedactionLeakDetector::new();
-        let output = "Contact: 555-123-4567";
+        let output = "Contact: 212-555-0199";
 
         let leaks = detector.detect_leaks(output);
         ensure(!leaks.is_empty(), true, "should detect phone number")?;
         ensure(leaks[0].pattern_name, "phone_number", "pattern name")
+    }
+
+    #[test]
+    fn detector_distinguishes_nanp_numbers_from_sec_identifiers() -> TestResult {
+        let detector = RedactionLeakDetector::new();
+        for phone in ["212-555-0199", "212.555.0199", "2125550199"] {
+            ensure(
+                detector
+                    .detect_leaks(phone)
+                    .iter()
+                    .any(|leak| leak.pattern_name == "phone_number"),
+                true,
+                &format!("NANP phone must be detected: {phone}"),
+            )?;
+        }
+        for public_identifier in [
+            "SEC CIK 0001720116",
+            "CIK 1720116",
+            "accession 0001957132-26-000015",
+            "inline canonical CIK 0001957132 in prose",
+        ] {
+            ensure(
+                detector
+                    .detect_leaks(public_identifier)
+                    .iter()
+                    .all(|leak| leak.pattern_name != "phone_number"),
+                true,
+                &format!("SEC identifier must not be a phone leak: {public_identifier}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

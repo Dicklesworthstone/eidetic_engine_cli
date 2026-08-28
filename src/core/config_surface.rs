@@ -338,15 +338,27 @@ pub fn set_config(
 fn merged_config(
     options: &ConfigSurfaceOptions,
 ) -> Result<crate::config::MergedConfig, ConfigSurfaceError> {
-    let expander = PathExpander::from_process_env();
+    let environment = process_env();
+    merged_config_with_environment(options, &environment)
+}
+
+fn merged_config_with_environment(
+    options: &ConfigSurfaceOptions,
+    process_environment: &BTreeMap<String, std::ffi::OsString>,
+) -> Result<crate::config::MergedConfig, ConfigSurfaceError> {
+    let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let home = process_environment.get(home_variable).map(PathBuf::from);
+    let expander = PathExpander::with_env(home, process_environment.clone());
     let defaults =
         built_in_config(&expander).map_err(|source| ConfigSurfaceError::Environment { source })?;
-    let environment = config_from_env(&process_env(), &expander)
+    let environment = config_from_env(process_environment, &expander)
         .map_err(|source| ConfigSurfaceError::Environment { source })?;
     let project = read_project_config(options, &expander)?.unwrap_or_else(ConfigFile::default);
+    let user = read_user_config(&expander)?.unwrap_or_else(ConfigFile::default);
     let mut layers = ConfigLayers::with_defaults(defaults);
     layers.environment = environment;
     layers.project = project;
+    layers.user = user;
     Ok(merge_config(&layers))
 }
 
@@ -364,6 +376,26 @@ fn read_project_config(
     expander: &PathExpander,
 ) -> Result<Option<ConfigFile>, ConfigSurfaceError> {
     let path = effective_config_path(&options.workspace_root, options.config_path.as_deref());
+    match read_optional_config_contents(&path)? {
+        Some(contents) => ConfigFile::parse_with_expander(&contents, expander)
+            .map(Some)
+            .map_err(|source| ConfigSurfaceError::Parse {
+                path,
+                message: source.to_string(),
+            }),
+        None => Ok(None),
+    }
+}
+
+fn read_user_config(expander: &PathExpander) -> Result<Option<ConfigFile>, ConfigSurfaceError> {
+    let path = expander
+        .expand("~/.config/ee/config.toml")
+        .map_err(|source| ConfigSurfaceError::Environment {
+            source: EnvironmentConfigError::PathExpansion {
+                variable: "HOME",
+                source,
+            },
+        })?;
     match read_optional_config_contents(&path)? {
         Some(contents) => ConfigFile::parse_with_expander(&contents, expander)
             .map(Some)
@@ -426,8 +458,8 @@ fn read_optional_config(path: &Path) -> Result<(bool, String), ConfigSurfaceErro
     }
 }
 
-/// Maximum bytes inspected when reading `<workspace>/.ee/config.toml`
-/// from the `ee config get|set` surfaces. Matches
+/// Maximum bytes inspected when reading project or user `config.toml` files
+/// from the merged config and `ee config get|set` surfaces. Matches
 /// `WORKSPACE_CONFIG_MAX_BYTES` in `src/core/memory.rs` (e1499deb) and
 /// `CURATE_CONFIG_MAX_BYTES` in `src/core/curate.rs` (0fe4a339), which
 /// read the same file from parallel surfaces. The three helpers must
@@ -471,10 +503,10 @@ fn read_optional_config_contents(path: &Path) -> Result<Option<String>, ConfigSu
             });
         }
     };
-    // Bound the read so a peer-planted multi-GB `.ee/config.toml`
-    // (accidental or hostile in a shared multi-agent checkout) cannot
-    // pin a matching allocation on every `ee config get|set`
-    // invocation. Same defect class that e1499deb closed for the
+    // Bound the read so a multi-GB config file (accidental, corrupt, or
+    // hostile in a shared multi-agent checkout) cannot pin a matching
+    // allocation on every merged-config or `ee config get|set` invocation.
+    // Same defect class that e1499deb closed for the
     // parallel `src/core/memory.rs::read_workspace_config_if_present`
     // and 0fe4a339 closed for
     // `src/core/curate.rs::structural_decay_config_contents`. Three
@@ -1089,13 +1121,17 @@ fn set_toml_value(document: &mut DocumentMut, path: &[&str], value: TomlScalar) 
 mod tests {
     use super::{
         ConfigSurfaceOptions, ensure_config_write_path_is_regular_or_missing, get_config,
-        graph_config_keys, publish_config_temp_file, set_config, show_config,
+        graph_config_keys, merged_config_with_environment, publish_config_temp_file, set_config,
+        show_config,
     };
     use crate::config::{
-        HANDOFF_STALE_ANY_EXPIRED_IN_PACK_KEY, HANDOFF_STALE_CONTENT_DRIFT_SCORE_KEY,
-        HANDOFF_STALE_MEMORIES_ADDED_KEY, HANDOFF_STALE_MEMORIES_REVISED_KEY,
+        ConfigValueSource, HANDOFF_STALE_ANY_EXPIRED_IN_PACK_KEY,
+        HANDOFF_STALE_CONTENT_DRIFT_SCORE_KEY, HANDOFF_STALE_MEMORIES_ADDED_KEY,
+        HANDOFF_STALE_MEMORIES_REVISED_KEY, POLICY_SECRET_DETECTOR_ALLOW_REGEX_KEY,
         SEARCH_DEFAULT_SPEED_KEY,
     };
+    use std::collections::BTreeMap;
+    use std::ffi::OsString;
     use std::fs;
 
     type TestResult = Result<(), String>;
@@ -1126,6 +1162,56 @@ mod tests {
         } else {
             Err(format!("unexpected graph keys: {keys:?}"))
         }
+    }
+
+    #[test]
+    fn merged_config_loads_user_layer_below_project_layer() -> TestResult {
+        let temp = workspace()?;
+        let workspace_root = temp.path().join("workspace");
+        let user_home = temp.path().join("home");
+        fs::create_dir_all(workspace_root.join(".ee")).map_err(|error| error.to_string())?;
+        fs::create_dir_all(user_home.join(".config").join("ee"))
+            .map_err(|error| error.to_string())?;
+        fs::write(
+            user_home.join(".config").join("ee").join("config.toml"),
+            "[policy.secret_detector]\nallow_regex = ['user-pattern']\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let home_variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let mut environment = BTreeMap::new();
+        environment.insert(
+            home_variable.to_owned(),
+            OsString::from(user_home.as_os_str()),
+        );
+
+        let merged = merged_config_with_environment(&options(&workspace_root), &environment)
+            .map_err(|error| error.to_string())?;
+        if merged.values.policy.secret_detector.allow_regex != Some(vec!["user-pattern".to_owned()])
+        {
+            return Err(format!("unexpected user-layer config: {merged:?}"));
+        }
+        if merged.source(POLICY_SECRET_DETECTOR_ALLOW_REGEX_KEY) != Some(ConfigValueSource::User) {
+            return Err(format!("unexpected user-layer source: {merged:?}"));
+        }
+
+        fs::write(
+            workspace_root.join(".ee").join("config.toml"),
+            "[policy.secret_detector]\nallow_regex = ['project-pattern']\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let merged = merged_config_with_environment(&options(&workspace_root), &environment)
+            .map_err(|error| error.to_string())?;
+        if merged.values.policy.secret_detector.allow_regex
+            != Some(vec!["project-pattern".to_owned()])
+        {
+            return Err(format!("unexpected project-layer config: {merged:?}"));
+        }
+        if merged.source(POLICY_SECRET_DETECTOR_ALLOW_REGEX_KEY) != Some(ConfigValueSource::Project)
+        {
+            return Err(format!("unexpected project-layer source: {merged:?}"));
+        }
+        Ok(())
     }
 
     #[test]
