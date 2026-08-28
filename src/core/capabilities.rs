@@ -233,18 +233,21 @@ pub struct CapabilitiesReport {
 impl CapabilitiesReport {
     /// Gather current capabilities from compile-time and runtime state.
     #[must_use]
-    pub fn gather() -> Self {
+    pub fn gather(commands: Vec<CommandEntry>) -> Self {
         let workspace_path = default_workspace_path();
-        Self::gather_with_workspace(workspace_path.as_deref())
+        Self::gather_with_workspace(workspace_path.as_deref(), commands)
     }
 
     #[must_use]
-    pub fn gather_for_workspace(workspace_path: &Path) -> Self {
-        Self::gather_with_workspace(Some(workspace_path))
+    pub fn gather_for_workspace(workspace_path: &Path, commands: Vec<CommandEntry>) -> Self {
+        Self::gather_with_workspace(Some(workspace_path), commands)
     }
 
     #[must_use]
-    pub fn gather_with_workspace(workspace_path: Option<&Path>) -> Self {
+    pub fn gather_with_workspace(
+        workspace_path: Option<&Path>,
+        commands: Vec<CommandEntry>,
+    ) -> Self {
         let info = build_info();
         let runtime_status = probe_runtime_capability();
         let storage_status = probe_storage_capability(workspace_path);
@@ -379,11 +382,6 @@ impl CapabilitiesReport {
         ));
         unimplemented.sort_by(|left, right| left.code.cmp(right.code));
 
-        // Command registration belongs to the CLI layer. The CLI injects its
-        // canonical visible Clap tree before rendering this report so core
-        // never maintains a second, drift-prone command registry.
-        let commands = Vec::new();
-
         let output_formats = vec![
             OutputFormatEntry::new("json", true, true, "Canonical stable response envelope"),
             OutputFormatEntry::new(
@@ -410,13 +408,6 @@ impl CapabilitiesReport {
             index,
             toon: ToonOutputCapability::gather(),
         }
-    }
-
-    /// Attach command metadata supplied by the CLI registration boundary.
-    #[must_use]
-    pub fn with_commands(mut self, commands: Vec<CommandEntry>) -> Self {
-        self.commands = commands;
-        self
     }
 
     /// Count of ready subsystems.
@@ -453,6 +444,13 @@ mod tests {
 
     type TestResult = Result<(), String>;
 
+    fn command_inventory_fixture() -> Vec<CommandEntry> {
+        vec![
+            CommandEntry::new("capabilities", true, "Report capabilities"),
+            CommandEntry::new("mcp serve-stdio", false, "Run the MCP adapter"),
+        ]
+    }
+
     fn ensure<T: std::fmt::Debug + PartialEq>(actual: T, expected: T, ctx: &str) -> TestResult {
         if actual == expected {
             Ok(())
@@ -477,7 +475,7 @@ mod tests {
 
     #[test]
     fn capabilities_report_gather_returns_valid_report() -> TestResult {
-        let report = CapabilitiesReport::gather();
+        let report = CapabilitiesReport::gather(command_inventory_fixture());
 
         ensure(
             report.version,
@@ -486,17 +484,13 @@ mod tests {
         )?;
         ensure_at_least(report.subsystems.len(), 3, "at least 3 subsystems")?;
         ensure_at_least(report.features.len(), 3, "at least 3 features")?;
-        ensure(
-            report.commands.is_empty(),
-            true,
-            "core does not duplicate the CLI command registry",
-        )?;
+        ensure(report.commands.len(), 2, "required CLI command inventory")?;
         ensure_at_least(report.output_formats.len(), 8, "all output formats")
     }
 
     #[test]
     fn capabilities_report_lists_all_global_output_formats() -> TestResult {
-        let report = CapabilitiesReport::gather();
+        let report = CapabilitiesReport::gather(command_inventory_fixture());
         let names = report
             .output_formats
             .iter()
@@ -513,7 +507,7 @@ mod tests {
 
     #[test]
     fn capabilities_report_has_runtime_ready() -> TestResult {
-        let report = CapabilitiesReport::gather();
+        let report = CapabilitiesReport::gather(command_inventory_fixture());
 
         let runtime = report
             .subsystems
@@ -525,7 +519,7 @@ mod tests {
 
     #[test]
     fn capabilities_report_surfaces_mesh_as_default_off() -> TestResult {
-        let report = CapabilitiesReport::gather();
+        let report = CapabilitiesReport::gather(command_inventory_fixture());
 
         let mesh = report
             .subsystems
@@ -548,10 +542,7 @@ mod tests {
 
     #[test]
     fn capabilities_report_counts_are_consistent() -> TestResult {
-        let report = CapabilitiesReport::gather().with_commands(vec![
-            CommandEntry::new("capabilities", true, "Report capabilities"),
-            CommandEntry::new("mcp serve-stdio", false, "Run the MCP adapter"),
-        ]);
+        let report = CapabilitiesReport::gather(command_inventory_fixture());
 
         ensure_at_least(report.ready_subsystem_count(), 1, "at least 1 ready")?;
         ensure(report.commands.len(), 2, "injected command count")?;
@@ -564,7 +555,7 @@ mod tests {
 
     #[test]
     fn capabilities_report_surfaces_build_time_gaps_once() -> TestResult {
-        let report = CapabilitiesReport::gather();
+        let report = CapabilitiesReport::gather(command_inventory_fixture());
         let codes = report
             .unimplemented
             .iter()
@@ -591,7 +582,7 @@ mod tests {
 
     #[test]
     fn capabilities_report_accepts_cli_owned_command_inventory() -> TestResult {
-        let report = CapabilitiesReport::gather().with_commands(vec![
+        let report = CapabilitiesReport::gather(vec![
             CommandEntry::new("capabilities", true, "Report capabilities"),
             CommandEntry::new("insights", true, "Bundle operational insights"),
         ]);
@@ -611,7 +602,7 @@ mod tests {
 
     #[test]
     fn capabilities_report_includes_toon_output_metadata() -> TestResult {
-        let report = CapabilitiesReport::gather();
+        let report = CapabilitiesReport::gather(command_inventory_fixture());
 
         ensure(report.toon.available, true, "toon output is available")?;
         ensure(

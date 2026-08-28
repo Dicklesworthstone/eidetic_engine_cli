@@ -3,7 +3,7 @@ success: true
 fields: standard
 data:
   command: capabilities
-  version: 0.13.1
+  version: 0.14.3
   subsystems[6]{name,status}:
     runtime,ready
     storage,pending
@@ -23,66 +23,558 @@ data:
   unimplemented[2]{code,featureFlag,shipTarget,trackingBead}:
     diagram_backend_unavailable,franken-mermaid-adapter,v0.3,bd-17c65.5.5
     mcp_feature_disabled,mcp,v0.2,bd-17c65.5.5
-  commands[58]{name,available}:
+  commands[551]{name,available}:
     agent,true
+    agent detect,true
+    agent scan,true
+    agent sources,true
+    agent status,true
     agent-docs,true
+    analyze,true
+    analyze clustering,true
+    analyze drift,true
+    analyze science-status,true
+    artifact,true
+    artifact inspect,true
+    artifact list,true
+    artifact register,true
+    artifact relocate,true
     ask,true
     attest,true
+    attest memory,true
+    attest pack,true
+    attest query,true
+    audit,true
+    audit diff,true
+    audit show,true
+    audit timeline,true
+    audit verify,true
     backup,true
+    backup create,true
+    backup inspect,true
+    backup list,true
+    backup restore,true
+    backup verify,true
     bootstrap,true
-    bootstrap docs,true
     bootstrap apply,true
+    bootstrap docs,true
+    cache,true
+    cache hotset-manifest,true
+    cache prewarm,true
     capabilities,true
+    capture,true
+    capture suggest,true
+    causal,true
+    causal compare,true
+    causal estimate,true
+    causal promote-plan,true
+    causal trace,true
+    certificate,true
+    certificate keygen,true
+    certificate list,true
+    certificate show,true
+    certificate sign,true
+    certificate verify,true
     check,true
+    claim,true
+    claim list,true
+    claim show,true
+    claim verify,true
+    completion,true
+    config,true
+    config get,true
+    config set,true
+    config show,true
+    conflict,true
+    conflict cluster,true
+    conflict explain,true
+    conflict list,true
+    conflict resolve,true
     context,true
+    context-show,true
+    coordination,true
+    coordination evidence,true
+    coordination evidence ingest,true
     curate,true
+    curate accept,true
+    curate apply,true
+    curate auto-promote,true
+    curate candidates,true
+    curate disposition,true
+    curate doctor,true
+    curate merge,true
+    curate propose-derived,true
+    curate reject,true
+    curate retire,true
+    curate show,true
+    curate snooze,true
+    curate tombstone,true
+    curate untombstone,true
+    curate validate,true
+    daemon,true
+    daemon install,true
+    daemon start,true
+    daemon status,true
+    daemon stop,true
+    daemon uninstall,true
     db,true
+    db check,true
+    db check-integrity,true
+    db inspect,true
+    db migrations,true
+    db reindex,true
+    db status,true
+    decide,true
+    decide list,true
+    decide record,true
+    decide revisit,true
+    demo,true
+    demo list,true
+    demo run,true
+    demo show,true
+    demo verify,true
+    diag,true
+    diag advisory-lock,true
+    diag agentsmd-drift,true
+    diag artifacts,true
+    diag build-admission,true
+    diag causal-edge,true
+    diag claims,true
+    diag contention,true
+    diag curation-candidate,true
+    diag database-skew,true
+    diag dependencies,true
+    diag disk-pressure,true
+    diag environment-attestation,true
+    diag graph,true
+    diag graph-snapshot,true
+    diag host-profile,true
+    diag incident,true
+    diag integrity,true
+    diag memory-validity,true
+    diag model-registry,true
+    diag pack-latest,true
+    diag pack-record,true
+    diag plan-cache,true
+    diag provenance,true
+    diag quarantine,true
+    diag quarantine list,true
+    diag quarantine show,true
+    diag resource-admission,true
+    diag search,true
+    diag store-integrity,true
+    diag streams,true
+    diag toolchain-provenance,true
+    diag tripwire,true
+    diag write-owner,true
+    diag write-spool,true
+    diagnose-error,true
     doctor,true
+    economy,true
+    economy prune-plan,true
+    economy report,true
+    economy score,true
+    economy simulate,true
     eval,true
+    eval list,true
+    eval report,true
+    eval run,true
     export,true
+    export agentsmd,true
+    focus,true
+    focus add,true
+    focus clear,true
+    focus explain,true
+    focus remove,true
+    focus set,true
+    focus show,true
+    focus suggest,true
+    graph,true
+    graph articulation,true
+    graph betweenness,true
+    graph centrality,true
+    graph centrality-refresh,true
+    graph communities,true
+    graph diff,true
+    graph explain-link,true
+    graph export,true
+    graph feature-enrichment,true
+    graph hits,true
+    graph k-core,true
+    graph louvain,true
+    graph neighborhood,true
+    graph pagerank,true
+    graph path,true
+    graph snapshot,true
+    graph snapshot refresh,true
+    graph suggest-links,true
+    handoff,true
+    handoff completion-audit,true
+    handoff create,true
+    handoff inspect,true
+    handoff preview,true
+    handoff resume,true
+    handoff rotate-key,true
     health,true
+    health scorecard,true
     help,true
+    history,true
     hook,true
+    hook claude-code,true
+    hook codex,true
+    hook gemini,true
+    hook git-readiness,true
+    hook status,true
     impact,true
     import,true
-    init,true
+    import agentsmd,true
+    import cass,true
+    import eidetic-legacy,true
+    import jsonl,true
     index,true
+    index rebuild,true
+    index reembed,true
+    index status,true
+    index vacuum,true
+    init,true
+    insights,true
+    install,true
+    install check,true
+    install plan,true
+    introspect,true
+    job,true
+    job list,true
+    job run,true
+    job show,true
+    journal,true
+    journal append,true
+    journal distill,true
+    journal list,true
+    journal show,true
+    lab,true
+    lab capture,true
+    lab counterfactual,true
+    lab generate-workload,true
+    lab promote-workload,true
+    lab replay,true
+    lab swarm,true
+    lab swarm replay,true
+    learn,true
+    learn agenda,true
+    learn close,true
+    learn cluster,true
+    learn experiment,true
+    learn experiment propose,true
+    learn experiment run,true
+    learn gaps,true
+    learn observe,true
+    learn summary,true
+    learn uncertainty,true
     lens,true
-    lens list,true
     lens explain,true
+    lens list,true
+    link,true
+    maintenance,true
+    maintenance graph-snapshot-prune,true
+    maintenance graph-witnesses-prune,true
+    maintenance run,true
+    maintenance status,true
+    maintenance wal-checkpoint,true
     mcp,true
+    mcp manifest,true
+    mcp serve-stdio,false
+    mcp validate,true
     memory,true
+    memory demote-global,true
+    memory drift,true
+    memory expire,true
+    memory history,true
+    memory level,true
+    memory link,true
+    memory list,true
+    memory outcome-global,true
+    memory promote-global,true
+    memory reveal,true
+    memory revise,true
+    memory show,true
+    memory tags,true
+    mesh,true
+    mesh auto-enroll,true
+    mesh disable,true
+    mesh discovery-policy,true
+    mesh discovery-policy allow,true
+    mesh discovery-policy deny,true
+    mesh discovery-policy set,true
+    mesh export,true
+    mesh grant,true
+    mesh hello-responder,true
+    mesh hello-responder register,true
+    mesh hello-responder run,true
+    mesh hello-responder status,true
+    mesh hello-responder unregister,true
+    mesh import,true
+    mesh init,true
+    mesh ledger,true
+    mesh peer,true
+    mesh peer add,true
+    mesh peer list,true
+    mesh peer revoke,true
+    mesh peer rotate,true
+    mesh peer show,true
+    mesh peer unknown-attempt,true
+    mesh peers,true
+    mesh preview-grant,true
+    mesh reenable,true
+    mesh revoke-lane,true
+    mesh status,true
+    mesh sync,true
     migrate,true
+    migrate run,true
+    migrate shard-fanout,true
+    migrate status,true
+    model,true
+    model fetch,true
+    model list,true
+    model status,true
+    note,true
     orient,true
     outcome,true
+    outcome trace,true
+    outcome-quarantine,true
+    outcome-quarantine list,true
+    outcome-quarantine release,true
     pack,true
-    pack --lens,true
+    pack build,true
+    pack diff,true
+    pack replay,true
+    perf,true
+    perf budget,true
+    perf budget check,true
+    perf compare,true
+    perf explain-latency,true
+    perf live,true
+    perf prompt-budget,true
+    perf snapshot,true
+    plan,true
+    plan explain,true
+    plan goal,true
+    plan recipe,true
+    plan recipe list,true
+    plan recipe show,true
+    plan recommend,true
+    playbook,true
+    playbook export,true
+    playbook extract,true
+    playbook import,true
+    playbook list,true
     preflight,true
     preflight check,true
+    preflight close,true
+    preflight guard,true
+    preflight run,true
+    preflight show,true
     primer,true
+    procedure,true
+    procedure drift,true
+    procedure export,true
+    procedure list,true
+    procedure promote,true
+    procedure propose,true
+    procedure retire,true
+    procedure show,true
+    procedure verify,true
+    profile,true
+    profile config,true
+    profile config apply,true
+    profile config plan,true
+    proof,true
+    proof admit,true
+    proof status,true
+    proximity,true
+    rationale,true
+    rationale attach,true
+    rationale list,true
+    rationale show,true
     recall,true
+    recorder,true
+    recorder event,true
+    recorder events,true
+    recorder events list,true
+    recorder finish,true
+    recorder flight,true
+    recorder flight append,true
+    recorder flight replay,true
+    recorder follow,true
+    recorder import,true
+    recorder start,true
+    recorder tail,true
+    reflect,true
+    reflect ingest,true
+    reflect propose,true
+    reflect request-ledger,true
+    reflect request-ledger diagnostics,true
+    regress,true
+    regress explain,true
+    rehearse,true
+    rehearse inspect,true
+    rehearse plan,true
+    rehearse promote-plan,true
+    rehearse run,true
     remember,true
     resume,true
+    review,true
+    review session,true
+    review workspace,true
     rule,true
+    rule add,true
+    rule list,true
+    rule mark,true
+    rule protect,true
+    rule provenance,true
+    rule show,true
+    rule update,true
+    sandbox,true
+    sandbox apply,true
+    sandbox curate,true
+    sandbox diff,true
+    sandbox import,true
+    sandbox remember,true
     schema,true
+    schema export,true
+    schema list,true
     search,true
+    sentinel,true
+    sentinel check,true
+    sentinel explain,true
+    serve,true
+    session-budget,true
+    session-budget plan,true
+    shadow,true
+    shadow demote,true
+    shadow promote,true
+    shadow run,true
+    share,true
+    share preview,true
+    show,true
     similar,true
+    situation,true
+    situation adopt,true
+    situation classify,true
+    situation compare,true
+    situation explain,true
+    situation link,true
+    situation show,true
     status,true
+    subscribe,true
+    subscribe poll,true
+    subscribe stream,true
     support,true
+    support bundle,true
+    support inspect,true
     swarm,true
     swarm brief,true
+    swarm next-action,true
+    swarm repair-plan,true
+    swarm work-packet,true
+    tag,true
+    task-frame,true
+    task-frame close,true
+    task-frame create,true
+    task-frame show,true
+    task-frame subgoal,true
+    task-frame subgoal add,true
+    task-frame update,true
+    team,true
+    team activity,true
+    team create,true
+    team credentials,true
+    team credentials backup,true
+    team credentials restore,true
+    team doctor,true
+    team fetch,true
+    team fetch body,true
+    team idp,true
+    team idp attest,true
+    team idp device,true
+    team idp require,true
+    team idp set,true
+    team idp status,true
+    team invite,true
+    team join,true
+    team leave,true
+    team members,true
+    team members add-node,true
+    team members list,true
+    team members reconcile,true
+    team members remove,true
+    team members revalidate,true
+    team members rotate-key,true
+    team pause,true
+    team port,true
+    team port migrate,true
+    team port show,true
+    team projects,true
+    team projects adopt,true
+    team projects list,true
+    team projects reconcile,true
+    team projects share,true
+    team resume,true
+    team revoke,true
+    team share,true
+    team share bodies,true
+    team share history,true
+    team status,true
+    team steward,true
+    team steward once,true
+    team sync,true
+    team unshare,true
+    team unshare bodies,true
     timeline,true
+    tripwire,true
+    tripwire check,true
+    tripwire list,true
+    trust,true
+    trust report,true
+    update,true
+    verification,true
+    verification broker,true
+    verification broker lookup,true
+    verification closeout,true
+    verification closeout capsule,true
+    verification closure-guidance,true
+    verification ingest,true
+    verification proofs,true
+    verification provenance,true
+    verification rch,true
+    verification rch blockers,true
+    verification rch ingest,true
+    verification rch runs,true
+    verification rch topology-audit,true
+    verify,true
+    verify broker,true
+    verify broker lookup,true
+    verify closeout,true
+    verify closeout capsule,true
+    verify closure-guidance,true
+    verify ingest,true
+    verify proofs,true
+    verify provenance,true
+    verify rch,true
+    verify rch blockers,true
+    verify rch ingest,true
+    verify rch runs,true
+    verify rch topology-audit,true
     version,true
     why,true
     why-not,true
+    workflow,true
+    workflow close,true
+    workflow create,true
     workspace,true
-    diag contention --use-daemon,true
-    ee.daemon.telemetry,true
-    ee.daemon.write,true
-    ee.daemon.write_journal,true
-    daemon foreground decay_sweep,true
-    daemon background,true
-    daemon foreground non-decay,true
+    workspace alias,true
+    workspace hygiene,true
+    workspace list,true
+    workspace resolve,true
   binaries:
     cass:
       source: missing
@@ -885,6 +1377,6 @@ data:
     enabledFeatures: 4
     totalFeatures: 8
     unimplementedCapabilities: 2
-    availableCommands: 59
-    totalCommands: 59
+    availableCommands: 550
+    totalCommands: 551
 degraded[0]:

@@ -13100,14 +13100,11 @@ where
             handle_bootstrap_command(&cli, bootstrap_cmd, stdout, stderr)
         }
         Some(Command::Capabilities) => {
-            let report = cli
-                .workspace
-                .as_deref()
-                .map_or_else(
-                    CapabilitiesReport::gather,
-                    CapabilitiesReport::gather_for_workspace,
-                )
-                .with_commands(public_cli_command_entries());
+            let commands = public_cli_command_entries();
+            let report = match cli.workspace.as_deref() {
+                Some(workspace) => CapabilitiesReport::gather_for_workspace(workspace, commands),
+                None => CapabilitiesReport::gather(commands),
+            };
             let profile = cli.fields_level().to_field_profile();
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
@@ -79528,24 +79525,31 @@ mod tests {
             "flags never appear as command-path segments",
         )?;
 
-        let mcp_stdio = entries
-            .iter()
-            .find(|entry| entry.name == "mcp serve-stdio")
-            .ok_or_else(|| "mcp serve-stdio capability missing".to_owned())?;
-        ensure_equal(
-            &mcp_stdio.available,
-            &cfg!(feature = "mcp"),
-            "mcp feature availability",
-        )?;
-        let graph_path = entries
-            .iter()
-            .find(|entry| entry.name == "graph path")
-            .ok_or_else(|| "graph path capability missing".to_owned())?;
-        ensure_equal(
-            &graph_path.available,
-            &cfg!(feature = "graph"),
-            "graph feature availability",
-        )
+        for (path, expected_available) in [
+            ("mcp serve-stdio", cfg!(feature = "mcp")),
+            ("proximity", cfg!(feature = "graph")),
+            ("graph articulation", cfg!(feature = "graph")),
+            ("graph betweenness", cfg!(feature = "graph")),
+            ("graph communities", cfg!(feature = "graph")),
+            ("graph explain-link", cfg!(feature = "graph")),
+            ("graph hits", cfg!(feature = "graph")),
+            ("graph k-core", cfg!(feature = "graph")),
+            ("graph louvain", cfg!(feature = "graph")),
+            ("graph pagerank", cfg!(feature = "graph")),
+            ("graph path", cfg!(feature = "graph")),
+            ("graph suggest-links", cfg!(feature = "graph")),
+        ] {
+            let entry = entries
+                .iter()
+                .find(|entry| entry.name == path)
+                .ok_or_else(|| format!("{path} capability missing"))?;
+            ensure_equal(
+                &entry.available,
+                &expected_available,
+                &format!("{path} feature availability"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

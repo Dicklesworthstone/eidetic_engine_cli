@@ -19410,6 +19410,7 @@ mod tests {
         status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
+    use crate::core::capabilities::{CapabilitiesReport, CommandEntry};
     use crate::core::degraded_aggregation::AggregatedDegradation;
     use crate::core::doctor::{
         CassImportGuidance, CassImportGuidanceStatus, CheckResult, CheckSeverity, CheckTier,
@@ -19476,6 +19477,14 @@ mod tests {
     };
 
     type TestResult = Result<(), String>;
+
+    fn capabilities_report_fixture() -> CapabilitiesReport {
+        CapabilitiesReport::gather(vec![CommandEntry::new(
+            "capabilities",
+            true,
+            "Report capabilities",
+        )])
+    }
 
     fn mesh_approval_bearer_canary() -> String {
         // Keep the recognizable credential prefix out of the source fixture
@@ -20669,7 +20678,7 @@ mod tests {
             ensure_top_level_degraded_mirrors_data_degraded(&value, context)?;
         }
 
-        let capabilities = crate::core::capabilities::CapabilitiesReport::gather();
+        let capabilities = capabilities_report_fixture();
         let check = crate::core::check::CheckReport::gather();
         let streams = crate::core::streams::StreamsReport {
             stdout_isolated: true,
@@ -25554,8 +25563,7 @@ mod tests {
     #[test]
     fn render_capabilities_json_filtered_minimal_only_essentials() -> TestResult {
         use super::{FieldProfile, render_capabilities_json_filtered};
-        use crate::core::capabilities::CapabilitiesReport;
-        let report = CapabilitiesReport::gather();
+        let report = capabilities_report_fixture();
         let json = render_capabilities_json_filtered(&report, FieldProfile::Minimal);
 
         ensure_contains(&json, "\"command\":\"capabilities\"", "command")?;
@@ -25571,8 +25579,7 @@ mod tests {
     #[test]
     fn render_capabilities_json_filtered_full_has_descriptions() -> TestResult {
         use super::{FieldProfile, render_capabilities_json_filtered};
-        use crate::core::capabilities::CapabilitiesReport;
-        let report = CapabilitiesReport::gather();
+        let report = capabilities_report_fixture();
         let json = render_capabilities_json_filtered(&report, FieldProfile::Full);
 
         ensure_contains(&json, "\"subsystems\":", "has subsystems")?;
