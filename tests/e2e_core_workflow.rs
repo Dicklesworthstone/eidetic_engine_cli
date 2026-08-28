@@ -433,12 +433,15 @@ fn remember_accepts_sec_identifiers_preserves_pii_refusal_and_loads_user_allow_r
         &Some(&serde_json::Value::String("configuration".to_owned())),
         "malformed user allow_regex error code",
     )?;
+    let malformed_message = malformed_json
+        .pointer("/error/message")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("malformed allow_regex error lacks a message: {malformed_json}"))?;
     ensure(
-        malformed_json
-            .pointer("/error/message")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|message| message.contains("Invalid policy.secret_detector.allow_regex")),
-        format!("malformed allow_regex error must name the key: {malformed_json}"),
+        malformed_message.contains("policy.secret_detector.allow_regex")
+            && malformed_message.contains("invalid value")
+            && malformed_message.contains("valid regex"),
+        format!("malformed allow_regex error must name the key and regex defect: {malformed_json}"),
     )
 }
 
