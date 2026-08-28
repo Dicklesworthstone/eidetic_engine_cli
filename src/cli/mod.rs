@@ -88098,6 +88098,38 @@ demos:
     }
 
     #[test]
+    fn remember_json_bare_source_path_names_file_uri_repair() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "remember",
+            "Test memory with a bare source path",
+            "--source",
+            "/abs/path.md",
+            "--dry-run",
+            "--json",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "bare source path exit")?;
+        ensure(stderr.is_empty(), "bare source path JSON stderr must be empty")?;
+
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.error.v2"),
+            "bare source path error schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("usage"),
+            "bare source path error code",
+        )?;
+        let repair = value["error"]["repair"]
+            .as_str()
+            .ok_or_else(|| "bare source path error missing repair".to_owned())?;
+        ensure_contains(repair, "file:///abs/path.md", "bare source path repair")
+    }
+
+    #[test]
     fn remember_json_accepts_manual_provenance_uri() -> TestResult {
         let (exit, stdout, stderr) = invoke(&[
             "ee",

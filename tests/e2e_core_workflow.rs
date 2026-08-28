@@ -730,6 +730,88 @@ fn core_workflow_init_remember_search_context_why() -> TestResult {
 }
 
 #[test]
+fn memory_list_and_show_round_trip_local_provenance_uri() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+    let source_path = tempdir.path().join("SN__SYNTHESIZED_REPORT.md");
+    fs::write(&source_path, "Local provenance round-trip evidence.")
+        .map_err(|error| error.to_string())?;
+    let source_uri = format!("file://{}", source_path.display());
+
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(&init.status.code(), &Some(EXIT_SUCCESS), "init")?;
+    assert_stderr_empty(&init, "init")?;
+
+    let remember = run_ee(&[
+        "--workspace",
+        &workspace,
+        "remember",
+        "Local provenance round-trip evidence.",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        "--source",
+        &source_uri,
+        "--json",
+    ])?;
+    ensure_equal(&remember.status.code(), &Some(EXIT_SUCCESS), "remember")?;
+    assert_stderr_empty(&remember, "remember")?;
+    let remember_json = stdout_json(&remember)?;
+    let memory_id = json_str(&remember_json, "/data/memory_id", "remember")?;
+    ensure_equal(
+        &json_str(&remember_json, "/data/provenance_uri", "remember")?,
+        &source_uri.as_str(),
+        "remember provenance URI",
+    )?;
+
+    let list = run_ee(&[
+        "--workspace",
+        &workspace,
+        "memory",
+        "list",
+        "--json",
+    ])?;
+    ensure_equal(&list.status.code(), &Some(EXIT_SUCCESS), "memory list")?;
+    assert_stderr_empty(&list, "memory list")?;
+    let list_json = stdout_json(&list)?;
+    let listed = json_array(&list_json, "/data/memories", "memory list")?
+        .iter()
+        .find(|memory| {
+            memory.get("id").and_then(serde_json::Value::as_str) == Some(memory_id)
+        })
+        .ok_or_else(|| format!("memory list omitted remembered memory {memory_id}"))?;
+    ensure_equal(
+        &listed
+            .get("provenance_uri")
+            .and_then(serde_json::Value::as_str),
+        &Some(source_uri.as_str()),
+        "memory list provenance URI",
+    )?;
+
+    let show = run_ee(&[
+        "--workspace",
+        &workspace,
+        "memory",
+        "show",
+        memory_id,
+        "--json",
+    ])?;
+    ensure_equal(&show.status.code(), &Some(EXIT_SUCCESS), "memory show")?;
+    assert_stderr_empty(&show, "memory show")?;
+    let show_json = stdout_json(&show)?;
+    ensure_equal(
+        &json_str(
+            &show_json,
+            "/data/memory/provenance_uri",
+            "memory show",
+        )?,
+        &source_uri.as_str(),
+        "memory show provenance URI",
+    )
+}
+
+#[test]
 fn context_and_why_report_changed_file_provenance() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let workspace = tempdir.path().to_string_lossy().to_string();

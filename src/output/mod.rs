@@ -20184,11 +20184,13 @@ mod tests {
     }
 
     #[test]
-    fn memory_show_output_redacts_sensitive_provenance_uri() -> TestResult {
+    fn memory_show_output_preserves_local_path_and_redacts_secret_value() -> TestResult {
+        let source =
+            "file:///Users/alice/private/logs/build.log?api_key=redaction-fixture";
+        let expected =
+            "file:///Users/alice/private/logs/build.log?api_key=[REDACTED:secret]";
         let report = MemoryShowReport::found(MemoryDetails {
-            memory: output_test_memory(Some(
-                "file:///Users/alice/private/logs/build.log?api_key=redaction-fixture".to_owned(),
-            )),
+            memory: output_test_memory(Some(source.to_owned())),
             tags: Vec::new(),
             typed_fields: None,
         });
@@ -20217,31 +20219,40 @@ mod tests {
             &Some("mem_output_redaction"),
             "memory show compatibility id",
         )?;
-        ensure_contains(&json, "[REDACTED_PATH]", "memory show path redaction")?;
-        ensure_contains(&json, "[REDACTED:secret]", "memory show secret redaction")?;
-        ensure(
-            !json.contains("/Users/alice"),
-            format!("memory show JSON leaked absolute path: {json}"),
+        ensure_equal(
+            &value
+                .pointer("/data/memory/provenance_uri")
+                .and_then(serde_json::Value::as_str),
+            &Some(expected),
+            "memory show local provenance",
         )?;
+        ensure(
+            !json.contains("[REDACTED_PATH]"),
+            format!("memory show JSON must preserve the local path: {json}"),
+        )?;
+        ensure_contains(&json, "[REDACTED:secret]", "memory show secret redaction")?;
         ensure(
             !json.contains("redaction-fixture"),
             format!("memory show JSON leaked secret-like value: {json}"),
         )?;
 
         let human = render_memory_show_human(&report);
-        ensure_contains(
-            &human,
-            "[REDACTED_PATH]",
-            "memory show human path redaction",
-        )?;
+        ensure_contains(&human, expected, "memory show human local provenance")?;
         ensure(
-            !human.contains("/Users/alice") && !human.contains("redaction-fixture"),
-            format!("memory show human leaked sensitive provenance: {human}"),
-        )
+            !human.contains("redaction-fixture"),
+            format!("memory show human leaked secret-like value: {human}"),
+        )?;
+
+        let toon = render_memory_show_toon(&report);
+        ensure_toon_matches_json(&json, &toon, "memory show TOON local provenance")
     }
 
     #[test]
-    fn memory_list_json_redacts_sensitive_provenance_uri() -> TestResult {
+    fn memory_list_output_preserves_local_path_and_redacts_secret_value() -> TestResult {
+        let source =
+            "file:///Volumes/USBNVME16TB/private/index.json#token=redaction-fixture";
+        let expected =
+            "file:///Volumes/USBNVME16TB/private/index.json#token=[REDACTED:secret]";
         let report = MemoryListReport::success(
             vec![MemorySummary {
                 id: "mem_output_redaction".to_owned(),
@@ -20250,10 +20261,7 @@ mod tests {
                 content: "Keep memory provenance output redacted.".to_owned(),
                 content_truncated: false,
                 confidence: 0.9,
-                provenance_uri: Some(
-                    "file:///Volumes/USBNVME16TB/private/index.json#token=redaction-fixture"
-                        .to_owned(),
-                ),
+                provenance_uri: Some(source.to_owned()),
                 is_tombstoned: false,
                 valid_from: None,
                 valid_to: None,
@@ -20267,16 +20275,27 @@ mod tests {
         );
 
         let json = render_memory_list_json(&report);
-        ensure_contains(&json, "[REDACTED_PATH]", "memory list path redaction")?;
-        ensure_contains(&json, "[REDACTED:secret]", "memory list secret redaction")?;
-        ensure(
-            !json.contains("/Volumes/USBNVME16TB"),
-            format!("memory list JSON leaked absolute path: {json}"),
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value
+                .pointer("/data/memories/0/provenance_uri")
+                .and_then(serde_json::Value::as_str),
+            &Some(expected),
+            "memory list local provenance",
         )?;
+        ensure(
+            !json.contains("[REDACTED_PATH]"),
+            format!("memory list JSON must preserve the local path: {json}"),
+        )?;
+        ensure_contains(&json, "[REDACTED:secret]", "memory list secret redaction")?;
         ensure(
             !json.contains("redaction-fixture"),
             format!("memory list JSON leaked secret-like value: {json}"),
-        )
+        )?;
+
+        let toon = render_memory_list_toon(&report);
+        ensure_toon_matches_json(&json, &toon, "memory list TOON local provenance")
     }
 
     fn ensure_starts_with(haystack: &str, prefix: &str, context: &str) -> TestResult {
