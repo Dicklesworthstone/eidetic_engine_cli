@@ -1008,6 +1008,12 @@ data:
       defaultValue: "false"
       isSet: false
       source: registry_default
+    - name: EE_MESH_TRANSPORT_DISABLED
+      category: mesh
+      controls: Disable authenticated mesh TCP connect and accepted-session handling before network or authentication work.
+      defaultValue: "false"
+      isSet: false
+      source: registry_default
     - name: EE_MESH_MODE
       category: mesh
       controls: Select the default mesh command mode.
