@@ -67590,6 +67590,7 @@ fn render_tripwire_check_human(report: &crate::core::tripwire::CheckReport) -> S
 #[allow(clippy::expect_used)]
 mod tests {
     use std::cell::RefCell;
+    use std::collections::BTreeSet;
     use std::ffi::OsString;
     use std::fmt::Debug;
     use std::fs;
@@ -67599,7 +67600,7 @@ mod tests {
     use std::time::Duration;
 
     use asupersync::{CancelKind, CancelReason};
-    use clap::{Parser, error::ErrorKind};
+    use clap::{CommandFactory, Parser, error::ErrorKind};
     use fs4::fs_std::FileExt as Fs4FileExt;
 
     use crate::core::agent_docs::{AGENT_CORE_COMMANDS, AgentDocsTopic};
