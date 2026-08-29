@@ -580,7 +580,7 @@ data:
       source: missing
       error: "cass binary 'tests/fixtures/missing-ee-workspace/no-cass' is not allowed: CASS import binary must be configured as an absolute path"
       trusted: false
-  envOverrides[120]:
+  envOverrides[121]:
     - name: EE_AGENT_NAME
       category: output
       controls: Identify the current agent for scoped memory retrieval.
@@ -1008,16 +1008,16 @@ data:
       defaultValue: "false"
       isSet: false
       source: registry_default
-    - name: EE_MESH_TRANSPORT_DISABLED
-      category: mesh
-      controls: Disable authenticated mesh TCP connect and accepted-session handling before network or authentication work.
-      defaultValue: "false"
-      isSet: false
-      source: registry_default
     - name: EE_MESH_MODE
       category: mesh
       controls: Select the default mesh command mode.
       defaultValue: off
+      isSet: false
+      source: registry_default
+    - name: EE_MESH_TRANSPORT_DISABLED
+      category: mesh
+      controls: Disable authenticated mesh TCP connect and accepted-session handling before network or authentication work.
+      defaultValue: "false"
       isSet: false
       source: registry_default
     - name: EE_NO_COLOR
