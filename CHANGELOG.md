@@ -17,12 +17,14 @@ checked-in Beads records. The durable research ledger is
 | 2026-08-06 → 2026-08-18 | **`0.14.0`** team confederation product, Windows mesh control, port migrate. |
 | 2026-08-18 | **`0.14.1`** franken-stack refresh (asupersync 0.4.8, fsqlite 0.3.5) on the 0.14 product. |
 | 2026-08-18 → 2026-08-20 | **`0.14.2`** workspace-id bind campaign plus franken-stack refresh (asupersync 0.4.9, fsqlite 0.3.7). |
-| 2026-08-20 → 2026-08-27 | **`0.14.3`** retrieval correctness, deterministic contract hardening, and crates.io/Homebrew distribution. |
+| 2026-08-20 → 2026-08-27 | **`0.14.3`** retrieval correctness and deterministic contract hardening; tagged, but not published as a GitHub Release. |
+| 2026-08-27 → 2026-08-29 | **`0.14.4`** agent-facing capability discovery plus tag, policy, and provenance correctness. |
 
-Release surface (as of 2026-08-27):
+Release surface (as of 2026-08-29):
 
 - Latest **published** GitHub Release before this cut: [`v0.14.2`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.14.2) (2026-08-20).
-- `Cargo.toml` carries `version = "0.14.3"` for this cut; prior tags remain
+- `v0.14.3` is an annotated tag without a corresponding GitHub Release.
+- `Cargo.toml` carries `version = "0.14.4"` for this cut; prior tags remain
   unchanged.
 - Distribution paths: verified GitHub release installers,
   `brew install Dicklesworthstone/tap/ee`, and
@@ -32,7 +34,8 @@ Release surface (as of 2026-08-27):
 
 | Version | Date | GitHub Release | Notes |
 | --- | --- | --- | --- |
-| [0.14.3](#0143---2026-08-27) | 2026-08-27 | this cut | Retrieval correctness, deterministic contract hardening, FrankenSQLite 0.3.9, and crates.io/Homebrew distribution |
+| [0.14.4](#0144---2026-08-29) | 2026-08-29 | this cut | Agent-facing capability discovery plus tag, policy, and provenance correctness |
+| [0.14.3](#0143---2026-08-27) | 2026-08-27 | tag only | Retrieval correctness, deterministic contract hardening, FrankenSQLite 0.3.9, and crates.io/Homebrew preparation |
 | [0.14.2](#0142---2026-08-20) | 2026-08-20 | yes | Workspace-id bind campaign plus franken-stack refresh: asupersync 0.4.9, FrankenSQLite 0.3.7, frankensearch 0.3.2 |
 | [0.14.1](#0141---2026-08-18) | 2026-08-18 | yes | Franken-stack refresh on the 0.14 product: asupersync 0.4.8, FrankenSQLite 0.3.5, crates.io `cargo update` |
 | [0.14.0](#0140---2026-08-18) | 2026-08-18 | tag only | Team confederation (ADR 0086), Windows scheduled-task + loopback control, encrypted credential backup, versioned team port migrate |
@@ -58,6 +61,29 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
+## [0.14.4] - 2026-08-29
+
+Agent-facing discovery and input-correctness patch release. This cut makes the
+machine-readable capability inventory follow the actual Clap command tree and
+closes correctness gaps in tag filters, SEC identifier policy, and local
+provenance rendering.
+
+### Added
+
+- **Capability discovery now exposes the complete live CLI contract.** The
+  inventory is derived from Clap rather than a parallel hand-maintained table,
+  including nested commands, aliases, environment variables, defaults, value
+  constraints, and stable JSON/TOON ordering.
+- **Local provenance has actionable repair guidance.** Memory list/show output
+  preserves supported local URI schemes while redacting sensitive path details,
+  and malformed or unsafe provenance explains how to repair the source.
+
+### Changed
+
+- **The pinned release stack advances to FrankenSQLite 0.3.11 and
+  `nightly-2026-08-25`.** The lockfile, path-dependency manifest, and release
+  toolchain now describe the same tested source graph.
+
 ### Fixed
 
 - **SEC identifiers no longer trip the phone-number policy.** Canonical
@@ -69,6 +95,9 @@ future changelog pass expands those rows into full capability sections.
   `ee memory list --tag` and tag bitmap queries accept mixed-case filters for
   existing canonical rows without requiring reindexing. Hyphens and
   underscores remain distinct outside documented scope-keyword aliases.
+- **Local memory provenance no longer loses its URI scheme at output time.**
+  Redacted list/show views retain enough typed provenance to round-trip through
+  machine consumers without exposing the underlying local path.
 
 ## [0.14.3] - 2026-08-27
 
