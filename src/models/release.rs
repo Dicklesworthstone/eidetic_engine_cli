@@ -875,7 +875,8 @@ pub fn is_allowed_package_member_path(path: &str) -> bool {
         || file_name.ends_with(".db")
         || file_name.ends_with(".sqlite")
         || file_name.ends_with(".sqlite3")
-        || file_name.ends_with(".pem") || file_name.ends_with(".key"))
+        || file_name.ends_with(".pem")
+        || file_name.ends_with(".key"))
 }
 
 fn is_forbidden_package_root(path: &str, root: &str) -> bool {

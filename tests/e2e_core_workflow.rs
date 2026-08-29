@@ -765,21 +765,13 @@ fn memory_list_and_show_round_trip_local_provenance_uri() -> TestResult {
         "remember provenance URI",
     )?;
 
-    let list = run_ee(&[
-        "--workspace",
-        &workspace,
-        "memory",
-        "list",
-        "--json",
-    ])?;
+    let list = run_ee(&["--workspace", &workspace, "memory", "list", "--json"])?;
     ensure_equal(&list.status.code(), &Some(EXIT_SUCCESS), "memory list")?;
     assert_stderr_empty(&list, "memory list")?;
     let list_json = stdout_json(&list)?;
     let listed = json_array(&list_json, "/data/memories", "memory list")?
         .iter()
-        .find(|memory| {
-            memory.get("id").and_then(serde_json::Value::as_str) == Some(memory_id)
-        })
+        .find(|memory| memory.get("id").and_then(serde_json::Value::as_str) == Some(memory_id))
         .ok_or_else(|| format!("memory list omitted remembered memory {memory_id}"))?;
     ensure_equal(
         &listed
@@ -801,11 +793,7 @@ fn memory_list_and_show_round_trip_local_provenance_uri() -> TestResult {
     assert_stderr_empty(&show, "memory show")?;
     let show_json = stdout_json(&show)?;
     ensure_equal(
-        &json_str(
-            &show_json,
-            "/data/memory/provenance_uri",
-            "memory show",
-        )?,
+        &json_str(&show_json, "/data/memory/provenance_uri", "memory show")?,
         &source_uri.as_str(),
         "memory show provenance URI",
     )

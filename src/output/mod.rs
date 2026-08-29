@@ -8503,10 +8503,7 @@ fn render_memory_fields(b: &mut JsonBuilder, details: &MemoryDetails) {
     b.field_raw("utility", &format!("{:.4}", mem.utility));
     b.field_raw("importance", &format!("{:.4}", mem.importance));
     if let Some(ref uri) = mem.provenance_uri {
-        b.field_str(
-            "provenance_uri",
-            &redact_local_memory_provenance_uri(uri),
-        );
+        b.field_str("provenance_uri", &redact_local_memory_provenance_uri(uri));
     }
     b.field_str("trust_class", &mem.trust_class);
     if let Some(ref sub) = mem.trust_subclass {
@@ -8627,10 +8624,7 @@ pub fn render_memory_list_json(report: &MemoryListReport) -> String {
             obj.field_bool("content_truncated", m.content_truncated);
             obj.field_raw("confidence", &format!("{:.4}", m.confidence));
             if let Some(ref uri) = m.provenance_uri {
-                obj.field_str(
-                    "provenance_uri",
-                    &redact_local_memory_provenance_uri(uri),
-                );
+                obj.field_str("provenance_uri", &redact_local_memory_provenance_uri(uri));
             }
             obj.field_bool("is_tombstoned", m.is_tombstoned);
             field_optional_str(obj, "valid_from", m.valid_from.as_deref());
@@ -19406,19 +19400,18 @@ mod tests {
         render_memory_impact_analysis_json, render_memory_impact_analysis_markdown,
         render_memory_impact_analysis_toon, render_memory_list_json, render_memory_list_toon,
         render_memory_show_human, render_memory_show_json, render_memory_show_toon,
-        render_pack_dna_json, render_pack_dna_markdown,
-        render_pack_dna_toon, render_preflight_run_json, render_preflight_show_json,
-        render_proximity_json, render_proximity_markdown, render_proximity_toon,
-        render_quarantine_entry_human, render_quarantine_entry_json, render_quarantine_entry_toon,
-        render_quarantine_human, render_quarantine_json, render_quarantine_json_filtered,
-        render_quarantine_toon, render_schema_export_json, render_schema_list_json,
-        render_shadow_run_human, render_shadow_run_json, render_shadow_run_toon,
-        render_status_json, render_status_json_filtered, render_status_json_with_meta,
-        render_status_skyline_json, render_status_skyline_markdown, render_status_skyline_toon,
-        render_status_toon, render_streams_json, render_structural_health_json,
-        render_structural_health_markdown, render_structural_health_toon, render_version_json,
-        render_why_causal_json, render_why_causal_markdown, render_why_causal_toon, schema_json,
-        status_response_json,
+        render_pack_dna_json, render_pack_dna_markdown, render_pack_dna_toon,
+        render_preflight_run_json, render_preflight_show_json, render_proximity_json,
+        render_proximity_markdown, render_proximity_toon, render_quarantine_entry_human,
+        render_quarantine_entry_json, render_quarantine_entry_toon, render_quarantine_human,
+        render_quarantine_json, render_quarantine_json_filtered, render_quarantine_toon,
+        render_schema_export_json, render_schema_list_json, render_shadow_run_human,
+        render_shadow_run_json, render_shadow_run_toon, render_status_json,
+        render_status_json_filtered, render_status_json_with_meta, render_status_skyline_json,
+        render_status_skyline_markdown, render_status_skyline_toon, render_status_toon,
+        render_streams_json, render_structural_health_json, render_structural_health_markdown,
+        render_structural_health_toon, render_version_json, render_why_causal_json,
+        render_why_causal_markdown, render_why_causal_toon, schema_json, status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::capabilities::{CapabilitiesReport, CommandEntry};
@@ -20186,10 +20179,8 @@ mod tests {
 
     #[test]
     fn memory_show_output_preserves_local_path_and_redacts_secret_value() -> TestResult {
-        let source =
-            "file:///Users/alice/private/logs/build.log?api_key=redaction-fixture";
-        let expected =
-            "file:///Users/alice/private/logs/build.log?api_key=[REDACTED:secret]";
+        let source = "file:///Users/alice/private/logs/build.log?api_key=redaction-fixture";
+        let expected = "file:///Users/alice/private/logs/build.log?api_key=[REDACTED:secret]";
         let report = MemoryShowReport::found(MemoryDetails {
             memory: output_test_memory(Some(source.to_owned())),
             tags: Vec::new(),
@@ -20250,10 +20241,8 @@ mod tests {
 
     #[test]
     fn memory_list_output_preserves_local_path_and_redacts_secret_value() -> TestResult {
-        let source =
-            "file:///Volumes/USBNVME16TB/private/index.json#token=redaction-fixture";
-        let expected =
-            "file:///Volumes/USBNVME16TB/private/index.json#token=[REDACTED:secret]";
+        let source = "file:///Volumes/USBNVME16TB/private/index.json#token=redaction-fixture";
+        let expected = "file:///Volumes/USBNVME16TB/private/index.json#token=[REDACTED:secret]";
         let report = MemoryListReport::success(
             vec![MemorySummary {
                 id: "mem_output_redaction".to_owned(),

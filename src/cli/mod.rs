@@ -88110,7 +88110,10 @@ demos:
             "--json",
         ]);
         ensure_equal(&exit, &ProcessExitCode::Usage, "bare source path exit")?;
-        ensure(stderr.is_empty(), "bare source path JSON stderr must be empty")?;
+        ensure(
+            stderr.is_empty(),
+            "bare source path JSON stderr must be empty",
+        )?;
 
         let value: serde_json::Value =
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
