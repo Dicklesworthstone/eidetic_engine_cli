@@ -1492,7 +1492,7 @@ pub fn apply_field_selector_to_json(
         return Ok(json.to_owned());
     }
 
-    let accepted_fields = collect_field_names(&serde_json::Value::Object(data.clone()));
+    let accepted_fields = collect_field_names(data);
     if !requested_fields.iter().any(|field| field == "*") {
         if let Some(rejected) = requested_fields
             .iter()
@@ -2350,9 +2350,17 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
     }
 }
 
-fn collect_field_names(value: &serde_json::Value) -> BTreeSet<String> {
+/// Collect every field name reachable inside a response `data` object.
+///
+/// Takes the map by reference rather than a `Value` so the caller does not
+/// have to deep-clone an entire response payload (packs run to megabytes)
+/// just to enumerate its key names.
+fn collect_field_names(object: &serde_json::Map<String, serde_json::Value>) -> BTreeSet<String> {
     let mut fields = BTreeSet::new();
-    collect_field_names_inner(value, &mut fields);
+    for (key, child) in object {
+        fields.insert(key.clone());
+        collect_field_names_inner(child, &mut fields);
+    }
     fields
 }
 

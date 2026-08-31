@@ -10410,8 +10410,10 @@ fn graph_memory_matches_filters(
             return false;
         }
     }
-    !(!filters.redaction.allow_categories.is_empty()
-        && !redaction_allow_categories(&memory.content, &filters.redaction))
+    // `redaction_allow_categories` already returns true for an empty
+    // allow-list, so guarding the call on `!is_empty()` only re-derives that
+    // short-circuit behind a double negation.
+    redaction_allow_categories(&memory.content, &filters.redaction)
 }
 
 fn redaction_allow_categories(content: &str, filters: &crate::models::RedactionFilters) -> bool {
