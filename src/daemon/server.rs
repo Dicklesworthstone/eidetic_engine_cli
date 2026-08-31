@@ -4133,6 +4133,43 @@ impl DaemonWriteParams {
     }
 }
 
+/// Bind a write's `params.workspacePath` to the authorized envelope `workspace_id`.
+///
+/// `ee.daemon.write` and `ee.daemon.write_journal` are classified
+/// [`DaemonAuthority::SameUidWorkspace`] and advertised as `same_uid_workspace`
+/// by `ee.daemon.capabilities`, but `authorize_daemon_method` only compares the
+/// ENVELOPE `workspace_id` against the daemon's bound workspace. The read
+/// methods close the loop by additionally binding their own `workspacePath`
+/// param — see `DaemonSearchParams::into_search_parts` and the context
+/// dispatcher. The write methods did not, so a caller could present an
+/// authorized envelope while pointing `params.workspacePath` at any other
+/// initialized workspace on the machine: `RememberMemoryOptions.workspace_path`
+/// and `database_path()` both derive from that field, so the write landed in
+/// the other workspace's database. Same confinement check, applied before
+/// anything reaches the write owner.
+///
+/// This binds the field that selects the DATABASE. A journal payload also
+/// carries its own `workspace_id`, which only tags the row inside that
+/// database and lives in the stable-id namespace rather than the path
+/// namespace the envelope uses, so it is deliberately not compared here.
+fn bind_write_workspace_to_authorized(
+    request: &DaemonRequest,
+    params_workspace_path: &Path,
+) -> Result<(), String> {
+    let Some(authorized_workspace_id) = request.workspace_id.as_deref() else {
+        return Err("authorized envelope `workspace_id` is missing".to_owned());
+    };
+    let workspace_path = canonical_workspace_path(params_workspace_path, "workspacePath")?;
+    let authorized_workspace =
+        canonical_workspace_path(Path::new(authorized_workspace_id), "workspace_id")?;
+    if workspace_path != authorized_workspace {
+        return Err(
+            "field `workspacePath` must identify the authorized envelope `workspace_id`".to_owned(),
+        );
+    }
+    Ok(())
+}
+
 /// Dispatch `ee.daemon.write`: execute a durable memory write. Inc 1 routes it
 /// straight through `remember_memory` (no actor), so the result is identical to
 /// `ee remember`. RPC-level failures (bad params) become a `DaemonResponse::err`;
@@ -4155,6 +4192,15 @@ fn dispatch_write(
             );
         }
     };
+    if let Err(message) = bind_write_workspace_to_authorized(request, &params.workspace_path) {
+        return DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            DAEMON_WRITE_PARAMS_INVALID_CODE,
+            message,
+        );
+    }
     // When the long-lived write-owner actor is hosted (bound workspace), route
     // the write through it so it can coalesce with siblings (Inc 2 wires the
     // path; real batching is Inc 3). Otherwise fall through to the in-process
@@ -4274,7 +4320,21 @@ fn dispatch_journal(
     write_router: Option<&DaemonWriteRouter>,
 ) -> DaemonResponse {
     use crate::core::write_owner::{WriteOperation, WriteResult};
-    if let Err(message) = DaemonJournalParams::from_payload(&request.params) {
+    let journal_params = match DaemonJournalParams::from_payload(&request.params) {
+        Ok(params) => params,
+        Err(message) => {
+            return DaemonResponse::err(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                request.workspace_id.clone(),
+                DAEMON_JOURNAL_PARAMS_INVALID_CODE,
+                message,
+            );
+        }
+    };
+    if let Err(message) =
+        bind_write_workspace_to_authorized(request, &journal_params.workspace_path)
+    {
         return DaemonResponse::err(
             request.request_id.clone(),
             request.agent_id.clone(),
@@ -6804,6 +6864,47 @@ mod tests {
         assert_eq!(
             response.error.as_ref().map(|error| error.code.as_str()),
             Some(DAEMON_SEARCH_PARAMS_INVALID_CODE)
+        );
+    }
+
+    #[test]
+    fn dispatch_write_binds_params_to_authorized_workspace() {
+        // The envelope `workspace_id` is authorized, but `params.workspacePath`
+        // addresses a different real workspace. `params.workspacePath` selects
+        // the database the write lands in, so it must be refused before the
+        // write is routed — the same binding `dispatch_search` enforces above.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let authorized = temp.path().join("authorized");
+        let other = temp.path().join("other");
+        fs::create_dir_all(authorized.join(".ee")).expect("authorized workspace");
+        fs::create_dir_all(other.join(".ee")).expect("other workspace");
+
+        let mut request = DaemonRequest::new(
+            "req-write-binding-001",
+            TEST_AGENT_ID,
+            METHOD_WRITE,
+            serde_json::json!({
+                "workspacePath": other,
+                "content": "an off-workspace daemon write must be refused"
+            }),
+        );
+        request.workspace_id = Some(authorized.display().to_string());
+
+        let response = dispatch_write(&request, None);
+        let error = response
+            .error
+            .as_ref()
+            .expect("off-workspace write refused");
+        assert_eq!(error.code.as_str(), DAEMON_WRITE_PARAMS_INVALID_CODE);
+        // Assert the specific reason: `workspacePath` and `content` are the only
+        // required params, so a generic parse failure here would otherwise let
+        // this test pass without ever exercising the binding.
+        assert!(
+            error
+                .message
+                .contains("must identify the authorized envelope"),
+            "expected the workspace-binding refusal, got: {}",
+            error.message
         );
     }
 
