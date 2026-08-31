@@ -2909,18 +2909,15 @@ fn path_matches_canonical_location(observed: &Path, expected: &Path) -> bool {
 /// one, so dropping the normalization makes every Windows comparison false
 /// and turns `owner_safe_canonical_path` into an unconditional
 /// `InvalidConfiguration`. Keep the platform branch.
+#[cfg(not(windows))]
 fn paths_are_same_location(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        normalize_windows_path(left).eq_ignore_ascii_case(&normalize_windows_path(right))
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
+    left == right
+}
+
+#[cfg(windows)]
+fn paths_are_same_location(left: &Path, right: &Path) -> bool {
+    left == right
+        || normalize_windows_path(left).eq_ignore_ascii_case(&normalize_windows_path(right))
 }
 
 #[cfg(windows)]
