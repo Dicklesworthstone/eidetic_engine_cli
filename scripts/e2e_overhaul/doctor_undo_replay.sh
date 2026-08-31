@@ -12,10 +12,12 @@
 #          (lock + run_dir creation IS the side effect; the
 #          chokepoint is reachable from the CLI).
 #   2. <workspace>/.doctor/runs/<run-id>/state.json exists, is valid
-#      JSON, and pins schema=ee.doctor.run_state.v1.
+#      JSON, pins schema=ee.doctor.run_state.v2, and records the original
+#      blast-radius roots used to authorize the run.
 #   3. ee doctor --undo <run-id> --workspace $TMP --json
-#      ->  ee.doctor.undo_summary.v1 with actionsUndone=0,
-#          actionsSkipped=0, status=undone, firstError=null.
+#      ->  ee.response.v2 with ee.doctor.undo_summary.v1 under data,
+#          actionsUndone=0, actionsSkipped=0, status=undone,
+#          firstError=null.
 #   4. <workspace>/.doctor/runs/<run-id>/state.json now reports
 #      status in {undone, undone_partial}.
 #   5. A peer-owned regular .doctor/latest forces finalization failure:
@@ -134,9 +136,17 @@ assert_state_json() {
   local schema status
   schema="$(jq -r '.schema' "$state_path")"
   status="$(jq -r '.status' "$state_path")"
-  if [ "$schema" != "ee.doctor.run_state.v1" ]; then
+  if [ "$schema" != "ee.doctor.run_state.v2" ]; then
     emit_event "state_json" "fail" "schema=$schema"
-    printf 'error: state.json schema=%s, expected ee.doctor.run_state.v1\n' "$schema" >&2
+    printf 'error: state.json schema=%s, expected ee.doctor.run_state.v2\n' "$schema" >&2
+    exit 4
+  fi
+  if ! jq -e '
+       .blast_radius_roots
+       | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)
+     ' "$state_path" >/dev/null; then
+    emit_event "state_json" "fail" "recorded blast radius missing or invalid"
+    printf 'error: state.json omitted canonical blast_radius_roots\n' >&2
     exit 4
   fi
   if [ "$expect_status" != "*" ] && [ "$status" != "$expect_status" ]; then
@@ -156,11 +166,15 @@ run_undo() {
   printf '%s\n' "$undo_json" > "$workspace/undo.json"
   local schema actions_undone first_error
   schema="$(printf '%s' "$undo_json" | jq -r '.schema')"
-  actions_undone="$(printf '%s' "$undo_json" | jq -r '.actionsUndone')"
-  first_error="$(printf '%s' "$undo_json" | jq -r '.firstError')"
-  if [ "$schema" != "ee.doctor.undo_summary.v1" ]; then
-    emit_event "undo" "fail" "schema mismatch: $schema"
-    printf 'error: --undo returned schema=%s\n' "$schema" >&2
+  local data_schema
+  data_schema="$(printf '%s' "$undo_json" | jq -r '.data.schema')"
+  actions_undone="$(printf '%s' "$undo_json" | jq -r '.data.actionsUndone')"
+  first_error="$(printf '%s' "$undo_json" | jq -r '.data.firstError')"
+  if [ "$schema" != "ee.response.v2" ] ||
+     [ "$data_schema" != "ee.doctor.undo_summary.v1" ]; then
+    emit_event "undo" "fail" "schema mismatch: envelope=$schema data=$data_schema"
+    printf 'error: --undo returned envelope=%s data.schema=%s\n' \
+      "$schema" "$data_schema" >&2
     exit 5
   fi
   if [ "$actions_undone" != "0" ]; then

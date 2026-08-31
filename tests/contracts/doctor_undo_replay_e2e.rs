@@ -17,7 +17,7 @@
 //! 4. It invokes both `ee doctor --fix` and `ee doctor --undo`.
 //! 5. It asserts the canonical `ee.response.v2` success envelope for
 //!    `ee.doctor.fix_summary.v1`, plus the canonical
-//!    `ee.doctor.undo_summary.v1` undo surface.
+//!    `ee.doctor.undo_summary.v1` payload inside the v2 response envelope.
 //! 6. It forces a finalization failure and asserts nonzero `ee.error.v2`,
 //!    nonempty retained fixer/action outcomes, canonical recovery, failed
 //!    persisted state, lock cleanup, peer-file preservation, and undo.
@@ -110,7 +110,8 @@ fn doctor_undo_replay_script_asserts_canonical_schemas() {
         "ee.error.v2",
         "ee.doctor.fix_summary.v1",
         "ee.doctor.undo_summary.v1",
-        "ee.doctor.run_state.v1",
+        "ee.doctor.run_state.v2",
+        "blast_radius_roots",
     ] {
         assert!(
             body.contains(needle),

@@ -9174,8 +9174,9 @@ pub struct DoctorArgs {
     /// file quarantine it via rename rather than removing it. Idempotent
     /// — re-running on a fully-undone run is a no-op. The run directory
     /// is resolved against the configured workspace as
-    /// `<workspace>/.doctor/runs/<RUN_ID>`. Emits an
-    /// `ee.doctor.undo_summary.v1` JSON envelope and exits.
+    /// `<workspace>/.doctor/runs/<RUN_ID>`. JSON mode emits the
+    /// `ee.doctor.undo_summary.v1` payload inside the canonical response or
+    /// error envelope.
     #[arg(
         long = "undo",
         value_name = "RUN_ID",
@@ -13422,41 +13423,138 @@ where
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                 });
                 let run_dir = workspace.join(".doctor").join("runs").join(run_id);
+                let recovery_workspace = workspace
+                    .canonicalize()
+                    .unwrap_or_else(|_| workspace.clone());
+                let recovery_workspace =
+                    shell_quote_cli_arg(&recovery_workspace.display().to_string());
+                let recovery_run_id = shell_quote_cli_arg(run_id);
                 return match crate::core::doctor_runtime::replay_undo_for_workspace(
                     &workspace, run_id,
                 ) {
                     Ok(summary) => {
+                        let undo_complete = matches!(
+                            &summary.status,
+                            crate::core::doctor_runtime::RunStatus::Undone
+                        );
+                        let failure_class = summary.first_error_class;
+                        let partial_exit = failure_class
+                            .map_or(ProcessExitCode::Storage, |class| {
+                                doctor_runtime_failure_exit_code(class)
+                            });
+                        let severity = match failure_class {
+                            Some(crate::core::doctor_runtime::DoctorRuntimeFailureClass::Policy) => {
+                                "high"
+                            }
+                            Some(
+                                crate::core::doctor_runtime::DoctorRuntimeFailureClass::Configuration,
+                            ) => "medium",
+                            Some(crate::core::doctor_runtime::DoctorRuntimeFailureClass::Storage)
+                            | None => "high",
+                        };
                         let status_str = serde_json::to_value(&summary.status)
                             .ok()
                             .and_then(|v| v.as_str().map(str::to_owned))
                             .unwrap_or_else(|| "unknown".to_owned());
-                        let json = serde_json::json!({
-                            "schema": "ee.doctor.undo_summary.v1",
+                        let error_code = summary.first_error_code.unwrap_or("doctor_undo_partial");
+                        let error_message = summary
+                            .first_error
+                            .clone()
+                            .unwrap_or_else(|| "Doctor undo completed only partially.".to_owned());
+                        let summary_json = serde_json::json!({
+                            "schema": crate::models::DOCTOR_UNDO_SUMMARY_SCHEMA_V1,
                             "runId": run_id,
                             "runDir": run_dir.display().to_string(),
                             "actionsUndone": summary.actions_undone,
                             "actionsSkipped": summary.actions_skipped,
                             "status": status_str,
                             "firstError": summary.first_error,
+                            "firstErrorCode": summary.first_error_code,
                         });
-                        write_stdout(stdout, &(json.to_string() + "\n"));
-                        ProcessExitCode::Success
+                        let response = if undo_complete {
+                            serde_json::json!({
+                                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                                "success": true,
+                                "data": summary_json,
+                                "degraded": [],
+                            })
+                        } else {
+                            serde_json::json!({
+                                "schema": crate::models::ERROR_SCHEMA_V2,
+                                "error": {
+                                    "code": error_code,
+                                    "message": error_message,
+                                    "severity": severity,
+                                    "repair": format!(
+                                        "Inspect {}/actions.jsonl and {}/undo_log.jsonl, resolve the reported failure, then retry the same undo.",
+                                        run_dir.display(),
+                                        run_dir.display()
+                                    ),
+                                    "details": {
+                                        "summary": summary_json,
+                                        "recovery": [{
+                                            "priority": 0,
+                                            "kind": "doctor_undo_retry",
+                                            "rationale": "Doctor stopped at the first inverse that could not be applied safely.",
+                                            "command": format!(
+                                                "ee --workspace {recovery_workspace} doctor --undo {recovery_run_id} --json"
+                                            ),
+                                        }],
+                                    },
+                                },
+                            })
+                        };
+                        let write_exit = write_stdout(stdout, &(response.to_string() + "\n"));
+                        if write_exit != ProcessExitCode::Success {
+                            write_exit
+                        } else if undo_complete {
+                            ProcessExitCode::Success
+                        } else {
+                            partial_exit
+                        }
                     }
                     Err(error) => {
+                        let error_code = error.code();
+                        let failure_class = error.failure_class();
+                        let exit_code = doctor_runtime_failure_exit_code(failure_class);
+                        let severity = match failure_class {
+                            crate::core::doctor_runtime::DoctorRuntimeFailureClass::Policy => "high",
+                            crate::core::doctor_runtime::DoctorRuntimeFailureClass::Configuration => {
+                                "medium"
+                            }
+                            crate::core::doctor_runtime::DoctorRuntimeFailureClass::Storage => "high",
+                        };
                         let json = serde_json::json!({
-                            "schema": "ee.doctor.undo_summary.v1",
-                            "runId": run_id,
-                            "runDir": run_dir.display().to_string(),
-                            "status": "fix_failed",
-                            "error": error.to_string(),
-                            "repair": format!(
-                                "Inspect {}/actions.jsonl and {}/undo_log.jsonl for line-level detail.",
-                                run_dir.display(),
-                                run_dir.display()
-                            ),
+                            "schema": crate::models::ERROR_SCHEMA_V2,
+                            "error": {
+                                "code": error_code,
+                                "message": error.to_string(),
+                                "severity": severity,
+                                "repair": format!(
+                                    "Inspect {}/actions.jsonl and {}/undo_log.jsonl for line-level detail.",
+                                    run_dir.display(),
+                                    run_dir.display()
+                                ),
+                                "details": {
+                                    "runId": run_id,
+                                    "runDir": run_dir.display().to_string(),
+                                    "recovery": [{
+                                        "priority": 0,
+                                        "kind": "doctor_run_inspect",
+                                        "rationale": "Inspect the preserved run artifacts before retrying undo.",
+                                        "command": format!(
+                                            "ee --workspace {recovery_workspace} doctor --list-runs --json"
+                                        ),
+                                    }],
+                                },
+                            },
                         });
-                        write_stdout(stdout, &(json.to_string() + "\n"));
-                        ProcessExitCode::Configuration
+                        let write_exit = write_stdout(stdout, &(json.to_string() + "\n"));
+                        if write_exit == ProcessExitCode::Success {
+                            exit_code
+                        } else {
+                            write_exit
+                        }
                     }
                 };
             }
@@ -21625,7 +21723,7 @@ fn doctor_robot_docs_json() -> String {
             ],
             "related_schemas": [
                 "ee.doctor.capabilities.v1",
-                "ee.doctor.run_state.v1",
+                "ee.doctor.run_state.v2",
                 "ee.doctor.action_line.v1"
             ]
         },
@@ -22334,6 +22432,13 @@ fn doctor_runtime_error_result(
             ProcessExitCode::Configuration,
             Some(lock_path.display().to_string()),
         ),
+        DoctorRuntimeError::InvalidBlastRadius { .. } => (
+            "doctor_blast_radius_env_invalid",
+            "high",
+            "Set EE_DOCTOR_BLAST_RADIUS to colon-separated absolute paths, or unset it to use the default doctor roots.",
+            ProcessExitCode::Configuration,
+            None,
+        ),
         DoctorRuntimeError::Io { .. }
         | DoctorRuntimeError::ActionsLogCorrupt { .. }
         | DoctorRuntimeError::InvalidRunId { .. }
@@ -22344,6 +22449,13 @@ fn doctor_runtime_error_result(
             "high",
             "Inspect <workspace>/.doctor/runs/ and ee doctor --list-runs --json for partial state before retrying.",
             ProcessExitCode::Storage,
+            None,
+        ),
+        DoctorRuntimeError::DryRunNotUndoable { .. } => (
+            "doctor_dry_run_not_undoable",
+            "info",
+            "Dry-run plans never changed the filesystem and therefore have no inverse to replay.",
+            ProcessExitCode::Configuration,
             None,
         ),
         DoctorRuntimeError::FinishStateUpdateFailed { .. } => (
@@ -22404,6 +22516,20 @@ fn doctor_runtime_error_result(
         })
         .to_string(),
         exit_code,
+    }
+}
+
+const fn doctor_runtime_failure_exit_code(
+    class: crate::core::doctor_runtime::DoctorRuntimeFailureClass,
+) -> ProcessExitCode {
+    match class {
+        crate::core::doctor_runtime::DoctorRuntimeFailureClass::Configuration => {
+            ProcessExitCode::Configuration
+        }
+        crate::core::doctor_runtime::DoctorRuntimeFailureClass::Storage => ProcessExitCode::Storage,
+        crate::core::doctor_runtime::DoctorRuntimeFailureClass::Policy => {
+            ProcessExitCode::PolicyDenied
+        }
     }
 }
 
@@ -81804,8 +81930,13 @@ mod tests {
             serde_json::from_str(&undo_stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &undo["schema"],
-            &serde_json::json!("ee.doctor.undo_summary.v1"),
-            "partial run undo schema",
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+            "partial run undo envelope schema",
+        )?;
+        ensure_equal(
+            &undo["data"]["schema"],
+            &serde_json::json!(crate::models::DOCTOR_UNDO_SUMMARY_SCHEMA_V1),
+            "partial run undo payload schema",
         )?;
         let undone_state: serde_json::Value = serde_json::from_slice(
             &fs::read(run_dir.join("state.json")).map_err(|error| error.to_string())?,
@@ -81815,6 +81946,167 @@ mod tests {
             &undone_state["status"],
             &serde_json::json!("undone"),
             "partial run becomes undone",
+        )
+    }
+
+    #[test]
+    fn doctor_undo_partial_failure_is_nonzero_and_classified() -> TestResult {
+        use crate::core::doctor_runtime::{
+            Op, RunContext, RunStatus, default_blast_radius_roots, mutate,
+        };
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        let roots = default_blast_radius_roots(&workspace);
+        let mut ctx = RunContext::start(&workspace, "partial-undo", roots, false)
+            .map_err(|error| error.to_string())?;
+        let target = workspace.join(".ee").join("drifted.txt");
+        fs::write(&target, b"before").map_err(|error| error.to_string())?;
+        let run_id = ctx.run_id().to_owned();
+        mutate(
+            &mut ctx,
+            &target,
+            Op::WriteFile {
+                bytes: b"doctor-after".to_vec(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        ctx.finish(RunStatus::CompletedOk)
+            .map_err(|error| error.to_string())?;
+        fs::write(&target, b"peer-after").map_err(|error| error.to_string())?;
+
+        let workspace_arg = workspace.to_string_lossy().into_owned();
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace_arg,
+            "doctor",
+            "--undo",
+            &run_id,
+            "--json",
+        ]);
+
+        ensure_equal(&exit, &ProcessExitCode::Storage, "partial undo exit")?;
+        ensure(stderr.is_empty(), "partial undo JSON stderr must be empty")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "partial undo envelope schema",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["summary"]["status"],
+            &serde_json::json!("undone_partial"),
+            "partial undo status",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("doctor_undo_state_drifted"),
+            "partial undo error code",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["summary"]["firstErrorCode"],
+            &serde_json::json!("doctor_undo_state_drifted"),
+            "partial undo summary error code",
+        )?;
+        ensure_equal(
+            &fs::read(&target).map_err(|error| error.to_string())?,
+            &b"peer-after".to_vec(),
+            "partial undo preserves drifted bytes",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_undo_policy_partial_preserves_policy_exit() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        use crate::core::doctor_runtime::{
+            ActionLine, Op, RunContext, RunStatus, default_blast_radius_roots, mutate,
+        };
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        let roots = default_blast_radius_roots(&workspace);
+        let mut ctx = RunContext::start(&workspace, "policy-partial-undo", roots, false)
+            .map_err(|error| error.to_string())?;
+        let run_dir = ctx.run_dir().to_path_buf();
+        let run_id = ctx.run_id().to_owned();
+        let target = workspace.join(".ee").join("policy-target.txt");
+        fs::write(&target, b"before").map_err(|error| error.to_string())?;
+        mutate(
+            &mut ctx,
+            &target,
+            Op::WriteFile {
+                bytes: b"after".to_vec(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        ctx.finish(RunStatus::CompletedOk)
+            .map_err(|error| error.to_string())?;
+
+        let actions =
+            fs::read_to_string(run_dir.join("actions.jsonl")).map_err(|error| error.to_string())?;
+        let action: ActionLine = serde_json::from_str(
+            actions
+                .lines()
+                .next()
+                .ok_or_else(|| "missing doctor action".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let backup = run_dir.join("backups").join(
+            action
+                .backup_rel_path
+                .ok_or_else(|| "write action omitted backup path".to_owned())?,
+        );
+        let retained_backup = backup.with_extension("retained");
+        fs::rename(&backup, &retained_backup).map_err(|error| error.to_string())?;
+        symlink(&retained_backup, &backup).map_err(|error| error.to_string())?;
+
+        let workspace_arg = workspace.to_string_lossy().into_owned();
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace_arg,
+            "doctor",
+            "--undo",
+            &run_id,
+            "--json",
+        ]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::PolicyDenied,
+            "policy partial undo exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "policy partial JSON stderr must be empty",
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "policy partial envelope schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("doctor_run_root_symlink_refused"),
+            "policy partial error code",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["summary"]["status"],
+            &serde_json::json!("undone_partial"),
+            "policy partial undo status",
+        )?;
+        ensure_equal(
+            &fs::read(&target).map_err(|error| error.to_string())?,
+            &b"after".to_vec(),
+            "policy partial preserves target",
         )
     }
 
@@ -81916,8 +82208,13 @@ mod tests {
             serde_json::from_str(&undo_stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &undo["schema"],
-            &serde_json::json!("ee.doctor.undo_summary.v1"),
-            "failed run undo schema",
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+            "failed run undo envelope schema",
+        )?;
+        ensure_equal(
+            &undo["data"]["schema"],
+            &serde_json::json!(crate::models::DOCTOR_UNDO_SUMMARY_SCHEMA_V1),
+            "failed run undo payload schema",
         )?;
         let undone_state: serde_json::Value = serde_json::from_slice(
             &fs::read(run_dir.join("state.json")).map_err(|error| error.to_string())?,

@@ -141,7 +141,7 @@ fn doctor_robot_docs_json_route_is_agent_readable_response_envelope() -> TestRes
         .ok_or_else(|| format!("data.related_schemas must be an array; got {data}"))?;
     for schema in [
         "ee.doctor.capabilities.v1",
-        "ee.doctor.run_state.v1",
+        "ee.doctor.run_state.v2",
         "ee.doctor.action_line.v1",
     ] {
         ensure(

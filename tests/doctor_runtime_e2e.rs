@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use ee::core::doctor_runtime::{
     ACTION_LINE_SCHEMA_V1, CAPABILITIES_SCHEMA_V1, CapabilitiesReport, DoctorRuntimeError, Op,
-    RUN_STATE_SCHEMA_V1, RunContext, RunStatus, default_blast_radius_roots, mutate,
+    RUN_STATE_SCHEMA_V2, RunContext, RunStatus, default_blast_radius_roots, mutate,
     replay_undo_with_authorized_roots,
 };
 use fs4::fs_std::FileExt as Fs4FileExt;
@@ -65,7 +65,9 @@ fn start_test_run(ws_path: &std::path::Path) -> RunContext {
     RunContext::start(ws_path, "e2e_sha", roots, false).expect("start run")
 }
 
-fn replay_test_undo(run_dir: &Path) -> Result<ee::core::doctor_runtime::UndoSummary, DoctorRuntimeError> {
+fn replay_test_undo(
+    run_dir: &Path,
+) -> Result<ee::core::doctor_runtime::UndoSummary, DoctorRuntimeError> {
     let run_id = run_dir
         .file_name()
         .and_then(|name| name.to_str())
@@ -623,7 +625,7 @@ fn capabilities_report_serializes_with_stable_schema() {
     );
     assert_eq!(
         json.get("run_artifact_schema").and_then(|v| v.as_str()),
-        Some(RUN_STATE_SCHEMA_V1)
+        Some(RUN_STATE_SCHEMA_V2)
     );
 
     // Exit-code dictionary is complete (0..=8 documented).

@@ -68,7 +68,7 @@ pub const CAPABILITIES_SCHEMA_V1: &str = "ee.doctor.capabilities.v1";
 pub const ACTION_LINE_SCHEMA_V1: &str = "ee.doctor.action.v1";
 
 /// Public schema string for the run state file (`<run-dir>/state.json`).
-pub const RUN_STATE_SCHEMA_V1: &str = "ee.doctor.run_state.v1";
+pub const RUN_STATE_SCHEMA_V2: &str = "ee.doctor.run_state.v2";
 
 /// Stable contents written only when doctor atomically creates the persistent
 /// advisory-lock inode. Reacquisition never rewrites an existing path because
@@ -132,6 +132,12 @@ pub enum DoctorRuntimeError {
     /// A persisted doctor run artifact does not bind to the workspace/run the
     /// caller selected, or violates the run-ledger contract.
     RunArtifactInvalid { path: PathBuf, reason: String },
+    /// The operator supplied an invalid doctor blast-radius override.
+    InvalidBlastRadius { reason: String },
+    /// Dry-run actions describe a hypothetical plan and never changed the
+    /// filesystem. Replaying them as real inverses would target unrelated
+    /// state created after the plan was recorded.
+    DryRunNotUndoable { run_id: String },
     /// During undo, the on-disk after_hash didn't match what `actions.jsonl`
     /// recorded — something outside the doctor mutated the file.
     UndoStateDrifted {
@@ -236,6 +242,13 @@ impl std::fmt::Display for DoctorRuntimeError {
                 path.display(),
                 reason
             ),
+            Self::InvalidBlastRadius { reason } => {
+                write!(f, "invalid doctor blast radius: {reason}")
+            }
+            Self::DryRunNotUndoable { run_id } => write!(
+                f,
+                "doctor run {run_id:?} is a dry-run plan and has no filesystem mutations to undo"
+            ),
             Self::UndoStateDrifted {
                 path,
                 expected_hash,
@@ -281,6 +294,60 @@ impl std::fmt::Display for DoctorRuntimeError {
 }
 
 impl std::error::Error for DoctorRuntimeError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DoctorRuntimeFailureClass {
+    Configuration,
+    Storage,
+    Policy,
+}
+
+impl DoctorRuntimeError {
+    /// Stable machine-readable classification for doctor runtime receipts.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::BlastRadiusExceeded { .. } => "doctor_blast_radius_exceeded",
+            Self::ConcurrencyLost { .. } => "doctor_concurrency_lost",
+            Self::BackupDirUnwritable { .. } => "doctor_backup_directory_unwritable",
+            Self::SymlinkedRunRoot { .. } => "doctor_run_root_symlink_refused",
+            Self::LifecycleRootChanged { .. } => "doctor_run_root_changed",
+            Self::UnsafeLatestEntry { .. } => "doctor_latest_entry_unsafe",
+            Self::Io { .. } => "doctor_runtime_io",
+            Self::ActionsLogCorrupt { .. } => "doctor_actions_log_corrupt",
+            Self::InvalidRunId { .. } => "doctor_run_id_invalid",
+            Self::RunArtifactInvalid { .. } => "doctor_run_artifact_invalid",
+            Self::InvalidBlastRadius { .. } => "doctor_blast_radius_env_invalid",
+            Self::DryRunNotUndoable { .. } => "doctor_dry_run_not_undoable",
+            Self::UndoStateDrifted { .. } => "doctor_undo_state_drifted",
+            Self::UndoBackupCorrupt { .. } => "doctor_undo_backup_corrupt",
+            Self::FinishStateUpdateFailed { .. } => "doctor_finish_state_update_failed",
+            Self::NoOpIdempotent => "doctor_runtime_noop",
+        }
+    }
+
+    #[must_use]
+    pub const fn failure_class(&self) -> DoctorRuntimeFailureClass {
+        match self {
+            Self::BlastRadiusExceeded { .. }
+            | Self::SymlinkedRunRoot { .. }
+            | Self::LifecycleRootChanged { .. }
+            | Self::UnsafeLatestEntry { .. } => DoctorRuntimeFailureClass::Policy,
+            Self::ConcurrencyLost { .. }
+            | Self::InvalidBlastRadius { .. }
+            | Self::DryRunNotUndoable { .. }
+            | Self::NoOpIdempotent => DoctorRuntimeFailureClass::Configuration,
+            Self::BackupDirUnwritable { .. }
+            | Self::Io { .. }
+            | Self::ActionsLogCorrupt { .. }
+            | Self::InvalidRunId { .. }
+            | Self::RunArtifactInvalid { .. }
+            | Self::UndoStateDrifted { .. }
+            | Self::UndoBackupCorrupt { .. }
+            | Self::FinishStateUpdateFailed { .. } => DoctorRuntimeFailureClass::Storage,
+        }
+    }
+}
 
 impl From<io::Error> for DoctorRuntimeError {
     fn from(source: io::Error) -> Self {
@@ -466,6 +533,11 @@ pub struct RunState {
     pub status: RunStatus,
     pub action_count: u64,
     pub dry_run: bool,
+    /// Canonical roots that authorized mutations when the run was created.
+    /// Replay intersects these with the operator's current authorization so
+    /// neither a widened environment nor a tampered action ledger can expand
+    /// an old run's original write surface.
+    pub blast_radius_roots: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -578,6 +650,8 @@ impl RunContext {
         // The input leaf itself is still rejected when it is a symlink.
         let workspace_buf = canonical_doctor_workspace(workspace)?;
         let workspace = workspace_buf.as_path();
+        let blast_radius_roots =
+            normalize_blast_radius_roots(workspace, &blast_radius_roots, true)?;
 
         let run_id = derive_run_id(target_sha);
         let started_at = Utc::now().to_rfc3339();
@@ -615,7 +689,7 @@ impl RunContext {
         }
 
         let state = RunState {
-            schema: RUN_STATE_SCHEMA_V1.into(),
+            schema: RUN_STATE_SCHEMA_V2.into(),
             run_id: run_id.clone(),
             target_sha: target_sha.into(),
             workspace: workspace.to_path_buf(),
@@ -624,6 +698,7 @@ impl RunContext {
             status: RunStatus::Running,
             action_count: 0,
             dry_run,
+            blast_radius_roots: blast_radius_roots.clone(),
         };
         if let Err(e) = write_lifecycle_state(&lifecycle, &run_dir, &state) {
             let _ = release_doctor_lock(&lifecycle, &lock_path);
@@ -1191,12 +1266,8 @@ pub fn replay_undo_for_workspace(
     run_id: &str,
 ) -> Result<UndoSummary, DoctorRuntimeError> {
     let workspace = canonical_doctor_workspace(workspace)?;
-    let allowed_roots = blast_radius_roots_from_env(&workspace).map_err(|reason| {
-        DoctorRuntimeError::RunArtifactInvalid {
-            path: workspace.join(".doctor").join("runs").join(run_id),
-            reason: format!("cannot resolve undo blast radius: {reason}"),
-        }
-    })?;
+    let allowed_roots = blast_radius_roots_from_env(&workspace)
+        .map_err(|reason| DoctorRuntimeError::InvalidBlastRadius { reason })?;
     replay_undo_with_authorized_roots(&workspace, run_id, &allowed_roots)
 }
 
@@ -1210,14 +1281,15 @@ pub fn replay_undo_with_authorized_roots(
     run_id: &str,
     allowed_roots: &[PathBuf],
 ) -> Result<UndoSummary, DoctorRuntimeError> {
-    let (run_dir, state) = read_doctor_run_state(workspace, run_id)?;
+    let (run_dir, mut state) = read_doctor_run_state(workspace, run_id)?;
     let workspace = canonical_doctor_workspace(workspace)?;
-    if allowed_roots.is_empty() || allowed_roots.iter().any(|root| !root.is_absolute()) {
-        return Err(DoctorRuntimeError::RunArtifactInvalid {
-            path: run_dir.join("state.json"),
-            reason: "undo authorization requires at least one absolute blast-radius root".into(),
+    if state.dry_run {
+        return Err(DoctorRuntimeError::DryRunNotUndoable {
+            run_id: run_id.to_owned(),
         });
     }
+    let allowed_roots = normalize_blast_radius_roots(&workspace, allowed_roots, false)?;
+    let recorded_roots = validate_recorded_blast_radius_roots(&run_dir, &state.blast_radius_roots)?;
     validate_doctor_lifecycle_paths([
         run_dir.as_path(),
         run_dir.join("state.json").as_path(),
@@ -1242,8 +1314,8 @@ pub fn replay_undo_with_authorized_roots(
             })?;
         lines.push(parsed);
     }
-    validate_undo_action_ledger(&run_dir, &state, &allowed_roots, &lines)?;
-
+    let observed_action_count =
+        validate_undo_action_ledger(&run_dir, &state, &recorded_roots, &allowed_roots, &lines)?;
     // Read existing undo_log to skip already-undone actions.
     //
     // Only a SUCCESSFUL entry retires an action. Failure entries carry the
@@ -1254,23 +1326,34 @@ pub fn replay_undo_with_authorized_roots(
     // the live bytes against `after_hash` and fails closed with
     // `UndoStateDrifted` rather than clobbering drifted content.
     let undo_log_path = run_dir.join("undo_log.jsonl");
-    let already_undone_sequences: std::collections::HashSet<u64> =
-        read_optional_doctor_jsonl_file(&undo_log_path, "undo_log.jsonl")?
-            .map(|raw| {
-                raw.lines()
-                    .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-                    .filter(|entry| entry.get("undone_at").is_some())
-                    .filter_map(|v| v.get("sequence")?.as_u64())
-                    .collect()
-            })
-            .unwrap_or_default();
+    let already_undone_sequences =
+        match read_optional_doctor_jsonl_file(&undo_log_path, "undo_log.jsonl")? {
+            Some(raw) => validate_undo_log(&run_dir, &raw, &lines)?,
+            None => std::collections::HashSet::new(),
+        };
+    if observed_action_count != state.action_count {
+        state.action_count = observed_action_count;
+        persist_replay_state(&workspace, run_id, &run_dir, &state)?;
+    }
 
     let mut undone = 0u64;
     let mut skipped = 0u64;
-    let mut undo_log = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&undo_log_path)?;
+    let mut undo_log_options = fs::OpenOptions::new();
+    undo_log_options.create(true).append(true);
+    configure_doctor_inspect_open_no_follow(&mut undo_log_options);
+    let mut undo_log =
+        undo_log_options
+            .open(&undo_log_path)
+            .map_err(|source| DoctorRuntimeError::Io {
+                context: format!("open undo_log.jsonl {}", undo_log_path.display()),
+                source,
+            })?;
+    if !undo_log.metadata()?.is_file() {
+        return Err(DoctorRuntimeError::RunArtifactInvalid {
+            path: undo_log_path,
+            reason: "undo log is not a regular file".into(),
+        });
+    }
 
     // bd-doctor-undo-state: the undo outcome is part of the run's durable
     // lifecycle. Persist the terminal status into state.json while the
@@ -1281,18 +1364,10 @@ pub fn replay_undo_with_authorized_roots(
         let mut persisted_state = read_state(&run_dir)?;
         validate_run_state_binding(&workspace, run_id, &run_dir, &persisted_state)?;
         persisted_state.status = status.clone();
-        let bytes = serde_json::to_vec_pretty(&persisted_state).map_err(|error| {
-            DoctorRuntimeError::Io {
-                context: "serialize RunState".into(),
-                source: io::Error::new(io::ErrorKind::InvalidData, error),
-            }
-        })?;
-        write_file_atomic(&run_dir.join("state.json"), &bytes).map_err(|source| {
-            DoctorRuntimeError::Io {
-            context: format!("write state.json {}", run_dir.join("state.json").display()),
-                source,
-            }
-        })
+        persisted_state
+            .finished_at
+            .get_or_insert_with(|| Utc::now().to_rfc3339());
+        persist_replay_state(&workspace, run_id, &run_dir, &persisted_state)
     };
 
     for action in lines.iter().rev() {
@@ -1328,6 +1403,8 @@ pub fn replay_undo_with_authorized_roots(
                     actions_skipped: skipped,
                     status: RunStatus::UndonePartial,
                     first_error: Some(e.to_string()),
+                    first_error_code: Some(e.code()),
+                    first_error_class: Some(e.failure_class()),
                 });
             }
         }
@@ -1340,6 +1417,8 @@ pub fn replay_undo_with_authorized_roots(
         actions_skipped: skipped,
         status: RunStatus::Undone,
         first_error: None,
+        first_error_code: None,
+        first_error_class: None,
     })
 }
 
@@ -1349,6 +1428,28 @@ pub struct UndoSummary {
     pub actions_skipped: u64,
     pub status: RunStatus,
     pub first_error: Option<String>,
+    pub first_error_code: Option<&'static str>,
+    pub first_error_class: Option<DoctorRuntimeFailureClass>,
+}
+
+fn persist_replay_state(
+    workspace: &Path,
+    run_id: &str,
+    run_dir: &Path,
+    state: &RunState,
+) -> Result<(), DoctorRuntimeError> {
+    validate_run_state_binding(workspace, run_id, run_dir, state)?;
+    validate_doctor_lifecycle_paths([run_dir, run_dir.join("state.json").as_path()])?;
+    let bytes = serde_json::to_vec_pretty(state).map_err(|error| DoctorRuntimeError::Io {
+        context: "serialize RunState".into(),
+        source: io::Error::new(io::ErrorKind::InvalidData, error),
+    })?;
+    write_file_atomic(&run_dir.join("state.json"), &bytes).map_err(|source| {
+        DoctorRuntimeError::Io {
+            context: format!("write state.json {}", run_dir.join("state.json").display()),
+            source,
+        }
+    })
 }
 
 fn validate_relative_run_artifact_path(
@@ -1372,16 +1473,19 @@ fn validate_relative_run_artifact_path(
 fn validate_undo_action_ledger(
     run_dir: &Path,
     state: &RunState,
-    allowed_roots: &[PathBuf],
+    recorded_roots: &[PathBuf],
+    current_roots: &[PathBuf],
     lines: &[ActionLine],
-) -> Result<(), DoctorRuntimeError> {
-    let observed_count = u64::try_from(lines.len()).map_err(|_| {
-        DoctorRuntimeError::RunArtifactInvalid {
+) -> Result<u64, DoctorRuntimeError> {
+    let run_artifact_roots = [run_dir.to_path_buf()];
+    let observed_count =
+        u64::try_from(lines.len()).map_err(|_| DoctorRuntimeError::RunArtifactInvalid {
             path: run_dir.join("actions.jsonl"),
             reason: "action count does not fit in u64".into(),
-        }
-    })?;
-    if state.action_count != observed_count {
+        })?;
+    let recoverable_append_gap = matches!(state.status, RunStatus::Running | RunStatus::Failed)
+        && state.action_count.checked_add(1) == Some(observed_count);
+    if state.action_count != observed_count && !recoverable_append_gap {
         return Err(DoctorRuntimeError::RunArtifactInvalid {
             path: run_dir.join("actions.jsonl"),
             reason: format!(
@@ -1393,12 +1497,11 @@ fn validate_undo_action_ledger(
 
     for (index, action) in lines.iter().enumerate() {
         let line_number = index + 1;
-        let expected_sequence = u64::try_from(line_number).map_err(|_| {
-            DoctorRuntimeError::ActionsLogCorrupt {
+        let expected_sequence =
+            u64::try_from(line_number).map_err(|_| DoctorRuntimeError::ActionsLogCorrupt {
                 line_number,
                 reason: "action sequence does not fit in u64".into(),
-            }
-        })?;
+            })?;
         if action.schema != ACTION_LINE_SCHEMA_V1 {
             return Err(DoctorRuntimeError::ActionsLogCorrupt {
                 line_number,
@@ -1448,15 +1551,31 @@ fn validate_undo_action_ledger(
             if !action.path.is_absolute() {
                 return Err(DoctorRuntimeError::ActionsLogCorrupt {
                     line_number,
-                    reason: format!("mutating action path must be absolute: {}", action.path.display()),
+                    reason: format!(
+                        "mutating action path must be absolute: {}",
+                        action.path.display()
+                    ),
                 });
             }
-            if action.path.starts_with(run_dir)
-                || !is_path_in_blast_radius(&action.path, allowed_roots)
+            if is_path_in_blast_radius(&action.path, &run_artifact_roots)
+                || !is_path_in_blast_radius(&action.path, recorded_roots)
+                || !is_path_in_blast_radius(&action.path, current_roots)
             {
+                let mut effective_roots = Vec::new();
+                for recorded in recorded_roots {
+                    for current in current_roots {
+                        if recorded.starts_with(current) {
+                            effective_roots.push(recorded.clone());
+                        } else if current.starts_with(recorded) {
+                            effective_roots.push(current.clone());
+                        }
+                    }
+                }
+                effective_roots.sort();
+                effective_roots.dedup();
                 return Err(DoctorRuntimeError::BlastRadiusExceeded {
                     path: action.path.clone(),
-                    allowed_roots: allowed_roots.to_vec(),
+                    allowed_roots: effective_roots,
                 });
             }
         }
@@ -1488,10 +1607,203 @@ fn validate_undo_action_ledger(
             _ => {}
         }
     }
-    Ok(())
+    Ok(observed_count)
+}
+
+fn validate_undo_log(
+    run_dir: &Path,
+    raw: &str,
+    actions: &[ActionLine],
+) -> Result<std::collections::HashSet<u64>, DoctorRuntimeError> {
+    let undo_log_path = run_dir.join("undo_log.jsonl");
+    let mut successful = std::collections::HashSet::new();
+    for (index, line) in raw.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let line_number = index + 1;
+        let entry = serde_json::from_str::<serde_json::Value>(line).map_err(|error| {
+            DoctorRuntimeError::RunArtifactInvalid {
+                path: undo_log_path.clone(),
+                reason: format!("line {line_number} is invalid JSON: {error}"),
+            }
+        })?;
+        if entry.get("schema").and_then(serde_json::Value::as_str)
+            != Some("ee.doctor.undo_entry.v1")
+        {
+            return Err(DoctorRuntimeError::RunArtifactInvalid {
+                path: undo_log_path.clone(),
+                reason: format!("line {line_number} has an unsupported schema"),
+            });
+        }
+        let sequence = entry
+            .get("sequence")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| DoctorRuntimeError::RunArtifactInvalid {
+                path: undo_log_path.clone(),
+                reason: format!("line {line_number} has no integer sequence"),
+            })?;
+        let action = sequence
+            .checked_sub(1)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .and_then(|offset| actions.get(offset))
+            .filter(|action| action.sequence == sequence)
+            .ok_or_else(|| DoctorRuntimeError::RunArtifactInvalid {
+                path: undo_log_path.clone(),
+                reason: format!("line {line_number} references unknown sequence {sequence}"),
+            })?;
+        if successful.contains(&sequence) {
+            return Err(DoctorRuntimeError::RunArtifactInvalid {
+                path: undo_log_path.clone(),
+                reason: format!(
+                    "line {line_number} appears after sequence {sequence} was already completed"
+                ),
+            });
+        }
+        let expected_path = action.path.display().to_string();
+        if entry.get("path").and_then(serde_json::Value::as_str) != Some(expected_path.as_str())
+            || entry.get("kind").and_then(serde_json::Value::as_str) != Some(action.kind.as_str())
+        {
+            return Err(DoctorRuntimeError::RunArtifactInvalid {
+                path: undo_log_path.clone(),
+                reason: format!("line {line_number} does not match action sequence {sequence}"),
+            });
+        }
+        let completed = entry.get("undone_at").and_then(serde_json::Value::as_str);
+        let failed = entry.get("failed_at").and_then(serde_json::Value::as_str);
+        if completed.is_some() == failed.is_some() {
+            return Err(DoctorRuntimeError::RunArtifactInvalid {
+                path: undo_log_path.clone(),
+                reason: format!(
+                    "line {line_number} must contain exactly one of undone_at or failed_at"
+                ),
+            });
+        }
+        if completed.is_some() {
+            successful.insert(sequence);
+        }
+    }
+    if let Some(first_success) = successful.iter().min().copied() {
+        let action_count =
+            u64::try_from(actions.len()).map_err(|_| DoctorRuntimeError::RunArtifactInvalid {
+                path: undo_log_path.clone(),
+                reason: "action count does not fit in u64".into(),
+            })?;
+        if (first_success..=action_count).any(|sequence| !successful.contains(&sequence)) {
+            return Err(DoctorRuntimeError::RunArtifactInvalid {
+                path: undo_log_path.clone(),
+                reason: "successful undo receipts must form a contiguous action suffix".into(),
+            });
+        }
+
+        let mut final_actions_by_path = std::collections::BTreeMap::new();
+        for action in actions {
+            if successful.contains(&action.sequence) && is_mutating_action_kind(&action.kind) {
+                final_actions_by_path
+                    .entry(action.path.clone())
+                    .or_insert(action);
+            }
+        }
+        for action in final_actions_by_path.values() {
+            if !action_pre_state_matches(run_dir, action)? {
+                return Err(DoctorRuntimeError::RunArtifactInvalid {
+                    path: undo_log_path.clone(),
+                    reason: format!(
+                        "successful receipt for sequence {} does not match the live post-undo state",
+                        action.sequence
+                    ),
+                });
+            }
+        }
+    }
+    Ok(successful)
+}
+
+fn is_mutating_action_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "write_file" | "chmod" | "create_dir_all" | "quarantine_by_rename"
+    )
+}
+
+fn undo_created_quarantine_path(run_dir: &Path, action: &ActionLine, root: &str) -> PathBuf {
+    run_dir
+        .join("quarantine")
+        .join(root)
+        .join(format!("{:06}", action.sequence))
+        .join(sanitize_path_for_run_dir(&action.path))
+}
+
+fn action_pre_state_matches(
+    run_dir: &Path,
+    action: &ActionLine,
+) -> Result<bool, DoctorRuntimeError> {
+    match action.kind.as_str() {
+        "write_file" => match action.before_hash.as_deref() {
+            Some(expected) => {
+                if !action.path.is_file() {
+                    return Ok(false);
+                }
+                Ok(hash_file(&action.path)? == expected)
+            }
+            None => {
+                let quarantine = undo_created_quarantine_path(run_dir, action, "undo_created");
+                validate_doctor_lifecycle_paths([quarantine.as_path()])?;
+                Ok(!action.path.exists() && quarantine.exists())
+            }
+        },
+        "chmod" => {
+            #[cfg(unix)]
+            {
+                Ok(read_mode(&action.path).map(|mode| mode & 0o7777)
+                    == action.before_mode.map(|mode| mode & 0o7777))
+            }
+            #[cfg(not(unix))]
+            {
+                Ok(true)
+            }
+        }
+        "create_dir_all" => {
+            let quarantine = undo_created_quarantine_path(run_dir, action, "undo_created_dirs");
+            validate_doctor_lifecycle_paths([quarantine.as_path()])?;
+            Ok(!action.path.exists() && quarantine.exists())
+        }
+        "quarantine_by_rename" => {
+            let source = action
+                .quarantine_dest_rel
+                .as_ref()
+                .map(|rel| run_dir.join("quarantine").join(rel));
+            if let Some(source) = source.as_deref() {
+                validate_doctor_lifecycle_paths([source])?;
+            }
+            let source_exists = source.as_deref().is_some_and(Path::exists);
+            let target_matches = match action.before_hash.as_deref() {
+                Some(expected) if action.path.is_file() => hash_file(&action.path)? == expected,
+                Some(_) => false,
+                None => action.path.exists(),
+            };
+            Ok(target_matches && !source_exists)
+        }
+        "manual"
+        | "emit_diagnostic"
+        | "run_index_rebuild"
+        | "run_graph_refresh"
+        | "run_wal_checkpoint"
+        | "run_migration"
+        | "rewrite_jsonl"
+        | "atomic_rewrite_toml"
+        | "snapshot_backup" => Ok(true),
+        other => Err(DoctorRuntimeError::ActionsLogCorrupt {
+            line_number: action.sequence as usize,
+            reason: format!("unknown action kind: {other}"),
+        }),
+    }
 }
 
 fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeError> {
+    if action_pre_state_matches(run_dir, action)? {
+        return Ok(());
+    }
     match action.kind.as_str() {
         "write_file" => {
             // Restore from backup. If `before_hash` is None, the file didn't
@@ -1527,6 +1839,7 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
                         }
                     }
                     let backup = run_dir.join("backups").join(rel);
+                    validate_doctor_lifecycle_paths([backup.as_path()])?;
                     if !backup.exists() {
                         return Err(DoctorRuntimeError::UndoBackupCorrupt {
                             backup_path: backup,
@@ -1584,12 +1897,8 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
                                 observed_hash: live_hash,
                             });
                         }
-                        let path_rel = sanitize_path_for_run_dir(&action.path);
-                        let quarantine_dest = run_dir
-                            .join("quarantine")
-                            .join("undo_created")
-                            .join(format!("{:06}", action.sequence))
-                            .join(&path_rel);
+                        let quarantine_dest =
+                            undo_created_quarantine_path(run_dir, action, "undo_created");
                         if let Some(parent) = quarantine_dest.parent() {
                             fs::create_dir_all(parent)?;
                         }
@@ -1628,8 +1937,10 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
                 if current_mode != expected_after {
                     return Err(DoctorRuntimeError::UndoStateDrifted {
                         path: action.path.clone(),
-                        expected_hash: expected_after
-                            .map_or_else(|| "<missing mode>".into(), |mode| format!("mode {mode:o}")),
+                        expected_hash: expected_after.map_or_else(
+                            || "<missing mode>".into(),
+                            |mode| format!("mode {mode:o}"),
+                        ),
                         observed_hash: current_mode
                             .map_or_else(|| "<missing>".into(), |mode| format!("mode {mode:o}")),
                     });
@@ -1693,12 +2004,8 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
                         observed_hash: "<non-empty directory>".to_owned(),
                     });
                 }
-                let path_rel = sanitize_path_for_run_dir(&action.path);
-                let quarantine_dest = run_dir
-                    .join("quarantine")
-                    .join("undo_created_dirs")
-                    .join(format!("{:06}", action.sequence))
-                    .join(&path_rel);
+                let quarantine_dest =
+                    undo_created_quarantine_path(run_dir, action, "undo_created_dirs");
                 if let Some(parent) = quarantine_dest.parent() {
                     fs::create_dir_all(parent)?;
                 }
@@ -1741,6 +2048,7 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
                 .as_ref()
                 .map(|rel| run_dir.join("quarantine").join(rel));
             if let Some(source) = quarantine_dest {
+                validate_doctor_lifecycle_paths([source.as_path()])?;
                 if source.exists() {
                     if let Some(parent) = action.path.parent() {
                         fs::create_dir_all(parent)?;
@@ -1817,7 +2125,7 @@ impl CapabilitiesReport {
             doctor_version: env!("CARGO_PKG_VERSION").into(),
             doctor_contract_version: "1.0.0".into(),
             tool_version: tool_version.into(),
-            run_artifact_schema: RUN_STATE_SCHEMA_V1.into(),
+            run_artifact_schema: RUN_STATE_SCHEMA_V2.into(),
             blast_radius,
             op_kinds: vec![
                 "write_file",
@@ -1842,38 +2150,38 @@ impl CapabilitiesReport {
                 },
                 ExitCodeEntry {
                     code: 1,
-                    name: "findings_present",
-                    meaning: "diagnose mode: at least one finding (no --fix passed)",
+                    name: "usage",
+                    meaning: "command-line usage or argument validation failed",
                 },
                 ExitCodeEntry {
                     code: 2,
-                    name: "fix_partial",
-                    meaning: "fix attempted; some actions failed but state is consistent",
+                    name: "configuration",
+                    meaning: "configuration, concurrency, or no-op precondition prevented the operation",
                 },
                 ExitCodeEntry {
                     code: 3,
-                    name: "fix_failed",
-                    meaning: "fix attempted; rolled back to pre-run state",
+                    name: "storage",
+                    meaning: "doctor storage, ledger, backup, or state restoration failed",
                 },
                 ExitCodeEntry {
                     code: 4,
-                    name: "refused_unsafe",
-                    meaning: "blast-radius / precondition refused; no mutations",
+                    name: "search_index",
+                    meaning: "search index operation failed",
                 },
                 ExitCodeEntry {
                     code: 5,
-                    name: "concurrency_lost",
-                    meaning: "another doctor run is holding the workspace lock",
+                    name: "import",
+                    meaning: "import operation failed",
                 },
                 ExitCodeEntry {
                     code: 6,
-                    name: "online_required",
-                    meaning: "network probe needed but --online was not passed",
+                    name: "unsatisfied_degraded_mode",
+                    meaning: "the requested operation cannot proceed in the current degraded mode",
                 },
                 ExitCodeEntry {
                     code: 7,
                     name: "policy_denied",
-                    meaning: "trauma-guard or other policy denied a precondition",
+                    meaning: "blast-radius or another safety policy denied the operation",
                 },
                 ExitCodeEntry {
                     code: 8,
@@ -1912,6 +2220,99 @@ pub fn default_blast_radius_roots(workspace: &Path) -> Vec<PathBuf> {
         roots.push(home.join(".local").join("share").join("ee"));
     }
     roots
+}
+
+fn normalize_blast_radius_roots(
+    workspace: &Path,
+    roots: &[PathBuf],
+    resolve_relative_from_cwd: bool,
+) -> Result<Vec<PathBuf>, DoctorRuntimeError> {
+    if roots.is_empty() {
+        return Err(DoctorRuntimeError::RunArtifactInvalid {
+            path: workspace.to_path_buf(),
+            reason: "doctor blast radius must contain at least one root".into(),
+        });
+    }
+
+    let mut normalized = Vec::with_capacity(roots.len());
+    for root in roots {
+        let absolute = if root.is_absolute() {
+            root.clone()
+        } else if resolve_relative_from_cwd {
+            std::env::current_dir()
+                .map(|current_dir| current_dir.join(root))
+                .map_err(|source| DoctorRuntimeError::Io {
+                    context: format!(
+                        "resolve relative doctor blast-radius root {}",
+                        root.display()
+                    ),
+                    source,
+                })?
+        } else {
+            return Err(DoctorRuntimeError::RunArtifactInvalid {
+                path: root.clone(),
+                reason:
+                    "persisted and replay-time doctor blast-radius roots must be absolute paths"
+                        .into(),
+            });
+        };
+        let canonical = if absolute.exists() {
+            fs::canonicalize(&absolute).map_err(|source| DoctorRuntimeError::Io {
+                context: format!(
+                    "canonicalize doctor blast-radius root {}",
+                    absolute.display()
+                ),
+                source,
+            })?
+        } else {
+            nearest_existing_ancestor_canonical(&absolute).ok_or_else(|| {
+                DoctorRuntimeError::RunArtifactInvalid {
+                    path: absolute.clone(),
+                    reason: "doctor blast-radius root has no safe existing ancestor".into(),
+                }
+            })?
+        };
+        normalized.push(canonical);
+    }
+    normalized.sort();
+    normalized.dedup();
+    Ok(normalized)
+}
+
+fn validate_recorded_blast_radius_roots(
+    run_dir: &Path,
+    roots: &[PathBuf],
+) -> Result<Vec<PathBuf>, DoctorRuntimeError> {
+    if roots.is_empty() {
+        return Err(DoctorRuntimeError::RunArtifactInvalid {
+            path: run_dir.join("state.json"),
+            reason: "run state has no recorded blast-radius roots".into(),
+        });
+    }
+
+    let mut validated = Vec::with_capacity(roots.len());
+    for root in roots {
+        if !root.is_absolute()
+            || root.components().any(|component| {
+                !matches!(
+                    component,
+                    Component::Prefix(_) | Component::RootDir | Component::Normal(_)
+                )
+            })
+        {
+            return Err(DoctorRuntimeError::RunArtifactInvalid {
+                path: run_dir.join("state.json"),
+                reason: format!(
+                    "recorded blast-radius root must be an absolute normalized path: {}",
+                    root.display()
+                ),
+            });
+        }
+        validated.push(root.clone());
+    }
+    validated.sort();
+    validated.dedup();
+    Ok(validated)
 }
 
 /// Blast-radius roots for `ee doctor --fix`, honoring the
@@ -2070,11 +2471,11 @@ fn validate_run_state_binding(
     run_dir: &Path,
     state: &RunState,
 ) -> Result<(), DoctorRuntimeError> {
-    if state.schema != RUN_STATE_SCHEMA_V1 {
+    if state.schema != RUN_STATE_SCHEMA_V2 {
         return Err(DoctorRuntimeError::RunArtifactInvalid {
             path: run_dir.join("state.json"),
             reason: format!(
-                "unsupported schema {:?}; expected {RUN_STATE_SCHEMA_V1:?}",
+                "unsupported schema {:?}; expected {RUN_STATE_SCHEMA_V2:?}",
                 state.schema
             ),
         });
@@ -3221,7 +3622,7 @@ fn read_mode(path: &Path) -> Option<u32> {
 /// Validate that a `dest_under_quarantine` PathBuf is a relative path containing
 /// only `Normal` components. Refuses absolute paths, `..` (`ParentDir`), Windows
 /// drive prefixes, etc. Returns `BlastRadiusExceeded` on failure so the caller
-/// surfaces it as exit 4 (refused_unsafe), matching the rest of the
+/// surfaces it as the global policy-denied exit (7), matching the rest of the
 /// containment story.
 ///
 /// This is defense-in-depth: callers are SUPPOSED to pass safe relative paths,
@@ -3268,11 +3669,9 @@ fn is_path_in_blast_radius(path: &Path, roots: &[PathBuf]) -> bool {
         Some(p) => p,
         None => return false,
     };
-    roots.iter().any(|root| {
-        root.canonicalize()
-            .map(|r| probe.starts_with(&r))
-            .unwrap_or(false)
-    })
+    roots
+        .iter()
+        .any(|root| root.is_absolute() && probe.starts_with(root))
 }
 
 /// Walk upward from `path` to the nearest existing ancestor, canonicalize
@@ -3673,25 +4072,23 @@ fn read_doctor_text_file_with_metadata(
 }
 
 fn read_doctor_backup_bytes(path: &Path) -> Result<Vec<u8>, DoctorRuntimeError> {
-    let metadata = fs::symlink_metadata(path).map_err(|source| {
-        DoctorRuntimeError::UndoBackupCorrupt {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|source| DoctorRuntimeError::UndoBackupCorrupt {
             backup_path: path.to_path_buf(),
             expected_hash: "<recorded before_hash>".into(),
             observed_hash: Some(format!("unreadable: {source}")),
-        }
-    })?;
+        })?;
     if !metadata.file_type().is_file() {
         return Err(DoctorRuntimeError::RunArtifactInvalid {
             path: path.to_path_buf(),
             reason: "backup is not a regular file".into(),
         });
     }
-    let mut file = open_doctor_inspect_file_for_read(path).map_err(|source| {
-        DoctorRuntimeError::Io {
+    let mut file =
+        open_doctor_inspect_file_for_read(path).map_err(|source| DoctorRuntimeError::Io {
             context: format!("open doctor backup {}", path.display()),
             source,
-        }
-    })?;
+        })?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
         .map_err(|source| DoctorRuntimeError::Io {
@@ -3926,7 +4323,15 @@ mod tests {
     #[test]
     fn doctor_run_id_is_one_bounded_portable_component() {
         assert!(validate_doctor_run_id("2026-08-31T00-00-00.000000000Z__1__abc123").is_ok());
-        for invalid in ["", ".", "..", "../escape", "nested/run", r"nested\run", "/tmp/run"] {
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "nested/run",
+            r"nested\run",
+            "/tmp/run",
+        ] {
             assert!(
                 matches!(
                     validate_doctor_run_id(invalid),
@@ -4024,6 +4429,222 @@ mod tests {
             !run_dir.join("undo_log.jsonl").exists(),
             "prevalidation failure must not append an undo record"
         );
+    }
+
+    #[test]
+    fn undo_recovers_durable_action_appended_before_failed_state_update() {
+        let ws = fresh_workspace();
+        let target = ws.path().join("crash-window.txt");
+        fs::write(&target, b"before").unwrap();
+
+        let mut ctx = start_run(ws.path());
+        let run_dir = ctx.run_dir().to_path_buf();
+        let run_id = ctx.run_id().to_owned();
+        mutate(
+            &mut ctx,
+            &target,
+            Op::WriteFile {
+                bytes: b"after".to_vec(),
+            },
+        )
+        .unwrap();
+        ctx.finish(RunStatus::CompletedOk).unwrap();
+
+        let mut stale_state = read_state(&run_dir).unwrap();
+        stale_state.status = RunStatus::Failed;
+        stale_state.action_count = 0;
+        fs::write(
+            run_dir.join("state.json"),
+            serde_json::to_vec_pretty(&stale_state).unwrap(),
+        )
+        .unwrap();
+
+        let mut roots = default_blast_radius_roots(ws.path());
+        roots.push(ws.path().to_path_buf());
+        let summary = replay_undo_with_authorized_roots(ws.path(), &run_id, &roots).unwrap();
+        assert_eq!(summary.actions_undone, 1);
+        assert!(matches!(summary.status, RunStatus::Undone));
+        assert_eq!(fs::read(&target).unwrap(), b"before");
+        assert_eq!(read_state(&run_dir).unwrap().action_count, 1);
+    }
+
+    #[test]
+    fn undo_rejects_action_count_gap_larger_than_single_crash_window() {
+        let ws = fresh_workspace();
+        let first = ws.path().join("gap-first.txt");
+        let second = ws.path().join("gap-second.txt");
+        fs::write(&first, b"first-before").unwrap();
+        fs::write(&second, b"second-before").unwrap();
+
+        let mut ctx = start_run(ws.path());
+        let run_dir = ctx.run_dir().to_path_buf();
+        let run_id = ctx.run_id().to_owned();
+        for (path, bytes) in [
+            (&first, b"first-after".as_slice()),
+            (&second, b"second-after".as_slice()),
+        ] {
+            mutate(
+                &mut ctx,
+                path,
+                Op::WriteFile {
+                    bytes: bytes.to_vec(),
+                },
+            )
+            .unwrap();
+        }
+        ctx.finish(RunStatus::CompletedOk).unwrap();
+
+        let mut stale_state = read_state(&run_dir).unwrap();
+        stale_state.status = RunStatus::Failed;
+        stale_state.action_count = 0;
+        fs::write(
+            run_dir.join("state.json"),
+            serde_json::to_vec_pretty(&stale_state).unwrap(),
+        )
+        .unwrap();
+
+        let mut roots = default_blast_radius_roots(ws.path());
+        roots.push(ws.path().to_path_buf());
+        assert!(matches!(
+            replay_undo_with_authorized_roots(ws.path(), &run_id, &roots),
+            Err(DoctorRuntimeError::RunArtifactInvalid { .. })
+        ));
+        assert_eq!(fs::read(&first).unwrap(), b"first-after");
+        assert_eq!(fs::read(&second).unwrap(), b"second-after");
+        assert!(!run_dir.join("undo_log.jsonl").exists());
+    }
+
+    #[test]
+    fn undo_intersects_recorded_and_current_blast_radius() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let sibling = root.path().join("sibling");
+        fs::create_dir(&workspace).unwrap();
+        fs::create_dir(&sibling).unwrap();
+        let original = workspace.join("original.txt");
+        let forged = sibling.join("forged.txt");
+        fs::write(&original, b"before").unwrap();
+        fs::write(&forged, b"peer-owned").unwrap();
+
+        let mut ctx =
+            RunContext::start(&workspace, "recorded-roots", vec![workspace.clone()], false)
+                .unwrap();
+        let run_dir = ctx.run_dir().to_path_buf();
+        let run_id = ctx.run_id().to_owned();
+        mutate(
+            &mut ctx,
+            &original,
+            Op::WriteFile {
+                bytes: b"after".to_vec(),
+            },
+        )
+        .unwrap();
+        ctx.finish(RunStatus::CompletedOk).unwrap();
+
+        let actions_path = run_dir.join("actions.jsonl");
+        let raw = fs::read_to_string(&actions_path).unwrap();
+        let mut action: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
+        action["path"] = serde_json::Value::String(forged.display().to_string());
+        fs::write(&actions_path, format!("{}\n", action)).unwrap();
+
+        assert!(matches!(
+            replay_undo_with_authorized_roots(&workspace, &run_id, &[root.path().to_path_buf()],),
+            Err(DoctorRuntimeError::BlastRadiusExceeded { .. })
+        ));
+        assert_eq!(fs::read(&forged).unwrap(), b"peer-owned");
+        assert_eq!(fs::read(&original).unwrap(), b"after");
+        assert!(!run_dir.join("undo_log.jsonl").exists());
+    }
+
+    #[test]
+    fn undo_never_reuses_recorded_authority_missing_from_current_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let external = root.path().join("external");
+        fs::create_dir(&workspace).unwrap();
+        fs::create_dir(&external).unwrap();
+        let target = external.join("target.txt");
+        fs::write(&target, b"before").unwrap();
+
+        let mut ctx = RunContext::start(
+            &workspace,
+            "current-roots",
+            vec![root.path().to_path_buf()],
+            false,
+        )
+        .unwrap();
+        let run_dir = ctx.run_dir().to_path_buf();
+        let run_id = ctx.run_id().to_owned();
+        mutate(
+            &mut ctx,
+            &target,
+            Op::WriteFile {
+                bytes: b"after".to_vec(),
+            },
+        )
+        .unwrap();
+        ctx.finish(RunStatus::CompletedOk).unwrap();
+
+        assert!(matches!(
+            replay_undo_with_authorized_roots(&workspace, &run_id, &[workspace.clone()]),
+            Err(DoctorRuntimeError::BlastRadiusExceeded { .. })
+        ));
+        assert_eq!(fs::read(&target).unwrap(), b"after");
+        assert!(!run_dir.join("undo_log.jsonl").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn undo_rejects_recorded_root_retargeted_by_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let recorded_root = root.path().join("recorded-root");
+        let retained_root = root.path().join("retained-root");
+        let replacement_root = root.path().join("replacement-root");
+        fs::create_dir(&workspace).unwrap();
+        fs::create_dir(&recorded_root).unwrap();
+        fs::create_dir(&replacement_root).unwrap();
+        let target = recorded_root.join("target.txt");
+        fs::write(&target, b"before").unwrap();
+
+        let mut ctx = RunContext::start(
+            &workspace,
+            "retargeted-root",
+            vec![recorded_root.clone()],
+            false,
+        )
+        .unwrap();
+        let run_dir = ctx.run_dir().to_path_buf();
+        let run_id = ctx.run_id().to_owned();
+        mutate(
+            &mut ctx,
+            &target,
+            Op::WriteFile {
+                bytes: b"after".to_vec(),
+            },
+        )
+        .unwrap();
+        ctx.finish(RunStatus::CompletedOk).unwrap();
+
+        fs::rename(&recorded_root, &retained_root).unwrap();
+        fs::write(replacement_root.join("target.txt"), b"after").unwrap();
+        symlink(&replacement_root, &recorded_root).unwrap();
+
+        assert!(matches!(
+            replay_undo_with_authorized_roots(&workspace, &run_id, &[recorded_root.clone()]),
+            Err(DoctorRuntimeError::BlastRadiusExceeded { .. })
+        ));
+        assert_eq!(
+            fs::read(replacement_root.join("target.txt")).unwrap(),
+            b"after"
+        );
+        assert_eq!(
+            fs::read(retained_root.join("target.txt")).unwrap(),
+            b"after"
+        );
+        assert!(!run_dir.join("undo_log.jsonl").exists());
     }
 
     #[test]
@@ -4560,6 +5181,75 @@ mod tests {
     }
 
     #[test]
+    fn undo_recovers_when_inverse_completed_before_success_receipt() {
+        let ws = fresh_workspace();
+        let target = ws.path().join("inverse-before-receipt.txt");
+        fs::write(&target, b"before").unwrap();
+
+        let mut ctx = start_run(ws.path());
+        let run_dir = ctx.run_dir().to_path_buf();
+        mutate(
+            &mut ctx,
+            &target,
+            Op::WriteFile {
+                bytes: b"after".to_vec(),
+            },
+        )
+        .unwrap();
+        ctx.finish(RunStatus::CompletedOk).unwrap();
+
+        // Simulate a process that restored the verified pre-state and then
+        // crashed before appending its success receipt.
+        fs::write(&target, b"before").unwrap();
+        assert!(!run_dir.join("undo_log.jsonl").exists());
+
+        let summary = replay_test_undo(&run_dir).unwrap();
+        assert_eq!(summary.actions_undone, 1);
+        assert!(matches!(summary.status, RunStatus::Undone));
+        assert_eq!(fs::read(&target).unwrap(), b"before");
+        assert!(run_dir.join("undo_log.jsonl").is_file());
+    }
+
+    #[test]
+    fn undo_rejects_matching_success_receipt_when_live_state_is_not_undone() {
+        let ws = fresh_workspace();
+        let target = ws.path().join("forged-log-target.txt");
+        fs::write(&target, b"before").unwrap();
+
+        let mut ctx = start_run(ws.path());
+        let run_dir = ctx.run_dir().to_path_buf();
+        mutate(
+            &mut ctx,
+            &target,
+            Op::WriteFile {
+                bytes: b"after".to_vec(),
+            },
+        )
+        .unwrap();
+        ctx.finish(RunStatus::CompletedOk).unwrap();
+
+        fs::write(
+            run_dir.join("undo_log.jsonl"),
+            serde_json::json!({
+                "schema": "ee.doctor.undo_entry.v1",
+                "sequence": 1,
+                "path": target.display().to_string(),
+                "kind": "write_file",
+                "undone_at": Utc::now().to_rfc3339(),
+            })
+            .to_string()
+                + "\n",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            replay_test_undo(&run_dir),
+            Err(DoctorRuntimeError::RunArtifactInvalid { .. })
+        ));
+        assert_eq!(fs::read(&target).unwrap(), b"after");
+    }
+
+    #[test]
     fn undo_fails_closed_when_state_json_is_missing() {
         let runs = fresh_workspace();
         let run_dir = runs
@@ -4735,7 +5425,9 @@ mod tests {
         assert!(json.contains("write_file"));
         assert!(json.contains("quarantine_by_rename"));
         assert!(json.contains("\"code\": 5"));
-        assert!(json.contains("concurrency_lost"));
+        assert!(json.contains("configuration"));
+        assert!(json.contains("storage"));
+        assert!(json.contains("policy_denied"));
     }
 
     #[test]
@@ -4775,6 +5467,32 @@ mod tests {
         // But the action is recorded.
         let actions = fs::read_to_string(ctx.run_dir().join("actions.jsonl")).unwrap();
         assert!(actions.contains("write_file"));
+    }
+
+    #[test]
+    fn undo_refuses_dry_run_plan_without_touching_later_state() {
+        let ws = fresh_workspace();
+        let target = ws.path().join("created-after-dry-run");
+        let mut roots = default_blast_radius_roots(ws.path());
+        roots.push(ws.path().to_path_buf());
+        let mut ctx = RunContext::start(ws.path(), "dry-undo", roots, true).unwrap();
+        let run_dir = ctx.run_dir().to_path_buf();
+        let run_id = ctx.run_id().to_owned();
+
+        mutate(&mut ctx, &target, Op::CreateDirAll { mode: 0o755 }).unwrap();
+        ctx.finish(RunStatus::CompletedOk).unwrap();
+        fs::create_dir(&target).unwrap();
+        let state_before = fs::read(run_dir.join("state.json")).unwrap();
+
+        let mut current_roots = default_blast_radius_roots(ws.path());
+        current_roots.push(ws.path().to_path_buf());
+        assert!(matches!(
+            replay_undo_with_authorized_roots(ws.path(), &run_id, &current_roots),
+            Err(DoctorRuntimeError::DryRunNotUndoable { .. })
+        ));
+        assert!(target.is_dir());
+        assert!(!run_dir.join("undo_log.jsonl").exists());
+        assert_eq!(fs::read(run_dir.join("state.json")).unwrap(), state_before);
     }
 
     #[test]

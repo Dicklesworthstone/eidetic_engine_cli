@@ -117,7 +117,7 @@ fn write_doctor_run_state(
     fs::create_dir_all(&run_dir)
         .map_err(|error| format!("create {}: {error}", run_dir.display()))?;
     let state = json!({
-        "schema": "ee.doctor.run_state.v1",
+        "schema": "ee.doctor.run_state.v2",
         "run_id": run_id,
         "target_sha": format!("sha256:{run_id}"),
         "workspace": path_string(&workspace.path),
@@ -126,6 +126,7 @@ fn write_doctor_run_state(
         "status": "completed_ok",
         "action_count": action_count,
         "dry_run": false,
+        "blast_radius_roots": [path_string(&workspace.path)],
     });
     let state_path = run_dir.join("state.json");
     fs::write(&state_path, state.to_string())

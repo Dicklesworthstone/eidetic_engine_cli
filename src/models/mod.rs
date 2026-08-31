@@ -437,6 +437,9 @@ pub const DOCTOR_FIX_SUMMARY_SCHEMA_V1: &str = "ee.doctor.fix_summary.v1";
 /// Schema for doctor run diff output.
 pub const DOCTOR_RUN_DIFF_SCHEMA_V1: &str = "ee.doctor.run_diff.v1";
 
+/// Schema for the nested doctor undo summary payload.
+pub const DOCTOR_UNDO_SUMMARY_SCHEMA_V1: &str = "ee.doctor.undo_summary.v1";
+
 /// Schema for failure mode fixtures used in tests and evaluations.
 pub const FAILURE_MODE_FIXTURE_SCHEMA_V1: &str = "ee.failure_mode_fixture.v1";
 

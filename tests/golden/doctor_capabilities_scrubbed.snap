@@ -3,7 +3,7 @@
   "doctor_version": "[CARGO_PKG_VERSION]",
   "doctor_contract_version": "1.0.0",
   "tool_version": "[CARGO_PKG_VERSION]",
-  "run_artifact_schema": "ee.doctor.run_state.v1",
+  "run_artifact_schema": "ee.doctor.run_state.v2",
   "blast_radius": [
     "[WORKSPACE]/.ee",
     "[WORKSPACE]/.doctor",
@@ -32,38 +32,38 @@
     },
     {
       "code": 1,
-      "name": "findings_present",
-      "meaning": "diagnose mode: at least one finding (no --fix passed)"
+      "name": "usage",
+      "meaning": "command-line usage or argument validation failed"
     },
     {
       "code": 2,
-      "name": "fix_partial",
-      "meaning": "fix attempted; some actions failed but state is consistent"
+      "name": "configuration",
+      "meaning": "configuration, concurrency, or no-op precondition prevented the operation"
     },
     {
       "code": 3,
-      "name": "fix_failed",
-      "meaning": "fix attempted; rolled back to pre-run state"
+      "name": "storage",
+      "meaning": "doctor storage, ledger, backup, or state restoration failed"
     },
     {
       "code": 4,
-      "name": "refused_unsafe",
-      "meaning": "blast-radius / precondition refused; no mutations"
+      "name": "search_index",
+      "meaning": "search index operation failed"
     },
     {
       "code": 5,
-      "name": "concurrency_lost",
-      "meaning": "another doctor run is holding the workspace lock"
+      "name": "import",
+      "meaning": "import operation failed"
     },
     {
       "code": 6,
-      "name": "online_required",
-      "meaning": "network probe needed but --online was not passed"
+      "name": "unsatisfied_degraded_mode",
+      "meaning": "the requested operation cannot proceed in the current degraded mode"
     },
     {
       "code": 7,
       "name": "policy_denied",
-      "meaning": "trauma-guard or other policy denied a precondition"
+      "meaning": "blast-radius or another safety policy denied the operation"
     },
     {
       "code": 8,
