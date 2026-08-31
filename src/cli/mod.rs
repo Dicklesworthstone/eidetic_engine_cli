@@ -21664,10 +21664,7 @@ fn doctor_list_runs_json(workspace: &Path, runs_root: &Path) -> String {
             if run_id.is_empty() {
                 continue;
             }
-            let row = match crate::core::doctor_runtime::read_doctor_run_state(
-                workspace,
-                &run_id,
-            ) {
+            let row = match crate::core::doctor_runtime::read_doctor_run_state(workspace, &run_id) {
                 Ok((validated_run_dir, state)) => match serde_json::to_value(state) {
                     Ok(value) => serde_json::json!({
                         "runId": run_id,
@@ -76899,12 +76896,17 @@ mod tests {
     fn parser_rejects_doctor_run_ids_that_are_paths() {
         for invalid in ["..", "../escape", "nested/run", r"nested\run", "/tmp/run"] {
             let undo = Cli::try_parse_from(["ee", "doctor", "--undo", invalid]);
-            assert!(undo.is_err(), "--undo accepted path-like run id {invalid:?}");
+            assert!(
+                undo.is_err(),
+                "--undo accepted path-like run id {invalid:?}"
+            );
 
-            let diff = Cli::try_parse_from([
-                "ee", "doctor", "--diff", "valid-run", "--diff", invalid,
-            ]);
-            assert!(diff.is_err(), "--diff accepted path-like run id {invalid:?}");
+            let diff =
+                Cli::try_parse_from(["ee", "doctor", "--diff", "valid-run", "--diff", invalid]);
+            assert!(
+                diff.is_err(),
+                "--diff accepted path-like run id {invalid:?}"
+            );
         }
     }
 
