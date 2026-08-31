@@ -2203,16 +2203,31 @@ fn key_value_redaction_code(default_code: &'static str, value: &str) -> &'static
     }
 }
 
+/// Whether a key/value payload holds a mesh approval bearer.
+///
+/// Measured exactly the way `detect_raw_api_token_matches` measures the
+/// `("eeap1_", "mesh_approval_token", 16, false)` pattern — trailing sentence
+/// punctuation is stripped by [`trim_raw_token_end`] *before* the 16-character
+/// threshold is applied. Counting the untrimmed run instead let this predicate
+/// accept `eeap1_` + 15 characters + `.` while the detector rejected it, so
+/// `redact_secret_like_content` reported a `mesh_approval_token` reason with no
+/// corresponding span. `redact_mesh_approval_bearers` fails closed on exactly
+/// that disagreement and replaces the WHOLE text with a placeholder, which for
+/// `error_response_json` meant emitting `[REDACTED:mesh_approval_token]` in
+/// place of an entire `ee.error.v2` envelope. Keep this in lockstep with the
+/// detector; `looks_like_gitlab_personal_access_token` below is the same shape.
 fn looks_like_mesh_approval_token(value: &str) -> bool {
     let value = value.trim_matches(|ch| matches!(ch, '"' | '\''));
-    let Some(suffix) = value.strip_prefix("eeap1_") else {
+    if !value.starts_with("eeap1_") {
         return false;
-    };
-    suffix
-        .chars()
-        .take_while(|ch| is_raw_token_char(*ch))
-        .count()
-        >= 16
+    }
+    let after_prefix = "eeap1_".len();
+    let token_end = value[after_prefix..]
+        .char_indices()
+        .find_map(|(offset, ch)| (!is_raw_token_char(ch)).then_some(after_prefix + offset))
+        .unwrap_or(value.len());
+    let actual_token_end = trim_raw_token_end(value, after_prefix, token_end);
+    actual_token_end - after_prefix >= 16
 }
 
 fn looks_like_gitlab_personal_access_token(value: &str) -> bool {
@@ -3434,6 +3449,40 @@ mod tests {
     #[test]
     fn subsystem_name_is_stable() {
         assert_eq!(subsystem_name(), "policy");
+    }
+
+    #[test]
+    fn mesh_approval_reason_never_outruns_its_span() {
+        // `redact_secret_like_content` builds `redacted_reasons` from the
+        // redaction chain and `matches` from an independent detect scan.
+        // `redact_mesh_approval_bearers` fails closed when those two views
+        // disagree, replacing the WHOLE text with a placeholder — which for
+        // `error_response_json` blanks an entire `ee.error.v2` envelope. The
+        // predicates must therefore agree on the 16-character threshold.
+        // Regression: the mesh predicate counted the raw-token run without
+        // stripping trailing sentence punctuation, so `eeap1_` + 15 characters
+        // + `.` produced a reason with no span.
+        for probe in [
+            "bearer eeap1_abcdefghijklmno.",
+            "bearer eeap1_abcdefghijklmno,",
+            "bearer eeap1_abcdefghijklmno;",
+            "bearer eeap1_abcdefghijklmno:",
+            "Authorization: Bearer eeap1_abcdefghijklmnopq.",
+            "bearer eeap1_abcdefghijklmnop",
+        ] {
+            let report = redact_secret_like_content(probe);
+            if report.redacted_reasons.contains(&"mesh_approval_token") {
+                assert!(
+                    report
+                        .matches
+                        .iter()
+                        .any(|matched| matched.pattern_id == "mesh_approval_token"),
+                    "reason without a span for {probe:?} (reasons={:?}, matches={:?})",
+                    report.redacted_reasons,
+                    report.matches,
+                );
+            }
+        }
     }
 
     #[test]

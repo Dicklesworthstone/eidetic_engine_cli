@@ -567,6 +567,41 @@ fn append_failed_index_job_transition(db: &DbConnection, job_id: &str, error_mes
     }
 }
 
+/// Terminalize every job a coalesced batch already claimed, with the real cause.
+///
+/// bd-2yz9p: a claimed job must never rely on the Drop finalizer for its
+/// failure record. `RunningIndexJobFinalizer::drop` writes the generic
+/// "index worker exited before recording a terminal job outcome" text, so any
+/// early return between the `pending -> running` claim and publication used to
+/// discard the concrete cause for the whole batch. Recording here also moves
+/// each row out of `running`, which makes the finalizer's status check turn its
+/// own write into a no-op.
+///
+/// Cancellation stays a cancellation: those rows are marked cancelled rather
+/// than failed, matching the single-job path.
+///
+/// Each job gets its own message buffer because
+/// `append_failed_index_job_transition` annotates the string it is handed when
+/// a transition does not land; sharing one buffer would leak each job's
+/// annotation into the records written for the jobs after it.
+fn finalize_coalesced_claimed_jobs(
+    db: &DbConnection,
+    claimed: &[StoredSearchIndexJob],
+    job_finalizers: &mut [RunningIndexJobFinalizer<'_>],
+    error: &IndexRebuildError,
+) {
+    if matches!(error, IndexRebuildError::Cancelled(_)) {
+        for finalizer in job_finalizers {
+            finalizer.mark_cancelled();
+        }
+        return;
+    }
+    for job in claimed {
+        let mut message = error.to_string();
+        append_failed_index_job_transition(db, &job.id, &mut message);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct IndexRebuildOptions {
     pub workspace_path: PathBuf,
@@ -2387,6 +2422,13 @@ where
         return Ok(reports);
     }
 
+    let snapshot = match collect_workspace_index_source_snapshot(db, workspace_id) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
+            return Err(error);
+        }
+    };
     let WorkspaceIndexSourceSnapshot {
         generation: published_generation,
         document_counts,
@@ -2394,7 +2436,7 @@ where
         documents: indexable_docs,
         open_job_ids,
         ..
-    } = collect_workspace_index_source_snapshot(db, workspace_id)?;
+    } = snapshot;
     if max_corpus_documents.is_some_and(|limit| documents_total > limit) {
         let limit = max_corpus_documents.unwrap_or(u32::MAX);
         for finalizer in &mut job_finalizers {
@@ -2423,16 +2465,18 @@ where
         return Ok(reports);
     }
     if let Err(error) = after_snapshot() {
-        if matches!(&error, IndexRebuildError::Cancelled(_)) {
-            for finalizer in &mut job_finalizers {
-                finalizer.mark_cancelled();
-            }
-        }
+        finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
         return Err(error);
     }
-    index_checkpoint(cx)?;
+    if let Err(error) = index_checkpoint(cx) {
+        finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
+        return Err(error);
+    }
     for job in &claimed {
-        update_running_index_job_total(db, &job.id, documents_total)?;
+        if let Err(error) = update_running_index_job_total(db, &job.id, documents_total) {
+            finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
+            return Err(error);
+        }
     }
 
     // Cancellation-aware intake publishes only a complete staged generation.
@@ -2478,8 +2522,23 @@ where
         processing_mode.push_str("_staged_full_rebuild");
     }
 
-    let _recovery_action = recover_interrupted_publish(index_dir)?;
-    let stack = workspace_embedder_stack(db, workspace_id)?;
+    let _recovery_action = match recover_interrupted_publish(index_dir) {
+        Ok(action) => action,
+        Err(error) => {
+            finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
+            return Err(error);
+        }
+    };
+    let stack = match workspace_embedder_stack(db, workspace_id) {
+        Ok(stack) => stack,
+        Err(error) => {
+            // `?` would convert here; do it explicitly so the batch records the
+            // same error the caller receives.
+            let error = IndexRebuildError::from(error);
+            finalize_coalesced_claimed_jobs(db, &claimed, &mut job_finalizers, &error);
+            return Err(error);
+        }
+    };
     let build_result = publish_full_index_generation_with_stack(
         cx,
         index_dir,
