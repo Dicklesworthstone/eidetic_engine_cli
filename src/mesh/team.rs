@@ -3099,7 +3099,7 @@ pub fn share_team_bodies_represented(
     let memories = connection
         .list_memories(workspace_id, None, false)
         .map_err(|error| OriginStreamError::Db(error.to_string()))?;
-    let mut items = Vec::new();
+    let mut candidates = Vec::new();
     for memory in memories.into_iter().take(cap) {
         let revision_id = history_revision_id(&memory.id, &memory.updated_at);
         let key = body_cache_key(&memory.id);
@@ -3108,13 +3108,18 @@ pub fn share_team_bodies_represented(
             .map_err(|error| OriginStreamError::Db(error.to_string()))?
             .map(|row| row.cache_status)
             .unwrap_or_else(|| "metadata_only".to_owned());
-        items.push(TeamBodyShareItem {
-            memory_id: memory.id,
+        let item = TeamBodyShareItem {
+            memory_id: memory.id.clone(),
             revision_id,
             size_bytes: u64::try_from(memory.content.len()).unwrap_or(u64::MAX),
             cache_status,
-        });
+        };
+        candidates.push((memory, item));
     }
+    let items = candidates
+        .iter()
+        .map(|(_, item)| item.clone())
+        .collect::<Vec<_>>();
     let consent_hash = bodies_consent_hash(&team.team_id, representation, &items);
     if issue_token && confirm {
         return Err(OriginStreamError::Encode(
@@ -3186,6 +3191,23 @@ pub fn share_team_bodies_represented(
             "team is paused; resume before sharing bodies".to_owned(),
         ));
     }
+    if representation == "already_redacted"
+        && candidates
+            .iter()
+            .any(|(_, item)| item.cache_status == "available")
+    {
+        return Err(OriginStreamError::Encode(
+            "refuse redact-over-exact; unshare and preview a fresh already_redacted set".to_owned(),
+        ));
+    }
+    if candidates.iter().any(|(memory, _)| {
+        u64::try_from(memory.content.len()).unwrap_or(u64::MAX)
+            > crate::mesh::key_store::MAX_RECORD_BYTES
+    }) {
+        return Err(OriginStreamError::Encode(
+            "body exceeds the hardened cache record cap".to_owned(),
+        ));
+    }
     let Some(store_path) = workspace_path else {
         return Err(OriginStreamError::Encode(
             "sharing bodies requires a workspace key-store path".to_owned(),
@@ -3199,40 +3221,15 @@ pub fn share_team_bodies_represented(
     let mut published = 0_usize;
     let mut skipped = 0_usize;
     let mut out = Vec::new();
-    for item in items {
+    // Publish the exact snapshot whose revision IDs, sizes, and cache states
+    // were authenticated above. Re-querying after token verification creates
+    // a mutation-loop race: a later stale row can otherwise fail after earlier
+    // rows have already appended events and written cache bytes.
+    for (memory, item) in candidates {
         if item.cache_status == "available" {
-            if representation == "already_redacted" {
-                return Err(OriginStreamError::Encode(
-                    "refuse redact-over-exact; unshare and preview a fresh already_redacted set"
-                        .to_owned(),
-                ));
-            }
             skipped = skipped.saturating_add(1);
             out.push(item);
             continue;
-        }
-        let Some(memory) = connection
-            .list_memories(workspace_id, None, false)
-            .map_err(|error| OriginStreamError::Db(error.to_string()))?
-            .into_iter()
-            .find(|row| row.id == item.memory_id)
-        else {
-            skipped = skipped.saturating_add(1);
-            out.push(item);
-            continue;
-        };
-        let current_size = u64::try_from(memory.content.len()).unwrap_or(u64::MAX);
-        if history_revision_id(&memory.id, &memory.updated_at) != item.revision_id
-            || current_size != item.size_bytes
-        {
-            return Err(OriginStreamError::Encode(
-                "body preview is stale; obtain a fresh approval token".to_owned(),
-            ));
-        }
-        if current_size > crate::mesh::key_store::MAX_RECORD_BYTES {
-            return Err(OriginStreamError::Encode(
-                "body exceeds the hardened cache record cap".to_owned(),
-            ));
         }
         let mut nonce = [0_u8; 32];
         getrandom::fill(&mut nonce)

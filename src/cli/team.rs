@@ -1279,12 +1279,12 @@ where
     let produced_at = chrono::Utc::now().to_rfc3339();
     let workspace_path = cli.resolve_workspace();
     let stdin_token = if args.token_stdin {
-        match read_invite_code_from_stdin() {
-            Ok(token) => Some(token),
+        match crate::mesh::lane_grant::read_bounded_token(&mut std::io::stdin().lock()) {
+            Ok(token) => Some(token.expose_bearer()),
             Err(error) => {
                 return write_domain_error(
                     &DomainError::Usage {
-                        message: format!("Failed to read body token from stdin: {error}"),
+                        message: format!("Failed to read bounded body token from stdin: {error}"),
                         repair: Some(
                             "ee team share bodies --confirm --token-stdin --workspace .".to_owned(),
                         ),
