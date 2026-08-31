@@ -1170,12 +1170,21 @@ pub fn replay_undo(run_dir: &Path) -> Result<UndoSummary, DoctorRuntimeError> {
     }
 
     // Read existing undo_log to skip already-undone actions.
+    //
+    // Only a SUCCESSFUL entry retires an action. Failure entries carry the
+    // same `sequence` but record `failed_at`/`error` instead of `undone_at`,
+    // so matching on `sequence` alone made a retry skip the very action that
+    // failed and then finish with a `RunStatus::Undone` receipt for work that
+    // never happened. Retrying a failed action is safe: `undo_one` re-checks
+    // the live bytes against `after_hash` and fails closed with
+    // `UndoStateDrifted` rather than clobbering drifted content.
     let undo_log_path = run_dir.join("undo_log.jsonl");
     let already_undone_sequences: std::collections::HashSet<u64> =
         read_optional_doctor_jsonl_file(&undo_log_path, "undo_log.jsonl")?
             .map(|raw| {
                 raw.lines()
                     .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                    .filter(|entry| entry.get("undone_at").is_some())
                     .filter_map(|v| v.get("sequence")?.as_u64())
                     .collect()
             })

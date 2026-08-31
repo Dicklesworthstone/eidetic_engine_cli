@@ -2280,11 +2280,16 @@ fn validate_preflight_run_id(run_id: &str) -> Result<(), DomainError> {
     if run_id.starts_with(PREFLIGHT_RUN_ID_PREFIX) {
         Ok(())
     } else {
+        // `run_id` is an unvalidated positional argument (`ee preflight
+        // show|close <RUN_ID>`), so the preview must be taken on character
+        // boundaries. Slicing `..len().min(3)` panicked whenever byte 3 fell
+        // inside a multi-byte character — `ee preflight show 😀` aborted the
+        // process instead of returning this usage error. Identical output for
+        // ASCII input, which is every well-formed run ID.
+        let preview: String = run_id.chars().take(3).collect();
         Err(DomainError::Usage {
             message: format!(
-                "Invalid preflight run ID: expected prefix '{}', got '{}'",
-                PREFLIGHT_RUN_ID_PREFIX,
-                &run_id[..run_id.len().min(3)]
+                "Invalid preflight run ID: expected prefix '{PREFLIGHT_RUN_ID_PREFIX}', got '{preview}'"
             ),
             repair: Some("Provide a valid preflight run ID (format: pf_<uuid>)".to_owned()),
         })

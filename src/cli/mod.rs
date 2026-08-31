@@ -23206,7 +23206,20 @@ where
             let evidence = crate::core::index::EvidenceAdmissionTotals::from_report(
                 &report.evidence_admission,
             );
-            match cli.renderer() {
+            // A publish or database failure is flattened into `Ok(report)` with
+            // an error status rather than an `Err` (see `rebuild_index`). Left
+            // unchecked, that produced `"success": true` and exit 0 over a
+            // rebuild that rolled back, so an agent gating on `success` or `$?`
+            // treated the previous generation as freshly rebuilt. Match
+            // exhaustively so a new status has to make this decision too.
+            let failure_exit = match report.status {
+                IndexRebuildStatus::DatabaseError => Some(ProcessExitCode::Storage),
+                IndexRebuildStatus::IndexError => Some(ProcessExitCode::SearchIndex),
+                IndexRebuildStatus::Success
+                | IndexRebuildStatus::DryRun
+                | IndexRebuildStatus::NoDocuments => None,
+            };
+            let write_status = match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &report.human_summary())
                 }
@@ -23232,12 +23245,17 @@ where
                 | output::Renderer::Hook => {
                     let json = serde_json::json!({
                         "schema": crate::models::RESPONSE_SCHEMA_V2,
-                        "success": true,
+                        "success": failure_exit.is_none(),
                         "degraded": [],
                         "data": report.data_json(),
                     });
                     write_stdout(stdout, &(json.to_string() + "\n"))
                 }
+            };
+            match failure_exit {
+                // Never mask a stdout write failure with the report's status.
+                Some(code) if write_status == ProcessExitCode::Success => code,
+                _ => write_status,
             }
         }
         Err(error) => write_index_rebuild_error(&error, cli.wants_json(), stdout, stderr),
@@ -23267,7 +23285,18 @@ where
             let evidence = crate::core::index::EvidenceAdmissionTotals::from_report(
                 &report.evidence_admission,
             );
-            match cli.renderer() {
+            // Same flattening as `handle_index_rebuild`: `reembed_index` turns a
+            // publish failure into `Ok(report)` with `status: IndexError` and
+            // `job_status: "failed"`, which must not be reported as a clean run.
+            let failure_exit = match report.status {
+                crate::core::index::IndexReembedStatus::IndexError => {
+                    Some(ProcessExitCode::SearchIndex)
+                }
+                crate::core::index::IndexReembedStatus::Success
+                | crate::core::index::IndexReembedStatus::DryRun
+                | crate::core::index::IndexReembedStatus::NoDocuments => None,
+            };
+            let write_status = match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &report.human_summary())
                 }
@@ -23295,12 +23324,17 @@ where
                 | output::Renderer::Hook => {
                     let json = serde_json::json!({
                         "schema": crate::models::RESPONSE_SCHEMA_V2,
-                        "success": true,
+                        "success": failure_exit.is_none(),
                         "degraded": [],
                         "data": report.data_json(),
                     });
                     write_stdout(stdout, &(json.to_string() + "\n"))
                 }
+            };
+            match failure_exit {
+                // Never mask a stdout write failure with the report's status.
+                Some(code) if write_status == ProcessExitCode::Success => code,
+                _ => write_status,
             }
         }
         Err(error) => write_index_rebuild_error(&error, cli.wants_json(), stdout, stderr),
