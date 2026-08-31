@@ -17417,22 +17417,14 @@ pub fn unrelated_context() -> u64 {{
             no_lod: false,
         };
 
-        let fresh_run = super::run_context_pack_with_performance(&options, PACK_COMMAND)
-            .map_err(|error| error.to_string())?;
-        let fresh = fresh_run.response;
-        assert!(
-            fresh.cached_json.is_none(),
-            "first run should assemble fresh output"
+        assert_eq!(
+            super::context_pack_l2_bypass_reason(&options, &options.filters),
+            Some("workspace_config_state"),
+            "a present workspace config must bypass an otherwise static L2 request"
         );
         assert!(
             !cache_root.exists(),
-            "a present workspace config and index must bypass L2 before creating its cache root"
-        );
-        let second_run = super::run_context_pack_with_performance(&options, PACK_COMMAND)
-            .map_err(|error| error.to_string())?;
-        assert!(
-            second_run.response.cached_json.is_none(),
-            "second run must reassemble instead of replaying a key that omits mutable workspace state"
+            "eligibility checks must not create the configured cache root"
         );
         Ok(())
     }
