@@ -464,6 +464,19 @@ pub fn redact_path(path: &str, level: RedactionLevel) -> String {
     }
 }
 
+fn redact_provenance_uri(uri: &str, level: RedactionLevel) -> String {
+    let path_redacted = if level.redacts_paths() {
+        redact_path(uri, level)
+    } else {
+        uri.to_owned()
+    };
+    if level.redacts_secrets() {
+        redact_content(&path_redacted, level)
+    } else {
+        path_redacted
+    }
+}
+
 /// Redact an identifier string (memory ID, agent name, etc.).
 #[must_use]
 pub fn redact_identifier(id: &str, level: RedactionLevel) -> String {
@@ -521,10 +534,8 @@ pub fn redact_memory_record(
         }
     }
 
-    if level.redacts_paths() {
-        if let Some(uri) = record.provenance_uri.as_ref() {
-            record.provenance_uri = Some(redact_path(uri, level));
-        }
+    if let Some(uri) = record.provenance_uri.as_ref() {
+        record.provenance_uri = Some(redact_provenance_uri(uri, level));
     }
 
     record
@@ -551,9 +562,9 @@ pub fn redact_artifact_record(
         if let Some(path) = record.canonical_path.as_ref() {
             record.canonical_path = Some(redact_path(path, level));
         }
-        if let Some(uri) = record.provenance_uri.as_ref() {
-            record.provenance_uri = Some(redact_path(uri, level));
-        }
+    }
+    if let Some(uri) = record.provenance_uri.as_ref() {
+        record.provenance_uri = Some(redact_provenance_uri(uri, level));
     }
 
     if let Some(reference) = record.external_ref.as_ref() {
@@ -1547,6 +1558,70 @@ mod tests {
         assert!(redacted.redacted);
         assert!(redacted.redaction_reason.is_some());
         assert_eq!(redacted.memory_id, "mem-001");
+    }
+
+    #[test]
+    fn minimal_redaction_scrubs_secret_bearing_provenance() {
+        let secret = secret_assignment("provenance-fixture");
+        let provenance = format!("https://example.test/report?{secret}");
+        assert_eq!(
+            redact_provenance_uri("manual://ordinary-source", RedactionLevel::Minimal),
+            "manual://ordinary-source",
+            "minimal redaction must preserve provenance that contains no secret"
+        );
+        let memory = ExportMemoryRecord::builder()
+            .memory_id("mem-provenance-redaction")
+            .workspace_id("ws-provenance-redaction")
+            .level("semantic")
+            .kind("fact")
+            .content("ordinary content")
+            .provenance_uri(&provenance)
+            .created_at("2026-08-30T12:00:00Z")
+            .build()
+            .expect("memory has required fields");
+        let artifact = ExportArtifactRecord::builder()
+            .artifact_id("artifact-provenance-redaction")
+            .workspace_id("ws-provenance-redaction")
+            .source_kind("file")
+            .artifact_type("report")
+            .content_hash("blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .media_type("text/plain")
+            .size_bytes(42)
+            .redaction_status("checked")
+            .provenance_uri(&provenance)
+            .created_at("2026-08-30T12:00:00Z")
+            .updated_at("2026-08-30T12:00:00Z")
+            .build()
+            .expect("artifact has required fields");
+
+        let redacted_memory = redact_memory_record(memory.clone(), RedactionLevel::Minimal);
+        let redacted_artifact = redact_artifact_record(artifact.clone(), RedactionLevel::Minimal);
+        assert_eq!(
+            redacted_memory.provenance_uri.as_deref(),
+            Some(REDACTED_PLACEHOLDER)
+        );
+        assert_eq!(
+            redacted_artifact.provenance_uri.as_deref(),
+            Some(REDACTED_PLACEHOLDER)
+        );
+        assert!(
+            !serde_json::to_string(&(redacted_memory, redacted_artifact))
+                .expect("redacted records serialize")
+                .contains(&secret)
+        );
+
+        assert_eq!(
+            redact_memory_record(memory, RedactionLevel::None)
+                .provenance_uri
+                .as_deref(),
+            Some(provenance.as_str())
+        );
+        assert_eq!(
+            redact_artifact_record(artifact, RedactionLevel::None)
+                .provenance_uri
+                .as_deref(),
+            Some(provenance.as_str())
+        );
     }
 
     #[test]

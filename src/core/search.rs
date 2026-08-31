@@ -5200,12 +5200,46 @@ fn search_display_visible_hits(hits: &[SearchHit]) -> Vec<SearchHit> {
         .collect()
 }
 
-fn query_assist_visible_candidates(options: &SearchOptions, hits: &[SearchHit]) -> Vec<SearchHit> {
-    let mut visible = hits
+fn query_assist_visible_candidates(
+    options: &SearchOptions,
+    hits: &[SearchHit],
+    degraded: &mut Vec<SearchDegradation>,
+    read_connection: Option<&DbConnection>,
+) -> Vec<SearchHit> {
+    let indexed_visible = hits
         .iter()
         .filter(|hit| query_assist_hit_visible(options, hit))
         .cloned()
         .collect::<Vec<_>>();
+    // Query-assist candidates render content, provenance, and matched IDs, so
+    // they must pass the same authoritative live-memory admission boundaries
+    // as ordinary results. Indexed tombstone/validity metadata is only a
+    // derived snapshot and memory scope cannot be established from a search
+    // document alone. These candidates affect the response's query-assist
+    // surface, so authoritative-admission failures and exclusions must remain
+    // visible in the response degradation contract. Collect them separately
+    // because the primary result path may already have emitted the same code.
+    let mut admission_degraded = Vec::new();
+    let live_visible = apply_tombstone_visibility_collecting(
+        options,
+        indexed_visible,
+        &mut admission_degraded,
+        read_connection,
+        None,
+    );
+    let (mut visible, _) = apply_memory_scope_visibility_with_metadata_mode_collecting(
+        options,
+        live_visible,
+        &mut admission_degraded,
+        read_connection,
+        false,
+        None,
+    );
+    for entry in admission_degraded {
+        if degraded.iter().all(|existing| existing.code != entry.code) {
+            degraded.push(entry);
+        }
+    }
     sort_search_hits_by_score_order(&mut visible);
     visible
 }
@@ -8354,12 +8388,6 @@ async fn run_search_inner_with_performance(
                 .partition(|hit| search_hit_meets_relevance_floor(hit, user_floor_override));
             let floor_counts = RelevanceFloorCounts::new(pre_floor_count, above_floor.len());
             let dropped = below_floor.len();
-            let query_assist_visibility_start = Instant::now();
-            let query_assist_candidates = query_assist_visible_candidates(options, &below_floor);
-            trace.record_elapsed(
-                "search::queryAssistVisibility",
-                query_assist_visibility_start,
-            );
             trace.record_elapsed("search::relevanceFloor", relevance_floor_start);
             let tombstone_start = Instant::now();
             let above_floor = apply_tombstone_visibility_collecting(
@@ -8405,6 +8433,17 @@ async fn run_search_inner_with_performance(
             );
             trace.record_elapsed("search::preloadReturnedMemories", preload_start);
             let kept = above_floor.len();
+            let query_assist_visibility_start = Instant::now();
+            let query_assist_candidates = query_assist_visible_candidates(
+                options,
+                &below_floor,
+                &mut degraded,
+                read_connection,
+            );
+            trace.record_elapsed(
+                "search::queryAssistVisibility",
+                query_assist_visibility_start,
+            );
 
             let floor = user_floor_override.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
 
@@ -8829,6 +8868,8 @@ async fn run_diag_search_with_cx_and_embedder_policy(
         .into_iter()
         .partition(|hit| search_hit_meets_relevance_floor(hit, user_floor_override));
     let floor_counts = RelevanceFloorCounts::new(pre_floor_count, above_floor.len());
+    let above_floor =
+        apply_tombstone_visibility_collecting(options, above_floor, &mut degraded, None, None);
     let (mut above_floor, scope_stats) =
         apply_memory_scope_visibility(options, above_floor, &mut degraded, None);
     annotate_hits_with_score_calibration(
@@ -8840,7 +8881,8 @@ async fn run_diag_search_with_cx_and_embedder_policy(
     );
     let kept = above_floor.len();
     let dropped = below_floor.len();
-    let query_assist_candidates = query_assist_visible_candidates(options, &below_floor);
+    let query_assist_candidates =
+        query_assist_visible_candidates(options, &below_floor, &mut degraded, None);
     let floor = user_floor_override.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
 
     if duplicates_collapsed > 0 {
@@ -20749,6 +20791,116 @@ mod tests {
                 .is_some_and(|items| !items.is_empty()),
             "near-memory content terms should produce at least one reformulation"
         );
+    }
+
+    #[test]
+    fn query_assist_rechecks_live_tombstones_and_memory_scope() -> TestResult {
+        let workspace = tempfile::Builder::new()
+            .prefix("ee-query-assist-live-admission")
+            .tempdir()
+            .map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_41234567890123456789012345";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: Some("query-assist-live-admission".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        for (memory_id, content, trust_class) in [
+            (
+                "mem_41000000000000000000000001",
+                "Verified candidate remains eligible for query assistance.",
+                "human_explicit",
+            ),
+            (
+                "mem_41000000000000000000000002",
+                "OUT OF SCOPE QUERY ASSIST CONTENT",
+                "agent_assertion",
+            ),
+            (
+                "mem_41000000000000000000000003",
+                "TOMBSTONED QUERY ASSIST CONTENT",
+                "human_explicit",
+            ),
+        ] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.to_owned(),
+                        level: "semantic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.7,
+                        importance: 0.8,
+                        provenance_uri: None,
+                        trust_class: trust_class.to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection
+            .tombstone_memory("mem_41000000000000000000000003")
+            .map_err(|error| error.to_string())?;
+
+        let mut options = source_mode_test_options(SearchSourceMode::Hybrid, false);
+        options.workspace_path = workspace.path().to_path_buf();
+        options.memory_scope = MemoryScope::Verified;
+        let hits = [
+            (
+                "mem_41000000000000000000000001",
+                "Verified candidate remains eligible for query assistance.",
+            ),
+            (
+                "mem_41000000000000000000000002",
+                "OUT OF SCOPE QUERY ASSIST CONTENT",
+            ),
+            (
+                "mem_41000000000000000000000003",
+                "TOMBSTONED QUERY ASSIST CONTENT",
+            ),
+        ]
+        .into_iter()
+        .map(|(memory_id, content)| {
+            let mut hit = synthetic_hit(memory_id, 0.02);
+            hit.metadata = Some(serde_json::json!({"content": content}));
+            hit
+        })
+        .collect::<Vec<_>>();
+
+        let mut degraded = Vec::new();
+        let visible =
+            query_assist_visible_candidates(&options, &hits, &mut degraded, Some(&connection));
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].doc_id, "mem_41000000000000000000000001");
+        let visible_content = visible
+            .iter()
+            .filter_map(|hit| hit.metadata.as_ref())
+            .filter_map(|metadata| metadata.get("content"))
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(!visible_content.contains(&"OUT OF SCOPE QUERY ASSIST CONTENT"));
+        assert!(!visible_content.contains(&"TOMBSTONED QUERY ASSIST CONTENT"));
+
+        options.strict_scope = true;
+        assert!(
+            query_assist_visible_candidates(&options, &hits, &mut degraded, Some(&connection))
+                .is_empty(),
+            "strict scope must fail closed when any live query-assist candidate is out of scope"
+        );
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]
