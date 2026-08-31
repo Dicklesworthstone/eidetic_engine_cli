@@ -1007,7 +1007,24 @@ fn extract_labeled_value_with(
 
 fn extract_prefixed_token(content: &str, prefix: &str) -> Option<String> {
     let lower = content.to_ascii_lowercase();
-    let start = lower.find(prefix)?;
+    // Match only where the prefix STARTS a token. A bare `find` also matched
+    // mid-word, so `ee remember --kind failure "reverted because-of-flaky"`
+    // hit the `cause-` inside "because-" and fabricated a
+    // `cause = "of-flaky"` sidecar, which then persisted and became
+    // filterable through `ee search --field cause=...`. These prefixes come
+    // from the negative-evidence tag convention (`family-*`, `cause-*`,
+    // `regression-*`, `reverted-at-*`) and always begin a token, so the
+    // preceding character must not be one the token charset below accepts.
+    // `to_ascii_lowercase` is length-preserving, so indices map onto `content`.
+    let start = lower
+        .match_indices(prefix)
+        .map(|(index, _)| index)
+        .find(|index| {
+            lower[..*index]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')))
+        })?;
     let token_start = start + prefix.len();
     let token = content[token_start..]
         .chars()
