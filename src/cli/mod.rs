@@ -48793,12 +48793,21 @@ fn try_append_journal_via_daemon(
         return None;
     }
     let params = serde_json::to_value(&prepared.payload).ok()?;
-    let request = crate::daemon::protocol::DaemonRequest::new(
+    let mut request = crate::daemon::protocol::DaemonRequest::new(
         format!("journal-append-{}", prepared.payload.entry_id),
         "ee-cli-journal",
         crate::daemon::server::METHOD_WRITE_JOURNAL,
         params,
     );
+    // `ee.daemon.write_journal` carries `DaemonAuthority::SameUidWorkspace`, and
+    // `authorize_daemon_method` rejects the request outright when the envelope
+    // `workspace_id` is absent. `DaemonRequest::new` leaves it `None`, so every
+    // request from this path was refused as `daemon_method_unauthorized` and
+    // silently fell back to the direct write below — `--daemon-write` never
+    // reached the write owner. Address the same workspace the payload does, so
+    // the envelope and `params.workspacePath` agree by construction and the
+    // daemon's workspace binding can be satisfied rather than merely dodged.
+    request.workspace_id = Some(prepared.payload.workspace_path.display().to_string());
     let response = crate::daemon::server::client_round_trip(&socket_path, &request).ok()?;
     if response.error.is_some() {
         return None;
