@@ -4586,7 +4586,11 @@ mod tests {
         ctx.finish(RunStatus::CompletedOk).unwrap();
 
         assert!(matches!(
-            replay_undo_with_authorized_roots(&workspace, &run_id, &[workspace.clone()]),
+            replay_undo_with_authorized_roots(
+                &workspace,
+                &run_id,
+                std::slice::from_ref(&workspace),
+            ),
             Err(DoctorRuntimeError::BlastRadiusExceeded { .. })
         ));
         assert_eq!(fs::read(&target).unwrap(), b"after");
@@ -4633,7 +4637,11 @@ mod tests {
         symlink(&replacement_root, &recorded_root).unwrap();
 
         assert!(matches!(
-            replay_undo_with_authorized_roots(&workspace, &run_id, &[recorded_root.clone()]),
+            replay_undo_with_authorized_roots(
+                &workspace,
+                &run_id,
+                std::slice::from_ref(&recorded_root),
+            ),
             Err(DoctorRuntimeError::BlastRadiusExceeded { .. })
         ));
         assert_eq!(
