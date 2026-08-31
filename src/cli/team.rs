@@ -3397,7 +3397,6 @@ mod tests {
         CreateWorkspaceInput, DbConnection, InsertTeamMemberInput, UpsertMeshPeerInput,
     };
     use crate::mesh::team::create_local_team;
-    use clap::Parser as _;
 
     fn open_db() -> DbConnection {
         let connection = DbConnection::open_memory().expect("open");
