@@ -462,8 +462,7 @@ pub fn cluster_spans(spans: &[AskSpan]) -> Vec<AskSpan> {
     order.sort_by(|&a, &b| {
         spans[b]
             .score
-            .partial_cmp(&spans[a].score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&spans[a].score)
             .then_with(|| spans[a].memory_id.cmp(&spans[b].memory_id))
             .then_with(|| spans[a].byte_start.cmp(&spans[b].byte_start))
     });
@@ -572,10 +571,19 @@ fn compose_answer(
             .unwrap_or("");
         let byte_range = span.byte_start..span.byte_end;
 
-        if byte_range.end > original.len() {
-            return Err("extractiveness: span range out of bounds");
-        }
-        let original_text = &original[byte_range];
+        // `str::get` rejects everything a raw slice would panic on — an end past
+        // the length, an inverted range, and endpoints that are not UTF-8
+        // character boundaries — so all three land on this function's designed
+        // `Err` path instead of aborting the process. The end-only bounds check
+        // this replaces left the other two unguarded, and they are reachable:
+        // `content_map` is keyed by `memory_id`, so two candidates sharing an id
+        // with different bodies collapse to one entry while their spans were
+        // offset against the other body. The byte-equality check below cannot
+        // catch that, because the panic would happen while producing the value
+        // it compares.
+        let Some(original_text) = original.get(byte_range) else {
+            return Err("extractiveness: span range is not a valid slice of the source");
+        };
 
         // Extractiveness invariant: emitted text must byte-equal the source span.
         if original_text != span.text.as_str() {
@@ -644,10 +652,14 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
     }
 
     // Sort all spans by score desc for clustering; full tiebreaker for byte-identical output.
+    // `total_cmp` rather than `partial_cmp(..).unwrap_or(Equal)`: collapsing an
+    // incomparable pair to `Equal` is not a strict weak ordering, which both
+    // forfeits the byte-identical output this module promises and is a case the
+    // current sort implementation is allowed to panic on. Matches the
+    // `total_cmp` convention already used across `core::search`.
     all_spans.sort_by(|a, b| {
         b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&a.score)
             .then_with(|| a.memory_id.cmp(&b.memory_id))
             .then_with(|| a.byte_start.cmp(&b.byte_start))
     });
