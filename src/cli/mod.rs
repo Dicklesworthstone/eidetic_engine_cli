@@ -9179,6 +9179,7 @@ pub struct DoctorArgs {
     #[arg(
         long = "undo",
         value_name = "RUN_ID",
+        value_parser = parse_doctor_run_id_arg,
         conflicts_with_all = ["fix_plan", "franken_health", "capabilities", "robot_docs"],
     )]
     pub undo: Option<String>,
@@ -9236,6 +9237,7 @@ pub struct DoctorArgs {
     #[arg(
         long = "since",
         value_name = "RUN_ID",
+        value_parser = parse_doctor_run_id_arg,
         conflicts_with_all = [
             "fix_plan", "franken_health", "capabilities", "robot_docs", "undo", "full",
         ],
@@ -9318,6 +9320,7 @@ pub struct DoctorArgs {
     #[arg(
         long = "diff",
         value_name = "RUN_ID",
+        value_parser = parse_doctor_run_id_arg,
         num_args = 1..=2,
         conflicts_with_all = [
             "fix_plan", "franken_health", "capabilities", "robot_docs", "undo",
@@ -13419,7 +13422,9 @@ where
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                 });
                 let run_dir = workspace.join(".doctor").join("runs").join(run_id);
-                return match crate::core::doctor_runtime::replay_undo(&run_dir) {
+                return match crate::core::doctor_runtime::replay_undo_for_workspace(
+                    &workspace, run_id,
+                ) {
                     Ok(summary) => {
                         let status_str = serde_json::to_value(&summary.status)
                             .ok()
@@ -21659,12 +21664,14 @@ fn doctor_list_runs_json(workspace: &Path, runs_root: &Path) -> String {
             if run_id.is_empty() {
                 continue;
             }
-            let state_path = path.join("state.json");
-            let row = match std::fs::read_to_string(&state_path) {
-                Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            let row = match crate::core::doctor_runtime::read_doctor_run_state(
+                workspace,
+                &run_id,
+            ) {
+                Ok((validated_run_dir, state)) => match serde_json::to_value(state) {
                     Ok(value) => serde_json::json!({
                         "runId": run_id,
-                        "runDir": path.display().to_string(),
+                        "runDir": validated_run_dir.display().to_string(),
                         "state": value,
                     }),
                     Err(error) => serde_json::json!({
@@ -21676,7 +21683,7 @@ fn doctor_list_runs_json(workspace: &Path, runs_root: &Path) -> String {
                 Err(error) => serde_json::json!({
                     "runId": run_id,
                     "runDir": path.display().to_string(),
-                    "parseError": format!("read state.json: {error}"),
+                    "parseError": error.to_string(),
                 }),
             };
             runs.push(row);
@@ -21737,25 +21744,13 @@ fn doctor_gc_plan_json(workspace: &Path, runs_root: &Path, threshold_days: u32) 
             if run_id.is_empty() {
                 continue;
             }
-            let state_path = path.join("state.json");
-            let raw = std::fs::read_to_string(&state_path);
-            let (timestamp_str, parse_error): (Option<String>, Option<String>) = match raw {
-                Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
-                    Ok(value) => {
-                        let finished = value
-                            .get("finished_at")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_owned);
-                        let started = value
-                            .get("started_at")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_owned);
-                        (finished.or(started), None)
+            let (timestamp_str, parse_error): (Option<String>, Option<String>) =
+                match crate::core::doctor_runtime::read_doctor_run_state(workspace, &run_id) {
+                    Ok((_validated_run_dir, state)) => {
+                        (state.finished_at.or(Some(state.started_at)), None)
                     }
                     Err(error) => (None, Some(error.to_string())),
-                },
-                Err(error) => (None, Some(format!("read state.json: {error}"))),
-            };
+                };
             let parsed_ts = timestamp_str
                 .as_deref()
                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
@@ -21918,10 +21913,8 @@ fn doctor_robot_triage_json(report: &DoctorReport) -> String {
 /// `parseError` field rather than failing the whole envelope.
 fn doctor_run_diff_json(workspace: &Path, baseline_id: &str, comparison_id: &str) -> String {
     fn load_side(workspace: &Path, run_id: &str) -> serde_json::Value {
-        let run_dir = workspace.join(".doctor").join("runs").join(run_id);
-        let state_path = run_dir.join("state.json");
-        match std::fs::read_to_string(&state_path) {
-            Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+        match crate::core::doctor_runtime::read_doctor_run_state(workspace, run_id) {
+            Ok((run_dir, state)) => match serde_json::to_value(state) {
                 Ok(value) => serde_json::json!({
                     "runId": run_id,
                     "runDir": run_dir.display().to_string(),
@@ -21935,8 +21928,8 @@ fn doctor_run_diff_json(workspace: &Path, baseline_id: &str, comparison_id: &str
             },
             Err(error) => serde_json::json!({
                 "runId": run_id,
-                "runDir": run_dir.display().to_string(),
-                "parseError": format!("read state.json: {error}"),
+                "runDir": workspace.join(".doctor").join("runs").join(run_id).display().to_string(),
+                "parseError": error.to_string(),
             }),
         }
     }
@@ -38665,6 +38658,12 @@ fn normalized_search_source_mode_token(value: &str) -> String {
     }
 
     normalized
+}
+
+fn parse_doctor_run_id_arg(value: &str) -> Result<String, String> {
+    crate::core::doctor_runtime::validate_doctor_run_id(value)
+        .map_err(|error| error.to_string())?;
+    Ok(value.to_owned())
 }
 
 fn parse_search_source_mode_arg(value: &str) -> Result<SearchSourceMode, String> {
@@ -76885,6 +76884,19 @@ mod tests {
             &Some("abc123".to_string()),
             "doctor --since captures the prior run id",
         )
+    }
+
+    #[test]
+    fn parser_rejects_doctor_run_ids_that_are_paths() {
+        for invalid in ["..", "../escape", "nested/run", r"nested\run", "/tmp/run"] {
+            let undo = Cli::try_parse_from(["ee", "doctor", "--undo", invalid]);
+            assert!(undo.is_err(), "--undo accepted path-like run id {invalid:?}");
+
+            let diff = Cli::try_parse_from([
+                "ee", "doctor", "--diff", "valid-run", "--diff", invalid,
+            ]);
+            assert!(diff.is_err(), "--diff accepted path-like run id {invalid:?}");
+        }
     }
 
     #[test]

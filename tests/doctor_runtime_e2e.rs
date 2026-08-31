@@ -27,7 +27,8 @@ use std::path::{Path, PathBuf};
 
 use ee::core::doctor_runtime::{
     ACTION_LINE_SCHEMA_V1, CAPABILITIES_SCHEMA_V1, CapabilitiesReport, DoctorRuntimeError, Op,
-    RUN_STATE_SCHEMA_V1, RunContext, RunStatus, default_blast_radius_roots, mutate, replay_undo,
+    RUN_STATE_SCHEMA_V1, RunContext, RunStatus, default_blast_radius_roots, mutate,
+    replay_undo_with_authorized_roots,
 };
 use fs4::fs_std::FileExt as Fs4FileExt;
 use tempfile::TempDir;
@@ -62,6 +63,21 @@ fn start_test_run(ws_path: &std::path::Path) -> RunContext {
     let mut roots = default_blast_radius_roots(ws_path);
     roots.push(ws_path.to_path_buf());
     RunContext::start(ws_path, "e2e_sha", roots, false).expect("start run")
+}
+
+fn replay_test_undo(run_dir: &Path) -> Result<ee::core::doctor_runtime::UndoSummary, DoctorRuntimeError> {
+    let run_id = run_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("test run id");
+    let workspace = run_dir
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .expect("test workspace");
+    let mut roots = default_blast_radius_roots(workspace);
+    roots.push(workspace.to_path_buf());
+    replay_undo_with_authorized_roots(workspace, run_id, &roots)
 }
 
 fn assert_persistent_doctor_lock_released(workspace: &Path) {
@@ -125,7 +141,7 @@ fn full_corrupt_fix_diagnose_undo_roundtrip_is_byte_identical() {
     assert_ne!(fs::read(&target).unwrap(), original);
 
     // Undo.
-    let summary = replay_undo(&run_dir).expect("replay_undo");
+    let summary = replay_test_undo(&run_dir).expect("replay_undo");
     assert!(matches!(summary.status, RunStatus::Undone));
     assert_eq!(summary.actions_undone, 1);
 
@@ -805,12 +821,12 @@ fn full_undo_idempotence_two_replays_safe() {
     }
 
     // First replay: 1 action undone.
-    let first = replay_undo(&run_dir).expect("replay 1");
+    let first = replay_test_undo(&run_dir).expect("replay 1");
     assert_eq!(first.actions_undone, 1);
     assert_eq!(fs::read(&target).unwrap(), b"a");
 
     // Second replay: 0 actions undone, 1 skipped (already done).
-    let second = replay_undo(&run_dir).expect("replay 2");
+    let second = replay_test_undo(&run_dir).expect("replay 2");
     assert_eq!(second.actions_undone, 0);
     assert_eq!(second.actions_skipped, 1);
     // File still byte-identical to the original.
@@ -832,7 +848,8 @@ fn undo_create_dir_all_reports_partial_when_created_dir_gains_content() {
 
     fs::write(target.join("peer-owned.txt"), b"do not hide this").unwrap();
 
-    let summary = replay_undo(&run_dir).expect("undo should report partial instead of erroring");
+    let summary =
+        replay_test_undo(&run_dir).expect("undo should report partial instead of erroring");
 
     assert!(matches!(summary.status, RunStatus::UndonePartial));
     assert_eq!(summary.actions_undone, 0);
