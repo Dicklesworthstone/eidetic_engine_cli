@@ -22336,6 +22336,8 @@ fn doctor_runtime_error_result(
         ),
         DoctorRuntimeError::Io { .. }
         | DoctorRuntimeError::ActionsLogCorrupt { .. }
+        | DoctorRuntimeError::InvalidRunId { .. }
+        | DoctorRuntimeError::RunArtifactInvalid { .. }
         | DoctorRuntimeError::UndoStateDrifted { .. }
         | DoctorRuntimeError::UndoBackupCorrupt { .. } => (
             "doctor_runtime_io",
